@@ -1,0 +1,37 @@
+# Engineering Rules
+
+Non-negotiable rules for this codebase. PRs violating these get rejected.
+
+## Code organization (OOP)
+
+1. **Program to interfaces.** Every external dependency (BLE, STT, CLIs, channels, computer-use) sits behind an ABC in `jarvis/core`. Concrete adapters live in their own package. No orchestrator code imports a vendor library directly.
+2. **One class, one responsibility.** Transport doesn't parse audio; audio doesn't render HUD pages; agents don't verify their own citations.
+3. **Dataclasses for domain models**, typed end-to-end (`mypy --strict` clean). Events over direct calls: components communicate via the `EventBus`.
+4. **Vendor code stays in `vendor/`** — never copy third-party source into `apps/`. Wrap it with an adapter instead. `vendor/` is gitignored; `scripts/clone_vendors.sh` reproduces it.
+5. **Tests required**: unit tests for every core class; integration tests for transport auth, verifier pipeline, and the debate state machine.
+
+## Safety & consent
+
+6. **Every consequential computer-use action requires explicit confirmation** (IMU nod or R1 ring). No exceptions, even in demos. Sandbox Mac actions in a Lume VM.
+7. **Consent tones for call recording.** Follow local recording-consent law.
+8. **Local-first privacy:** transcripts and notes stay on the Mac unless a task explicitly needs cloud. Log content hashes, not content, in audit trails.
+
+## ToS & licensing
+
+9. **Claude critic:** invoke only the official `claude` binary (`claude -p`). Never reuse Claude OAuth tokens in any other client, SDK, or third-party tool. Keep the loop switchable to a metered API key with `--max-budget-usd`.
+10. **Codex:** ChatGPT-subscription auth in Codex CLI is permitted — fine as-is.
+11. **Firmware:** stock G2 firmware only (ECDSA-P256-signed images). App-layer BLE protocol only. Do not depend on `g2flash`.
+12. **Licenses:** BlackHole is GPL-3.0 — use as an installed driver, don't link/vendor its code into ours. Check each cloned repo's license before deriving code from it.
+
+## Debate loop
+
+13. **No submission passes without verification.** Every non-trivial claim ≥1 citation; every citation carries a verbatim quote. Unverifiable ⇒ DENY + structured repair request. Cap repair retries and total rounds.
+14. **Judge threshold:** convergence requires agreement ≥ 0.85 and zero blocking issues.
+15. **Re-verify CLI flags before automation.** Codex and Claude CLIs move fast — check `--help` against the pinned version in `config/` before wiring flags into the loop.
+
+## Hardware constraints (design against these)
+
+16. HUD canvas = **576×288 monochrome green**. All display code targets this; nothing else.
+17. **One BLE central per lens.** Handoff is always: disconnect → rescan → reconnect both lenses → replay 7-packet auth + init → resend page state.
+18. Even Hub relay: WebSocket domains must be exact-matched in `app.json` (no wildcards) or the Hub silently blocks them.
+19. Mic enable is `[0x0E, 0x01]`; LC3 frames arrive 0xF1-prefixed on NUS; decode via `liblc3` to 16 kHz mono 16-bit PCM.

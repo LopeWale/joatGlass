@@ -1,0 +1,23 @@
+# Vendor clones (reproduce via scripts/clone_vendors.sh)
+vendor/*
+!vendor/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets & local config
+.env
+*.local.toml
