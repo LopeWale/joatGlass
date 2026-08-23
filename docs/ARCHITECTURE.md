@@ -12,7 +12,7 @@
 | Component | Package | Responsibility |
 |---|---|---|
 | G2 transport | `jarvis/ble` | Connect both lens peripherals, 7-packet auth replay, heartbeat, reconnect, host handoff |
-| Audio pipeline | `jarvis/audio` | Mic enable `[0x0E, 0x01]`, LC3 (0xF1/NUS) → `liblc3` → 16 kHz PCM, VAD/wake word, STT |
+| Audio pipeline | `jarvis/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
 | HUD renderer | `jarvis/display` | 576×288 canvas, text containers, cards, differential page updates |
 | Reasoning | `jarvis/services` | Orchestrator: route utterances to MLX (fast path) or the debate loop (planning path) |
 | Debate agents | `jarvis/agents` | `ProposerAgent` (Codex CLI), `CriticAgent` (Claude CLI), `JudgeAgent` (local MLX), `DebateLoop` state machine |
@@ -50,8 +50,8 @@ Domain models (dataclasses): `HudPage`, `Transcript`, `DebateTask`, `Plan`, `Cla
 
 ## 4. Operating modes & host handoff
 
-1. **Mac direct-BLE** (primary, at desk): CoreBluetooth via the gateway; lowest latency.
-2. **Even Hub relay** (mobility): Hub plugin (WebView + WebSocket) → Mac over LAN. Phone must stay foregrounded (Guided Access, Auto-Lock Never). WebSocket domains must be exact-matched in `app.json`.
+1. **Mac direct-BLE** (desk): CoreBluetooth via the gateway; lowest latency; needs raw LC3 decode.
+2. **Even Hub relay** (mobility, and the fastest path to a working system): our Hub plugin (WebView + WebSocket) → Mac over LAN. Officially supported APIs — decoded PCM, IMU, location, camera. Phone must stay foregrounded (Guided Access, Auto-Lock Never). WebSocket domains must be exact-matched in `app.json`. See [HUB_PLUGIN.md](HUB_PLUGIN.md).
 3. **Custom iOS companion** (Phase 5): background BLE via `bluetooth-central` + State Preservation/Restoration.
 
 `HandoffManager` (in `services/`) owns the switch: disconnect current central → rescan both lens addresses → reconnect → replay 7-packet auth + init (time-sync, pipe-role, heartbeat) → resend current page state. Only one central per lens, ever.

@@ -41,13 +41,21 @@ unset OPENAI_API_KEY
 # Suppress OpenTelemetry crash (known Codex CLI bug)
 export OTEL_SDK_DISABLED=true
 
+# ── Model ─────────────────────────────────────────────────
+# Pinned here rather than inherited from ~/.codex/config.toml so the bridge
+# does not silently change which model your interactive `codex` sessions use.
+# Subscription credits are metered per tier — a higher tier can be exhausted
+# while a lower one still has quota.
+# Override per call:  CODEX_MODEL=gpt-5.6-terra .claude/bin/codex-bridge.sh ...
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.3-codex-spark}"
+
 # ── Execute ───────────────────────────────────────────────
 case "$MODE" in
   think)
-    exec codex exec -s read-only "$PROMPT"
+    exec codex exec -m "$CODEX_MODEL" -s read-only "$PROMPT"
     ;;
   build)
-    exec codex exec --full-auto "$PROMPT"
+    exec codex exec -m "$CODEX_MODEL" -s workspace-write -c approval_policy="never" "$PROMPT"
     ;;
   *)
     echo "Error: Mode must be 'think' or 'build'. Got: $MODE" >&2

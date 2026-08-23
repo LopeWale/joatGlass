@@ -21,3 +21,6 @@ dist/
 # Secrets & local config
 .env
 *.local.toml
+
+# Cross-model collab workspace (specs, reports, transient codex output)
+.collab/

@@ -34,4 +34,14 @@ Non-negotiable rules for this codebase. PRs violating these get rejected.
 16. HUD canvas = **576×288 monochrome green**. All display code targets this; nothing else.
 17. **One BLE central per lens.** Handoff is always: disconnect → rescan → reconnect both lenses → replay 7-packet auth + init → resend page state.
 18. Even Hub relay: WebSocket domains must be exact-matched in `app.json` (no wildcards) or the Hub silently blocks them.
-19. Mic enable is `[0x0E, 0x01]`; LC3 frames arrive 0xF1-prefixed on NUS; decode via `liblc3` to 16 kHz mono 16-bit PCM.
+19. **Direct-BLE path only:** mic enable is `[0x0E, 0x01]`; LC3 frames arrive 0xF1-prefixed on NUS; decode via `liblc3` to 16 kHz mono 16-bit PCM. On the **Hub relay path the SDK already delivers 16 kHz mono 16-bit LE PCM** via `audioEvent.audioPcm` — do not add a decode step there.
+
+## Even Hub SDK (relay path)
+
+20. **Call order is mandatory:** `waitForEvenAppBridge()` → `createStartUpPageContainer()` (one-shot, must return `success`) → everything else. Glasses-mic `audioControl` and `imuControl` fail without it.
+21. **Exactly one container per page has `isEventCapture: 1`.** Zero or multiple is undefined behaviour.
+22. **`zOrderIndex` is all-or-nothing per page and must be unique** — otherwise SDK validation rejects the page before it reaches native.
+23. **Limits:** `containerTotalNum` 1–12, max 8 text containers, max 4 image containers, `textContainerUpgrade` ≤ 2000 chars, list ≤ 20 items × 64 chars.
+24. **`updateImageRawData` calls must be serial** — await each before the next.
+25. **Always call the returned unsubscribe** for `onEvenHubEvent` / `onDeviceStatusChanged` / `onLaunchSource`; `onLaunchSource` fires once, so register it immediately after bridge init.
+26. **Prefer `textContainerUpgrade` over `rebuildPageContainer`** for content changes — in-place, no flicker. Rebuild only for actual layout changes.
