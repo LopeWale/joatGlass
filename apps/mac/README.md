@@ -11,7 +11,7 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-38 tests today: protocol parsing/serialization plus integration tests that stand up a real WebSocket server and round-trip against it.
+51 tests today: protocol parsing/serialization, VAD segmentation, orchestrator flow, plus integration tests that stand up a real WebSocket server and round-trip against it.
 
 ## What exists
 
@@ -20,8 +20,9 @@ pytest tests/ -q
 | `jarvis/core/protocol.py` | Done — mirror of `types.ts`, with `parse_uplink` and `to_wire` |
 | `jarvis/core/interfaces.py` | Done — `GlassesTransport`, `SttEngine`, `Confirmer` ABCs |
 | `jarvis/ble/hub_gateway.py` | Done — `HubGatewayTransport`, the WebSocket server the plugin dials |
-| `jarvis/audio/whisperkit.py` | Scaffold — shells out to `whisperkit-cli`, untested against the real binary |
-| `jarvis/services/` | Empty — the Orchestrator goes here |
+| `jarvis/audio/whisperkit.py` | Done — shells out to `whisperkit-cli`, verified against the real binary |
+| `jarvis/audio/vad.py` | Done — RMS utterance segmentation (thresholds uncalibrated) |
+| `jarvis/services/orchestrator.py` | Done — Phase-0 voice loop: mic → VAD → STT → HUD transcript |
 | `jarvis/agents/`, `verifier/`, `channels/`, `computeruse/` | Empty — Phases 2–4 |
 
 ## Protocol drift is the main hazard
@@ -43,3 +44,26 @@ Naming convention across the boundary: the wire is **camelCase** (`actionId`, `c
 ## Next
 
 The `Orchestrator` in `jarvis/services/`: subscribe to transport audio, feed `SttEngine`, route transcripts to a reply, and send `HudText` back. That closes Phase 0.
+
+## Deploying to a new Mac (mini, Studio, anything)
+
+One command, idempotent — no manual reconfiguration:
+
+```bash
+git clone <this repo> && cd joatGlass
+./scripts/setup_brain.sh --service --warm
+```
+
+The script installs Python ≥3.12 and `whisperkit-cli` (via Homebrew) if missing,
+creates the venv, installs the package, runs the test suite, pre-downloads the
+Whisper model (`--warm`), and installs a launchd agent (`--service`) so the
+brain starts at login and restarts if it dies. Logs: `~/Library/Logs/joat/brain.log`.
+
+The one step it will not automate: adding the new Mac's hostname to the plugin's
+`app.json` network whitelist (and `VITE_MAC_WS_URL`). That is a deliberate
+security decision — the script detects the mismatch and tells you exactly what
+to add, but a human commits it. The whitelist already carries the MacBook and
+the mac mini; a third machine is one more pair of `ws://`/`wss://` entries.
+
+Model choice: `JOAT_STT_MODEL=<name>` overrides the default `large-v3_turbo`
+(e.g. `base` on a low-RAM machine).
