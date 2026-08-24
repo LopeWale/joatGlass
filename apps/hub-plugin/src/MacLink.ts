@@ -4,8 +4,13 @@ import type { DownlinkMessage, UplinkMessage } from './types';
 export type LinkState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
 export interface MacLinkOptions {
-  /** Must be an exact-match domain listed in app.json — the Hub blocks anything else. */
-  url: string;
+  /**
+   * Candidate brain URLs, tried in order with rotation on failure. Every
+   * entry must be an exact-match domain listed in app.json — the Hub blocks
+   * anything else. Multiple entries make the brain PORTABLE: run it on any
+   * whitelisted Mac and the plugin finds it, no rebuild needed.
+   */
+  urls: readonly string[];
   maxQueue?: number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
@@ -22,6 +27,7 @@ export class MacLink {
   private socket?: WebSocket;
   private queue: UplinkMessage[] = [];
   private attempt = 0;
+  private urlIndex = 0;
   private closed = false;
   private handler?: (msg: DownlinkMessage) => void;
   private stateHandler?: (state: LinkState) => void;
@@ -31,9 +37,15 @@ export class MacLink {
   private readonly capMs: number;
 
   constructor(private readonly opts: MacLinkOptions) {
+    if (opts.urls.length === 0) throw new Error('MacLink needs at least one URL');
     this.maxQueue = opts.maxQueue ?? 200;
     this.baseMs = opts.reconnectBaseMs ?? 500;
     this.capMs = opts.reconnectMaxMs ?? 15_000;
+  }
+
+  /** The URL currently being dialed (for status surfaces). */
+  get activeUrl(): string {
+    return this.opts.urls[this.urlIndex % this.opts.urls.length] as string;
   }
 
   onMessage(handler: (msg: DownlinkMessage) => void): void {
@@ -47,7 +59,7 @@ export class MacLink {
   connect(): void {
     this.closed = false;
     this.stateHandler?.(this.attempt === 0 ? 'connecting' : 'reconnecting');
-    const socket = new WebSocket(this.opts.url);
+    const socket = new WebSocket(this.activeUrl);
     this.socket = socket;
 
     socket.onopen = () => {
@@ -93,7 +105,12 @@ export class MacLink {
   }
 
   private scheduleReconnect(): void {
-    const delay = Math.min(this.baseMs * 2 ** this.attempt++, this.capMs);
+    // Rotate to the next candidate brain before retrying, so a dead primary
+    // never blocks a live secondary. Backoff grows per full rotation, not per
+    // attempt — trying 3 dead hosts shouldn't take 3x as long to give up on.
+    this.urlIndex = (this.urlIndex + 1) % this.opts.urls.length;
+    const round = Math.floor(this.attempt++ / this.opts.urls.length);
+    const delay = Math.min(this.baseMs * 2 ** round, this.capMs);
     const jitter = delay * 0.2 * Math.random();
     setTimeout(() => { if (!this.closed) this.connect(); }, delay + jitter);
   }

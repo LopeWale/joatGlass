@@ -11,8 +11,15 @@ import { Settings } from './Settings';
 import { SettingsMenu } from './SettingsMenu';
 import { ContainerId, CONFIRM_HINT, type DownlinkMessage } from './types';
 
-/** Must be an exact-match domain in app.json (no wildcards) or the Hub blocks it. */
-const MAC_WS_URL = import.meta.env.VITE_MAC_WS_URL ?? 'wss://mac.local:8787/glasses';
+/**
+ * Comma-separated candidate brain URLs — every host must be an exact-match
+ * domain in app.json or the Hub blocks it silently. MacLink rotates through
+ * them, so the brain can run on ANY whitelisted Mac without a plugin rebuild.
+ */
+const MAC_WS_URLS = (import.meta.env.VITE_MAC_WS_URL ?? 'wss://mac.local:8787/glasses')
+  .split(',')
+  .map((u) => u.trim())
+  .filter((u) => u.length > 0);
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
 function setPanel(id: string, text: string): void {
@@ -23,15 +30,16 @@ function setPanel(id: string, text: string): void {
 async function boot(): Promise<void> {
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
-  const link = new MacLink({ url: MAC_WS_URL });
+  const link = new MacLink({ urls: MAC_WS_URLS });
 
-  setPanel('p-url', MAC_WS_URL);
+  setPanel('p-url', link.activeUrl);
   // A reconnected socket is a fresh session on the Mac's side — without a new
   // hello the brain never learns who connected and never greets. announce() is
   // set once device info exists; the guard covers the first pre-boot 'connected'.
   let announce: (() => void) | undefined;
   link.onState((state) => {
     setPanel('p-link', state);
+    setPanel('p-url', link.activeUrl); // failover rotation, made visible
     if (state === 'connected') announce?.();
   });
 
