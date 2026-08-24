@@ -17,9 +17,12 @@ an iPhone relay, voice in and HUD out. See [README.md](README.md) for the system
 
 ## Status
 
-Phase 0 skeleton. No build manifest is committed yet (no `pyproject.toml`,
-no `package.json`), so there is no wired test command — establish one before
-relying on any workflow that says "run the test suite".
+Phase 0. The hub plugin (`apps/hub-plugin`) is a real Vite + TypeScript
+package: `npm run build` (typecheck + bundle) and `npm test` (vitest) both
+work — run them from that directory after touching plugin code. The Python
+brain (`apps/mac/jarvis`) is still an empty skeleton with no `pyproject.toml`
+and no test runner — establish one before relying on any workflow that says
+"run the test suite" against Python code.
 
 ## Key constraints
 
@@ -77,8 +80,9 @@ The bridge is adapted to the installed CLI (`codex-cli 0.148.0-alpha.15`):
   Default `gpt-5.3-codex-spark`; override per call with `CODEX_MODEL=<model>`.
   Reason: `gpt-5.6-terra` subscription credits are exhausted until 2026-08-28.
   Revisit that default once credits reset.
-- **`npm test` does not apply here.** This repo has no JS test runner and no build manifest.
-  Substitute the real test command in the rules above once one is wired.
+- **`npm test` applies only to `apps/hub-plugin`** (vitest; run it from that
+  directory). The Python side has no test runner yet — substitute the real
+  command in the rules above once one is wired.
 
 ## Docs
 

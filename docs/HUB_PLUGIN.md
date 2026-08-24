@@ -66,7 +66,9 @@ Rules that bite:
 | `ImuMonitor` | `imuControl`; nod detection → confirm result back to the Mac |
 | `EventRouter` | Single `onEvenHubEvent` subscription → typed dispatch (list/text/sys/audio) |
 | `MacLink` | WebSocket client to the Mac brain: reconnect, backpressure, framed messages |
-| `DeviceMonitor` | `onDeviceStatusChanged` — battery, wearing, charging, connect state |
+| `DeviceMonitor` | `onDeviceStatusChanged` — battery, wearing, charging, connect state. Doff stops the glasses mic locally (fail-safe); resume follows the wearer's `ResumePolicy` (`auto` / `mac` / `confirm`) |
+| `Settings` | Wearer-adjustable settings (resume policy), persisted in WebView localStorage; Mac can also set them via `policy.set` downlink |
+| `SettingsMenu` | On-glasses settings page: **left-temple double-tap** toggles it, list row click applies + persists + announces to the Mac. Events are consumed locally while open |
 
 `MacLink` is the seam: the Mac's `HubGatewayTransport` speaks the same message protocol whether the peer is this plugin or `men-g2-ble-gateway`.
 

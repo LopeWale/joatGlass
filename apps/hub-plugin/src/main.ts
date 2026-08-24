@@ -6,6 +6,9 @@ import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
 import { ImuMonitor } from './ImuMonitor';
 import { EventRouter } from './EventRouter';
+import { DeviceMonitor } from './DeviceMonitor';
+import { Settings } from './Settings';
+import { SettingsMenu } from './SettingsMenu';
 import { ContainerId, type DownlinkMessage } from './types';
 
 /** Must be an exact-match domain in app.json (no wildcards) or the Hub blocks it. */
@@ -23,7 +26,11 @@ async function boot(): Promise<void> {
   const hud = new HudPresenter(client, layouts);
   const audio = new AudioStreamer(client, link);
   const imu = new ImuMonitor(client, link);
-  new EventRouter(client, link, audio, imu).attach();
+  const settings = new Settings();
+  settings.load();
+  const menu = new SettingsMenu(hud, settings, link);
+  new EventRouter(client, link, audio, imu, menu).attach();
+  new DeviceMonitor(client, link, audio, imu, hud, settings).attach();
 
   link.onMessage(async (msg: DownlinkMessage) => {
     switch (msg.kind) {
@@ -48,6 +55,11 @@ async function boot(): Promise<void> {
         await hud.showText(`${msg.prompt}\n\nNod or tap ring to confirm.`, ContainerId.Main);
         imu.await(msg.actionId);
         break;
+      case 'policy.set':
+        // Mac-side config path; the wearer's on-glasses menu is the other.
+        settings.setResumePolicy(msg.resume);
+        link.send({ kind: 'policy', resume: settings.resumePolicy });
+        break;
       case 'shutdown':
         await teardown();
         await client.require().shutDownPageContainer(msg.exitMode ?? 1);
@@ -64,6 +76,8 @@ async function boot(): Promise<void> {
     model: device?.model ?? 'unknown',
     launchSource: client.getLaunchSource() ?? 'unknown',
   });
+  // Announce the persisted policy so the Mac's session logic starts in sync.
+  link.send({ kind: 'policy', resume: settings.resumePolicy });
 
   await hud.setStatus('JOAT · connecting');
   await audio.start(AudioInputSource.Glasses);

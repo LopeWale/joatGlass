@@ -13,7 +13,7 @@ import type { IMU_Report_Data } from '@evenrealities/even_hub_sdk';
  */
 export class ImuMonitor {
   private samples: Array<{ y: number; at: number }> = [];
-  private pending?: { actionId: string; expiresAt: number };
+  private pending?: { actionId: string; expiresAt: number; onResult?: (accepted: boolean) => void };
   private open = false;
 
   constructor(
@@ -35,9 +35,16 @@ export class ImuMonitor {
     this.open = false;
   }
 
-  /** Arm a confirmation window. The Mac sends confirm.request; we answer confirm. */
-  await(actionId: string, timeoutMs = 8000): void {
-    this.pending = { actionId, expiresAt: Date.now() + timeoutMs };
+  /**
+   * Arm a confirmation window.
+   *
+   * Without onResult (the Mac's confirm.request flow): the verdict is sent
+   * uplink as a confirm message. With onResult (plugin-local decisions like
+   * resume-on-don): the callback gets the verdict and NOTHING goes to the
+   * Mac — it never asked, so it gets no answer.
+   */
+  await(actionId: string, timeoutMs = 8000, onResult?: (accepted: boolean) => void): void {
+    this.pending = { actionId, expiresAt: Date.now() + timeoutMs, onResult };
     this.samples = [];
   }
 
@@ -66,8 +73,13 @@ export class ImuMonitor {
 
   private resolve(accepted: boolean): void {
     if (!this.pending) return;
-    this.link.send({ kind: 'confirm', actionId: this.pending.actionId, accepted });
+    const { actionId, onResult } = this.pending;
     this.pending = undefined;
     this.samples = [];
+    if (onResult) {
+      onResult(accepted);
+    } else {
+      this.link.send({ kind: 'confirm', actionId, accepted });
+    }
   }
 }

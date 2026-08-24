@@ -3,6 +3,7 @@ import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
+import type { SettingsMenu } from './SettingsMenu';
 
 /**
  * Single onEvenHubEvent subscription fanned out to typed handlers.
@@ -16,22 +17,11 @@ export class EventRouter {
     private readonly link: MacLink,
     private readonly audio: AudioStreamer,
     private readonly imu: ImuMonitor,
+    private readonly menu: SettingsMenu,
   ) {}
 
   attach(): void {
     this.client.track(this.client.require().onEvenHubEvent((event) => this.dispatch(event)));
-
-    this.client.track(
-      this.client.require().onDeviceStatusChanged((status) => {
-        this.link.send({
-          kind: 'device',
-          battery: status.batteryLevel,
-          wearing: status.isWearing,
-          charging: status.isCharging,
-          connect: status.connectType,
-        });
-      }),
-    );
   }
 
   private dispatch(event: EvenHubEvent): void {
@@ -43,6 +33,15 @@ export class EventRouter {
       const sys = event.sysEvent;
       if (sys.eventType === OsEventTypeList.IMU_DATA_REPORT && sys.imuData) {
         this.imu.ingest(sys.imuData);
+        return;
+      }
+      // Left-temple double-tap toggles the on-glasses settings menu —
+      // consumed locally, never relayed. Right temple + ring stay Mac-facing.
+      if (
+        sys.eventSource === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L &&
+        sys.eventType === OsEventTypeList.DOUBLE_CLICK_EVENT
+      ) {
+        this.menu.toggle();
         return;
       }
       // R1 ring tap is a clean confirm signal — no nod heuristics needed.
@@ -72,6 +71,8 @@ export class EventRouter {
     }
 
     if (event.listEvent) {
+      // Settings menu open → selection is a local concern, not Mac input.
+      if (this.menu.handleList(event.listEvent)) return;
       this.link.send({
         kind: 'input',
         event: {

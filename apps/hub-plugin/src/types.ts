@@ -15,6 +15,13 @@ export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
 
+/**
+ * How listening resumes after the wearer puts the glasses back on.
+ * Doff always stops the mic locally (fail-safe); this only governs resume.
+ * Wearer-configurable on the G2 (left-temple double-tap → settings list).
+ */
+export type ResumePolicy = 'auto' | 'mac' | 'confirm';
+
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
   | { kind: 'hello'; sn: string; model: string; launchSource: string }
@@ -22,7 +29,8 @@ export type UplinkMessage =
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
   | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string }
-  | { kind: 'confirm'; actionId: string; accepted: boolean };
+  | { kind: 'confirm'; actionId: string; accepted: boolean }
+  | { kind: 'policy'; resume: ResumePolicy };
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
@@ -32,6 +40,7 @@ export type DownlinkMessage =
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   | { kind: 'confirm.request'; actionId: string; prompt: string }
+  | { kind: 'policy.set'; resume: ResumePolicy }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
 export interface InputEventPayload {

@@ -24,8 +24,16 @@ export class AudioStreamer {
     private readonly flushMs = 200,
   ) {}
 
+  /** True while the mic is streaming. DeviceMonitor keys resume logic off this. */
+  get isOpen(): boolean {
+    return this.open;
+  }
+
   /** Glasses mic requires a successful startup page; phone mic does not. */
   async start(source: AudioInputSource = AudioInputSource.Glasses): Promise<boolean> {
+    // Idempotent: a second start while open must not stack another flush
+    // timer (the overwritten handle would leak and flush forever).
+    if (this.open) return true;
     const bridge =
       source === AudioInputSource.Glasses ? this.client.assertStarted() : this.client.require();
     const ok = await bridge.audioControl(true, source);
