@@ -1,5 +1,8 @@
 import type { DownlinkMessage, UplinkMessage } from './types';
 
+/** Observable link lifecycle, for status surfaces (webview panel, HUD). */
+export type LinkState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
+
 export interface MacLinkOptions {
   /** Must be an exact-match domain listed in app.json — the Hub blocks anything else. */
   url: string;
@@ -21,6 +24,7 @@ export class MacLink {
   private attempt = 0;
   private closed = false;
   private handler?: (msg: DownlinkMessage) => void;
+  private stateHandler?: (state: LinkState) => void;
 
   private readonly maxQueue: number;
   private readonly baseMs: number;
@@ -36,13 +40,19 @@ export class MacLink {
     this.handler = handler;
   }
 
+  onState(handler: (state: LinkState) => void): void {
+    this.stateHandler = handler;
+  }
+
   connect(): void {
     this.closed = false;
+    this.stateHandler?.(this.attempt === 0 ? 'connecting' : 'reconnecting');
     const socket = new WebSocket(this.opts.url);
     this.socket = socket;
 
     socket.onopen = () => {
       this.attempt = 0;
+      this.stateHandler?.('connected');
       for (const msg of this.queue.splice(0)) this.rawSend(msg);
     };
     socket.onmessage = (event) => {
@@ -52,7 +62,14 @@ export class MacLink {
         // Ignore malformed frames rather than killing the link.
       }
     };
-    socket.onclose = () => { if (!this.closed) this.scheduleReconnect(); };
+    socket.onclose = () => {
+      if (!this.closed) {
+        this.stateHandler?.('reconnecting');
+        this.scheduleReconnect();
+      } else {
+        this.stateHandler?.('closed');
+      }
+    };
     socket.onerror = () => socket.close();
   }
 

@@ -18,6 +18,12 @@ function isResumePolicy(v: unknown): v is ResumePolicy {
  */
 export class Settings {
   private resume: ResumePolicy = 'confirm';
+  private listener?: (policy: ResumePolicy) => void;
+
+  /** Status surfaces (webview panel) subscribe to see menu-driven changes. */
+  onChange(listener: (policy: ResumePolicy) => void): void {
+    this.listener = listener;
+  }
 
   load(): void {
     try {
@@ -37,6 +43,7 @@ export class Settings {
 
   setResumePolicy(policy: ResumePolicy): void {
     this.resume = policy;
+    this.listener?.(policy);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ resume: this.resume }));
     } catch {
