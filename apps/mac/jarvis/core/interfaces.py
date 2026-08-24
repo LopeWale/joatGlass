@@ -85,3 +85,16 @@ class Confirmer(ABC):
 
     @abstractmethod
     async def confirm(self, prompt: str, timeout_s: float = 8.0) -> bool: ...
+
+
+class ReplyEngine(ABC):
+    """The fast-path local LLM (MAC_APP.md): transcript in, terse reply out.
+
+    Implementations must keep the model resident — the whole point of the
+    fast path is no per-utterance cold start. Return None to decline (engine
+    unavailable, empty prompt), in which case the orchestrator shows the
+    transcript alone.
+    """
+
+    @abstractmethod
+    async def reply(self, text: str) -> str | None: ...

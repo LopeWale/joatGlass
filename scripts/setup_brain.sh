@@ -62,7 +62,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   "$PY" -m venv "$VENV"
 fi
 say "installing jarvis package (+dev tools)"
-"$VENV/bin/pip" install -q -e "$REPO_DIR[dev]"
+"$VENV/bin/pip" install -q -e "$REPO_DIR[dev,mlx]"
 
 # ── 4. whisperkit-cli ───────────────────────────────────────────────────────
 if ! command -v whisperkit-cli >/dev/null; then
