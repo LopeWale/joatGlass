@@ -27,6 +27,5 @@ dist/
 
 # IMU calibration traces (personal motion data)
 traces/
-tests/
 # Packed Hub plugin bundles (build artifacts)
 *.ehpk
