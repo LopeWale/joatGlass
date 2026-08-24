@@ -5,7 +5,7 @@ import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
-import { ContainerId } from './types';
+import { ContainerId, CONFIRM_HINT } from './types';
 
 /** Fields we track per onDeviceStatusChanged callback. All optional — older hosts omit them. */
 interface Snapshot {
@@ -85,7 +85,7 @@ export class DeviceMonitor {
    *   auto    — start the glasses mic immediately;
    *   mac     — status line only; the Mac sees wearing=true from the relay
    *             and sends audio.control when its session logic wants ears;
-   *   confirm — HUD prompt, resume only on nod / ring tap (RULES.md
+   *   confirm — HUD prompt, resume only on nod / temple or ring tap (RULES.md
    *             consequential-action gate). Timeout or no answer = stay off.
    */
   private onWorn(): void {
@@ -102,7 +102,7 @@ export class DeviceMonitor {
         void this.hud.setStatus('JOAT · glasses on');
         break;
       case 'confirm':
-        void this.hud.showText('Resume listening?\n\nNod or tap ring to confirm.', ContainerId.Main);
+        void this.hud.showText(`Resume listening?\n\n${CONFIRM_HINT}`, ContainerId.Main);
         this.imu.await('local:resume', 8000, (accepted) => {
           if (accepted) void this.audio.start(AudioInputSource.Glasses);
           void this.hud.setStatus(accepted ? 'JOAT · listening' : 'JOAT · mic off');

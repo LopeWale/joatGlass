@@ -15,6 +15,7 @@ export class ImuMonitor {
   private samples: Array<{ y: number; at: number }> = [];
   private pending?: { actionId: string; expiresAt: number; onResult?: (accepted: boolean) => void };
   private open = false;
+  private trace = false;
 
   constructor(
     private readonly client: BridgeClient,
@@ -48,10 +49,26 @@ export class ImuMonitor {
     this.samples = [];
   }
 
+  /**
+   * Calibration mode: relay every raw sample uplink so thresholds can be
+   * derived from real labelled gestures instead of guessed. Off by default —
+   * at P100 this is 10 messages/second of pure debug traffic.
+   */
+  setTrace(enabled: boolean): void {
+    this.trace = enabled;
+  }
+
   /** Called by EventRouter for each sysEvent carrying imuData. */
   ingest(imu: IMU_Report_Data): void {
-    if (!this.pending) return;
     const now = Date.now();
+
+    // Trace runs before the pending guard: calibration needs the idle and
+    // walking baselines too, not just samples inside a confirm window.
+    if (this.trace) {
+      this.link.send({ kind: 'imu', x: imu.x ?? 0, y: imu.y ?? 0, z: imu.z ?? 0, at: now });
+    }
+
+    if (!this.pending) return;
 
     if (now > this.pending.expiresAt) {
       this.resolve(false);
@@ -66,8 +83,15 @@ export class ImuMonitor {
     if (swing >= this.threshold) this.resolve(true);
   }
 
-  /** Explicit accept path — R1 ring tap is unambiguous, unlike a nod. */
-  confirmByRing(): void {
+  /**
+   * Explicit accept path — a deliberate tap is unambiguous, unlike a nod.
+   *
+   * Fed by the R1 ring click and by a right-temple click. The temple is the
+   * one confirm gesture available to a wearer with no ring, so it is not a
+   * fallback: until the nod thresholds are calibrated against real traces it
+   * is the only confirm surface we actually trust.
+   */
+  confirmByTap(): void {
     if (this.pending) this.resolve(true);
   }
 

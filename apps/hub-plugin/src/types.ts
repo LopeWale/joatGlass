@@ -16,6 +16,16 @@ export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
 
 /**
+ * Confirmation prompt hint. Lives here, not in main.ts, so DeviceMonitor can
+ * use it without a circular import.
+ *
+ * Names the right temple rather than the ring: the ring is an optional
+ * accessory, the temple is always present. Both resolve the same confirm, and
+ * the nod is listed last because its thresholds are still uncalibrated.
+ */
+export const CONFIRM_HINT = 'Tap the right temple (or nod) to confirm.';
+
+/**
  * How listening resumes after the wearer puts the glasses back on.
  * Doff always stops the mic locally (fail-safe); this only governs resume.
  * Wearer-configurable on the G2 (left-temple double-tap → settings list).
@@ -39,6 +49,8 @@ export type DownlinkMessage =
   | { kind: 'hud.list'; items: string[] }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
+  /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */
+  | { kind: 'imu.trace'; enabled: boolean }
   | { kind: 'confirm.request'; actionId: string; prompt: string }
   | { kind: 'policy.set'; resume: ResumePolicy }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };

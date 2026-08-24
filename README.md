@@ -52,6 +52,7 @@ utilsG2/
 | [docs/MAC_APP.md](docs/MAC_APP.md) | Mac Studio brain — detailed design |
 | [docs/HUB_PLUGIN.md](docs/HUB_PLUGIN.md) | Even Hub SDK reference — the relay path, container model, audio/IMU/location APIs |
 | [docs/STARTER_REPOS.md](docs/STARTER_REPOS.md) | Verified GitHub repos to clone so we don't build from zero |
+| [docs/TESTING.md](docs/TESTING.md) | Three testing tiers (vitest / simulator / glasses), event-shape probe, nod calibration |
 | [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) | What to do next, in order, and what's deliberately deferred |
 
 ## Quick start (Phase 0)

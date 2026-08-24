@@ -44,12 +44,16 @@ export class EventRouter {
         this.menu.toggle();
         return;
       }
-      // R1 ring tap is a clean confirm signal — no nod heuristics needed.
+      // Deliberate taps are clean confirm signals — no nod heuristics needed.
+      // Right temple matters most: a wearer with no R1 ring has no other
+      // trustworthy way to confirm, since the nod thresholds are uncalibrated.
+      // Still relayed uplink afterwards — the Mac may want the raw input too.
       if (
-        sys.eventSource === EventSourceType.TOUCH_EVENT_FROM_RING &&
+        (sys.eventSource === EventSourceType.TOUCH_EVENT_FROM_RING ||
+          sys.eventSource === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) &&
         sys.eventType === OsEventTypeList.CLICK_EVENT
       ) {
-        this.imu.confirmByRing();
+        this.imu.confirmByTap();
       }
       this.link.send({
         kind: 'input',
@@ -59,6 +63,19 @@ export class EventRouter {
     }
 
     if (event.textEvent) {
+      // Hardware-uncertainty hedge. Text_ItemEvent carries no eventSource, so
+      // if the host delivers a temple tap on the event-capture container as a
+      // textEvent rather than a sysEvent, the sysEvent branch above never
+      // fires and a ringless wearer has NO confirm path at all.
+      //
+      // Scoped tight so this cannot become an accidental-confirm bug: only a
+      // CLICK, only while a confirm window is already armed, and the prompt is
+      // on screen when it is. Verify which shape the G2 actually emits with
+      // the event dump in docs/TESTING.md, then delete whichever branch is
+      // dead rather than leaving both in place.
+      if (event.textEvent.eventType === OsEventTypeList.CLICK_EVENT) {
+        this.imu.confirmByTap();
+      }
       this.link.send({
         kind: 'input',
         event: {

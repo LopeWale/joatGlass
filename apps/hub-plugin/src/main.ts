@@ -9,7 +9,7 @@ import { EventRouter } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { SettingsMenu } from './SettingsMenu';
-import { ContainerId, type DownlinkMessage } from './types';
+import { ContainerId, CONFIRM_HINT, type DownlinkMessage } from './types';
 
 /** Must be an exact-match domain in app.json (no wildcards) or the Hub blocks it. */
 const MAC_WS_URL = import.meta.env.VITE_MAC_WS_URL ?? 'wss://mac.local:8787/glasses';
@@ -51,8 +51,11 @@ async function boot(): Promise<void> {
       case 'imu.control':
         msg.open ? await imu.start() : await imu.stop();
         break;
+      case 'imu.trace':
+        imu.setTrace(msg.enabled);
+        break;
       case 'confirm.request':
-        await hud.showText(`${msg.prompt}\n\nNod or tap ring to confirm.`, ContainerId.Main);
+        await hud.showText(`${msg.prompt}\n\n${CONFIRM_HINT}`, ContainerId.Main);
         imu.await(msg.actionId);
         break;
       case 'policy.set':

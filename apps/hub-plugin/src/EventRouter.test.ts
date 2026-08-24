@@ -12,7 +12,7 @@ function make(menuConsumesLists = false) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
   const audio = { ingest: vi.fn() };
-  const imu = { ingest: vi.fn(), confirmByRing: vi.fn() };
+  const imu = { ingest: vi.fn(), confirmByTap: vi.fn() };
   const menu = { toggle: vi.fn(), handleList: vi.fn(() => menuConsumesLists) };
   const client = {
     track: (u: () => void) => u,
@@ -79,8 +79,47 @@ describe('EventRouter', () => {
         eventSource: EventSourceType.TOUCH_EVENT_FROM_RING,
       },
     });
-    expect(imu.confirmByRing).toHaveBeenCalledTimes(1);
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
     expect(sent).toHaveLength(1);
+  });
+
+  // The ring-free confirm path. Without this a wearer with no R1 has only the
+  // uncalibrated nod, so this test guards an actual safety gate (RULES.md #6).
+  it('right-temple single click confirms and still relays as input', () => {
+    const { fire, imu, sent } = make();
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+      },
+    });
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('left-temple single click does NOT confirm — it is the menu side', () => {
+    const { fire, imu } = make();
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+  });
+
+  // Hedge for hosts that deliver a temple tap as textEvent (no eventSource).
+  it('text-container click confirms — the shape-uncertainty fallback', () => {
+    const { fire, imu, sent } = make();
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.CLICK_EVENT } });
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('non-click text events do not confirm', () => {
+    const { fire, imu } = make();
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
   });
 
   it('list events: consumed by an open menu, relayed otherwise', () => {

@@ -1,0 +1,94 @@
+# Testing — glasses, no ring
+
+Three tiers, cheapest first. Each catches a different class of bug, and **none of them substitutes for the others.**
+
+| Tier | Needs | Catches | Cannot catch |
+|---|---|---|---|
+| 1. Vitest | nothing | Logic: event routing by source, confirm resolution, settings persistence | Whether the G2 emits the events we assume |
+| 2. Simulator | simulator binary | Boot, HUD rendering, list navigation, container validity | **Which input source fired** — the API has no source field |
+| 3. Real glasses | G2 + phone | Everything real: event shapes, latency, wearing detection | — |
+
+## Tier 1 — Vitest (start here)
+
+```bash
+cd apps/hub-plugin && npm test
+```
+
+Covers the confirm paths without hardware, because `confirmByTap()` is just a method — no ring required to call it. `EventRouter.test.ts` asserts the source routing: left temple → settings menu, right temple → confirm, ring → confirm, and that a left-temple *single* click does not confirm.
+
+> If you're on Linux/CI and hit `Cannot find native binding`, the `node_modules` was installed on a different platform. Remove `node_modules` and `package-lock.json`, then `npm i`.
+
+## Tier 2 — Simulator (no glasses)
+
+A plain browser will not work: `waitForEvenAppBridge()` never resolves without a host, so `boot()` hangs forever. You need the simulator, which injects the bridge.
+
+```bash
+npm run dev                                            # serve the plugin
+evenhub-simulator http://localhost:5173 --automation-port 9898
+sleep 4                                                # SDK init + startup page take time
+curl -s http://127.0.0.1:9898/api/ping                 # → pong
+```
+
+Drive it and observe:
+
+```bash
+# Console output — start WITHOUT since_id, then track last_id (a negative value errors)
+curl -s http://127.0.0.1:9898/api/console | jq '.entries[-5:]'
+
+# Send touchpad input
+curl -s -XPOST http://127.0.0.1:9898/api/input \
+  -H 'Content-Type: application/json' -d '{"action":"click"}'
+
+# Screenshot the HUD (576x288 RGBA PNG)
+curl -s http://127.0.0.1:9898/api/screenshot/glasses -o /tmp/hud.png
+```
+
+Actions available: `up`, `down`, `click`, `double_click`. Input is **silently ignored** if no event-capture container is active — so a dead click is a real signal that `createStartUpPageContainer` failed or `isEventCapture` is wrong.
+
+**Reading screenshots:** keep them RGBA. Background is `(0,255,0,α=0)`, lit pixels are `(0,255,0,α=255)` — converting to RGB makes both pure green and indistinguishable. Test lit-ness with `px[3] > 0`.
+
+### The simulator's hard limit
+
+`POST /api/input` takes an **action only — no source**. It cannot tell the app whether a tap came from the left temple, the right temple, or the ring. So the simulator **cannot test the confirm routing**, which is the exact thing you're trying to test. It verifies the app boots, renders, and responds to clicks; source discrimination is Tier 1 (vitest) and Tier 3 (hardware) only.
+
+## Tier 3 — Real glasses: dump events first
+
+**Do this before trusting any confirm gesture.** The SDK enum says a right-temple touch arrives as `sysEvent` with `eventSource: 1` (`TOUCH_EVENT_FROM_GLASSES_R`), but that is the documented shape, not a verified one. `Text_ItemEvent` carries **no `eventSource` field at all** — so if the host delivers a temple tap as a `textEvent` on the event-capture container instead, the source-based branch never fires.
+
+`EventRouter` currently handles **both** shapes: the `sysEvent` source check, plus a narrowly scoped `textEvent` CLICK fallback that only fires while a confirm window is already armed. One of those two branches is dead code on real hardware. Find out which:
+
+```bash
+python3 scripts/imu_capture.py --out /tmp/probe.csv --label probe
+```
+
+It accepts the plugin's WebSocket and logs every uplink message, including `input`. Then, wearing the glasses:
+
+1. Tap the **right** temple → note whether an `input` arrives with `eventSource: 1`, or a `containerId` and no source.
+2. Tap the **left** temple once → should relay, must **not** confirm.
+3. Double-tap the **left** temple → settings menu opens, nothing relays.
+
+Then delete whichever `EventRouter` branch never fired. Leaving both in place means one is untested forever.
+
+## Nod calibration
+
+The `0.35` threshold is a guess. Calibrate it:
+
+```bash
+python3 scripts/imu_capture.py --out traces/nod.csv   --label nod    # nod repeatedly
+python3 scripts/imu_capture.py --out traces/walk.csv  --label walk   # walk around
+python3 scripts/imu_capture.py --out traces/still.csv --label still  # sit still
+python3 scripts/imu_analyze.py traces/*.csv
+```
+
+`imu_capture.py` turns on trace mode (`imu.trace` downlink), writes CSV, and flushes per sample so Ctrl-C mid-gesture keeps the data. `imu_analyze.py` replays each trace through the *same* sliding-window swing calculation `ImuMonitor` uses and reports the distribution per gesture.
+
+**Capture `walk`, not just `still`.** The threshold has to clear the loudest *non-nod* gesture, and that's walking. Calibrating against a still baseline gives you a confirmer that fires while you cross the street.
+
+The analyzer exits `2` and refuses to suggest a number when the nod and non-nod distributions overlap — that verdict means the nod is not a usable confirmer with this metric, and you should rely on the temple tap rather than ship a gate that fires on footsteps. A better feature (zero-crossing count, or swing-and-return rather than raw peak-to-peak) would be the next thing to try.
+
+## Order of operations
+
+1. `npm test` — green before touching hardware.
+2. Simulator — boot, HUD renders, clicks land.
+3. Glasses — dump events, fix the routing, delete the dead branch.
+4. Calibrate the nod, or formally decide the nod isn't trustworthy and document that.

@@ -29,7 +29,7 @@ describe('ImuMonitor confirms', () => {
     const { imu, sent } = make();
     const cb = vi.fn();
     imu.await('local:resume', 8000, cb);
-    imu.confirmByRing();
+    imu.confirmByTap();
     expect(cb).toHaveBeenCalledWith(true);
     expect(sent).toEqual([]);
   });
@@ -41,9 +41,9 @@ describe('ImuMonitor confirms', () => {
     expect(sent).toEqual([{ kind: 'confirm', actionId: 'late', accepted: false }]);
   });
 
-  it('ring tap with nothing pending is a no-op', () => {
+  it('tap with nothing pending is a no-op', () => {
     const { imu, sent } = make();
-    imu.confirmByRing();
+    imu.confirmByTap();
     expect(sent).toEqual([]);
   });
 
@@ -51,9 +51,53 @@ describe('ImuMonitor confirms', () => {
     const { imu, sent } = make();
     const second = vi.fn();
     imu.await('first', 8000, () => imu.await('second', 8000, second));
-    imu.confirmByRing(); // resolves first → callback arms second
-    imu.confirmByRing(); // must hit the re-armed window, not a stale one
+    imu.confirmByTap(); // resolves first → callback arms second
+    imu.confirmByTap(); // must hit the re-armed window, not a stale one
     expect(second).toHaveBeenCalledWith(true);
     expect(sent).toEqual([]);
+  });
+});
+
+describe('ImuMonitor trace mode', () => {
+  it('is off by default — no debug traffic on the wire', () => {
+    const { imu, sent } = make();
+    imu.ingest(sample(0.1));
+    expect(sent).toEqual([]);
+  });
+
+  it('relays raw samples when enabled, even with no confirm pending', () => {
+    const { imu, sent } = make();
+    imu.setTrace(true);
+    imu.ingest({ x: 1, y: 2, z: 3 } as IMU_Report_Data);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ kind: 'imu', x: 1, y: 2, z: 3 });
+  });
+
+  it('missing axes default to 0 rather than emitting undefined', () => {
+    const { imu, sent } = make();
+    imu.setTrace(true);
+    imu.ingest(sample(0.5));
+    expect(sent[0]).toMatchObject({ kind: 'imu', x: 0, y: 0.5, z: 0 });
+  });
+
+  it('tracing does not suppress the confirm it is observing', () => {
+    const { imu, sent } = make();
+    imu.setTrace(true);
+    imu.await('act-2');
+    imu.ingest(sample(0.0));
+    imu.ingest(sample(0.4));
+    expect(sent.filter((m) => m.kind === 'imu')).toHaveLength(2);
+    expect(sent.filter((m) => m.kind === 'confirm')).toEqual([
+      { kind: 'confirm', actionId: 'act-2', accepted: true },
+    ]);
+  });
+
+  it('setTrace(false) stops the stream', () => {
+    const { imu, sent } = make();
+    imu.setTrace(true);
+    imu.ingest(sample(0.1));
+    imu.setTrace(false);
+    imu.ingest(sample(0.2));
+    expect(sent).toHaveLength(1);
   });
 });
