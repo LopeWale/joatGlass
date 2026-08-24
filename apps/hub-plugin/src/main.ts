@@ -26,7 +26,14 @@ async function boot(): Promise<void> {
   const link = new MacLink({ url: MAC_WS_URL });
 
   setPanel('p-url', MAC_WS_URL);
-  link.onState((state) => setPanel('p-link', state));
+  // A reconnected socket is a fresh session on the Mac's side — without a new
+  // hello the brain never learns who connected and never greets. announce() is
+  // set once device info exists; the guard covers the first pre-boot 'connected'.
+  let announce: (() => void) | undefined;
+  link.onState((state) => {
+    setPanel('p-link', state);
+    if (state === 'connected') announce?.();
+  });
 
   // 1. Bridge, 2. startup page (one-shot) — order is mandatory. The second
   // argument lets a reloaded WebView adopt the host's existing page.
@@ -111,14 +118,17 @@ async function boot(): Promise<void> {
   link.connect();
 
   const device = await client.require().getDeviceInfo();
-  link.send({
-    kind: 'hello',
-    sn: device?.sn ?? 'unknown',
-    model: device?.model ?? 'unknown',
-    launchSource: client.getLaunchSource() ?? 'unknown',
-  });
-  // Announce the persisted policy so the Mac's session logic starts in sync.
-  link.send({ kind: 'policy', resume: settings.resumePolicy });
+  announce = () => {
+    link.send({
+      kind: 'hello',
+      sn: device?.sn ?? 'unknown',
+      model: device?.model ?? 'unknown',
+      launchSource: client.getLaunchSource() ?? 'unknown',
+    });
+    // Announce the persisted policy so the Mac's session logic starts in sync.
+    link.send({ kind: 'policy', resume: settings.resumePolicy });
+  };
+  announce();
 
   await hud.setStatus('JOAT · connecting');
   setPanel('p-status', 'connecting');

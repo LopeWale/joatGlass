@@ -74,13 +74,17 @@ discrimination is Tier 1 (vitest) and Tier 3 (hardware) only.
   falls back to `rebuildPageContainer` and adopts the existing page. If you see
   `boot failed: startup page failed: invalid`, you are on a plugin bundle older than that
   fallback.
-- **Occasional blank HUD after rapid reloads.** `[TAURI] Couldn't find callback id`
-  warnings mean a reload orphaned an in-flight bridge call and that boot wedged. It
-  self-heals on the next reload; restart the simulator if it persists.
-- **A blank HUD with a clean console can also mean the DISK is full.** The simulator
-  silently stops painting the glasses canvas when writes fail (observed at <1 GB free;
-  same sequence rendered perfectly after freeing space). Check `df -h /` before
-  debugging the protocol.
+- **Double Click blanks the canvas — it is the system-exit gesture.** The simulator's
+  Double Click button (and `POST /api/input {"action":"double_click"}`) injects a
+  right-temple double-press, which is the host's app-exit path: the page is cleared and
+  the canvas goes blank with a clean console. (Hardware shows an exit dialog; the
+  simulator just clears.) Verified deterministic: greeting on screen → one double_click
+  → blank. Use Click when poking around; recover with a vite reload. This masqueraded
+  as two earlier false diagnoses (full disk, orphaned callbacks) — check the console
+  tail for `eventType:3, eventSource:1` before believing anything else.
+- **Occasional wedged boot after rapid reloads.** `[TAURI] Couldn't find callback id`
+  warnings mean a reload orphaned an in-flight bridge call. Self-heals on the next
+  reload; restart the simulator if it persists.
 
 ## Tier 3 — Real glasses
 
