@@ -30,7 +30,10 @@ right-temple-only input, double-click = system exit).
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
 Remaining: the local MLX model between flush() and send(). **That closes Phase 0.**
 
-**Metric: round-trip voice → HUD < 3 s.** Measure it before adding anything else.
+**Metric: round-trip voice → HUD < 3 s.** First live measurement: 7.1 s utterance-end
+→ transcript (spoken through speakers → sim mic → tailnet → WhisperKit → HUD). Most of
+that is the CLI cold-starting the model per utterance — a persistent WhisperKit process
+(or Swift binding) is the known fix, not VAD or transport.
 
 ## 5. Calibrate the nod thresholds
 

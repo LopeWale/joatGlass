@@ -62,10 +62,31 @@ export class AudioStreamer {
     }
   }
 
-  /** Called by EventRouter for each audioEvent. */
+  // A byte left over when an event ends mid-sample; prepended to the next
+  // event. Without this, one odd-length event misaligns every later sample.
+  private carry: number | null = null;
+
+  /**
+   * Called by EventRouter for each audioEvent.
+   *
+   * The SDK's audioPcm is a Uint8Array of s16le BYTES (PCM 字节码), not an
+   * array of samples — treating bytes as samples yields near-silent noise at
+   * half speed (peak 255 instead of 32767). Decode byte pairs here so the
+   * wire carries real 16-bit samples, as protocol.py documents.
+   */
   ingest(pcm: Uint8Array | number[]): void {
     if (!this.open) return;
-    for (const sample of pcm) this.buffer.push(sample);
+    const bytes = pcm instanceof Uint8Array ? pcm : Uint8Array.from(pcm);
+    let i = 0;
+    if (this.carry !== null && bytes.length > 0) {
+      this.buffer.push(toSigned16(this.carry, bytes[0] as number));
+      this.carry = null;
+      i = 1;
+    }
+    for (; i + 1 < bytes.length; i += 2) {
+      this.buffer.push(toSigned16(bytes[i] as number, bytes[i + 1] as number));
+    }
+    if (i < bytes.length) this.carry = bytes[i] as number;
   }
 
   private flush(source: AudioInputSource): void {
@@ -77,4 +98,10 @@ export class AudioStreamer {
       pcm: this.buffer.splice(0),
     });
   }
+}
+
+/** Two little-endian bytes → one signed 16-bit sample. */
+function toSigned16(lo: number, hi: number): number {
+  const v = lo | (hi << 8);
+  return v >= 0x8000 ? v - 0x10000 : v;
 }
