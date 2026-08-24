@@ -19,9 +19,10 @@ async function boot(): Promise<void> {
   const layouts = new HudPageBuilder();
   const link = new MacLink({ url: MAC_WS_URL });
 
-  // 1. Bridge, 2. startup page (one-shot) — order is mandatory.
+  // 1. Bridge, 2. startup page (one-shot) — order is mandatory. The second
+  // argument lets a reloaded WebView adopt the host's existing page.
   await client.init();
-  await client.start(layouts.startup());
+  await client.start(layouts.startup(), layouts.defaultLayout());
 
   const hud = new HudPresenter(client, layouts);
   const audio = new AudioStreamer(client, link);
@@ -103,9 +104,11 @@ async function boot(): Promise<void> {
   link.send({ kind: 'policy', resume: settings.resumePolicy });
 
   await hud.setStatus('JOAT · connecting');
-  await audio.start(AudioInputSource.Glasses);
+  // Both starts degrade to false on hosts missing the capability (the desktop
+  // simulator has no IMU at all) — boot must survive either being absent.
+  const micOk = await audio.start(AudioInputSource.Glasses);
   await imu.start();
-  await hud.setStatus('JOAT · listening');
+  await hud.setStatus(micOk ? 'JOAT · listening' : 'JOAT · mic unavailable');
 
   async function teardown(): Promise<void> {
     await audio.stop();

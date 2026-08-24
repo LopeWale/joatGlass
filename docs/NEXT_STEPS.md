@@ -2,11 +2,18 @@
 
 Ordered, with the reasoning. Everything here is Phase 0 unless noted.
 
-## 1. Scaffold the real Hub plugin build (blocks everything else)
+## 1. Scaffold the real Hub plugin build — DONE
 
-The `src/` classes exist but there's no manifest or build config. Run `even-hub init` in `apps/hub-plugin/`, then merge the generated `package.json` / `vite.config.ts` / `app.json` around the existing `src/`. Let the CLI own the manifest — hand-writing `app.json` is how the WebSocket allowlist silently breaks.
+Build config (`package.json`, `vite.config.ts`, `tsconfig.json`) and `app.json` exist; the
+manifest was generated with the official CLI (`evenhub init`, from
+`@evenrealities/evenhub-cli` — the binary is `evenhub`/`eh`, not `even-hub`) and merged.
+The whitelist currently carries `ws://emmanuels-macbook-pro.local:8787` (this MacBook's real
+mDNS name, LAN-only — fine for desk dev).
 
-**Then:** add the Mac's WebSocket domain to `app.json` as an exact match. Give the Mac a stable hostname first (Tailscale MagicDNS is the least fragile option) — a DHCP IP will break the allowlist every time the lease changes.
+**Still open:** Tailscale is not installed yet. When it is, add the MagicDNS URL
+(`ws://<machine>.<tailnet>.ts.net:8787`) to BOTH `app.json`'s network whitelist and
+`VITE_MAC_WS_URL` in `apps/hub-plugin/.env` — and when the brain moves to the Mac Studio,
+swap the hostname in the same two places.
 
 ## 2. Stand up the Mac side of the link
 

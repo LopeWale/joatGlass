@@ -1,0 +1,27 @@
+{
+  "package_id": "com.akinwale.joat",
+  "edition": "202601",
+  "name": "JOAT",
+  "version": "0.1.0",
+  "min_sdk_version": "0.0.12",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "g2-microphone",
+      "desc": "Voice input from the glasses mic array, streamed to the wearer's own Mac for transcription."
+    },
+    {
+      "name": "network",
+      "desc": "WebSocket link to the wearer's own Mac (the assistant brain). No third-party servers.",
+      "whitelist": [
+        "ws://emmanuels-macbook-pro.tail3a3363.ts.net:8787",
+        "wss://emmanuels-macbook-pro.tail3a3363.ts.net:8787",
+        "ws://admins-mac-mini.tail3a3363.ts.net:8787",
+        "wss://admins-mac-mini.tail3a3363.ts.net:8787",
+        "ws://emmanuels-macbook-pro.local:8787",
+        "wss://emmanuels-macbook-pro.local:8787"
+      ]
+    }
+  ],
+  "supported_languages": ["en"]
+}
