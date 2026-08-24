@@ -123,10 +123,10 @@ Ignoring 6 and 7 leaves the glasses mic streaming after the wearer exits. That's
 
 ## Deployment constraints
 
-- **WebSocket domains must be listed in `app.json` — exact match, no wildcards.** The Hub silently blocks anything else. The Mac endpoint needs a stable hostname (Tailscale MagicDNS or a static LAN name), not an IP that churns.
+- **The Mac's WebSocket URL must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, scheme included — the Phase-0 gateway is plain `ws://`, and a `wss://`-only whitelist fails the same silent way. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
 - `navigator.geolocation` only works in a **published** Hub plugin, not via QR sideload — use `bridge.getAppLocation()` instead, which works in both.
 - The Even Hub app suspends when the phone locks or backgrounds → Guided Access + Auto-Lock Never + plugged in, or a dedicated spare iPhone. Phase 5 (custom companion) is the real fix.
-- Dev loop: `even-hub` CLI (`init`, `qr`, `pack`) + the desktop simulator, which accepts `window.postMessage` pushes for audio/IMU/device events — so `AudioStreamer` and `ImuMonitor` are testable without hardware.
+- Dev loop: the official CLI + simulator (`npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities/evenhub-simulator`). Binaries: `evenhub` (alias `eh`) — `evenhub init` scaffolds `app.json` only, `evenhub qr` sideloads with hot reload, `evenhub pack app.json dist` builds the `.ehpk`. The simulator (`evenhub-simulator <url> --automation-port 9898`) injects the bridge and exposes an HTTP automation API — see [TESTING.md](TESTING.md) tier 2. No Even account needed for dev; `evenhub login` is only for store submission.
 
 ## Host push formats (for simulator/tests)
 

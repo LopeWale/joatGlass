@@ -34,10 +34,16 @@ export class AudioStreamer {
     // Idempotent: a second start while open must not stack another flush
     // timer (the overwritten handle would leak and flush forever).
     if (this.open) return true;
-    const bridge =
-      source === AudioInputSource.Glasses ? this.client.assertStarted() : this.client.require();
-    const ok = await bridge.audioControl(true, source);
-    if (!ok) return false;
+    try {
+      const bridge =
+        source === AudioInputSource.Glasses ? this.client.assertStarted() : this.client.require();
+      const ok = await bridge.audioControl(true, source);
+      if (!ok) return false;
+    } catch (err) {
+      // A host without mic support must degrade the mic, not kill boot.
+      console.warn('[AudioStreamer] audioControl unavailable on this host:', err);
+      return false;
+    }
     this.open = true;
     this.flushTimer = setInterval(() => this.flush(source), this.flushMs);
     return true;
@@ -45,11 +51,15 @@ export class AudioStreamer {
 
   async stop(): Promise<void> {
     if (!this.open) return;
-    await this.client.require().audioControl(false);
     this.open = false;
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = undefined;
     this.buffer = [];
+    try {
+      await this.client.require().audioControl(false);
+    } catch {
+      // Host without audio support: nothing was ever on.
+    }
   }
 
   /** Called by EventRouter for each audioEvent. */

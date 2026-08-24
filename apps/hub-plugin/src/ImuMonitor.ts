@@ -25,15 +25,28 @@ export class ImuMonitor {
   ) {}
 
   async start(pace: ImuReportPace = ImuReportPace.P100): Promise<boolean> {
-    const ok = await this.client.assertStarted().imuControl(true, pace);
-    this.open = ok;
-    return ok;
+    try {
+      const ok = await this.client.assertStarted().imuControl(true, pace);
+      this.open = ok;
+      return ok;
+    } catch (err) {
+      // Hosts without IMU reject the call outright — the desktop simulator's
+      // bridge implements no `imuControl` variant at all. Degrade instead of
+      // killing boot: nod-confirm is unavailable, tap-confirm still works.
+      console.warn('[ImuMonitor] imuControl unavailable on this host:', err);
+      this.open = false;
+      return false;
+    }
   }
 
   async stop(): Promise<void> {
     if (!this.open) return;
-    await this.client.require().imuControl(false);
     this.open = false;
+    try {
+      await this.client.require().imuControl(false);
+    } catch {
+      // Same hosts reject the off-call too; there is nothing to turn off.
+    }
   }
 
   /**

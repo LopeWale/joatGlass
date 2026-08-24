@@ -18,18 +18,20 @@ See [../../docs/HUB_PLUGIN.md](../../docs/HUB_PLUGIN.md) for the SDK reference a
 | `src/MacLink.ts` | WebSocket to the Mac: backoff reconnect, bounded queue (drops oldest audio) |
 | `src/main.ts` | Boot sequence and downlink command handling |
 
-## Not yet done
+## Status
 
-- No `package.json` / `vite.config.ts` / `app.json` yet — scaffold with the `even-hub` CLI (`even-hub init`) and merge this `src/` in, so the generated manifest and build config stay canonical.
-- `app.json` must list the Mac WebSocket domain as an **exact match** (no wildcards).
-- IMU nod thresholds in `ImuMonitor` are untuned guesses — calibrate against hardware.
-- No tests yet; the desktop simulator accepts `window.postMessage` pushes, so `AudioStreamer`, `ImuMonitor`, and `EventRouter` are testable without glasses.
+- Build is wired: `package.json`, `vite.config.ts`, `tsconfig.json`, and `app.json` all exist. `npm run build` typechecks + bundles; `npm test` runs vitest.
+- `app.json`'s `network` permission `whitelist` must carry the Mac's WebSocket URL exactly (scheme included — the Phase-0 gateway is plain `ws://`). Keep it in sync with `VITE_MAC_WS_URL` in `.env`; a mismatch fails silently.
+- IMU nod thresholds in `ImuMonitor` are untuned guesses — calibrate with `scripts/imu_capture.py` (see [docs/TESTING.md](../../docs/TESTING.md)).
 
 ## Dev loop
 
 ```bash
-even-hub init          # generate manifest + build config
-npm install @evenrealities/even_hub_sdk
-even-hub qr            # sideload to the phone for testing
-even-hub pack          # build .ehpk for submission
+# one-time: official CLI + simulator (binaries: evenhub / eh / evenhub-simulator)
+npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities/evenhub-simulator
+
+npm run dev                                  # serve the plugin
+evenhub-simulator http://localhost:5190      # desktop simulator (injects the bridge)
+evenhub qr                                   # QR sideload to the phone (auto-detects LAN IP)
+npm run build && evenhub pack app.json dist  # .ehpk for submission (not needed for dev)
 ```

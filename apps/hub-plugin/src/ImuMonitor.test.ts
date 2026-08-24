@@ -101,3 +101,26 @@ describe('ImuMonitor trace mode', () => {
     expect(sent).toHaveLength(1);
   });
 });
+
+describe('ImuMonitor host degradation', () => {
+  it('start() returns false instead of throwing when the host has no IMU', async () => {
+    const sent: UplinkMessage[] = [];
+    const client = {
+      assertStarted: () => ({
+        imuControl: () => Promise.reject(new Error('unknown variant `imuControl`')),
+      }),
+    } as unknown as BridgeClient;
+    const imu = new ImuMonitor(client, { send: (m: UplinkMessage) => sent.push(m) } as unknown as MacLink);
+    await expect(imu.start()).resolves.toBe(false);
+  });
+
+  it('stop() never throws even when the host rejects the off-call', async () => {
+    const client = {
+      assertStarted: () => ({ imuControl: () => Promise.resolve(true) }),
+      require: () => ({ imuControl: () => Promise.reject(new Error('unknown variant')) }),
+    } as unknown as BridgeClient;
+    const imu = new ImuMonitor(client, { send: () => {} } as unknown as MacLink);
+    await imu.start();
+    await expect(imu.stop()).resolves.toBeUndefined();
+  });
+});
