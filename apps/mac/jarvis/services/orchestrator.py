@@ -17,7 +17,7 @@ import asyncio
 import logging
 
 from ..audio.vad import RmsVad
-from ..core.interfaces import GlassesTransport, SttEngine
+from ..core.interfaces import GlassesTransport, ReplyEngine, SttEngine
 from ..core.protocol import AudioControl, ContainerId, HudText
 
 log = logging.getLogger(__name__)
@@ -37,11 +37,13 @@ class VoiceOrchestrator:
         stt: SttEngine,
         vad: RmsVad | None = None,
         stt_available: bool = True,
+        replier: ReplyEngine | None = None,
     ) -> None:
         self._transport = transport
         self._stt = stt
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
+        self._replier = replier
         self._last_seq: int | None = None
         self._busy = False
 
@@ -85,14 +87,24 @@ class VoiceOrchestrator:
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")
             return
+        # Busy covers STT AND the reply: overlapping generations raced the
+        # MLX engine and produced garbage before this held to the end.
         self._busy = True
         try:
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
+            if transcript is None or not transcript.text:
+                log.info("STT produced no text")
+                return
+            log.info("transcript: %s", transcript.text)
+            # Show the wearer their words immediately — proof they were heard —
+            # then replace with the reply once the model has one.
+            await self._transport.send(HudText(text=transcript.text))
+            if self._replier is None:
+                return
+            reply = await self._replier.reply(transcript.text)
+            if reply:
+                log.info("reply: %s", reply)
+                await self._transport.send(HudText(text=reply))
         finally:
             self._busy = False
-        if transcript is None or not transcript.text:
-            log.info("STT produced no text")
-            return
-        log.info("transcript: %s", transcript.text)
-        await self._transport.send(HudText(text=transcript.text))

@@ -11,8 +11,10 @@ import argparse
 import asyncio
 import logging
 
+from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
+from .core.interfaces import ReplyEngine
 from .core.protocol import Hello
 from .services.orchestrator import VoiceOrchestrator
 
@@ -25,6 +27,8 @@ async def main() -> None:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stt-binary", default="whisperkit-cli")
     parser.add_argument("--stt-model", default="large-v3_turbo")
+    parser.add_argument("--llm-model", default=DEFAULT_MODEL)
+    parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -39,7 +43,19 @@ async def main() -> None:
         log.warning("%s not found — voice loop runs without transcription "
                     "(brew install whisperkit-cli)", args.stt_binary)
 
-    orchestrator = VoiceOrchestrator(transport, stt, stt_available=stt.available)
+    replier: ReplyEngine | None = None
+    if args.no_llm:
+        log.info("LLM disabled (--no-llm) — echoing transcripts")
+    elif mlx_available():
+        replier = MlxReplyEngine(model_id=args.llm_model)
+        log.info("reply engine: %s (loads on first utterance)", args.llm_model)
+    else:
+        log.warning("mlx-lm not installed — echoing transcripts "
+                    "(pip install -e '.[mlx]')")
+
+    orchestrator = VoiceOrchestrator(
+        transport, stt, stt_available=stt.available, replier=replier
+    )
     orchestrator.attach()
 
     def greet(_hello: Hello) -> None:

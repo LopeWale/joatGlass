@@ -131,3 +131,72 @@ class TestVoiceLoop:
         assert transport.sent[1:] and isinstance(transport.sent[-1], AudioControl)
         assert transport.sent[-1].open is True
         assert len(transport.sent) == 3  # status, install hint, mic on
+
+
+class FakeReplier:
+    def __init__(self, text: str | None = "It is 72 degrees.") -> None:
+        self.text = text
+        self.asked: list[str] = []
+
+    async def reply(self, text: str) -> str | None:
+        self.asked.append(text)
+        return self.text
+
+
+class TestReplyFlow:
+    async def test_transcript_then_reply_both_reach_the_hud(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("what is the weather")
+        replier = FakeReplier("It is 72 degrees.")
+        orch = VoiceOrchestrator(transport, engine, replier=replier)  # type: ignore[arg-type]
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+        texts = [m.text for m in transport.sent if isinstance(m, HudText)]
+        assert texts == ["what is the weather", "It is 72 degrees."]
+        assert replier.asked == ["what is the weather"]
+
+    async def test_replier_declining_leaves_transcript_standing(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("hm")
+        orch = VoiceOrchestrator(transport, engine, replier=FakeReplier(None))  # type: ignore[arg-type]
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+        texts = [m.text for m in transport.sent if isinstance(m, HudText)]
+        assert texts == ["hm"]
+
+    async def test_utterance_during_reply_is_dropped_single_flight(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("first question")
+
+        class SlowReplier:
+            def __init__(self) -> None:
+                self.gate = asyncio.Event()
+                self.asked: list[str] = []
+
+            async def reply(self, text: str) -> str | None:
+                self.asked.append(text)
+                await self.gate.wait()
+                return "slow answer"
+
+        replier = SlowReplier()
+        orch = VoiceOrchestrator(transport, engine, replier=replier)  # type: ignore[arg-type]
+        orch.attach()
+        assert transport.audio_cb is not None
+
+        seq = 0
+        for pcm in [LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]:
+            transport.audio_cb(pcm, seq); seq += 1
+        await drain()
+        # second utterance arrives while the reply is still generating
+        for pcm in [LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]:
+            transport.audio_cb(pcm, seq); seq += 1
+        await drain()
+        replier.gate.set()
+        await drain()
+
+        assert replier.asked == ["first question"]  # second was dropped, not raced
+        texts = [m.text for m in transport.sent if isinstance(m, HudText)]
+        assert texts == ["first question", "slow answer"]
