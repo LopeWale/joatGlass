@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 
 ImuCallback = Callable[[Imu], None]
 ConfirmCallback = Callable[[Confirm], None]
+HelloCallback = Callable[[Hello], None]
 
 
 class HubGatewayTransport(GlassesTransport):
@@ -66,6 +67,7 @@ class HubGatewayTransport(GlassesTransport):
         self._device_cbs: list[DeviceCallback] = []
         self._imu_cbs: list[ImuCallback] = []
         self._confirm_cbs: list[ConfirmCallback] = []
+        self._hello_cbs: list[HelloCallback] = []
 
         self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
         self._last_seq: int | None = None
@@ -109,6 +111,10 @@ class HubGatewayTransport(GlassesTransport):
 
     def on_confirm(self, callback: ConfirmCallback) -> None:
         self._confirm_cbs.append(callback)
+
+    def on_hello(self, callback: HelloCallback) -> None:
+        """Fires when a plugin announces itself — the 'wearer is here' moment."""
+        self._hello_cbs.append(callback)
 
     # ── sending ──────────────────────────────────────────────────────────────
 
@@ -179,6 +185,8 @@ class HubGatewayTransport(GlassesTransport):
             case Hello():
                 self.hello = message
                 log.info("device %s / %s", message.model, message.sn)
+                for hello_cb in self._hello_cbs:
+                    hello_cb(message)
             case Audio():
                 self._handle_audio(message)
             case Imu():
