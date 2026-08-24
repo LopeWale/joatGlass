@@ -30,10 +30,11 @@ right-temple-only input, double-click = system exit).
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
 Remaining: the local MLX model between flush() and send(). **That closes Phase 0.**
 
-**Metric: round-trip voice → HUD < 3 s.** First live measurement: 7.1 s utterance-end
-→ transcript (spoken through speakers → sim mic → tailnet → WhisperKit → HUD). Most of
-that is the CLI cold-starting the model per utterance — a persistent WhisperKit process
-(or Swift binding) is the known fix, not VAD or transport.
+**Metric: round-trip voice → HUD < 3 s.** Measured live (wearer's real voice, warm
+MLX): utterance-end → transcript **7.6 s** (whisperkit-cli cold-starts the model every
+utterance), transcript → LLM reply **0.72 s** (resident mlx-lm). The entire latency
+problem is the per-utterance Whisper shell-out — a persistent WhisperKit process (or
+Swift binding) is the fix; VAD, transport, and the LLM are already fast enough.
 
 ## 5. Calibrate the nod thresholds
 
