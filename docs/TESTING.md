@@ -77,6 +77,10 @@ discrimination is Tier 1 (vitest) and Tier 3 (hardware) only.
 - **Occasional blank HUD after rapid reloads.** `[TAURI] Couldn't find callback id`
   warnings mean a reload orphaned an in-flight bridge call and that boot wedged. It
   self-heals on the next reload; restart the simulator if it persists.
+- **A blank HUD with a clean console can also mean the DISK is full.** The simulator
+  silently stops painting the glasses canvas when writes fail (observed at <1 GB free;
+  same sequence rendered perfectly after freeing space). Check `df -h /` before
+  debugging the protocol.
 
 ## Tier 3 — Real glasses
 
