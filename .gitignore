@@ -29,3 +29,6 @@ dist/
 traces/
 # Packed Hub plugin bundles (build artifacts)
 *.ehpk
+
+# Python build metadata
+*.egg-info/
