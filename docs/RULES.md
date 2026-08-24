@@ -45,3 +45,7 @@ Non-negotiable rules for this codebase. PRs violating these get rejected.
 24. **`updateImageRawData` calls must be serial** — await each before the next.
 25. **Always call the returned unsubscribe** for `onEvenHubEvent` / `onDeviceStatusChanged` / `onLaunchSource`; `onLaunchSource` fires once, so register it immediately after bridge init.
 26. **Prefer `textContainerUpgrade` over `rebuildPageContainer`** for content changes — in-place, no flicker. Rebuild only for actual layout changes.
+27. **Always `?? 0` when reading a numeric event field.** The protobuf transport omits zero values, so `eventType` for a single press and `currentSelectItemIndex` for the first row both arrive as `undefined`. `x === CLICK_EVENT` (i.e. `=== 0`) never matches, and the bug is invisible in review — the code reads correctly and does nothing.
+28. **Clicks arrive as `sysEvent`, not `textEvent`.** Only scroll gestures produce `textEvent`. Any handler that expects a click on a text container is dead code.
+29. **Handle `SYSTEM_EXIT_EVENT` (7) and `ABNORMAL_EXIT_EVENT` (6)** — stop the mic and IMU there. Skipping them leaves the glasses mic streaming after the wearer exits.
+30. **Never tear down before `shutDownPageContainer(1)`** — the wearer can still cancel the dialog, and an app that cancelled into a dead event loop is worse than one that exited.

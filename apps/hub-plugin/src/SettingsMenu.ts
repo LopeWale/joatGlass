@@ -48,8 +48,12 @@ export class SettingsMenu {
   handleList(list: ListEvent): boolean {
     if (!this.open) return false;
 
-    if (list.eventType === OsEventTypeList.CLICK_EVENT) {
-      const row = ROWS[list.currentSelectItemIndex ?? -1];
+    // `?? 0` on both reads: the protobuf transport omits zero-valued fields,
+    // so CLICK_EVENT (0) and the first row's index (0) both arrive as
+    // `undefined`. Without this the top row is unselectable and no click
+    // registers at all.
+    if ((list.eventType ?? 0) === OsEventTypeList.CLICK_EVENT) {
+      const row = ROWS[list.currentSelectItemIndex ?? 0];
       if (row) {
         this.settings.setResumePolicy(row.policy);
         this.link.send({ kind: 'policy', resume: row.policy });

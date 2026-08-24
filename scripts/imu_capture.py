@@ -69,6 +69,9 @@ class ImuCapture:
 async def handle(websocket, capture: ImuCapture) -> None:
     print("plugin connected — enabling trace mode")
     await websocket.send(json.dumps({"kind": "imu.trace", "enabled": True}))
+    # The plugin auto-starts its mic at boot; a calibration session doesn't
+    # want ~16 kB/s of PCM JSON drowning the 10 Hz trace. Mic off, IMU on.
+    await websocket.send(json.dumps({"kind": "audio.control", "open": False}))
     await websocket.send(
         json.dumps(
             {

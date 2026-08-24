@@ -50,6 +50,55 @@ Rules that bite:
 - `updateImageRawData` calls must be **serial** (await each). The SDK LZ4-compresses internally since 0.0.12; pass raw 4-bit greyscale pixels as before.
 - Always call the unsubscribe function returned by `onEvenHubEvent` / `onDeviceStatusChanged` / `onLaunchSource`.
 
+## Input routing — verified, and full of traps
+
+Which event field a gesture lands in depends on the **active container** (the one with `isEventCapture: 1`).
+
+**Text container active** (our default page):
+
+| Gesture | Arrives as | `eventType` |
+|---|---|---|
+| Swipe up | `textEvent` | `1` |
+| Swipe down | `textEvent` | `2` |
+| Single press | **`sysEvent`** | `0` |
+| Double press | **`sysEvent`** | `3` |
+
+**List container active** (settings menu):
+
+| Gesture | Arrives as | Detail |
+|---|---|---|
+| Swipe | — | SDK scrolls internally, no event |
+| Single press | `listEvent` | `currentSelectItemIndex` |
+| Double press | `sysEvent` | `eventType 3` |
+
+**Clicks never arrive as `textEvent` — only scrolls do.** This is the single most common event-handling bug on this platform. It also resolves the source question: since presses land in `sysEvent`, `eventSource` **is** available (`1` right temple, `2` ring, `3` left temple), so left/right/ring routing works.
+
+### The protobuf zero-value trap
+
+The transport drops zero-valued fields, so **they arrive as `undefined`, not `0`**:
+
+- `sysEvent.eventType` — a single press is `0`, so it arrives **absent**
+- `listEvent.currentSelectItemIndex` — the first row is `0`, so it arrives **absent**
+
+Comparing `eventType === CLICK_EVENT` (i.e. `=== 0`) therefore **never matches**, and the code looks correctly wired while silently doing nothing. **Always `?? 0` on every numeric event field.**
+
+### Exit gesture
+
+Every app is expected to offer an exit via the glasses. The canonical pattern is double-press → `shutDownPageContainer(1)` (confirmation dialog; mode `0` exits immediately with no warning). Do **not** tear down before calling it — the wearer can still cancel. Clean up in the `SYSTEM_EXIT_EVENT` (7) handler instead.
+
+We use **left**-temple double-press for the settings menu and **right**-temple double-press for the exit dialog.
+
+### Lifecycle events (all `sysEvent`)
+
+| `eventType` | Event | What we do |
+|---|---|---|
+| `4` | Foreground enter | Repaint status — the frame may be stale |
+| `5` | Foreground exit | Flush dirty state (currently none; `Settings` writes through) |
+| `6` | Abnormal exit | Stop mic + IMU, close link |
+| `7` | System exit | Same — wearer confirmed the dialog |
+
+Ignoring 6 and 7 leaves the glasses mic streaming after the wearer exits. That's a privacy bug, not a resource leak.
+
 ## Result codes to handle explicitly
 
 `StartUpPageCreateResult`: `success 0` · `invalid 1` (bad config / z-order) · `oversize 2` (containers exceed display) · `outOfMemory 3`.

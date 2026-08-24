@@ -5,7 +5,7 @@ import { HudPresenter } from './HudPresenter';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
 import { ImuMonitor } from './ImuMonitor';
-import { EventRouter } from './EventRouter';
+import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { SettingsMenu } from './SettingsMenu';
@@ -29,7 +29,27 @@ async function boot(): Promise<void> {
   const settings = new Settings();
   settings.load();
   const menu = new SettingsMenu(hud, settings, link);
-  new EventRouter(client, link, audio, imu, menu).attach();
+
+  const lifecycle: LifecycleHandler = {
+    onForegroundEnter: () => {
+      // The host may have paused delivery while backgrounded; repaint so the
+      // wearer isn't looking at a stale frame.
+      void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
+    },
+    onForegroundExit: () => {
+      // Nothing to flush: Settings writes through on every change, so there is
+      // no dirty state to lose. Deliberately a no-op rather than invented work.
+      // If buffered state ever lands here, this is where it gets persisted.
+    },
+    onExit: (reason) => {
+      // Terminal. Stop the hardware: a mic still streaming after the wearer
+      // exited is a privacy bug, not a leak of a few frames.
+      console.info(`[joat] exiting (${reason})`);
+      void teardown();
+    },
+  };
+
+  new EventRouter(client, link, audio, imu, menu, lifecycle).attach();
   new DeviceMonitor(client, link, audio, imu, hud, settings).attach();
 
   link.onMessage(async (msg: DownlinkMessage) => {

@@ -17,12 +17,18 @@ an iPhone relay, voice in and HUD out. See [README.md](README.md) for the system
 
 ## Status
 
-Phase 0. The hub plugin (`apps/hub-plugin`) is a real Vite + TypeScript
-package: `npm run build` (typecheck + bundle) and `npm test` (vitest) both
-work — run them from that directory after touching plugin code. The Python
-brain (`apps/mac/jarvis`) is still an empty skeleton with no `pyproject.toml`
-and no test runner — establish one before relying on any workflow that says
-"run the test suite" against Python code.
+Phase 0. Two real packages, each with a wired test command:
+
+- **Hub plugin** (`apps/hub-plugin`, Vite + TS): `npm run build`
+  (typecheck + bundle) and `npm test` (vitest), run from that directory.
+- **Mac brain** (`apps/mac/jarvis`, Python ≥3.12): from the repo root,
+  `.venv/bin/python -m pytest` and `.venv/bin/python -m mypy` (strict —
+  keep it green, RULES.md #3). Setup: `python3 -m venv .venv &&
+  .venv/bin/pip install -e ".[dev]"`.
+
+The wire protocol lives twice by design: `apps/hub-plugin/src/types.ts` and
+`apps/mac/jarvis/core/protocol.py` must change in the same commit
+(`tests/unit/test_protocol.py` pins the wire shapes).
 
 ## Key constraints
 

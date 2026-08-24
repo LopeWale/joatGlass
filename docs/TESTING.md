@@ -51,11 +51,13 @@ Actions available: `up`, `down`, `click`, `double_click`. Input is **silently ig
 
 `POST /api/input` takes an **action only — no source**. It cannot tell the app whether a tap came from the left temple, the right temple, or the ring. So the simulator **cannot test the confirm routing**, which is the exact thing you're trying to test. It verifies the app boots, renders, and responds to clicks; source discrimination is Tier 1 (vitest) and Tier 3 (hardware) only.
 
-## Tier 3 — Real glasses: dump events first
+## Tier 3 — Real glasses
 
-**Do this before trusting any confirm gesture.** The SDK enum says a right-temple touch arrives as `sysEvent` with `eventSource: 1` (`TOUCH_EVENT_FROM_GLASSES_R`), but that is the documented shape, not a verified one. `Text_ItemEvent` carries **no `eventSource` field at all** — so if the host delivers a temple tap as a `textEvent` on the event-capture container instead, the source-based branch never fires.
+**The event-shape question is now answered — no probe needed.** A single press on a text container arrives as `sysEvent`, not `textEvent` (only scrolls arrive as `textEvent`), so `eventSource` is available and left/right/ring routing works as designed. The earlier `textEvent` CLICK fallback was dead code and has been deleted.
 
-`EventRouter` currently handles **both** shapes: the `sysEvent` source check, plus a narrowly scoped `textEvent` CLICK fallback that only fires while a confirm window is already armed. One of those two branches is dead code on real hardware. Find out which:
+What still needs hardware confirmation is narrower: that the **right** temple reports `eventSource: 1` and the **left** reports `3`, rather than the reverse. If they're swapped, settings and confirm swap sides — annoying, one-line fix, but you want to know before muscle memory sets in.
+
+Run the probe to check:
 
 ```bash
 python3 scripts/imu_capture.py --out /tmp/probe.csv --label probe
@@ -63,11 +65,12 @@ python3 scripts/imu_capture.py --out /tmp/probe.csv --label probe
 
 It accepts the plugin's WebSocket and logs every uplink message, including `input`. Then, wearing the glasses:
 
-1. Tap the **right** temple → note whether an `input` arrives with `eventSource: 1`, or a `containerId` and no source.
-2. Tap the **left** temple once → should relay, must **not** confirm.
-3. Double-tap the **left** temple → settings menu opens, nothing relays.
+1. Press the **right** temple once → expect `input` with `eventSource: 1`. Confirms.
+2. Press the **left** temple once → expect `eventSource: 3`. Relays, must **not** confirm.
+3. Double-press the **left** temple → settings menu opens, nothing relays.
+4. Double-press the **right** temple → system exit dialog appears. Cancel it; the app must still be listening afterwards.
 
-Then delete whichever `EventRouter` branch never fired. Leaving both in place means one is untested forever.
+If 1 and 2 are swapped, flip the two `EventSourceType` constants in `EventRouter.handleSys`.
 
 ## Nod calibration
 

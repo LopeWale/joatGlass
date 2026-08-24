@@ -1,0 +1,39 @@
+[project]
+name = "jarvis-g2"
+version = "0.1.0"
+description = "J.A.R.V.I.S. brain for the Even Realities G2 — Mac Studio side."
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["apps/mac"]
+include = ["jarvis*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["apps/mac"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+# RULES.md #3: typed end to end.
+python_version = "3.12"
+strict = true
+mypy_path = "apps/mac"
+packages = ["jarvis"]
+
+[[tool.mypy.overrides]]
+module = "websockets.*"
+ignore_missing_imports = true
