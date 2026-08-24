@@ -7,27 +7,28 @@ Ordered, with the reasoning. Everything here is Phase 0 unless noted.
 Build config (`package.json`, `vite.config.ts`, `tsconfig.json`) and `app.json` exist; the
 manifest was generated with the official CLI (`evenhub init`, from
 `@evenrealities/evenhub-cli` — the binary is `evenhub`/`eh`, not `even-hub`) and merged.
-The whitelist currently carries `ws://laptop-mac.local:8787` (this MacBook's real
-mDNS name, LAN-only — fine for desk dev).
+The whitelist carries both tailnet names (MacBook + mac mini, `ws://` and `wss://` each)
+plus the MacBook's `.local` mDNS fallback; `VITE_MAC_WS_URL` dials the MacBook's tailnet
+URL. Adding another Mac = one more whitelist pair + (if it should be the dial target)
+the `.env` line — `scripts/setup_brain.sh` detects and prints exactly this when run on
+a non-whitelisted machine.
 
-**Still open:** Tailscale is not installed yet. When it is, add the MagicDNS URL
-(`ws://<machine>.<tailnet>.ts.net:8787`) to BOTH `app.json`'s network whitelist and
-`VITE_MAC_WS_URL` in `apps/hub-plugin/.env` — and when the brain moves to the Mac Studio,
-swap the hostname in the same two places.
+## 2. Stand up the Mac side of the link — DONE
 
-## 2. Stand up the Mac side of the link
+`jarvis/ble/hub_gateway.py` implements `GlassesTransport`; `jarvis/core/protocol.py`
+mirrors `types.ts` (drift pinned by `tests/unit/test_protocol.py`). Round-trip proven
+live against the simulator over the tailnet, including HUD text rendered from Python.
 
-Minimal Python WebSocket server in `apps/mac/jarvis/ble/hub_gateway_transport.py` implementing `GlassesTransport`, speaking the message protocol in `apps/hub-plugin/src/types.ts`. Mirror those types in `jarvis/core` as dataclasses so the two ends can't drift.
+## 3. Test in the simulator before touching hardware — DONE
 
-Order inside this step: accept `hello` → log `device` → buffer `audio` frames → echo a `hud.text` back. Prove the round-trip with a hardcoded string before any STT exists.
+Tier 2 complete (see docs/TESTING.md, including the simulator findings: no IMU,
+right-temple-only input, double-click = system exit).
 
-## 3. Test in the simulator before touching hardware
+## 4. Wire STT + MLX reply — STT HALF DONE
 
-The desktop simulator accepts `window.postMessage` pushes for audio, IMU, and device events. That makes `AudioStreamer`, `ImuMonitor`, and `EventRouter` unit-testable with synthetic PCM — do this before debugging on glasses, where you can't set breakpoints.
-
-## 4. Wire STT + MLX reply
-
-`SttEngine` adapter over WhisperKit (CLI or Swift binary) fed by the buffered PCM, then a local MLX model, then `hud.text` back down. **This closes Phase 0.**
+`python -m jarvis` runs the voice loop: mic → RmsVad → WhisperKitEngine → transcript
+as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
+Remaining: the local MLX model between flush() and send(). **That closes Phase 0.**
 
 **Metric: round-trip voice → HUD < 3 s.** Measure it before adding anything else.
 
