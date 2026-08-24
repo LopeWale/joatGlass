@@ -14,10 +14,19 @@ import { ContainerId, CONFIRM_HINT, type DownlinkMessage } from './types';
 /** Must be an exact-match domain in app.json (no wildcards) or the Hub blocks it. */
 const MAC_WS_URL = import.meta.env.VITE_MAC_WS_URL ?? 'wss://mac.local:8787/glasses';
 
+/** Webview status panel (index.html). Absent ids are a no-op by design. */
+function setPanel(id: string, text: string): void {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
 async function boot(): Promise<void> {
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
   const link = new MacLink({ url: MAC_WS_URL });
+
+  setPanel('p-url', MAC_WS_URL);
+  link.onState((state) => setPanel('p-link', state));
 
   // 1. Bridge, 2. startup page (one-shot) — order is mandatory. The second
   // argument lets a reloaded WebView adopt the host's existing page.
@@ -29,6 +38,8 @@ async function boot(): Promise<void> {
   const imu = new ImuMonitor(client, link);
   const settings = new Settings();
   settings.load();
+  setPanel('p-policy', settings.resumePolicy);
+  settings.onChange((policy) => setPanel('p-policy', policy));
   const menu = new SettingsMenu(hud, settings, link);
 
   const lifecycle: LifecycleHandler = {
@@ -65,9 +76,15 @@ async function boot(): Promise<void> {
         await hud.showDefault();
         break;
       case 'audio.control':
-        msg.open
-          ? await audio.start(msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses)
-          : await audio.stop();
+        if (msg.open) {
+          const ok = await audio.start(
+            msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses,
+          );
+          setPanel('p-mic', ok ? 'streaming' : 'unavailable');
+        } else {
+          await audio.stop();
+          setPanel('p-mic', 'off');
+        }
         break;
       case 'imu.control':
         msg.open ? await imu.start() : await imu.stop();
@@ -104,11 +121,14 @@ async function boot(): Promise<void> {
   link.send({ kind: 'policy', resume: settings.resumePolicy });
 
   await hud.setStatus('JOAT · connecting');
+  setPanel('p-status', 'connecting');
   // Both starts degrade to false on hosts missing the capability (the desktop
   // simulator has no IMU at all) — boot must survive either being absent.
   const micOk = await audio.start(AudioInputSource.Glasses);
   await imu.start();
   await hud.setStatus(micOk ? 'JOAT · listening' : 'JOAT · mic unavailable');
+  setPanel('p-status', micOk ? 'listening' : 'mic unavailable');
+  setPanel('p-mic', micOk ? 'streaming' : 'unavailable');
 
   async function teardown(): Promise<void> {
     await audio.stop();

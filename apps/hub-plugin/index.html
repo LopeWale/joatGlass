@@ -6,13 +6,32 @@
     <title>JOAT · Hub Plugin</title>
     <style>
       html, body { margin: 0; height: 100%; background: #000; color: #7CFC98;
-                   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+                   font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
       body { display: flex; align-items: center; justify-content: center;
-             padding: 1rem; text-align: center; white-space: pre-wrap; }
+             padding: 1rem; text-align: left; white-space: pre-wrap; }
+      main { max-width: 26rem; width: 100%; }
+      .brand { font-size: 1.2rem; margin-bottom: 1rem; }
+      .brand span { opacity: 0.8; font-size: 0.9rem; margin-left: 0.5rem; }
+      dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0 0 1.25rem; }
+      dt { opacity: 0.55; }
+      dd { margin: 0; }
+      .hint { opacity: 0.45; font-size: 0.8rem; line-height: 1.5; }
     </style>
   </head>
   <body>
-    <!-- boot() writes failure text into document.body; keep this element empty. -->
+    <!-- Status readout only — the real UI renders on the glasses HUD.
+         On boot FAILURE, main.ts replaces this whole body with the error. -->
+    <main id="panel">
+      <div class="brand">JOAT <span id="p-status">booting…</span></div>
+      <dl>
+        <dt>Mac link</dt><dd id="p-link">idle</dd>
+        <dt>Mic</dt><dd id="p-mic">off</dd>
+        <dt>Resume policy</dt><dd id="p-policy">—</dd>
+        <dt>Dial target</dt><dd id="p-url">—</dd>
+      </dl>
+      <p class="hint">This page is the plugin's status panel. The assistant's actual
+display is the glasses HUD — in the simulator, the “Glasses Display” window.</p>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
