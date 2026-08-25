@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 
 from ..core.interfaces import ReplyEngine
+from ..verifier.citations import parse_citations
+from ..verifier.gate import CitationStatus, VerifierGate
 from .hud import HudWriter
 
 log = logging.getLogger(__name__)
@@ -92,6 +94,13 @@ class DebateSession(Session):
     requirement (visibility IS the proof it was debated).
     """
 
+    SOURCES_CONTRACT = (
+        "\nIf you make factual claims, end with a SOURCES: block, one line "
+        'per source, formatted exactly: [1] https://url :: "exact verbatim '
+        'quote from that page". Only cite pages you are confident contain '
+        "the quote word-for-word."
+    )
+
     def __init__(
         self,
         topic: str,
@@ -99,12 +108,17 @@ class DebateSession(Session):
         propose: Callable[[str], AsyncIterator[str]],
         critique: Callable[[str], AsyncIterator[str]],
         judge: ReplyEngine | None,
+        gate: VerifierGate | None = None,
+        max_repairs: int = 1,
     ) -> None:
         self._topic = topic
         self._hud = hud
         self._propose = propose
         self._critique = critique
         self._judge = judge
+        self._gate = gate
+        self._max_repairs = max_repairs
+        self._verify_summary: list[str] = []
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -112,39 +126,96 @@ class DebateSession(Session):
 
     async def run(self) -> None:
         await self._hud.status(f"DEBATE · {self._topic[:40]}")
-        proposal = await self._turn(
-            "» PROPOSER (codex)\n",
-            self._propose(
-                f"Propose a concrete answer, under 120 words, plain text: {self._topic}"
-            ),
+        proposal = await self._verified_turn(
+            "PROPOSER (codex)", self._propose,
+            f"Propose a concrete answer, under 120 words, plain text: "
+            f"{self._topic}{self.SOURCES_CONTRACT}",
+            first=True,
         )
         if self._cancelled or not proposal:
             await self._finish("debate cancelled" if self._cancelled else "proposer silent")
             return
-        critique = await self._turn(
-            "\n\n» CRITIC (claude)\n",
-            self._critique(
-                "Critique this proposal in under 100 words, plain text. Name the "
-                f"weakest claim.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}"
-            ),
+        critique = await self._verified_turn(
+            "CRITIC (claude)", self._critique,
+            "Critique this proposal in under 100 words, plain text. Name the "
+            f"weakest claim.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}"
+            f"{self.SOURCES_CONTRACT}",
         )
         if self._cancelled:
             await self._finish("debate cancelled")
             return
         if self._judge is not None:
             await self._hud.append("\n\n» JUDGE (local)\n")
+            verification = "; ".join(self._verify_summary) or "no citations offered"
             async for chunk in self._judge.stream(
                 "You are the judge of a short debate. In under 60 words give a "
-                f"verdict and what to do.\n\nTopic: {self._topic}\n\n"
-                f"Proposal:\n{proposal}\n\nCritique:\n{critique}"
+                f"verdict and what to do. Weigh verified claims above unverified "
+                f"ones.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}\n\n"
+                f"Critique:\n{critique}\n\nCitation verification: {verification}"
             ):
                 if self._cancelled:
                     break
                 await self._hud.append(chunk)
         await self._finish("debate done — say something to continue")
 
-    async def _turn(self, header: str, stream: AsyncIterator[str]) -> str:
-        if header.startswith("»"):
+    async def _verified_turn(
+        self,
+        role: str,
+        agent: Callable[[str], AsyncIterator[str]],
+        prompt: str,
+        first: bool = False,
+    ) -> str:
+        """One debater turn plus its visible verification (and one repair).
+
+        The verifier is itself a turn on the HUD — the wearer watches each
+        citation get checked and fabrications get bounced. A turn is never
+        silently rewritten: every repair attempt streams under its own header.
+        """
+        text = await self._stream_turn(f"» {role}\n", agent(prompt), replace=first)
+        if self._gate is None or self._cancelled:
+            return text
+        for attempt in range(self._max_repairs + 1):
+            verdict_ok, repair = await self._verify_visibly(role, text)
+            if verdict_ok or self._cancelled or attempt == self._max_repairs:
+                return text
+            text = await self._stream_turn(
+                f"\n\n» {role} — repair {attempt + 1}\n",
+                agent(
+                    f"{prompt}\n\nYour previous answer:\n{text}\n\n"
+                    f"The citation verifier rejected it:\n{repair}\n"
+                    "Fix the citations (verbatim quotes at real URLs) or drop "
+                    "the unverifiable claims, then answer again."
+                ),
+            )
+        return text
+
+    async def _verify_visibly(self, role: str, text: str) -> tuple[bool, str]:
+        assert self._gate is not None
+        citations = parse_citations(text)
+        await self._hud.append("\n\n» VERIFIER\n")
+        if not citations:
+            await self._hud.append("no sources cited\n")
+            self._verify_summary.append(f"{role}: no citations")
+            return True, ""
+        verdict = await self._gate.verify(citations)
+        marks = {
+            CitationStatus.VERIFIED: "OK",
+            CitationStatus.PARTIALLY_VERIFIED: "PARTIAL",
+            CitationStatus.UNVERIFIABLE: "FAIL",
+        }
+        for cv in verdict.citations:
+            await self._hud.append(f"[{cv.citation_id}] {marks[cv.status]} — {cv.reason}\n")
+        outcome = "PASS" if verdict.passed else "DENIED — repair requested"
+        await self._hud.append(outcome + "\n")
+        self._verify_summary.append(
+            f"{role}: {outcome} ({len(citations)} citation(s))"
+        )
+        return verdict.passed, verdict.repair_request
+
+    async def _stream_turn(
+        self, header: str, stream: AsyncIterator[str], replace: bool = False
+    ) -> str:
+        if replace:
             await self._hud.show(header)
         else:
             await self._hud.append(header)

@@ -21,6 +21,8 @@ from .core.protocol import Hello
 from .services.hud import HudWriter
 from .services.orchestrator import VoiceOrchestrator
 from .services.session import DebateSession, Session, SessionManager
+from .verifier.fetcher import fetch_page_text, wayback_page_text
+from .verifier.gate import VerifierGate
 
 log = logging.getLogger("jarvis")
 
@@ -87,11 +89,13 @@ async def main() -> None:
         log.warning("debate unavailable (codex: %s, claude: %s)",
                     "ok" if propose_agent else "missing", "ok" if critic_agent else "missing")
 
+    gate = VerifierGate(fetch_page_text, wayback_page_text)
+
     def make_debate(topic: str) -> Session | None:
         if propose_agent is None or critic_agent is None:
             return None
         return DebateSession(
-            topic, hud, propose_agent.stream, critic_agent.stream, replier
+            topic, hud, propose_agent.stream, critic_agent.stream, replier, gate=gate
         )
 
     sessions = SessionManager(hud, make_debate)

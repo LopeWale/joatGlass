@@ -131,3 +131,81 @@ class TestSessionManager:
     async def test_factory_declining_falls_through(self) -> None:
         mgr = SessionManager(HudWriter(SinkTransport()), lambda topic: None)
         assert mgr.handle_transcript("debate anything") is False
+
+
+class ScriptedGate:
+    """Deny first verify() call, pass afterwards."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def verify(self, citations):  # duck-typed as VerifierGate
+        from jarvis.verifier.gate import CitationStatus, CitationVerdict, Verdict
+        self.calls += 1
+        if self.calls == 1:
+            return Verdict(
+                passed=False,
+                citations=tuple(
+                    CitationVerdict(c.id, CitationStatus.UNVERIFIABLE, "quote not found")
+                    for c in citations
+                ),
+                repair_request="DENIED — fix [1]",
+            )
+        return Verdict(
+            passed=True,
+            citations=tuple(
+                CitationVerdict(c.id, CitationStatus.VERIFIED, "quote found")
+                for c in citations
+            ),
+        )
+
+
+CITED = 'Claim.\nSOURCES:\n[1] https://a.example/x :: "quote"'
+
+
+class TestVerifiedDebate:
+    async def test_denied_turn_repairs_visibly_then_passes(self) -> None:
+        transport = SinkTransport()
+        gate = ScriptedGate()
+        prompts: list[str] = []
+
+        def proposer(chunks_by_call: list[str]):
+            calls = iter(chunks_by_call)
+
+            async def stream(prompt: str):
+                prompts.append(prompt)
+                yield next(calls)
+            return stream
+
+        session = DebateSession(
+            "topic", HudWriter(transport),
+            proposer([CITED, CITED]),          # original then repair
+            agent(["no factual claims here"]),  # critic cites nothing
+            None,
+            gate=gate,  # type: ignore[arg-type]
+        )
+        await session.run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        # visible order: turn, verifier deny, repair turn, verifier pass
+        assert joined.index("» PROPOSER") < joined.index("FAIL — quote not found")
+        assert joined.index("DENIED") < joined.index("repair 1")
+        assert joined.index("repair 1") < joined.index("[1] OK")
+        assert "PASS" in joined
+        # the repair prompt carried the verifier's complaint
+        assert any("DENIED — fix [1]" in p for p in prompts[1:])
+        # critic with no citations: verifier says so, does not deny
+        assert "no sources cited" in joined
+        assert gate.calls == 2
+
+    async def test_uncited_turns_flow_straight_through(self) -> None:
+        transport = SinkTransport()
+        gate = ScriptedGate()
+        session = DebateSession(
+            "topic", HudWriter(transport),
+            agent(["pure opinion"]), agent(["also opinion"]), None,
+            gate=gate,  # type: ignore[arg-type]
+        )
+        await session.run()
+        assert gate.calls == 0  # nothing to verify
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert joined.count("no sources cited") == 2
