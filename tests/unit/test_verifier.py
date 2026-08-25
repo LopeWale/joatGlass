@@ -129,3 +129,77 @@ class TestCitationParser:
     def test_prose_without_sources_parses_empty(self) -> None:
         from jarvis.verifier.citations import parse_citations
         assert parse_citations("Just an opinion, no sources.") == []
+
+
+class TestClaimExtraction:
+    def test_finds_sentence_with_marker_excluding_sources(self) -> None:
+        from jarvis.verifier.claims import claim_for_citation
+        prose = (
+            "The G2 display is monochrome [1]. It also has a mic array [2].\n\n"
+            "SOURCES:\n[1] https://a.example/x :: \"monochrome green\"\n"
+        )
+        assert claim_for_citation(prose, "1") == "The G2 display is monochrome."
+        assert claim_for_citation(prose, "2") == "It also has a mic array."
+        assert claim_for_citation(prose, "9") is None
+
+
+class FakeClaimJudge:
+    def __init__(self, score: float | None) -> None:
+        self.score = score
+        self.asked: list[tuple[str, str]] = []
+
+    async def support(self, doc: str, claim: str) -> float | None:
+        self.asked.append((doc, claim))
+        return self.score
+
+
+CITED_PROSE = (
+    "The firmware is signed with ECDSA-P256 [1].\n\nSOURCES:\n"
+    '[1] https://a.example/spec :: "signed with ECDSA-P256"\n'
+)
+
+
+class TestNliStage:
+    async def test_supported_claim_stays_verified_with_score_shown(self) -> None:
+        judge = FakeClaimJudge(0.92)
+        gate = VerifierGate(fake_fetcher({"https://a.example/spec": PAGE}), claim_judge=judge)
+        verdict = await gate.verify(
+            [Citation("1", "https://a.example/spec", "signed with ECDSA-P256")],
+            prose=CITED_PROSE,
+        )
+        v = verdict.citations[0]
+        assert v.status is CitationStatus.VERIFIED
+        assert "claim support 0.92" in v.reason
+        assert judge.asked and "firmware is signed" in judge.asked[0][1]
+
+    async def test_real_quote_weak_claim_downgrades_visibly(self) -> None:
+        gate = VerifierGate(
+            fake_fetcher({"https://a.example/spec": PAGE}), claim_judge=FakeClaimJudge(0.12)
+        )
+        verdict = await gate.verify(
+            [Citation("1", "https://a.example/spec", "signed with ECDSA-P256")],
+            prose=CITED_PROSE,
+        )
+        v = verdict.citations[0]
+        assert v.status is CitationStatus.PARTIALLY_VERIFIED
+        assert "weakly supported" in v.reason
+        assert verdict.passed  # downgraded and flagged, not denied (v1 policy)
+
+    async def test_judge_failure_never_counts_as_support(self) -> None:
+        gate = VerifierGate(
+            fake_fetcher({"https://a.example/spec": PAGE}), claim_judge=FakeClaimJudge(None)
+        )
+        verdict = await gate.verify(
+            [Citation("1", "https://a.example/spec", "signed with ECDSA-P256")],
+            prose=CITED_PROSE,
+        )
+        v = verdict.citations[0]
+        assert v.status is CitationStatus.VERIFIED  # quote stands on its own
+        assert "claim support" not in v.reason      # no fabricated score
+
+    async def test_no_prose_skips_nli_silently(self) -> None:
+        judge = FakeClaimJudge(0.9)
+        gate = VerifierGate(fake_fetcher({"https://a.example/spec": PAGE}), claim_judge=judge)
+        verdict = await gate.verify([Citation("1", "https://a.example/spec", "signed with ECDSA-P256")])
+        assert judge.asked == []
+        assert verdict.passed

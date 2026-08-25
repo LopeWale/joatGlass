@@ -139,7 +139,7 @@ class ScriptedGate:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def verify(self, citations):  # duck-typed as VerifierGate
+    async def verify(self, citations, prose=None):  # duck-typed as VerifierGate
         from jarvis.verifier.gate import CitationStatus, CitationVerdict, Verdict
         self.calls += 1
         if self.calls == 1:

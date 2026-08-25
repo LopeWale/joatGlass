@@ -252,7 +252,7 @@ class DebateSession(Session):
             await self._hud.append("no sources cited\n")
             self._verify_summary.append(f"{role}: no citations")
             return True, ""
-        verdict = await self._gate.verify(citations)
+        verdict = await self._gate.verify(citations, prose=text)
         marks = {
             CitationStatus.VERIFIED: "OK",
             CitationStatus.PARTIALLY_VERIFIED: "PARTIAL",

@@ -22,6 +22,7 @@ from .services.hud import HudWriter
 from .services.orchestrator import VoiceOrchestrator
 from .services.session import DebateSession, Session, SessionManager
 from .verifier.fetcher import fetch_page_text, wayback_page_text
+from .verifier.nli import MiniCheckJudge, minicheck_available
 from .verifier.gate import VerifierGate
 
 log = logging.getLogger("jarvis")
@@ -91,7 +92,12 @@ async def main() -> None:
         log.warning("debate unavailable (codex: %s, claude: %s)",
                     "ok" if propose_agent else "missing", "ok" if critic_agent else "missing")
 
-    gate = VerifierGate(fetch_page_text, wayback_page_text)
+    claim_judge = MiniCheckJudge() if minicheck_available() else None
+    if claim_judge:
+        log.info("NLI claim judge ready (MiniCheck flan-t5-large; loads on first use)")
+    else:
+        log.info("NLI claim judge absent — install the 'nli' extra to enable")
+    gate = VerifierGate(fetch_page_text, wayback_page_text, claim_judge=claim_judge)
 
     def make_debate(topic: str) -> Session | None:
         if propose_agent is None or critic_agent is None:

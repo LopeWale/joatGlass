@@ -30,9 +30,13 @@ right-temple-only input, double-click = system exit).
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
 Phase 0 CLOSED (metric met at ~2.2 s). Phase 2 in progress: debate loop with
 visible verifier turns and repair, wake-word address gate, and the DebateLoop
-convergence state machine (agreement >= 0.85, capped rounds). Remaining in
-Phase 2: NLI claim-support judge (MiniCheck) for uncited claims, and the JSON
-plan/critique schemas once the debate graduates from prose contracts.
+convergence state machine (agreement >= 0.85, capped rounds). NLI claim-support (MiniCheck flan-t5-large, optional `nli` extra) now runs
+inside the gate: a real quote propping up a misrepresenting claim gets visibly
+downgraded ('claim support 0.12 — quote real but claim weakly supported').
+Remaining in Phase 2: JSON plan/critique schemas once the debate graduates
+from prose contracts. CAUTION for future installers: PyPI's 'minicheck' is an
+UNRELATED formal-methods tool — the fact-checker installs from git (pinned in
+pyproject's nli extra).
 
 **Metric: round-trip voice → HUD < 3 s — MET.** With `whisperkit-cli serve`
 (resident model, `WhisperServeEngine`): utterance-end → transcript **0.79–0.89 s**,

@@ -108,3 +108,15 @@ class ReplyEngine(ABC):
         result = await self.reply(text)
         if result:
             yield result
+
+
+class ClaimJudge(ABC):
+    """NLI claim-support check (ARCHITECTURE: MiniCheck stage of the gate).
+
+    Given the fetched source document and the claim sentence an agent made,
+    return the probability the document supports the claim — or None when
+    the judge cannot run (model absent, inference failure). None must never
+    be treated as support."""
+
+    @abstractmethod
+    async def support(self, doc: str, claim: str) -> float | None: ...
