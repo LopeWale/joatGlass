@@ -209,3 +209,76 @@ class TestVerifiedDebate:
         assert gate.calls == 0  # nothing to verify
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         assert joined.count("no sources cited") == 2
+
+
+class ScriptedJudge(ReplyEngine):
+    """Emit scripted judgments per round."""
+
+    def __init__(self, judgments: list[str]) -> None:
+        self._judgments = iter(judgments)
+
+    async def reply(self, text: str) -> str | None:
+        return next(self._judgments)
+
+
+class TestConvergence:
+    def _session(self, judge: ReplyEngine, transport: SinkTransport,
+                 proposer_calls: list[str]) -> DebateSession:
+        calls = iter(proposer_calls)
+
+        async def propose(prompt: str):
+            yield next(calls)
+
+        return DebateSession(
+            "topic", HudWriter(transport), propose, agent(["critique text"]),
+            judge, max_rounds=2,
+        )
+
+    async def test_low_agreement_runs_second_round_then_converges(self) -> None:
+        transport = SinkTransport()
+        judge = ScriptedJudge([
+            "Not aligned yet.\nAGREEMENT: 0.40\nBLOCKING: yes",
+            "Aligned now.\nAGREEMENT: 0.95\nBLOCKING: no",
+        ])
+        await self._session(judge, transport, ["v1 proposal", "v2 proposal"]).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "PROPOSER — round 2" in joined
+        assert "v2 proposal" in joined
+        assert "converged (agreement 0.95, round 2)" in joined
+
+    async def test_high_agreement_converges_in_one_round(self) -> None:
+        transport = SinkTransport()
+        judge = ScriptedJudge(["Fine.\nAGREEMENT: 0.9\nBLOCKING: no"])
+        await self._session(judge, transport, ["only proposal"]).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "round 2" not in joined
+        assert "converged (agreement 0.90, round 1)" in joined
+
+    async def test_never_converging_stops_at_cap(self) -> None:
+        transport = SinkTransport()
+        judge = ScriptedJudge([
+            "No.\nAGREEMENT: 0.2\nBLOCKING: yes",
+            "Still no.\nAGREEMENT: 0.3\nBLOCKING: yes",
+        ])
+        await self._session(judge, transport, ["p1", "p2", "p3"]).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "no convergence after 2 round(s) (last 0.30)" in joined
+
+    async def test_illegible_judge_stops_without_converging(self) -> None:
+        transport = SinkTransport()
+        judge = ScriptedJudge(["I simply vibe with this proposal."])
+        await self._session(judge, transport, ["p1"]).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "judge gave no score" in joined
+
+
+class TestParseJudgment:
+    def test_parses_scores_and_blocking(self) -> None:
+        from jarvis.services.session import parse_judgment
+        assert parse_judgment("x\nAGREEMENT: 0.85\nBLOCKING: no") == (0.85, False)
+        assert parse_judgment("agreement: 0.4\nblocking: YES") == (0.4, True)
+
+    def test_malformed_never_green_lights(self) -> None:
+        from jarvis.services.session import parse_judgment
+        agreement, blocking = parse_judgment("great job everyone")
+        assert agreement is None and blocking is True
