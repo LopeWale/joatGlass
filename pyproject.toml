@@ -15,6 +15,8 @@ nli = [
     # The fact-checking MiniCheck (Liyan06) — NOT the PyPI 'minicheck',
     # which is an unrelated formal-methods model checker.
     "minicheck @ git+https://github.com/Liyan06/MiniCheck.git@main",
+    # transformers' device_map path needs this; MiniCheck doesn't declare it
+    "accelerate>=0.30",
 ]
 dev = [
     "pytest>=8.0",
@@ -48,4 +50,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "minicheck.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "nltk.*"
 ignore_missing_imports = true
