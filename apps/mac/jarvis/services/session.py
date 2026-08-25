@@ -44,10 +44,31 @@ class SessionManager:
         self._factory = factory
         self._active: Session | None = None
         self._task: asyncio.Task[None] | None = None
+        self._pending_cards: list[str] = []
 
     @property
     def active(self) -> bool:
         return self._active is not None
+
+    def notify(self, card: str) -> None:
+        """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
+        shows the card now; an active session is never interrupted — cards
+        queue and drain the moment it ends."""
+        if self._active is not None:
+            self._pending_cards.append(card)
+            log.info("card queued behind active session: %s", card)
+            return
+        asyncio.get_running_loop().create_task(self._show_card(card))
+
+    async def _show_card(self, card: str) -> None:
+        await self._hud.show(card)
+
+    def _drain_cards(self) -> None:
+        if not self._pending_cards:
+            return
+        cards, self._pending_cards = self._pending_cards, []
+        combined = "\n".join(cards[-6:])  # HUD is small; newest wins
+        asyncio.get_running_loop().create_task(self._show_card(combined))
 
     def handle_transcript(self, text: str) -> bool:
         """True = consumed (session active or started); False = default flow."""
@@ -81,6 +102,7 @@ class SessionManager:
             finally:
                 self._active = None
                 self._task = None
+                self._drain_cards()
 
         self._task = asyncio.get_running_loop().create_task(runner())
         return True

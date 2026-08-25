@@ -16,6 +16,7 @@ from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
+from .channels.notifications import NotificationChannel, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
 from .core.protocol import Hello
 from .services.hud import HudWriter
@@ -41,6 +42,8 @@ async def main() -> None:
     parser.add_argument("--always-answer", action="store_true",
                         help="answer ALL speech (dev only) instead of requiring 'Jarvis/JOAT ...'")
     parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
+    parser.add_argument("--no-notifications", action="store_true",
+                        help="disable the Notification Center channel")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -121,12 +124,21 @@ async def main() -> None:
 
     transport.on_hello(greet)
 
+    notif_task: asyncio.Task[None] | None = None
+    if not args.no_notifications:
+        channel = NotificationChannel(
+            NotificationStore(), triage=replier, deliver=sessions.notify
+        )
+        notif_task = asyncio.get_running_loop().create_task(channel.run())
+
     await transport.start()
     log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
     try:
         await asyncio.Event().wait()
     finally:
         await transport.stop()
+        if notif_task is not None:
+            notif_task.cancel()
         if serve_engine is not None:
             await serve_engine.close()
 
