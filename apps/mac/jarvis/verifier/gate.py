@@ -22,6 +22,7 @@ import difflib
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from typing import Protocol
 from dataclasses import dataclass, field
 from enum import Enum
 from urllib.parse import urlparse
@@ -30,6 +31,10 @@ log = logging.getLogger(__name__)
 
 FetchText = Callable[[str], Awaitable[str]]
 """url → extracted page text. Raises on failure."""
+
+
+class ClaimJudgeLike(Protocol):
+    async def support(self, doc: str, claim: str) -> float | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,16 +102,20 @@ class VerifierGate:
         verified_threshold: float = 0.95,
         partial_threshold: float = 0.70,
         max_concurrent: int = 4,
+        claim_judge: "ClaimJudgeLike | None" = None,
+        support_threshold: float = 0.5,
     ) -> None:
         self._fetch = fetch_text
         self._wayback = wayback_text
         self._verified = verified_threshold
         self._partial = partial_threshold
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._claim_judge = claim_judge
+        self._support_threshold = support_threshold
 
-    async def verify(self, citations: list[Citation]) -> Verdict:
+    async def verify(self, citations: list[Citation], prose: str | None = None) -> Verdict:
         verdicts = tuple(
-            await asyncio.gather(*(self._verify_one(c) for c in citations))
+            await asyncio.gather(*(self._verify_one(c, prose) for c in citations))
         )
         failures = [
             v for v, c in zip(verdicts, citations, strict=True)
@@ -125,7 +134,7 @@ class VerifierGate:
             )
         return Verdict(passed=True, citations=verdicts)
 
-    async def _verify_one(self, citation: Citation) -> CitationVerdict:
+    async def _verify_one(self, citation: Citation, prose: str | None = None) -> CitationVerdict:
         policy = self._url_policy(citation.url)
         if policy is not None:
             return CitationVerdict(citation.id, CitationStatus.UNVERIFIABLE, policy)
@@ -137,20 +146,41 @@ class VerifierGate:
                 f"fetch failed (live{' and wayback' if self._wayback else ''}): {fetch_error}",
             )
         coverage = quote_coverage(page, citation.quote)
-        if coverage >= self._verified:
+        if coverage < self._partial:
             return CitationVerdict(
-                citation.id, CitationStatus.VERIFIED,
-                f"quote found ({coverage:.0%} contiguous match)", source,
+                citation.id, CitationStatus.UNVERIFIABLE,
+                f"quote not found in page ({coverage:.0%} best match)", source,
             )
-        if coverage >= self._partial:
-            return CitationVerdict(
-                citation.id, CitationStatus.PARTIALLY_VERIFIED,
-                f"quote only partially present ({coverage:.0%})", source,
-            )
-        return CitationVerdict(
-            citation.id, CitationStatus.UNVERIFIABLE,
-            f"quote not found in page ({coverage:.0%} best match)", source,
+        status = (
+            CitationStatus.VERIFIED if coverage >= self._verified
+            else CitationStatus.PARTIALLY_VERIFIED
         )
+        reason = (
+            f"quote found ({coverage:.0%} contiguous match)"
+            if status is CitationStatus.VERIFIED
+            else f"quote only partially present ({coverage:.0%})"
+        )
+        # NLI stage: a real quote can still prop up a misrepresenting CLAIM.
+        # Low support downgrades a verified citation to partial — visibly.
+        support = await self._claim_support(citation, prose, page)
+        if support is not None:
+            reason += f"; claim support {support:.2f}"
+            if support < self._support_threshold and status is CitationStatus.VERIFIED:
+                status = CitationStatus.PARTIALLY_VERIFIED
+                reason += " — quote real but claim weakly supported"
+        return CitationVerdict(citation.id, status, reason, source)
+
+    async def _claim_support(
+        self, citation: Citation, prose: str | None, page: str
+    ) -> float | None:
+        if self._claim_judge is None or prose is None:
+            return None
+        from .claims import claim_for_citation
+
+        claim = claim_for_citation(prose, citation.id)
+        if claim is None:
+            return None
+        return await self._claim_judge.support(page, claim)
 
     async def _fetch_with_fallback(self, url: str) -> tuple[str | None, str, str]:
         try:
