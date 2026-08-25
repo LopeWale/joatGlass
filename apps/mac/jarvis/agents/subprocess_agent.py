@@ -114,8 +114,13 @@ def proposer(model: str | None = None) -> SubprocessAgent | None:
 
 
 def critic() -> SubprocessAgent | None:
-    """Claude critiques, via the official binary only (RULES.md #9)."""
+    """Claude critiques, via the official binary only (RULES.md #9).
+
+    ANTHROPIC_API_KEY is stripped so the critic always runs on the
+    subscription login — RULES #9 makes metered API an explicit config
+    choice (AuthStrategy, with --max-budget-usd), never an accident of
+    whatever the shell happened to export."""
     binary = find_claude_binary()
     if binary is None:
         return None
-    return SubprocessAgent([binary, "-p"])
+    return SubprocessAgent([binary, "-p"], env_strip=("ANTHROPIC_API_KEY",))
