@@ -20,6 +20,7 @@ from ..audio.vad import RmsVad
 from ..core.interfaces import GlassesTransport, ReplyEngine, SttEngine
 from ..core.protocol import AudioControl, ContainerId, HudText
 from .hud import HudWriter
+from .session import SessionManager
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +40,11 @@ class VoiceOrchestrator:
         vad: RmsVad | None = None,
         stt_available: bool = True,
         replier: ReplyEngine | None = None,
+        sessions: SessionManager | None = None,
     ) -> None:
         self._transport = transport
         self._hud = HudWriter(transport)
+        self._sessions = sessions
         self._stt = stt
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
@@ -99,6 +102,10 @@ class VoiceOrchestrator:
                 log.info("STT produced no text")
                 return
             log.info("transcript: %s", transcript.text)
+            # Sessions get first claim: an active session owns the HUD, and a
+            # trigger phrase ("debate ...") starts one that takes over.
+            if self._sessions is not None and self._sessions.handle_transcript(transcript.text):
+                return
             # Show the wearer their words immediately — proof they were heard —
             # then STREAM the reply over them chunk by chunk as it generates
             # (the same visible-streaming path Phase 2's debate turns use).

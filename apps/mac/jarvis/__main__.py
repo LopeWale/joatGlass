@@ -12,12 +12,15 @@ import asyncio
 import logging
 
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
+from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
 from .core.interfaces import ReplyEngine, SttEngine
 from .core.protocol import Hello
+from .services.hud import HudWriter
 from .services.orchestrator import VoiceOrchestrator
+from .services.session import DebateSession, Session, SessionManager
 
 log = logging.getLogger("jarvis")
 
@@ -76,8 +79,24 @@ async def main() -> None:
         log.warning("mlx-lm not installed — echoing transcripts "
                     "(pip install -e '.[mlx]')")
 
+    hud = HudWriter(transport)
+    propose_agent, critic_agent = proposer(), critic()
+    if propose_agent and critic_agent:
+        log.info("debate agents ready: codex proposer + claude critic + local judge")
+    else:
+        log.warning("debate unavailable (codex: %s, claude: %s)",
+                    "ok" if propose_agent else "missing", "ok" if critic_agent else "missing")
+
+    def make_debate(topic: str) -> Session | None:
+        if propose_agent is None or critic_agent is None:
+            return None
+        return DebateSession(
+            topic, hud, propose_agent.stream, critic_agent.stream, replier
+        )
+
+    sessions = SessionManager(hud, make_debate)
     orchestrator = VoiceOrchestrator(
-        transport, stt, stt_available=stt_available, replier=replier
+        transport, stt, stt_available=stt_available, replier=replier, sessions=sessions
     )
     orchestrator.attach()
 
