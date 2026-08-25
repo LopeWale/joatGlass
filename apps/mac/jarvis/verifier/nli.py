@@ -59,6 +59,12 @@ class MiniCheckJudge(ClaimJudge):
             return None
 
     def _load(self) -> Any:
+        # MiniCheck's chunking needs NLTK's punkt_tab data but its installer
+        # fetches only the legacy 'punkt' — self-heal the gap here (no-op
+        # when already present).
+        import nltk
+
+        nltk.download("punkt_tab", quiet=True)
         from minicheck.minicheck import MiniCheck  # lazy: optional dependency
 
         return MiniCheck(model_name=self._model_name)
