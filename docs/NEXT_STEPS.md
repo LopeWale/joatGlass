@@ -30,11 +30,16 @@ right-temple-only input, double-click = system exit).
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
 Remaining: the local MLX model between flush() and send(). **That closes Phase 0.**
 
-**Metric: round-trip voice → HUD < 3 s.** Measured live (wearer's real voice, warm
-MLX): utterance-end → transcript **7.6 s** (whisperkit-cli cold-starts the model every
-utterance), transcript → LLM reply **0.72 s** (resident mlx-lm). The entire latency
-problem is the per-utterance Whisper shell-out — a persistent WhisperKit process (or
-Swift binding) is the fix; VAD, transport, and the LLM are already fast enough.
+**Metric: round-trip voice → HUD < 3 s — MET.** With `whisperkit-cli serve`
+(resident model, `WhisperServeEngine`): utterance-end → transcript **0.79–0.89 s**,
+transcript → reply **0.51–0.55 s**; plus the 0.8 s VAD hangover ≈ **2.2 s total**
+(was 8.4 s with the per-utterance CLI). Serve warms once at brain boot (~7 s) and
+auto-respawns if it dies mid-session (verified by killing it live).
+
+**Phase 2 requirement (wearer-stated):** the debate must be LIVE-STREAMED to the HUD
+turn by turn — visible as it happens, one exchange at a time — not a background job
+that surfaces only a verdict. Visibility is the proof it was debated.
+`HudPresenter.appendText` is the streaming primitive for this.
 
 ## 5. Calibrate the nod thresholds
 

@@ -12,9 +12,10 @@ import asyncio
 import logging
 
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
+from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
-from .core.interfaces import ReplyEngine
+from .core.interfaces import ReplyEngine, SttEngine
 from .core.protocol import Hello
 from .services.orchestrator import VoiceOrchestrator
 
@@ -27,6 +28,9 @@ async def main() -> None:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stt-binary", default="whisperkit-cli")
     parser.add_argument("--stt-model", default="large-v3_turbo")
+    parser.add_argument("--stt-mode", choices=["serve", "batch"], default="serve",
+                        help="serve = resident model (~1s/utterance); batch = CLI per utterance (~7s)")
+    parser.add_argument("--stt-port", type=int, default=50060)
     parser.add_argument("--llm-model", default=DEFAULT_MODEL)
     parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -38,10 +42,29 @@ async def main() -> None:
     )
 
     transport = HubGatewayTransport(host=args.host, port=args.port)
-    stt = WhisperKitEngine(binary=args.stt_binary, model=args.stt_model)
-    if not stt.available:
+
+    serve_engine: WhisperServeEngine | None = None
+    stt: SttEngine
+    if args.stt_mode == "serve":
+        serve_engine = WhisperServeEngine(
+            binary=args.stt_binary, model=args.stt_model, port=args.stt_port
+        )
+        stt = serve_engine
+    else:
+        stt = WhisperKitEngine(binary=args.stt_binary, model=args.stt_model)
+
+    stt_available = getattr(stt, "available", True)
+    if not stt_available:
         log.warning("%s not found — voice loop runs without transcription "
                     "(brew install whisperkit-cli)", args.stt_binary)
+    elif serve_engine is not None:
+        # Warm the resident model at boot, not on the first utterance.
+        log.info("starting whisper serve (model loads now, stays resident)…")
+        if not await serve_engine.start():
+            log.warning("serve mode failed — falling back to batch engine")
+            stt = WhisperKitEngine(binary=args.stt_binary, model=args.stt_model)
+            serve_engine = None
+            stt_available = getattr(stt, "available", True)
 
     replier: ReplyEngine | None = None
     if args.no_llm:
@@ -54,7 +77,7 @@ async def main() -> None:
                     "(pip install -e '.[mlx]')")
 
     orchestrator = VoiceOrchestrator(
-        transport, stt, stt_available=stt.available, replier=replier
+        transport, stt, stt_available=stt_available, replier=replier
     )
     orchestrator.attach()
 
@@ -69,6 +92,8 @@ async def main() -> None:
         await asyncio.Event().wait()
     finally:
         await transport.stop()
+        if serve_engine is not None:
+            await serve_engine.close()
 
 
 if __name__ == "__main__":
