@@ -107,3 +107,25 @@ class TestHtmlToText:
     def test_strips_scripts_and_collapses(self) -> None:
         html = "<html><head><script>evil()</script></head><body><p>Real  text</p><style>x{}</style></body></html>"
         assert html_to_text(html) == "Real text"
+
+
+class TestCitationParser:
+    def test_parses_sources_block_variants(self) -> None:
+        from jarvis.verifier.citations import parse_citations
+        prose = (
+            "Some argument text.\n\nSOURCES:\n"
+            '[1] https://a.example/x :: "quote one"\n'
+            "[2] https://b.example/y — “curly quote two”\n"
+            '[c3] https://c.example/z "no separator"\n'
+            "not a citation line\n"
+        )
+        cites = parse_citations(prose)
+        assert [(c.id, c.url, c.quote) for c in cites] == [
+            ("1", "https://a.example/x", "quote one"),
+            ("2", "https://b.example/y", "curly quote two"),
+            ("c3", "https://c.example/z", "no separator"),
+        ]
+
+    def test_prose_without_sources_parses_empty(self) -> None:
+        from jarvis.verifier.citations import parse_citations
+        assert parse_citations("Just an opinion, no sources.") == []
