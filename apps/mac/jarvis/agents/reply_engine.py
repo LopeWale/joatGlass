@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -37,9 +38,12 @@ class MlxReplyEngine(ReplyEngine):
     """Resident mlx-lm model. First reply() triggers load (and, first time
     ever, the model download) — subsequent replies reuse the loaded weights."""
 
-    def __init__(self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150) -> None:
+    def __init__(
+        self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150, chunk_chars: int = 32
+    ) -> None:
         self._model_id = model_id
         self._max_tokens = max_tokens
+        self._chunk_chars = chunk_chars
         self._model: Any = None
         self._tokenizer: Any = None
         self._load_lock = asyncio.Lock()
@@ -73,17 +77,62 @@ class MlxReplyEngine(ReplyEngine):
             self._mlx_thread, self._generate, text
         )
 
-    def _generate(self, text: str) -> str:
-        from mlx_lm import generate  # lazy: optional dependency
+    async def stream(self, text: str) -> AsyncIterator[str]:
+        """True token streaming: chunks arrive as the model produces them.
 
-        prompt = self._tokenizer.apply_chat_template(
+        Generation runs on the dedicated MLX thread (streams are
+        thread-bound); chunks cross to the event loop via a queue. Tokens are
+        batched to ~chunk_chars per HUD append — every append is a BLE
+        textContainerUpgrade, so per-token updates would flood the link.
+        """
+        if not text.strip():
+            return
+        await self._ensure_loaded()
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        def worker() -> None:
+            try:
+                from mlx_lm import stream_generate  # lazy: optional dependency
+
+                buf = ""
+                for response in stream_generate(
+                    self._model, self._tokenizer,
+                    prompt=self._chat_prompt(text), max_tokens=self._max_tokens,
+                ):
+                    buf += str(response.text)
+                    if len(buf) >= self._chunk_chars:
+                        loop.call_soon_threadsafe(queue.put_nowait, buf)
+                        buf = ""
+                if buf:
+                    loop.call_soon_threadsafe(queue.put_nowait, buf)
+            except Exception:
+                log.exception("stream_generate failed")
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        done = loop.run_in_executor(self._mlx_thread, worker)
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+        await done
+
+    def _chat_prompt(self, text: str) -> Any:
+        return self._tokenizer.apply_chat_template(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text},
             ],
             add_generation_prompt=True,
         )
+
+    def _generate(self, text: str) -> str:
+        from mlx_lm import generate  # lazy: optional dependency
+
         out: str = generate(
-            self._model, self._tokenizer, prompt=prompt, max_tokens=self._max_tokens
+            self._model, self._tokenizer,
+            prompt=self._chat_prompt(text), max_tokens=self._max_tokens,
         )
         return out.strip()

@@ -149,6 +149,9 @@ class HudText:
     container_id: ContainerId = ContainerId.MAIN
     offset: int | None = None
     length: int | None = None
+    append: bool = False
+    """append=True streams onto the container (debate turns, token streams);
+    False repaints it. Mirrors types.ts hud.text."""
 
     def to_wire(self) -> dict[str, Any]:
         msg: dict[str, Any] = {
@@ -160,6 +163,8 @@ class HudText:
             msg["offset"] = self.offset
         if self.length is not None:
             msg["length"] = self.length
+        if self.append:
+            msg["append"] = True
         return msg
 
 

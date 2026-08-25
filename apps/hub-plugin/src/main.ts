@@ -82,7 +82,10 @@ async function boot(): Promise<void> {
   link.onMessage(async (msg: DownlinkMessage) => {
     switch (msg.kind) {
       case 'hud.text':
-        await hud.showText(msg.text, msg.containerId);
+        // append streams (debate turns, token-by-token replies) without a
+        // full repaint; plain hud.text replaces the container.
+        if (msg.append) await hud.appendText(msg.text, msg.containerId);
+        else await hud.showText(msg.text, msg.containerId);
         break;
       case 'hud.list':
         await hud.showList(msg.items);

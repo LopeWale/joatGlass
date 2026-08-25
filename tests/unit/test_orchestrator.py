@@ -6,6 +6,7 @@ import asyncio
 import struct
 
 from jarvis.core.interfaces import (
+    ReplyEngine,
     AudioCallback,
     DeviceCallback,
     GlassesTransport,
@@ -133,7 +134,7 @@ class TestVoiceLoop:
         assert len(transport.sent) == 3  # status, install hint, mic on
 
 
-class FakeReplier:
+class FakeReplier(ReplyEngine):
     def __init__(self, text: str | None = "It is 72 degrees.") -> None:
         self.text = text
         self.asked: list[str] = []
@@ -147,7 +148,7 @@ class TestReplyFlow:
     async def test_transcript_then_reply_both_reach_the_hud(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("what is the weather")
         replier = FakeReplier("It is 72 degrees.")
-        orch = VoiceOrchestrator(transport, engine, replier=replier)  # type: ignore[arg-type]
+        orch = VoiceOrchestrator(transport, engine, replier=replier)
         orch.attach()
         assert transport.audio_cb is not None
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
@@ -159,7 +160,7 @@ class TestReplyFlow:
 
     async def test_replier_declining_leaves_transcript_standing(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hm")
-        orch = VoiceOrchestrator(transport, engine, replier=FakeReplier(None))  # type: ignore[arg-type]
+        orch = VoiceOrchestrator(transport, engine, replier=FakeReplier(None))
         orch.attach()
         assert transport.audio_cb is not None
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
@@ -171,7 +172,7 @@ class TestReplyFlow:
     async def test_utterance_during_reply_is_dropped_single_flight(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("first question")
 
-        class SlowReplier:
+        class SlowReplier(ReplyEngine):
             def __init__(self) -> None:
                 self.gate = asyncio.Event()
                 self.asked: list[str] = []
@@ -182,7 +183,7 @@ class TestReplyFlow:
                 return "slow answer"
 
         replier = SlowReplier()
-        orch = VoiceOrchestrator(transport, engine, replier=replier)  # type: ignore[arg-type]
+        orch = VoiceOrchestrator(transport, engine, replier=replier)
         orch.attach()
         assert transport.audio_cb is not None
 
@@ -200,3 +201,50 @@ class TestReplyFlow:
         assert replier.asked == ["first question"]  # second was dropped, not raced
         texts = [m.text for m in transport.sent if isinstance(m, HudText)]
         assert texts == ["first question", "slow answer"]
+
+
+class StreamingReplier(ReplyEngine):
+    """True chunked streaming, like MlxReplyEngine.stream."""
+
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+
+    async def reply(self, text: str) -> str | None:
+        return "".join(self.chunks)
+
+    async def stream(self, text: str):
+        for c in self.chunks:
+            yield c
+
+
+class TestStreamedReply:
+    async def test_chunks_stream_as_show_then_appends(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("tell me a story")
+        orch = VoiceOrchestrator(
+            transport, engine, replier=StreamingReplier(["Once ", "upon ", "a time."])
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        hud = [m for m in transport.sent if isinstance(m, HudText)]
+        # transcript replace, first chunk replace, remaining chunks append
+        assert [(m.text, m.append) for m in hud] == [
+            ("tell me a story", False),
+            ("Once ", False),
+            ("upon ", True),
+            ("a time.", True),
+        ]
+
+    async def test_single_chunk_default_stream_still_replaces(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("hi")
+        orch = VoiceOrchestrator(transport, engine, replier=FakeReplier("Hello!"))
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+        hud = [m for m in transport.sent if isinstance(m, HudText)]
+        assert [(m.text, m.append) for m in hud] == [("hi", False), ("Hello!", False)]
