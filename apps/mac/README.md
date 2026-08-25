@@ -22,6 +22,7 @@ pytest tests/ -q
 | `jarvis/ble/hub_gateway.py` | Done — `HubGatewayTransport`, the WebSocket server the plugin dials |
 | `jarvis/audio/whisperkit.py` | Done — shells out to `whisperkit-cli`, verified against the real binary |
 | `jarvis/audio/vad.py` | Done — RMS utterance segmentation (thresholds uncalibrated) |
+| `jarvis/audio/whisper_serve.py` | Done — resident STT via `whisperkit-cli serve` (~0.85 s/utterance; default `--stt-mode serve`) |
 | `jarvis/services/orchestrator.py` | Done — Phase-0 voice loop: mic → VAD → STT → HUD transcript |
 | `jarvis/agents/`, `verifier/`, `channels/`, `computeruse/` | Empty — Phases 2–4 |
 
