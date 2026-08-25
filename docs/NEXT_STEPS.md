@@ -28,7 +28,11 @@ right-temple-only input, double-click = system exit).
 
 `python -m jarvis` runs the voice loop: mic → RmsVad → WhisperKitEngine → transcript
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
-Remaining: the local MLX model between flush() and send(). **That closes Phase 0.**
+Phase 0 CLOSED (metric met at ~2.2 s). Phase 2 in progress: debate loop with
+visible verifier turns and repair, wake-word address gate, and the DebateLoop
+convergence state machine (agreement >= 0.85, capped rounds). Remaining in
+Phase 2: NLI claim-support judge (MiniCheck) for uncited claims, and the JSON
+plan/critique schemas once the debate graduates from prose contracts.
 
 **Metric: round-trip voice → HUD < 3 s — MET.** With `whisperkit-cli serve`
 (resident model, `WhisperServeEngine`): utterance-end → transcript **0.79–0.89 s**,

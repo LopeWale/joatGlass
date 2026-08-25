@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 
@@ -110,6 +111,8 @@ class DebateSession(Session):
         judge: ReplyEngine | None,
         gate: VerifierGate | None = None,
         max_repairs: int = 1,
+        max_rounds: int = 2,
+        agreement_threshold: float = 0.85,
     ) -> None:
         self._topic = topic
         self._hud = hud
@@ -118,6 +121,8 @@ class DebateSession(Session):
         self._judge = judge
         self._gate = gate
         self._max_repairs = max_repairs
+        self._max_rounds = max_rounds
+        self._agreement_threshold = agreement_threshold
         self._verify_summary: list[str] = []
         self._cancelled = False
 
@@ -125,6 +130,13 @@ class DebateSession(Session):
         self._cancelled = True
 
     async def run(self) -> None:
+        """The DebateLoop state machine (ARCHITECTURE §5), fully visible:
+
+        propose → critique → judge; the judge scores agreement, and the loop
+        CONVERGES at ≥ threshold with no blocking issues — otherwise the
+        proposer revises against the critique and the next round begins,
+        capped at max_rounds. Every turn of every round streams to the HUD.
+        """
         await self._hud.status(f"DEBATE · {self._topic[:40]}")
         proposal = await self._verified_turn(
             "PROPOSER (codex)", self._propose,
@@ -135,28 +147,71 @@ class DebateSession(Session):
         if self._cancelled or not proposal:
             await self._finish("debate cancelled" if self._cancelled else "proposer silent")
             return
-        critique = await self._verified_turn(
-            "CRITIC (claude)", self._critique,
-            "Critique this proposal in under 100 words, plain text. Name the "
-            f"weakest claim.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}"
-            f"{self.SOURCES_CONTRACT}",
-        )
-        if self._cancelled:
-            await self._finish("debate cancelled")
-            return
-        if self._judge is not None:
-            await self._hud.append("\n\n» JUDGE (local)\n")
-            verification = "; ".join(self._verify_summary) or "no citations offered"
-            async for chunk in self._judge.stream(
-                "You are the judge of a short debate. In under 60 words give a "
-                f"verdict and what to do. Weigh verified claims above unverified "
-                f"ones.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}\n\n"
-                f"Critique:\n{critique}\n\nCitation verification: {verification}"
-            ):
-                if self._cancelled:
-                    break
-                await self._hud.append(chunk)
-        await self._finish("debate done — say something to continue")
+
+        outcome = "no judge — single round"
+        for round_no in range(1, self._max_rounds + 1):
+            critique = await self._verified_turn(
+                "CRITIC (claude)", self._critique,
+                "Critique this proposal in under 100 words, plain text. Name the "
+                f"weakest claim.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}"
+                f"{self.SOURCES_CONTRACT}",
+            )
+            if self._cancelled:
+                await self._finish("debate cancelled")
+                return
+            if self._judge is None:
+                break
+            judged = await self._judge_turn(proposal, critique, round_no)
+            if self._cancelled:
+                await self._finish("debate cancelled")
+                return
+            agreement, blocking = parse_judgment(judged)
+            converged = (
+                agreement is not None
+                and agreement >= self._agreement_threshold
+                and not blocking
+            )
+            if converged:
+                outcome = f"converged (agreement {agreement:.2f}, round {round_no})"
+                break
+            if agreement is None:
+                # An unparseable judgment must not spin the loop forever.
+                outcome = f"judge gave no score — stopped at round {round_no}"
+                break
+            if round_no == self._max_rounds:
+                outcome = f"no convergence after {round_no} round(s) (last {agreement:.2f})"
+                break
+            proposal = await self._verified_turn(
+                f"PROPOSER — round {round_no + 1}", self._propose,
+                f"Revise your proposal for: {self._topic}\n\nYour previous "
+                f"proposal:\n{proposal}\n\nThe critic said:\n{critique}\n\n"
+                "Address the critique head-on, under 120 words, plain text."
+                f"{self.SOURCES_CONTRACT}",
+            )
+            if self._cancelled or not proposal:
+                await self._finish("debate cancelled" if self._cancelled else "proposer silent")
+                return
+        await self._finish(f"debate done — {outcome}")
+
+    async def _judge_turn(self, proposal: str, critique: str, round_no: int) -> str:
+        assert self._judge is not None
+        await self._hud.append(f"\n\n» JUDGE (local) — round {round_no}\n")
+        verification = "; ".join(self._verify_summary) or "no citations offered"
+        collected: list[str] = []
+        async for chunk in self._judge.stream(
+            "You are the judge of a short debate. In under 60 words give a "
+            "verdict and what to do. Weigh verified claims above unverified "
+            "ones. End with exactly two lines:\n"
+            "AGREEMENT: <0.00-1.00, how much proposer and critic now agree>\n"
+            "BLOCKING: <yes|no, does the critique block acting on the proposal>\n\n"
+            f"Topic: {self._topic}\n\nProposal:\n{proposal}\n\n"
+            f"Critique:\n{critique}\n\nCitation verification: {verification}"
+        ):
+            if self._cancelled:
+                break
+            collected.append(chunk)
+            await self._hud.append(chunk)
+        return "".join(collected)
 
     async def _verified_turn(
         self,
@@ -229,3 +284,17 @@ class DebateSession(Session):
 
     async def _finish(self, status: str) -> None:
         await self._hud.status(f"JOAT · {status}")
+
+
+_AGREEMENT = re.compile(r"AGREEMENT:\s*([01](?:\.\d+)?)", re.IGNORECASE)
+_BLOCKING = re.compile(r"BLOCKING:\s*(yes|no)", re.IGNORECASE)
+
+
+def parse_judgment(text: str) -> tuple[float | None, bool]:
+    """(agreement or None if unscored, blocking). Malformed → (None, True):
+    an illegible judge never green-lights convergence."""
+    m = _AGREEMENT.search(text)
+    agreement = min(1.0, max(0.0, float(m.group(1)))) if m else None
+    b = _BLOCKING.search(text)
+    blocking = True if b is None else b.group(1).lower() == "yes"
+    return agreement, blocking
