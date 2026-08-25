@@ -44,7 +44,7 @@ export type UplinkMessage =
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
-  | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number }
+  | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image' }
   | { kind: 'hud.list'; items: string[] }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }

@@ -9,7 +9,7 @@ Parakeet, must not touch a line of orchestration code.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from .protocol import Device, DownlinkMessage, InputEvent
@@ -98,3 +98,13 @@ class ReplyEngine(ABC):
 
     @abstractmethod
     async def reply(self, text: str) -> str | None: ...
+
+    async def stream(self, text: str) -> AsyncIterator[str]:
+        """Yield the reply in chunks for live HUD streaming.
+
+        Default adapts reply(): one chunk. Engines with true token streaming
+        override — same wearer-visible contract either way (the streaming
+        HUD requirement in docs/SESSION_MODEL.md)."""
+        result = await self.reply(text)
+        if result:
+            yield result

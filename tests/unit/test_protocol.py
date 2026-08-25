@@ -158,3 +158,10 @@ class TestPackPcm:
 
     def test_empty_is_empty(self) -> None:
         assert pack_pcm([]) == b""
+
+
+class TestHudTextAppend:
+    def test_append_flag_serializes_only_when_true(self) -> None:
+        assert "append" not in HudText(text="x").to_wire()
+        wire = HudText(text="x", append=True).to_wire()
+        assert wire["append"] is True and wire["kind"] == "hud.text"

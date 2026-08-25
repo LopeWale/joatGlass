@@ -19,6 +19,7 @@ import logging
 from ..audio.vad import RmsVad
 from ..core.interfaces import GlassesTransport, ReplyEngine, SttEngine
 from ..core.protocol import AudioControl, ContainerId, HudText
+from .hud import HudWriter
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class VoiceOrchestrator:
         replier: ReplyEngine | None = None,
     ) -> None:
         self._transport = transport
+        self._hud = HudWriter(transport)
         self._stt = stt
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
@@ -98,13 +100,19 @@ class VoiceOrchestrator:
                 return
             log.info("transcript: %s", transcript.text)
             # Show the wearer their words immediately — proof they were heard —
-            # then replace with the reply once the model has one.
-            await self._transport.send(HudText(text=transcript.text))
+            # then STREAM the reply over them chunk by chunk as it generates
+            # (the same visible-streaming path Phase 2's debate turns use).
+            await self._hud.show(transcript.text)
             if self._replier is None:
                 return
-            reply = await self._replier.reply(transcript.text)
-            if reply:
-                log.info("reply: %s", reply)
-                await self._transport.send(HudText(text=reply))
+            parts: list[str] = []
+            async for chunk in self._replier.stream(transcript.text):
+                if parts:
+                    await self._hud.append(chunk)
+                else:
+                    await self._hud.show(chunk)
+                parts.append(chunk)
+            if parts:
+                log.info("reply: %s", "".join(parts))
         finally:
             self._busy = False
