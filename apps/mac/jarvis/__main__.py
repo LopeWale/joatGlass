@@ -37,6 +37,8 @@ async def main() -> None:
                         help="serve = resident model (~1s/utterance); batch = CLI per utterance (~7s)")
     parser.add_argument("--stt-port", type=int, default=50060)
     parser.add_argument("--llm-model", default=DEFAULT_MODEL)
+    parser.add_argument("--always-answer", action="store_true",
+                        help="answer ALL speech (dev only) instead of requiring 'Jarvis/JOAT ...'")
     parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -99,8 +101,12 @@ async def main() -> None:
         )
 
     sessions = SessionManager(hud, make_debate)
+    wake_words = None if args.always_answer else (
+        "hey jarvis", "hey joat", "jarvis", "joat", "jot"
+    )
     orchestrator = VoiceOrchestrator(
-        transport, stt, stt_available=stt_available, replier=replier, sessions=sessions
+        transport, stt, stt_available=stt_available, replier=replier,
+        sessions=sessions, wake_words=wake_words
     )
     orchestrator.attach()
 

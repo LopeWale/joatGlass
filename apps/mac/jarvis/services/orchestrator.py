@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from ..audio.vad import RmsVad
 from ..core.interfaces import GlassesTransport, ReplyEngine, SttEngine
@@ -41,10 +42,15 @@ class VoiceOrchestrator:
         stt_available: bool = True,
         replier: ReplyEngine | None = None,
         sessions: SessionManager | None = None,
+        wake_words: tuple[str, ...] | None = None,
     ) -> None:
         self._transport = transport
         self._hud = HudWriter(transport)
         self._sessions = sessions
+        # Longest first so "hey jarvis" strips before "jarvis" matches.
+        self._wake_words = (
+            tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
+        )
         self._stt = stt
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
@@ -57,7 +63,9 @@ class VoiceOrchestrator:
 
     async def on_connect(self) -> None:
         """Greet the wearer so a live brain is visibly different from none."""
-        status = "JOAT · brain online" if self._stt_available else "JOAT · brain online (no STT)"
+        wake_hint = " — say 'Jarvis ...'" if self._wake_words else ""
+        status = (f"JOAT · online{wake_hint}" if self._stt_available
+                  else "JOAT · online (no STT)")
         await self._transport.send(HudText(text=status, container_id=ContainerId.STATUS_BAR))
         if not self._stt_available:
             await self._transport.send(
@@ -106,14 +114,26 @@ class VoiceOrchestrator:
             # trigger phrase ("debate ...") starts one that takes over.
             if self._sessions is not None and self._sessions.handle_transcript(transcript.text):
                 return
+            # Address gate: speech not aimed at the assistant is IGNORED —
+            # no HUD write, no LLM call. The wearer's model, in their words:
+            # "I can let the system know when I need it." Room conversation
+            # is not a prompt.
+            addressed = self._strip_wake_word(transcript.text)
+            if addressed is None:
+                log.info("unaddressed speech ignored")
+                return
+            if not addressed:
+                await self._hud.show("Yes?")
+                return
+            query = addressed
             # Show the wearer their words immediately — proof they were heard —
             # then STREAM the reply over them chunk by chunk as it generates
             # (the same visible-streaming path Phase 2's debate turns use).
-            await self._hud.show(transcript.text)
+            await self._hud.show(query)
             if self._replier is None:
                 return
             parts: list[str] = []
-            async for chunk in self._replier.stream(transcript.text):
+            async for chunk in self._replier.stream(query):
                 if parts:
                     await self._hud.append(chunk)
                 else:
@@ -123,3 +143,24 @@ class VoiceOrchestrator:
                 log.info("reply: %s", "".join(parts))
         finally:
             self._busy = False
+
+    def _strip_wake_word(self, text: str) -> str | None:
+        """None = not addressed to us; '' = wake word alone; else the query.
+
+        Text-level gate on the transcript (v1). The audio-level VadWakeWord
+        from MAC_APP.md replaces this later and stops even the transcription
+        of unaddressed speech; until then, unaddressed audio is transcribed
+        for this check but never answered, shown, or sent to an LLM.
+        """
+        if self._wake_words is None:
+            return text
+        normalized = re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
+        for wake in self._wake_words:
+            if normalized == wake:
+                return ""
+            if normalized.startswith(wake + " "):
+                # Strip from the ORIGINAL text at the matched word count so
+                # the query keeps its natural casing and punctuation.
+                words = text.split()
+                return " ".join(words[len(wake.split()):]).lstrip(",.!? ")
+        return None

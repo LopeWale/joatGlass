@@ -16,6 +16,7 @@ from jarvis.core.interfaces import (
 )
 from jarvis.core.protocol import AudioControl, DownlinkMessage, HudText
 from jarvis.services.orchestrator import VoiceOrchestrator
+from jarvis.services.session import Session
 
 BATCH_SAMPLES = 3200
 
@@ -248,3 +249,63 @@ class TestStreamedReply:
         await drain()
         hud = [m for m in transport.sent if isinstance(m, HudText)]
         assert [(m.text, m.append) for m in hud] == [("hi", False), ("Hello!", False)]
+
+
+WAKE = ("hey jarvis", "jarvis", "joat")
+
+
+class TestWakeWordGate:
+    async def _run(self, text: str, wake: tuple[str, ...] | None = WAKE):
+        transport, engine = FakeTransport(), FakeEngine(text)
+        orch = VoiceOrchestrator(
+            transport, engine, replier=FakeReplier("answer"), wake_words=wake
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+        return [m.text for m in transport.sent if isinstance(m, HudText)]
+
+    async def test_unaddressed_room_speech_is_fully_ignored(self) -> None:
+        texts = await self._run("I'm so tired of repeating this to the team.")
+        assert texts == []  # no HUD write, no reply, nothing
+
+    async def test_addressed_speech_answers_with_wake_word_stripped(self) -> None:
+        texts = await self._run("Jarvis, what time is sunset?")
+        assert texts == ["what time is sunset?", "answer"]
+
+    async def test_multiword_wake_word_strips_whole_prefix(self) -> None:
+        texts = await self._run("Hey Jarvis what is the weather")
+        assert texts == ["what is the weather", "answer"]
+
+    async def test_wake_word_alone_prompts(self) -> None:
+        texts = await self._run("Jarvis.")
+        assert texts == ["Yes?"]
+
+    async def test_none_gate_answers_everything(self) -> None:
+        texts = await self._run("any old speech", wake=None)
+        assert texts == ["any old speech", "answer"]
+
+    async def test_debate_trigger_still_works_bare(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("debate tabs or spaces")
+        started: list[str] = []
+
+        class S(Session):
+            async def run(self) -> None:
+                started.append("ran")
+
+            def cancel(self) -> None: ...
+
+        from jarvis.services.hud import HudWriter as HW
+        from jarvis.services.session import SessionManager as SM
+        orch = VoiceOrchestrator(
+            transport, engine, replier=FakeReplier("x"),
+            sessions=SM(HW(transport), lambda t: S()), wake_words=WAKE,
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+        assert started == ["ran"]
