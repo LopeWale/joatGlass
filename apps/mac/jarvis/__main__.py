@@ -17,10 +17,12 @@ from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
+from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
 from .core.protocol import Hello
 from .services.hud import HudWriter
+from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.session import DebateSession, Session, SessionManager
 from .verifier.fetcher import fetch_page_text, wayback_page_text
@@ -53,6 +55,7 @@ async def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
+    status = StatusPublisher()
     transport = HubGatewayTransport(host=args.host, port=args.port)
 
     serve_engine: WhisperServeEngine | None = None
@@ -66,6 +69,7 @@ async def main() -> None:
         stt = WhisperKitEngine(binary=args.stt_binary, model=args.stt_model)
 
     stt_available = getattr(stt, "available", True)
+    status.set(stt="ready" if stt_available else "missing")
     if not stt_available:
         log.warning("%s not found — voice loop runs without transcription "
                     "(brew install whisperkit-cli)", args.stt_binary)
@@ -77,6 +81,7 @@ async def main() -> None:
             stt = WhisperKitEngine(binary=args.stt_binary, model=args.stt_model)
             serve_engine = None
             stt_available = getattr(stt, "available", True)
+    status.set(stt="ready" if stt_available else "missing")
 
     replier: ReplyEngine | None = None
     if args.no_llm:
@@ -88,6 +93,7 @@ async def main() -> None:
         log.warning("mlx-lm not installed — echoing transcripts "
                     "(pip install -e '.[mlx]')")
 
+    status.set(llm="ready" if replier is not None else "off")
     hud = HudWriter(transport)
     propose_agent, critic_agent = proposer(), critic()
     if propose_agent and critic_agent:
@@ -110,28 +116,39 @@ async def main() -> None:
             topic, hud, propose_agent.stream, critic_agent.stream, replier, gate=gate
         )
 
+    status.set(debate="ready" if (propose_agent and critic_agent) else "unavailable")
     sessions = SessionManager(hud, make_debate)
     wake_words = None if args.always_answer else (
         "hey jarvis", "hey joat", "jarvis", "joat", "jot"
     )
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,
-        sessions=sessions, wake_words=wake_words
+        sessions=sessions, wake_words=wake_words, status=status
     )
     orchestrator.attach()
 
-    def greet(_hello: Hello) -> None:
+    def greet(hello: Hello) -> None:
+        status.set(glasses="connected", device=f"{hello.model} / {hello.sn}", mic="streaming")
         asyncio.get_running_loop().create_task(orchestrator.on_connect())
 
     transport.on_hello(greet)
 
     notif_task: asyncio.Task[None] | None = None
     if not args.no_notifications:
-        store: NotificationSource = (
-            BiomeNotificationStore() if DEFAULT_STREAM_DIR.is_dir()
-            else NotificationStore()
-        )
-        channel = NotificationChannel(store, triage=replier, deliver=sessions.notify)
+        jsonl = JsonlNotificationStore()
+        store: NotificationSource
+        if jsonl.available:
+            # Preferred: JOAT.app's Accessibility watcher — the only source
+            # that carries the notification's actual text.
+            store = jsonl
+            log.info("notification source: JOAT.app accessibility watcher")
+        elif DEFAULT_STREAM_DIR.is_dir():
+            store = BiomeNotificationStore()
+            log.info("notification source: Biome store (identity+time only, no body text)")
+        else:
+            store = NotificationStore()
+        channel = NotificationChannel(store, triage=replier, deliver=sessions.notify,
+                                     status=status)
         notif_task = asyncio.get_running_loop().create_task(channel.run())
 
     await transport.start()
