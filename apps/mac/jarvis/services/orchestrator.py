@@ -43,10 +43,12 @@ class VoiceOrchestrator:
         replier: ReplyEngine | None = None,
         sessions: SessionManager | None = None,
         wake_words: tuple[str, ...] | None = None,
+        status: object | None = None,
     ) -> None:
         self._transport = transport
         self._hud = HudWriter(transport)
         self._sessions = sessions
+        self._status = status
         # Longest first so "hey jarvis" strips before "jarvis" matches.
         self._wake_words = (
             tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
@@ -110,6 +112,9 @@ class VoiceOrchestrator:
                 log.info("STT produced no text")
                 return
             log.info("transcript: %s", transcript.text)
+            if self._status is not None:
+                self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
+                self._status.bump("utterances")  # type: ignore[attr-defined]
             # Sessions get first claim: an active session owns the HUD, and a
             # trigger phrase ("debate ...") starts one that takes over.
             if self._sessions is not None and self._sessions.handle_transcript(transcript.text):
@@ -140,7 +145,10 @@ class VoiceOrchestrator:
                     await self._hud.show(chunk)
                 parts.append(chunk)
             if parts:
-                log.info("reply: %s", "".join(parts))
+                reply_text = "".join(parts)
+                log.info("reply: %s", reply_text)
+                if self._status is not None:
+                    self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
             self._busy = False
 

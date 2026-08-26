@@ -12,6 +12,7 @@ matching batch in AudioStreamer.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import struct
@@ -77,7 +78,26 @@ class HubGatewayTransport(GlassesTransport):
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        self._server = await serve(self._session, self._host, self._port)
+        # A just-killed predecessor can still hold the port for a moment
+        # (the shell reaps it, but process death and socket release are not
+        # simultaneous). Retry briefly instead of dying — an unretried bind
+        # turned every app relaunch into a crash-loop.
+        last: OSError | None = None
+        for attempt in range(10):
+            try:
+                self._server = await serve(self._session, self._host, self._port)
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    raise
+                last = exc
+                if attempt == 0:
+                    log.info("port %d busy — waiting for the old engine to release it",
+                             self._port)
+                await asyncio.sleep(0.5)
+        else:
+            assert last is not None
+            raise last
         log.info("hub gateway listening on ws://%s:%d", self._host, self._port)
 
     async def stop(self) -> None:

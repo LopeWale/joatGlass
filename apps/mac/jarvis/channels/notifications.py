@@ -148,11 +148,13 @@ class NotificationChannel:
         triage: ReplyEngine | None,
         deliver: Callable[[str], None],
         poll_interval_s: float = 2.0,
+        status: object | None = None,
     ) -> None:
         self._store = store
         self._triage = triage
         self._deliver = deliver
         self._interval = poll_interval_s
+        self._status = status
         self._running = False
 
     async def run(self) -> None:
@@ -167,6 +169,8 @@ class NotificationChannel:
             return
         self._running = True
         log.info("notification channel live (watermark %s)", last)
+        if self._status is not None:
+            self._status.set(notifications="live")  # type: ignore[attr-defined]
         while self._running:
             await asyncio.sleep(self._interval)
             try:
@@ -201,4 +205,7 @@ class NotificationChannel:
         # stage with no trace, which made "did a card fire?" unanswerable.
         log.info("card delivered (%.1fs after delivery): %s",
                  time.time() - n.delivered_unix, card)
+        if self._status is not None:
+            self._status.set(last_card=card)  # type: ignore[attr-defined]
+            self._status.bump("cards")  # type: ignore[attr-defined]
         self._deliver(card)

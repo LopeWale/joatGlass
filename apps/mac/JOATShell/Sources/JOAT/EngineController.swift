@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import ServiceManagement
 import SwiftUI
 
@@ -10,6 +11,8 @@ import SwiftUI
 /// mirror doff-stops-mic).
 @MainActor
 final class EngineController: ObservableObject {
+    static let shared = EngineController()
+
     enum State: Equatable { case stopped, running, crashed(Int32), failed(String) }
 
     /// Single source of truth for the engine's WS port — passed to the
@@ -24,6 +27,7 @@ final class EngineController: ObservableObject {
 
     @Published var state: State = .stopped
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @Published var accessibilityTrusted: Bool = AXIsProcessTrusted()
 
     private var process: Process?
     private var userStopped = false
@@ -45,6 +49,18 @@ final class EngineController: ObservableObject {
 
     init() {
         start()
+        // The AX watcher is the only source of notification TEXT; start it
+        // when trusted, and keep the trust flag live so the UI can prompt.
+        NotificationWatcher.shared.start()
+        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            Task { @MainActor in
+                self.accessibilityTrusted = AXIsProcessTrusted()
+            }
+        }
+    }
+
+    func requestAccessibility() {
+        NotificationWatcher.shared.requestAccess()
     }
 
     // MARK: repo discovery — user-chosen, never hardcoded
