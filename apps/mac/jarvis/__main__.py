@@ -16,6 +16,7 @@ from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
+from .core.pairing import PairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.imessage import IMessageStore
 from .channels.jsonl_source import JsonlNotificationStore
@@ -61,7 +62,8 @@ async def main() -> None:
     )
 
     status = StatusPublisher()
-    transport = HubGatewayTransport(host=args.host, port=args.port)
+    transport = HubGatewayTransport(host=args.host, port=args.port,
+                                    pairing=PairingStore())
 
     serve_engine: WhisperServeEngine | None = None
     stt: SttEngine

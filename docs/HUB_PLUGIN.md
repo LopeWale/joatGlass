@@ -1,4 +1,4 @@
-# Even Hub Plugin — `@evenrealities/even_hub_sdk` (v0.0.12)
+# Even Hub Plugin — `@evenrealities/even_hub_sdk` (v0.0.14)
 
 The Hub plugin is our **officially supported path** to the glasses: a TypeScript web app running in the Even companion app's WebView that owns the G2 and streams audio, IMU, and input events to the Mac brain over WebSocket. No BLE reverse engineering, no sideloading, no firmware risk.
 
@@ -158,7 +158,7 @@ engine must be up for voice/cards (the script warns on both).
 ### Path B — packed private build (survives without the dev server)
 
 ```
-cd apps/hub-plugin && npm run pack     # -> joat.ehpk, --sdk-ver pinned 0.0.12
+cd apps/hub-plugin && npm run pack     # -> joat.ehpk, --sdk-ver pinned 0.0.14
 ```
 
 Upload at hub.evenrealities.com → project → **Private builds**; install on
@@ -176,6 +176,25 @@ first.
 5. Left-temple double-tap — settings menu opens on the glasses.
 6. Lock the phone 5 minutes, unlock — page state intact (the store QA gate).
 
+### Pairing (transport auth — RULES.md #5, implemented 2026-08-26)
+
+The gateway no longer trusts the LAN. Trust-on-first-use: the **first remote
+client to connect is issued a token** (`pairing.set` downlink → plugin
+localStorage) and every later remote connection must dial with `?token=` or
+is rejected 401 before the handshake. That first client is your phone at
+QR-scan time. Loopback is exempt — the simulator and `speak_test.py` run on
+the Mac itself, and a local process could read the token file anyway.
+
+- Token store: `~/Library/Application Support/JOAT/pairing.json` (0600).
+- **Re-pair a new/reset phone**: delete that file, reconnect. Symptom that
+  you need to: the plugin's socket never opens on a phone that used to work
+  (or never paired), while the simulator connects fine.
+- Honest limits: the token rides the URL over plain `ws://`, so an *active*
+  LAN sniffer can capture it, and TOFU means a hostile first-connect during
+  the pairing window wins. This closes "anyone on the LAN owns the HUD and
+  the confirm gate"; the strong path is still the tailnet (`wss` via
+  Tailscale) once TLS lands.
+
 ### Known unknowns (test on device, in this order)
 
 - **Plain `ws://` from a WebView page to the LAN Mac** is undocumented for
@@ -187,10 +206,11 @@ first.
   all, and how permission prompts surface to the wearer.
 - Whether the phone resolves `.local` mDNS from inside the WebView; the
   Tailscale candidates need the Tailscale app installed on the phone.
-- SDK is pinned 0.0.12; 0.0.14 (2026-08-20) adds long-press, contextual
-  menus, `textColor`, `zOrderIndex`, Gray8/Gray4 raw images, and audio
-  `direction`/`speakerRole` (speaker attribution). Upgrade AFTER the first
-  on-device loop passes — one variable at a time.
+- SDK upgraded to 0.0.14 (2026-08-26; typecheck + 53 tests green). New
+  surface not yet wired: contextual menus, `textColor`, `zOrderIndex`,
+  Gray8/Gray4 raw images via `updateImageRawData`, audio
+  `direction`/`speakerRole` (speaker attribution — useful for wearer-only
+  filtering). Long-press (eventType 9/10) needs no wiring: EventRouter's fall-through already relays unmatched sysEvents to the Mac as `input`.
 
 ## Host push formats (for simulator/tests)
 

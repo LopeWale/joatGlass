@@ -245,6 +245,20 @@ class Shutdown:
         return {"kind": "shutdown", "exitMode": self.exit_mode}
 
 
+@dataclass(frozen=True, slots=True)
+class PairingSet:
+    """Issued once, to the first remote client (TOFU — see core/pairing.py).
+
+    The plugin persists it in localStorage and presents it as ?token= on
+    every later dial; the gateway rejects remote peers without it.
+    """
+
+    token: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": "pairing.set", "token": self.token}
+
+
 DownlinkMessage = (
     HudText
     | HudRebuild
@@ -255,6 +269,7 @@ DownlinkMessage = (
     | ConfirmRequest
     | PolicySet
     | Shutdown
+    | PairingSet
 )
 
 
