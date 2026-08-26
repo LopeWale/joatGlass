@@ -215,6 +215,32 @@ itself, and a local process could read the token file anyway.
   confirm gate"; the strong path is still the tailnet (`wss` via Tailscale)
   once TLS lands.
 
+### Wrong screen: "asking for an auth token"
+
+If the phone asks for an **auth token**, you are on the **Even Terminal**
+connect screen (Terminal Mode, enabled in the Even app's *Settings*), not the
+Hub developer screen. Terminal takes a URL *plus* a token because its own
+server mints one; `evenhub qr` emits a bare URL, so the token field stays
+empty and the connect fails.
+
+**The Hub developer QR flow has no auth token at all** — verified three ways:
+`evenhub qr` encodes only the literal URL (`~/.config/evenhub/qr.yaml` holds
+just scheme/host/port/path), the CLI's `qr` handler never reads credentials,
+and no Even Hub doc mentions a token for developer mode or QR scanning.
+
+Right screen: **Even Hub tab → developer section, top right → Scan QR** (a
+camera viewfinder, no text fields). If that section is missing, Developer
+Mode is not active — and there is **no toggle**: sign in at
+hub.evenrealities.com/login with the same account registered *in the phone
+app*, then **force-quit** the Even app (swipe from recents; backgrounding is
+not enough) and reopen.
+
+`evenhub login` is NOT the fix — it only gates `pack --check`, writes
+`~/.config/evenhub/credentials.yaml`, and is never read by `qr`.
+
+Before blaming auth, open the dev-server URL in the **phone's browser** on the
+same Wi-Fi. If that fails it is firewall or AP isolation, not a token.
+
 ### Known unknowns (test on device, in this order)
 
 - **Plain `ws://` from a WebView page to the LAN Mac** is undocumented for
