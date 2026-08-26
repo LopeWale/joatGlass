@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import logging
 
+from .agents.grounding import Grounding, local_clock
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
@@ -95,7 +96,10 @@ async def main() -> None:
     if args.no_llm:
         log.info("LLM disabled (--no-llm) — echoing transcripts")
     elif mlx_available():
-        replier = MlxReplyEngine(model_id=args.llm_model)
+        # Facts the model cannot know, refreshed per reply. Without this it
+        # confabulates them — it answered "2:47 PM" at 4:44 PM.
+        grounding = Grounding([local_clock()])
+        replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding)
         log.info("reply engine: %s (loads on first utterance)", args.llm_model)
     else:
         log.warning("mlx-lm not installed — echoing transcripts "
