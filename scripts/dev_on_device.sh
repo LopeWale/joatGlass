@@ -31,16 +31,46 @@ fi
 [ -f "$PLUGIN/.env" ] || \
   echo "WARNING: apps/hub-plugin/.env missing — MacLink will use the wss://mac.local fallback."
 
+# A stale dev server answers the readiness probe exactly like a fresh one,
+# so an earlier run left behind will make this script print a QR for a
+# server that never started. Worse, a server predating a dependency change
+# serves stale optimized deps. Clear the port first, deliberately.
+STALE="$(lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+if [ -n "$STALE" ]; then
+  echo "port $PORT held by pid(s) $STALE — stopping (stale dev server)"
+  # shellcheck disable=SC2086
+  kill $STALE 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  if lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "could not free port $PORT — stop that process and re-run" >&2
+    exit 1
+  fi
+fi
+
 echo "dev server: http://$IP:$PORT  (phone and Mac must share this network)"
 ( cd "$PLUGIN" && npm run dev -- --host ) &
 VITE_PID=$!
 trap 'kill "$VITE_PID" 2>/dev/null || true' EXIT INT TERM
 
-for _ in $(seq 1 40); do
-  nc -z 127.0.0.1 "$PORT" 2>/dev/null && break
+# Readiness means OUR server is serving OUR page — not merely that something
+# holds the port. Check the child is alive each round, so a crashed vite
+# fails fast with its own error visible instead of timing out silently.
+ready=""
+for _ in $(seq 1 60); do
+  if ! kill -0 "$VITE_PID" 2>/dev/null; then
+    echo "vite exited during startup — see its error above" >&2
+    exit 1
+  fi
+  if curl -fsS -m 2 "http://127.0.0.1:$PORT/" 2>/dev/null | grep -q "JOAT"; then
+    ready=1
+    break
+  fi
   sleep 0.25
 done
-nc -z 127.0.0.1 "$PORT" 2>/dev/null || { echo "vite never opened :$PORT" >&2; exit 1; }
+[ -n "$ready" ] || { echo "vite never served the plugin on :$PORT" >&2; exit 1; }
 
 echo
 echo "Scan from the Even app: Even Hub tab -> developer section (top right) -> Scan QR"
