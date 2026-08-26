@@ -19,7 +19,9 @@
         "ws://admins-mac-mini.tail3a3363.ts.net:8787",
         "wss://admins-mac-mini.tail3a3363.ts.net:8787",
         "ws://emmanuels-macbook-pro.local:8787",
-        "wss://emmanuels-macbook-pro.local:8787"
+        "wss://emmanuels-macbook-pro.local:8787",
+        "ws://192.168.12.200:8787",
+        "wss://192.168.12.200:8787"
       ]
     }
   ],
