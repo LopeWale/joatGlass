@@ -13,6 +13,7 @@ same feed() shape when false triggers start to matter.
 from __future__ import annotations
 
 import struct
+from collections import deque
 from dataclasses import dataclass, field
 
 SAMPLE_RATE = 16_000
@@ -35,32 +36,91 @@ class RmsVad:
     """Feed PCM batches in; get a completed utterance back when one ends.
 
     speech_rms: batch RMS at/above this counts as speech. The right value
-    depends on mic gain — calibrate against a real quiet room; 0.015 is a
-    starting point, not a tuned number.
+    depends on mic gain, so the trigger is adaptive by default (see below).
     hangover_batches: consecutive sub-threshold batches that close an
-    utterance (4 x 200 ms = 0.8 s of silence).
+    utterance (8 x 200 ms = 1.6 s of silence).
     max_utterance_s: hard cut so a noisy room cannot buffer unboundedly.
     """
 
-    speech_rms: float = 0.015
-    hangover_batches: int = 4
+    speech_rms: float = 0.004
+    """Absolute minimum the trigger may fall to — guards against arming on
+    pure digital silence. NOT the working threshold when adaptive=True."""
+
+    hangover_batches: int = 5
+    """5 x 200ms = 1.0s. 4 (0.8s) split sentences at a clause pause; 8 (1.6s)
+    never closed them, because a noisy room produces a spike more often than
+    once per 1.6s. 1.0s is the measured middle."""
+
+    start_batches: int = 2
+    """Consecutive loud batches required to ARM. A single spike (keystroke,
+    door, chair) is not speech, and without this debounce one stray packet
+    started an utterance that the hangover then kept alive."""
+
     max_utterance_s: float = 30.0
+    adaptive: bool = True
+    """Track the room's noise floor and trigger relative to it. A fixed
+    threshold assumes a mic gain we do not control: measured live, speech
+    peaked at 0.019 against a 0.015 trigger, so only the loudest syllables
+    registered and everything between them ended the utterance."""
+
+    noise_margin: float = 1.8
+    """Trigger at floor x margin. Measured live on the built-in mic at full
+    gain (120 packets): p20 0.0111, median 0.0144, p80 0.0211, max 0.065.
+    At 1.6x the trigger sat at 0.0177 and passed 30% of ALL packets, so the
+    hangover never elapsed; 1.8x puts it at ~0.020, just above the median
+    room level and below the speech band."""
+
+    floor_window: int = 100
+    """Batches of history (100 x 200ms = 20s) used to estimate the floor."""
 
     _buffer: bytearray = field(default_factory=bytearray, repr=False)
     _in_speech: bool = False
     _quiet_run: int = 0
+    _loud_run: int = 0
+    _recent: deque[float] = field(
+        default_factory=lambda: deque(maxlen=100), repr=False)
+    """Rolling RMS history. The floor is its 20th percentile, which tracks
+    room tone whether or not anyone is talking. An earlier EWMA that only
+    sampled 'quiet' batches could LOCK: one too-low estimate made room tone
+    read as speech forever, and utterances ran to the 30s cap."""
 
     @property
     def in_speech(self) -> bool:
         return self._in_speech
 
+    @property
+    def floor(self) -> float:
+        """Room tone estimate: 20th percentile of recent levels. Speech is
+        bursty and occupies the upper percentiles, so it cannot drag this up
+        the way a mean would."""
+        if len(self._recent) < 10:
+            return 0.0
+        ordered = sorted(self._recent)
+        return ordered[len(ordered) // 5]
+
+    @property
+    def trigger(self) -> float:
+        """The RMS a batch must reach to count as speech, right now."""
+        floor = self.floor
+        if not self.adaptive or floor <= 0.0:
+            return self.speech_rms
+        return max(self.speech_rms, floor * self.noise_margin)
+
     def feed(self, pcm: bytes) -> bytes | None:
         """Returns the finished utterance's PCM when this batch closes one."""
-        loud = rms(pcm) >= self.speech_rms
+        level = rms(pcm)
+        # History is fed unconditionally — a percentile floor needs to see
+        # speech to know what is NOT speech.
+        self._recent.append(level)
+        loud = level >= self.trigger
 
         if not self._in_speech:
             if not loud:
+                self._loud_run = 0
                 return None
+            self._loud_run += 1
+            if self._loud_run < self.start_batches:
+                return None  # debounce: not enough consecutive speech yet
             self._in_speech = True
             self._quiet_run = 0
             self._buffer = bytearray(pcm)
@@ -85,6 +145,7 @@ class RmsVad:
         self._buffer = bytearray()
         self._in_speech = False
         self._quiet_run = 0
+        self._loud_run = 0
 
     def _finish(self) -> bytes:
         utterance = bytes(self._buffer)

@@ -14,6 +14,7 @@ async transcribe/send work as a task.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
 
@@ -44,11 +45,20 @@ class VoiceOrchestrator:
         sessions: SessionManager | None = None,
         wake_words: tuple[str, ...] | None = None,
         status: object | None = None,
+        fuzzy_wake: tuple[str, ...] = ("jarvis", "joat"),
+        fuzzy_threshold: float = 0.72,
     ) -> None:
         self._transport = transport
         self._hud = HudWriter(transport)
         self._sessions = sessions
         self._status = status
+        # STT mangles a one-word wake utterance differently every time
+        # (observed: Jeves, Javes, Javits, Jokes). A curated alias list can
+        # never be complete, so near-misses are matched by similarity too.
+        # 0.72 was chosen against live mishearings: it accepts javits/javes/
+        # jote and rejects service/driving/job/just/jazz/javascript.
+        self._fuzzy_wake = fuzzy_wake
+        self._fuzzy_threshold = fuzzy_threshold
         # Longest first so "hey jarvis" strips before "jarvis" matches.
         self._wake_words = (
             tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
@@ -125,7 +135,9 @@ class VoiceOrchestrator:
             # is not a prompt.
             addressed = self._strip_wake_word(transcript.text)
             if addressed is None:
-                log.info("unaddressed speech ignored")
+                # Include the text: a wake word misheard by STT is
+                # indistinguishable from room noise without it.
+                log.info("unaddressed speech ignored: %s", transcript.text)
                 return
             if not addressed:
                 await self._hud.show("Yes?")
@@ -155,6 +167,11 @@ class VoiceOrchestrator:
     def _strip_wake_word(self, text: str) -> str | None:
         """None = not addressed to us; '' = wake word alone; else the query.
 
+        The wake word may appear ANYWHERE, because people don't speak in
+        command syntax: "Jarvis, what's the weather", "Good morning, Jarvis",
+        and "hey Jarvis can you..." are all addressed. Requiring a prefix
+        silently ignored the wearer's real speech (observed live).
+
         Text-level gate on the transcript (v1). The audio-level VadWakeWord
         from MAC_APP.md replaces this later and stops even the transcription
         of unaddressed speech; until then, unaddressed audio is transcribed
@@ -162,13 +179,45 @@ class VoiceOrchestrator:
         """
         if self._wake_words is None:
             return text
-        normalized = re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
-        for wake in self._wake_words:
-            if normalized == wake:
-                return ""
-            if normalized.startswith(wake + " "):
-                # Strip from the ORIGINAL text at the matched word count so
-                # the query keeps its natural casing and punctuation.
-                words = text.split()
-                return " ".join(words[len(wake.split()):]).lstrip(",.!? ")
+        words = re.findall(r"[a-z0-9]+", text.lower())
+        if not words:
+            return None
+        for wake in self._wake_words:  # longest first
+            wake_words = wake.split()
+            n = len(wake_words)
+            for i in range(len(words) - n + 1):
+                if words[i:i + n] != wake_words:
+                    continue
+                # Addressed. Rebuild the query from the ORIGINAL text minus
+                # the wake phrase, so casing and punctuation survive.
+                pattern = r"\b" + r"[^a-z0-9]+".join(
+                    re.escape(w) for w in wake_words) + r"\b"
+                query = re.sub(pattern, " ", text, count=1, flags=re.IGNORECASE)
+                query = re.sub(r"\s+", " ", query)
+                # Removing the wake phrase can orphan its punctuation
+                # ("Good morning, Jarvis." -> "Good morning, ."). Reattach
+                # and drop the orphan, but NEVER strip terminal ?/! — they
+                # carry meaning the model should see.
+                query = re.sub(r"\s+([,.!?])", r"\1", query)
+                query = re.sub(r",+([.!?])", r"\1", query)
+                query = re.sub(r"^[\s,.\-—]+", "", query)
+                return query.rstrip(" ,-—")
+
+        # No exact hit — try similarity against the core names.
+        for i, word in enumerate(words):
+            if len(word) < 4:
+                continue  # short words collide with everything
+            for core in self._fuzzy_wake:
+                ratio = difflib.SequenceMatcher(None, word, core).ratio()
+                if ratio < self._fuzzy_threshold:
+                    continue
+                log.info("wake word matched by similarity: %r ~ %r (%.2f)",
+                         word, core, ratio)
+                query = re.sub(r"\b" + re.escape(word) + r"\b", " ", text,
+                               count=1, flags=re.IGNORECASE)
+                query = re.sub(r"\s+", " ", query)
+                query = re.sub(r"\s+([,.!?])", r"\1", query)
+                query = re.sub(r",+([.!?])", r"\1", query)
+                query = re.sub(r"^[\s,.\-—]+", "", query)
+                return query.rstrip(" ,-—")
         return None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import struct
 
+from jarvis.audio.vad import RmsVad
 from jarvis.core.interfaces import (
     ReplyEngine,
     AudioCallback,
@@ -73,6 +74,13 @@ class FakeEngine(SttEngine):
         self.fed.clear()
 
 
+def TEST_VAD() -> RmsVad:
+    """Fixed, short-hangover VAD so routing tests stay deterministic and
+    independent of production acoustic tuning."""
+    return RmsVad(hangover_batches=3, adaptive=False, speech_rms=0.015,
+                  start_batches=1)
+
+
 async def drain() -> None:
     for _ in range(4):
         await asyncio.sleep(0)
@@ -81,7 +89,7 @@ async def drain() -> None:
 class TestVoiceLoop:
     async def test_utterance_becomes_hud_text(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("turn on the lights")
-        orch = VoiceOrchestrator(transport, engine)
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
         orch.attach()
         assert transport.audio_cb is not None
 
@@ -98,7 +106,7 @@ class TestVoiceLoop:
 
     async def test_seq_gap_resets_vad_and_engine(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
-        orch = VoiceOrchestrator(transport, engine)
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
         orch.attach()
         assert transport.audio_cb is not None
 
@@ -149,7 +157,7 @@ class TestReplyFlow:
     async def test_transcript_then_reply_both_reach_the_hud(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("what is the weather")
         replier = FakeReplier("It is 72 degrees.")
-        orch = VoiceOrchestrator(transport, engine, replier=replier)
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(), replier=replier)
         orch.attach()
         assert transport.audio_cb is not None
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
@@ -161,7 +169,7 @@ class TestReplyFlow:
 
     async def test_replier_declining_leaves_transcript_standing(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hm")
-        orch = VoiceOrchestrator(transport, engine, replier=FakeReplier(None))
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(), replier=FakeReplier(None))
         orch.attach()
         assert transport.audio_cb is not None
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
@@ -184,7 +192,7 @@ class TestReplyFlow:
                 return "slow answer"
 
         replier = SlowReplier()
-        orch = VoiceOrchestrator(transport, engine, replier=replier)
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(), replier=replier)
         orch.attach()
         assert transport.audio_cb is not None
 
@@ -222,7 +230,7 @@ class TestStreamedReply:
     async def test_chunks_stream_as_show_then_appends(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("tell me a story")
         orch = VoiceOrchestrator(
-            transport, engine, replier=StreamingReplier(["Once ", "upon ", "a time."])
+            transport, engine, vad=TEST_VAD(), replier=StreamingReplier(["Once ", "upon ", "a time."])
         )
         orch.attach()
         assert transport.audio_cb is not None
@@ -241,7 +249,7 @@ class TestStreamedReply:
 
     async def test_single_chunk_default_stream_still_replaces(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hi")
-        orch = VoiceOrchestrator(transport, engine, replier=FakeReplier("Hello!"))
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(), replier=FakeReplier("Hello!"))
         orch.attach()
         assert transport.audio_cb is not None
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
@@ -258,7 +266,7 @@ class TestWakeWordGate:
     async def _run(self, text: str, wake: tuple[str, ...] | None = WAKE):
         transport, engine = FakeTransport(), FakeEngine(text)
         orch = VoiceOrchestrator(
-            transport, engine, replier=FakeReplier("answer"), wake_words=wake
+            transport, engine, vad=TEST_VAD(), replier=FakeReplier("answer"), wake_words=wake
         )
         orch.attach()
         assert transport.audio_cb is not None
@@ -300,7 +308,7 @@ class TestWakeWordGate:
         from jarvis.services.hud import HudWriter as HW
         from jarvis.services.session import SessionManager as SM
         orch = VoiceOrchestrator(
-            transport, engine, replier=FakeReplier("x"),
+            transport, engine, vad=TEST_VAD(), replier=FakeReplier("x"),
             sessions=SM(HW(transport), lambda t: S()), wake_words=WAKE,
         )
         orch.attach()
