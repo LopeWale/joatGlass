@@ -37,6 +37,23 @@ log = logging.getLogger(__name__)
 MIN_UTTERANCE_BYTES = SAMPLE_RATE * SAMPLE_WIDTH // 4  # < 250 ms is a VAD blip
 
 
+def is_prompt_echo(text: str, prompt: str | None) -> bool:
+    """True when STT 'heard' its own vocabulary-bias prompt.
+
+    Whisper hallucinates its initial prompt on near-silent audio — observed
+    live: the transcript 'The wearer addresses the assistant as JOAT.' is
+    OUR bias text, and the assistant then answered it. Normalized substring
+    match, gated to ≥15 chars so a genuine short utterance ('JOAT') — whose
+    words also appear in the prompt — is never eaten.
+    """
+    if not prompt or not text:
+        return False
+    def norm(s: str) -> str:
+        return "".join(c for c in s.lower() if c.isalnum() or c == " ").strip()
+    t_norm = " ".join(norm(text).split())
+    return len(t_norm) >= 15 and t_norm in " ".join(norm(prompt).split())
+
+
 def wav_bytes(pcm: bytes) -> bytes:
     """16 kHz mono s16le PCM → in-memory WAV."""
     buf = io.BytesIO()
@@ -164,6 +181,15 @@ class WhisperServeEngine(SttEngine):
         return None
 
     async def flush(self) -> Transcript | None:
+        return self._filter_echo(await self._flush_raw())
+
+    def _filter_echo(self, transcript: Transcript | None) -> Transcript | None:
+        if transcript is not None and is_prompt_echo(transcript.text, self._prompt):
+            log.info("dropped prompt-echo hallucination: %s", transcript.text)
+            return None
+        return transcript
+
+    async def _flush_raw(self) -> Transcript | None:
         if len(self._buffer) < MIN_UTTERANCE_BYTES:
             self._buffer.clear()
             return None
