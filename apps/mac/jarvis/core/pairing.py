@@ -50,13 +50,23 @@ class PairingStore:
     def token(self) -> str | None:
         return self._token
 
-    def issue(self) -> str:
-        """Generate, persist, and return a fresh token (first pairing)."""
-        token = secrets.token_urlsafe(24)
+    @staticmethod
+    def mint() -> str:
+        """A fresh candidate token — NOT yet trusted or persisted.
+
+        Minting and confirming are separate because persisting at issue time
+        strands the wearer: if the pairing frame is lost (Wi-Fi blip at
+        QR-scan time), the Mac would hold a token no phone has, and 401 the
+        real phone forever. The token becomes real only once the plugin acks
+        that it stored it.
+        """
+        return secrets.token_urlsafe(24)
+
+    def confirm(self, token: str) -> None:
+        """Persist a token the plugin has acknowledged storing."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"token": token}))
         os.chmod(tmp, 0o600)
         os.replace(tmp, self._path)
         self._token = token
-        return token

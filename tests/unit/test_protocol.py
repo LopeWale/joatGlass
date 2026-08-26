@@ -25,6 +25,7 @@ from jarvis.core.protocol import (
     HudText,
     Imu,
     ImuTrace,
+    PairingAck,
     PairingSet,
     Input,
     Policy,
@@ -147,6 +148,17 @@ class TestDownlinkWire:
         # exitMode 1 = show a dialog. Defaulting to 0 would close the app out
         # from under the wearer with no warning.
         assert Shutdown().to_wire()["exitMode"] == 1
+
+    def test_pairing_ack_uplink_parses(self) -> None:
+        # The Mac persists the token ONLY on this ack; a drifted key would
+        # silently reopen the pairing window forever.
+        msg = parse_uplink({"kind": "pairing", "token": "tok"})
+        assert isinstance(msg, PairingAck)
+        assert msg.token == "tok"
+
+    def test_pairing_ack_requires_a_token(self) -> None:
+        with pytest.raises(ProtocolError):
+            parse_uplink({"kind": "pairing"})
 
     def test_pairing_set_wire_shape(self) -> None:
         # The plugin's dispatch switches on this exact shape; a drifted key

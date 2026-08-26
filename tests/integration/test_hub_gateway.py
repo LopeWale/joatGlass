@@ -246,38 +246,74 @@ async def paired_transport(unused_tcp_port: int, tmp_path):
         await t.stop()
 
 
+async def _pair(url: str) -> str:
+    """Complete a full pairing handshake and return the confirmed token."""
+    async with websockets.connect(url) as ws:
+        frame = json.loads(await ws.recv())
+        token = frame["token"]
+        await ws.send(json.dumps({"kind": "pairing", "token": token}))
+        await asyncio.sleep(0.05)  # let the ack land before the socket closes
+    return str(token)
+
+
 class TestPairing:
     """Transport auth (RULES.md #5): TOFU token, enforced pre-handshake."""
 
-    async def test_first_client_is_issued_a_token(self, paired_transport) -> None:
+    async def test_first_client_is_offered_a_token(self, paired_transport) -> None:
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
             frame = json.loads(await ws.recv())
         assert frame["kind"] == "pairing.set"
-        assert frame["token"] == store.token
-        assert store.token  # persisted, non-empty
+        assert frame["token"]
 
-    async def test_unpaired_client_is_rejected_after_pairing(self, paired_transport) -> None:
+    async def test_offer_is_not_persisted_until_acked(self, paired_transport) -> None:
+        """The strand-the-wearer bug: a lost pairing frame must NOT burn the
+        token, or the phone that never got it is 401'd forever."""
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
-            await ws.recv()  # pairing.set — this peer is now THE phone
+            await ws.recv()  # offer received, deliberately not acked
+        assert store.token is None
+        # The window is still open: a retry pairs cleanly.
+        token = await _pair(url)
+        assert store.token == token
+
+    async def test_ack_persists_and_closes_the_window(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        token = await _pair(url)
+        assert store.token == token
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
             await websockets.connect(url)
         assert exc.value.response.status_code == 401
 
-    async def test_wrong_token_is_rejected(self, paired_transport) -> None:
+    async def test_mismatched_ack_is_ignored(self, paired_transport) -> None:
+        """A forged ack must not pair a token the real phone never stored."""
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
             await ws.recv()
+            await ws.send(json.dumps({"kind": "pairing", "token": "forged-token"}))
+            await asyncio.sleep(0.05)
+        assert store.token is None
+
+    async def test_wrong_token_is_rejected(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        await _pair(url)
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
             await websockets.connect(f"{url}/?token=not-the-token")
         assert exc.value.response.status_code == 401
 
+    async def test_non_ascii_token_is_rejected_cleanly(self, paired_transport) -> None:
+        """compare_digest raises TypeError on non-ASCII str — which would
+        surface as a 500 + ERROR traceback any LAN peer could trigger."""
+        t, url, store = paired_transport
+        await _pair(url)
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            await websockets.connect(f"{url}/?token=%C3%A9")
+        assert exc.value.response.status_code == 401
+
     async def test_paired_client_reconnects_with_token(self, paired_transport) -> None:
         t, url, store = paired_transport
-        async with websockets.connect(url) as ws:
-            await ws.recv()
-        async with websockets.connect(f"{url}/?token={store.token}") as ws:
+        token = await _pair(url)
+        async with websockets.connect(f"{url}/?token={token}") as ws:
             await ws.send(
                 json.dumps({"kind": "hello", "sn": "SN2", "model": "g2", "launchSource": "x"})
             )
@@ -287,7 +323,8 @@ class TestPairing:
     async def test_already_paired_store_never_reissues(self, unused_tcp_port, tmp_path) -> None:
         """A restart must not hand the token to the next comer."""
         store = PairingStore(tmp_path / "pairing.json")
-        first = store.issue()
+        first = PairingStore.mint()
+        store.confirm(first)
         t = HubGatewayTransport(
             host=HOST, port=unused_tcp_port, pairing=store, trust_loopback=False
         )
@@ -303,7 +340,7 @@ class TestPairing:
         """Simulator + speak_test connect from this Mac with no token, even
         when a phone is already paired."""
         store = PairingStore(tmp_path / "pairing.json")
-        store.issue()
+        store.confirm(PairingStore.mint())
         t = HubGatewayTransport(host=HOST, port=unused_tcp_port, pairing=store)
         await t.start()
         try:
@@ -311,3 +348,17 @@ class TestPairing:
                 await _wait_for(lambda: t.connected)
         finally:
             await t.stop()
+
+    async def test_transport_survives_a_peer_that_drops_mid_pairing(
+        self, paired_transport
+    ) -> None:
+        """The stale-_conn bug: an exception during the TOFU offer skipped
+        the cleanup finally, leaving connected=True and every later send —
+        including the fail-closed confirm gate — raising instead of failing
+        closed."""
+        t, url, store = paired_transport
+        ws = await websockets.connect(url)
+        await ws.close()
+        await _wait_for(lambda: not t.connected)
+        # Fail-closed, not an exception, once the peer is gone.
+        assert await t.request_confirm("a1", "ok?", timeout_s=0.1) is False

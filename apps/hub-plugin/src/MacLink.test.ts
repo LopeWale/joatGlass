@@ -56,6 +56,15 @@ describe('MacLink pairing token', () => {
     expect(dialed).toEqual(['ws://m:1/g', 'ws://m:1/g?token=fresh']);
   });
 
+  it('carries the token across URL rotation (failover keeps auth)', () => {
+    const link = new MacLink({ urls: ['ws://a:1/g', 'ws://b:1/g'], token: 't' });
+    link.connect();
+    // scheduleReconnect rotates urlIndex; simulate by closing the socket.
+    (link as unknown as { urlIndex: number }).urlIndex = 1;
+    link.connect();
+    expect(dialed).toEqual(['ws://a:1/g?token=t', 'ws://b:1/g?token=t']);
+  });
+
   it('keeps activeUrl clean for status surfaces — no token leak to the panel', () => {
     const link = new MacLink({ urls: ['ws://m:1/g'], token: 'secret' });
     link.connect();

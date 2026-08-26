@@ -40,7 +40,9 @@ export type UplinkMessage =
   | { kind: 'input'; event: InputEventPayload }
   | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string }
   | { kind: 'confirm'; actionId: string; accepted: boolean }
-  | { kind: 'policy'; resume: ResumePolicy };
+  | { kind: 'policy'; resume: ResumePolicy }
+  /** Confirms a freshly issued pairing token was PERSISTED (not merely received). */
+  | { kind: 'pairing'; token: string };
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
