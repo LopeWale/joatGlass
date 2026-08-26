@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MacLink } from './MacLink';
 
 /**
@@ -7,6 +7,8 @@ import { MacLink } from './MacLink';
  */
 const dialed: string[] = [];
 
+const sockets: FakeWebSocket[] = [];
+
 class FakeWebSocket {
   static readonly OPEN = 1;
   readyState = 0;
@@ -14,17 +16,29 @@ class FakeWebSocket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
+  closed = false;
   constructor(url: string) {
     dialed.push(url);
+    sockets.push(this);
   }
   send(_data: string): void {}
-  close(): void {}
+  close(): void {
+    this.closed = true;
+    this.onclose?.();
+  }
+  /** Simulate the server accepting this dial. */
+  open(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.onopen?.();
+  }
 }
 
 (globalThis as { WebSocket?: unknown }).WebSocket = FakeWebSocket;
 
 afterEach(() => {
   dialed.length = 0;
+  sockets.length = 0;
+  vi.useRealTimers();
 });
 
 describe('MacLink pairing token', () => {
@@ -69,5 +83,74 @@ describe('MacLink pairing token', () => {
     const link = new MacLink({ urls: ['ws://m:1/g'], token: 'secret' });
     link.connect();
     expect(link.activeUrl).toBe('ws://m:1/g');
+  });
+});
+
+
+describe('MacLink reconnect storm', () => {
+  /**
+   * Observed on real G2 hardware: ~2 reconnects/second, indefinitely. A
+   * superseded socket kept its handlers, so its close scheduled ANOTHER
+   * dial that raced the current one; both opened, the newest-wins server
+   * dropped the older, and its close dialed again. The loop compounds.
+   *
+   * Retrying forever while down is CORRECT, so these assert the invariant
+   * that actually broke: one drop must produce exactly one dial.
+   */
+  const SETTLE_MS = 1_000; // base backoff 500ms + up to 20% jitter
+
+  it('abandons the previous socket when dialing again', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    const first = sockets[0]!;
+    link.connect();
+    expect(first.closed).toBe(true);
+    expect(first.onclose).toBeNull(); // detached: cannot schedule a dial
+  });
+
+  it('a superseded socket closing does NOT schedule a reconnect', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    const stale = sockets[0]!;
+    link.connect();
+    const before = dialed.length;
+    stale.onclose?.(); // the server dropped the older socket, late
+    vi.advanceTimersByTime(SETTLE_MS);
+    expect(dialed.length).toBe(before); // no dial from a socket we replaced
+  });
+
+  it('coalesces repeated closes of one socket into a single dial', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    const before = dialed.length;
+    const live = sockets[0]!;
+    live.close();
+    live.onclose?.(); // spurious repeats must not compound
+    live.onclose?.();
+    vi.advanceTimersByTime(SETTLE_MS);
+    expect(dialed.length).toBe(before + 1);
+  });
+
+  it('an opened socket still reconnects exactly once when it drops', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    const before = dialed.length;
+    sockets[0]!.open();
+    sockets[0]!.close();
+    vi.advanceTimersByTime(SETTLE_MS);
+    expect(dialed.length).toBe(before + 1);
+  });
+
+  it('the dial watchdog retries a hung dial, but only one at a time', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://m:1/g'], dialTimeoutMs: 100 });
+    link.connect();
+    const before = dialed.length;
+    // Socket never opens: watchdog closes it, which schedules one retry.
+    vi.advanceTimersByTime(100 + SETTLE_MS);
+    expect(dialed.length).toBe(before + 1);
   });
 });
