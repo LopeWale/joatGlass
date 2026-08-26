@@ -56,6 +56,14 @@ class RmsVad:
     door, chair) is not speech, and without this debounce one stray packet
     started an utterance that the hangover then kept alive."""
 
+    preroll_batches: int = 3
+    """Batches of audio kept BEFORE the trigger fires and prepended to the
+    utterance. Without it the debounce silently ate the first 200ms+ of
+    every utterance — which is exactly where the wake word is. Measured:
+    'Jarvis, are you there?' transcribed as 'Are you there?', and 'JOAT'
+    as 'Jode'. Speech also ramps up, so its first syllable often sits just
+    under the trigger; pre-roll recovers that too."""
+
     max_utterance_s: float = 30.0
     adaptive: bool = True
     """Track the room's noise floor and trigger relative to it. A fixed
@@ -77,6 +85,8 @@ class RmsVad:
     _in_speech: bool = False
     _quiet_run: int = 0
     _loud_run: int = 0
+    _preroll: deque[bytes] = field(
+        default_factory=lambda: deque(maxlen=3), repr=False)
     _recent: deque[float] = field(
         default_factory=lambda: deque(maxlen=100), repr=False)
     """Rolling RMS history. The floor is its 20th percentile, which tracks
@@ -115,6 +125,7 @@ class RmsVad:
         loud = level >= self.trigger
 
         if not self._in_speech:
+            self._preroll.append(pcm)
             if not loud:
                 self._loud_run = 0
                 return None
@@ -123,7 +134,10 @@ class RmsVad:
                 return None  # debounce: not enough consecutive speech yet
             self._in_speech = True
             self._quiet_run = 0
-            self._buffer = bytearray(pcm)
+            # Seed with the pre-roll (which already includes this batch and
+            # the debounced ones) so the utterance keeps its own beginning.
+            self._buffer = bytearray(b"".join(self._preroll))
+            self._preroll.clear()
             return None
 
         self._buffer.extend(pcm)
@@ -146,6 +160,7 @@ class RmsVad:
         self._in_speech = False
         self._quiet_run = 0
         self._loud_run = 0
+        self._preroll.clear()
 
     def _finish(self) -> bytes:
         utterance = bytes(self._buffer)

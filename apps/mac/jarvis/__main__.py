@@ -41,6 +41,10 @@ async def main() -> None:
     parser.add_argument("--stt-mode", choices=["serve", "batch"], default="serve",
                         help="serve = resident model (~1s/utterance); batch = CLI per utterance (~7s)")
     parser.add_argument("--stt-port", type=int, default=50060)
+    parser.add_argument("--stt-prompt",
+                        default="JOAT. Jarvis. The wearer addresses the "
+                                "assistant as JOAT or Jarvis.",
+                        help="vocabulary bias so STT spells the wake word right")
     parser.add_argument("--llm-model", default=DEFAULT_MODEL)
     parser.add_argument("--always-answer", action="store_true",
                         help="answer ALL speech (dev only) instead of requiring 'Jarvis/JOAT ...'")
@@ -62,7 +66,8 @@ async def main() -> None:
     stt: SttEngine
     if args.stt_mode == "serve":
         serve_engine = WhisperServeEngine(
-            binary=args.stt_binary, model=args.stt_model, port=args.stt_port
+            binary=args.stt_binary, model=args.stt_model, port=args.stt_port,
+            prompt=args.stt_prompt,
         )
         stt = serve_engine
     else:
