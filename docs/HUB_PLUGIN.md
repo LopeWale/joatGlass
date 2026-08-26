@@ -121,6 +121,9 @@ Ignoring 6 and 7 leaves the glasses mic streaming after the wearer exits. That's
 
 `MacLink` is the seam: the Mac's `HubGatewayTransport` speaks the same message protocol whether the peer is this plugin or `men-g2-ble-gateway`.
 
+The resting-page design and the pages the wearer moves between live in
+[HUD_DASHBOARD.md](HUD_DASHBOARD.md).
+
 ## Deployment constraints
 
 - **The Mac's WebSocket URL must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, scheme included — the Phase-0 gateway is plain `ws://`, and a `wss://`-only whitelist fails the same silent way. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
