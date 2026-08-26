@@ -20,9 +20,31 @@ export class BridgeClient {
   private readonly unsubscribes: Unsubscribe[] = [];
   private launchSource?: string;
 
-  /** Step 1. Also registers onLaunchSource, which fires exactly once. */
-  async init(): Promise<EvenAppBridge> {
-    this.bridge = await waitForEvenAppBridge();
+  /** Step 1. Also registers onLaunchSource, which fires exactly once.
+   *
+   * BOUNDED on purpose: waitForEvenAppBridge never rejects, so a host that
+   * never announces the bridge leaves boot suspended forever — a dark HUD,
+   * no error on the phone panel, and nothing in the Mac log. That is
+   * indistinguishable from a network fault while being a completely
+   * different problem, so it must fail loudly instead of hanging.
+   */
+  async init(timeoutMs = 8000): Promise<EvenAppBridge> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      this.bridge = await Promise.race([
+        waitForEvenAppBridge(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(
+              `Even App bridge never became ready after ${timeoutMs}ms — ` +
+              'is this page open inside the Even Hub app?')),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
     this.track(this.bridge.onLaunchSource((src) => { this.launchSource = src; }));
     return this.bridge;
   }

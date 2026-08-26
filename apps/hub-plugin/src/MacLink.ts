@@ -16,6 +16,8 @@ export interface MacLinkOptions {
   maxQueue?: number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
+  /** Give up on a dial that has not opened, and rotate. */
+  dialTimeoutMs?: number;
 }
 
 /**
@@ -38,6 +40,8 @@ export class MacLink {
   private readonly maxQueue: number;
   private readonly baseMs: number;
   private readonly capMs: number;
+  private readonly dialMs: number;
+  private dialTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly opts: MacLinkOptions) {
     if (opts.urls.length === 0) throw new Error('MacLink needs at least one URL');
@@ -45,6 +49,7 @@ export class MacLink {
     this.maxQueue = opts.maxQueue ?? 200;
     this.baseMs = opts.reconnectBaseMs ?? 500;
     this.capMs = opts.reconnectMaxMs ?? 15_000;
+    this.dialMs = opts.dialTimeoutMs ?? 4_000;
   }
 
   /** The URL currently being dialed (for status surfaces). */
@@ -76,7 +81,17 @@ export class MacLink {
     const socket = new WebSocket(url);
     this.socket = socket;
 
+    // A host that DROPS packets (wrong subnet, asleep, AP isolation) never
+    // errors — it hangs until the OS timeout, minutes later. With several
+    // candidates that stalls the whole rotation behind one dead host, so
+    // give up early and let the next candidate have its turn.
+    this.clearDialTimer();
+    this.dialTimer = setTimeout(() => {
+      if (socket.readyState !== WebSocket.OPEN) socket.close();
+    }, this.dialMs);
+
     socket.onopen = () => {
+      this.clearDialTimer();
       this.attempt = 0;
       this.stateHandler?.('connected');
       for (const msg of this.queue.splice(0)) this.rawSend(msg);
@@ -89,6 +104,7 @@ export class MacLink {
       }
     };
     socket.onclose = () => {
+      this.clearDialTimer();
       if (!this.closed) {
         this.stateHandler?.('reconnecting');
         this.scheduleReconnect();
@@ -110,8 +126,16 @@ export class MacLink {
 
   close(): void {
     this.closed = true;
+    this.clearDialTimer();
     this.socket?.close();
     this.queue = [];
+  }
+
+  private clearDialTimer(): void {
+    if (this.dialTimer !== undefined) {
+      clearTimeout(this.dialTimer);
+      this.dialTimer = undefined;
+    }
   }
 
   private rawSend(msg: UplinkMessage): void {
