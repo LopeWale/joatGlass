@@ -21,7 +21,8 @@ listening.
 |---|---|---|
 | Launch at login | `SMAppService.mainApp`, `.requiresApproval` surfaced via `openSystemSettingsLoginItems()`, status re-read on menu open | correct API (documented) |
 | Signing | Developer ID + hardened runtime + secure timestamp + entitlements file | required for notarization |
-| Icon | legacy `.icns` via `iconutil` (script-generated) | stopgap — Icon Composer needs an Xcode target |
+| Icon | asset catalog (`Assets.xcassets`), compiled by `actool` | Apple's documented path; Icon Composer `.icon` can drop in later |
+| Build | `xcodegen` + `xcodebuild archive` + `exportArchive` | Apple's documented distribution flow |
 | Engine supervision | direct child, crash circuit-breaker, port-ownership reaping, engine-side orphan watchdog (exit on reparent to PID 1) | pattern documented; details ours |
 | Repo location | UserDefaults + folder picker | dev harness, see debt list |
 
@@ -34,18 +35,24 @@ the grant. Never "fix" a broken grant by adding the bare python binary to
 the FDA list — that grants FDA to every Python script on the machine.
 
 **Known architectural debt (from the audit, in priority order):**
-1. **No Xcode app target.** The SwiftPM+script bundle assembly cannot carry
-   an Icon Composer (Liquid Glass) icon, asset catalogs, or produce an
-   archive for notarization/TestFlight. Fix: an Xcode app target consuming
-   `JOATShell` as a local package (Apple's documented modularization).
+1. ~~No Xcode app target.~~ **DONE.** `apps/mac/JOATShell/project.yml` is an
+   XcodeGen spec; `scripts/build_app.sh` regenerates the project, archives,
+   and exports a Developer ID app. The `.xcodeproj` is generated and
+   gitignored — a checked-in pbxproj drifts from its sources and conflicts
+   on every merge. This unblocked: the asset-catalog icon (Assets.car),
+   entitlements, Swift 6 strict concurrency (which immediately caught a
+   non-concurrency-safe global), universal binaries (archive honours
+   ARCHS_STANDARD; plain `build` does not), and the notarization path.
 2. **Engine interpreter lives outside the bundle** (user repo `.venv`).
    Ship-quality fix: vendor a relocatable Python into `Contents/Helpers/`,
    sign every nested Mach-O inside-out (never `codesign --deep`), engine id
    `com.joat.shell.engine`. Makes the app self-contained and gives TCC its
    strongest (documented-adjacent) attribution case.
-3. **Not notarized.** Local installs never see Gatekeeper; ANY distribution
-   to another Mac requires `notarytool` + `stapler` (macOS 15+ removed the
-   Control-click bypass). The signing flags are now notarization-ready.
+3. **Not notarized YET** — the pipeline exists (`build_app.sh --notarize`:
+   ditto → `notarytool submit --wait` → `stapler staple` → `spctl` check).
+   It needs a one-time credential:
+   `xcrun notarytool store-credentials joat --apple-id … --team-id … --password <app-specific>`.
+   Until then the app runs here but Gatekeeper BLOCKS it on any other Mac.
 4. No update channel (Sparkle needs the Xcode target's nested-code layout),
    no dSYM archiving, no localization, shell has no os_log.
 
