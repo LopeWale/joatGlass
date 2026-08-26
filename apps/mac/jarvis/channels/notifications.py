@@ -22,6 +22,7 @@ import asyncio
 import logging
 import plistlib
 import sqlite3
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 from dataclasses import dataclass
@@ -195,4 +196,9 @@ class NotificationChannel:
             log.info("notification ignored: [%s] %s", app_short, summary)
             return
         prefix = "!! " if level == "URGENT" else ""
-        self._deliver(f"{prefix}[{app_short}] {summary}")
+        card = f"{prefix}[{app_short}] {summary}"
+        # Deliveries were previously silent in the log — the only pipeline
+        # stage with no trace, which made "did a card fire?" unanswerable.
+        log.info("card delivered (%.1fs after delivery): %s",
+                 time.time() - n.delivered_unix, card)
+        self._deliver(card)
