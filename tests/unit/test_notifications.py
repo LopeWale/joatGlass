@@ -7,6 +7,7 @@ import plistlib
 import sqlite3
 from pathlib import Path
 
+from jarvis.channels.cards import Urgency
 from jarvis.channels.notifications import (
     COCOA_EPOCH_UNIX,
     Notification,
@@ -66,8 +67,8 @@ class TestStore:
 class TestTriageParse:
     def test_levels_and_summary(self) -> None:
         assert parse_triage("URGENT — Dele is waiting for a reply") == (
-            "URGENT", "Dele is waiting for a reply")
-        assert parse_triage("ignore - promo blast") == ("IGNORE", "promo blast")
+            Urgency.URGENT, "Dele is waiting for a reply")
+        assert parse_triage("ignore - promo blast") == (Urgency.IGNORE, "promo blast")
         assert parse_triage("total nonsense") is None
 
 
@@ -110,7 +111,10 @@ class TestChannel:
         await asyncio.sleep(0.1)
         channel.stop()
         task.cancel()
-        assert delivered == ["!! [MobileSMS] Dele asks if you are coming"]
+        # New contract: humanized channel, sender headline, two lines, and a
+        # SHORT message shown verbatim rather than model-paraphrased. The
+        # promo is still classified IGNORE by the model and never delivered.
+        assert delivered == ["Dele · Messages\nare you coming?"]
 
     async def test_unreadable_store_goes_dormant_not_fatal(self, tmp_path: Path) -> None:
         channel = NotificationChannel(

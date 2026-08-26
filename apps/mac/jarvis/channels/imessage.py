@@ -18,6 +18,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .contacts import ContactResolver
 from .notifications import Notification
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ class IMessageStore:
 
     def __init__(self, db_path: Path = DEFAULT_DB) -> None:
         self._path = db_path
+        self._last_change = 0.0
+        # Messages stores only the raw handle; the wearer needs a name.
+        self._contacts = ContactResolver()
 
     @property
     def available(self) -> bool:
@@ -51,8 +55,32 @@ class IMessageStore:
             row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message").fetchone()
             return int(row[0])
 
+    def _changed(self) -> bool:
+        """Cheap gate: has the store been written since we last looked?
+
+        SQLite in WAL mode lands new rows in chat.db-wal, so that file's
+        mtime moves on every delivery. Comparing an mtime costs one stat;
+        opening and querying 350k rows costs far more. Polling stays at a
+        1s cadence for latency, but the expensive half only runs when there
+        is genuinely something new — subscribe-like behaviour without
+        depending on FSEvents in the engine process.
+        """
+        newest = 0.0
+        for suffix in ("", "-wal"):
+            try:
+                newest = max(newest, (self._path.parent /
+                                      (self._path.name + suffix)).stat().st_mtime)
+            except OSError:
+                continue
+        if newest > self._last_change:
+            self._last_change = newest
+            return True
+        return False
+
     def read_new(self, watermark: Any) -> tuple[list[Notification], Any]:
         last = int(watermark)
+        if not self._changed():
+            return [], last
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -77,7 +105,7 @@ class IMessageStore:
         out: list[Notification] = []
         for rowid, text, sender, date, chat_name in rows:
             last = max(last, int(rowid))
-            who = chat_name or sender or "unknown"
+            who = chat_name or self._contacts.name_for(sender) or "unknown"
             out.append(Notification(
                 rec_id=int(rowid),
                 app="Messages",
