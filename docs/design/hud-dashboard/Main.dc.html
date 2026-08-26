@@ -9,27 +9,40 @@
 <helmet>
   <style>
     body { margin: 0; background: #000000; }
+    /* Borders must NOT change row height: a selection highlight that grows
+       its row by 1px each side makes every row below it jog as the
+       highlight moves — visible jitter on a head-mounted display. */
+    * { box-sizing: border-box; }
     a { color: #7cfc98; } a:hover { color: #a8ffc2; }
+    /* Firmware brightness tiers (textColor 4..1). ONE tier per element,
+       never nested — 16 green levels cannot render 0.44 and 0.45 apart. */
+    .t4 { opacity: 1; }
+    .t3 { opacity: 0.72; }
+    .t2 { opacity: 0.5; }
+    .t1 { opacity: 0.3; }
+    .hud { width: 576px; height: 288px; background: #000000; color: #7cfc98;
+           font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+           display: flex; flex-direction: column; overflow: hidden; }
+    .status { height: 32px; display: flex; justify-content: space-between;
+              align-items: center; padding: 0 16px; font-size: 15px; }
+    .hint { height: 32px; display: flex; align-items: center;
+            padding: 0 16px; font-size: 14px; }
+    .body { flex-grow: 1; display: flex; flex-direction: column; }
   </style>
 </helmet>
-<div style="width: 576px; height: 288px; background: #000000; color: #7cfc98; font-family: ui-monospace, 'SF Mono', Menlo, monospace; display: flex; flex-direction: column; overflow: hidden;">
-  <div style="height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font-size: 15px; opacity: 0.55;">
-    <span>09:41</span>
-    <span>JOAT listening</span>
-    <span>bat 87%</span>
+<div class="hud">
+  <div class="status t2"><span>09:41</span><span>JOAT listening</span><span>bat 87%</span></div>
+  <div class="body" style="gap: 4px; padding: 16px 16px 0 16px;">
+    <div class="t4" style="font-size: 20px; line-height: 32px;">Dele &#183; Messages</div>
+    <div class="t4" style="font-size: 20px; line-height: 32px;">On my way, 10 min out</div>
   </div>
-  <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 4px; padding: 20px 16px 0 16px;">
-    <div style="font-size: 20px; line-height: 32px;">Dele &#183; Messages</div>
-    <div style="font-size: 20px; line-height: 32px; opacity: 0.9;">On my way, 10 min out</div>
-  </div>
-  <div style="height: 32px; display: flex; align-items: center; padding: 0 16px; font-size: 16px; opacity: 0.55;">
+  <div class="t3" style="height: 32px; display: flex; align-items: center; padding: 0 16px; font-size: 16px;">
     <span>you 09:38&nbsp;&nbsp;ok see you at 7</span>
   </div>
-  <div style="height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font-size: 15px; opacity: 0.45;">
-    <span>2 waiting &#183; Dele, Battery</span>
-    <span>12 asks today</span>
+  <div class="t2" style="height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font-size: 15px;">
+    <span>3 waiting &#183; Dele, Adaeze, Charles</span><span>12 asks today</span>
   </div>
-  <div style="height: 24px;"></div>
+  <div class="hint t1"><span>left double-tap: menu &#183; say &#8220;JOAT&#8221; to ask</span></div>
 </div>
 </x-dc>
 </body>

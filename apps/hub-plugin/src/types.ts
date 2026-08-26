@@ -9,6 +9,10 @@ export const ContainerId = {
   Main: 2,
   List: 3,
   Image: 4,
+  // Dashboard regions (docs/HUD_DASHBOARD.md) — mirrored in protocol.py.
+  Context: 5,
+  Tray: 6,
+  Hint: 7,
 } as const;
 export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
 

@@ -154,3 +154,43 @@ describe('MacLink reconnect storm', () => {
     expect(dialed.length).toBe(before + 1);
   });
 });
+
+describe('MacLink stale pairing token', () => {
+  /**
+   * A rejected token is indistinguishable from an unreachable Mac inside a
+   * WebView — the socket just never opens, no 401 is visible. Without
+   * self-healing the wearer stays locked out of their own brain until
+   * someone clears localStorage by hand (which happened, twice).
+   */
+  // Long enough for one backoff (500ms + jitter), short enough that the 4s
+  // dial watchdog does not fire and count a failure of its own.
+  const RETRY_MS = 1_000;
+
+  it('drops a token that keeps failing, and reports it once', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g', 'ws://b:1/g'], token: 'stale' });
+    let forgotten = 0;
+    link.onStaleToken(() => { forgotten += 1; });
+    link.connect();
+    for (let i = 0; i < 5; i += 1) {
+      sockets[sockets.length - 1]!.close();
+      vi.advanceTimersByTime(RETRY_MS);
+    }
+    expect(forgotten).toBe(1);
+    expect(dialed[dialed.length - 1]).not.toContain('token=');
+  });
+
+  it('a successful connect resets the failure count', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g'], token: 't' });
+    let forgotten = 0;
+    link.onStaleToken(() => { forgotten += 1; });
+    link.connect();
+    sockets[0]!.close();                   // one failure
+    vi.advanceTimersByTime(RETRY_MS);
+    sockets[sockets.length - 1]!.open();    // Mac came back — count resets
+    sockets[sockets.length - 1]!.close();   // and dropped again later
+    vi.advanceTimersByTime(RETRY_MS);
+    expect(forgotten).toBe(0); // intermittency is not staleness
+  });
+});

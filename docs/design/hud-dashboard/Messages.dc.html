@@ -9,40 +9,35 @@
 <helmet>
   <style>
     body { margin: 0; background: #000000; }
+    /* Borders must NOT change row height: a selection highlight that grows
+       its row by 1px each side makes every row below it jog as the
+       highlight moves — visible jitter on a head-mounted display. */
+    * { box-sizing: border-box; }
     a { color: #7cfc98; } a:hover { color: #a8ffc2; }
+    /* Firmware brightness tiers (textColor 4..1). ONE tier per element,
+       never nested — 16 green levels cannot render 0.44 and 0.45 apart. */
+    .t4 { opacity: 1; }
+    .t3 { opacity: 0.72; }
+    .t2 { opacity: 0.5; }
+    .t1 { opacity: 0.3; }
+    .hud { width: 576px; height: 288px; background: #000000; color: #7cfc98;
+           font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+           display: flex; flex-direction: column; overflow: hidden; }
+    .status { height: 32px; display: flex; justify-content: space-between;
+              align-items: center; padding: 0 16px; font-size: 15px; }
+    .hint { height: 32px; display: flex; align-items: center;
+            padding: 0 16px; font-size: 14px; }
+    .body { flex-grow: 1; display: flex; flex-direction: column; }
   </style>
 </helmet>
-<div style="width: 576px; height: 288px; background: #000000; color: #7cfc98; font-family: ui-monospace, 'SF Mono', Menlo, monospace; display: flex; flex-direction: column; overflow: hidden;">
-  <div style="height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font-size: 15px; opacity: 0.55;">
-    <span>Messages</span>
-    <span>3 conversations</span>
+<div class="hud">
+  <div class="status t2"><span>09:41</span><span>Messages &#183; 3</span><span>bat 87%</span></div>
+  <div class="body" style="gap: 2px; padding: 4px 12px 0 12px;">
+    <div class="t4" style="display: flex; flex-direction: column; justify-content: center; gap: 2px; height: 62px; padding: 0 10px; border: 1px solid #7cfc98;"><div style="display: flex; justify-content: space-between; font-size: 18px;"><span>Dele</span><span style="font-size: 15px;">2m</span></div><div style="font-size: 16px;">On my way, 10 min out</div></div>
+    <div class="t3" style="display: flex; flex-direction: column; justify-content: center; gap: 2px; height: 62px; padding: 0 10px; border: 1px solid transparent;"><div style="display: flex; justify-content: space-between; font-size: 18px;"><span>Adaeze</span><span style="font-size: 15px;">18m</span></div><div style="font-size: 16px;">Call me when you are free</div></div>
+    <div class="t3" style="display: flex; flex-direction: column; justify-content: center; gap: 2px; height: 62px; padding: 0 10px; border: 1px solid transparent;"><div style="display: flex; justify-content: space-between; font-size: 18px;"><span>Charles M.</span><span style="font-size: 15px;">1h</span></div><div style="font-size: 16px;">Congrats on the demo!</div></div>
   </div>
-  <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 2px; padding: 6px 12px 0 12px;">
-    <div style="display: flex; flex-direction: column; justify-content: center; gap: 2px; height: 62px; padding: 0 10px; border: 1px solid rgba(124, 252, 152, 0.9);">
-      <div style="display: flex; justify-content: space-between; font-size: 18px;">
-        <span>Dele</span>
-        <span style="opacity: 0.45; font-size: 15px;">2m</span>
-      </div>
-      <div style="font-size: 16px; opacity: 0.65;">On my way, 10 min out</div>
-    </div>
-    <div style="display: flex; flex-direction: column; justify-content: center; gap: 2px; height: 62px; padding: 0 11px;">
-      <div style="display: flex; justify-content: space-between; font-size: 18px; opacity: 0.85;">
-        <span>Charles M.</span>
-        <span style="opacity: 0.5; font-size: 15px;">1h</span>
-      </div>
-      <div style="font-size: 16px; opacity: 0.55;">Congrats on the demo!</div>
-    </div>
-    <div style="display: flex; flex-direction: column; justify-content: center; gap: 2px; height: 62px; padding: 0 11px;">
-      <div style="display: flex; justify-content: space-between; font-size: 18px; opacity: 0.85;">
-        <span>Adaeze</span>
-        <span style="opacity: 0.5; font-size: 15px;">3h</span>
-      </div>
-      <div style="font-size: 16px; opacity: 0.55;">Call me when you are free</div>
-    </div>
-  </div>
-  <div style="height: 28px; display: flex; align-items: center; padding: 0 16px; font-size: 14px; opacity: 0.35;">
-    <span>swipe: move &#183; tap: read &#183; double-tap: menu</span>
-  </div>
+  <div class="hint t1"><span>swipe: move &#183; right tap: open &#183; left double-tap: back</span></div>
 </div>
 </x-dc>
 </body>

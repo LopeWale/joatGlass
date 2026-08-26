@@ -53,6 +53,16 @@ async function boot(): Promise<void> {
   const layouts = new HudPageBuilder();
   const link = new MacLink({ urls: MAC_WS_URLS, token: loadToken() });
 
+  // A token the Mac no longer honours must not outlive the session, or
+  // every relaunch dials with it and is refused again.
+  link.onStaleToken(() => {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // Storage unavailable — the in-memory drop already unblocked us.
+    }
+  });
+
   setPanel('p-url', link.activeUrl);
   // A reconnected socket is a fresh session on the Mac's side — without a new
   // hello the brain never learns who connected and never greets. announce() is
@@ -60,7 +70,17 @@ async function boot(): Promise<void> {
   let announce: (() => void) | undefined;
   link.onState((state) => {
     setPanel('p-link', state);
-    setPanel('p-url', link.activeUrl); // failover rotation, made visible
+    // A token the Mac no longer honours must not outlive the session, or
+  // every relaunch dials with it and is refused again.
+  link.onStaleToken(() => {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // Storage unavailable — the in-memory drop already unblocked us.
+    }
+  });
+
+  setPanel('p-url', link.activeUrl); // failover rotation, made visible
     if (state === 'connected') announce?.();
   });
 

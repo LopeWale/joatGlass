@@ -104,10 +104,8 @@ class TestVoiceLoop:
             seq += 1
         await drain()
 
-        main = [m for m in transport.sent
-                if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert len(main) == 1
-        assert main[0].text == "turn on the lights"
+        said = region(transport, ContainerId.CONTEXT)
+        assert said == ["you  turn on the lights"]
 
     async def test_seq_gap_resets_vad_and_engine(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
@@ -125,9 +123,7 @@ class TestVoiceLoop:
         for i, pcm in enumerate([QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, 8 + i)
         await drain()
-        main = [m for m in transport.sent
-                if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert len(main) == 1
+        assert len(region(transport, ContainerId.CONTEXT)) == 1
 
     async def test_no_stt_stays_silent_but_alive(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
@@ -170,8 +166,8 @@ class TestReplyFlow:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        texts = [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert texts == ["what is the weather", "It is 72 degrees."]
+        assert region(transport, ContainerId.MAIN) == ["It is 72 degrees."]
+        assert region(transport, ContainerId.CONTEXT) == ["you  what is the weather"]
         assert replier.asked == ["what is the weather"]
 
     async def test_replier_declining_leaves_transcript_standing(self) -> None:
@@ -182,8 +178,9 @@ class TestReplyFlow:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        texts = [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert texts == ["hm"]
+        # No reply: MAIN stays clear, but the wearer still sees they were heard.
+        assert region(transport, ContainerId.MAIN) == []
+        assert region(transport, ContainerId.CONTEXT) == ["you  hm"]
 
     async def test_utterance_during_reply_is_dropped_single_flight(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("first question")
@@ -215,8 +212,8 @@ class TestReplyFlow:
         await drain()
 
         assert replier.asked == ["first question"]  # second was dropped, not raced
-        texts = [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert texts == ["first question", "slow answer"]
+        assert region(transport, ContainerId.MAIN) == ["slow answer"]
+        assert region(transport, ContainerId.CONTEXT) == ["you  first question"]
 
 
 class StreamingReplier(ReplyEngine):
@@ -246,13 +243,13 @@ class TestStreamedReply:
         await drain()
 
         hud = [m for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        # transcript replace, first chunk replace, remaining chunks append
+        # MAIN is the reply's alone now: first chunk replaces, rest append.
         assert [(m.text, m.append) for m in hud] == [
-            ("tell me a story", False),
             ("Once ", False),
             ("upon ", True),
             ("a time.", True),
         ]
+        assert region(transport, ContainerId.CONTEXT) == ["you  tell me a story"]
 
     async def test_single_chunk_default_stream_still_replaces(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hi")
@@ -263,7 +260,14 @@ class TestStreamedReply:
             transport.audio_cb(pcm, i)
         await drain()
         hud = [m for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert [(m.text, m.append) for m in hud] == [("hi", False), ("Hello!", False)]
+        assert [(m.text, m.append) for m in hud] == [("Hello!", False)]
+        assert region(transport, ContainerId.CONTEXT) == ["you  hi"]
+
+
+def region(transport, container: ContainerId) -> list[str]:
+    """Text written to one dashboard region (docs/HUD_DASHBOARD.md)."""
+    return [m.text for m in transport.sent
+            if isinstance(m, HudText) and m.container_id is container]
 
 
 WAKE = ("hey joat", "joat")
@@ -305,7 +309,10 @@ class TestWakeWordGate:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        return [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
+        # The wearer's words land in CONTEXT prefixed "you  "; the reply
+        # owns MAIN. Strip the prefix so these stay about the wake gate.
+        said = [s.removeprefix("you  ") for s in region(transport, ContainerId.CONTEXT)]
+        return said + region(transport, ContainerId.MAIN)
 
     async def test_unaddressed_room_speech_is_fully_ignored(self) -> None:
         texts = await self._run("I'm so tired of repeating this to the team.")

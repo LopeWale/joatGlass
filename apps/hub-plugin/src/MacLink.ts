@@ -43,6 +43,8 @@ export class MacLink {
   private readonly dialMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
   private reconnectPending = false;
+  private failedWithToken = 0;
+  private staleTokenHandler?: () => void;
 
   constructor(private readonly opts: MacLinkOptions) {
     if (opts.urls.length === 0) throw new Error('MacLink needs at least one URL');
@@ -61,6 +63,16 @@ export class MacLink {
   /** Adopt a pairing token mid-session (pairing.set); used from the next dial on. */
   setToken(token: string): void {
     this.token = token;
+    this.failedWithToken = 0;
+  }
+
+  /**
+   * Fires when a held token has failed enough dials to be considered stale
+   * (the Mac re-paired without us). The token is already dropped; the
+   * handler's job is to forget it durably so a relaunch doesn't resurrect it.
+   */
+  onStaleToken(handler: () => void): void {
+    this.staleTokenHandler = handler;
   }
 
   onMessage(handler: (msg: DownlinkMessage) => void): void {
@@ -101,6 +113,7 @@ export class MacLink {
       if (this.socket !== socket) return; // superseded by a newer dial
       this.clearDialTimer();
       this.attempt = 0;
+      this.failedWithToken = 0;
       this.stateHandler?.('connected');
       for (const msg of this.queue.splice(0)) this.rawSend(msg);
     };
@@ -115,6 +128,19 @@ export class MacLink {
     socket.onclose = () => {
       if (this.socket !== socket) return; // a superseded socket is not news
       this.clearDialTimer();
+      // A rejected token looks EXACTLY like an unreachable Mac from here —
+      // a WebView socket never sees the 401. So if a held token has failed
+      // a full rotation and then some, assume the Mac re-paired without us
+      // and dial bare: the Mac only ever offers a token while unpaired, so
+      // this re-pairs instead of leaving the wearer locked out forever.
+      if (this.token !== null && socket.readyState !== WebSocket.OPEN) {
+        this.failedWithToken += 1;
+        if (this.failedWithToken >= this.opts.urls.length * 2) {
+          this.token = null;
+          this.failedWithToken = 0;
+          this.staleTokenHandler?.();
+        }
+      }
       if (!this.closed) {
         this.stateHandler?.('reconnecting');
         this.scheduleReconnect();

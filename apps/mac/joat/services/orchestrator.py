@@ -147,10 +147,9 @@ class VoiceOrchestrator:
                 await self._hud.show("Yes?")
                 return
             query = addressed
-            # Show the wearer their words immediately — proof they were heard —
-            # then STREAM the reply over them chunk by chunk as it generates
-            # (the same visible-streaming path Phase 2's debate turns use).
-            await self._hud.show(query)
+            # The wearer's words go to their OWN region, so the reply no
+            # longer erases the proof they were heard (HUD_DASHBOARD.md).
+            await self._hud.context(f"you  {query}")
             if self._replier is None:
                 return
             parts: list[str] = []

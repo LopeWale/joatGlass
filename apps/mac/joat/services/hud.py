@@ -27,6 +27,19 @@ class HudWriter:
         """Replace the container's content."""
         await self._transport.send(HudText(text=text, container_id=container))
 
+    async def context(self, text: str) -> None:
+        """What the wearer last said (docs/HUD_DASHBOARD.md).
+
+        Its own region because the reply used to be streamed over the top of
+        it: the proof of being heard was destroyed by the answer to it,
+        about 200ms after appearing.
+        """
+        await self._transport.send(HudText(text=text, container_id=ContainerId.CONTEXT))
+
+    async def tray(self, text: str) -> None:
+        """What is waiting — queued cards, counts. Never steals MAIN."""
+        await self._transport.send(HudText(text=text, container_id=ContainerId.TRAY))
+
     async def append(self, chunk: str, container: ContainerId = ContainerId.MAIN) -> None:
         """Stream a chunk onto the container without repainting — the
         primitive behind visible, turn-by-turn debate streaming."""
