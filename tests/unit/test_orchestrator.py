@@ -15,7 +15,12 @@ from jarvis.core.interfaces import (
     SttEngine,
     Transcript,
 )
-from jarvis.core.protocol import AudioControl, DownlinkMessage, HudText
+from jarvis.core.protocol import (
+    AudioControl,
+    ContainerId,
+    DownlinkMessage,
+    HudText,
+)
 from jarvis.services.orchestrator import VoiceOrchestrator
 from jarvis.services.session import Session
 
@@ -99,10 +104,10 @@ class TestVoiceLoop:
             seq += 1
         await drain()
 
-        assert len(transport.sent) == 1
-        msg = transport.sent[0]
-        assert isinstance(msg, HudText)
-        assert msg.text == "turn on the lights"
+        main = [m for m in transport.sent
+                if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
+        assert len(main) == 1
+        assert main[0].text == "turn on the lights"
 
     async def test_seq_gap_resets_vad_and_engine(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
@@ -120,7 +125,9 @@ class TestVoiceLoop:
         for i, pcm in enumerate([QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, 8 + i)
         await drain()
-        assert len(transport.sent) == 1
+        main = [m for m in transport.sent
+                if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
+        assert len(main) == 1
 
     async def test_no_stt_stays_silent_but_alive(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
@@ -163,7 +170,7 @@ class TestReplyFlow:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        texts = [m.text for m in transport.sent if isinstance(m, HudText)]
+        texts = [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
         assert texts == ["what is the weather", "It is 72 degrees."]
         assert replier.asked == ["what is the weather"]
 
@@ -175,7 +182,7 @@ class TestReplyFlow:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        texts = [m.text for m in transport.sent if isinstance(m, HudText)]
+        texts = [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
         assert texts == ["hm"]
 
     async def test_utterance_during_reply_is_dropped_single_flight(self) -> None:
@@ -208,7 +215,7 @@ class TestReplyFlow:
         await drain()
 
         assert replier.asked == ["first question"]  # second was dropped, not raced
-        texts = [m.text for m in transport.sent if isinstance(m, HudText)]
+        texts = [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
         assert texts == ["first question", "slow answer"]
 
 
@@ -238,7 +245,7 @@ class TestStreamedReply:
             transport.audio_cb(pcm, i)
         await drain()
 
-        hud = [m for m in transport.sent if isinstance(m, HudText)]
+        hud = [m for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
         # transcript replace, first chunk replace, remaining chunks append
         assert [(m.text, m.append) for m in hud] == [
             ("tell me a story", False),
@@ -255,11 +262,36 @@ class TestStreamedReply:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        hud = [m for m in transport.sent if isinstance(m, HudText)]
+        hud = [m for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
         assert [(m.text, m.append) for m in hud] == [("hi", False), ("Hello!", False)]
 
 
 WAKE = ("hey jarvis", "jarvis", "joat")
+
+
+class TestAcknowledgement:
+    """The wearer must know they were heard BEFORE the answer exists.
+
+    On real hardware transcription took 24s, and an unchanged HUD for that
+    long is indistinguishable from a dead assistant — the wearer reported
+    exactly that ("nothing happens").
+    """
+
+    async def test_status_bar_acknowledges_before_the_transcript(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("what is the weather")
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(),
+                                 replier=FakeReplier("72 degrees"))
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+        hud = [m for m in transport.sent if isinstance(m, HudText)]
+        status = [m for m in hud if m.container_id is ContainerId.STATUS_BAR]
+        assert status, "no acknowledgement — the wearer sees a dead HUD while waiting"
+        # And it lands BEFORE the transcript reaches the main container.
+        assert hud.index(status[0]) < next(
+            i for i, m in enumerate(hud) if m.container_id is ContainerId.MAIN)
 
 
 class TestWakeWordGate:
@@ -273,7 +305,7 @@ class TestWakeWordGate:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        return [m.text for m in transport.sent if isinstance(m, HudText)]
+        return [m.text for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
 
     async def test_unaddressed_room_speech_is_fully_ignored(self) -> None:
         texts = await self._run("I'm so tired of repeating this to the team.")

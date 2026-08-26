@@ -188,10 +188,14 @@ async def main() -> None:
         raise SystemExit(0)
 
     watchdog = asyncio.get_running_loop().create_task(orphan_watchdog())
+    # Diagnostic: a starved loop delays every reply, and looks exactly
+    # like a slow model in the logs unless it is measured directly.
+    lag_task = asyncio.get_running_loop().create_task(orchestrator.watch_loop_lag())
     try:
         await asyncio.Event().wait()
     finally:
         watchdog.cancel()
+        lag_task.cancel()
         await transport.stop()
         if notif_task is not None:
             notif_task.cancel()

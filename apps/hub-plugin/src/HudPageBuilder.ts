@@ -32,7 +32,14 @@ export class HudPageBuilder {
     });
   }
 
-  private main(height: number): TextContainerProperty {
+  /**
+   * `isEventCapture` is a PARAMETER, not a constant: only ONE container per
+   * page may capture, and in the list layout that container must be the list
+   * — the firmware moves the selection highlight and emits `listEvent` only
+   * for the capturing list. Leaving capture here draws the rows but makes
+   * them unnavigable (swipes come back as `textEvent`, presses as `sysEvent`).
+   */
+  private main(height: number, isEventCapture: 0 | 1 = 1): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.Main,
       containerName: 'main',
@@ -42,8 +49,7 @@ export class HudPageBuilder {
       height,
       paddingLength: 8,
       borderWidth: 0,
-      // The single event-capture container for every layout.
-      isEventCapture: 1,
+      isEventCapture,
       zOrderIndex: 2,
       content: '',
     });
@@ -70,7 +76,8 @@ export class HudPageBuilder {
     const capped = items.slice(0, 20).map((s) => s.slice(0, 64));
     return new RebuildPageContainer({
       containerTotalNum: 3,
-      textObject: [this.statusBar(), this.main(48)],
+      // Capture moves OFF main and ONTO the list — see main()'s note.
+      textObject: [this.statusBar(), this.main(48, 0)],
       listObject: [
         new ListContainerProperty({
           containerID: ContainerId.List,
@@ -80,7 +87,9 @@ export class HudPageBuilder {
           width: CANVAS.width,
           height: CANVAS.height - 80,
           paddingLength: 6,
-          isEventCapture: 0,
+          // The capturing container for this layout: firmware scrolls the
+          // highlight on swipe and reports the pick as `listEvent`.
+          isEventCapture: 1,
           zOrderIndex: 3,
           itemContainer: new ListItemContainerProperty({
             itemCount: capped.length,
