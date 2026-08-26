@@ -49,9 +49,9 @@ final class EngineController: ObservableObject {
 
     init() {
         start()
-        // The AX watcher is the only source of notification TEXT; start it
-        // when trusted, and keep the trust flag live so the UI can prompt.
-        NotificationWatcher.shared.start()
+        // The AX watcher is started from applicationDidFinishLaunching, NOT
+        // here: this initializer can run inside SwiftUI's App.init(), and
+        // anything that touches AX before the runloop exists deadlocks.
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
             Task { @MainActor in
                 self.accessibilityTrusted = AXIsProcessTrusted()

@@ -17,6 +17,7 @@ from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
+from .channels.imessage import IMessageStore
 from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
@@ -146,9 +147,16 @@ async def main() -> None:
 
     notif_task: asyncio.Task[None] | None = None
     if not args.no_notifications:
+        imessage = IMessageStore()
         jsonl = JsonlNotificationStore()
         store: NotificationSource
-        if jsonl.available:
+        if imessage.available:
+            # Preferred: a per-source channel with a stable contract and real
+            # content (sender + full text). Banner scraping is undocumented,
+            # differs per macOS release, and reaches nothing at all on 27.
+            store = imessage
+            log.info("notification source: Messages (chat.db)")
+        elif jsonl.available:
             # Preferred: JOAT.app's Accessibility watcher — the only source
             # that carries the notification's actual text.
             store = jsonl
