@@ -241,6 +241,102 @@ not enough) and reopen.
 Before blaming auth, open the dev-server URL in the **phone's browser** on the
 same Wi-Fi. If that fails it is firewall or AP isolation, not a token.
 
+### On-device triage (symptom first)
+
+Three readings decide nearly everything: the **phone panel** (`p-url`, `p-link`, `p-mic`, `p-status`), the **engine log** (`plugin connected` / `rejected unpaired connection` / silence), and whether **SYNs reach 8787**. In every table below, causes are ordered most likely first.
+
+#### First 60 seconds
+
+1. **Read the phone panel.** Body replaced by `boot failed: …` → go to *"boot failed: …"*. `p-url` still `—` → *No JOAT page at all*. `p-url` filled but `p-link` stuck `idle` → bridge hang, *No JOAT page at all*. Panel intact and cycling `reconnecting` → continue.
+2. **Tail the engine log.** Which line appears: nothing at all, `plugin connected`, or `rejected unpaired connection from …`? That fork routes almost every remaining case.
+3. **If `rejected unpaired`:** `rm ~/Library/Application\ Support/JOAT/pairing.json`, then reconnect. Most common real-world failure — fixed in one command.
+4. **If the log is silent:** `sudo tcpdump -ni any tcp port 8787` while the plugin retries. **Zero SYNs** = blocked before the network (whitelist / iOS Local Network / AP isolation). **SYNs present** = it reaches the Mac; the problem is auth or the app.
+5. **Check the dial target against reality:** compare `p-url` literally to `apps/hub-plugin/app.json`, then `ipconfig getifaddr en0` and `lsof -nP -iTCP:8787 -sTCP:LISTEN` (IPv4-only listed is itself a cause — see *Stuck on "connecting"*).
+6. **Reload the plugin page**, then `lsof -nP -iTCP:8787` — expect exactly one remote peer. Clears `outOfMemory`, a stale WebView, and a second client flapping the link.
+
+#### Nothing on the HUD — no JOAT page ever appears
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| **Bridge ready event never fires** (`waitForEvenAppBridge` has no timeout) | `p-url` POPULATED, `p-link` still `idle`, engine log completely empty | Race the wait against a ~5 s rejecting timer so it reaches `boot().catch()` |
+| Entry module never executed (404 or SyntaxError in WKWebView) | `p-url` stays `—` **and** body NOT replaced. `curl -sI http://<lan-ip>:5190/src/main.ts` (404 vs 200); Safari Web Inspector shows the parse error | Add top-level `esbuild: { target: 'safari15' }` (dev too, unlike `build.target`); add an inline `window.onerror` writing to `#p-status` |
+| Boot threw | Body is one line of bare text → see *"boot failed: …"* | — |
+| Vite not serving / QR points at a dead port | Phone shows a network error page, not the panel. `curl -sI http://<lan-ip>:5190/` refused; `lsof -i :5190` | Free 5190 before `npm run dev`; confirm the QR host matches the phone's LAN interface. Keep `strictPort: true` |
+
+#### "boot failed: …" on the phone (HUD dark or frozen on the startup page)
+
+The text names the cause — match it exactly.
+
+| Text | Cause | Fix |
+|---|---|---|
+| `MacLink needs at least one URL` | `VITE_MAC_WS_URL=` present but blank (`??` doesn't guard `''`). Check `grep VITE_MAC_WS_URL apps/hub-plugin/.env` | Default *after* filtering; construct MacLink after `client.start()` |
+| `startup page failed: oversize` | Layout payload too large. Reproduces on **every** reload | Fall back to a single-text minimal layout so the wearer sees an error on-glass |
+| `startup page failed: outOfMemory` | Host resource state. **Clears on reload** — reload twice to tell it from `oversize` | Retry once after a short delay |
+| `The operation is insecure` (SecurityError) | `ws://` from a secure page origin — Path B packed build only. Zero packets on tcpdump; same phone connects fine on Path A | Stay on Path A for bring-up; longer term, Tailscale HTTPS cert + `wss://` tailnet candidate |
+| anything, with the link already open | `link.connect()` runs before `getDeviceInfo()` — Mac shows `plugin connected` but never `device … / …`; confirms then stall the full 8 s | Connect after device info, or call `teardown()` from boot's catch |
+
+#### HUD page exists but is blank (empty green canvas)
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| First paint serialized behind a hung `getDeviceInfo()` | Log has `plugin connected` but **never** `device <model> / <sn>`; panel stuck at `booting…` with the link connected. (Empty log instead = bridge hang) | Move `hud.setStatus('JOAT · connecting')` above the call; wrap it in a timeout resolving to `null` (both fields already tolerate null) |
+| `invalid` masked by the rebuild fallback (malformed layout treated as "page already exists") | A **fresh** launch (`client.getLaunchSource()`) that still took the rebuild path. Decisive: run `validateEvenHubPageContainer(container)` on the layout | Validate at the top of `BridgeClient.start` and throw; only then treat `invalid` as the reload case |
+| Edited layout broke an unenforced invariant | Only if `HudPageBuilder.ts` was touched — shipped layouts are valid. `containerTotalNum` is a hand-kept literal (`2` / `3`) next to the arrays | Derive the count from the arrays; add a test running every layout through `validateEvenHubPageContainer` |
+
+#### Stuck on "JOAT · connecting" — panel cycles connecting → reconnecting
+
+The engine log fork does most of the work: `rejected unpaired connection` = it reached the Mac; silence + zero SYNs = blocked before the network.
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| **Mac holds a pairing token, plugin doesn't** (WebView data cleared, reinstall, or Path A ↔ Path B origins hold separate tokens) | `rejected unpaired connection from ('<phone ip>', …)` once per backoff tick, **and** `ls -l ~/Library/Application\ Support/JOAT/pairing.json` exists | `rm ~/Library/Application\ Support/JOAT/pairing.json`, reconnect. Pick one delivery path per session; key the stored token by host |
+| **Rotation + backoff stall** (rotates off the good candidate on every close; no per-dial timeout — a blackholed IP wedges ~75 s) | Gap between `plugin disconnected` and the next `plugin connected` is tens of seconds while `lsof -nP -iTCP:8787 -sTCP:LISTEN` shows the listener up | Dial watchdog (~3 s in CONNECTING), sticky last-known-good candidate, reset `attempt` on FOREGROUND_ENTER |
+| Dial URL not in the app.json whitelist (Hub blocks silently) | Compare `p-url` literally to `apps/hub-plugin/app.json`. Log shows `hub gateway listening` but never `plugin connected`; tcpdump shows zero SYNs | Import app.json at boot and assert every candidate's origin is whitelisted; fail loud on-glass |
+| Built with no `.env` → `wss://mac.local:8787/glasses` fallback (wrong scheme, wrong host, not whitelisted) | `grep -o 'wss\?://[^"]*' apps/hub-plugin/dist/assets/*.js` prints `mac.local` | Commit a `.env.defaults`; make the fallback a loud boot error |
+| Whitelist match semantics unverified — entries carry no `/glasses` path, dials do (**NEEDS-EMPIRICAL**) | Zero SYNs despite a host that looks whitelisted | Add one byte-identical entry including `/glasses`, repack, see if it opens. Keep `.env` and `app.json` in the same commit |
+| Packed from a stale `dist/` (missing the raw-IP fallback) | `grep -c 192.168.12.200 apps/hub-plugin/dist/assets/*.js` → 0 while `.env` → 1 | Always `npm run pack`; never pack a dist you didn't just build |
+| Hardcoded `192.168.12.200` rotted after DHCP move | `ipconfig getifaddr en0` ≠ the literal in `.env` / `app.json` | DHCP reservation. Note Path B bakes URLs at build time — an IP change needs rebuild + repack + reinstall |
+| iOS Local Network permission denied | Path B only. Path A rendering the page at all already proves the grant. Mac-side: zero SYNs but `ping <phone ip>` from the Mac succeeds | Settings → Even Realities → Local Network on; put the raw IP first in `.env` for bring-up |
+| `.local` resolves to IPv6, engine binds IPv4 only | `lsof -nP -iTCP:8787 -sTCP:LISTEN` shows IPv4 only; `nc -4 -vz 192.168.12.200 8787` OK while `nc -6 -vz <v6 addr> 8787` refused | Launch with `--host ::` |
+| Off-LAN and Tailscale down on the phone | `tailscale status` — is `iphone182` online? A `100.x` peer in `plugin connected` means the tailnet path is healthy | Keep Tailscale connected. Transport switch needs no re-pair |
+| Two Macs, one stored token | Run the engine on both: paired Mac logs `plugin connected`, the other logs `rejected unpaired` from the same phone IP at the same instant | Key localStorage per host and look up the token for the URL being dialed |
+| AP / client isolation (guest, hotel, corporate Wi-Fi) | Zero SYNs **and** `ping <phone LAN ip>` from the Mac fails while both are on the same SSID. Works on cellular | Use the tailnet candidates (DERP traverses isolation), or a non-isolating SSID |
+
+#### It was working, then died (backgrounded, locked, woke from sleep)
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| Server keepalive reaps the suspended WebView (`ping_interval=20`/`ping_timeout=20` defaults) | `plugin disconnected` lands ~40 s after the lock, no error, no `rejected` line; reconnects only on unlock | Pass `ping_interval=None` (or ≥120) to `serve()`; pair with the dial watchdog |
+| `closed = true` and nothing ever clears it (`pagehide`/`beforeunload` → `teardown()`; FOREGROUND_ENTER only repaints) | **The one mode with no retry traffic at all** — `plugin disconnected` then total silence, zero new SYNs on tcpdump | Handle `pagehide` with persisted-state awareness; call `link.connect()` and reset `attempt` on FOREGROUND_ENTER |
+| Slow recovery, not death | See *rotation + backoff stall* above | — |
+| Oversize audio frame → 1009 message-too-big | `plugin disconnected` within a second of foregrounding, preceded by a large audio seq gap; `--verbose` shows the close on the receive side | Cap the splice in `AudioStreamer`; set `max_size` explicitly on `serve()` |
+
+#### Link says connected but behaves badly
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| **Stale audio backlog replayed on reconnect** (200-message queue = 40 s of audio) | Post-reconnect burst of transcripts with **no** `audio gap: seq N → M` line — the absence despite an obvious outage is the tell | Don't queue audio at all; queue only control messages, or discard frames older than ~2 s at flush |
+| Two clients flapping (newest-connection-wins vs unconditional reconnect) | Log alternates `replacing existing plugin connection` / `connected` / `disconnected` several times a second; `lsof -nP -iTCP:8787` shows two peers | Close the loser with code 4001 and stop retrying on it |
+| Backpressure filling the WebView send buffer (no `bufferedAmount` check) | `netstat -an` shows a persistently non-zero Recv-Q on 8787 while transcripts stop and **no** `plugin disconnected` ever logs | Drop audio frames when `bufferedAmount` > ~256 KB; keep control messages unconditional |
+| One message kind silently stops rendering (async handler rejection swallowed) | Link healthy, engine still logging card deliveries, HUD never changes. Add `window.addEventListener('unhandledrejection', …)` — the kind names itself | try/catch the `onMessage` body into `#p-status` + HUD; global `unhandledrejection` backstop |
+
+#### Taps do nothing (list renders, no row highlights)
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| `isEventCapture: 1` left on the `main` text container instead of the list | Nothing errors and the list draws — that rules out every layout rejection. Log which `EvenHubEvent` branch arrives: a `textEvent` instead of a `listEvent` confirms it | In `listLayout()`, capture on the list container and `0` on `main` |
+
+#### Mic still streaming after a reload (privacy — treat as a bug, not cosmetic)
+
+| Cause | Distinguisher | Fix |
+|---|---|---|
+| `beforeunload` teardown registered on the last line of `boot()`, so any earlier throw or hang leaves no shutdown hook; no HMR dispose | `plugin connected` / `plugin disconnected` pair with audio frames continuing across the boundary, and `p-mic` never returns to `off` | Register teardown right after `client.init()`; add `import.meta.hot?.dispose(() => { void teardown(); })` |
+
+#### Silent today, arms a failure later
+
+- **Pairing never confirmed.** Log shows `pairing: token offered to <addr>` on *every* connect and never `pairing: confirmed …`, while `pairing.json` does not exist. Everything works, the TOFU window stays open to any LAN peer, and the day another peer acks first the real phone is 401'd forever. Fix: re-ack when the offered token equals the stored one; only ignore a *different* token.
+- **HudPageBuilder invariants are documented but unenforced** and the SDK validates only z-order/menu/brightness. A layout edit will land silently and surface later as a blank HUD via the masked `invalid` path.
+
 ### Known unknowns (test on device, in this order)
 
 - **Plain `ws://` from a WebView page to the LAN Mac** is undocumented for

@@ -16,10 +16,15 @@ import { ContainerId, CONFIRM_HINT, type DownlinkMessage } from './types';
  * domain in app.json or the Hub blocks it silently. MacLink rotates through
  * them, so the brain can run on ANY whitelisted Mac without a plugin rebuild.
  */
-const MAC_WS_URLS = (import.meta.env.VITE_MAC_WS_URL ?? 'wss://mac.local:8787/glasses')
-  .split(',')
-  .map((u) => u.trim())
-  .filter((u) => u.length > 0);
+const MAC_WS_URLS = ((): readonly string[] => {
+  const parsed = (import.meta.env.VITE_MAC_WS_URL ?? '')
+    .split(',')
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0);
+  // Fall back AFTER filtering: an empty or whitespace-only env var survives
+  // `??` and would otherwise leave zero candidates and abort boot.
+  return parsed.length > 0 ? parsed : ['wss://mac.local:8787/glasses'];
+})();
 
 /**
  * Pairing token storage. The Mac issues a token to the first remote client
@@ -164,7 +169,17 @@ async function boot(): Promise<void> {
 
   link.connect();
 
-  const device = await client.require().getDeviceInfo();
+  // First light BEFORE any further host round trip: a dark lens reads as a
+  // failure, and getDeviceInfo is a call into the phone that can stall.
+  await hud.setStatus('JOAT · connecting');
+  setPanel('p-status', 'connecting');
+
+  // Tolerate a stalled/absent device info — both fields already default, and
+  // the wearer would rather have a live HUD than an accurate serial number.
+  const device = await Promise.race([
+    client.require().getDeviceInfo(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+  ]).catch(() => null);
   announce = () => {
     link.send({
       kind: 'hello',
@@ -177,8 +192,6 @@ async function boot(): Promise<void> {
   };
   announce();
 
-  await hud.setStatus('JOAT · connecting');
-  setPanel('p-status', 'connecting');
   // Both starts degrade to false on hosts missing the capability (the desktop
   // simulator has no IMU at all) — boot must survive either being absent.
   const micOk = await audio.start(AudioInputSource.Glasses);

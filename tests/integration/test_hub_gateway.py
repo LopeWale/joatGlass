@@ -362,3 +362,28 @@ class TestPairing:
         await _wait_for(lambda: not t.connected)
         # Fail-closed, not an exception, once the peer is gone.
         assert await t.request_confirm("a1", "ok?", timeout_s=0.1) is False
+
+
+class TestBindFamilies:
+    """iOS resolves .local via Bonjour and may pick IPv6; an IPv4-only
+    listener then refuses the connection the phone actually attempts."""
+
+    async def test_wildcard_host_accepts_both_families(self, unused_tcp_port) -> None:
+        t = HubGatewayTransport(host="0.0.0.0", port=unused_tcp_port)
+        await t.start()
+        try:
+            for host in ("127.0.0.1", "[::1]"):
+                async with websockets.connect(f"ws://{host}:{unused_tcp_port}"):
+                    await _wait_for(lambda: t.connected)
+        finally:
+            await t.stop()
+
+    async def test_explicit_host_is_still_honored(self, unused_tcp_port) -> None:
+        # An operator pinning a single interface must keep getting exactly it.
+        t = HubGatewayTransport(host="127.0.0.1", port=unused_tcp_port)
+        await t.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{unused_tcp_port}"):
+                await _wait_for(lambda: t.connected)
+        finally:
+            await t.stop()

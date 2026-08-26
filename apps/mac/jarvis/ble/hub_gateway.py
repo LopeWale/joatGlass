@@ -124,11 +124,17 @@ class HubGatewayTransport(GlassesTransport):
         # (the shell reaps it, but process death and socket release are not
         # simultaneous). Retry briefly instead of dying — an unretried bind
         # turned every app relaunch into a crash-loop.
+        # A wildcard IPv4 host binds ONLY IPv4, but iOS resolves a .local
+        # name via Bonjour to whichever family it prefers — commonly IPv6.
+        # Passing None makes asyncio bind every interface in both families,
+        # so the phone connects on whichever address it picked.
+        bind_host = None if self._host in ("0.0.0.0", "::", "") else self._host
+
         last: OSError | None = None
         for attempt in range(10):
             try:
                 self._server = await serve(
-                    self._session, self._host, self._port,
+                    self._session, bind_host, self._port,
                     process_request=self._authorize,
                 )
                 break
