@@ -1,0 +1,126 @@
+"""The first tools on the belt: weather and the wearer's messages.
+
+Weather rides Open-Meteo — no API key, free for personal use, and the
+engine already reaches the open web for the debate verifier, so this adds
+no new network posture. Messages ride the chat.db reader that has been
+parsing this data all along.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import urllib.parse
+import urllib.request
+from typing import TYPE_CHECKING, Any
+
+from .tools import Tool
+
+if TYPE_CHECKING:
+    from ..channels.imessage import IMessageStore
+
+# WMO weather interpretation codes, the subset that matters when spoken.
+_WMO = {
+    0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+    45: "fog", 48: "icy fog", 51: "light drizzle", 53: "drizzle",
+    55: "heavy drizzle", 61: "light rain", 63: "rain", 65: "heavy rain",
+    71: "light snow", 73: "snow", 75: "heavy snow", 80: "rain showers",
+    81: "rain showers", 82: "violent rain showers", 95: "thunderstorm",
+    96: "thunderstorm with hail", 99: "thunderstorm with heavy hail",
+}
+
+
+def _fetch_json(url: str) -> Any:
+    with urllib.request.urlopen(url, timeout=8.0) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _weather_sync(location: str) -> str:
+    geo = _fetch_json(
+        "https://geocoding-api.open-meteo.com/v1/search?"
+        + urllib.parse.urlencode({"name": location, "count": 1})
+    )
+    hits = geo.get("results") or []
+    if not hits:
+        return f"error: no place called {location!r} found"
+    place = hits[0]
+    fc = _fetch_json(
+        "https://api.open-meteo.com/v1/forecast?"
+        + urllib.parse.urlencode({
+            "latitude": place["latitude"], "longitude": place["longitude"],
+            "current": "temperature_2m,apparent_temperature,weather_code,"
+                       "wind_speed_10m,precipitation",
+            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+        })
+    )
+    cur = fc.get("current") or {}
+    sky = _WMO.get(int(cur.get("weather_code", -1)), "unknown sky")
+    return (
+        f"Weather in {place['name']}: {sky}, {cur.get('temperature_2m')}F "
+        f"(feels like {cur.get('apparent_temperature')}F), "
+        f"wind {cur.get('wind_speed_10m')} mph"
+    )
+
+
+def weather_tool() -> Tool:
+    async def run(args: dict[str, Any]) -> str:
+        location = str(args.get("location", "")).strip()
+        if not location:
+            return "error: a location is needed — ask the wearer where"
+        return await asyncio.to_thread(_weather_sync, location)
+
+    return Tool(
+        name="get_weather",
+        description=(
+            "Current weather for a named place. Call this whenever the "
+            "wearer asks about weather, rain, or temperature."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"location": {
+                "type": "string",
+                "description": "City or place name, e.g. 'Norman, Oklahoma'",
+            }},
+            "required": ["location"],
+        },
+        run=run,
+    )
+
+
+def messages_tool(store: "IMessageStore") -> Tool:
+    def _age(unix: float) -> str:
+        mins = max(0, int((time.time() - unix) / 60))
+        if mins < 1:
+            return "just now"
+        if mins < 60:
+            return f"{mins}m ago"
+        hours = mins // 60
+        return f"{hours}h ago" if hours < 24 else f"{hours // 24}d ago"
+
+    async def run(args: dict[str, Any]) -> str:
+        try:
+            limit = int(args.get("limit", 3))
+        except (TypeError, ValueError):
+            limit = 3
+        rows = await asyncio.to_thread(store.recent, limit)
+        if not rows:
+            return "no recent messages"
+        return "; ".join(
+            f"{sender} ({_age(at)}): {text[:80]}" for sender, text, at in rows
+        )
+
+    return Tool(
+        name="get_recent_messages",
+        description=(
+            "The wearer's most recent incoming text messages, newest per "
+            "sender. Call this when they ask who messaged them or what "
+            "someone said."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "How many senders, max 10"}},
+            "required": [],
+        },
+        run=run,
+    )

@@ -11,7 +11,9 @@ import argparse
 import asyncio
 import logging
 
+from .agents.builtin_tools import messages_tool, weather_tool
 from .agents.grounding import Grounding, device_facts, local_clock
+from .agents.tools import ToolBelt
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
@@ -102,16 +104,25 @@ async def main() -> None:
             sources=[local_clock(), device_facts(transport)],
             # Named explicitly, not merely absent: a small model asked to
             # infer "it is not listed, so I should decline" does not — it
-            # invents. These are exactly the questions a wearer asks glasses.
+            # invents. Weather and messages are NOT here — they have tools
+            # now, and the assistant's job is to go get them, not disclaim.
             unknowns=[
-                "the weather",
                 "the wearer's location",
                 "their calendar or schedule",
-                "unread message counts or who messaged them",
             ],
         )
-        replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding)
-        log.info("reply engine: %s (loads on first utterance)", args.llm_model)
+        # The belt: what the model can GO GET instead of declining. The
+        # wearer's ruling — an assistant that stops at "I don't know" is as
+        # fired as one that invents the answer.
+        belt_tools = [weather_tool()]
+        tools_store = IMessageStore()
+        if tools_store.available:
+            belt_tools.append(messages_tool(tools_store))
+        belt = ToolBelt(belt_tools)
+        replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding,
+                                 tools=belt)
+        log.info("reply engine: %s (+%d tools; loads on first utterance)",
+                 args.llm_model, len(belt_tools))
     else:
         log.warning("mlx-lm not installed — echoing transcripts "
                     "(pip install -e '.[mlx]')")
