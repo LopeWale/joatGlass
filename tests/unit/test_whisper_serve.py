@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from joat.audio.whisper_serve import MIN_UTTERANCE_BYTES, WhisperServeEngine
+from joat.audio.whisper_serve import MIN_UTTERANCE_BYTES, WhisperServeEngine, is_prompt_echo
 
 
 def free_port() -> int:
@@ -134,3 +134,25 @@ class TestLifecycle:
             ready_timeout_s=2.0,
         )
         assert await engine.start() is False  # returned, not raised
+
+
+class TestPromptEcho:
+    """Whisper hallucinates its vocabulary-bias prompt on near-silence —
+    observed live, and the assistant ANSWERED it."""
+
+    PROMPT = "JOAT. The wearer addresses the assistant as JOAT."
+
+    def test_the_observed_hallucination_is_dropped(self) -> None:
+        assert is_prompt_echo("The wearer addresses the assistant as JOAT.", self.PROMPT)
+
+    def test_a_genuine_short_wake_survives(self) -> None:
+        # 'JOAT' appears in the prompt, but eating it would make the
+        # assistant deaf to its own name.
+        assert not is_prompt_echo("JOAT.", self.PROMPT)
+        assert not is_prompt_echo("JOAT", self.PROMPT)
+
+    def test_real_speech_survives(self) -> None:
+        assert not is_prompt_echo("What time is it, JOAT?", self.PROMPT)
+
+    def test_no_prompt_never_matches(self) -> None:
+        assert not is_prompt_echo("anything", None)
