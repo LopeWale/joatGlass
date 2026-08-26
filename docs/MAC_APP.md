@@ -4,28 +4,50 @@
 ## Native shell — JOAT.app (the Mac app proper)
 
 The brain's ENGINE is Python (the AI stack — mlx-lm, MiniCheck, subprocess
-agents — is Python-native and stays that way). Its macOS CITIZENSHIP is a
-native Swift shell, per Apple's current recommendations:
+agents — is Python-native and stays that way). Its macOS CITIZENSHIP is the
+native Swift app in `apps/mac/JOATShell/`. This section was audited against
+Apple's primary documentation (2026-08-25); claims below carry their audit
+status.
 
-| Concern | How | Apple guidance followed |
+**Current shape (post-audit):** a REGULAR app — Dock icon, ⌘-Tab, one main
+window (engine status + live log + controls) — plus a `MenuBarExtra` status
+surface. `Settings` scene for preferences. The engine runs as an app-owned
+child `Process`; Quit uses `applicationShouldTerminate → .terminateLater`
+and WAITS for the child (SIGKILL escalation after 5 s). Closing the window
+does not stop the engine; quitting the app does — a closed app is not
+listening.
+
+| Concern | How | Audit status |
 |---|---|---|
-| App shape | SwiftUI `MenuBarExtra`, `LSUIElement` background app | modern menu-bar app API |
-| Engine lifecycle | JOAT.app spawns/supervises `.venv/bin/python -m jarvis` as a child `Process`; crash → backoff restart; Quit stops listening | app-owned subprocess |
-| Launch at login | `SMAppService.mainApp` toggle in the menu | sanctioned login-item API (replaces hand-written launchd plists) |
-| Permissions | ONE Full Disk Access grant on **JOAT.app** — the child engine inherits the app's TCC identity | signed-app TCC attribution |
-| Signing | Developer ID Application + hardened runtime | stable identity: grants survive rebuilds |
-| Repo location | chosen via standard folder picker, stored in `UserDefaults` — nothing machine-specific in code | |
+| Launch at login | `SMAppService.mainApp`, `.requiresApproval` surfaced via `openSystemSettingsLoginItems()`, status re-read on menu open | correct API (documented) |
+| Signing | Developer ID + hardened runtime + secure timestamp + entitlements file | required for notarization |
+| Icon | legacy `.icns` via `iconutil` (script-generated) | stopgap — Icon Composer needs an Xcode target |
+| Engine supervision | direct child, crash circuit-breaker, port-ownership reaping, engine-side orphan watchdog (exit on reparent to PID 1) | pattern documented; details ours |
+| Repo location | UserDefaults + folder picker | dev harness, see debt list |
 
-Source lives in `apps/mac/JOATShell/` (SwiftPM package — opens directly in
-Xcode; `scripts/build_app.sh` builds, signs, and installs JOAT.app).
-The earlier `com.joat.brain` launchd agent is superseded by the app and must
-be unloaded when the app manages the engine (port 8787 conflict otherwise).
+**TCC reality (do not overstate):** the Python child is EXPECTED to inherit
+the app's Full Disk Access via responsible-process attribution. Apple DTS
+describes this behavior but it is NOT a documented API contract, and it
+regressed once before (macOS 11.4 stopped helper FDA inheritance as a CVE
+fix). The engine must treat a TCC denial as a visible state, never assume
+the grant. Never "fix" a broken grant by adding the bare python binary to
+the FDA list — that grants FDA to every Python script on the machine.
 
-Honest note: notification triage reads Apple's Biome store
-(`Notification.Delivery` SEGB segments) — there is NO sanctioned API for
-reading other apps' notifications, in Swift or anything else. That read is
-unsupported by design and implemented read-only + fail-dormant.
-
+**Known architectural debt (from the audit, in priority order):**
+1. **No Xcode app target.** The SwiftPM+script bundle assembly cannot carry
+   an Icon Composer (Liquid Glass) icon, asset catalogs, or produce an
+   archive for notarization/TestFlight. Fix: an Xcode app target consuming
+   `JOATShell` as a local package (Apple's documented modularization).
+2. **Engine interpreter lives outside the bundle** (user repo `.venv`).
+   Ship-quality fix: vendor a relocatable Python into `Contents/Helpers/`,
+   sign every nested Mach-O inside-out (never `codesign --deep`), engine id
+   `com.joat.shell.engine`. Makes the app self-contained and gives TCC its
+   strongest (documented-adjacent) attribution case.
+3. **Not notarized.** Local installs never see Gatekeeper; ANY distribution
+   to another Mac requires `notarytool` + `stapler` (macOS 15+ removed the
+   Control-click bypass). The signing flags are now notarization-ready.
+4. No update channel (Sparkle needs the Xcode target's nested-code layout),
+   no dSYM archiving, no localization, shell has no os_log.
 
 The Mac Studio runs everything: BLE transport, audio, reasoning, the debate loop, verifier, channels, and computer use. Python 3.12+ package, structured as a long-running service (launchd), OOP throughout.
 

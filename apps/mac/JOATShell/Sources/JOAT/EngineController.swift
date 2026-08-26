@@ -10,7 +10,17 @@ import SwiftUI
 /// mirror doff-stops-mic).
 @MainActor
 final class EngineController: ObservableObject {
-    enum State: Equatable { case stopped, running, crashed(Int32) }
+    enum State: Equatable { case stopped, running, crashed(Int32), failed(String) }
+
+    /// Single source of truth for the engine's WS port — passed to the
+    /// engine via --port and used by the stale-engine reaper. Overridable
+    /// without a rebuild: `defaults write com.joat.shell EnginePort 9090`
+    /// (UserDefaults, not an env var — GUI apps launched from Finder or as
+    /// login items don't inherit the shell environment). NOTE: the hub
+    /// plugin's VITE_MAC_WS_URL and the packed app.json whitelist must
+    /// still agree with whatever this resolves to.
+    static let enginePort =
+        (UserDefaults.standard.object(forKey: "EnginePort") as? Int) ?? 8787
 
     @Published var state: State = .stopped
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
@@ -18,6 +28,7 @@ final class EngineController: ObservableObject {
     private var process: Process?
     private var userStopped = false
     private var recentCrashes: [Date] = []
+    private var pendingStopCompletion: (() -> Void)?
 
     private let defaults = UserDefaults.standard
     private let logURL = FileManager.default.homeDirectoryForCurrentUser
@@ -28,6 +39,7 @@ final class EngineController: ObservableObject {
         case .running: "JOAT · engine running"
         case .stopped: "JOAT · stopped"
         case .crashed(let code): "JOAT · engine crashed (\(code))"
+        case .failed(let why): "JOAT · \(why)"
         }
     }
 
@@ -60,6 +72,41 @@ final class EngineController: ObservableObject {
             atPath: url.appendingPathComponent(".venv/bin/python").path)
     }
 
+    /// Why repoURL() returned nil — three distinct failures that previously
+    /// all collapsed into an opaque crashed(-1): repo never chosen, repo
+    /// moved/deleted, or repo present but its venv broken (the symlinked
+    /// venv python dangles after a Homebrew/macOS Python upgrade).
+    private func repoDiagnosis() -> String {
+        guard let stored = defaults.string(forKey: "RepoPath") else {
+            return "repo not set — use Set Repo Folder…"
+        }
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: stored, isDirectory: &isDir),
+           isDir.boolValue {
+            return "venv broken in \(stored) — recreate: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'"
+        }
+        return "repo missing at \(stored) — use Set Repo Folder…"
+    }
+
+    /// Failures must be visible in Open Log, not just the menu bar.
+    private func fail(_ reason: String) {
+        state = .failed(reason)
+        appendLog("[shell] \(reason)")
+    }
+
+    private func appendLog(_ line: String) {
+        try? FileManager.default.createDirectory(
+            at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        if let h = try? FileHandle(forWritingTo: logURL) {
+            try? h.seekToEnd()
+            try? h.write(contentsOf: Data((line + "\n").utf8))
+            try? h.close()
+        }
+    }
+
     func chooseRepo() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -76,7 +123,7 @@ final class EngineController: ObservableObject {
     func start() {
         guard process == nil else { return }
         guard let repo = repoURL() else {
-            state = .crashed(-1)
+            fail(repoDiagnosis())
             chooseRepo()
             return
         }
@@ -93,7 +140,7 @@ final class EngineController: ObservableObject {
 
         let p = Process()
         p.executableURL = repo.appendingPathComponent(".venv/bin/python")
-        p.arguments = ["-u", "-m", "jarvis"]
+        p.arguments = ["-u", "-m", "jarvis", "--port", String(Self.enginePort)]
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
         // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
@@ -112,15 +159,24 @@ final class EngineController: ObservableObject {
             process = p
             state = .running
         } catch {
-            state = .crashed(-1)
+            fail("engine spawn failed: \(error.localizedDescription)")
         }
     }
 
-    func stop() {
+    func stop(completion: (() -> Void)? = nil) {
         userStopped = true
-        process?.terminate()
-        process = nil
-        state = .stopped
+        guard let p = process else {
+            state = .stopped
+            completion?()
+            return
+        }
+        pendingStopCompletion = completion
+        p.terminate()
+        // Escalate if the engine ignores SIGTERM (audit §C2).
+        let pid = p.processIdentifier
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            if self?.process != nil { kill(pid, SIGKILL) }
+        }
     }
 
     func restart() {
@@ -132,6 +188,8 @@ final class EngineController: ObservableObject {
         process = nil
         if userStopped {
             state = .stopped
+            pendingStopCompletion?()
+            pendingStopCompletion = nil
             return
         }
         state = .crashed(code)
@@ -144,17 +202,24 @@ final class EngineController: ObservableObject {
     }
 
     /// Exactly one engine may exist. An app relaunch (or a crashed shell)
-    /// can leave an orphan holding port 8787 — the new engine would then
-    /// crash-loop on bind. Reap by PORT OWNERSHIP: the kernel reports the
-    /// engine's argv with the resolved interpreter path (not .venv/...), so
-    /// command-pattern matching is unreliable; holding the port is not.
+    /// can leave an orphan holding the engine port — the new engine would
+    /// then crash-loop on bind. Reap by PORT OWNERSHIP: the kernel reports
+    /// the engine's argv with the resolved interpreter path (not .venv/...),
+    /// so command-pattern matching is unreliable; holding the port is not.
+    ///
+    /// The superseded com.joat.brain launchd agent (setup_brain.sh --service)
+    /// has KeepAlive=true — killing its process by port would just make
+    /// launchd resurrect it, forever fighting this app. Boot it out and
+    /// remove its plist FIRST; setup_brain.sh can always recreate it.
     private func reapStaleEngines() {
         let reap = Process()
         reap.executableURL = URL(fileURLWithPath: "/bin/sh")
         reap.arguments = ["-c",
-            "PIDS=$(lsof -ti tcp:8787 -sTCP:LISTEN); "
+            "launchctl bootout gui/$(id -u)/com.joat.brain 2>/dev/null; "
+            + "rm -f \"$HOME/Library/LaunchAgents/com.joat.brain.plist\"; "
+            + "PIDS=$(lsof -ti tcp:\(Self.enginePort) -sTCP:LISTEN); "
             + "[ -n \"$PIDS\" ] && kill $PIDS && sleep 1; "
-            + "pkill -f -- '[-]u -m jarvis$' && sleep 1; true"]
+            + "pkill -f -- '[-]u -m jarvis' && sleep 1; true"]
         try? reap.run()
         reap.waitUntilExit()
     }
@@ -172,6 +237,28 @@ final class EngineController: ObservableObject {
             launchAtLogin = enabled
         } catch {
             launchAtLogin = SMAppService.mainApp.status == .enabled
+            if SMAppService.mainApp.status == .requiresApproval {
+                // The user disabled us in System Settings — send them there
+                // instead of silently snapping the toggle back (audit §4).
+                SMAppService.openSystemSettingsLoginItems()
+            }
         }
+    }
+
+    /// System Settings can change this behind our back — re-read whenever a
+    /// menu or settings pane appears (audit §4: stale state).
+    func refreshLaunchAtLogin() {
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    /// Last N lines of the engine log, for the main window's live tail.
+    nonisolated func logTail(lines: Int) -> String {
+        guard let data = try? Data(contentsOf: FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/joat/brain.log")),
+            let text = String(data: data.suffix(64_000), encoding: .utf8)
+        else { return "" }
+        return text.split(separator: "\n", omittingEmptySubsequences: false)
+            .suffix(lines).joined(separator: "\n")
     }
 }
