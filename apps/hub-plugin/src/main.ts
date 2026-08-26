@@ -21,6 +21,22 @@ const MAC_WS_URLS = (import.meta.env.VITE_MAC_WS_URL ?? 'wss://mac.local:8787/gl
   .map((u) => u.trim())
   .filter((u) => u.length > 0);
 
+/**
+ * Pairing token storage. The Mac issues a token to the first remote client
+ * (TOFU — pairing.set) and rejects unpaired LAN peers from then on. It lives
+ * in localStorage, NOT in the bundle: .env rules forbid secrets in VITE_*,
+ * and a token baked into an .ehpk would ship to anyone holding the file.
+ */
+const TOKEN_KEY = 'joat.pairing.token';
+
+function loadToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null; // storage unavailable: dial bare; the Mac re-pairs if unpaired
+  }
+}
+
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
 function setPanel(id: string, text: string): void {
   const el = document.getElementById(id);
@@ -30,7 +46,7 @@ function setPanel(id: string, text: string): void {
 async function boot(): Promise<void> {
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
-  const link = new MacLink({ urls: MAC_WS_URLS });
+  const link = new MacLink({ urls: MAC_WS_URLS, token: loadToken() });
 
   setPanel('p-url', link.activeUrl);
   // A reconnected socket is a fresh session on the Mac's side — without a new
@@ -113,6 +129,16 @@ async function boot(): Promise<void> {
       case 'confirm.request':
         await hud.showText(`${msg.prompt}\n\n${CONFIRM_HINT}`, ContainerId.Main);
         imu.await(msg.actionId);
+        break;
+      case 'pairing.set':
+        // The Mac just paired THIS phone; reconnects must present the token
+        // or the gateway rejects them in favor of... nobody. Persist first.
+        try {
+          localStorage.setItem(TOKEN_KEY, msg.token);
+        } catch {
+          // Storage unavailable: the token still covers this session.
+        }
+        link.setToken(msg.token);
         break;
       case 'policy.set':
         // Mac-side config path; the wearer's on-glasses menu is the other.

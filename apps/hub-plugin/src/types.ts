@@ -53,6 +53,8 @@ export type DownlinkMessage =
   | { kind: 'imu.trace'; enabled: boolean }
   | { kind: 'confirm.request'; actionId: string; prompt: string }
   | { kind: 'policy.set'; resume: ResumePolicy }
+  /** TOFU pairing: sent once to the first remote client; presented back as ?token= on every dial. */
+  | { kind: 'pairing.set'; token: string }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
 export interface InputEventPayload {

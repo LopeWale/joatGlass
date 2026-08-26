@@ -11,6 +11,8 @@ export interface MacLinkOptions {
    * whitelisted Mac and the plugin finds it, no rebuild needed.
    */
   urls: readonly string[];
+  /** Pairing token (from a previous pairing.set), appended as ?token= on dial. */
+  token?: string | null;
   maxQueue?: number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
@@ -31,6 +33,7 @@ export class MacLink {
   private closed = false;
   private handler?: (msg: DownlinkMessage) => void;
   private stateHandler?: (state: LinkState) => void;
+  private token: string | null;
 
   private readonly maxQueue: number;
   private readonly baseMs: number;
@@ -38,6 +41,7 @@ export class MacLink {
 
   constructor(private readonly opts: MacLinkOptions) {
     if (opts.urls.length === 0) throw new Error('MacLink needs at least one URL');
+    this.token = opts.token ?? null;
     this.maxQueue = opts.maxQueue ?? 200;
     this.baseMs = opts.reconnectBaseMs ?? 500;
     this.capMs = opts.reconnectMaxMs ?? 15_000;
@@ -46,6 +50,11 @@ export class MacLink {
   /** The URL currently being dialed (for status surfaces). */
   get activeUrl(): string {
     return this.opts.urls[this.urlIndex % this.opts.urls.length] as string;
+  }
+
+  /** Adopt a pairing token mid-session (pairing.set); used from the next dial on. */
+  setToken(token: string): void {
+    this.token = token;
   }
 
   onMessage(handler: (msg: DownlinkMessage) => void): void {
@@ -59,7 +68,12 @@ export class MacLink {
   connect(): void {
     this.closed = false;
     this.stateHandler?.(this.attempt === 0 ? 'connecting' : 'reconnecting');
-    const socket = new WebSocket(this.activeUrl);
+    // Token rides the URL: the gateway authorizes BEFORE the WebSocket
+    // handshake, and a WebView WebSocket cannot set headers.
+    const url = this.token
+      ? `${this.activeUrl}${this.activeUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(this.token)}`
+      : this.activeUrl;
+    const socket = new WebSocket(url);
     this.socket = socket;
 
     socket.onopen = () => {

@@ -15,6 +15,7 @@ import pytest
 import websockets
 
 from jarvis.ble.hub_gateway import HubGatewayTransport
+from jarvis.core.pairing import PairingStore
 from jarvis.core.protocol import (
     Device,
     EventSource,
@@ -228,3 +229,85 @@ class TestReviewRegressions:
         started = loop.time()
         assert await t.request_confirm("act-void", "Delete?", timeout_s=8.0) is False
         assert loop.time() - started < 1.0
+
+
+@pytest.fixture
+async def paired_transport(unused_tcp_port: int, tmp_path):
+    """Gateway with pairing REQUIRED even from loopback, so the token paths
+    are exercisable from a test that can only connect via 127.0.0.1."""
+    store = PairingStore(tmp_path / "pairing.json")
+    t = HubGatewayTransport(
+        host=HOST, port=unused_tcp_port, pairing=store, trust_loopback=False
+    )
+    await t.start()
+    try:
+        yield t, f"ws://{HOST}:{unused_tcp_port}", store
+    finally:
+        await t.stop()
+
+
+class TestPairing:
+    """Transport auth (RULES.md #5): TOFU token, enforced pre-handshake."""
+
+    async def test_first_client_is_issued_a_token(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        async with websockets.connect(url) as ws:
+            frame = json.loads(await ws.recv())
+        assert frame["kind"] == "pairing.set"
+        assert frame["token"] == store.token
+        assert store.token  # persisted, non-empty
+
+    async def test_unpaired_client_is_rejected_after_pairing(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        async with websockets.connect(url) as ws:
+            await ws.recv()  # pairing.set — this peer is now THE phone
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            await websockets.connect(url)
+        assert exc.value.response.status_code == 401
+
+    async def test_wrong_token_is_rejected(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        async with websockets.connect(url) as ws:
+            await ws.recv()
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            await websockets.connect(f"{url}/?token=not-the-token")
+        assert exc.value.response.status_code == 401
+
+    async def test_paired_client_reconnects_with_token(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        async with websockets.connect(url) as ws:
+            await ws.recv()
+        async with websockets.connect(f"{url}/?token={store.token}") as ws:
+            await ws.send(
+                json.dumps({"kind": "hello", "sn": "SN2", "model": "g2", "launchSource": "x"})
+            )
+            await _wait_for(lambda: t.hello is not None)
+        assert t.hello.sn == "SN2"
+
+    async def test_already_paired_store_never_reissues(self, unused_tcp_port, tmp_path) -> None:
+        """A restart must not hand the token to the next comer."""
+        store = PairingStore(tmp_path / "pairing.json")
+        first = store.issue()
+        t = HubGatewayTransport(
+            host=HOST, port=unused_tcp_port, pairing=store, trust_loopback=False
+        )
+        await t.start()
+        try:
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
+            assert store.token == first
+        finally:
+            await t.stop()
+
+    async def test_loopback_is_trusted_by_default(self, unused_tcp_port, tmp_path) -> None:
+        """Simulator + speak_test connect from this Mac with no token, even
+        when a phone is already paired."""
+        store = PairingStore(tmp_path / "pairing.json")
+        store.issue()
+        t = HubGatewayTransport(host=HOST, port=unused_tcp_port, pairing=store)
+        await t.start()
+        try:
+            async with websockets.connect(f"ws://{HOST}:{unused_tcp_port}"):
+                await _wait_for(lambda: t.connected)
+        finally:
+            await t.stop()

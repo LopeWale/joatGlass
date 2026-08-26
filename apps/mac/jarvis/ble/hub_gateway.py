@@ -15,11 +15,16 @@ import asyncio
 import errno
 import json
 import logging
+import secrets
 import struct
 from collections.abc import Callable
+from http import HTTPStatus
+from ipaddress import ip_address
+from urllib.parse import parse_qs, urlsplit
 
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from ..core.interfaces import (
     AudioCallback,
@@ -27,6 +32,7 @@ from ..core.interfaces import (
     GlassesTransport,
     InputCallback,
 )
+from ..core.pairing import PairingStore
 from ..core.protocol import (
     Audio,
     Confirm,
@@ -36,6 +42,7 @@ from ..core.protocol import (
     Hello,
     Imu,
     Input,
+    PairingSet,
     Policy,
     ProtocolError,
     parse_uplink,
@@ -57,9 +64,17 @@ class HubGatewayTransport(GlassesTransport):
     far more common than genuine concurrent use.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8787) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8787,
+        pairing: PairingStore | None = None,
+        trust_loopback: bool = True,
+    ) -> None:
         self._host = host
         self._port = port
+        self._pairing = pairing
+        self._trust_loopback = trust_loopback
         self._server: object | None = None
         self._conn: ServerConnection | None = None
 
@@ -85,7 +100,10 @@ class HubGatewayTransport(GlassesTransport):
         last: OSError | None = None
         for attempt in range(10):
             try:
-                self._server = await serve(self._session, self._host, self._port)
+                self._server = await serve(
+                    self._session, self._host, self._port,
+                    process_request=self._authorize,
+                )
                 break
             except OSError as exc:
                 if exc.errno != errno.EADDRINUSE:
@@ -173,6 +191,38 @@ class HubGatewayTransport(GlassesTransport):
         finally:
             self._pending_confirms.pop(action_id, None)
 
+    # ── pairing ──────────────────────────────────────────────────────────────
+
+    def _peer_is_exempt(self, conn: ServerConnection) -> bool:
+        """Loopback peers skip pairing: the simulator and test harnesses run
+        on this Mac, and a local process could read the token file anyway —
+        the boundary being enforced is the network, not the machine."""
+        if not self._trust_loopback:
+            return False
+        addr = conn.remote_address
+        try:
+            return bool(ip_address(addr[0]).is_loopback)
+        except (ValueError, IndexError, TypeError):
+            return False
+
+    def _authorize(self, conn: ServerConnection, request: Request) -> Response | None:
+        """Reject unpaired remote clients before the handshake completes.
+
+        None = proceed. A 401 here is what the wearer sees as "socket never
+        opens" on an unpaired phone — the runbook's re-pair procedure (delete
+        the store file) is the fix.
+        """
+        if self._pairing is None or self._peer_is_exempt(conn):
+            return None
+        expected = self._pairing.token
+        if expected is None:
+            return None  # pairing window: first remote peer, token issued in _session
+        supplied = parse_qs(urlsplit(request.path).query).get("token", [""])[-1]
+        if secrets.compare_digest(supplied, expected):
+            return None
+        log.warning("rejected unpaired connection from %s", conn.remote_address)
+        return conn.respond(HTTPStatus.UNAUTHORIZED, "pairing token required\n")
+
     # ── receiving ────────────────────────────────────────────────────────────
 
     async def _session(self, conn: ServerConnection) -> None:
@@ -182,6 +232,17 @@ class HubGatewayTransport(GlassesTransport):
         self._conn = conn
         self._last_seq = None
         log.info("plugin connected")
+        if (
+            self._pairing is not None
+            and self._pairing.token is None
+            and not self._peer_is_exempt(conn)
+        ):
+            # TOFU: this first remote peer IS the wearer's phone (it just
+            # scanned the QR). Two remote peers racing this window is a
+            # single-wearer non-scenario; newest-wins eviction applies anyway.
+            token = self._pairing.issue()
+            await conn.send(json.dumps(PairingSet(token=token).to_wire()))
+            log.info("pairing: token issued to %s", conn.remote_address)
         try:
             async for raw in conn:
                 self._dispatch(raw)

@@ -25,6 +25,7 @@ from jarvis.core.protocol import (
     HudText,
     Imu,
     ImuTrace,
+    PairingSet,
     Input,
     Policy,
     ProtocolError,
@@ -146,6 +147,11 @@ class TestDownlinkWire:
         # exitMode 1 = show a dialog. Defaulting to 0 would close the app out
         # from under the wearer with no warning.
         assert Shutdown().to_wire()["exitMode"] == 1
+
+    def test_pairing_set_wire_shape(self) -> None:
+        # The plugin's dispatch switches on this exact shape; a drifted key
+        # silently strands the phone unpaired.
+        assert PairingSet(token="tok").to_wire() == {"kind": "pairing.set", "token": "tok"}
 
 
 class TestPackPcm:
