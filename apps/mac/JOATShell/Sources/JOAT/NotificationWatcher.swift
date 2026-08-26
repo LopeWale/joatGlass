@@ -60,7 +60,10 @@ final class NotificationWatcher {
     private var debugEnabled: Bool { UserDefaults.standard.bool(forKey: "AXDebug") }
 
     func requestAccess() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        // The literal, not kAXTrustedCheckOptionPrompt: that global is a
+        // mutable var in the C header, which Swift 6 strict concurrency
+        // rejects. The key string itself is stable public API.
+        let opts = ["AXTrustedCheckOptionPrompt": true]
         _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
     }
 

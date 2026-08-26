@@ -1,0 +1,77 @@
+# XcodeGen spec for JOAT.app.
+#
+# The .xcodeproj is GENERATED from this file and gitignored: a checked-in
+# pbxproj is a merge-conflict magnet and drifts silently from the sources
+# it claims to build. `scripts/build_app.sh` regenerates it every build, so
+# the spec is the source of truth.
+#
+# Why an Xcode target at all (see docs/MAC_APP.md §Native shell): a SwiftPM
+# executable plus a hand-assembled bundle cannot carry an asset catalog,
+# entitlements, or produce an archive — which blocks the app icon,
+# notarization, TestFlight, and any Sparkle-style updater. Apple documents
+# no path from an .executableTarget to a .app.
+
+name: JOAT
+
+options:
+  bundleIdPrefix: com.joat
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"   # SwiftUI scene APIs (defaultLaunchBehavior) need 15+
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    # Ship a universal binary: an Intel Mac must not be handed arm64-only.
+    ARCHS: "$(ARCHS_STANDARD)"
+    ENABLE_HARDENED_RUNTIME: YES
+    # A secure timestamp is REQUIRED for notarization; without it the
+    # submission is rejected with "signature does not include a secure
+    # timestamp".
+    OTHER_CODE_SIGN_FLAGS: "--timestamp"
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  JOAT:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/JOAT
+      - path: Resources
+    entitlements:
+      path: JOAT.entitlements
+      properties: {}   # no sandbox, no relaxations — hardened runtime only
+    settings:
+      base:
+        # Let Xcode synthesize Info.plist from INFOPLIST_KEY_* settings —
+        # Apple's recommended path, and it fills in the platform/SDK/build
+        # keys a hand-written plist silently omits.
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.joat.shell
+        PRODUCT_NAME: JOAT
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_NSHumanReadableCopyright: "JOAT — personal assistant shell"
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        # Regular app: Dock icon, Cmd-Tab, a real window. NOT LSUIElement —
+        # this is an assistant the wearer opens, not a hidden agent.
+        INFOPLIST_KEY_LSUIElement: NO
+        # The app is the TCC-responsible process for its Python child, so
+        # every usage description the engine needs must live HERE.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription:
+          "JOAT transcribes your voice locally so the glasses can answer you."
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription:
+          "JOAT connects to your Even Realities G2 glasses over Bluetooth."
+        INFOPLIST_KEY_NSAppleEventsUsageDescription:
+          "JOAT reads notifications and controls apps you explicitly ask it to."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription:
+          "JOAT transcribes your speech on-device to answer on the HUD."
+        # macOS must always give the app a chance to stop its engine child.
+        INFOPLIST_KEY_NSSupportsSuddenTermination: NO
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        # Stable identity matters beyond distribution: TCC keys Full Disk
+        # Access and Accessibility grants to the signing identity, so an
+        # ad-hoc or churning signature makes the user re-grant every build.
+        DEVELOPMENT_TEAM: J2XU5XWJM9

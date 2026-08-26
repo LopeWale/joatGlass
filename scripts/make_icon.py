@@ -11,6 +11,7 @@ scanline accent — echoes the 576x288 monochrome green HUD identity.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -55,7 +56,37 @@ def draw_master(px: int = 1024) -> Image.Image:
     return img
 
 
-def main(out_icns: str) -> None:
+def write_appiconset(target: Path) -> None:
+    """Emit an Xcode asset-catalog AppIcon set.
+
+    This is what an Xcode app target consumes; `actool` compiles it into
+    Assets.car and the app references it via CFBundleIconName. The legacy
+    .icns path below stays for anything building outside Xcode.
+    """
+    master = draw_master()
+    target.mkdir(parents=True, exist_ok=True)
+    images = []
+    for size in SIZES:
+        for scale in (1, 2):
+            px = size * scale
+            name = f"icon_{size}x{size}{'@2x' if scale == 2 else ''}.png"
+            master.resize((px, px), Image.LANCZOS).save(target / name)
+            images.append({
+                "size": f"{size}x{size}",
+                "idiom": "mac",
+                "filename": name,
+                "scale": f"{scale}x",
+            })
+    (target / "Contents.json").write_text(json.dumps(
+        {"images": images, "info": {"version": 1, "author": "xcode"}}, indent=2))
+    print(f"wrote {target}")
+
+
+def main(out: str) -> None:
+    path = Path(out)
+    if path.suffix == ".appiconset":
+        write_appiconset(path)
+        return
     master = draw_master()
     with tempfile.TemporaryDirectory() as td:
         iconset = Path(td) / "AppIcon.iconset"
@@ -66,8 +97,8 @@ def main(out_icns: str) -> None:
             master.resize((size * 2, size * 2), Image.LANCZOS).save(
                 iconset / f"icon_{size}x{size}@2x.png")
         subprocess.run(["iconutil", "-c", "icns", str(iconset),
-                        "-o", out_icns], check=True)
-    print(f"wrote {out_icns}")
+                        "-o", out], check=True)
+    print(f"wrote {out}")
 
 
 if __name__ == "__main__":
