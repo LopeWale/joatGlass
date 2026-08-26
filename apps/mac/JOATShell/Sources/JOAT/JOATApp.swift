@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Reference established unconditionally at launch — never in a lazy
         // menu's onAppear, which may not run before logout (audit §C1).
         _ = EngineController.shared
+        // Runloop is up by now, so AX queries can safely block a moment.
+        NotificationWatcher.shared.start()
         // The app must always get a chance to stop its child (audit §A).
         ProcessInfo.processInfo.disableSuddenTermination()
     }
