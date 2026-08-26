@@ -12,6 +12,7 @@ observe a half-written snapshot.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -56,6 +57,19 @@ class StatusPublisher:
         counts[counter] = counts.get(counter, 0) + 1
         self._state["counts"] = counts
         self.flush()
+
+    async def heartbeat(self, interval_s: float = 5.0) -> None:
+        """Re-stamp the snapshot on a timer.
+
+        set()/bump() fire only on EVENTS, but the shell declares a snapshot
+        stale after 15s and blanks every field — so a healthy idle engine
+        looked identical to a dead one within 15 seconds of the last
+        utterance, while the (ungated) counters kept ticking. Interval must
+        stay well under that window.
+        """
+        while True:
+            await asyncio.sleep(interval_s)
+            self.flush()
 
     def flush(self) -> None:
         self._state["at"] = time.time()

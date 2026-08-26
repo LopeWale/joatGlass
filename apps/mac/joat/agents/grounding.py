@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass, field
 
 FactSource = Callable[[], str | None]
@@ -29,6 +30,14 @@ class Grounding:
     """Composes the fact block prepended to the system prompt."""
 
     sources: list[FactSource] = field(default_factory=list)
+    unknowns: list[str] = field(default_factory=list)
+    """Things the assistant has NO source for, named explicitly.
+
+    Omitting a fact is a weak signal: a 3B model must infer "battery is
+    absent from this list, therefore I should decline" — exactly the
+    inference small models fail, and exactly how the clock got invented.
+    Naming the gap is a far stronger instruction than leaving a hole.
+    """
 
     def add(self, source: FactSource) -> None:
         self.sources.append(source)
@@ -46,6 +55,10 @@ class Grounding:
                 lines.append(f"- {value}")
         return "\n".join(lines)
 
+    def cannot_know(self) -> str:
+        """The 'do not invent these' block, or empty when nothing is listed."""
+        return ", ".join(self.unknowns)
+
 
 def local_clock(now: Callable[[], float] = time.time) -> FactSource:
     """Date and time in the Mac's local zone — recomputed per reply.
@@ -62,6 +75,29 @@ def local_clock(now: Callable[[], float] = time.time) -> FactSource:
             f"Current date and time: {time.strftime('%A, %-d %B %Y, %-I:%M %p', stamp)}"
             f"{f' {zone}' if zone else ''}"
         )
+
+    return source
+
+
+def device_facts(transport: Any) -> FactSource:
+    """Glasses battery / worn / charging — already parsed and cached.
+
+    This data has been arriving over the wire and sitting on the transport
+    the whole time, while "what is my battery" was answered by a model that
+    had never seen it. Same failure as the clock, different costume.
+    """
+
+    def source() -> str:
+        device = getattr(transport, "device", None)
+        if device is None:
+            return "Glasses battery: unknown (no device report received yet)"
+        bits: list[str] = []
+        if device.battery is not None:
+            charging = " (charging)" if device.charging else ""
+            bits.append(f"battery {device.battery}%{charging}")
+        if device.wearing is not None:
+            bits.append("being worn" if device.wearing else "not being worn")
+        return f"Glasses: {', '.join(bits)}" if bits else ""
 
     return source
 
