@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from joat.channels.cards import (
+    CardLog,
     Card,
     DeliveryPolicy,
     Urgency,
@@ -77,3 +78,23 @@ class TestSystemish:
         assert is_systemish("BatteriesAvocadoWidget", "Battery")
         assert is_systemish("com.apple.softwareupdate", "Update available")
         assert not is_systemish("com.apple.MobileSMS", "Dele")
+
+
+class TestCardLog:
+    """Cards were rendered and immediately forgotten — 'what did I miss?'
+    was answered by a model with no record (audit finding 6)."""
+
+    def test_remembers_newest_last(self) -> None:
+        log = CardLog(keep=3)
+        for c in ("a", "b", "c"):
+            log.add(c, at=1.0)
+        assert [c for _, c in log.recent(3)] == ["a", "b", "c"]
+
+    def test_bounded_to_keep(self) -> None:
+        log = CardLog(keep=2)
+        for c in ("a", "b", "c", "d"):
+            log.add(c, at=1.0)
+        assert [c for _, c in log.recent(5)] == ["c", "d"]
+
+    def test_empty_log_is_empty(self) -> None:
+        assert CardLog().recent() == []

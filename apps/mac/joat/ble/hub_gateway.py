@@ -111,6 +111,7 @@ class HubGatewayTransport(GlassesTransport):
         self._imu_cbs: list[ImuCallback] = []
         self._confirm_cbs: list[ConfirmCallback] = []
         self._hello_cbs: list[HelloCallback] = []
+        self._disconnect_cbs: list[Callable[[], None]] = []
 
         self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
         self._last_seq: int | None = None
@@ -188,6 +189,15 @@ class HubGatewayTransport(GlassesTransport):
     def on_hello(self, callback: HelloCallback) -> None:
         """Fires when a plugin announces itself — the 'wearer is here' moment."""
         self._hello_cbs.append(callback)
+
+    def on_disconnect(self, callback: Callable[[], None]) -> None:
+        """Fires when the LAST connection drops (not on newest-wins swaps).
+
+        Without this the status pills latched whatever the hello set —
+        'connected / streaming' forever, however long the glasses had
+        actually been gone (audit finding 25).
+        """
+        self._disconnect_cbs.append(callback)
 
     # ── sending ──────────────────────────────────────────────────────────────
 
@@ -304,6 +314,8 @@ class HubGatewayTransport(GlassesTransport):
         finally:
             if self._conn is conn:
                 self._conn = None
+                for cb in self._disconnect_cbs:
+                    cb()
             log.info("plugin disconnected")
 
     def _dispatch(self, raw: str | bytes) -> None:
