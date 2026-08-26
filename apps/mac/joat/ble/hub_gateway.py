@@ -43,6 +43,7 @@ from ..core.protocol import (
     Hello,
     Imu,
     Input,
+    Location,
     PairingAck,
     PairingSet,
     Policy,
@@ -117,6 +118,7 @@ class HubGatewayTransport(GlassesTransport):
         self._last_seq: int | None = None
         self.device: Device | None = None
         self.hello: Hello | None = None
+        self.location: Location | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -353,6 +355,12 @@ class HubGatewayTransport(GlassesTransport):
                     confirm_cb(message)
             case Policy():
                 log.info("wearer resume policy: %s", message.resume)
+            case Location():
+                first = self.location is None
+                self.location = message
+                if first:
+                    log.info("wearer location known (±%sm)",
+                             int(message.accuracy) if message.accuracy else "?")
             case PairingAck():
                 # Only now is the token real: the phone has it on disk, so
                 # locking out every other peer can no longer strand the wearer.

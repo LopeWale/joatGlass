@@ -17,6 +17,10 @@ export class AudioStreamer {
   private buffer: number[] = [];
   private flushTimer?: ReturnType<typeof setInterval>;
   private open = false;
+  /** Which mic was last (or is currently) hot — the menu's unmute reuses it. */
+  lastSource: AudioInputSource = AudioInputSource.Glasses;
+  /** Dominant speakerRole across the current batch (SDK 0.0.14). */
+  private speaker?: string;
 
   constructor(
     private readonly client: BridgeClient,
@@ -45,6 +49,7 @@ export class AudioStreamer {
       return false;
     }
     this.open = true;
+    this.lastSource = source;
     this.flushTimer = setInterval(() => this.flush(source), this.flushMs);
     return true;
   }
@@ -74,7 +79,13 @@ export class AudioStreamer {
    * half speed (peak 255 instead of 32767). Decode byte pairs here so the
    * wire carries real 16-bit samples, as protocol.py documents.
    */
-  ingest(pcm: Uint8Array | number[]): void {
+  ingest(pcm: Uint8Array | number[], speakerRole?: string | null): void {
+    // Attribution rides the batch (self/other/unknown). Passed through for
+    // calibration on the Mac; a future gate keeps non-wearer speech out of
+    // STT entirely — which STRENGTHENS the explicit-invocation rule.
+    if (typeof speakerRole === 'string' && speakerRole.length > 0) {
+      this.speaker = speakerRole;
+    }
     if (!this.open) return;
     const bytes = pcm instanceof Uint8Array ? pcm : Uint8Array.from(pcm);
     let i = 0;
@@ -96,7 +107,9 @@ export class AudioStreamer {
       source: source === AudioInputSource.Glasses ? 'glasses' : 'phone',
       seq: this.seq++,
       pcm: this.buffer.splice(0),
+      ...(this.speaker !== undefined ? { speaker: this.speaker } : {}),
     });
+    this.speaker = undefined;
   }
 }
 

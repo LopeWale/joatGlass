@@ -13,6 +13,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from .tools import Tool
@@ -35,6 +36,25 @@ _WMO = {
 def _fetch_json(url: str) -> Any:
     with urllib.request.urlopen(url, timeout=8.0) as resp:
         return json.loads(resp.read().decode())
+
+
+def _forecast(latitude: float, longitude: float, name: str) -> str:
+    fc = _fetch_json(
+        "https://api.open-meteo.com/v1/forecast?"
+        + urllib.parse.urlencode({
+            "latitude": latitude, "longitude": longitude,
+            "current": "temperature_2m,apparent_temperature,weather_code,"
+                       "wind_speed_10m,precipitation",
+            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+        })
+    )
+    cur = fc.get("current") or {}
+    sky = _WMO.get(int(cur.get("weather_code", -1)), "unknown sky")
+    return (
+        f"Weather {name}: {sky}, {cur.get('temperature_2m')}F "
+        f"(feels like {cur.get('apparent_temperature')}F), "
+        f"wind {cur.get('wind_speed_10m')} mph"
+    )
 
 
 def _weather_sync(location: str) -> str:
@@ -64,12 +84,20 @@ def _weather_sync(location: str) -> str:
     )
 
 
-def weather_tool() -> Tool:
+CoordsProvider = Callable[[], "tuple[float, float] | None"]
+
+
+def weather_tool(coords: CoordsProvider | None = None) -> Tool:
     async def run(args: dict[str, Any]) -> str:
         location = str(args.get("location", "")).strip()
-        if not location:
+        if location:
+            return await asyncio.to_thread(_weather_sync, location)
+        # No city named: use the wearer's reported position (finding 12) —
+        # the forecast API takes lat/lon directly, no geocoding hop.
+        here = coords() if coords is not None else None
+        if here is None:
             return "error: a location is needed — ask the wearer where"
-        return await asyncio.to_thread(_weather_sync, location)
+        return await asyncio.to_thread(_forecast, here[0], here[1], "where you are")
 
     return Tool(
         name="get_weather",

@@ -61,7 +61,7 @@ describe('EventRouter — audio and IMU', () => {
   it('audio frames go to the streamer', () => {
     const { fire, audio } = make();
     fire({ audioEvent: { audioPcm: [1, 2, 3] } });
-    expect(audio.ingest).toHaveBeenCalledWith([1, 2, 3]);
+    expect(audio.ingest).toHaveBeenCalledWith([1, 2, 3], undefined);
   });
 
   it('IMU reports go to the monitor and are not relayed', () => {

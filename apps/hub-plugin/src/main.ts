@@ -2,6 +2,7 @@ import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
+import { LocationMonitor } from './LocationMonitor';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
 import { ImuMonitor } from './ImuMonitor';
@@ -51,7 +52,19 @@ function setPanel(id: string, text: string): void {
 async function boot(): Promise<void> {
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
-  const link = new MacLink({ urls: MAC_WS_URLS, token: loadToken() });
+  // Bridge FIRST: the pairing token prefers HOST storage (finding 20 — the
+  // WebView's localStorage is origin-scoped, so dev-server and packed
+  // builds held separate tokens and every switch forced a manual re-pair;
+  // host storage is one bucket for both).
+  await client.init();
+  let token = loadToken();
+  try {
+    const hosted = await client.require().getLocalStorage(TOKEN_KEY);
+    if (hosted) token = hosted;
+  } catch {
+    // Older host: WebView storage remains the fallback.
+  }
+  const link = new MacLink({ urls: MAC_WS_URLS, token });
 
   // A token the Mac no longer honours must not outlive the session, or
   // every relaunch dials with it and is refused again.
@@ -61,6 +74,7 @@ async function boot(): Promise<void> {
     } catch {
       // Storage unavailable — the in-memory drop already unblocked us.
     }
+    void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
   });
 
   setPanel('p-url', link.activeUrl);
@@ -78,15 +92,15 @@ async function boot(): Promise<void> {
     } catch {
       // Storage unavailable — the in-memory drop already unblocked us.
     }
+    void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
   });
 
   setPanel('p-url', link.activeUrl); // failover rotation, made visible
     if (state === 'connected') announce?.();
   });
 
-  // 1. Bridge, 2. startup page (one-shot) — order is mandatory. The second
+  // Startup page (one-shot; bridge already initialized above). The second
   // argument lets a reloaded WebView adopt the host's existing page.
-  await client.init();
   await client.start(layouts.startup(), layouts.defaultLayout());
 
   const hud = new HudPresenter(client, layouts);
@@ -167,6 +181,7 @@ async function boot(): Promise<void> {
         // costs a retry instead of stranding the phone permanently.
         try {
           localStorage.setItem(TOKEN_KEY, msg.token);
+          void client.require().setLocalStorage(TOKEN_KEY, msg.token).catch(() => {});
           link.setToken(msg.token);
           link.send({ kind: 'pairing', token: msg.token });
         } catch {
@@ -200,12 +215,16 @@ async function boot(): Promise<void> {
     client.require().getDeviceInfo(),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
   ]).catch(() => null);
+  // Host account name grounds "the wearer's name" with zero configuration
+  // (finding 21). Best-effort: older hosts reject the call.
+  const user = await client.require().getUserInfo().catch(() => null);
   announce = () => {
     link.send({
       kind: 'hello',
       sn: device?.sn ?? 'unknown',
       model: device?.model ?? 'unknown',
       launchSource: client.getLaunchSource() ?? 'unknown',
+      ...(user?.name ? { userName: user.name } : {}),
     });
     // Announce the persisted policy so the Mac's session logic starts in sync.
     link.send({ kind: 'policy', resume: settings.resumePolicy });
@@ -214,11 +233,35 @@ async function boot(): Promise<void> {
 
   // Both starts degrade to false on hosts missing the capability (the desktop
   // simulator has no IMU at all) — boot must survive either being absent.
-  const micOk = await audio.start(AudioInputSource.Glasses);
+  // The boot-time device status was fetched and thrown away (finding 18):
+  // glasses sitting in the case had their mic opened anyway. Only an
+  // EXPLICIT not-worn skips — unknown must not silence a working mic.
+  const worn = device?.status?.isWearing;
+  let micStatus: string;
+  if (worn === false) {
+    micStatus = 'JOAT · mic off (glasses not worn)';
+    setPanel('p-mic', 'off (not worn)');
+  } else {
+    let micOk = await audio.start(AudioInputSource.Glasses);
+    let label = 'JOAT · listening';
+    if (!micOk) {
+      // The fallback ear (finding 13): the phone mic, NAMED on the status
+      // line — a silent source switch on a privacy surface is worse than
+      // no fallback.
+      micOk = await audio.start(AudioInputSource.Phone);
+      label = 'JOAT · listening (phone mic)';
+    }
+    micStatus = micOk ? label : 'JOAT · mic unavailable';
+  }
   await imu.start();
-  await hud.setStatus(micOk ? 'JOAT · listening' : 'JOAT · mic unavailable');
-  setPanel('p-status', micOk ? 'listening' : 'mic unavailable');
-  setPanel('p-mic', micOk ? 'streaming' : 'unavailable');
+  await hud.setStatus(micStatus);
+
+  // Wearer position -> Mac (finding 12): weather-without-asking, and the
+  // brain stops answering timezone questions from the Mac's point of view.
+  const location = new LocationMonitor(client, link);
+  void location.start();
+  setPanel('p-status', audio.isOpen ? 'listening' : 'mic off');
+  setPanel('p-mic', audio.isOpen ? 'streaming' : 'off');
 
   async function teardown(): Promise<void> {
     await audio.stop();
