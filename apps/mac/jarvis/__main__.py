@@ -167,7 +167,7 @@ async def main() -> None:
         else:
             store = NotificationStore()
         channel = NotificationChannel(store, triage=replier, deliver=sessions.notify,
-                                     status=status)
+                                     status=status, poll_interval_s=1.0)
         notif_task = asyncio.get_running_loop().create_task(channel.run())
 
     await transport.start()

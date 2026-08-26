@@ -29,6 +29,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..core.interfaces import ReplyEngine
+from .cards import (
+    Card,
+    DeliveryPolicy,
+    Urgency,
+    corroborates_urgency,
+    humanize_app,
+    is_systemish,
+    looks_like_echo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -115,19 +124,25 @@ class NotificationStore:
 
 
 TRIAGE_PROMPT = (
-    "Triage this notification for a heads-up display. Reply with EXACTLY one "
-    "line: URGENT, NOTIFY, or IGNORE, then ' — ', then a summary under 12 "
-    "words. URGENT = needs attention now (person waiting, deadline, alarm). "
-    "NOTIFY = worth a glance. IGNORE = promotional, routine, or noise.\n\n"
+    "Triage one notification for smart-glasses. Answer with EXACTLY one "
+    "line: LEVEL — summary.\n"
+    "LEVEL is URGENT, NOTIFY, or IGNORE.\n"
+    "URGENT is RARE: a person is waiting on a reply right now, a deadline "
+    "or alarm is firing, or something is wrong. Almost nothing else.\n"
+    "NOTIFY: worth a glance when convenient (most messages, most alerts).\n"
+    "IGNORE: promotional, automated, or noise.\n"
+    "Never mark a battery, sync, update, or widget notification URGENT.\n"
+    "The summary is under 10 words, plain, no app name, no quotes.\n\n"
     "App: {app}\nTitle: {title}\nSubtitle: {subtitle}\nBody: {body}"
 )
 
 
-def parse_triage(reply: str) -> tuple[str, str] | None:
+def parse_triage(reply: str) -> tuple[Urgency, str] | None:
     head = reply.strip().splitlines()[0] if reply.strip() else ""
-    for level in ("URGENT", "NOTIFY", "IGNORE"):
-        if head.upper().startswith(level):
-            summary = head[len(level):].lstrip(" —-–:").strip()
+    for name, level in (("URGENT", Urgency.URGENT), ("NOTIFY", Urgency.NOTIFY),
+                        ("IGNORE", Urgency.IGNORE)):
+        if head.upper().startswith(name):
+            summary = head[len(name):].lstrip(" —-–:").strip()
             return level, summary
     return None
 
@@ -149,12 +164,14 @@ class NotificationChannel:
         deliver: Callable[[str], None],
         poll_interval_s: float = 2.0,
         status: object | None = None,
+        policy: DeliveryPolicy | None = None,
     ) -> None:
         self._store = store
         self._triage = triage
         self._deliver = deliver
         self._interval = poll_interval_s
         self._status = status
+        self._policy = policy or DeliveryPolicy()
         self._running = False
 
     async def run(self) -> None:
@@ -184,28 +201,51 @@ class NotificationChannel:
     def stop(self) -> None:
         self._running = False
 
+    # A message this short IS its own summary. The model is still asked to
+    # CLASSIFY it (so promotional noise is still filtered), but its wording
+    # is not used: asked to compress "ok see you at 7", a small model
+    # invents. Only longer content earns a model-written summary.
+    VERBATIM_CHARS = 70
+
     async def _handle(self, n: Notification) -> None:
-        level, summary = "NOTIFY", (n.title or n.subtitle or n.body)[:60]
+        raw = (n.body or n.subtitle or n.title).strip()
+        level, summary = Urgency.NOTIFY, raw[:120]
+        short = len(raw) <= self.VERBATIM_CHARS
         if self._triage is not None:
             reply = await self._triage.reply(TRIAGE_PROMPT.format(
                 app=n.app, title=n.title, subtitle=n.subtitle, body=n.body,
             ))
             parsed = parse_triage(reply or "")
             if parsed is not None:
-                level, summary = parsed
+                level = parsed[0]
+                # Trust the model's WORDS only for long content it actually
+                # needed to compress, and never when it echoed the prompt.
+                if not short and not looks_like_echo(parsed[1]) and parsed[1]:
+                    summary = parsed[1]
             # Unparseable triage falls back to NOTIFY with the raw title —
             # a flaky judge must never silently hide notifications.
-        app_short = n.app.rsplit(".", 1)[-1] or "app"
-        if level == "IGNORE":
-            log.info("notification ignored: [%s] %s", app_short, summary)
+
+        channel = humanize_app(n.app)
+        # For a person-to-person channel the TITLE is the sender, which is
+        # what the wearer needs to see; for app alerts the app name is.
+        source = n.title if channel in ("Messages", "Mail", "Slack", "Discord") else channel
+        if level is Urgency.URGENT:
+            # Urgency must be corroborated by the text itself, not asserted
+            # by a 3B model that marked routine texts URGENT in testing.
+            if is_systemish(n.app, n.title) or not corroborates_urgency(raw):
+                level = Urgency.NOTIFY
+        if not summary.strip():
+            summary = n.body or n.title
+
+        card = self._policy.admit(Card(source=source, channel=channel,
+                                       summary=summary, urgency=level))
+        if card is None:
+            log.info("card suppressed (%s): [%s] %s", level.name, channel, summary)
             return
-        prefix = "!! " if level == "URGENT" else ""
-        card = f"{prefix}[{app_short}] {summary}"
-        # Deliveries were previously silent in the log — the only pipeline
-        # stage with no trace, which made "did a card fire?" unanswerable.
+        rendered = card.render()
         log.info("card delivered (%.1fs after delivery): %s",
-                 time.time() - n.delivered_unix, card)
+                 time.time() - n.delivered_unix, rendered.replace("\n", " / "))
         if self._status is not None:
-            self._status.set(last_card=card)  # type: ignore[attr-defined]
+            self._status.set(last_card=rendered)  # type: ignore[attr-defined]
             self._status.bump("cards")  # type: ignore[attr-defined]
-        self._deliver(card)
+        self._deliver(rendered)
