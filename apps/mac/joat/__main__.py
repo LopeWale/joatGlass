@@ -21,6 +21,7 @@ from .agents.grounding import (
     Grounding,
     device_facts,
     local_clock,
+    location_facts,
     static_fact,
 )
 from .agents.tools import ToolBelt
@@ -36,7 +37,7 @@ from .channels.imessage import IMessageStore
 from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
-from .core.protocol import Device, Hello
+from .core.protocol import Device, Hello, InputEvent
 from .services.hud import HudWriter
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
@@ -119,13 +120,13 @@ async def main() -> None:
         # Facts the model cannot know, refreshed per reply. Without this it
         # confabulates them — it answered "2:47 PM" at 4:44 PM.
         grounding = Grounding(
-            sources=[local_clock(), device_facts(transport)],
+            sources=[local_clock(), device_facts(transport),
+                     location_facts(transport)],
             # Named explicitly, not merely absent: a small model asked to
             # infer "it is not listed, so I should decline" does not — it
-            # invents. Weather and messages are NOT here — they have tools
-            # now, and the assistant's job is to go get them, not disclaim.
+            # invents. Weather, messages and location have sources now —
+            # the assistant's job is to go get them, not disclaim.
             unknowns=[
-                "the wearer's location",
                 "their calendar or schedule",
             ],
         )
@@ -134,7 +135,11 @@ async def main() -> None:
         # The belt: what the model can GO GET instead of declining. The
         # wearer's ruling — an assistant that stops at "I don't know" is as
         # fired as one that invents the answer.
-        belt_tools = [weather_tool(), notifications_tool(card_log)]
+        def wearer_coords() -> tuple[float, float] | None:
+            loc = transport.location
+            return (loc.latitude, loc.longitude) if loc is not None else None
+
+        belt_tools = [weather_tool(wearer_coords), notifications_tool(card_log)]
         tools_store = IMessageStore()
         if tools_store.available:
             belt_tools.append(messages_tool(tools_store))
@@ -189,7 +194,14 @@ async def main() -> None:
     )
     orchestrator.attach()
 
+    # The wearer's name from the host account (getUserInfo -> hello), unless
+    # the CLI already set one. Grounded once — greet fires on every reconnect.
+    named = {"done": bool(args.wearer_name)}
+
     def greet(hello: Hello) -> None:
+        if hello.user_name and not named["done"] and replier is not None:
+            grounding.add(static_fact(f"The wearer's name is {hello.user_name}"))
+            named["done"] = True
         status.set(glasses="connected", device=f"{hello.model} / {hello.sn}", mic="streaming")
         asyncio.get_running_loop().create_task(orchestrator.on_connect())
 
@@ -210,6 +222,16 @@ async def main() -> None:
 
     transport.on_disconnect(farewell)
     transport.on_device(on_device)
+
+    def on_input(event: InputEvent) -> None:
+        # Glasses-OS contextual menu / long-press: "repeat last reply".
+        # Deterministic by design — a reflex, not a model decision.
+        if event.container_name == "sysmenu" and event.selected_index == 1:
+            last = status.get("last_reply")
+            asyncio.get_running_loop().create_task(
+                hud.show(last if last else "Nothing to repeat yet."))
+
+    transport.on_input(on_input)
 
     notif_task: asyncio.Task[None] | None = None
     if not args.no_notifications:

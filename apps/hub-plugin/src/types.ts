@@ -38,19 +38,21 @@ export type ResumePolicy = 'auto' | 'mac' | 'confirm';
 
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
-  | { kind: 'hello'; sn: string; model: string; launchSource: string }
-  | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[] }
+  | { kind: 'hello'; sn: string; model: string; launchSource: string; userName?: string }
+  | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string }
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
   | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string }
   | { kind: 'confirm'; actionId: string; accepted: boolean }
   | { kind: 'policy'; resume: ResumePolicy }
+  /** Wearer position via bridge.getAppLocation — the sideload-safe API. */
+  | { kind: 'location'; latitude: number; longitude: number; accuracy?: number }
   /** Confirms a freshly issued pairing token was PERSISTED (not merely received). */
   | { kind: 'pairing'; token: string };
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
-  | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean }
+  | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image' }
   | { kind: 'hud.list'; items: string[] }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }

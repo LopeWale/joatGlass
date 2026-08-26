@@ -50,6 +50,12 @@ class StatusPublisher:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self.flush()
 
+    def get(self, key: str, default: str = "") -> str:
+        """Read one snapshot field (the sysmenu 'repeat' action needs
+        last_reply back)."""
+        value = self._state.get(key, default)
+        return value if isinstance(value, str) else default
+
     def set(self, **fields: Any) -> None:
         self._state.update(fields)
         self.flush()

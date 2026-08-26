@@ -25,6 +25,7 @@ from joat.core.protocol import (
     HudText,
     Imu,
     ImuTrace,
+    Location,
     PairingAck,
     PairingSet,
     Input,
@@ -190,3 +191,38 @@ class TestHudTextAppend:
         assert "append" not in HudText(text="x").to_wire()
         wire = HudText(text="x", append=True).to_wire()
         assert wire["append"] is True and wire["kind"] == "hud.text"
+
+
+class TestLocationAndIdentity:
+    """New wire shapes for audit findings 12/15/16/21 — mirrored in types.ts."""
+
+    def test_location_parses(self) -> None:
+        msg = parse_uplink({"kind": "location", "latitude": 35.2, "longitude": -97.4,
+                            "accuracy": 12.5})
+        assert isinstance(msg, Location)
+        assert (msg.latitude, msg.longitude, msg.accuracy) == (35.2, -97.4, 12.5)
+
+    def test_location_accuracy_is_optional(self) -> None:
+        msg = parse_uplink({"kind": "location", "latitude": 1.0, "longitude": 2.0})
+        assert isinstance(msg, Location)
+        assert msg.accuracy is None
+
+    def test_hello_user_name_is_optional(self) -> None:
+        msg = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",
+                            "launchSource": "x", "userName": "Emmanuel"})
+        assert isinstance(msg, Hello)
+        assert msg.user_name == "Emmanuel"
+        bare = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",
+                             "launchSource": "x"})
+        assert isinstance(bare, Hello)
+        assert bare.user_name == ""
+
+    def test_audio_speaker_is_optional(self) -> None:
+        msg = parse_uplink({"kind": "audio", "source": "glasses", "seq": 1,
+                            "pcm": [], "speaker": "other"})
+        assert isinstance(msg, Audio)
+        assert msg.speaker == "other"
+
+    def test_hud_text_color_rides_the_wire_only_when_set(self) -> None:
+        assert "textColor" not in HudText(text="x").to_wire()
+        assert HudText(text="x", text_color=4).to_wire()["textColor"] == 4

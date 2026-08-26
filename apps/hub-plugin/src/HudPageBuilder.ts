@@ -4,6 +4,8 @@ import {
   TextContainerProperty,
   ListContainerProperty,
   ListItemContainerProperty,
+  MenuContainerProperty,
+  MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
 import { CANVAS, ContainerId } from './types';
 
@@ -103,11 +105,32 @@ export class HudPageBuilder {
     ];
   }
 
+  /**
+   * The glasses-OS contextual menu (long-press): stable ids the wearer can
+   * reach from ANY screen without costing the display. Attached to EVERY
+   * layout deliberately — a rebuild without menuObject CLEARS the menu, so
+   * closing settings would silently delete it (SDK d.ts on rebuild).
+   */
+  static readonly MENU_REPEAT = 1;
+  static readonly MENU_MUTE = 2;
+  static readonly MENU_REDIAL = 3;
+
+  private systemMenu(): MenuContainerProperty {
+    return new MenuContainerProperty({
+      menuItems: [
+        new MenuItemProperty({ itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' }),
+        new MenuItemProperty({ itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' }),
+        new MenuItemProperty({ itemID: HudPageBuilder.MENU_REDIAL, itemName: 'Reconnect brain' }),
+      ],
+    });
+  }
+
   /** Status bar + main text. The default for voice → HUD replies. */
   startup(): CreateStartUpPageContainer {
     return new CreateStartUpPageContainer({
       containerTotalNum: 5,
       textObject: this.dashboard(),
+      menuObject: this.systemMenu(),
     });
   }
 
@@ -116,6 +139,7 @@ export class HudPageBuilder {
     return new RebuildPageContainer({
       containerTotalNum: 5,
       textObject: this.dashboard(),
+      menuObject: this.systemMenu(),
     });
   }
 
@@ -124,6 +148,7 @@ export class HudPageBuilder {
     const capped = items.slice(0, 20).map((s) => s.slice(0, 64));
     return new RebuildPageContainer({
       containerTotalNum: 3,
+      menuObject: this.systemMenu(),
       // Capture moves OFF main and ONTO the list — see main()'s note.
       textObject: [this.statusBar(), this.main(48, 0)],
       listObject: [

@@ -2,13 +2,17 @@
   "package_id": "com.akinwale.joat",
   "edition": "202601",
   "name": "JOAT",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "min_sdk_version": "0.0.14",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "g2-microphone",
       "desc": "Voice input from the glasses mic array, streamed to the wearer's own Mac for transcription."
+    },
+    {
+      "name": "phone-microphone",
+      "desc": "Fallback voice input from the phone mic when the glasses mic is unavailable."
     },
     {
       "name": "network",
@@ -23,6 +27,10 @@
         "ws://192.168.12.200:8787",
         "wss://192.168.12.200:8787"
       ]
+    },
+    {
+      "name": "location",
+      "desc": "Your position, sent only to your own Mac, so weather and time zones are right where you are."
     }
   ],
   "supported_languages": [

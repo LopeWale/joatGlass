@@ -58,7 +58,15 @@ export class EventRouter {
 
   private dispatch(event: EvenHubEvent): void {
     if (event.audioEvent) {
-      this.audio.ingest(event.audioEvent.audioPcm);
+      this.audio.ingest(event.audioEvent.audioPcm, event.audioEvent.speakerRole);
+    }
+
+    // Contextual-menu clicks (SDK 0.0.14). Without this branch a declared
+    // menu renders but every selection vanishes silently — the event has
+    // its own field and matches none of the other branches.
+    if (event.menuItemClickEvent) {
+      this.handleMenu(event.menuItemClickEvent.itemID ?? 0);
+      return;
     }
 
     if (event.sysEvent) {
@@ -135,6 +143,17 @@ export class EventRouter {
       return;
     }
 
+    if (type === OsEventTypeList.LONG_PRESS_EVENT) {
+      // Long-press = "repeat that" — the most-wanted mid-walk action gets
+      // the cheapest gesture. Release (10) is deliberately ignored.
+      this.link.send({ kind: 'input', event: { containerName: 'sysmenu',
+        selectedIndex: 1, eventType: type, eventSource: source } });
+      return;
+    }
+    if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
+      return;
+    }
+
     if (type === OsEventTypeList.CLICK_EVENT) {
       // Deliberate taps are clean confirm signals — no nod heuristics needed.
       // Right temple matters most: a wearer with no R1 ring has no other
@@ -149,5 +168,26 @@ export class EventRouter {
 
     // Relayed after local handling — the Mac may want the raw input too.
     this.link.send({ kind: 'input', event: { eventType: type, eventSource: source } });
+  }
+
+  private handleMenu(itemID: number): void {
+    switch (itemID) {
+      case 1: // Repeat last reply — the Mac holds it
+        this.link.send({ kind: 'input', event: { containerName: 'sysmenu', selectedIndex: 1 } });
+        return;
+      case 2: // Mute/unmute is LOCAL: a privacy control must not need the Mac
+        if (this.audio.isOpen) {
+          void this.audio.stop();
+        } else {
+          void this.audio.start(this.audio.lastSource);
+        }
+        return;
+      case 3: // Re-dial the brain
+        this.link.connect();
+        return;
+      default:
+        // Future firmware items: relay so the Mac can learn about them.
+        this.link.send({ kind: 'input', event: { containerName: 'sysmenu', selectedIndex: itemID } });
+    }
   }
 }

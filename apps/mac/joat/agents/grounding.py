@@ -105,6 +105,25 @@ def device_facts(transport: Any) -> FactSource:
     return source
 
 
+def location_facts(transport: Any) -> FactSource:
+    """Whether the wearer's position is known — stated either way.
+
+    The coordinates themselves stay OUT of the prompt (a model reciting raw
+    lat/lon at the wearer is noise); what the model needs to know is that
+    get_weather works without asking for a city.
+    """
+
+    def source() -> str:
+        loc = getattr(transport, "location", None)
+        if loc is None:
+            return ("Wearer location: unknown (phone has not reported it — "
+                    "ask for a city if one is needed)")
+        return ("Wearer location: known. get_weather with no location uses "
+                "it automatically.")
+
+    return source
+
+
 def static_fact(text: str) -> FactSource:
     """A fact that does not change during a session (e.g. the wearer's name)."""
     return lambda: text

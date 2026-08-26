@@ -66,7 +66,10 @@ class SessionManager:
     async def _show_card(self, card: str) -> None:
         if self._card_log is not None:
             self._card_log.add(card)
-        await self._hud.show(card)
+        # Urgency gets BRIGHTNESS now, not merely punctuation: firmware
+        # textColor 4 for "!!" cards, a shade dimmer for routine ones.
+        urgent = card.startswith("!!")
+        await self._hud.show_with_brightness(card, 4 if urgent else 3)
 
     def _drain_cards(self) -> None:
         if not self._pending_cards:

@@ -74,6 +74,9 @@ class Hello:
     sn: str
     model: str
     launch_source: str
+    user_name: str = ""
+    """From the host's getUserInfo — grounds the wearer's name without
+    configuration. Optional: older hosts omit it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,10 @@ class Audio:
     source: AudioSource
     seq: int
     pcm: list[int]
+    speaker: str | None = None
+    """SDK 0.0.14 speaker attribution: self / other / unknown. Logged for
+    calibration now; a future gate keeps non-wearer speech out of STT,
+    which STRENGTHENS the explicit-invocation rule."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +151,17 @@ class Policy:
 
 
 @dataclass(frozen=True, slots=True)
+class Location:
+    """Wearer position from the phone (bridge.getAppLocation — the
+    sideload-safe API). Powers weather-without-asking and, later, timezone
+    correctness when the wearer travels."""
+
+    latitude: float
+    longitude: float
+    accuracy: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PairingAck:
     """Plugin confirms it PERSISTED a freshly issued token.
 
@@ -156,7 +174,9 @@ class PairingAck:
     token: str
 
 
-UplinkMessage = Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
+UplinkMessage = (
+    Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck | Location
+)
 
 
 # ── Downlink: Mac → plugin ───────────────────────────────────────────────────
@@ -171,6 +191,9 @@ class HudText:
     append: bool = False
     """append=True streams onto the container (debate turns, token streams);
     False repaints it. Mirrors types.ts hud.text."""
+    text_color: int | None = None
+    """Firmware brightness 0-4 per paint (SDK 0.0.14) — urgency can be
+    BRIGHT now, not merely punctuated."""
 
     def to_wire(self) -> dict[str, Any]:
         msg: dict[str, Any] = {
@@ -184,6 +207,8 @@ class HudText:
             msg["length"] = self.length
         if self.append:
             msg["append"] = True
+        if self.text_color is not None:
+            msg["textColor"] = self.text_color
         return msg
 
 
@@ -322,6 +347,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 sn=_require(payload, "sn", kind),
                 model=_require(payload, "model", kind),
                 launch_source=payload.get("launchSource", "unknown"),
+                user_name=str(payload.get("userName", "")),
             )
         case "audio":
             # Coerce samples HERE so one malformed value is a ProtocolError
@@ -331,10 +357,12 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 pcm = [int(v) for v in _require(payload, "pcm", kind)]
             except (TypeError, ValueError) as exc:
                 raise ProtocolError(f"audio pcm contains a non-numeric sample: {exc}") from exc
+            speaker = payload.get("speaker")
             return Audio(
                 source=payload.get("source", "glasses"),
                 seq=int(_require(payload, "seq", kind)),
                 pcm=pcm,
+                speaker=str(speaker) if speaker is not None else None,
             )
         case "imu":
             return Imu(
@@ -357,6 +385,13 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             )
         case "pairing":
             return PairingAck(token=str(_require(payload, "token", kind)))
+        case "location":
+            acc = payload.get("accuracy")
+            return Location(
+                latitude=float(_require(payload, "latitude", kind)),
+                longitude=float(_require(payload, "longitude", kind)),
+                accuracy=float(acc) if acc is not None else None,
+            )
         case "device":
             return Device(
                 connect=payload.get("connect", "none"),

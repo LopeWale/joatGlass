@@ -27,6 +27,12 @@ class HudWriter:
         """Replace the container's content."""
         await self._transport.send(HudText(text=text, container_id=container))
 
+    async def show_with_brightness(self, text: str, level: int,
+                                   container: ContainerId = ContainerId.MAIN) -> None:
+        """Replace content at an explicit firmware brightness (0-4)."""
+        await self._transport.send(
+            HudText(text=text, container_id=container, text_color=level))
+
     async def context(self, text: str) -> None:
         """What the wearer last said (docs/HUD_DASHBOARD.md).
 
