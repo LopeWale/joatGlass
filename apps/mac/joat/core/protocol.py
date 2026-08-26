@@ -29,6 +29,12 @@ class ContainerId(IntEnum):
     MAIN = 2
     LIST = 3
     IMAGE = 4
+    # Dashboard regions (docs/HUD_DASHBOARD.md): each has ONE owner, so
+    # content stops colliding — the reply no longer erases the wearer's
+    # words, and a card no longer erases the reply.
+    CONTEXT = 5   # what the wearer last said
+    TRAY = 6      # what is waiting (queued cards, counts)
+    HINT = 7      # gesture hints, plugin-owned
 
 
 class EventSource(IntEnum):

@@ -55,19 +55,67 @@ export class HudPageBuilder {
     });
   }
 
-  /** Status bar + main text. The default for voice → HUD replies. */
-  startup(): CreateStartUpPageContainer {
-    return new CreateStartUpPageContainer({
-      containerTotalNum: 2,
-      textObject: [this.statusBar(), this.main(CANVAS.height - 32)],
+  /**
+   * A dashboard region: one owner, one purpose (docs/HUD_DASHBOARD.md).
+   * `textColor` is firmware brightness 0-4 — chrome dim, content bright, so
+   * hierarchy survives on transparent glass where color cannot carry it.
+   */
+  private region(
+    id: ContainerId, name: string, y: number, height: number,
+    z: number, textColor: number,
+  ): TextContainerProperty {
+    return new TextContainerProperty({
+      containerID: id,
+      containerName: name,
+      xPosition: 0,
+      yPosition: y,
+      width: CANVAS.width,
+      height,
+      paddingLength: 8,
+      borderWidth: 0,
+      isEventCapture: 0,
+      zOrderIndex: z,
+      textColor,
+      content: '',
     });
   }
 
-  /** Same two text containers, for rebuildPageContainer. */
+  /**
+   * The dashboard: five regions, each with a single owner, so content stops
+   * colliding. Before this everything shared MAIN — a reply erased the
+   * wearer's own words 200ms after showing them, and a notification card
+   * erased the reply. Regions also let the PLUGIN paint chrome (status,
+   * hints) with no Mac attached, instead of a frozen screen.
+   *
+   *   0   status  32   plugin: clock, link, mic, battery
+   *   32  main   128   Mac: reply / card / debate  <-- capture
+   *   160 context 64   Mac: what the wearer last said
+   *   224 tray    32   Mac: what is waiting
+   *   256 hint    32   plugin: gesture hints, blank at rest
+   */
+  private dashboard(): TextContainerProperty[] {
+    return [
+      this.statusBar(),
+      this.main(128),
+      this.region(ContainerId.Context, 'context', 160, 64, 3, 3),
+      this.region(ContainerId.Tray, 'tray', 224, 32, 4, 2),
+      this.region(ContainerId.Hint, 'hint', 256, 32, 5, 1),
+    ];
+  }
+
+  /** Status bar + main text. The default for voice → HUD replies. */
+  startup(): CreateStartUpPageContainer {
+    return new CreateStartUpPageContainer({
+      containerTotalNum: 5,
+      textObject: this.dashboard(),
+    });
+  }
+
+  /** The same five regions, for rebuildPageContainer. */
   defaultLayout(): RebuildPageContainer {
     return new RebuildPageContainer({
-      containerTotalNum: 2,
-      textObject: [this.statusBar(), this.main(CANVAS.height - 32)],
+      containerTotalNum: 5,
+      textObject: this.dashboard(),
     });
   }
 

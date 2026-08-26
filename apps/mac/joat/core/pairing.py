@@ -48,6 +48,17 @@ class PairingStore:
 
     @property
     def token(self) -> str | None:
+        """The current token, RE-CHECKED against the file each read.
+
+        Caching this in memory made the documented recovery ("delete
+        pairing.json, reconnect") do nothing — the engine kept enforcing a
+        token no phone had, and the wearer stayed locked out until a
+        restart they were never told to do. A stat per connection attempt
+        is nothing next to that.
+        """
+        if self._token is not None and not self._path.exists():
+            log.info("pairing store removed — re-opening the pairing window")
+            self._token = None
         return self._token
 
     @staticmethod

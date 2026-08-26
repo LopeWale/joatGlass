@@ -101,3 +101,23 @@ class TestTokenRedaction:
         rec = self._record("< %s %s", "GET", "/glasses")
         _RedactToken().filter(rec)
         assert rec.getMessage() == "< GET /glasses"
+
+
+class TestRecovery:
+    """The documented recovery must work WITHOUT restarting the engine."""
+
+    def test_deleting_the_file_reopens_the_window(self, tmp_path: Path) -> None:
+        path = tmp_path / "pairing.json"
+        store = PairingStore(path)
+        store.confirm(PairingStore.mint())
+        assert store.token is not None
+        path.unlink()
+        assert store.token is None  # not a stale in-memory copy
+
+    def test_a_present_file_still_enforces_its_token(self, tmp_path: Path) -> None:
+        path = tmp_path / "pairing.json"
+        store = PairingStore(path)
+        token = PairingStore.mint()
+        store.confirm(token)
+        assert store.token == token
+        assert store.token == token  # repeated reads stay stable

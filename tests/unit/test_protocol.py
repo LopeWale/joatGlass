@@ -160,6 +160,13 @@ class TestDownlinkWire:
         with pytest.raises(ProtocolError):
             parse_uplink({"kind": "pairing"})
 
+    def test_dashboard_container_ids_are_pinned(self) -> None:
+        # Mirrored in types.ts — a drifted value silently paints the wrong
+        # region on the glasses.
+        assert ContainerId.CONTEXT == 5
+        assert ContainerId.TRAY == 6
+        assert ContainerId.HINT == 7
+
     def test_pairing_set_wire_shape(self) -> None:
         # The plugin's dispatch switches on this exact shape; a drifted key
         # silently strands the phone unpaired.
