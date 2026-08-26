@@ -138,16 +138,18 @@ final class EngineController: ObservableObject {
 
     /// Exactly one engine may exist. An app relaunch (or a crashed shell)
     /// can leave an orphan holding port 8787 — the new engine would then
-    /// crash-loop on bind. Reap by exact command match before starting.
+    /// crash-loop on bind. Reap by PORT OWNERSHIP: the kernel reports the
+    /// engine's argv with the resolved interpreter path (not .venv/...), so
+    /// command-pattern matching is unreliable; holding the port is not.
     private func reapStaleEngines() {
         let reap = Process()
-        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        reap.arguments = ["-f", "[.]venv/bin/python -u -m jarvis"]
+        reap.executableURL = URL(fileURLWithPath: "/bin/sh")
+        reap.arguments = ["-c",
+            "PIDS=$(lsof -ti tcp:8787 -sTCP:LISTEN); "
+            + "[ -n \"$PIDS\" ] && kill $PIDS && sleep 1; "
+            + "pkill -f -- '[-]u -m jarvis$' && sleep 1; true"]
         try? reap.run()
         reap.waitUntilExit()
-        if reap.terminationStatus == 0 {  // something was reaped; let the port free
-            Thread.sleep(forTimeInterval: 1.0)
-        }
     }
 
     // MARK: conveniences
