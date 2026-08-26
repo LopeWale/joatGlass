@@ -81,6 +81,7 @@ final class EngineController: ObservableObject {
             return
         }
         userStopped = false
+        reapStaleEngines()
 
         try? FileManager.default.createDirectory(
             at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -132,6 +133,20 @@ final class EngineController: ObservableObject {
         recentCrashes.removeAll { $0 < Date().addingTimeInterval(-300) }
         if recentCrashes.count <= 5 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.start() }
+        }
+    }
+
+    /// Exactly one engine may exist. An app relaunch (or a crashed shell)
+    /// can leave an orphan holding port 8787 — the new engine would then
+    /// crash-loop on bind. Reap by exact command match before starting.
+    private func reapStaleEngines() {
+        let reap = Process()
+        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        reap.arguments = ["-f", "[.]venv/bin/python -u -m jarvis"]
+        try? reap.run()
+        reap.waitUntilExit()
+        if reap.terminationStatus == 0 {  // something was reaped; let the port free
+            Thread.sleep(forTimeInterval: 1.0)
         }
     }
 
