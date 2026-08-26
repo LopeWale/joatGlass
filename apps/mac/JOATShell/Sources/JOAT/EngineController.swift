@@ -156,7 +156,7 @@ final class EngineController: ObservableObject {
 
         let p = Process()
         p.executableURL = repo.appendingPathComponent(".venv/bin/python")
-        p.arguments = ["-u", "-m", "jarvis", "--port", String(Self.enginePort)]
+        p.arguments = ["-u", "-m", "joat", "--port", String(Self.enginePort)]
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
         // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
@@ -235,7 +235,7 @@ final class EngineController: ObservableObject {
             + "rm -f \"$HOME/Library/LaunchAgents/com.joat.brain.plist\"; "
             + "PIDS=$(lsof -ti tcp:\(Self.enginePort) -sTCP:LISTEN); "
             + "[ -n \"$PIDS\" ] && kill $PIDS && sleep 1; "
-            + "pkill -f -- '[-]u -m jarvis' && sleep 1; true"]
+            + "pkill -f -- '[-]u -m joat' && sleep 1; true"]
         try? reap.run()
         reap.waitUntilExit()
     }

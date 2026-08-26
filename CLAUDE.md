@@ -1,13 +1,13 @@
-# CLAUDE.md — J.A.R.V.I.S. // Even Realities G2
+# CLAUDE.md — JOAT // Even Realities G2
 
-Personal AI assistant for the Even Realities G2 smart glasses: a Mac Studio brain,
+JOAT — personal AI assistant for the Even Realities G2 smart glasses: a Mac Studio brain,
 an iPhone relay, voice in and HUD out. See [README.md](README.md) for the system diagram.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `apps/mac/jarvis/` | Python package — the brain (core, ble, audio, display, agents, verifier, channels, computeruse, services) |
+| `apps/mac/joat/` | Python package — the brain (core, ble, audio, display, agents, verifier, channels, computeruse, services) |
 | `apps/ios-companion/` | Phase 5: Swift background-BLE companion |
 | `apps/hub-plugin/` | Even Hub SDK plugin (TypeScript + Vite) |
 | `config/` | App config, schemas, allowlists |
@@ -21,13 +21,13 @@ Phase 0. Two real packages, each with a wired test command:
 
 - **Hub plugin** (`apps/hub-plugin`, Vite + TS): `npm run build`
   (typecheck + bundle) and `npm test` (vitest), run from that directory.
-- **Mac brain** (`apps/mac/jarvis`, Python ≥3.12): from the repo root,
+- **Mac brain** (`apps/mac/joat`, Python ≥3.12): from the repo root,
   `.venv/bin/python -m pytest` and `.venv/bin/python -m mypy` (strict —
   keep it green, RULES.md #3). Setup: `python3 -m venv .venv &&
   .venv/bin/pip install -e ".[dev]"`.
 
 The wire protocol lives twice by design: `apps/hub-plugin/src/types.ts` and
-`apps/mac/jarvis/core/protocol.py` must change in the same commit
+`apps/mac/joat/core/protocol.py` must change in the same commit
 (`tests/unit/test_protocol.py` pins the wire shapes).
 
 ## Key constraints

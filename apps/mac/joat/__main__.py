@@ -1,4 +1,4 @@
-"""Run the Phase-0 brain:  python -m jarvis
+"""Run the Phase-0 brain:  python -m joat
 
 Stands up the Hub gateway, wires the voice loop, and echoes transcripts to
 the HUD. With no whisperkit-cli installed it still runs — the wearer just
@@ -31,11 +31,11 @@ from .verifier.fetcher import fetch_page_text, wayback_page_text
 from .verifier.nli import MiniCheckJudge, minicheck_available
 from .verifier.gate import VerifierGate
 
-log = logging.getLogger("jarvis")
+log = logging.getLogger("joat")
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(prog="jarvis", description=__doc__)
+    parser = argparse.ArgumentParser(prog="joat", description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stt-binary", default="whisperkit-cli")
@@ -44,12 +44,12 @@ async def main() -> None:
                         help="serve = resident model (~1s/utterance); batch = CLI per utterance (~7s)")
     parser.add_argument("--stt-port", type=int, default=50060)
     parser.add_argument("--stt-prompt",
-                        default="JOAT. Jarvis. The wearer addresses the "
-                                "assistant as JOAT or Jarvis.",
+                        default="JOAT. The wearer addresses the "
+                                "assistant as JOAT.",
                         help="vocabulary bias so STT spells the wake word right")
     parser.add_argument("--llm-model", default=DEFAULT_MODEL)
     parser.add_argument("--always-answer", action="store_true",
-                        help="answer ALL speech (dev only) instead of requiring 'Jarvis/JOAT ...'")
+                        help="answer ALL speech (dev only) instead of requiring 'JOAT ...'")
     parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
     parser.add_argument("--no-notifications", action="store_true",
                         help="disable the Notification Center channel")
@@ -126,13 +126,12 @@ async def main() -> None:
 
     status.set(debate="ready" if (propose_agent and critic_agent) else "unavailable")
     sessions = SessionManager(hud, make_debate)
-    # Wake words plus mishearings observed LIVE from whisper on short
-    # utterances — a one-word utterance gives the model no context, so
-    # "Jarvis" comes back as "Jeves"/"Javis" and "JOAT" as "Jokes"/"Jote".
-    # Rejecting those made the assistant look deaf to its own name.
+    # The assistant's name is JOAT — plus mishearings observed LIVE from
+    # whisper on short utterances: a one-word utterance gives the model no
+    # context, so "JOAT" comes back as "Jokes"/"Jote"/"Jolt". Rejecting
+    # those made the assistant look deaf to its own name.
     wake_words = None if args.always_answer else (
-        "hey jarvis", "hey joat",
-        "jarvis", "jeeves", "jeves", "javis", "jarvus",
+        "hey joat",
         "joat", "jote", "jolt", "jokes", "jot",
     )
     orchestrator = VoiceOrchestrator(

@@ -14,9 +14,9 @@ import json
 import pytest
 import websockets
 
-from jarvis.ble.hub_gateway import HubGatewayTransport
-from jarvis.core.pairing import PairingStore
-from jarvis.core.protocol import (
+from joat.ble.hub_gateway import HubGatewayTransport
+from joat.core.pairing import PairingStore
+from joat.core.protocol import (
     Device,
     EventSource,
     EventType,

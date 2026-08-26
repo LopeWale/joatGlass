@@ -15,7 +15,7 @@ a non-whitelisted machine.
 
 ## 2. Stand up the Mac side of the link — DONE
 
-`jarvis/ble/hub_gateway.py` implements `GlassesTransport`; `jarvis/core/protocol.py`
+`joat/ble/hub_gateway.py` implements `GlassesTransport`; `joat/core/protocol.py`
 mirrors `types.ts` (drift pinned by `tests/unit/test_protocol.py`). Round-trip proven
 live against the simulator over the tailnet, including HUD text rendered from Python.
 
@@ -26,7 +26,7 @@ right-temple-only input, double-click = system exit).
 
 ## 4. Wire STT + MLX reply — STT HALF DONE
 
-`python -m jarvis` runs the voice loop: mic → RmsVad → WhisperKitEngine → transcript
+`python -m joat` runs the voice loop: mic → RmsVad → WhisperKitEngine → transcript
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
 Phase 0 CLOSED (metric met at ~2.2 s). Phase 2 in progress: debate loop with
 visible verifier turns and repair, wake-word address gate, and the DebateLoop

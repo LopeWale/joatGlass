@@ -25,7 +25,7 @@ IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null |
 
 # The plugin renders without the engine, but voice/cards need it: warn, don't block.
 if ! lsof -nP -iTCP:8787 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "WARNING: nothing listening on :8787 — start JOAT.app (or .venv/bin/python -m jarvis)"
+  echo "WARNING: nothing listening on :8787 — start JOAT.app (or .venv/bin/python -m joat)"
   echo "         The HUD page will render, but voice and cards will be dead."
 fi
 [ -f "$PLUGIN/.env" ] || \

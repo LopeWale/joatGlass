@@ -60,7 +60,7 @@ class RmsVad:
     """Batches of audio kept BEFORE the trigger fires and prepended to the
     utterance. Without it the debounce silently ate the first 200ms+ of
     every utterance — which is exactly where the wake word is. Measured:
-    'Jarvis, are you there?' transcribed as 'Are you there?', and 'JOAT'
+    'JOAT, are you there?' transcribed as 'Are you there?', and 'JOAT'
     as 'Jode'. Speech also ramps up, so its first syllable often sits just
     under the trigger; pre-roll recovers that too."""
 

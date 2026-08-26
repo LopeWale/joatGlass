@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from jarvis.core.interfaces import GlassesTransport, ReplyEngine
-from jarvis.core.protocol import ContainerId, DownlinkMessage, HudText
-from jarvis.services.hud import HudWriter
-from jarvis.services.session import DebateSession, Session, SessionManager
+from joat.core.interfaces import GlassesTransport, ReplyEngine
+from joat.core.protocol import ContainerId, DownlinkMessage, HudText
+from joat.services.hud import HudWriter
+from joat.services.session import DebateSession, Session, SessionManager
 
 
 class SinkTransport(GlassesTransport):
@@ -140,7 +140,7 @@ class ScriptedGate:
         self.calls = 0
 
     async def verify(self, citations, prose=None):  # duck-typed as VerifierGate
-        from jarvis.verifier.gate import CitationStatus, CitationVerdict, Verdict
+        from joat.verifier.gate import CitationStatus, CitationVerdict, Verdict
         self.calls += 1
         if self.calls == 1:
             return Verdict(
@@ -274,11 +274,11 @@ class TestConvergence:
 
 class TestParseJudgment:
     def test_parses_scores_and_blocking(self) -> None:
-        from jarvis.services.session import parse_judgment
+        from joat.services.session import parse_judgment
         assert parse_judgment("x\nAGREEMENT: 0.85\nBLOCKING: no") == (0.85, False)
         assert parse_judgment("agreement: 0.4\nblocking: YES") == (0.4, True)
 
     def test_malformed_never_green_lights(self) -> None:
-        from jarvis.services.session import parse_judgment
+        from joat.services.session import parse_judgment
         agreement, blocking = parse_judgment("great job everyone")
         assert agreement is None and blocking is True

@@ -17,18 +17,18 @@ pytest tests/ -q
 
 | Module | Status |
 |---|---|
-| `jarvis/core/protocol.py` | Done — mirror of `types.ts`, with `parse_uplink` and `to_wire` |
-| `jarvis/core/interfaces.py` | Done — `GlassesTransport`, `SttEngine`, `Confirmer` ABCs |
-| `jarvis/ble/hub_gateway.py` | Done — `HubGatewayTransport`, the WebSocket server the plugin dials |
-| `jarvis/audio/whisperkit.py` | Done — shells out to `whisperkit-cli`, verified against the real binary |
-| `jarvis/audio/vad.py` | Done — RMS utterance segmentation (thresholds uncalibrated) |
-| `jarvis/audio/whisper_serve.py` | Done — resident STT via `whisperkit-cli serve` (~0.85 s/utterance; default `--stt-mode serve`) |
-| `jarvis/services/orchestrator.py` | Done — Phase-0 voice loop: mic → VAD → STT → HUD transcript |
-| `jarvis/agents/`, `verifier/`, `channels/`, `computeruse/` | Empty — Phases 2–4 |
+| `joat/core/protocol.py` | Done — mirror of `types.ts`, with `parse_uplink` and `to_wire` |
+| `joat/core/interfaces.py` | Done — `GlassesTransport`, `SttEngine`, `Confirmer` ABCs |
+| `joat/ble/hub_gateway.py` | Done — `HubGatewayTransport`, the WebSocket server the plugin dials |
+| `joat/audio/whisperkit.py` | Done — shells out to `whisperkit-cli`, verified against the real binary |
+| `joat/audio/vad.py` | Done — RMS utterance segmentation (thresholds uncalibrated) |
+| `joat/audio/whisper_serve.py` | Done — resident STT via `whisperkit-cli serve` (~0.85 s/utterance; default `--stt-mode serve`) |
+| `joat/services/orchestrator.py` | Done — Phase-0 voice loop: mic → VAD → STT → HUD transcript |
+| `joat/agents/`, `verifier/`, `channels/`, `computeruse/` | Empty — Phases 2–4 |
 
 ## Protocol drift is the main hazard
 
-`jarvis/core/protocol.py` and `apps/hub-plugin/src/types.ts` describe the same wire format in two languages. **Change them in the same commit.** `tests/unit/test_protocol.py` uses the exact JSON the plugin emits, so drift fails there rather than in the field — but only if the TS side is the thing you updated first.
+`joat/core/protocol.py` and `apps/hub-plugin/src/types.ts` describe the same wire format in two languages. **Change them in the same commit.** `tests/unit/test_protocol.py` uses the exact JSON the plugin emits, so drift fails there rather than in the field — but only if the TS side is the thing you updated first.
 
 Naming convention across the boundary: the wire is **camelCase** (`actionId`, `containerId`, `paceMs`), Python is **snake_case**. Every `to_wire()` and every `parse_uplink` branch does that translation explicitly. Don't add a generic auto-converter — the explicit mapping is what makes a missing field a loud parse error instead of a silent `None`.
 
@@ -44,7 +44,7 @@ Naming convention across the boundary: the wire is **camelCase** (`actionId`, `c
 
 ## Next
 
-The `Orchestrator` in `jarvis/services/`: subscribe to transport audio, feed `SttEngine`, route transcripts to a reply, and send `HudText` back. That closes Phase 0.
+The `Orchestrator` in `joat/services/`: subscribe to transport audio, feed `SttEngine`, route transcripts to a reply, and send `HudText` back. That closes Phase 0.
 
 ## Deploying to a new Mac (mini, Studio, anything)
 

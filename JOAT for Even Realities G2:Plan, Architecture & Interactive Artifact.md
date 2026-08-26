@@ -155,7 +155,7 @@ const risks = [
   { q: "Firmware", rec: "Stay on stock firmware (ECDSA-P256 blocks custom images); use the app-layer BLE protocol, which needs no firmware mod." },
 ];
 
-export default function JarvisG2() {
+export default function JOATG2() {
   const [tab, setTab] = useState("overview");
   const [sel, setSel] = useState(nodes[0]);
   const [mode, setMode] = useState(modes[0]);

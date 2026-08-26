@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jarvis.channels.cards import (
+from joat.channels.cards import (
     Card,
     DeliveryPolicy,
     Urgency,

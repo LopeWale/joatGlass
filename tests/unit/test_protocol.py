@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from jarvis.ble.hub_gateway import pack_pcm
-from jarvis.core.protocol import (
+from joat.ble.hub_gateway import pack_pcm
+from joat.core.protocol import (
     Audio,
     AudioControl,
     Confirm,

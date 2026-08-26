@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from jarvis.audio.whisper_serve import MIN_UTTERANCE_BYTES, WhisperServeEngine
+from joat.audio.whisper_serve import MIN_UTTERANCE_BYTES, WhisperServeEngine
 
 
 def free_port() -> int:

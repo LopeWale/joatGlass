@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import struct
 
-from jarvis.audio.vad import RmsVad
-from jarvis.core.interfaces import (
+from joat.audio.vad import RmsVad
+from joat.core.interfaces import (
     ReplyEngine,
     AudioCallback,
     DeviceCallback,
@@ -15,14 +15,14 @@ from jarvis.core.interfaces import (
     SttEngine,
     Transcript,
 )
-from jarvis.core.protocol import (
+from joat.core.protocol import (
     AudioControl,
     ContainerId,
     DownlinkMessage,
     HudText,
 )
-from jarvis.services.orchestrator import VoiceOrchestrator
-from jarvis.services.session import Session
+from joat.services.orchestrator import VoiceOrchestrator
+from joat.services.session import Session
 
 BATCH_SAMPLES = 3200
 
@@ -266,7 +266,7 @@ class TestStreamedReply:
         assert [(m.text, m.append) for m in hud] == [("hi", False), ("Hello!", False)]
 
 
-WAKE = ("hey jarvis", "jarvis", "joat")
+WAKE = ("hey joat", "joat")
 
 
 class TestAcknowledgement:
@@ -312,15 +312,15 @@ class TestWakeWordGate:
         assert texts == []  # no HUD write, no reply, nothing
 
     async def test_addressed_speech_answers_with_wake_word_stripped(self) -> None:
-        texts = await self._run("Jarvis, what time is sunset?")
+        texts = await self._run("JOAT, what time is sunset?")
         assert texts == ["what time is sunset?", "answer"]
 
     async def test_multiword_wake_word_strips_whole_prefix(self) -> None:
-        texts = await self._run("Hey Jarvis what is the weather")
+        texts = await self._run("Hey JOAT what is the weather")
         assert texts == ["what is the weather", "answer"]
 
     async def test_wake_word_alone_prompts(self) -> None:
-        texts = await self._run("Jarvis.")
+        texts = await self._run("JOAT.")
         assert texts == ["Yes?"]
 
     async def test_none_gate_answers_everything(self) -> None:
@@ -337,8 +337,8 @@ class TestWakeWordGate:
 
             def cancel(self) -> None: ...
 
-        from jarvis.services.hud import HudWriter as HW
-        from jarvis.services.session import SessionManager as SM
+        from joat.services.hud import HudWriter as HW
+        from joat.services.session import SessionManager as SM
         orch = VoiceOrchestrator(
             transport, engine, vad=TEST_VAD(), replier=FakeReplier("x"),
             sessions=SM(HW(transport), lambda t: S()), wake_words=WAKE,

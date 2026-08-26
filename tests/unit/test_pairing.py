@@ -7,8 +7,8 @@ import logging
 import stat
 from pathlib import Path
 
-from jarvis.ble.hub_gateway import _RedactToken
-from jarvis.core.pairing import PairingStore
+from joat.ble.hub_gateway import _RedactToken
+from joat.core.pairing import PairingStore
 
 
 class TestPairingStore:

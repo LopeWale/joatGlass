@@ -1,4 +1,4 @@
-# J.A.R.V.I.S. // Even Realities G2
+# JOAT // Even Realities G2
 
 A personal AI assistant for the Even Realities G2 smart glasses, powered by an always-on Mac Studio (the brain) and an iPhone (relay/companion). Voice in, HUD out — with a cited planning debate loop (Codex proposes, Claude critiques, local MLX judges) gated by a source Verifier that denies anything it can't verify against the live web.
 
@@ -24,7 +24,7 @@ Mac Studio brain
 utilsG2/
 ├── docs/                     # Architecture, roadmap, rules, Mac app, starter repos
 ├── apps/
-│   ├── mac/jarvis/           # Python package — the brain (OOP, layered)
+│   ├── mac/joat/           # Python package — the brain (OOP, layered)
 │   │   ├── core/             # Domain models, abstract interfaces, events
 │   │   ├── ble/              # G2 transport adapters (direct-BLE, gateway client)
 │   │   ├── audio/            # LC3 decode, STT engines, VAD/wake word

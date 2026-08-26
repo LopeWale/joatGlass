@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from jarvis.verifier.fetcher import html_to_text
-from jarvis.verifier.gate import (
+from joat.verifier.fetcher import html_to_text
+from joat.verifier.gate import (
     Citation,
     CitationStatus,
     VerifierGate,
@@ -111,7 +111,7 @@ class TestHtmlToText:
 
 class TestCitationParser:
     def test_parses_sources_block_variants(self) -> None:
-        from jarvis.verifier.citations import parse_citations
+        from joat.verifier.citations import parse_citations
         prose = (
             "Some argument text.\n\nSOURCES:\n"
             '[1] https://a.example/x :: "quote one"\n'
@@ -127,13 +127,13 @@ class TestCitationParser:
         ]
 
     def test_prose_without_sources_parses_empty(self) -> None:
-        from jarvis.verifier.citations import parse_citations
+        from joat.verifier.citations import parse_citations
         assert parse_citations("Just an opinion, no sources.") == []
 
 
 class TestClaimExtraction:
     def test_finds_sentence_with_marker_excluding_sources(self) -> None:
-        from jarvis.verifier.claims import claim_for_citation
+        from joat.verifier.claims import claim_for_citation
         prose = (
             "The G2 display is monochrome [1]. It also has a mic array [2].\n\n"
             "SOURCES:\n[1] https://a.example/x :: \"monochrome green\"\n"
