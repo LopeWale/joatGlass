@@ -1,12 +1,27 @@
 import SwiftUI
 
+/// Ensures the engine dies on EVERY termination path — menu Quit, Cmd-Q,
+/// osascript 'quit app', logout — not just our own Quit button.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static weak var engine: EngineController?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        AppDelegate.engine?.stop()
+        return .terminateNow
+    }
+}
+
 @main
 struct JOATApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var engine = EngineController()
+
+    init() {}
 
     var body: some Scene {
         MenuBarExtra {
             MenuContent(engine: engine)
+                .onAppear { AppDelegate.engine = engine }
         } label: {
             Image(systemName: engine.state == .running ? "brain.fill" : "brain")
         }
