@@ -125,8 +125,72 @@ Ignoring 6 and 7 leaves the glasses mic streaming after the wearer exits. That's
 
 - **The Mac's WebSocket URL must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, scheme included — the Phase-0 gateway is plain `ws://`, and a `wss://`-only whitelist fails the same silent way. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
 - `navigator.geolocation` only works in a **published** Hub plugin, not via QR sideload — use `bridge.getAppLocation()` instead, which works in both.
-- The Even Hub app suspends when the phone locks or backgrounds → Guided Access + Auto-Lock Never + plugged in, or a dedicated spare iPhone. Phase 5 (custom companion) is the real fix.
+- Phone lock/background (official lifecycle doc): on **iOS the WebView keeps running** — JS state and usually the WebSocket survive, and the store QA gate is exactly this (5-minute lock, state preserved). What always stops when the app is suspended is **audio capture** — so the HUD keeps working through a lock, but voice needs the Even app foregrounded. Continuous listening still wants Guided Access / Auto-Lock Never, or Phase 5 (custom companion). Android WebViews may be killed under memory pressure — treat resume as a cold restart (localStorage survives; we already persist settings there).
 - Dev loop: the official CLI + simulator (`npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities/evenhub-simulator`). Binaries: `evenhub` (alias `eh`) — `evenhub init` scaffolds `app.json` only, `evenhub qr` sideloads with hot reload, `evenhub pack app.json dist` builds the `.ehpk`. The simulator (`evenhub-simulator <url> --automation-port 9898`) injects the bridge and exposes an HTTP automation API — see [TESTING.md](TESTING.md) tier 2. No Even account needed for dev; `evenhub login` is only for store submission.
+
+## On-device runbook (verified against hub.evenrealities.com/docs, 2026-08)
+
+Everything above ran only in the simulator until now. This is the path onto
+the real phone + glasses. Toolchain on this Mac: `evenhub` CLI 0.1.14 at
+`~/.local/bin/evenhub` (current); `npm run pack` produces a valid `.ehpk`
+(111 KB, verified).
+
+### One-time: enable Developer Mode
+
+1. Glasses paired in the Even Realities app, firmware updated ("most early
+   connection failures trace back to stale firmware" — their words).
+2. Sign in at <https://hub.evenrealities.com/login> with the **same account**
+   as the phone app.
+3. Force-quit the Even app (swipe away, not background) and reopen. A
+   **developer section appears top-right of the Even Hub tab** with Scan QR.
+
+### Path A — dev server + QR (hot reload; use this for iteration)
+
+```
+./scripts/dev_on_device.sh
+```
+
+Starts Vite on the LAN and prints the QR. Scan it from the Even Hub tab;
+the glasses render the plugin within a second, and saved edits hot-reload
+without re-scanning. Phone and Mac must be on the same network, and the
+engine must be up for voice/cards (the script warns on both).
+
+### Path B — packed private build (survives without the dev server)
+
+```
+cd apps/hub-plugin && npm run pack     # -> joat.ehpk, --sdk-ver pinned 0.0.12
+```
+
+Upload at hub.evenrealities.com → project → **Private builds**; install on
+the phone via Even Hub tab → Me → Apps → Private builds. Account-bound, no
+store review. Iteration is rebuild → re-upload → reinstall, so do Path A
+first.
+
+### First-session checklist (maps to the Phase 0/1 metrics)
+
+1. Page renders: status bar + main text on the real HUD.
+2. Say "JOAT, what time is it" — transcript back on the HUD; note the
+   wall-clock latency vs the ~2.2 s desk-mic number.
+3. Right-temple click and R1 ring answer a `confirm.request`.
+4. Send yourself an iMessage — card appears on the HUD (< 5 s target).
+5. Left-temple double-tap — settings menu opens on the glasses.
+6. Lock the phone 5 minutes, unlock — page state intact (the store QA gate).
+
+### Known unknowns (test on device, in this order)
+
+- **Plain `ws://` from a WebView page to the LAN Mac** is undocumented for
+  packed builds (no ATS discussion anywhere official). Path A demonstrably
+  supports `http://` dev pages, so if the socket opens there but not in the
+  Path B build, this is the cause — fixes are wss via Tailscale cert or
+  keeping dev mode. Whitelist entries are hostname-exact either way.
+- Whether the dev-mode QR flow enforces `app.json` permissions/whitelist at
+  all, and how permission prompts surface to the wearer.
+- Whether the phone resolves `.local` mDNS from inside the WebView; the
+  Tailscale candidates need the Tailscale app installed on the phone.
+- SDK is pinned 0.0.12; 0.0.14 (2026-08-20) adds long-press, contextual
+  menus, `textColor`, `zOrderIndex`, Gray8/Gray4 raw images, and audio
+  `direction`/`speakerRole` (speaker attribution). Upgrade AFTER the first
+  on-device loop passes — one variable at a time.
 
 ## Host push formats (for simulator/tests)
 
