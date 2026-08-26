@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "everything-evenhub": {
+      "source": {
+        "source": "github",
+        "repo": "even-realities/everything-evenhub"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "everything-evenhub@everything-evenhub": true
+  }
+}
