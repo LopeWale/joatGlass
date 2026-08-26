@@ -15,6 +15,7 @@ import asyncio
 import errno
 import json
 import logging
+import re
 import secrets
 import struct
 from collections.abc import Callable
@@ -42,6 +43,7 @@ from ..core.protocol import (
     Hello,
     Imu,
     Input,
+    PairingAck,
     PairingSet,
     Policy,
     ProtocolError,
@@ -49,6 +51,30 @@ from ..core.protocol import (
 )
 
 log = logging.getLogger(__name__)
+
+
+class _RedactToken(logging.Filter):
+    """Strip ?token=... from websockets' request-line logging.
+
+    The library logs the full request target at DEBUG, and our auth rides
+    the query string — so `--verbose` (exactly what an operator enables to
+    debug a pairing failure) would write the long-lived token into
+    ~/Library/Logs/joat/brain.log, which the app surfaces in its UI and
+    which outlives the on-wire exposure.
+    """
+
+    _PATTERN = re.compile(r"(token=)[^&\s]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            record.args = tuple(
+                self._PATTERN.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+                for a in (record.args if isinstance(record.args, tuple) else (record.args,))
+            )
+        if isinstance(record.msg, str):
+            record.msg = self._PATTERN.sub(r"\1<redacted>", record.msg)
+        return True
+
 
 ImuCallback = Callable[[Imu], None]
 ConfirmCallback = Callable[[Confirm], None]
@@ -75,6 +101,7 @@ class HubGatewayTransport(GlassesTransport):
         self._port = port
         self._pairing = pairing
         self._trust_loopback = trust_loopback
+        self._provisional: str | None = None
         self._server: object | None = None
         self._conn: ServerConnection | None = None
 
@@ -116,6 +143,8 @@ class HubGatewayTransport(GlassesTransport):
         else:
             assert last is not None
             raise last
+        if self._pairing is not None:
+            logging.getLogger("websockets").addFilter(_RedactToken())
         log.info("hub gateway listening on ws://%s:%d", self._host, self._port)
 
     async def stop(self) -> None:
@@ -218,7 +247,11 @@ class HubGatewayTransport(GlassesTransport):
         if expected is None:
             return None  # pairing window: first remote peer, token issued in _session
         supplied = parse_qs(urlsplit(request.path).query).get("token", [""])[-1]
-        if secrets.compare_digest(supplied, expected):
+        # Compare as BYTES: compare_digest raises TypeError on non-ASCII str,
+        # which websockets turns into a 500 + ERROR traceback instead of our
+        # 401 — letting any LAN peer spam the log and muddy the runbook's
+        # "401 means unpaired" diagnostic.
+        if secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
             return None
         log.warning("rejected unpaired connection from %s", conn.remote_address)
         return conn.respond(HTTPStatus.UNAUTHORIZED, "pairing token required\n")
@@ -232,18 +265,23 @@ class HubGatewayTransport(GlassesTransport):
         self._conn = conn
         self._last_seq = None
         log.info("plugin connected")
-        if (
-            self._pairing is not None
-            and self._pairing.token is None
-            and not self._peer_is_exempt(conn)
-        ):
-            # TOFU: this first remote peer IS the wearer's phone (it just
-            # scanned the QR). Two remote peers racing this window is a
-            # single-wearer non-scenario; newest-wins eviction applies anyway.
-            token = self._pairing.issue()
-            await conn.send(json.dumps(PairingSet(token=token).to_wire()))
-            log.info("pairing: token issued to %s", conn.remote_address)
         try:
+            # TOFU offer INSIDE the try: minting touches the disk and the send
+            # can hit a dropped socket, and an escape here would skip the
+            # finally — leaving a stale _conn that reports connected while
+            # every send (including the fail-closed confirm gate) raises.
+            if (
+                self._pairing is not None
+                and self._pairing.token is None
+                and not self._peer_is_exempt(conn)
+            ):
+                # This first remote peer IS the wearer's phone (it just
+                # scanned the QR). The token stays PROVISIONAL until the
+                # plugin acks storing it — see PairingAck.
+                if self._provisional is None:
+                    self._provisional = PairingStore.mint()
+                await conn.send(json.dumps(PairingSet(token=self._provisional).to_wire()))
+                log.info("pairing: token offered to %s", conn.remote_address)
             async for raw in conn:
                 self._dispatch(raw)
         except websockets.ConnectionClosed:
@@ -288,6 +326,19 @@ class HubGatewayTransport(GlassesTransport):
                     confirm_cb(message)
             case Policy():
                 log.info("wearer resume policy: %s", message.resume)
+            case PairingAck():
+                # Only now is the token real: the phone has it on disk, so
+                # locking out every other peer can no longer strand the wearer.
+                if (
+                    self._pairing is not None
+                    and self._provisional is not None
+                    and secrets.compare_digest(
+                        message.token.encode("utf-8"), self._provisional.encode("utf-8")
+                    )
+                ):
+                    self._pairing.confirm(self._provisional)
+                    self._provisional = None
+                    log.info("pairing: confirmed — remote peers now require the token")
 
     def _handle_audio(self, message: Audio) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:

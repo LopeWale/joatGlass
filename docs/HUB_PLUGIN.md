@@ -178,22 +178,42 @@ first.
 
 ### Pairing (transport auth — RULES.md #5, implemented 2026-08-26)
 
-The gateway no longer trusts the LAN. Trust-on-first-use: the **first remote
-client to connect is issued a token** (`pairing.set` downlink → plugin
-localStorage) and every later remote connection must dial with `?token=` or
-is rejected 401 before the handshake. That first client is your phone at
-QR-scan time. Loopback is exempt — the simulator and `speak_test.py` run on
-the Mac itself, and a local process could read the token file anyway.
+The gateway no longer trusts the LAN. Trust-on-first-use, in three steps:
+
+1. The first remote client to connect is **offered** a token (`pairing.set`
+   downlink). That client is your phone at QR-scan time.
+2. The plugin persists it to localStorage and **acks** (`pairing` uplink) —
+   only on a successful write.
+3. The Mac persists on the ack, and from then on every remote dial must
+   carry `?token=` or is rejected 401 before the handshake completes.
+
+The offer/ack split exists because persisting at offer time strands the
+wearer: a Wi-Fi blip during the pairing frame would leave the Mac holding a
+token no phone has, 401-ing the real phone forever. Unacked offers keep the
+window open, so a failed pairing costs a retry, not a manual reset.
+
+Loopback is exempt — the simulator and `speak_test.py` run on the Mac
+itself, and a local process could read the token file anyway.
 
 - Token store: `~/Library/Application Support/JOAT/pairing.json` (0600).
 - **Re-pair a new/reset phone**: delete that file, reconnect. Symptom that
   you need to: the plugin's socket never opens on a phone that used to work
   (or never paired), while the simulator connects fine.
+- **Dev server ↔ packed build**: localStorage is origin-scoped, so Path A and
+  Path B hold *separate* tokens. Switching between them hits the same 401
+  symptom — and looks exactly like the undocumented `ws://` risk below.
+  Delete `pairing.json` and let the build you are using re-pair; the other
+  build's stored token is then stale. Pick one path per bring-up session.
+- The plugin **ignores a second `pairing.set`** while it already holds a
+  token. Without that guard, any LAN peer answering the plain-`ws` mDNS name
+  in the whitelist could overwrite the good token and lock the wearer out of
+  their own brain until localStorage was wiped by hand.
 - Honest limits: the token rides the URL over plain `ws://`, so an *active*
   LAN sniffer can capture it, and TOFU means a hostile first-connect during
-  the pairing window wins. This closes "anyone on the LAN owns the HUD and
-  the confirm gate"; the strong path is still the tailnet (`wss` via
-  Tailscale) once TLS lands.
+  the pairing window wins. `--verbose` request-line logging is redacted, but
+  the wire is not. This closes "anyone on the LAN owns the HUD and the
+  confirm gate"; the strong path is still the tailnet (`wss` via Tailscale)
+  once TLS lands.
 
 ### Known unknowns (test on device, in this order)
 

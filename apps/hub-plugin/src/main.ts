@@ -131,14 +131,24 @@ async function boot(): Promise<void> {
         imu.await(msg.actionId);
         break;
       case 'pairing.set':
-        // The Mac just paired THIS phone; reconnects must present the token
-        // or the gateway rejects them in favor of... nobody. Persist first.
+        // IGNORE if we already hold a token. app.json whitelists plain-ws
+        // mDNS names, which any LAN peer can answer, so an unguarded handler
+        // lets a rogue "Mac" overwrite our good token — locking the wearer
+        // out of their real brain until localStorage is wiped by hand.
+        // Re-pairing is deliberate: clear storage, or reinstall.
+        if (loadToken()) break;
+        // Ack only after the write SUCCEEDS: the Mac keeps the pairing
+        // window open until then, so a lost frame or unavailable storage
+        // costs a retry instead of stranding the phone permanently.
         try {
           localStorage.setItem(TOKEN_KEY, msg.token);
+          link.setToken(msg.token);
+          link.send({ kind: 'pairing', token: msg.token });
         } catch {
-          // Storage unavailable: the token still covers this session.
+          // Storage unavailable (private mode): use it for this session
+          // only, and stay unpaired so the next launch can pair for real.
+          link.setToken(msg.token);
         }
-        link.setToken(msg.token);
         break;
       case 'policy.set':
         // Mac-side config path; the wearer's on-glasses menu is the other.

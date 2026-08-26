@@ -137,7 +137,20 @@ class Policy:
     resume: ResumePolicy
 
 
-UplinkMessage = Hello | Audio | Imu | Input | Device | Confirm | Policy
+@dataclass(frozen=True, slots=True)
+class PairingAck:
+    """Plugin confirms it PERSISTED a freshly issued token.
+
+    Without the ack the Mac would persist a token the phone may never have
+    stored (a dropped frame mid-pairing), permanently 401-ing the wearer's
+    own phone. The plugin acks only after its localStorage write succeeds,
+    so this is proof of durability, not just delivery.
+    """
+
+    token: str
+
+
+UplinkMessage = Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
 
 
 # ── Downlink: Mac → plugin ───────────────────────────────────────────────────
@@ -336,6 +349,8 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     selected_name=raw.get("selectedName"),
                 )
             )
+        case "pairing":
+            return PairingAck(token=str(_require(payload, "token", kind)))
         case "device":
             return Device(
                 connect=payload.get("connect", "none"),
