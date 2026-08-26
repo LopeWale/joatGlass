@@ -99,3 +99,26 @@ The bridge is adapted to the installed CLI (`codex-cli 0.148.0-alpha.15`):
 | [docs/RULES.md](docs/RULES.md) | Engineering rules, safety gates, ToS constraints |
 | [docs/MAC_APP.md](docs/MAC_APP.md) | Mac Studio brain — detailed design |
 | [docs/STARTER_REPOS.md](docs/STARTER_REPOS.md) | Verified GitHub repos to clone so we don't build from zero |
+
+## Even Hub plugin skills
+
+`everything-evenhub@everything-evenhub` (Even Realities' official marketplace) is enabled at
+**project scope** via `.claude/settings.json`, so its 13 G2 skills load only in this repo.
+Skills only — no hooks, agents, or MCP servers. The load-bearing ones:
+
+| Skill | Use for |
+|---|---|
+| `sdk-reference` | `@evenrealities/even_hub_sdk` API signatures, types, enums |
+| `glasses-ui` | Text/list/image containers, page lifecycle on the 576x288 canvas |
+| `design-guidelines` | HUD layout patterns, icons, Unicode glyphs |
+| `font-measurement` | Pixel-accurate text sizing against the firmware's LVGL renderer |
+| `handle-input` / `device-features` | Touch, IMU, and on-device capabilities |
+| `simulator-automation`, `test-with-simulator`, `build-and-deploy`, `cli-reference` | `evenhub` CLI and simulator workflows |
+
+Two caveats:
+
+- **`sdk-reference` documents SDK 0.0.12**; [apps/hub-plugin](apps/hub-plugin/package.json) pins
+  `^0.0.14`. On any conflict the installed `node_modules/@evenrealities/even_hub_sdk` type
+  definitions win — the skill is a guide, not ground truth.
+- **Never invoke `quickstart` here.** It scaffolds a *new* Even Hub project from scratch;
+  `apps/hub-plugin/` already exists.
