@@ -1,5 +1,32 @@
 # Mac App — the Brain (`apps/mac/jarvis`)
 
+
+## Native shell — JOAT.app (the Mac app proper)
+
+The brain's ENGINE is Python (the AI stack — mlx-lm, MiniCheck, subprocess
+agents — is Python-native and stays that way). Its macOS CITIZENSHIP is a
+native Swift shell, per Apple's current recommendations:
+
+| Concern | How | Apple guidance followed |
+|---|---|---|
+| App shape | SwiftUI `MenuBarExtra`, `LSUIElement` background app | modern menu-bar app API |
+| Engine lifecycle | JOAT.app spawns/supervises `.venv/bin/python -m jarvis` as a child `Process`; crash → backoff restart; Quit stops listening | app-owned subprocess |
+| Launch at login | `SMAppService.mainApp` toggle in the menu | sanctioned login-item API (replaces hand-written launchd plists) |
+| Permissions | ONE Full Disk Access grant on **JOAT.app** — the child engine inherits the app's TCC identity | signed-app TCC attribution |
+| Signing | Developer ID Application + hardened runtime | stable identity: grants survive rebuilds |
+| Repo location | chosen via standard folder picker, stored in `UserDefaults` — nothing machine-specific in code | |
+
+Source lives in `apps/mac/JOATShell/` (SwiftPM package — opens directly in
+Xcode; `scripts/build_app.sh` builds, signs, and installs JOAT.app).
+The earlier `com.joat.brain` launchd agent is superseded by the app and must
+be unloaded when the app manages the engine (port 8787 conflict otherwise).
+
+Honest note: notification triage reads Apple's Biome store
+(`Notification.Delivery` SEGB segments) — there is NO sanctioned API for
+reading other apps' notifications, in Swift or anything else. That read is
+unsupported by design and implemented read-only + fail-dormant.
+
+
 The Mac Studio runs everything: BLE transport, audio, reasoning, the debate loop, verifier, channels, and computer use. Python 3.12+ package, structured as a long-running service (launchd), OOP throughout.
 
 ## Runtime layout

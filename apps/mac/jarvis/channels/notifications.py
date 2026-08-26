@@ -23,6 +23,7 @@ import logging
 import plistlib
 import sqlite3
 from collections.abc import Callable
+from typing import Any, Protocol
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,7 +98,19 @@ class NotificationStore:
         return out
 
     def _connect(self) -> sqlite3.Connection:
+        # A missing store must never be CREATED by a reader — connecting to a
+        # nonexistent path can leave a stub file in Apple's container.
+        if not self._path.is_file() or self._path.stat().st_size == 0:
+            raise FileNotFoundError(f"no notification store at {self._path}")
         return sqlite3.connect(f"file:{self._path}?immutable=1", uri=True)
+
+    def baseline(self) -> int:
+        return self.latest_rec_id()
+
+    def read_new(self, watermark: Any) -> tuple[list[Notification], Any]:
+        fresh = self.read_since(watermark)
+        newest = max([watermark, *(n.rec_id for n in fresh)])
+        return fresh, newest
 
 
 TRIAGE_PROMPT = (
@@ -118,12 +131,19 @@ def parse_triage(reply: str) -> tuple[str, str] | None:
     return None
 
 
+class NotificationSource(Protocol):
+    """Watermark-generic store: sqlite (legacy) or Biome (macOS 26+)."""
+
+    def baseline(self) -> Any: ...
+    def read_new(self, watermark: Any) -> tuple[list[Notification], Any]: ...
+
+
 class NotificationChannel:
     """Poll → triage → deliver. deliver() is the SessionManager seam."""
 
     def __init__(
         self,
-        store: NotificationStore,
+        store: NotificationSource,
         triage: ReplyEngine | None,
         deliver: Callable[[str], None],
         poll_interval_s: float = 2.0,
@@ -136,7 +156,7 @@ class NotificationChannel:
 
     async def run(self) -> None:
         try:
-            last = await asyncio.to_thread(self._store.latest_rec_id)
+            last = await asyncio.to_thread(self._store.baseline)
         except Exception as exc:
             log.warning(
                 "notification channel dormant — cannot read the store (%s). "
@@ -145,16 +165,15 @@ class NotificationChannel:
             )
             return
         self._running = True
-        log.info("notification channel live (from rec_id %d)", last)
+        log.info("notification channel live (watermark %s)", last)
         while self._running:
             await asyncio.sleep(self._interval)
             try:
-                fresh = await asyncio.to_thread(self._store.read_since, last)
+                fresh, last = await asyncio.to_thread(self._store.read_new, last)
             except Exception as exc:
                 log.warning("notification poll failed: %s", exc)
                 continue
             for n in fresh:
-                last = max(last, n.rec_id)
                 await self._handle(n)
 
     def stop(self) -> None:

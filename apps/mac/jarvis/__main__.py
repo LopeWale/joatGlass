@@ -16,7 +16,8 @@ from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
-from .channels.notifications import NotificationChannel, NotificationStore
+from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
+from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
 from .core.protocol import Hello
 from .services.hud import HudWriter
@@ -126,9 +127,11 @@ async def main() -> None:
 
     notif_task: asyncio.Task[None] | None = None
     if not args.no_notifications:
-        channel = NotificationChannel(
-            NotificationStore(), triage=replier, deliver=sessions.notify
+        store: NotificationSource = (
+            BiomeNotificationStore() if DEFAULT_STREAM_DIR.is_dir()
+            else NotificationStore()
         )
+        channel = NotificationChannel(store, triage=replier, deliver=sessions.notify)
         notif_task = asyncio.get_running_loop().create_task(channel.run())
 
     await transport.start()
