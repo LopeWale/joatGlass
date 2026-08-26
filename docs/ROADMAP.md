@@ -15,6 +15,13 @@ Each phase has a hard success metric. Do not advance until the metric is met.
 
 **Metric: triaged alert latency < 5 s.**
 
+## Phase 1.5 — Native Mac shell (JOAT.app)
+- SwiftUI MenuBarExtra app owning the Python engine (start/stop/restart, crash supervision, log access).
+- SMAppService launch-at-login; Developer ID-signed; hardened runtime.
+- Single Full Disk Access grant on JOAT.app covers the engine (child-process TCC attribution).
+
+**Metric: fresh Mac → cloned repo → setup script → JOAT.app running with ONE permission grant, surviving app rebuilds.**
+
 ## Phase 2 — Debate loop + Verifier Gate v1
 - `ProposerAgent` (Codex CLI: `codex exec --json --output-schema`, `web_search=live`).
 - `CriticAgent` (official `claude -p --output-format json`; architect so it can flip to a metered API key + `--max-budget-usd` without a rewrite).
