@@ -132,10 +132,17 @@ class MlxReplyEngine(ReplyEngine):
         """Prompt plus the facts as of NOW — recomputed every reply."""
         if self._grounding is None:
             return SYSTEM_PROMPT
+        parts = [SYSTEM_PROMPT]
         facts = self._grounding.facts()
-        if not facts:
-            return SYSTEM_PROMPT
-        return f"{SYSTEM_PROMPT}\n\nFacts you can rely on right now:\n{facts}"
+        if facts:
+            parts.append(f"Facts you can rely on right now:\n{facts}")
+        gaps = self._grounding.cannot_know()
+        if gaps:
+            parts.append(
+                "You have NO source for these and must never invent them — "
+                f"say you do not have them: {gaps}."
+            )
+        return "\n\n".join(parts)
 
     def _chat_prompt(self, text: str) -> Any:
         return self._tokenizer.apply_chat_template(

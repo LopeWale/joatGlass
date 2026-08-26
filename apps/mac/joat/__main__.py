@@ -11,7 +11,7 @@ import argparse
 import asyncio
 import logging
 
-from .agents.grounding import Grounding, local_clock
+from .agents.grounding import Grounding, device_facts, local_clock
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
@@ -98,7 +98,18 @@ async def main() -> None:
     elif mlx_available():
         # Facts the model cannot know, refreshed per reply. Without this it
         # confabulates them — it answered "2:47 PM" at 4:44 PM.
-        grounding = Grounding([local_clock()])
+        grounding = Grounding(
+            sources=[local_clock(), device_facts(transport)],
+            # Named explicitly, not merely absent: a small model asked to
+            # infer "it is not listed, so I should decline" does not — it
+            # invents. These are exactly the questions a wearer asks glasses.
+            unknowns=[
+                "the weather",
+                "the wearer's location",
+                "their calendar or schedule",
+                "unread message counts or who messaged them",
+            ],
+        )
         replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding)
         log.info("reply engine: %s (loads on first utterance)", args.llm_model)
     else:
@@ -194,11 +205,14 @@ async def main() -> None:
     # Diagnostic: a starved loop delays every reply, and looks exactly
     # like a slow model in the logs unless it is measured directly.
     lag_task = asyncio.get_running_loop().create_task(orchestrator.watch_loop_lag())
+    # Prove liveness between events, or the shell blanks the dashboard.
+    beat_task = asyncio.get_running_loop().create_task(status.heartbeat())
     try:
         await asyncio.Event().wait()
     finally:
         watchdog.cancel()
         lag_task.cancel()
+        beat_task.cancel()
         await transport.stop()
         if notif_task is not None:
             notif_task.cancel()
