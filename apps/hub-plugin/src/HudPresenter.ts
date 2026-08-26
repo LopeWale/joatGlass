@@ -6,24 +6,83 @@ import { ContainerId } from './types';
 const MAX_UPGRADE_CHARS = 2000;
 
 /**
+ * Repaint throttle for streamed text. Tokens arrive far faster than BLE can
+ * move frames to the glasses; painting per token floods the link and, on
+ * real hardware, rendered as flashing fragments ("cutting out, one line").
+ * ~3 paints/second reads as live streaming while keeping BLE sane.
+ */
+const PAINT_INTERVAL_MS = 300;
+
+/**
  * Renders text to the HUD.
  *
- * textContainerUpgrade is the default path — it updates in place with no
- * flicker, which matters when streaming a reply token-by-token.
- * rebuildPageContainer is reserved for actual layout changes.
+ * Streaming is ACCUMULATE-AND-REPAINT, not splice-at-offset: every paint
+ * carries the full accumulated text from offset 0, so each frame is
+ * self-contained. Offset splicing looked fine in the simulator but real
+ * firmware rendered only the latest chunk — and with per-token BLE writes a
+ * dropped frame silently corrupted everything after it. Full frames make
+ * dropped/reordered updates self-healing.
  */
 export class HudPresenter {
   private lastLength = new Map<number, number>();
+  private streams = new Map<number, string>();
+  private lastPaint = new Map<number, number>();
+  private pendingPaint = new Map<number, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly client: BridgeClient,
     private readonly layouts: HudPageBuilder,
   ) {}
 
-  /** Replace a container's full text. */
+  /** Replace a container's full text. Also resets any stream in progress. */
   async showText(text: string, containerId: ContainerId = ContainerId.Main): Promise<boolean> {
-    const content = text.slice(0, MAX_UPGRADE_CHARS);
+    this.cancelPending(containerId);
+    this.streams.set(containerId, text);
+    return this.paint(containerId);
+  }
+
+  /** Stream a chunk: accumulate, repaint (throttled) with the full text. */
+  async appendText(chunk: string, containerId: ContainerId = ContainerId.Main): Promise<boolean> {
+    this.streams.set(containerId, (this.streams.get(containerId) ?? '') + chunk);
+    const now = Date.now();
+    const elapsed = now - (this.lastPaint.get(containerId) ?? 0);
+    if (elapsed >= PAINT_INTERVAL_MS) {
+      return this.paint(containerId);
+    }
+    if (!this.pendingPaint.has(containerId)) {
+      // Trailing paint so the tail of a burst always lands — without it the
+      // final tokens of a reply would sit unpainted forever.
+      this.pendingPaint.set(containerId, setTimeout(() => {
+        this.pendingPaint.delete(containerId);
+        void this.paint(containerId);
+      }, PAINT_INTERVAL_MS - elapsed));
+    }
+    return true;
+  }
+
+  setStatus(text: string): Promise<boolean> {
+    return this.showText(text, ContainerId.StatusBar);
+  }
+
+  async showList(items: string[]): Promise<boolean> {
+    const ok = await this.client.require().rebuildPageContainer(this.layouts.listLayout(items));
+    this.resetAll();
+    return ok;
+  }
+
+  async showDefault(): Promise<boolean> {
+    const ok = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+    this.resetAll();
+    return ok;
+  }
+
+  private async paint(containerId: number): Promise<boolean> {
+    const full = this.streams.get(containerId) ?? '';
+    // Overflow keeps the TAIL: mid-stream, the newest words are the ones
+    // being read; the opening lines are already consumed.
+    const content = full.length > MAX_UPGRADE_CHARS ? full.slice(-MAX_UPGRADE_CHARS) : full;
     const previous = this.lastLength.get(containerId) ?? 0;
+    this.lastPaint.set(containerId, Date.now());
     const ok = await this.client.require().textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: containerId,
@@ -37,38 +96,18 @@ export class HudPresenter {
     return ok;
   }
 
-  /** Append without redrawing — for streaming LLM output. */
-  async appendText(chunk: string, containerId: ContainerId = ContainerId.Main): Promise<boolean> {
-    const offset = this.lastLength.get(containerId) ?? 0;
-    if (offset + chunk.length > MAX_UPGRADE_CHARS) {
-      // Ran out of container budget: restart from the tail of the stream.
-      return this.showText(chunk, containerId);
+  private cancelPending(containerId: number): void {
+    const timer = this.pendingPaint.get(containerId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.pendingPaint.delete(containerId);
     }
-    const ok = await this.client.require().textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: containerId,
-        contentOffset: offset,
-        contentLength: chunk.length,
-        content: chunk,
-      }),
-    );
-    this.lastLength.set(containerId, offset + chunk.length);
-    return ok;
   }
 
-  setStatus(text: string): Promise<boolean> {
-    return this.showText(text, ContainerId.StatusBar);
-  }
-
-  async showList(items: string[]): Promise<boolean> {
-    const ok = await this.client.require().rebuildPageContainer(this.layouts.listLayout(items));
+  private resetAll(): void {
+    for (const id of this.pendingPaint.keys()) this.cancelPending(id);
     this.lastLength.clear();
-    return ok;
-  }
-
-  async showDefault(): Promise<boolean> {
-    const ok = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
-    this.lastLength.clear();
-    return ok;
+    this.streams.clear();
+    this.lastPaint.clear();
   }
 }
