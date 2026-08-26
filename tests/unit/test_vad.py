@@ -36,7 +36,7 @@ class TestSegmentation:
         assert all(vad.feed(QUIET) is None for _ in range(20))
 
     def test_speech_then_hangover_silence_yields_one_utterance(self) -> None:
-        vad = RmsVad(hangover_batches=3)
+        vad = RmsVad(hangover_batches=3, adaptive=False, start_batches=1)
         for _ in range(5):
             assert vad.feed(LOUD) is None
         assert vad.feed(QUIET) is None
@@ -48,7 +48,7 @@ class TestSegmentation:
         assert not vad.in_speech
 
     def test_pause_shorter_than_hangover_does_not_split(self) -> None:
-        vad = RmsVad(hangover_batches=4)
+        vad = RmsVad(hangover_batches=4, adaptive=False, start_batches=1)
         for _ in range(3):
             vad.feed(LOUD)
         for _ in range(3):  # pause, but < hangover
@@ -57,15 +57,43 @@ class TestSegmentation:
         assert vad.in_speech
 
     def test_max_length_forces_cut(self) -> None:
-        vad = RmsVad(max_utterance_s=0.6)  # 3 batches
+        vad = RmsVad(max_utterance_s=0.6, adaptive=False, start_batches=1)
         assert vad.feed(LOUD) is None
         assert vad.feed(LOUD) is None
         assert vad.feed(LOUD) is not None  # hard cut at the cap
 
     def test_reset_drops_partial_utterance(self) -> None:
-        vad = RmsVad(hangover_batches=2)
+        vad = RmsVad(hangover_batches=2, adaptive=False, start_batches=1)
         vad.feed(LOUD)
         vad.reset()
         assert not vad.in_speech
         assert vad.feed(QUIET) is None
         assert vad.feed(QUIET) is None  # no stale speech to close
+
+
+class TestDebounceAndAdaptiveFloor:
+    def test_isolated_spike_does_not_start_an_utterance(self) -> None:
+        """A keystroke or door bump is one loud batch, not speech."""
+        vad = RmsVad(adaptive=False, start_batches=2, hangover_batches=2)
+        assert vad.feed(LOUD) is None
+        assert not vad.in_speech          # armed only after 2 consecutive
+        assert vad.feed(QUIET) is None
+        assert not vad.in_speech
+        assert vad.feed(LOUD) is None
+        assert vad.feed(LOUD) is None
+        assert vad.in_speech              # two in a row: real speech
+
+    def test_floor_tracks_room_tone_and_cannot_lock(self) -> None:
+        """Percentile floor must follow the room UP as well as down — the
+        earlier EWMA locked low and made room tone read as speech forever."""
+        vad = RmsVad()
+        quiet_room = batch(120)
+        for _ in range(40):
+            vad.feed(quiet_room)
+        low_floor = vad.floor
+        noisy_room = batch(900)
+        for _ in range(120):            # window is 100, so this fully replaces
+            vad.feed(noisy_room)
+        assert vad.floor > low_floor * 3
+        # and the noisy room itself must NOT count as speech
+        assert rms(noisy_room) < vad.trigger

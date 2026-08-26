@@ -118,8 +118,14 @@ async def main() -> None:
 
     status.set(debate="ready" if (propose_agent and critic_agent) else "unavailable")
     sessions = SessionManager(hud, make_debate)
+    # Wake words plus mishearings observed LIVE from whisper on short
+    # utterances — a one-word utterance gives the model no context, so
+    # "Jarvis" comes back as "Jeves"/"Javis" and "JOAT" as "Jokes"/"Jote".
+    # Rejecting those made the assistant look deaf to its own name.
     wake_words = None if args.always_answer else (
-        "hey jarvis", "hey joat", "jarvis", "joat", "jot"
+        "hey jarvis", "hey joat",
+        "jarvis", "jeeves", "jeves", "javis", "jarvus",
+        "joat", "jote", "jolt", "jokes", "jot",
     )
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,
