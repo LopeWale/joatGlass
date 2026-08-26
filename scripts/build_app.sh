@@ -10,9 +10,21 @@
 # apply entitlements, and could not produce an archive (so: no
 # notarization, no TestFlight, no Sparkle-style updates).
 #
-# --notarize needs a stored credential profile, created once with:
-#   xcrun notarytool store-credentials joat --apple-id you@example.com \
-#       --team-id TEAMID --password <app-specific-password>
+# --notarize accepts EITHER credential form:
+#
+#   1) App Store Connect API key (recommended — no app-specific password,
+#      no 2FA prompts, works unattended in CI, and does not break when the
+#      Apple ID password changes). Create at App Store Connect > Users and
+#      Access > Integrations > Keys, then export:
+#        export JOAT_NOTARY_KEY=~/private_keys/AuthKey_ABC123.p8
+#        export JOAT_NOTARY_KEY_ID=ABC123
+#        export JOAT_NOTARY_ISSUER=<issuer uuid shown above the key list>
+#
+#   2) Keychain profile from an APP-SPECIFIC password (appleid.apple.com >
+#      Sign-In and Security > App-Specific Passwords — the account password
+#      itself returns HTTP 401):
+#        xcrun notarytool store-credentials joat \
+#          --apple-id you@example.com --team-id J2XU5XWJM9 --password abcd-efgh-ijkl-mnop
 
 set -euo pipefail
 
@@ -79,13 +91,28 @@ codesign --verify --strict "$APP" && say "signature verified (strict)"
 say "architectures: $(lipo -archs "$APP/Contents/MacOS/JOAT")"
 
 if [ "$WANT_NOTARIZE" = 1 ]; then
-  xcrun notarytool history --keychain-profile "$KEYCHAIN_PROFILE" >/dev/null 2>&1 \
-    || die "no notary profile '$KEYCHAIN_PROFILE' — see this script's header"
-  say "notarizing (waits on Apple)"
+  # Prefer the API key when present; fall back to a keychain profile.
+  NOTARY_ARGS=()
+  if [ -n "${JOAT_NOTARY_KEY:-}" ]; then
+    [ -f "$JOAT_NOTARY_KEY" ] || die "JOAT_NOTARY_KEY not found: $JOAT_NOTARY_KEY"
+    [ -n "${JOAT_NOTARY_KEY_ID:-}" ] || die "JOAT_NOTARY_KEY_ID is required with the key"
+    [ -n "${JOAT_NOTARY_ISSUER:-}" ] || die "JOAT_NOTARY_ISSUER is required with the key"
+    NOTARY_ARGS=(--key "$JOAT_NOTARY_KEY" --key-id "$JOAT_NOTARY_KEY_ID"
+                 --issuer "$JOAT_NOTARY_ISSUER")
+    say "notarizing with App Store Connect API key $JOAT_NOTARY_KEY_ID"
+  else
+    xcrun notarytool history --keychain-profile "$KEYCHAIN_PROFILE" >/dev/null 2>&1 \
+      || die "no usable credentials. Either export JOAT_NOTARY_KEY/_KEY_ID/_ISSUER,
+       or create a profile with an APP-SPECIFIC password (the plain Apple ID
+       password returns HTTP 401):
+         xcrun notarytool store-credentials $KEYCHAIN_PROFILE \\
+           --apple-id <id> --team-id $TEAM_ID --password abcd-efgh-ijkl-mnop"
+    NOTARY_ARGS=(--keychain-profile "$KEYCHAIN_PROFILE")
+    say "notarizing with keychain profile $KEYCHAIN_PROFILE"
+  fi
   # ditto, not zip: preserves symlinks and metadata inside the bundle.
   ditto -c -k --keepParent "$APP" "$DIST/JOAT.zip"
-  xcrun notarytool submit "$DIST/JOAT.zip" \
-    --keychain-profile "$KEYCHAIN_PROFILE" --wait
+  xcrun notarytool submit "$DIST/JOAT.zip" "${NOTARY_ARGS[@]}" --wait
   # Staple so Gatekeeper accepts the app on a Mac that is OFFLINE.
   xcrun stapler staple "$APP"
   spctl -a -vvv -t exec "$APP" 2>&1 | tail -2
