@@ -196,9 +196,13 @@ Loopback is exempt — the simulator and `speak_test.py` run on the Mac
 itself, and a local process could read the token file anyway.
 
 - Token store: `~/Library/Application Support/JOAT/pairing.json` (0600).
-- **Re-pair a new/reset phone**: delete that file, reconnect. Symptom that
-  you need to: the plugin's socket never opens on a phone that used to work
-  (or never paired), while the simulator connects fine.
+- **Re-pair a new/reset phone**: delete that file **and restart the engine**,
+  then reconnect. The restart is REQUIRED — `PairingStore` reads the token
+  once at construction and holds it in memory, so deleting the file alone
+  changes nothing and the phone keeps getting 401s (observed in the field,
+  where the delete looked like it had failed).
+  Symptom that you need this: the plugin's socket never opens on a phone
+  that used to work (or never paired), while the simulator connects fine.
 - **Dev server ↔ packed build**: localStorage is origin-scoped, so Path A and
   Path B hold *separate* tokens. Switching between them hits the same 401
   symptom — and looks exactly like the undocumented `ws://` risk below.
