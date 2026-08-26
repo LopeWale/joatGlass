@@ -5,7 +5,7 @@ The Hub plugin is our **officially supported path** to the glasses: a TypeScript
 ```
 apps/hub-plugin (this) ⇄ EvenAppBridge ⇄ Even App (host) ⇄ G2 glasses
         │ WebSocket
-     Mac brain (jarvis)
+     Mac brain (joat)
 ```
 
 ## Why this changes the architecture

@@ -1,6 +1,6 @@
 /**
  * Shared types for the Hub plugin ⇄ Mac brain protocol.
- * Keep this file in sync with apps/mac/jarvis/core (the Python mirror).
+ * Keep this file in sync with apps/mac/joat/core (the Python mirror).
  */
 
 /** Container IDs — stable across rebuilds so textContainerUpgrade can target them. */

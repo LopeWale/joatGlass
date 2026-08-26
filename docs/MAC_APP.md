@@ -1,4 +1,4 @@
-# Mac App — the Brain (`apps/mac/jarvis`)
+# Mac App — the Brain (`apps/mac/joat`)
 
 
 ## Native shell — JOAT.app (the Mac app proper)
@@ -61,7 +61,7 @@ The Mac Studio runs everything: BLE transport, audio, reasoning, the debate loop
 ## Runtime layout
 
 ```
-jarvis/
+joat/
 ├── core/          # ABCs + dataclasses + EventBus (zero external deps)
 ├── ble/           # DirectBleTransport (bleak/CoreBluetooth), HubGatewayTransport (WS client to men-g2-ble-gateway)
 ├── audio/         # Lc3Decoder (liblc3), VadWakeWord, WhisperKitEngine, ParakeetMlxEngine
@@ -98,7 +98,7 @@ jarvis/
 
 ## Config (`config/`)
 
-- `jarvis.toml`: mode (desk/mobile/auto), STT engine, MLX model ids, debate caps (max rounds, retries, judge threshold 0.85), budget caps.
+- `joat.toml`: mode (desk/mobile/auto), STT engine, MLX model ids, debate caps (max rounds, retries, judge threshold 0.85), budget caps.
 - `plan.schema.json` / `critique.schema.json`: the debate JSON schemas.
 - `domains.allowlist`: verifier domain reputation seeds; Hub `app.json` WS domains.
 - Pinned CLI versions (Codex v0.148.0 at time of writing) — re-verify flags on upgrade.

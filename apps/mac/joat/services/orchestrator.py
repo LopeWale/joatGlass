@@ -45,7 +45,7 @@ class VoiceOrchestrator:
         sessions: SessionManager | None = None,
         wake_words: tuple[str, ...] | None = None,
         status: object | None = None,
-        fuzzy_wake: tuple[str, ...] = ("jarvis", "joat"),
+        fuzzy_wake: tuple[str, ...] = ("joat",),
         fuzzy_threshold: float = 0.72,
     ) -> None:
         self._transport = transport
@@ -59,7 +59,7 @@ class VoiceOrchestrator:
         # jote and rejects service/driving/job/just/jazz/javascript.
         self._fuzzy_wake = fuzzy_wake
         self._fuzzy_threshold = fuzzy_threshold
-        # Longest first so "hey jarvis" strips before "jarvis" matches.
+        # Longest first so "hey joat" strips before "joat" matches.
         self._wake_words = (
             tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
         )
@@ -75,7 +75,7 @@ class VoiceOrchestrator:
 
     async def on_connect(self) -> None:
         """Greet the wearer so a live brain is visibly different from none."""
-        wake_hint = " — say 'Jarvis ...'" if self._wake_words else ""
+        wake_hint = " — say 'JOAT ...'" if self._wake_words else ""
         status = (f"JOAT · online{wake_hint}" if self._stt_available
                   else "JOAT · online (no STT)")
         await self._transport.send(HudText(text=status, container_id=ContainerId.STATUS_BAR))
@@ -188,8 +188,8 @@ class VoiceOrchestrator:
         """None = not addressed to us; '' = wake word alone; else the query.
 
         The wake word may appear ANYWHERE, because people don't speak in
-        command syntax: "Jarvis, what's the weather", "Good morning, Jarvis",
-        and "hey Jarvis can you..." are all addressed. Requiring a prefix
+        command syntax: "JOAT, what's the weather", "Good morning, JOAT",
+        and "hey JOAT can you..." are all addressed. Requiring a prefix
         silently ignored the wearer's real speech (observed live).
 
         Text-level gate on the transcript (v1). The audio-level VadWakeWord
@@ -215,7 +215,7 @@ class VoiceOrchestrator:
                 query = re.sub(pattern, " ", text, count=1, flags=re.IGNORECASE)
                 query = re.sub(r"\s+", " ", query)
                 # Removing the wake phrase can orphan its punctuation
-                # ("Good morning, Jarvis." -> "Good morning, ."). Reattach
+                # ("Good morning, JOAT." -> "Good morning, ."). Reattach
                 # and drop the orphan, but NEVER strip terminal ?/! — they
                 # carry meaning the model should see.
                 query = re.sub(r"\s+([,.!?])", r"\1", query)

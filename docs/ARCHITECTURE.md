@@ -11,16 +11,16 @@
 
 | Component | Package | Responsibility |
 |---|---|---|
-| G2 transport | `jarvis/ble` | Connect both lens peripherals, 7-packet auth replay, heartbeat, reconnect, host handoff |
-| Audio pipeline | `jarvis/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
-| HUD renderer | `jarvis/display` | 576×288 canvas, text containers, cards, differential page updates |
-| Reasoning | `jarvis/services` | Orchestrator: route utterances to MLX (fast path) or the debate loop (planning path) |
-| Debate agents | `jarvis/agents` | `ProposerAgent` (Codex CLI), `CriticAgent` (Claude CLI), `JudgeAgent` (local MLX), `DebateLoop` state machine |
-| Verifier Gate | `jarvis/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
-| Channels | `jarvis/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |
-| Computer use | `jarvis/computeruse` | cua driver in Lume sandbox (Mac), iPhone Mirroring + OCR + Karabiner (iOS) |
+| G2 transport | `joat/ble` | Connect both lens peripherals, 7-packet auth replay, heartbeat, reconnect, host handoff |
+| Audio pipeline | `joat/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
+| HUD renderer | `joat/display` | 576×288 canvas, text containers, cards, differential page updates |
+| Reasoning | `joat/services` | Orchestrator: route utterances to MLX (fast path) or the debate loop (planning path) |
+| Debate agents | `joat/agents` | `ProposerAgent` (Codex CLI), `CriticAgent` (Claude CLI), `JudgeAgent` (local MLX), `DebateLoop` state machine |
+| Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
+| Channels | `joat/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |
+| Computer use | `joat/computeruse` | cua driver in Lume sandbox (Mac), iPhone Mirroring + OCR + Karabiner (iOS) |
 
-## 3. Core abstractions (`jarvis/core`)
+## 3. Core abstractions (`joat/core`)
 
 ```python
 class GlassesTransport(ABC):        # implemented by DirectBleTransport, HubGatewayTransport

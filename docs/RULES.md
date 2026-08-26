@@ -4,7 +4,7 @@ Non-negotiable rules for this codebase. PRs violating these get rejected.
 
 ## Code organization (OOP)
 
-1. **Program to interfaces.** Every external dependency (BLE, STT, CLIs, channels, computer-use) sits behind an ABC in `jarvis/core`. Concrete adapters live in their own package. No orchestrator code imports a vendor library directly.
+1. **Program to interfaces.** Every external dependency (BLE, STT, CLIs, channels, computer-use) sits behind an ABC in `joat/core`. Concrete adapters live in their own package. No orchestrator code imports a vendor library directly.
 2. **One class, one responsibility.** Transport doesn't parse audio; audio doesn't render HUD pages; agents don't verify their own citations.
 3. **Dataclasses for domain models**, typed end-to-end (`mypy --strict` clean). Events over direct calls: components communicate via the `EventBus`.
 4. **Vendor code stays in `vendor/`** — never copy third-party source into `apps/`. Wrap it with an adapter instead. `vendor/` is gitignored; `scripts/clone_vendors.sh` reproduces it.

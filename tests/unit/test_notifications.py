@@ -7,15 +7,15 @@ import plistlib
 import sqlite3
 from pathlib import Path
 
-from jarvis.channels.cards import Urgency
-from jarvis.channels.notifications import (
+from joat.channels.cards import Urgency
+from joat.channels.notifications import (
     COCOA_EPOCH_UNIX,
     Notification,
     NotificationChannel,
     NotificationStore,
     parse_triage,
 )
-from jarvis.core.interfaces import ReplyEngine
+from joat.core.interfaces import ReplyEngine
 
 
 def make_db(path: Path, rows: list[tuple[str, str, str, str]]) -> None:
@@ -125,9 +125,9 @@ class TestChannel:
 
 class TestManagerCards:
     async def test_idle_shows_now_active_queues_and_drains(self) -> None:
-        from jarvis.core.protocol import HudText
-        from jarvis.services.hud import HudWriter
-        from jarvis.services.session import Session, SessionManager
+        from joat.core.protocol import HudText
+        from joat.services.hud import HudWriter
+        from joat.services.session import Session, SessionManager
         from tests.unit.test_session import SinkTransport
 
         transport = SinkTransport()

@@ -32,7 +32,7 @@ struct MainWindowView: View {
             GroupBox("Last exchange") {
                 VStack(alignment: .leading, spacing: 6) {
                     Row(icon: "quote.bubble", label: "You said",
-                        text: status.lastTranscript.isEmpty ? "nothing yet — say “Jarvis …”" : status.lastTranscript)
+                        text: status.lastTranscript.isEmpty ? "nothing yet — say “JOAT …”" : status.lastTranscript)
                     Row(icon: "eyeglasses", label: "On the HUD",
                         text: status.lastReply.isEmpty ? "—" : status.lastReply)
                     if !status.lastCard.isEmpty {

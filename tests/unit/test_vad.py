@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from jarvis.audio.vad import RmsVad, rms
+from joat.audio.vad import RmsVad, rms
 
 BATCH_SAMPLES = 3200  # 200 ms at 16 kHz
 

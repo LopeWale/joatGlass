@@ -93,7 +93,7 @@ Three of the four states below are the **same five containers with different con
 |                                              |
 |                                              |
 +----------------------------------------------+  y=160 id5 CONTEXT bright3   <- kept, not clobbered
-|you 09:41  jarvis when is the standup         |
+|you 09:41  joat when is the standup         |
 |                                              |
 +----------------------------------------------+  y=224 id6 TRAY    bright2
 |qwen3-4b . 1.8s                      2 waiting|
@@ -240,7 +240,7 @@ Add `textColor: 2` to `statusBar()` and `textColor: 4` to `main()` (`HudPageBuil
 
 **Step 3 — plugin-side chrome fills in.** Ticking clock, mic/link/battery/wearing indicators, transient hint line. Still no protocol change. At this point the dashboard exists and survives a dead Mac.
 
-**Step 4 — `hud.dash` + `HudWriter.dash()`.** First real use is the clobber fix: query → `CONTEXT`, reply → `MAIN` (`orchestrator.py:149-157`). Also register `transport.on_device` in `__main__.py` — it is currently never registered anywhere in `apps/mac/jarvis`, so battery/wearing arrive at the gateway (`hub_gateway.py:178-179`) and are dropped.
+**Step 4 — `hud.dash` + `HudWriter.dash()`.** First real use is the clobber fix: query → `CONTEXT`, reply → `MAIN` (`orchestrator.py:149-157`). Also register `transport.on_device` in `__main__.py` — it is currently never registered anywhere in `apps/mac/joat`, so battery/wearing arrive at the gateway (`hub_gateway.py:178-179`) and are dropped.
 
 **Step 5 — `hud.card` + `card` uplink + a plugin-side card queue.** Cards stop overwriting replies; `TRAY`'s "N waiting" becomes true because dismissals reach the Mac.
 

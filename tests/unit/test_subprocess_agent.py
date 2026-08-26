@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sys
 
-from jarvis.agents.subprocess_agent import _CODEX_NOISE, SubprocessAgent, find_claude_binary
+from joat.agents.subprocess_agent import _CODEX_NOISE, SubprocessAgent, find_claude_binary
 
 
 async def collect(agent: SubprocessAgent, prompt: str) -> str:

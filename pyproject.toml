@@ -1,5 +1,5 @@
 [project]
-name = "jarvis-g2"
+name = "joat-g2"
 version = "0.1.0"
 description = "J.A.R.V.I.S. brain for the Even Realities G2 — Mac Studio side."
 requires-python = ">=3.12"
@@ -30,7 +30,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["apps/mac"]
-include = ["jarvis*"]
+include = ["joat*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -42,7 +42,7 @@ asyncio_mode = "auto"
 python_version = "3.12"
 strict = true
 mypy_path = "apps/mac"
-packages = ["jarvis"]
+packages = ["joat"]
 
 [[tool.mypy.overrides]]
 module = "websockets.*"

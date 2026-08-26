@@ -61,7 +61,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   say "creating venv"
   "$PY" -m venv "$VENV"
 fi
-say "installing jarvis package (+dev tools)"
+say "installing joat package (+dev tools)"
 "$VENV/bin/pip" install -q -e "$REPO_DIR[dev,mlx]"
 
 # ── 4. whisperkit-cli ───────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ if [ "$WANT_SERVICE" = 1 ]; then
   <array>
     <string>$VENV/bin/python</string>
     <string>-m</string>
-    <string>jarvis</string>
+    <string>joat</string>
   </array>
   <key>WorkingDirectory</key><string>$REPO_DIR</string>
   <key>RunAtLoad</key><true/>
@@ -130,7 +130,7 @@ PLIST
   say "launchd agent installed: $PLIST_LABEL (logs: $LOG_DIR/brain.log)"
   say "stop with: launchctl unload $PLIST_PATH"
 else
-  say "run the brain:  $VENV/bin/python -m jarvis"
+  say "run the brain:  $VENV/bin/python -m joat"
   say "(or re-run with --service to keep it always on)"
 fi
 
