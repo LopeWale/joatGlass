@@ -95,6 +95,13 @@ final class EngineController: ObservableObject {
         p.executableURL = repo.appendingPathComponent(".venv/bin/python")
         p.arguments = ["-u", "-m", "jarvis"]
         p.currentDirectoryURL = repo
+        // GUI apps do not inherit the login shell's PATH; without brew and
+        // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
+        var env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:"
+            + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+        p.environment = env
         p.standardOutput = log
         p.standardError = log
         p.terminationHandler = { [weak self] proc in

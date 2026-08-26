@@ -136,9 +136,24 @@ async def main() -> None:
 
     await transport.start()
     log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
+
+    async def orphan_watchdog() -> None:
+        """Exit when the supervising shell dies without stopping us (kill -9,
+        crash) — reparenting to PID 1 is the tell. Prevents orphan engines
+        holding :8787 and crash-looping every future launch."""
+        import os
+        if os.getppid() == 1:
+            return  # started detached (terminal/launchd) — no parent to watch
+        while os.getppid() != 1:
+            await asyncio.sleep(2)
+        log.warning("supervisor died — engine shutting down")
+        raise SystemExit(0)
+
+    watchdog = asyncio.get_running_loop().create_task(orphan_watchdog())
     try:
         await asyncio.Event().wait()
     finally:
+        watchdog.cancel()
         await transport.stop()
         if notif_task is not None:
             notif_task.cancel()
