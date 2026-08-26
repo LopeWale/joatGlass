@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ..core.interfaces import ReplyEngine
+from .grounding import Grounding
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +27,13 @@ DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 SYSTEM_PROMPT = (
     "You are JOAT, a heads-up-display assistant on smart glasses. "
     "Answer in under 50 words of plain text. No markdown, no lists, "
-    "no preamble — just the answer."
+    "no preamble — just the answer. "
+    # Without this the model invents facts it has no source for, and a
+    # confident wrong answer on a HUD is worse than none — the wearer
+    # cannot tell it was guessing.
+    "Use the facts below when they answer the question. If something is "
+    "not in them and you cannot know it, say you do not have it rather "
+    "than guessing."
 )
 
 
@@ -39,11 +46,13 @@ class MlxReplyEngine(ReplyEngine):
     ever, the model download) — subsequent replies reuse the loaded weights."""
 
     def __init__(
-        self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150, chunk_chars: int = 32
+        self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150, chunk_chars: int = 32,
+        grounding: Grounding | None = None,
     ) -> None:
         self._model_id = model_id
         self._max_tokens = max_tokens
         self._chunk_chars = chunk_chars
+        self._grounding = grounding
         self._model: Any = None
         self._tokenizer: Any = None
         self._load_lock = asyncio.Lock()
@@ -119,10 +128,19 @@ class MlxReplyEngine(ReplyEngine):
             yield chunk
         await done
 
+    def _system_prompt(self) -> str:
+        """Prompt plus the facts as of NOW — recomputed every reply."""
+        if self._grounding is None:
+            return SYSTEM_PROMPT
+        facts = self._grounding.facts()
+        if not facts:
+            return SYSTEM_PROMPT
+        return f"{SYSTEM_PROMPT}\n\nFacts you can rely on right now:\n{facts}"
+
     def _chat_prompt(self, text: str) -> Any:
         return self._tokenizer.apply_chat_template(
             [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt()},
                 {"role": "user", "content": text},
             ],
             add_generation_prompt=True,
