@@ -116,6 +116,10 @@ class VoiceOrchestrator:
         # MLX engine and produced garbage before this held to the end.
         self._busy = True
         try:
+            # Acknowledge FIRST. Transcription takes seconds, and an
+            # unchanged HUD for that long reads as "the assistant is dead" —
+            # the wearer has no other signal that they were heard.
+            await self._hud.status("JOAT · hearing you…")
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
             if transcript is None or not transcript.text:
@@ -163,6 +167,22 @@ class VoiceOrchestrator:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
             self._busy = False
+
+    async def watch_loop_lag(self, interval_s: float = 0.5,
+                             warn_s: float = 0.75) -> None:
+        """Log when the event loop is blocked longer than a wearer would wait.
+
+        A blocked loop delays every await — the STT round trip included — so
+        a slow reply looks like a slow model when it is really CPU
+        contention. This measures the difference directly.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            before = loop.time()
+            await asyncio.sleep(interval_s)
+            lag = loop.time() - before - interval_s
+            if lag > warn_s:
+                log.warning("event loop stalled %.2fs — replies delayed by at least this", lag)
 
     def _strip_wake_word(self, text: str) -> str | None:
         """None = not addressed to us; '' = wake word alone; else the query.
