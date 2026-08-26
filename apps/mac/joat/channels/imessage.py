@@ -116,6 +116,43 @@ class IMessageStore:
             ))
         return out, last
 
+    def recent(self, limit: int = 5) -> list[tuple[str, str, float]]:
+        """Newest incoming message per sender: (sender, text, unix_time).
+
+        This data was parsed and sitting here while "who messaged me?" was
+        answered by a model that had never seen it. Tool-facing: the reply
+        loop calls this when the wearer asks about their messages.
+        """
+        limit = max(1, min(int(limit), 10))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(h.id, ''),
+                       COALESCE(m.text, ''),
+                       m.date,
+                       COALESCE(c.display_name, '')
+                FROM message m
+                LEFT JOIN handle h ON m.handle_id = h.ROWID
+                LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                LEFT JOIN chat c ON c.ROWID = cmj.chat_id
+                WHERE m.is_from_me = 0
+                  AND m.text IS NOT NULL AND m.text != ''
+                ORDER BY m.ROWID DESC
+                LIMIT 60
+                """
+            ).fetchall()
+        out: list[tuple[str, str, float]] = []
+        seen: set[str] = set()
+        for handle, text, raw_date, display in rows:
+            sender = display or self._contacts.name_for(handle)
+            if sender in seen:
+                continue  # newest message per sender only
+            seen.add(sender)
+            out.append((sender, str(text), _unix_time(raw_date)))
+            if len(out) >= limit:
+                break
+        return out
+
     def _connect(self) -> sqlite3.Connection:
         # immutable=1: the store is live and WAL-journaled; a normal open can
         # take locks that stall Messages itself.

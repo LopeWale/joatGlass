@@ -17,6 +17,7 @@ from typing import Any
 
 from ..core.interfaces import ReplyEngine
 from .grounding import Grounding
+from .tools import ToolBelt
 
 log = logging.getLogger(__name__)
 
@@ -47,12 +48,13 @@ class MlxReplyEngine(ReplyEngine):
 
     def __init__(
         self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150, chunk_chars: int = 32,
-        grounding: Grounding | None = None,
+        grounding: Grounding | None = None, tools: ToolBelt | None = None,
     ) -> None:
         self._model_id = model_id
         self._max_tokens = max_tokens
         self._chunk_chars = chunk_chars
         self._grounding = grounding
+        self._tools = tools
         self._model: Any = None
         self._tokenizer: Any = None
         self._load_lock = asyncio.Lock()
@@ -82,9 +84,54 @@ class MlxReplyEngine(ReplyEngine):
         if not text.strip():
             return None
         await self._ensure_loaded()
+        tool_note = await self._maybe_use_tools(text)
         return await asyncio.get_running_loop().run_in_executor(
-            self._mlx_thread, self._generate, text
+            self._mlx_thread, self._generate, text, tool_note
         )
+
+    async def _maybe_use_tools(self, text: str) -> str | None:
+        """DECIDE pass: offer the tools; execute whatever the model calls.
+
+        The wearer's ruling: an assistant that stops at "I don't know" is as
+        fired as one that makes the answer up — it goes and figures out what
+        is needed. The model picks the tool (policy); the belt executes it
+        with timeouts and error containment (mechanism).
+
+        Decide-then-answer, empirically: the 3B emits clean calls but
+        over-calls (asked the time — in its facts — it still called the
+        weather tool). Splitting the passes makes a needless call a harmless
+        extra fetch instead of a wrong answer: the ANSWER pass gets facts
+        AND results, with no tools offered, so it must produce text.
+
+        Returns the tool-results note for the answer pass, or None.
+        """
+        if self._tools is None or not self._tools:
+            return None
+        decision = await asyncio.get_running_loop().run_in_executor(
+            self._mlx_thread, self._decide, text
+        )
+        call = self._tools.parse_call(decision)
+        if call is None:
+            return None
+        result = await self._tools.execute(call)
+        return f"You looked this up with {call.name}: {result}"
+
+    def _decide(self, text: str) -> str:
+        from mlx_lm import generate  # lazy: optional dependency
+
+        out: str = generate(
+            self._model, self._tokenizer,
+            prompt=self._tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": self._system_prompt()},
+                    {"role": "user", "content": text},
+                ],
+                tools=self._tools.schemas() if self._tools else None,
+                add_generation_prompt=True,
+            ),
+            max_tokens=80, verbose=False,
+        )
+        return out
 
     async def stream(self, text: str) -> AsyncIterator[str]:
         """True token streaming: chunks arrive as the model produces them.
@@ -97,6 +144,7 @@ class MlxReplyEngine(ReplyEngine):
         if not text.strip():
             return
         await self._ensure_loaded()
+        tool_note = await self._maybe_use_tools(text)
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -107,7 +155,8 @@ class MlxReplyEngine(ReplyEngine):
                 buf = ""
                 for response in stream_generate(
                     self._model, self._tokenizer,
-                    prompt=self._chat_prompt(text), max_tokens=self._max_tokens,
+                    prompt=self._chat_prompt(text, tool_note),
+                    max_tokens=self._max_tokens,
                 ):
                     buf += str(response.text)
                     if len(buf) >= self._chunk_chars:
@@ -144,20 +193,25 @@ class MlxReplyEngine(ReplyEngine):
             )
         return "\n\n".join(parts)
 
-    def _chat_prompt(self, text: str) -> Any:
+    def _chat_prompt(self, text: str, tool_note: str | None = None) -> Any:
+        system = self._system_prompt()
+        if tool_note is not None:
+            # Results ride the system prompt for the ANSWER pass — no tools
+            # offered here, so the model must produce text, not another call.
+            system = f"{system}\n\n{tool_note}"
         return self._tokenizer.apply_chat_template(
             [
-                {"role": "system", "content": self._system_prompt()},
+                {"role": "system", "content": system},
                 {"role": "user", "content": text},
             ],
             add_generation_prompt=True,
         )
 
-    def _generate(self, text: str) -> str:
+    def _generate(self, text: str, tool_note: str | None = None) -> str:
         from mlx_lm import generate  # lazy: optional dependency
 
         out: str = generate(
             self._model, self._tokenizer,
-            prompt=self._chat_prompt(text), max_tokens=self._max_tokens,
+            prompt=self._chat_prompt(text, tool_note), max_tokens=self._max_tokens,
         )
         return out.strip()

@@ -1,0 +1,78 @@
+"""ToolBelt: the model decides, the runtime executes.
+
+The ruling this implements: an assistant that stops at "I don't know" is as
+fired as one that invents the answer — it goes and figures out what is
+needed. The LLM picks the tool (the pathfinding deterministic code cannot
+do); this layer runs it with timeouts and error containment.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from joat.agents.tools import Tool, ToolBelt, ToolCall
+
+
+def make_tool(name: str = "probe", result: str = "42") -> Tool:
+    async def run(args: dict[str, Any]) -> str:
+        return result
+
+    return Tool(name=name, description="", parameters={"type": "object"}, run=run)
+
+
+class TestParseCall:
+    def test_clean_call_parses(self) -> None:
+        # Verbatim what the live 3B emitted in the probe.
+        call = ToolBelt.parse_call(
+            '{"name": "get_weather", "parameters": {"location": "Norman, Oklahoma"}}')
+        assert call == ToolCall("get_weather", {"location": "Norman, Oklahoma"})
+
+    def test_call_wrapped_in_prose_still_parses(self) -> None:
+        call = ToolBelt.parse_call('Sure! {"name": "t", "parameters": {"x": 1}} done')
+        assert call == ToolCall("t", {"x": 1})
+
+    def test_plain_text_is_not_a_call(self) -> None:
+        assert ToolBelt.parse_call("The time is 5:20 PM.") is None
+
+    def test_json_that_is_not_a_call_is_not_a_call(self) -> None:
+        assert ToolBelt.parse_call('{"weather": "sunny"}') is None
+
+    def test_arguments_key_variant_parses(self) -> None:
+        call = ToolBelt.parse_call('{"name": "t", "arguments": {"x": 1}}')
+        assert call == ToolCall("t", {"x": 1})
+
+    def test_malformed_json_is_not_a_call(self) -> None:
+        assert ToolBelt.parse_call('{"name": "t", "parameters": {') is None
+
+
+class TestExecute:
+    async def test_runs_the_named_tool(self) -> None:
+        belt = ToolBelt([make_tool(result="got it")])
+        assert await belt.execute(ToolCall("probe", {})) == "got it"
+
+    async def test_unknown_tool_is_an_error_string_not_an_exception(self) -> None:
+        belt = ToolBelt([make_tool()])
+        out = await belt.execute(ToolCall("nope", {}))
+        assert out.startswith("error:")
+
+    async def test_a_raising_tool_becomes_information(self) -> None:
+        async def boom(args: dict[str, Any]) -> str:
+            raise RuntimeError("sensor offline")
+
+        belt = ToolBelt([Tool("bad", "", {"type": "object"}, boom)])
+        out = await belt.execute(ToolCall("bad", {}))
+        assert "sensor offline" in out
+
+    async def test_a_hung_tool_times_out_into_information(self) -> None:
+        async def hang(args: dict[str, Any]) -> str:
+            await asyncio.sleep(60)
+            return "never"
+
+        belt = ToolBelt([Tool("slow", "", {"type": "object"}, hang)], timeout_s=0.05)
+        out = await belt.execute(ToolCall("slow", {}))
+        assert "timed out" in out
+
+    def test_empty_belt_is_falsy(self) -> None:
+        assert not ToolBelt()
+        assert ToolBelt([make_tool()])
