@@ -39,28 +39,40 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <key>LSUIElement</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsSuddenTermination</key><false/>
+  <key>NSMicrophoneUsageDescription</key><string>JOAT transcribes your voice locally for the glasses HUD and call handling.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>JOAT connects to the Even G2 glasses over Bluetooth.</string>
   <key>NSHumanReadableCopyright</key><string>JOAT — personal assistant shell</string>
 </dict>
 </plist>
 PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+say "generating app icon"
+"$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/make_icon.py" \
+  "$APP/Contents/Resources/AppIcon.icns"
+
 IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
   | grep -m1 'Developer ID Application' | sed 's/.*"\(.*\)".*/\1/')
 if [ -n "${IDENTITY:-}" ]; then
-  say "signing with: $IDENTITY (hardened runtime)"
-  codesign --force --options runtime --sign "$IDENTITY" "$APP"
+  say "signing with: $IDENTITY (hardened runtime, secure timestamp)"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$SHELL_DIR/JOAT.entitlements" --sign "$IDENTITY" "$APP"
 else
   warn "no Developer ID identity — ad-hoc signing (FDA grant will NOT survive rebuilds)"
   codesign --force --sign - "$APP"
 fi
-codesign --verify --deep "$APP" && say "signature verified"
+codesign --verify --strict "$APP" && say "signature verified (strict)"
 
 if [ "${1:-}" = "--install" ]; then
   say "installing to /Applications (replacing any old copy)"
   rm -rf /Applications/JOAT.app
-  cp -R "$APP" /Applications/JOAT.app
+  ditto "$APP" /Applications/JOAT.app
   say "installed: /Applications/JOAT.app"
 else
   say "built: $APP   (run with --install to copy to /Applications)"
