@@ -78,6 +78,7 @@ class WhisperServeEngine(SttEngine):
         port: int = 50060,
         base_url: str | None = None,
         command: list[str] | None = None,
+        prompt: str | None = None,
         max_buffer_s: float = 30.0,
         ready_timeout_s: float = 180.0,
     ) -> None:
@@ -85,6 +86,11 @@ class WhisperServeEngine(SttEngine):
         self._model = model
         self._port = port
         self._base_url = base_url or f"http://127.0.0.1:{port}"
+        # Vocabulary bias. Whisper renders unknown proper nouns phonetically
+        # ("JOAT" -> "Jode"/"Jodh"), which no alias list fully covers. The
+        # OpenAI-compatible `prompt` field is the sanctioned way to teach it
+        # names it would otherwise guess at.
+        self._prompt = prompt
         self._command = command
         self._external = base_url is not None and command is None
         self._max_bytes = int(max_buffer_s * SAMPLE_RATE * SAMPLE_WIDTH)
@@ -193,9 +199,11 @@ class WhisperServeEngine(SttEngine):
             return False
 
     def _post(self, wav_payload: bytes) -> str:
+        fields = {"model": self._model, "response_format": "json"}
+        if self._prompt:
+            fields["prompt"] = self._prompt
         body, content_type = multipart(
-            {"model": self._model, "response_format": "json"},
-            "file", "utterance.wav", wav_payload,
+            fields, "file", "utterance.wav", wav_payload,
         )
         req = urllib.request.Request(
             f"{self._base_url}/v1/audio/transcriptions",
