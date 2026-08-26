@@ -387,3 +387,25 @@ class TestBindFamilies:
                 await _wait_for(lambda: t.connected)
         finally:
             await t.stop()
+
+
+class TestSendResilience:
+    async def test_send_survives_a_peer_vanishing_mid_write(self, transport) -> None:
+        """A phone can drop between the connected check and the write.
+        That is a dropped frame, not an exception for the caller."""
+        t, url = transport
+        ws = await websockets.connect(url)
+        await _wait_for(lambda: t.connected)
+        await ws.close()
+        # No _wait_for: the point is racing the close, exactly as the field
+        # storm did. This must not raise.
+        await t.send(HudText(text="hello"))
+
+    async def test_confirm_gate_stays_fail_closed_when_the_peer_drops(
+        self, transport
+    ) -> None:
+        t, url = transport
+        ws = await websockets.connect(url)
+        await _wait_for(lambda: t.connected)
+        await ws.close()
+        assert await t.request_confirm("a1", "ok?", timeout_s=0.2) is False

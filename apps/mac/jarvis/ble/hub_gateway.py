@@ -196,7 +196,16 @@ class HubGatewayTransport(GlassesTransport):
         if conn is None:
             log.warning("dropping %s — no plugin connected", type(message).__name__)
             return
-        await conn.send(json.dumps(message.to_wire()))
+        try:
+            await conn.send(json.dumps(message.to_wire()))
+        except websockets.ConnectionClosed:
+            # The wearer's phone can drop between the None check and the
+            # write (backgrounding, roaming, a reconnect replacing us). A
+            # vanished peer is a dropped frame, not an error to raise into
+            # the caller — request_confirm in particular must stay
+            # fail-closed rather than explode inside the safety gate.
+            log.info("dropping %s — plugin disconnected mid-send",
+                     type(message).__name__)
 
     async def request_confirm(
         self, action_id: str, prompt: str, timeout_s: float = 8.0

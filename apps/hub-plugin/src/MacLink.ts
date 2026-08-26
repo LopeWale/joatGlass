@@ -42,6 +42,7 @@ export class MacLink {
   private readonly capMs: number;
   private readonly dialMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
+  private reconnectPending = false;
 
   constructor(private readonly opts: MacLinkOptions) {
     if (opts.urls.length === 0) throw new Error('MacLink needs at least one URL');
@@ -72,6 +73,12 @@ export class MacLink {
 
   connect(): void {
     this.closed = false;
+    // Abandon any previous socket BEFORE dialing again. A socket we are
+    // replacing must stop driving state: otherwise its close schedules
+    // another dial that races this one, both open, the newest-wins server
+    // drops the older, ITS close dials again — and the loop never settles.
+    // Observed on real hardware as ~2 reconnects/second, indefinitely.
+    this.abandon();
     this.stateHandler?.(this.attempt === 0 ? 'connecting' : 'reconnecting');
     // Token rides the URL: the gateway authorizes BEFORE the WebSocket
     // handshake, and a WebView WebSocket cannot set headers.
@@ -91,12 +98,14 @@ export class MacLink {
     }, this.dialMs);
 
     socket.onopen = () => {
+      if (this.socket !== socket) return; // superseded by a newer dial
       this.clearDialTimer();
       this.attempt = 0;
       this.stateHandler?.('connected');
       for (const msg of this.queue.splice(0)) this.rawSend(msg);
     };
     socket.onmessage = (event) => {
+      if (this.socket !== socket) return;
       try {
         this.handler?.(JSON.parse(String(event.data)) as DownlinkMessage);
       } catch {
@@ -104,6 +113,7 @@ export class MacLink {
       }
     };
     socket.onclose = () => {
+      if (this.socket !== socket) return; // a superseded socket is not news
       this.clearDialTimer();
       if (!this.closed) {
         this.stateHandler?.('reconnecting');
@@ -127,8 +137,24 @@ export class MacLink {
   close(): void {
     this.closed = true;
     this.clearDialTimer();
-    this.socket?.close();
+    this.abandon();
     this.queue = [];
+  }
+
+  /** Detach and close the current socket so it can no longer drive state. */
+  private abandon(): void {
+    const prev = this.socket;
+    if (prev === undefined) return;
+    this.socket = undefined;
+    prev.onopen = null;
+    prev.onmessage = null;
+    prev.onclose = null;
+    prev.onerror = null;
+    try {
+      prev.close();
+    } catch {
+      // Already closing/closed — nothing to do.
+    }
   }
 
   private clearDialTimer(): void {
@@ -143,6 +169,10 @@ export class MacLink {
   }
 
   private scheduleReconnect(): void {
+    // At most ONE dial in flight. Without this, every stray close adds
+    // another pending connect and they compound.
+    if (this.reconnectPending) return;
+    this.reconnectPending = true;
     // Rotate to the next candidate brain before retrying, so a dead primary
     // never blocks a live secondary. Backoff grows per full rotation, not per
     // attempt — trying 3 dead hosts shouldn't take 3x as long to give up on.
@@ -150,6 +180,9 @@ export class MacLink {
     const round = Math.floor(this.attempt++ / this.opts.urls.length);
     const delay = Math.min(this.baseMs * 2 ** round, this.capMs);
     const jitter = delay * 0.2 * Math.random();
-    setTimeout(() => { if (!this.closed) this.connect(); }, delay + jitter);
+    setTimeout(() => {
+      this.reconnectPending = false;
+      if (!this.closed) this.connect();
+    }, delay + jitter);
   }
 }
