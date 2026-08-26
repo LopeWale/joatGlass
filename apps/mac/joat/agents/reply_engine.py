@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -28,13 +29,16 @@ DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 SYSTEM_PROMPT = (
     "You are JOAT, a heads-up-display assistant on smart glasses. "
     "Answer in under 50 words of plain text. No markdown, no lists, "
-    "no preamble — just the answer. "
-    # Without this the model invents facts it has no source for, and a
-    # confident wrong answer on a HUD is worse than none — the wearer
-    # cannot tell it was guessing.
-    "Use the facts below when they answer the question. If something is "
-    "not in them and you cannot know it, say you do not have it rather "
-    "than guessing."
+    "no preamble — just the answer."
+)
+
+# Attached ONLY alongside an actual fact block — a standing reference to
+# "the facts below" with no facts below is a dangling pointer the model
+# resolves by inventing the block.
+FACTS_PREAMBLE = (
+    "Use these facts when they answer the question. If something is not "
+    "in them and no tool can get it, say you do not have it rather than "
+    "guessing."
 )
 
 
@@ -49,12 +53,18 @@ class MlxReplyEngine(ReplyEngine):
     def __init__(
         self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150, chunk_chars: int = 32,
         grounding: Grounding | None = None, tools: ToolBelt | None = None,
+        on_loaded: Callable[[], None] | None = None,
     ) -> None:
         self._model_id = model_id
         self._max_tokens = max_tokens
         self._chunk_chars = chunk_chars
         self._grounding = grounding
         self._tools = tools
+        self._on_loaded = on_loaded
+        # 5-minute, 3-exchange working memory. Without it "repeat that" and
+        # "and tomorrow?" are answered by a model that invents a plausible
+        # prior turn — an assistant with amnesia that hides its amnesia.
+        self._history: list[tuple[float, str, str]] = []
         self._model: Any = None
         self._tokenizer: Any = None
         self._load_lock = asyncio.Lock()
@@ -73,6 +83,8 @@ class MlxReplyEngine(ReplyEngine):
                 self._mlx_thread, self._load
             )
             log.info("MLX model resident")
+            if self._on_loaded is not None:
+                self._on_loaded()
 
     def _load(self) -> tuple[Any, Any]:
         from mlx_lm import load  # lazy: optional dependency
@@ -85,9 +97,12 @@ class MlxReplyEngine(ReplyEngine):
             return None
         await self._ensure_loaded()
         tool_note = await self._maybe_use_tools(text)
-        return await asyncio.get_running_loop().run_in_executor(
+        answer = await asyncio.get_running_loop().run_in_executor(
             self._mlx_thread, self._generate, text, tool_note
         )
+        if answer:
+            self.remember(text, answer)
+        return answer
 
     async def _maybe_use_tools(self, text: str) -> str | None:
         """DECIDE pass: offer the tools; execute whatever the model calls.
@@ -170,12 +185,16 @@ class MlxReplyEngine(ReplyEngine):
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
         done = loop.run_in_executor(self._mlx_thread, worker)
+        spoken: list[str] = []
         while True:
             chunk = await queue.get()
             if chunk is None:
                 break
+            spoken.append(chunk)
             yield chunk
         await done
+        if spoken:
+            self.remember(text, "".join(spoken))
 
     def _system_prompt(self) -> str:
         """Prompt plus the facts as of NOW — recomputed every reply."""
@@ -184,7 +203,7 @@ class MlxReplyEngine(ReplyEngine):
         parts = [SYSTEM_PROMPT]
         facts = self._grounding.facts()
         if facts:
-            parts.append(f"Facts you can rely on right now:\n{facts}")
+            parts.append(f"{FACTS_PREAMBLE}\nFacts you can rely on right now:\n{facts}")
         gaps = self._grounding.cannot_know()
         if gaps:
             parts.append(
@@ -192,6 +211,21 @@ class MlxReplyEngine(ReplyEngine):
                 f"say you do not have them: {gaps}."
             )
         return "\n\n".join(parts)
+
+    HISTORY_TTL_S = 300.0
+    HISTORY_TURNS = 3
+
+    def _recent_turns(self) -> list[dict[str, str]]:
+        cutoff = time.monotonic() - self.HISTORY_TTL_S
+        self._history = [h for h in self._history if h[0] >= cutoff]
+        turns: list[dict[str, str]] = []
+        for _, asked, answered in self._history[-self.HISTORY_TURNS:]:
+            turns.append({"role": "user", "content": asked})
+            turns.append({"role": "assistant", "content": answered})
+        return turns
+
+    def remember(self, asked: str, answered: str) -> None:
+        self._history.append((time.monotonic(), asked, answered))
 
     def _chat_prompt(self, text: str, tool_note: str | None = None) -> Any:
         system = self._system_prompt()
@@ -202,6 +236,7 @@ class MlxReplyEngine(ReplyEngine):
         return self._tokenizer.apply_chat_template(
             [
                 {"role": "system", "content": system},
+                *self._recent_turns(),
                 {"role": "user", "content": text},
             ],
             add_generation_prompt=True,

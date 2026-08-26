@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from .tools import Tool
 
 if TYPE_CHECKING:
+    from ..channels.cards import CardLog
     from ..channels.imessage import IMessageStore
 
 # WMO weather interpretation codes, the subset that matters when spoken.
@@ -83,6 +84,32 @@ def weather_tool() -> Tool:
                 "description": "City or place name, e.g. 'Norman, Oklahoma'",
             }},
             "required": ["location"],
+        },
+        run=run,
+    )
+
+
+def notifications_tool(log_: "CardLog") -> Tool:
+    async def run(args: dict[str, Any]) -> str:
+        entries = log_.recent(int(args.get("limit", 5) or 5))
+        if not entries:
+            return "no notifications shown recently"
+        now = time.time()
+        return "; ".join(
+            f"[{max(0, int((now - at) / 60))}m ago] {card.replace(chr(10), ' / ')}"
+            for at, card in entries
+        )
+
+    return Tool(
+        name="get_recent_notifications",
+        description=(
+            "Notifications recently shown on the wearer's glasses. Call "
+            "this when they ask what they missed or what that alert was."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}},
+            "required": [],
         },
         run=run,
     )

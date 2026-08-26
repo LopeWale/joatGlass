@@ -97,6 +97,9 @@ def device_facts(transport: Any) -> FactSource:
             bits.append(f"battery {device.battery}%{charging}")
         if device.wearing is not None:
             bits.append("being worn" if device.wearing else "not being worn")
+        hello = getattr(transport, "hello", None)
+        if hello is not None:
+            bits.append(f"model {hello.model}, serial {hello.sn}")
         return f"Glasses: {', '.join(bits)}" if bits else ""
 
     return source

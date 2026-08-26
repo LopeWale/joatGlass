@@ -39,11 +39,13 @@ class StatusPublisher:
             "stt": "off",
             "llm": "off",
             "debate": "off",
-            "session": "idle",
             "last_transcript": "",
             "last_reply": "",
             "last_card": "",
-            "counts": {"utterances": 0, "cards": 0, "debates": 0},
+            # "session" and counts.debates were dead schema — written into
+            # every snapshot, decoded by the shell, displayed by nothing,
+            # and updated by nothing (audit finding 26).
+            "counts": {"utterances": 0, "cards": 0},
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self.flush()

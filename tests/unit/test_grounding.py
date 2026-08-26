@@ -85,3 +85,36 @@ class TestUnknowns:
 
     def test_no_unknowns_is_empty(self) -> None:
         assert Grounding().cannot_know() == ""
+
+
+class TestTurnMemory:
+    """'Repeat that' must not be answered by a model that invents a
+    plausible prior turn. History is bounded and expires on a long idle."""
+
+    def _engine(self):  # type: ignore[no-untyped-def]
+        from joat.agents.reply_engine import MlxReplyEngine
+        return MlxReplyEngine()
+
+    def test_recent_turns_replay_in_order(self) -> None:
+        e = self._engine()
+        e.remember("what time is it", "5:09 PM")
+        e.remember("and the weather", "92F, clear")
+        turns = e._recent_turns()
+        assert [t["content"] for t in turns] == [
+            "what time is it", "5:09 PM", "and the weather", "92F, clear"]
+
+    def test_history_is_bounded_to_the_last_exchanges(self) -> None:
+        e = self._engine()
+        for i in range(6):
+            e.remember(f"q{i}", f"a{i}")
+        turns = e._recent_turns()
+        assert len(turns) == e.HISTORY_TURNS * 2
+        assert turns[0]["content"] == "q3"
+
+    def test_history_expires_after_the_ttl(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import time as time_mod
+        e = self._engine()
+        e.remember("old question", "old answer")
+        real = time_mod.monotonic
+        monkeypatch.setattr(time_mod, "monotonic", lambda: real() + e.HISTORY_TTL_S + 1)
+        assert e._recent_turns() == []

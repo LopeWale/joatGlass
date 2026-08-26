@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from ..core.interfaces import ReplyEngine
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
+from ..channels.cards import CardLog
 from .hud import HudWriter
 
 log = logging.getLogger(__name__)
@@ -39,12 +40,14 @@ SessionFactory = Callable[[str], Session | None]
 class SessionManager:
     """Routes transcripts; enforces the one-active-session invariant."""
 
-    def __init__(self, hud: HudWriter, factory: SessionFactory) -> None:
+    def __init__(self, hud: HudWriter, factory: SessionFactory,
+                 card_log: CardLog | None = None) -> None:
         self._hud = hud
         self._factory = factory
         self._active: Session | None = None
         self._task: asyncio.Task[None] | None = None
         self._pending_cards: list[str] = []
+        self._card_log = card_log
 
     @property
     def active(self) -> bool:
@@ -61,6 +64,8 @@ class SessionManager:
         asyncio.get_running_loop().create_task(self._show_card(card))
 
     async def _show_card(self, card: str) -> None:
+        if self._card_log is not None:
+            self._card_log.add(card)
         await self._hud.show(card)
 
     def _drain_cards(self) -> None:

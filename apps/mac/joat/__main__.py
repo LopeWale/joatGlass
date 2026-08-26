@@ -10,9 +10,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 
-from .agents.builtin_tools import messages_tool, weather_tool
-from .agents.grounding import Grounding, device_facts, local_clock
+from .agents.builtin_tools import (
+    messages_tool,
+    notifications_tool,
+    weather_tool,
+)
+from .agents.grounding import (
+    Grounding,
+    device_facts,
+    local_clock,
+    static_fact,
+)
 from .agents.tools import ToolBelt
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.subprocess_agent import critic, proposer
@@ -21,11 +31,12 @@ from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
 from .core.pairing import PairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
+from .channels.cards import CardLog
 from .channels.imessage import IMessageStore
 from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
-from .core.protocol import Hello
+from .core.protocol import Device, Hello
 from .services.hud import HudWriter
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
@@ -51,6 +62,9 @@ async def main() -> None:
                                 "assistant as JOAT.",
                         help="vocabulary bias so STT spells the wake word right")
     parser.add_argument("--llm-model", default=DEFAULT_MODEL)
+    parser.add_argument("--wearer-name", default=os.environ.get("JOAT_WEARER", ""),
+                        help="the wearer's name, grounded into every reply "
+                             "(env JOAT_WEARER)")
     parser.add_argument("--always-answer", action="store_true",
                         help="answer ALL speech (dev only) instead of requiring 'JOAT ...'")
     parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
@@ -94,6 +108,10 @@ async def main() -> None:
             stt_available = getattr(stt, "available", True)
     status.set(stt="ready" if stt_available else "missing")
 
+    # Cards shown on the HUD are remembered here so "what did I miss?" has a
+    # real source instead of a model with no record (audit finding 6).
+    card_log = CardLog()
+
     replier: ReplyEngine | None = None
     if args.no_llm:
         log.info("LLM disabled (--no-llm) — echoing transcripts")
@@ -111,23 +129,28 @@ async def main() -> None:
                 "their calendar or schedule",
             ],
         )
+        if args.wearer_name:
+            grounding.add(static_fact(f"The wearer's name is {args.wearer_name}"))
         # The belt: what the model can GO GET instead of declining. The
         # wearer's ruling — an assistant that stops at "I don't know" is as
         # fired as one that invents the answer.
-        belt_tools = [weather_tool()]
+        belt_tools = [weather_tool(), notifications_tool(card_log)]
         tools_store = IMessageStore()
         if tools_store.available:
             belt_tools.append(messages_tool(tools_store))
         belt = ToolBelt(belt_tools)
         replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding,
-                                 tools=belt)
+                                 tools=belt,
+                                 on_loaded=lambda: status.set(llm="ready"))
         log.info("reply engine: %s (+%d tools; loads on first utterance)",
                  args.llm_model, len(belt_tools))
     else:
         log.warning("mlx-lm not installed — echoing transcripts "
                     "(pip install -e '.[mlx]')")
 
-    status.set(llm="ready" if replier is not None else "off")
+    # "available" is a claim about pip; "ready" is a claim about resident
+    # weights. The pill said ready before the model had ever loaded (27).
+    status.set(llm="available" if replier is not None else "off")
     hud = HudWriter(transport)
     propose_agent, critic_agent = proposer(), critic()
     if propose_agent and critic_agent:
@@ -151,7 +174,7 @@ async def main() -> None:
         )
 
     status.set(debate="ready" if (propose_agent and critic_agent) else "unavailable")
-    sessions = SessionManager(hud, make_debate)
+    sessions = SessionManager(hud, make_debate, card_log=card_log)
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no
     # context, so "JOAT" comes back as "Jokes"/"Jote"/"Jolt". Rejecting
@@ -171,6 +194,22 @@ async def main() -> None:
         asyncio.get_running_loop().create_task(orchestrator.on_connect())
 
     transport.on_hello(greet)
+
+    def farewell() -> None:
+        # The pills must not lie about a link that is gone (finding 25).
+        status.set(glasses="disconnected", mic="off")
+
+    def on_device(device: Device) -> None:
+        # Battery reaches the dashboard, not just the model (finding 2).
+        hello = transport.hello
+        who = f"{hello.model} / {hello.sn}" if hello else "glasses"
+        if device.battery is not None:
+            charge = "+" if device.charging else ""
+            who += f" · {device.battery}%{charge}"
+        status.set(device=who)
+
+    transport.on_disconnect(farewell)
+    transport.on_device(on_device)
 
     notif_task: asyncio.Task[None] | None = None
     if not args.no_notifications:

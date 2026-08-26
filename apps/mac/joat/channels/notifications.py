@@ -133,8 +133,19 @@ TRIAGE_PROMPT = (
     "IGNORE: promotional, automated, or noise.\n"
     "Never mark a battery, sync, update, or widget notification URGENT.\n"
     "The summary is under 10 words, plain, no app name, no quotes.\n\n"
-    "App: {app}\nTitle: {title}\nSubtitle: {subtitle}\nBody: {body}"
+    "App: {app}\nArrived: {age}\nTitle: {title}\nSubtitle: {subtitle}\nBody: {body}"
 )
+
+
+def humanize_age(seconds: float) -> str:
+    """'12 seconds ago' / '40 minutes ago' — recency is the strongest
+    predictor of 'someone is waiting on you right now', and the triager was
+    deciding urgency without it."""
+    if seconds < 60:
+        return f"{max(0, int(seconds))} seconds ago"
+    if seconds < 3600:
+        return f"{int(seconds / 60)} minutes ago"
+    return f"{seconds / 3600:.1f} hours ago"
 
 
 def parse_triage(reply: str) -> tuple[Urgency, str] | None:
@@ -212,8 +223,11 @@ class NotificationChannel:
         level, summary = Urgency.NOTIFY, raw[:120]
         short = len(raw) <= self.VERBATIM_CHARS
         if self._triage is not None:
+            age = (humanize_age(time.time() - n.delivered_unix)
+                   if n.delivered_unix > 0 else "unknown")
             reply = await self._triage.reply(TRIAGE_PROMPT.format(
-                app=n.app, title=n.title, subtitle=n.subtitle, body=n.body,
+                app=n.app, age=age, title=n.title, subtitle=n.subtitle,
+                body=n.body,
             ))
             parsed = parse_triage(reply or "")
             if parsed is not None:

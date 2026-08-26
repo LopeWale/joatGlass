@@ -180,3 +180,22 @@ def looks_like_echo(summary: str) -> bool:
 def corroborates_urgency(text: str) -> bool:
     low = text.lower()
     return any(signal in low for signal in _URGENT_SIGNALS)
+
+
+class CardLog:
+    """The last cards shown, so "what did I miss?" has a real source.
+
+    Cards were rendered to the HUD and immediately forgotten — the model was
+    asked about notifications it had no record of. Bounded; newest last.
+    """
+
+    def __init__(self, keep: int = 10) -> None:
+        self._keep = keep
+        self._entries: list[tuple[float, str]] = []
+
+    def add(self, card: str, at: float | None = None) -> None:
+        self._entries.append((time.time() if at is None else at, card))
+        del self._entries[:-self._keep]
+
+    def recent(self, limit: int = 5) -> list[tuple[float, str]]:
+        return self._entries[-max(1, min(limit, self._keep)):]
