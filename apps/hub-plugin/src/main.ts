@@ -2,6 +2,7 @@ import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
+import { Chrome } from './Chrome';
 import { LocationMonitor } from './LocationMonitor';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
@@ -82,8 +83,12 @@ async function boot(): Promise<void> {
   // hello the brain never learns who connected and never greets. announce() is
   // set once device info exists; the guard covers the first pre-boot 'connected'.
   let announce: (() => void) | undefined;
+  // Declared early: the link/mic callbacks below are registered before the
+  // page exists, and must not paint into a page that is not there yet.
+  let chromeRef: Chrome | undefined;
   link.onState((state) => {
     setPanel('p-link', state);
+    chromeRef?.setLink(state);
     // A token the Mac no longer honours must not outlive the session, or
   // every relaunch dials with it and is refused again.
   link.onStaleToken(() => {
@@ -116,6 +121,7 @@ async function boot(): Promise<void> {
   // latch "streaming" at hello and never verify.
   audio.onState = (open) => {
     setPanel('p-mic', open ? 'streaming' : 'off');
+    chromeRef?.setMic(open);
     link.send({ kind: 'device', connect: 'connected', mic: open });
   };
 
@@ -139,11 +145,20 @@ async function boot(): Promise<void> {
   };
 
   new EventRouter(client, link, audio, imu, menu, lifecycle).attach();
-  new DeviceMonitor(client, link, audio, imu, hud, settings).attach();
+  const devices = new DeviceMonitor(client, link, audio, imu, hud, settings);
+  devices.onBattery = (level, charging) => chromeRef?.setBattery(level, charging);
+  devices.attach();
 
   link.onMessage(async (msg: DownlinkMessage) => {
     switch (msg.kind) {
       case 'hud.text':
+        // Status-bar writes become the STATE WORD, not the whole line: the
+        // bar has one owner (Chrome), so the clock and battery survive what
+        // the Mac has to say.
+        if (msg.containerId === ContainerId.StatusBar) {
+          chromeRef?.setMacState(msg.text);
+          break;
+        }
         // append streams (debate turns, token-by-token replies) without a
         // full repaint; plain hud.text replaces the container.
         if (msg.append) await hud.appendText(msg.text, msg.containerId);
@@ -261,7 +276,20 @@ async function boot(): Promise<void> {
     micStatus = micOk ? label : 'JOAT · mic unavailable';
   }
   await imu.start();
-  await hud.setStatus(micStatus);
+
+  // Plugin-owned chrome: clock, link, mic, battery, and the gesture hint —
+  // painted from state the PHONE has, so the HUD keeps informing the wearer
+  // through a Mac outage instead of going blank.
+  const chrome = new Chrome(hud);
+  chromeRef = chrome;
+  chrome.setMic(audio.isOpen);
+  chrome.setBattery(device?.status?.batteryLevel, device?.status?.isCharging === true);
+  chrome.start();
+  if (micStatus.includes('phone mic')) {
+    await hud.showText('Using the phone mic — glasses mic unavailable.', ContainerId.Main);
+  } else if (worn === false) {
+    await hud.showText('Put the glasses on to start listening.', ContainerId.Main);
+  }
 
   // Wearer position -> Mac (finding 12): weather-without-asking, and the
   // brain stops answering timezone questions from the Mac's point of view.
