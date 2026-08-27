@@ -128,6 +128,14 @@ class DebateSnapshot:
     verdict: str = ""
     running: bool = False
 
+    def headline(self) -> str:
+        """The panel header, in the dashboard's "Messages · 3" shape."""
+        if not self.topic:
+            return "Debate"
+        if self.running:
+            return f"Debate · {len(self.speakers)} seats"
+        return f"Debate · {self.verdict}" if self.verdict else "Debate"
+
     def rows(self, width: int = 60, limit: int = 8) -> list[str]:
         """Newest-last list rows for the HUD's fixed 40px list layout.
 
