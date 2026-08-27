@@ -141,3 +141,13 @@ class TestDebateStateSink:
         await sink.chunk("\n[!] claude could not answer: exited 1 — see the log")
         await sink.close("no debate — 1 of 2 spoke")
         assert sink.snapshot.rows()[0] == "CLAUDE: could not answer"
+
+    async def test_headline_matches_the_dashboard_panel_shape(self) -> None:
+        from joat.services.sinks import DebateStateSink
+
+        sink = DebateStateSink()
+        assert sink.snapshot.headline() == "Debate"          # never opened
+        await sink.open("tabs or spaces", ["codex", "claude", "openclaw"])
+        assert sink.snapshot.headline() == "Debate · 3 seats"
+        await sink.close("converged 0.91")
+        assert sink.snapshot.headline() == "Debate · converged 0.91"
