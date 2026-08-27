@@ -31,18 +31,18 @@
     .body { flex-grow: 1; display: flex; flex-direction: column; }
   </style>
 </helmet>
-<div class="hud">
-  <div class="status t2"><span>09:41</span><span>debate &#183; round 2/4 &#183; 0.78</span><span>bat 87%</span></div>
-  <div class="body" style="gap: 6px; padding: 8px 16px 0 16px;">
-    <div class="t2" style="font-size: 15px;">&#187; CODEX &#183; proposer</div>
-    <div class="t3" style="font-size: 17px; line-height: 24px;">Cache the STT model in memory and reuse the session across utterances.</div>
-    <div class="t2" style="font-size: 15px; margin-top: 4px;">&#187; CLAUDE &#183; critic</div>
-    <div class="t4" style="font-size: 17px; line-height: 24px;">
+<div style="width: 576px; height: 288px; background: #000000; color: #7cfc98; font-family: ui-monospace, 'SF Mono', Menlo, monospace; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; box-sizing: border-box;">
+  <div style="height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font-size: 15px; opacity: 0.5; box-sizing: border-box;"><span>09:41</span><span>debate &#183; round 2/4 &#183; 0.78</span><span>bat 87%</span></div>
+  <div style="flex-grow: 1; display: flex; flex-direction: column; box-sizing: border-box; gap: 6px; padding: 8px 16px 0 16px;">
+    <div style="opacity: 0.5; box-sizing: border-box; font-size: 15px;">&#187; CODEX &#183; proposer</div>
+    <div style="opacity: 0.72; box-sizing: border-box; font-size: 17px; line-height: 24px;">Cache the STT model in memory and reuse the session across utterances.</div>
+    <div style="opacity: 0.5; box-sizing: border-box; font-size: 15px; margin-top: 4px;">&#187; CLAUDE &#183; critic</div>
+    <div style="opacity: 1; box-sizing: border-box; font-size: 17px; line-height: 24px;">
       <span>Agreed on caching, but the session must reset on audio gaps or</span>
       <span style="display: inline-block; width: 10px; height: 17px; background: #7cfc98; vertical-align: text-bottom; animation: joat-blink 1s step-start infinite;"></span>
     </div>
   </div>
-  <div class="hint t1"><span>right tap: stop &#183; left double-tap: menu</span></div>
+  <div style="height: 32px; display: flex; align-items: center; padding: 0 16px; font-size: 14px; opacity: 0.3; box-sizing: border-box;"><span>right tap: stop &#183; left double-tap: menu</span></div>
 </div>
 </x-dc>
 </body>
