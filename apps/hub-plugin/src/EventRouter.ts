@@ -3,7 +3,7 @@ import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
-import type { SettingsMenu } from './SettingsMenu';
+import type { CapabilityMenu } from './CapabilityMenu';
 
 /**
  * Lifecycle hooks. The SDK reports app suspend/resume/exit as sysEvents, and
@@ -48,7 +48,7 @@ export class EventRouter {
     private readonly link: MacLink,
     private readonly audio: AudioStreamer,
     private readonly imu: ImuMonitor,
-    private readonly menu: SettingsMenu,
+    private readonly menu: CapabilityMenu,
     private readonly lifecycle?: LifecycleHandler,
   ) {}
 
@@ -143,16 +143,11 @@ export class EventRouter {
       return;
     }
 
-    if (type === OsEventTypeList.LONG_PRESS_EVENT) {
-      // Long-press = "repeat that" — the most-wanted mid-walk action gets
-      // the cheapest gesture. Release (10) is deliberately ignored.
-      this.link.send({ kind: 'input', event: { containerName: 'sysmenu',
-        selectedIndex: 1, eventType: type, eventSource: source } });
-      return;
-    }
-    if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
-      return;
-    }
+    // Long-press belongs to the glasses OS: with a menuObject declared it
+    // opens the contextual menu (Repeat / Mute / Reconnect). Our own
+    // long-press handler competed with that — double-firing where the OS
+    // passed the event through, dead where the OS consumed it — so repeat
+    // now lives ONLY as contextual-menu item 1.
 
     if (type === OsEventTypeList.CLICK_EVENT) {
       // Deliberate taps are clean confirm signals — no nod heuristics needed.

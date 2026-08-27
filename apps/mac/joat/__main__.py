@@ -41,6 +41,7 @@ from .core.protocol import Device, Hello, InputEvent
 from .services.hud import HudWriter
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
+from .services.capabilities import CapabilityRouter
 from .services.session import DebateSession, Session, SessionManager
 from .verifier.fetcher import fetch_page_text, wayback_page_text
 from .verifier.nli import MiniCheckJudge, minicheck_available
@@ -227,35 +228,21 @@ async def main() -> None:
     transport.on_disconnect(farewell)
     transport.on_device(on_device)
 
-    async def repaint_home() -> None:
-        """Restore the content regions after a menu rebuild blanked them.
+    # One chat.db reader serves BOTH the notification channel and the
+    # capability menu's Messages view.
+    imessage = IMessageStore()
 
-        Closing the on-glasses menu rebuilds the page, which CLEARS every
-        region — and a silent Mac then means a blank screen the wearer read
-        as a dead assistant (observed: the only way out was killing the
-        phone app)."""
-        last_reply = status.get("last_reply")
-        if last_reply:
-            await hud.show(last_reply)
-        last_heard = status.get("last_transcript")
-        if last_heard:
-            await hud.context(f"you  {last_heard}")
-
-    def on_input(event: InputEvent) -> None:
-        # Glasses-OS contextual menu / long-press: "repeat last reply".
-        # Deterministic by design — a reflex, not a model decision.
-        if event.container_name == "sysmenu" and event.selected_index == 1:
-            last = status.get("last_reply")
-            asyncio.get_running_loop().create_task(
-                hud.show(last if last else "Nothing to repeat yet."))
-        if event.container_name == "menu" and event.selected_name == "closed":
-            asyncio.get_running_loop().create_task(repaint_home())
-
-    transport.on_input(on_input)
+    # Glasses gestures in, drawn views out: the capability menu (Messages /
+    # Notifications / Calendar / Debate), the contextual menu's repeat, and
+    # the repaint after a menu close blanked the regions.
+    capabilities = CapabilityRouter(
+        hud=hud, transport=transport, status=status,
+        messages=imessage if imessage.available else None, cards=card_log,
+    )
+    transport.on_input(capabilities.on_input)
 
     notif_task: asyncio.Task[None] | None = None
     if not args.no_notifications:
-        imessage = IMessageStore()
         jsonl = JsonlNotificationStore()
         store: NotificationSource
         if imessage.available:
