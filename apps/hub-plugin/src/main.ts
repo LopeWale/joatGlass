@@ -12,7 +12,7 @@ import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
-import { ContainerId, CONFIRM_HINT, type DownlinkMessage } from './types';
+import { ContainerId, type DownlinkMessage } from './types';
 
 /**
  * Comma-separated candidate brain URLs — every host must be an exact-match
@@ -151,7 +151,7 @@ async function boot(): Promise<void> {
         else await hud.showText(msg.text, msg.containerId, msg.textColor);
         break;
       case 'hud.list':
-        await hud.showList(msg.items);
+        await hud.showList(msg.items, { title: msg.title, hint: msg.hint });
         break;
       case 'hud.rebuild':
         await hud.showDefault();
@@ -173,10 +173,22 @@ async function boot(): Promise<void> {
       case 'imu.trace':
         imu.setTrace(msg.enabled);
         break;
-      case 'confirm.request':
-        await hud.showText(`${msg.prompt}\n\n${CONFIRM_HINT}`, ContainerId.Main);
-        imu.await(msg.actionId);
+      case 'confirm.request': {
+        const rendered = hud.showConfirmation(msg.prompt, msg.actionId);
+        imu.prepare(msg.actionId, (accepted) => {
+          void hud.dismissConfirmation(msg.actionId);
+          link.send({ kind: 'confirm', actionId: msg.actionId, accepted });
+        });
+        let visible = false;
+        try {
+          visible = await rendered;
+        } catch (err) {
+          console.error('[joat] confirmation render failed:', err);
+        }
+        if (visible) imu.activate(msg.actionId, 8000);
+        else imu.cancel(msg.actionId);
         break;
+      }
       case 'pairing.set':
         handlePairingOffer(msg.token, link, (tok) => {
           void client.require().setLocalStorage(TOKEN_KEY, tok).catch(() => {});
@@ -270,6 +282,7 @@ async function boot(): Promise<void> {
 
   async function teardown(): Promise<void> {
     await audio.stop();
+    imu.dispose();
     await imu.stop();
     link.close();
     client.dispose();

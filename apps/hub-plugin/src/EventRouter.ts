@@ -56,10 +56,57 @@ export class EventRouter {
     this.client.track(this.client.require().onEvenHubEvent((event) => this.dispatch(event)));
   }
 
+  /**
+   * Long-press → mute/unmute the glasses mic.
+   *
+   * Checked in EVERY event class because the SDK README is explicit that
+   * 9/10 are "delivered inside the matching list, text, or system event
+   * rather than as separate top-level events" (README:392) and that they
+   * "remain regular list/text/sys events" (README:433). An earlier build
+   * ceded this gesture to the glasses OS on the theory that a declared
+   * menuObject makes long-press open the contextual menu — the SDK says
+   * the opposite, there is no bridge verb that opens a menu, and on
+   * hardware the gesture simply did nothing.
+   *
+   * The action is LOCAL: a privacy control must not need the Mac, and
+   * handling it here also sidesteps the relay, which routed these events
+   * to a Mac that ignored them.
+   *
+   * Returns true when the event was consumed.
+   */
+  private handleLongPress(eventType: number | undefined, via: string): boolean {
+    const type = eventType ?? 0;
+    if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
+      // Consumed silently: one press is one toggle, and the release must
+      // not reach the Mac as a phantom input.
+      return true;
+    }
+    if (type !== OsEventTypeList.LONG_PRESS_EVENT) return false;
+    // Logged with its event class: if firmware never delivers long-press,
+    // this line's ABSENCE is the proof, instead of a third guess.
+    console.info(`[EventRouter] long-press via ${via} — toggling mic`);
+    this.toggleMic();
+    return true;
+  }
+
+  /** The one mute implementation, shared by the gesture and menu item 2. */
+  private toggleMic(): void {
+    if (this.audio.isOpen) {
+      void this.audio.stop();
+    } else {
+      void this.audio.start(this.audio.lastSource);
+    }
+  }
+
   private dispatch(event: EvenHubEvent): void {
     if (event.audioEvent) {
       this.audio.ingest(event.audioEvent.audioPcm, event.audioEvent.speakerRole);
     }
+
+    // The decision surface owns every non-lifecycle input. Audio may keep
+    // flowing, but list rows, text scrolls, and contextual-menu items cannot
+    // mutate state behind the prompt.
+    if (this.imu.isPending() && !event.sysEvent) return;
 
     // Contextual-menu clicks (SDK 0.0.14). Without this branch a declared
     // menu renders but every selection vanishes silently — the event has
@@ -70,12 +117,17 @@ export class EventRouter {
     }
 
     if (event.sysEvent) {
+      if (this.handleLongPress(event.sysEvent.eventType, 'sysEvent')) return;
       this.handleSys(event.sysEvent);
       return;
     }
 
     if (event.textEvent) {
-      // Scroll only — clicks on a text container arrive as sysEvent.
+      // Long-press first: on a text-capture page the SDK delivers 9/10
+      // HERE, and the relay below would forward it as an ordinary scroll.
+      if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
+      // Scrolls and clicks: clicks on a text container arrive as sysEvent,
+      // so what reaches this line is a scroll.
       this.link.send({
         kind: 'input',
         event: {
@@ -88,6 +140,7 @@ export class EventRouter {
     }
 
     if (event.listEvent) {
+      if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
       // Settings menu open → selection is a local concern, not Mac input.
       if (this.menu.handleList(event.listEvent)) return;
       this.link.send({
@@ -129,6 +182,23 @@ export class EventRouter {
         return;
     }
 
+    // Confirmation is exclusive: no menu navigation, OS exit dialog, or
+    // generic Mac input may occur behind it. Only a single-click verdict is
+    // meaningful; every other wearer gesture is consumed until settlement.
+    if (this.imu.isPending()) {
+      if (type === OsEventTypeList.CLICK_EVENT) {
+        if (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L) {
+          this.imu.declineByTap();
+        } else if (
+          source === EventSourceType.TOUCH_EVENT_FROM_RING ||
+          source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
+        ) {
+          this.imu.confirmByTap();
+        }
+      }
+      return;
+    }
+
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
       // Left temple: our settings menu. Consumed locally, never relayed.
       if (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L) {
@@ -150,6 +220,14 @@ export class EventRouter {
     // now lives ONLY as contextual-menu item 1.
 
     if (type === OsEventTypeList.CLICK_EVENT) {
+      // Left is the explicit refusal path only while a decision is pending.
+      // Otherwise it remains free and the raw input continues to the Mac.
+      if (
+        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L &&
+        this.imu.declineByTap()
+      ) {
+        return;
+      }
       // Deliberate taps are clean confirm signals — no nod heuristics needed.
       // Right temple matters most: a wearer with no R1 ring has no other
       // trustworthy way to confirm, since the nod thresholds are uncalibrated.
@@ -157,7 +235,9 @@ export class EventRouter {
         source === EventSourceType.TOUCH_EVENT_FROM_RING ||
         source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
       ) {
-        this.imu.confirmByTap();
+        // A decision gesture is consumed by the gate. Relaying the same tap
+        // as generic Mac input could trigger a second, unrelated action.
+        if (this.imu.confirmByTap()) return;
       }
     }
 
@@ -171,11 +251,7 @@ export class EventRouter {
         this.link.send({ kind: 'input', event: { containerName: 'sysmenu', selectedIndex: 1 } });
         return;
       case 2: // Mute/unmute is LOCAL: a privacy control must not need the Mac
-        if (this.audio.isOpen) {
-          void this.audio.stop();
-        } else {
-          void this.audio.start(this.audio.lastSource);
-        }
+        this.toggleMic();
         return;
       case 3: // Re-dial the brain
         this.link.connect();

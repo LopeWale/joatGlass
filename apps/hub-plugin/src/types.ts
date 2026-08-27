@@ -23,11 +23,11 @@ export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
  * Confirmation prompt hint. Lives here, not in main.ts, so DeviceMonitor can
  * use it without a circular import.
  *
- * Names the right temple rather than the ring: the ring is an optional
- * accessory, the temple is always present. Both resolve the same confirm, and
- * the nod is listed last because its thresholds are still uncalibrated.
+ * Names every implemented outcome: the right temple is always present, the
+ * ring is optional, nod thresholds are still uncalibrated, and left is an
+ * explicit refusal rather than silence.
  */
-export const CONFIRM_HINT = 'Tap the right temple (or nod) to confirm.';
+export const CONFIRM_HINT = 'RIGHT/RING/NOD accept · LEFT cancel · 8s';
 
 /**
  * How listening resumes after the wearer puts the glasses back on.
@@ -54,7 +54,7 @@ export type UplinkMessage =
 export type DownlinkMessage =
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image' }
-  | { kind: 'hud.list'; items: string[] }
+  | { kind: 'hud.list'; items: string[]; title?: string; hint?: string }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */

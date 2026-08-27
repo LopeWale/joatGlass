@@ -4,8 +4,22 @@ import { CANVAS, ContainerId } from './types';
 
 type Page = {
   containerTotalNum?: number;
-  textObject?: Array<{ containerID?: number; isEventCapture?: number; zOrderIndex?: number }>;
-  listObject?: Array<{ containerID?: number; isEventCapture?: number; zOrderIndex?: number }>;
+  textObject?: Array<{
+    containerID?: number;
+    isEventCapture?: number;
+    zOrderIndex?: number;
+    yPosition?: number;
+    height?: number;
+    textColor?: number;
+    content?: string;
+  }>;
+  listObject?: Array<{
+    containerID?: number;
+    isEventCapture?: number;
+    zOrderIndex?: number;
+    yPosition?: number;
+    height?: number;
+  }>;
   imageObject?: Array<{ containerID?: number; isEventCapture?: number; zOrderIndex?: number }>;
 };
 
@@ -61,5 +75,31 @@ describe('HudPageBuilder invariants', () => {
     expect(list.itemContainer.itemName).toHaveLength(20);
     expect(list.itemContainer.itemName.every((s) => s.length <= 64)).toBe(true);
     expect(list.yPosition + list.height).toBeLessThanOrEqual(CANVAS.height);
+  });
+
+  it('list layout keeps status plus compact title/actions around five focus rows', () => {
+    const page = builder.listLayout(['Messages', 'Settings'], {
+      title: 'CAPABILITIES',
+      hint: 'SWIPE move · TAP open · LEFT x2 back',
+    }) as Page;
+    const title = page.textObject?.find((c) => c.containerID === ContainerId.Main);
+    const list = page.listObject?.[0];
+
+    expect(page.containerTotalNum).toBe(3);
+    expect(title).toMatchObject({ yPosition: 32, height: 48, textColor: 3 });
+    expect(list).toMatchObject({ yPosition: 80, height: 208 });
+    expect(title?.content?.endsWith('SWIPE move · TAP open · LEFT x2 back')).toBe(true);
+    expect(page.textObject?.some((c) => c.containerID === ContainerId.Hint)).toBe(false);
+    expect((list?.yPosition ?? 0) + (list?.height ?? 0)).toBe(CANVAS.height);
+  });
+
+  it('dashboard encodes brightness hierarchy instead of relying on firmware defaults', () => {
+    const page = builder.defaultLayout() as Page;
+    const byId = (id: number) => page.textObject?.find((c) => c.containerID === id)?.textColor;
+    expect(byId(ContainerId.StatusBar)).toBe(2);
+    expect(byId(ContainerId.Main)).toBe(4);
+    expect(byId(ContainerId.Context)).toBe(3);
+    expect(byId(ContainerId.Tray)).toBe(2);
+    expect(byId(ContainerId.Hint)).toBe(1);
   });
 });

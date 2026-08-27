@@ -24,11 +24,15 @@ function make(policy: 'auto' | 'mac' | 'confirm' = 'confirm', micOpen = false) {
     stop: vi.fn(async () => {}),
   };
   const imu = {
-    await: vi.fn((_actionId: string, _timeoutMs?: number, _onResult?: (a: boolean) => void) => {}),
+    prepare: vi.fn((_actionId: string, _onResult?: (a: boolean) => void) => {}),
+    activate: vi.fn((_actionId: string, _timeoutMs?: number) => true),
+    cancel: vi.fn((_actionId: string) => true),
   };
   const hud = {
     setStatus: vi.fn(async (_text: string) => true),
     showText: vi.fn(async (_text: string, _containerId?: number) => true),
+    showConfirmation: vi.fn(async (_prompt: string, _actionId?: string) => true),
+    dismissConfirmation: vi.fn(async (_actionId?: string) => true),
   };
   const client = {
     track: (u: () => void) => u,
@@ -98,9 +102,10 @@ describe('DeviceMonitor don / resume policy', () => {
   it('does NOTHING when the mic is already open (boot don event — regression)', () => {
     const { push, audio, imu, hud } = make('confirm', true);
     push({ isWearing: true, connectType: 'connected' });
-    expect(imu.await).not.toHaveBeenCalled();
+    expect(imu.prepare).not.toHaveBeenCalled();
     expect(audio.start).not.toHaveBeenCalled();
     expect(hud.showText).not.toHaveBeenCalled();
+    expect(hud.showConfirmation).not.toHaveBeenCalled();
   });
 
   it('auto: starts the mic immediately', () => {
@@ -113,20 +118,41 @@ describe('DeviceMonitor don / resume policy', () => {
     const { push, audio, imu } = make('mac');
     push({ isWearing: true, connectType: 'connected' });
     expect(audio.start).not.toHaveBeenCalled();
-    expect(imu.await).not.toHaveBeenCalled();
+    expect(imu.prepare).not.toHaveBeenCalled();
   });
 
-  it('confirm: arms a local window; accept starts the mic, decline leaves it off', () => {
-    const { push, audio, imu } = make('confirm');
+  it('confirm: activates only after rendering; accept starts the mic', async () => {
+    const { push, audio, imu, hud } = make('confirm');
     push({ isWearing: true, connectType: 'connected' });
-    expect(imu.await).toHaveBeenCalledTimes(1);
-    const onResult = imu.await.mock.calls[0]?.[2];
+    expect(imu.prepare).toHaveBeenCalledTimes(1);
+    expect(hud.showConfirmation).toHaveBeenCalledWith('Resume listening?', 'local:resume');
+    await vi.waitFor(() => expect(imu.activate).toHaveBeenCalledWith('local:resume', 8000));
+    const onResult = imu.prepare.mock.calls[0]?.[1];
     expect(onResult).toBeDefined();
 
     onResult?.(false);
     expect(audio.start).not.toHaveBeenCalled();
+    expect(hud.dismissConfirmation).toHaveBeenCalledTimes(1);
     onResult?.(true);
     expect(audio.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirm: a failed HUD render cancels the exact action fail-closed', async () => {
+    const { push, imu, hud } = make('confirm');
+    hud.showConfirmation.mockResolvedValue(false);
+
+    push({ isWearing: true, connectType: 'connected' });
+
+    await vi.waitFor(() => expect(imu.cancel).toHaveBeenCalledWith('local:resume'));
+  });
+
+  it('confirm: a rejected HUD render also cancels fail-closed', async () => {
+    const { push, imu, hud } = make('confirm');
+    hud.showConfirmation.mockRejectedValue(new Error('bridge unavailable'));
+
+    push({ isWearing: true, connectType: 'connected' });
+
+    await vi.waitFor(() => expect(imu.cancel).toHaveBeenCalledWith('local:resume'));
   });
 });
 

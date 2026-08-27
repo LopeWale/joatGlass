@@ -13,7 +13,13 @@ import type { IMU_Report_Data } from '@evenrealities/even_hub_sdk';
  */
 export class ImuMonitor {
   private samples: Array<{ y: number; at: number }> = [];
-  private pending?: { actionId: string; expiresAt: number; onResult?: (accepted: boolean) => void };
+  private pending?: {
+    actionId: string;
+    active: boolean;
+    expiresAt: number;
+    onResult?: (accepted: boolean) => void;
+  };
+  private expiryTimer?: ReturnType<typeof setTimeout>;
   private open = false;
   private trace = false;
 
@@ -58,8 +64,27 @@ export class ImuMonitor {
    * Mac — it never asked, so it gets no answer.
    */
   await(actionId: string, timeoutMs = 8000, onResult?: (accepted: boolean) => void): void {
-    this.pending = { actionId, expiresAt: Date.now() + timeoutMs, onResult };
+    this.prepare(actionId, onResult);
+    this.activate(actionId, timeoutMs);
+  }
+
+  /** Reserve exclusive input ownership while its HUD prompt is rendering. */
+  prepare(actionId: string, onResult?: (accepted: boolean) => void): void {
+    // One decision surface at a time. Replacing a pending request refuses it
+    // before the new prompt is armed, so an old action can never be approved
+    // by a gesture intended for the new one.
+    if (this.pending) this.resolve(false);
+    this.pending = { actionId, active: false, expiresAt: Number.POSITIVE_INFINITY, onResult };
     this.samples = [];
+  }
+
+  /** Start the decision clock only after the complete prompt is visible. */
+  activate(actionId: string, timeoutMs = 8000): boolean {
+    if (this.pending?.actionId !== actionId) return false;
+    this.pending.active = true;
+    this.pending.expiresAt = Date.now() + timeoutMs;
+    this.expiryTimer = setTimeout(() => this.resolve(false), Math.max(0, timeoutMs));
+    return true;
   }
 
   /**
@@ -69,6 +94,26 @@ export class ImuMonitor {
    */
   setTrace(enabled: boolean): void {
     this.trace = enabled;
+  }
+
+  /** True only while an exclusive decision surface owns wearer gestures. */
+  isPending(): boolean {
+    return this.pending !== undefined;
+  }
+
+  /** Fail closed only if the named action still owns the decision surface. */
+  cancel(actionId: string): boolean {
+    if (this.pending?.actionId !== actionId) return false;
+    this.resolve(false);
+    return true;
+  }
+
+  /** Teardown path: clear timers without emitting into a link being closed. */
+  dispose(): void {
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = undefined;
+    this.pending = undefined;
+    this.samples = [];
   }
 
   /** Called by EventRouter for each sysEvent carrying imuData. */
@@ -81,7 +126,7 @@ export class ImuMonitor {
       this.link.send({ kind: 'imu', x: imu.x ?? 0, y: imu.y ?? 0, z: imu.z ?? 0, at: now });
     }
 
-    if (!this.pending) return;
+    if (!this.pending?.active) return;
 
     if (now > this.pending.expiresAt) {
       this.resolve(false);
@@ -104,8 +149,11 @@ export class ImuMonitor {
    * fallback: until the nod thresholds are calibrated against real traces it
    * is the only confirm surface we actually trust.
    */
-  confirmByTap(): void {
-    if (!this.pending) return;
+  confirmByTap(): boolean {
+    if (!this.pending) return false;
+    // Rendering owns input but cannot approve. Consume the gesture and wait
+    // for an explicit tap after activate() starts the visible decision.
+    if (!this.pending.active) return true;
     // Expiry must hold HERE, not only in ingest(): ingest is driven by IMU
     // samples, and on a host where imuControl fails (the simulator rejects
     // it outright) no sample ever arrives — so an armed window lived
@@ -114,15 +162,25 @@ export class ImuMonitor {
     // expired window resolves REFUSED, clearing the pending state.
     if (Date.now() > this.pending.expiresAt) {
       this.resolve(false);
-      return;
+      return true;
     }
     this.resolve(true);
+    return true;
+  }
+
+  /** Explicit refusal: the left temple is otherwise unused while a gate is live. */
+  declineByTap(): boolean {
+    if (!this.pending) return false;
+    this.resolve(false);
+    return true;
   }
 
   private resolve(accepted: boolean): void {
     if (!this.pending) return;
     const { actionId, onResult } = this.pending;
     this.pending = undefined;
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = undefined;
     this.samples = [];
     if (onResult) {
       onResult(accepted);

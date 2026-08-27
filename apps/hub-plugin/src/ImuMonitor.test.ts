@@ -47,6 +47,15 @@ describe('ImuMonitor confirms', () => {
     expect(sent).toEqual([]);
   });
 
+  it('left-temple decline resolves false', () => {
+    const { imu, sent } = make();
+    imu.await('cancel-me');
+    expect(imu.isPending()).toBe(true);
+    expect(imu.declineByTap()).toBe(true);
+    expect(imu.isPending()).toBe(false);
+    expect(sent).toEqual([{ kind: 'confirm', actionId: 'cancel-me', accepted: false }]);
+  });
+
   it('pending is cleared before the callback runs, so a callback may re-arm', () => {
     const { imu, sent } = make();
     const second = vi.fn();
@@ -55,6 +64,35 @@ describe('ImuMonitor confirms', () => {
     imu.confirmByTap(); // must hit the re-armed window, not a stale one
     expect(second).toHaveBeenCalledWith(true);
     expect(sent).toEqual([]);
+  });
+
+  it('a stale render failure cannot cancel the replacement action', () => {
+    const { imu, sent } = make();
+    imu.await('action-a');
+    imu.await('action-b');
+
+    expect(imu.cancel('action-a')).toBe(false);
+    expect(imu.isPending()).toBe(true);
+    expect(imu.confirmByTap()).toBe(true);
+    expect(sent).toEqual([
+      { kind: 'confirm', actionId: 'action-a', accepted: false },
+      { kind: 'confirm', actionId: 'action-b', accepted: true },
+    ]);
+  });
+
+  it('prepared gate consumes accepts but cannot approve until the prompt is visible', () => {
+    const { imu, sent } = make();
+    imu.prepare('rendering');
+
+    expect(imu.isPending()).toBe(true);
+    expect(imu.confirmByTap()).toBe(true);
+    expect(sent).toEqual([]);
+
+    expect(imu.activate('rendering', 1000)).toBe(true);
+    expect(imu.confirmByTap()).toBe(true);
+    expect(sent).toEqual([
+      { kind: 'confirm', actionId: 'rendering', accepted: true },
+    ]);
   });
 });
 
@@ -141,6 +179,36 @@ describe('confirm window expiry at the tap path', () => {
     vi.advanceTimersByTime(5000); // window long dead, no IMU samples flowed
     imu.confirmByTap();
     expect(sent).toEqual([{ kind: 'confirm', actionId: 'a1', accepted: false }]);
+    vi.useRealTimers();
+  });
+
+  it('expires on its own without requiring an IMU sample or later tap', () => {
+    vi.useFakeTimers();
+    const sent: Array<{ kind: string; accepted?: boolean }> = [];
+    const link = { send: (m: { kind: string }) => sent.push(m) } as never;
+    const imu = new ImuMonitor({} as never, link);
+    imu.await('a-timeout', 1000);
+    vi.advanceTimersByTime(1000);
+    expect(sent).toEqual([
+      { kind: 'confirm', actionId: 'a-timeout', accepted: false },
+    ]);
+    imu.confirmByTap();
+    expect(sent).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it('dispose clears expiry without writing to a closed link', () => {
+    vi.useFakeTimers();
+    const sent: Array<{ kind: string }> = [];
+    const link = { send: (m: { kind: string }) => sent.push(m) } as never;
+    const imu = new ImuMonitor({} as never, link);
+    imu.await('teardown', 1000);
+
+    imu.dispose();
+    vi.advanceTimersByTime(1000);
+
+    expect(imu.isPending()).toBe(false);
+    expect(sent).toEqual([]);
     vi.useRealTimers();
   });
 
