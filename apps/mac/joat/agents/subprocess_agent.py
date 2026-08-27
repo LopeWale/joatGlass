@@ -20,6 +20,8 @@ import re
 import shutil
 from collections.abc import AsyncIterator
 
+from ..services.roundtable import failure_notice
+
 log = logging.getLogger(__name__)
 
 # codex exec banner/noise lines that mean nothing on a 576x288 HUD.
@@ -49,8 +51,10 @@ class SubprocessAgent:
     """Run a CLI agent; yield its stdout in chunks as they arrive."""
 
     def __init__(self, command: list[str], env_strip: tuple[str, ...] = (),
-                 timeout_s: float = 240.0, noise: re.Pattern[str] | None = None) -> None:
+                 timeout_s: float = 240.0, noise: re.Pattern[str] | None = None,
+                 name: str | None = None) -> None:
         self._command = command
+        self._name = name or os.path.basename(command[0])
         self._env_strip = env_strip
         self._timeout_s = timeout_s
         self._noise = noise
@@ -69,16 +73,17 @@ class SubprocessAgent:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout_s
         pending = ""
+        timed_out = False
         try:
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    log.warning("agent %s timed out", self._command[0])
+                    timed_out = True
                     break
                 try:
                     raw = await asyncio.wait_for(proc.stdout.read(512), remaining)
                 except asyncio.TimeoutError:
-                    log.warning("agent %s timed out", self._command[0])
+                    timed_out = True
                     break
                 if not raw:
                     break
@@ -90,10 +95,48 @@ class SubprocessAgent:
                     yield out + "\n"
             if pending.strip() and not self._is_noise(pending):
                 yield pending
+            # How the turn ended, in the wearer's view. The exit code is the
+            # ONLY trustworthy success signal: a failing CLI prints its
+            # complaint on stdout, indistinguishable from an answer
+            # (`claude -p` exits 1 and says "You're out of usage credits").
+            # A hung child is NEVER waited on here — the finally clause kills
+            # it — because a stalled collaborator must cost the debate one
+            # seat, not the whole round.
+            if timed_out:
+                log.warning("agent %s timed out after %.0fs", self._name, self._timeout_s)
+                yield "\n" + failure_notice(
+                    self._name, f"no answer within {self._timeout_s:.0f}s"
+                ) + "\n"
+            else:
+                # stdout is at EOF, so reaping is normally instant — but a
+                # child that closes stdout and lingers must not become an
+                # unbounded wait, so it shares the turn's remaining budget.
+                try:
+                    await asyncio.wait_for(
+                        proc.wait(), max(0.5, deadline - loop.time())
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                if proc.returncode:
+                    log.warning("agent %s exited %s", self._name, proc.returncode)
+                    yield "\n" + failure_notice(
+                        self._name, f"exited {proc.returncode} — see the log"
+                    ) + "\n"
         finally:
             if proc.returncode is None:
                 proc.kill()
-            await proc.wait()
+            # Bounded, because asyncio completes wait() only once the stdout
+            # PIPE closes — and a killed agent's own children inherit that
+            # pipe and keep it open. `codex exec` spawns children, so an
+            # unbounded wait here stalls the debate for the lifetime of a
+            # grandchild we already gave up on. Measured: 30s for a killed
+            # `sh -c "sleep 30"`. Reaping is the OS's problem; the round
+            # table's problem is the next speaker.
+            try:
+                await asyncio.wait_for(asyncio.shield(proc.wait()), 2.0)
+            except asyncio.TimeoutError:
+                log.warning("agent %s killed but not reaped within 2s "
+                            "(a child is holding its stdout)", self._name)
 
     def _is_noise(self, line: str) -> bool:
         return bool(self._noise and self._noise.match(line.strip()))
@@ -110,7 +153,12 @@ def proposer(model: str | None = None) -> SubprocessAgent | None:
         [binary, "exec", "-m", codex_model, "-s", "read-only"],
         env_strip=("OPENAI_API_KEY",),
         noise=_CODEX_NOISE,
+        name="codex",
     )
+
+
+# MCP plumbing chatter claude prints on stdout; not part of any critique.
+_CLAUDE_NOISE = re.compile(r"^Client\.\w+\(\) called but server does not advertise")
 
 
 def critic() -> SubprocessAgent | None:
@@ -123,4 +171,5 @@ def critic() -> SubprocessAgent | None:
     binary = find_claude_binary()
     if binary is None:
         return None
-    return SubprocessAgent([binary, "-p"], env_strip=("ANTHROPIC_API_KEY",))
+    return SubprocessAgent([binary, "-p"], env_strip=("ANTHROPIC_API_KEY",),
+                           noise=_CLAUDE_NOISE, name="claude")

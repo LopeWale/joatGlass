@@ -12,13 +12,17 @@ import asyncio
 import logging
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 
 from ..core.interfaces import ReplyEngine
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
 from ..channels.cards import CardLog
 from .hud import HudWriter
+from .roundtable import (
+    Participant, RoundTable, build_prompt, is_failure, parse_direction,
+)
+from .sinks import TranscriptSink
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +35,15 @@ class Session(ABC):
 
     @abstractmethod
     def cancel(self) -> None: ...
+
+    def direct(self, text: str) -> str | None:
+        """The wearer naming who speaks next; None when this isn't a direction.
+
+        Lives on the base class so the manager can offer every session the
+        chance to claim an utterance without knowing what kind of session it
+        is. Most sessions have no notion of turn order and decline.
+        """
+        return None
 
 
 SessionFactory = Callable[[str], Session | None]
@@ -85,6 +98,12 @@ class SessionManager:
             if lowered in ("stop", "cancel", "stop the debate"):
                 log.info("wearer cancelled the active session")
                 self._active.cancel()
+                return True
+            # Chairing the room is not an interruption: "claude, respond"
+            # steers who speaks next without ending anything.
+            directed = self._active.direct(text)
+            if directed is not None:
+                log.info("wearer gave the floor to %s", directed)
             else:
                 log.info("session active — transcript not routed to assistant: %s", text)
             return True
@@ -117,12 +136,18 @@ class SessionManager:
 
 
 class DebateSession(Session):
-    """One debate round, streamed turn by turn — the wearer watches it happen.
+    """One debate, streamed turn by turn — the wearer watches it happen.
 
-    Proposer (codex) → Critic (claude) → Judge (local MLX verdict). Every
-    chunk goes through HudWriter.append the moment it exists; a background
-    debate that only reports a verdict would violate the wearer's stated
-    requirement (visibility IS the proof it was debated).
+    Every seat at the RoundTable speaks once per round, in an order the
+    wearer can redirect by name, and then a local judge scores how far apart
+    the room still is. Each chunk reaches the sinks the moment it exists: a
+    background debate that only reported a verdict would violate the stated
+    requirement, where visibility IS the proof it was debated.
+
+    N participants rather than a hardcoded proposer/critic pair is what lets
+    OpenClaw take a third seat without a second debate implementation to
+    drift out of sync — and at two seats this reduces exactly to the
+    propose → critique → judge loop it replaced.
     """
 
     SOURCES_CONTRACT = (
@@ -135,9 +160,8 @@ class DebateSession(Session):
     def __init__(
         self,
         topic: str,
-        hud: HudWriter,
-        propose: Callable[[str], AsyncIterator[str]],
-        critique: Callable[[str], AsyncIterator[str]],
+        table: RoundTable,
+        sink: TranscriptSink,
         judge: ReplyEngine | None,
         gate: VerifierGate | None = None,
         max_repairs: int = 1,
@@ -145,63 +169,72 @@ class DebateSession(Session):
         agreement_threshold: float = 0.85,
     ) -> None:
         self._topic = topic
-        self._hud = hud
-        self._propose = propose
-        self._critique = critique
+        self._table = table
+        self._sink = sink
         self._judge = judge
         self._gate = gate
         self._max_repairs = max_repairs
         self._max_rounds = max_rounds
         self._agreement_threshold = agreement_threshold
         self._verify_summary: list[str] = []
+        self._transcript: list[tuple[str, str]] = []
+        self._silenced: list[str] = []
         self._cancelled = False
 
     def cancel(self) -> None:
         self._cancelled = True
 
+    def direct(self, text: str) -> str | None:
+        """Give the floor to a named seat. Returns the name, or None."""
+        seat = parse_direction(text, self._table)
+        if seat is None:
+            return None
+        self._table.direct(seat.name)
+        return seat.name
+
     async def run(self) -> None:
-        """The DebateLoop state machine (ARCHITECTURE §5), fully visible:
+        """The DebateLoop state machine (ARCHITECTURE §5), fully visible.
 
-        propose → critique → judge; the judge scores agreement, and the loop
-        CONVERGES at ≥ threshold with no blocking issues — otherwise the
-        proposer revises against the critique and the next round begins,
-        capped at max_rounds. Every turn of every round streams to the HUD.
+        A ROUND is one turn for every seat. After each round the judge scores
+        agreement, and the loop CONVERGES at ≥ threshold with no blocking
+        issues — otherwise the room goes around again, capped at max_rounds.
         """
-        await self._hud.status(f"DEBATE · {self._topic[:40]}")
-        proposal = await self._verified_turn(
-            "PROPOSER (codex)", self._propose,
-            f"Propose a concrete answer, under 120 words, plain text: "
-            f"{self._topic}{self.SOURCES_CONTRACT}",
-            first=True,
-        )
-        if self._cancelled or not proposal:
-            await self._finish("debate cancelled" if self._cancelled else "proposer silent")
-            return
-
-        outcome = "no judge — single round"
+        await self._sink.open(self._topic, self._table.names)
+        outcome = "no judge — one round"
         for round_no in range(1, self._max_rounds + 1):
-            critique = await self._verified_turn(
-                "CRITIC (claude)", self._critique,
-                "Critique this proposal in under 100 words, plain text. Name the "
-                f"weakest claim.\n\nTopic: {self._topic}\n\nProposal:\n{proposal}"
-                f"{self.SOURCES_CONTRACT}",
-            )
-            if self._cancelled:
-                await self._finish("debate cancelled")
+            for _ in range(len(self._table)):
+                speaker = self._table.next_speaker()
+                said = await self._verified_turn(speaker, round_no)
+                if self._cancelled:
+                    await self._finish("cancelled")
+                    return
+                if is_failure(said):
+                    # Seen, not quoted: the wearer watched the failure stream
+                    # past, but it is not a position for anyone to answer.
+                    if speaker.name not in self._silenced:
+                        self._silenced.append(speaker.name)
+                    log.warning("%s could not take its turn", speaker.name)
+                elif said:
+                    self._transcript.append((speaker.label, said))
+            # A debate needs at least two positions in the room. One voice
+            # plus a stack trace is a monologue, and scoring it would report
+            # convergence with nobody to converge with.
+            if len(self._transcript) < 2:
+                spoke = len(self._transcript)
+                await self._finish(
+                    f"no debate — {spoke} of {len(self._table)} spoke"
+                    + (f" ({', '.join(self._silenced)} silent)" if self._silenced else "")
+                )
                 return
             if self._judge is None:
                 break
-            judged = await self._judge_turn(proposal, critique, round_no)
+            judged = await self._judge_turn(round_no)
             if self._cancelled:
-                await self._finish("debate cancelled")
+                await self._finish("cancelled")
                 return
             agreement, blocking = parse_judgment(judged)
-            converged = (
-                agreement is not None
-                and agreement >= self._agreement_threshold
-                and not blocking
-            )
-            if converged:
+            if agreement is not None and agreement >= self._agreement_threshold \
+                    and not blocking:
                 outcome = f"converged (agreement {agreement:.2f}, round {round_no})"
                 break
             if agreement is None:
@@ -211,61 +244,52 @@ class DebateSession(Session):
             if round_no == self._max_rounds:
                 outcome = f"no convergence after {round_no} round(s) (last {agreement:.2f})"
                 break
-            proposal = await self._verified_turn(
-                f"PROPOSER — round {round_no + 1}", self._propose,
-                f"Revise your proposal for: {self._topic}\n\nYour previous "
-                f"proposal:\n{proposal}\n\nThe critic said:\n{critique}\n\n"
-                "Address the critique head-on, under 120 words, plain text."
-                f"{self.SOURCES_CONTRACT}",
-            )
-            if self._cancelled or not proposal:
-                await self._finish("debate cancelled" if self._cancelled else "proposer silent")
-                return
-        await self._finish(f"debate done — {outcome}")
+        await self._finish(f"done — {outcome}")
 
-    async def _judge_turn(self, proposal: str, critique: str, round_no: int) -> str:
+    async def _judge_turn(self, round_no: int) -> str:
         assert self._judge is not None
-        await self._hud.append(f"\n\n» JUDGE (local) — round {round_no}\n")
+        await self._sink.turn(f"JUDGE (local) — round {round_no}")
         verification = "; ".join(self._verify_summary) or "no citations offered"
         collected: list[str] = []
         async for chunk in self._judge.stream(
-            "You are the judge of a short debate. In under 60 words give a "
+            "You are the judge of a short debate between "
+            f"{len(self._table)} collaborators. In under 60 words give a "
             "verdict and what to do. Weigh verified claims above unverified "
             "ones. End with exactly two lines:\n"
-            "AGREEMENT: <0.00-1.00, how much proposer and critic now agree>\n"
-            "BLOCKING: <yes|no, does the critique block acting on the proposal>\n\n"
-            f"Topic: {self._topic}\n\nProposal:\n{proposal}\n\n"
-            f"Critique:\n{critique}\n\nCitation verification: {verification}"
+            "AGREEMENT: <0.00-1.00, how much the participants now agree>\n"
+            "BLOCKING: <yes|no, do the objections block acting on this>\n\n"
+            f"Topic: {self._topic}\n\n{self._transcript_text()}\n\n"
+            f"Citation verification: {verification}"
         ):
             if self._cancelled:
                 break
             collected.append(chunk)
-            await self._hud.append(chunk)
+            await self._sink.chunk(chunk)
         return "".join(collected)
 
-    async def _verified_turn(
-        self,
-        role: str,
-        agent: Callable[[str], AsyncIterator[str]],
-        prompt: str,
-        first: bool = False,
-    ) -> str:
-        """One debater turn plus its visible verification (and one repair).
+    def _transcript_text(self) -> str:
+        return "\n\n".join(f"[{label}]\n{text}" for label, text in self._transcript)
 
-        The verifier is itself a turn on the HUD — the wearer watches each
-        citation get checked and fabrications get bounced. A turn is never
-        silently rewritten: every repair attempt streams under its own header.
+    async def _verified_turn(self, speaker: Participant, round_no: int) -> str:
+        """One speaker's turn plus its visible verification (and one repair).
+
+        The verifier is itself a turn on the transcript — the wearer watches
+        each citation get checked and fabrications get bounced. A turn is
+        never silently rewritten: every repair streams under its own header.
         """
-        text = await self._stream_turn(f"» {role}\n", agent(prompt), replace=first)
-        if self._gate is None or self._cancelled:
+        label = speaker.label if round_no == 1 else f"{speaker.label} — round {round_no}"
+        prompt = build_prompt(self._topic, speaker, self._transcript,
+                              self.SOURCES_CONTRACT)
+        text = await self._stream_turn(label, speaker.stream(prompt))
+        if self._gate is None or self._cancelled or is_failure(text):
             return text
         for attempt in range(self._max_repairs + 1):
-            verdict_ok, repair = await self._verify_visibly(role, text)
+            verdict_ok, repair = await self._verify_visibly(label, text)
             if verdict_ok or self._cancelled or attempt == self._max_repairs:
                 return text
             text = await self._stream_turn(
-                f"\n\n» {role} — repair {attempt + 1}\n",
-                agent(
+                f"{label} — repair {attempt + 1}",
+                speaker.stream(
                     f"{prompt}\n\nYour previous answer:\n{text}\n\n"
                     f"The citation verifier rejected it:\n{repair}\n"
                     "Fix the citations (verbatim quotes at real URLs) or drop "
@@ -274,13 +298,13 @@ class DebateSession(Session):
             )
         return text
 
-    async def _verify_visibly(self, role: str, text: str) -> tuple[bool, str]:
+    async def _verify_visibly(self, label: str, text: str) -> tuple[bool, str]:
         assert self._gate is not None
         citations = parse_citations(text)
-        await self._hud.append("\n\n» VERIFIER\n")
+        await self._sink.turn("VERIFIER")
         if not citations:
-            await self._hud.append("no sources cited\n")
-            self._verify_summary.append(f"{role}: no citations")
+            await self._sink.chunk("no sources cited\n")
+            self._verify_summary.append(f"{label}: no citations")
             return True, ""
         verdict = await self._gate.verify(citations, prose=text)
         marks = {
@@ -289,31 +313,39 @@ class DebateSession(Session):
             CitationStatus.UNVERIFIABLE: "FAIL",
         }
         for cv in verdict.citations:
-            await self._hud.append(f"[{cv.citation_id}] {marks[cv.status]} — {cv.reason}\n")
+            await self._sink.chunk(f"[{cv.citation_id}] {marks[cv.status]} — {cv.reason}\n")
         outcome = "PASS" if verdict.passed else "DENIED — repair requested"
-        await self._hud.append(outcome + "\n")
-        self._verify_summary.append(
-            f"{role}: {outcome} ({len(citations)} citation(s))"
-        )
+        await self._sink.chunk(outcome + "\n")
+        self._verify_summary.append(f"{label}: {outcome} ({len(citations)} citation(s))")
         return verdict.passed, verdict.repair_request
 
-    async def _stream_turn(
-        self, header: str, stream: AsyncIterator[str], replace: bool = False
-    ) -> str:
-        if replace:
-            await self._hud.show(header)
-        else:
-            await self._hud.append(header)
+    async def _stream_turn(self, label: str, stream: AsyncIterator[str]) -> str:
+        await self._sink.turn(label)
         collected: list[str] = []
         async for chunk in stream:
             if self._cancelled:
                 break
             collected.append(chunk)
-            await self._hud.append(chunk)
+            await self._sink.chunk(chunk)
         return "".join(collected).strip()
 
     async def _finish(self, status: str) -> None:
-        await self._hud.status(f"JOAT · {status}")
+        await self._sink.close(status)
+
+
+def seat_participants(
+    seats: Sequence[tuple[str, str, object]],
+) -> RoundTable:
+    """Build a table from (name, role, agent) triples, skipping absent agents.
+
+    Agents come from binaries and daemons that may simply not be installed,
+    so "who is at the table" is a runtime fact. Anything falsy is left out.
+    """
+    present = [
+        Participant(name=name, role=role, stream=agent.stream)  # type: ignore[attr-defined]
+        for name, role, agent in seats if agent
+    ]
+    return RoundTable(present)
 
 
 _AGREEMENT = re.compile(r"AGREEMENT:\s*([01](?:\.\d+)?)", re.IGNORECASE)

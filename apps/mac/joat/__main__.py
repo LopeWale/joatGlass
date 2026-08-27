@@ -26,6 +26,7 @@ from .agents.grounding import (
 )
 from .agents.tools import ToolBelt
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
+from .agents.openclaw import OpenClawAgent
 from .agents.subprocess_agent import critic, proposer
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
@@ -42,7 +43,10 @@ from .services.hud import HudWriter
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.capabilities import CapabilityRouter
-from .services.session import DebateSession, Session, SessionManager
+from .services.session import (
+    DebateSession, Session, SessionManager, seat_participants,
+)
+from .services.sinks import Broadcast, DebateStateSink, HudSink, TerminalSink
 from .verifier.fetcher import fetch_page_text, wayback_page_text
 from .verifier.nli import MiniCheckJudge, minicheck_available
 from .verifier.gate import VerifierGate
@@ -158,12 +162,26 @@ async def main() -> None:
     # weights. The pill said ready before the model had ever loaded (27).
     status.set(llm="available" if replier is not None else "off")
     hud = HudWriter(transport)
-    propose_agent, critic_agent = proposer(), critic()
-    if propose_agent and critic_agent:
-        log.info("debate agents ready: codex proposer + claude critic + local judge")
+    # Who is at the table is a RUNTIME fact: each collaborator is a binary or
+    # a daemon that may simply not be installed. OpenClaw is the optional
+    # third seat, so it is probed rather than assumed — an unreachable
+    # gateway costs the debate a voice, never the debate itself.
+    openclaw = OpenClawAgent()
+    openclaw_up = openclaw.available()
+    seats: list[tuple[str, str, object]] = [
+        ("codex", "proposer", proposer()),
+        ("claude", "critic", critic()),
+        ("openclaw", "third opinion", openclaw if openclaw_up else None),
+    ]
+    seated = [(name, role, a) for name, role, a in seats if a]
+    absent = [name for name, _r, a in seats if not a]
+    if len(seated) >= 2:
+        log.info("round table: %s%s",
+                 ", ".join(f"{n} ({r})" for n, r, _ in seated),
+                 f" — absent: {', '.join(absent)}" if absent else "")
     else:
-        log.warning("debate unavailable (codex: %s, claude: %s)",
-                    "ok" if propose_agent else "missing", "ok" if critic_agent else "missing")
+        log.warning("debate unavailable — need 2 collaborators, have %d (absent: %s)",
+                    len(seated), ", ".join(absent))
 
     claim_judge = MiniCheckJudge() if minicheck_available() else None
     if claim_judge:
@@ -172,14 +190,23 @@ async def main() -> None:
         log.info("NLI claim judge absent — install the 'nli' extra to enable")
     gate = VerifierGate(fetch_page_text, wayback_page_text, claim_judge=claim_judge)
 
+    # One snapshot outlives any single debate: the wearer opens the Debate
+    # panel after the fact and must still see what was said.
+    debate_state = DebateStateSink()
+
     def make_debate(topic: str) -> Session | None:
-        if propose_agent is None or critic_agent is None:
+        # A debate needs someone to disagree with; one seat is a monologue.
+        if len(seated) < 2:
             return None
         return DebateSession(
-            topic, hud, propose_agent.stream, critic_agent.stream, replier, gate=gate
+            topic,
+            seat_participants(seated),
+            Broadcast([HudSink(hud), TerminalSink(), debate_state]),
+            replier,
+            gate=gate,
         )
 
-    status.set(debate="ready" if (propose_agent and critic_agent) else "unavailable")
+    status.set(debate=f"{len(seated)} seats" if len(seated) >= 2 else "unavailable")
     sessions = SessionManager(hud, make_debate, card_log=card_log)
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no

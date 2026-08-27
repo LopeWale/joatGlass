@@ -1,4 +1,9 @@
-"""SessionManager + DebateSession tests with fake agents and HUD."""
+"""SessionManager + DebateSession tests with fake agents and HUD.
+
+The debate is driven by a RoundTable of N participants, so these run it
+through the real HudSink — what the assertions read is what the glasses
+would have been sent.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,9 @@ from collections.abc import AsyncIterator
 from joat.core.interfaces import GlassesTransport, ReplyEngine
 from joat.core.protocol import ContainerId, DownlinkMessage, HudText
 from joat.services.hud import HudWriter
+from joat.services.roundtable import Participant, RoundTable
 from joat.services.session import DebateSession, Session, SessionManager
+from joat.services.sinks import HudSink
 
 
 class SinkTransport(GlassesTransport):
@@ -42,6 +49,21 @@ class OneShotJudge(ReplyEngine):
         return "Verdict: proposal stands."
 
 
+def table(*seats) -> RoundTable:
+    """(name, role, stream) triples → a seated round table."""
+    return RoundTable([Participant(name=n, role=r, stream=st) for n, r, st in seats])
+
+
+def pair(propose, critique) -> RoundTable:
+    return table(("codex", "proposer", propose), ("claude", "critic", critique))
+
+
+def debate(transport: SinkTransport, seats: RoundTable, judge, **kw) -> DebateSession:
+    return DebateSession(
+        kw.pop("topic", "topic"), seats, HudSink(HudWriter(transport)), judge, **kw
+    )
+
+
 def hud_texts(transport: SinkTransport) -> list[tuple[str, bool, int]]:
     return [(m.text, m.append, int(m.container_id))
             for m in transport.sent if isinstance(m, HudText)]
@@ -50,40 +72,127 @@ def hud_texts(transport: SinkTransport) -> list[tuple[str, bool, int]]:
 class TestDebateSession:
     async def test_turns_stream_in_order_visibly(self) -> None:
         transport = SinkTransport()
-        session = DebateSession(
-            "tabs or spaces", HudWriter(transport),
-            agent(["Use spaces. ", "Simple."]), agent(["Weak claim: simplicity."]),
+        session = debate(
+            transport,
+            pair(agent(["Use spaces. ", "Simple."]), agent(["Weak claim: simplicity."])),
             OneShotJudge(),
+            topic="tabs or spaces",
         )
         await session.run()
         texts = [t for t, _a, c in hud_texts(transport) if c == int(ContainerId.MAIN)]
         joined = "".join(texts)
-        # order: proposer header+chunks, critic header+chunks, judge header+verdict
-        assert joined.index("PROPOSER") < joined.index("Use spaces.")
-        assert joined.index("Use spaces.") < joined.index("CRITIC")
-        assert joined.index("CRITIC") < joined.index("Weak claim")
+        # order: each speaker's header, then their words, then the judge
+        assert joined.index("CODEX") < joined.index("Use spaces.")
+        assert joined.index("Use spaces.") < joined.index("CLAUDE")
+        assert joined.index("CLAUDE") < joined.index("Weak claim")
         assert joined.index("Weak claim") < joined.index("JUDGE")
         assert "Verdict: proposal stands." in joined
-        # streaming means appends, not one repaint
-        appends = [t for t, a, c in hud_texts(transport) if a]
-        assert len(appends) >= 5
+        # streaming means the two proposer chunks arrived as two writes, not
+        # one block after the turn finished
+        appends = [t for t, a, _c in hud_texts(transport) if a]
+        assert "Use spaces. " in appends and "Simple." in appends
+
+    async def test_a_third_seat_speaks_after_the_other_two(self) -> None:
+        """OpenClaw's whole integration requirement, as a test: a third voice
+        is a seat at the table, not a second debate implementation."""
+        transport = SinkTransport()
+        seats = table(
+            ("codex", "proposer", agent(["one"])),
+            ("claude", "critic", agent(["two"])),
+            ("openclaw", "third opinion", agent(["three"])),
+        )
+        await debate(transport, seats, None).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert joined.index("one") < joined.index("two") < joined.index("three")
+        assert "OPENCLAW (third opinion)" in joined
+
+    async def test_each_speaker_sees_every_prior_turn(self) -> None:
+        """Sequencing is structural: turn N+1's prompt CONTAINS turn N, so a
+        parallel debate could not produce this transcript at all."""
+        transport = SinkTransport()
+        seen: list[str] = []
+
+        def recorder(reply: str):
+            async def stream(prompt: str) -> AsyncIterator[str]:
+                seen.append(prompt)
+                yield reply
+            return stream
+
+        seats = table(
+            ("codex", "proposer", recorder("gas is cheaper")),
+            ("claude", "critic", recorder("only near a pipeline")),
+            ("openclaw", "third opinion", recorder("both ignore permitting")),
+        )
+        await debate(transport, seats, None, topic="heat pumps").run()
+        assert "gas is cheaper" not in seen[0]          # opener sees no room
+        assert "gas is cheaper" in seen[1]              # critic sees the proposal
+        assert "gas is cheaper" in seen[2] and "only near a pipeline" in seen[2]
+
+    async def test_the_wearer_can_hand_the_floor_to_a_named_seat(self) -> None:
+        transport = SinkTransport()
+        seats = table(
+            ("codex", "proposer", agent(["FIRSTWORD"])),
+            ("claude", "critic", agent(["SECONDWORD"])),
+            ("openclaw", "third opinion", agent(["THIRDWORD"])),
+        )
+        session = debate(transport, seats, None)
+        assert session.direct("openclaw, your turn") == "openclaw"
+        assert session.direct("what did codex mean by that") is None  # not a command
+        await session.run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        # The directed seat OPENED, and the rotation carried on from there —
+        # a debate must not stall waiting for the next instruction.
+        assert joined.index("THIRDWORD") < joined.index("FIRSTWORD")
+        assert joined.index("FIRSTWORD") < joined.index("SECONDWORD")
+
+    async def test_a_failed_seat_is_shown_but_never_quoted(self) -> None:
+        """Live on this machine: `claude -p` exits 1 and prints "You're out of
+        usage credits" on stdout. Recorded as a position, the next speaker
+        argues with a billing notice and the judge scores it."""
+        transport = SinkTransport()
+        seen: list[str] = []
+
+        def recorder(reply: str):
+            async def stream(prompt: str) -> AsyncIterator[str]:
+                seen.append(prompt)
+                yield reply
+            return stream
+
+        seats = table(
+            ("codex", "proposer", recorder("Cache the model in RAM.")),
+            ("claude", "critic",
+             recorder("You're out of usage credits.\n"
+                      "[!] claude could not answer: exited 1 — see the log")),
+            ("openclaw", "third opinion", recorder("Thermals decide it.")),
+        )
+        await debate(transport, seats, None).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "out of usage credits" in joined      # the wearer SEES it
+        assert "Cache the model in RAM." in seen[2]  # openclaw got the real turn
+        assert "usage credits" not in seen[2]        # and not the failure
+
+    async def test_one_voice_and_a_failure_is_not_a_debate(self) -> None:
+        transport = SinkTransport()
+        seats = pair(
+            agent(["A position."]),
+            agent(["[!] claude could not answer: no answer within 240s"]),
+        )
+        await debate(transport, seats, OneShotJudge()).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "no debate — 1 of 2 spoke (claude silent)" in joined
+        assert "JUDGE" not in joined  # nothing to score, so no verdict is faked
 
     async def test_cancel_stops_midstream(self) -> None:
         transport = SinkTransport()
+        holder: dict[str, DebateSession] = {}
 
-        class Sess:
-            pass
-
-        session = DebateSession(
-            "x", HudWriter(transport), agent(["a", "b", "c"]), agent(["never"]), None,
-        )
-
-        async def cancelling_stream(prompt: str) -> AsyncIterator[str]:
+        async def cancelling(prompt: str) -> AsyncIterator[str]:
             yield "first"
-            session.cancel()
+            holder["s"].cancel()
             yield "second"
 
-        session._propose = cancelling_stream  # type: ignore[method-assign]
+        session = debate(transport, pair(cancelling, agent(["never"])), None)
+        holder["s"] = session
         await session.run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         assert "never" not in joined
@@ -127,6 +236,31 @@ class TestSessionManager:
         await asyncio.sleep(0)
         assert not mgr.active
         assert mgr.handle_transcript("hello again") is False
+
+    async def test_direction_reaches_the_session_without_cancelling_it(self) -> None:
+        """Chairing the room is not an interruption. An earlier build treated
+        every utterance during a session as noise to log and drop, which left
+        the wearer no way to say who speaks next once a debate had started."""
+        directed: list[str] = []
+
+        class Chairable(Session):
+            async def run(self) -> None:
+                await asyncio.Event().wait()
+
+            def cancel(self) -> None: ...
+
+            def direct(self, text: str) -> str | None:
+                if "openclaw" in text.lower():
+                    directed.append(text)
+                    return "openclaw"
+                return None
+
+        mgr = SessionManager(HudWriter(SinkTransport()), lambda t: Chairable())
+        assert mgr.handle_transcript("debate heat pumps") is True
+        await asyncio.sleep(0)
+        assert mgr.handle_transcript("openclaw, your turn") is True
+        assert directed == ["openclaw, your turn"]
+        assert mgr.active  # still running — direction is not a stop
 
     async def test_factory_declining_falls_through(self) -> None:
         mgr = SessionManager(HudWriter(SinkTransport()), lambda topic: None)
@@ -177,17 +311,17 @@ class TestVerifiedDebate:
                 yield next(calls)
             return stream
 
-        session = DebateSession(
-            "topic", HudWriter(transport),
-            proposer([CITED, CITED]),          # original then repair
-            agent(["no factual claims here"]),  # critic cites nothing
+        session = debate(
+            transport,
+            pair(proposer([CITED, CITED]),      # original then repair
+                 agent(["no factual claims here"])),  # critic cites nothing
             None,
             gate=gate,  # type: ignore[arg-type]
         )
         await session.run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         # visible order: turn, verifier deny, repair turn, verifier pass
-        assert joined.index("» PROPOSER") < joined.index("FAIL — quote not found")
+        assert joined.index("» CODEX") < joined.index("FAIL — quote not found")
         assert joined.index("DENIED") < joined.index("repair 1")
         assert joined.index("repair 1") < joined.index("[1] OK")
         assert "PASS" in joined
@@ -200,9 +334,8 @@ class TestVerifiedDebate:
     async def test_uncited_turns_flow_straight_through(self) -> None:
         transport = SinkTransport()
         gate = ScriptedGate()
-        session = DebateSession(
-            "topic", HudWriter(transport),
-            agent(["pure opinion"]), agent(["also opinion"]), None,
+        session = debate(
+            transport, pair(agent(["pure opinion"]), agent(["also opinion"])), None,
             gate=gate,  # type: ignore[arg-type]
         )
         await session.run()
@@ -229,10 +362,8 @@ class TestConvergence:
         async def propose(prompt: str):
             yield next(calls)
 
-        return DebateSession(
-            "topic", HudWriter(transport), propose, agent(["critique text"]),
-            judge, max_rounds=2,
-        )
+        return debate(transport, pair(propose, agent(["critique text"])),
+                      judge, max_rounds=2)
 
     async def test_low_agreement_runs_second_round_then_converges(self) -> None:
         transport = SinkTransport()
@@ -242,7 +373,7 @@ class TestConvergence:
         ])
         await self._session(judge, transport, ["v1 proposal", "v2 proposal"]).run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
-        assert "PROPOSER — round 2" in joined
+        assert "CODEX (proposer) — round 2" in joined
         assert "v2 proposal" in joined
         assert "converged (agreement 0.95, round 2)" in joined
 
