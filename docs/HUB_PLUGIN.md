@@ -199,13 +199,20 @@ Loopback is exempt — the simulator and `speak_test.py` run on the Mac
 itself, and a local process could read the token file anyway.
 
 - Token store: `~/Library/Application Support/JOAT/pairing.json` (0600).
-- **Re-pair a new/reset phone**: delete that file **and restart the engine**,
-  then reconnect. The restart is REQUIRED — `PairingStore` reads the token
-  once at construction and holds it in memory, so deleting the file alone
-  changes nothing and the phone keeps getting 401s (observed in the field,
-  where the delete looked like it had failed).
-  Symptom that you need this: the plugin's socket never opens on a phone
-  that used to work (or never paired), while the simulator connects fine.
+- **Re-pair**: delete that file, reconnect. No restart needed (the store
+  re-checks the file on every connection), and no phone-side wipe either:
+  an unpaired Mac **adopts** the token the connecting phone presents, so a
+  phone that used to work re-pairs itself on its next dial. A genuinely new
+  phone (no token) pairs through the offer/ack flow. First remote peer to
+  connect wins the window — the same trust-on-first-use as ever.
+- **Lost-ack self-heal**: if the pairing ack ever fails to land, the phone
+  re-acks when the Mac re-offers the identical token, and the Mac adopts a
+  presented token when its store is empty — the "stored but never acked"
+  state is no longer absorbing (this was a two-pass audit finding: the old
+  guard dropped the re-offer, leaving the window open to the whole LAN for
+  the life of the install).
+  Symptom you need a re-pair at all: the plugin's socket never opens on a
+  phone that used to work, while the simulator connects fine.
 - **Dev server ↔ packed build**: localStorage is origin-scoped, so Path A and
   Path B hold *separate* tokens. Switching between them hits the same 401
   symptom — and looks exactly like the undocumented `ws://` risk below.

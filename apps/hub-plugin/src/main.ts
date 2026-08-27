@@ -3,6 +3,7 @@ import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import { Chrome } from './Chrome';
+import { TOKEN_KEY, handlePairingOffer, loadToken } from './Pairing';
 import { LocationMonitor } from './LocationMonitor';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
@@ -28,21 +29,6 @@ const MAC_WS_URLS = ((): readonly string[] => {
   return parsed.length > 0 ? parsed : ['wss://mac.local:8787/glasses'];
 })();
 
-/**
- * Pairing token storage. The Mac issues a token to the first remote client
- * (TOFU — pairing.set) and rejects unpaired LAN peers from then on. It lives
- * in localStorage, NOT in the bundle: .env rules forbid secrets in VITE_*,
- * and a token baked into an .ehpk would ship to anyone holding the file.
- */
-const TOKEN_KEY = 'joat.pairing.token';
-
-function loadToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null; // storage unavailable: dial bare; the Mac re-pairs if unpaired
-  }
-}
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
 function setPanel(id: string, text: string): void {
@@ -192,25 +178,9 @@ async function boot(): Promise<void> {
         imu.await(msg.actionId);
         break;
       case 'pairing.set':
-        // IGNORE if we already hold a token. app.json whitelists plain-ws
-        // mDNS names, which any LAN peer can answer, so an unguarded handler
-        // lets a rogue "Mac" overwrite our good token — locking the wearer
-        // out of their real brain until localStorage is wiped by hand.
-        // Re-pairing is deliberate: clear storage, or reinstall.
-        if (loadToken()) break;
-        // Ack only after the write SUCCEEDS: the Mac keeps the pairing
-        // window open until then, so a lost frame or unavailable storage
-        // costs a retry instead of stranding the phone permanently.
-        try {
-          localStorage.setItem(TOKEN_KEY, msg.token);
-          void client.require().setLocalStorage(TOKEN_KEY, msg.token).catch(() => {});
-          link.setToken(msg.token);
-          link.send({ kind: 'pairing', token: msg.token });
-        } catch {
-          // Storage unavailable (private mode): use it for this session
-          // only, and stay unpaired so the next launch can pair for real.
-          link.setToken(msg.token);
-        }
+        handlePairingOffer(msg.token, link, (tok) => {
+          void client.require().setLocalStorage(TOKEN_KEY, tok).catch(() => {});
+        });
         break;
       case 'policy.set':
         // Mac-side config path; the wearer's on-glasses menu is the other.
