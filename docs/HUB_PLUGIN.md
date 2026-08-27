@@ -124,6 +124,27 @@ Ignoring 6 and 7 leaves the glasses mic streaming after the wearer exits. That's
 The resting-page design and the pages the wearer moves between live in
 [HUD_DASHBOARD.md](HUD_DASHBOARD.md).
 
+### The startup page is one-shot PER HOST SESSION
+
+`createStartUpPageContainer` succeeds once per HOST session, not per page
+load. A WebView reload (vite HMR, backgrounding, a relaunch) therefore gets
+`invalid` on the second call, and `rebuildPageContainer` can report success
+WITHOUT materialising the containers — after which every
+`textContainerUpgrade` fails and the HUD is blank for the rest of the
+session with no error surfaced anywhere.
+
+Seen in the simulator as 382 consecutive `TextContainerUpgrade failed:
+container N not found` warnings behind a blank display, plus
+`inject_input: no active event container`. A fresh simulator session
+rendered the identical build correctly — which is the tell: if the HUD is
+blank but the plugin is otherwise alive (audio streaming, link connected),
+suspect a stale host session before suspecting the layout.
+
+`HudPresenter` now checks EVERY paint result and rebuilds the page once on
+failure, so any cause of a missing page self-heals on the next write.
+Diagnose with the simulator's log, not its screenshot: the screenshot only
+tells you it is blank.
+
 ## Deployment constraints
 
 - **The Mac's WebSocket URL must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, scheme included — the Phase-0 gateway is plain `ws://`, and a `wss://`-only whitelist fails the same silent way. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).

@@ -106,6 +106,40 @@ export class HudPresenter {
     return ok;
   }
 
+  /**
+   * Rebuild the page and retry once when a paint reports failure.
+   *
+   * textContainerUpgrade returns false when the container does not exist —
+   * which happens whenever the host already had a startup page and our
+   * createStartUpPageContainer therefore returned `invalid` (it is one-shot
+   * PER HOST SESSION, not per page load: a WebView reload, a relaunch, or a
+   * second plugin instance all land here). BridgeClient's rebuild fallback
+   * reports success without necessarily materialising the containers, so
+   * every later paint failed SILENTLY and the HUD went dead for the rest of
+   * the session — observed in the simulator as 382 consecutive
+   * "container N not found" warnings behind a blank display.
+   *
+   * Every paint result is now checked, so any cause of a missing page
+   * self-heals on the next write.
+   */
+  private healing = false;
+
+  private async healAndRetry(containerId: number): Promise<boolean> {
+    if (this.healing) return false; // one attempt; never recurse
+    this.healing = true;
+    try {
+      const rebuilt = await this.client.require()
+        .rebuildPageContainer(this.layouts.defaultLayout());
+      if (!rebuilt) return false;
+      console.warn('[HudPresenter] page was missing — rebuilt and repainting');
+      return await this.paint(containerId);
+    } catch {
+      return false;
+    } finally {
+      this.healing = false;
+    }
+  }
+
   private async paint(containerId: number): Promise<boolean> {
     const full = this.streams.get(containerId) ?? '';
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
@@ -126,6 +160,11 @@ export class HudPresenter {
       }),
     );
     this.lastLength.set(containerId, content.length);
+    if (!ok && !this.healing) {
+      // The container is gone. Rebuild the page and paint again, rather
+      // than dropping this and every future write on the floor.
+      return this.healAndRetry(containerId);
+    }
     return ok;
   }
 
