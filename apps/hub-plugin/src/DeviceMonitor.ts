@@ -27,6 +27,8 @@ const LOW_BATTERY_PCT = 15;
  * off. Resuming on don is deliberately not automatic — see onWorn().
  */
 export class DeviceMonitor {
+  /** Battery feed for the plugin-owned status bar. */
+  onBattery?: (level: number | undefined, charging: boolean) => void;
   private prev?: Snapshot;
   private warnedLowBattery = false;
 
@@ -49,6 +51,7 @@ export class DeviceMonitor {
           connect: status.connectType,
         };
         this.link.send({ kind: 'device', ...next });
+        this.onBattery?.(next.battery, next.charging === true);
         this.apply(this.prev, next);
         this.prev = next;
       }),
