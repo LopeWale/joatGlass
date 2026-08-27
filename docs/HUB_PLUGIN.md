@@ -205,6 +205,13 @@ itself, and a local process could read the token file anyway.
   phone that used to work re-pairs itself on its next dial. A genuinely new
   phone (no token) pairs through the offer/ack flow. First remote peer to
   connect wins the window — the same trust-on-first-use as ever.
+- **Stuck on "reconnecting" after reinstalling the plugin**: the Mac is
+  paired to a token the phone no longer has (reinstall, cleared storage, a
+  different phone). The phone cannot fix this itself — it cannot
+  authenticate to ask — so the authority is physical access to the Mac:
+  press **Forget Glasses** in JOAT.app (or delete `pairing.json`), and the
+  next dial re-pairs by adopting the phone's own token. The engine logs a
+  PAIRING LOCKOUT error naming this fix after five consecutive refusals.
 - **Lost-ack self-heal**: if the pairing ack ever fails to land, the phone
   re-acks when the Mac re-offers the identical token, and the Mac adopts a
   presented token when its store is empty — the "stored but never acked"

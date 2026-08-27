@@ -242,6 +242,19 @@ final class EngineController: ObservableObject {
 
     // MARK: conveniences
 
+    /// Delete the pairing token so the next phone to connect re-pairs.
+    ///
+    /// Deliberately a file operation rather than an engine RPC: the engine
+    /// re-reads the store on every connection, so removing the file takes
+    /// effect immediately with no restart and works even if the engine is
+    /// wedged. The gateway re-opens its TOFU window on the next dial.
+    func forgetPairing() {
+        let store = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/JOAT/pairing.json")
+        try? FileManager.default.removeItem(at: store)
+        appendLog("pairing forgotten — put the glasses on and they will re-pair")
+    }
+
     func openLog() {
         NSWorkspace.shared.open(logURL)
     }

@@ -545,3 +545,50 @@ class TestPairingRecovery:
                 await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
         finally:
             await t.stop()
+
+
+class TestLockoutRecovery:
+    """The mirror of token adoption: the MAC is paired and the phone holds a
+    different token (reinstall, cleared storage, a second phone). The phone
+    cannot authenticate to ask for help, so the wearer sees 'reconnecting'
+    forever — observed on hardware. Authority to fix it is physical access
+    to the Mac."""
+
+    async def test_paired_mac_refuses_a_phone_with_the_wrong_token(
+        self, paired_transport
+    ) -> None:
+        t, url, store = paired_transport
+        store.confirm("MAC-SIDE-TOKEN")
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            await websockets.connect(f"{url}/?token=PHONE-SIDE-DIFFERENT")
+        assert exc.value.response.status_code == 401
+
+    async def test_forget_pairing_reopens_the_window(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        store.confirm("MAC-SIDE-TOKEN")
+        assert t.forget_pairing() is True
+        # The phone's own token is now adopted on its next dial — no wipe.
+        async with websockets.connect(f"{url}/?token=PHONE-SIDE-DIFFERENT") as ws:
+            await ws.send(json.dumps(
+                {"kind": "hello", "sn": "S", "model": "g2", "launchSource": "x"}))
+            await _wait_for(lambda: store.token == "PHONE-SIDE-DIFFERENT")
+        # And strangers are refused again immediately.
+        with pytest.raises(websockets.exceptions.InvalidStatus):
+            await websockets.connect(url)
+
+    async def test_repeated_refusals_log_an_actionable_lockout_warning(
+        self, paired_transport, caplog
+    ) -> None:
+        t, url, store = paired_transport
+        store.confirm("MAC-SIDE-TOKEN")
+        with caplog.at_level(logging.ERROR):
+            for _ in range(5):
+                with pytest.raises(websockets.exceptions.InvalidStatus):
+                    await websockets.connect(f"{url}/?token=WRONG")
+        assert "PAIRING LOCKOUT" in caplog.text
+        assert "delete" in caplog.text  # tells the operator what to DO
+
+    async def test_forget_on_an_unpaired_store_is_a_no_op(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        assert store.token is None
+        assert t.forget_pairing() is False

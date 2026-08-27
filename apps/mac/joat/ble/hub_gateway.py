@@ -124,6 +124,8 @@ class HubGatewayTransport(GlassesTransport):
         self._pairing = pairing
         self._trust_loopback = trust_loopback
         self._provisional: str | None = None
+        self._refusals: dict[str, int] = {}
+        self._lockout_warned = False
         self._server: object | None = None
         self._conn: ServerConnection | None = None
 
@@ -282,6 +284,25 @@ class HubGatewayTransport(GlassesTransport):
         except (ValueError, IndexError, TypeError):
             return False
 
+    def forget_pairing(self) -> bool:
+        """Drop the paired token so the next phone to connect re-pairs.
+
+        The recovery for the OPPOSITE asymmetry from token adoption: the Mac
+        is paired and the phone holds a different token (reinstall, cleared
+        storage, a second phone). Nothing the phone does can fix that — it
+        cannot authenticate to ask — so the authority has to be physical
+        access to the Mac. Safe: it only re-opens the TOFU window.
+        """
+        if self._pairing is None:
+            return False
+        forgotten = self._pairing.forget()
+        if forgotten:
+            self._provisional = None
+            self._refusals.clear()
+            self._lockout_warned = False
+            log.info("pairing forgotten — the next remote peer will re-pair")
+        return forgotten
+
     @staticmethod
     def _presented_token(conn: ServerConnection) -> str:
         """The ?token= this peer dialed with, or '' when it dialed bare."""
@@ -309,7 +330,24 @@ class HubGatewayTransport(GlassesTransport):
         # "401 means unpaired" diagnostic.
         if secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
             return None
-        log.warning("rejected unpaired connection from %s", conn.remote_address)
+        # A wearer whose phone cannot authenticate sees only "reconnecting"
+        # forever; the log said "rejected unpaired connection" and nothing
+        # about what to DO. Count refusals per peer and, once it is clearly
+        # a lockout rather than a stray probe, say the fix out loud — once.
+        host = str(conn.remote_address[0]) if conn.remote_address else "?"
+        self._refusals[host] = self._refusals.get(host, 0) + 1
+        if self._refusals[host] >= 5 and not self._lockout_warned:
+            self._lockout_warned = True
+            log.error(
+                "PAIRING LOCKOUT: %s has been refused %d times — its token does "
+                "not match this Mac's. The wearer sees 'reconnecting' forever. "
+                "Fix: delete %s (no restart needed) and it re-pairs on the next "
+                "dial, or use Forget paired glasses in JOAT.app.",
+                host, self._refusals[host],
+                self._pairing._path if self._pairing else "the pairing store",
+            )
+        else:
+            log.warning("rejected unpaired connection from %s", conn.remote_address)
         return conn.respond(HTTPStatus.UNAUTHORIZED, "pairing token required\n")
 
     # ── receiving ────────────────────────────────────────────────────────────
@@ -320,6 +358,9 @@ class HubGatewayTransport(GlassesTransport):
             await self._conn.close()
         self._conn = conn
         self._last_seq = None
+        host = str(conn.remote_address[0]) if conn.remote_address else "?"
+        self._refusals.pop(host, None)
+        self._lockout_warned = False
         log.info("plugin connected")
         try:
             # TOFU offer INSIDE the try: minting touches the disk and the send
