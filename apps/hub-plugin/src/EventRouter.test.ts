@@ -5,7 +5,7 @@ import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
-import type { SettingsMenu } from './SettingsMenu';
+import type { CapabilityMenu } from './CapabilityMenu';
 import type { UplinkMessage } from './types';
 
 function make(menuConsumesLists = false) {
@@ -35,7 +35,7 @@ function make(menuConsumesLists = false) {
     { send: (m: UplinkMessage) => sent.push(m) } as unknown as MacLink,
     audio as unknown as AudioStreamer,
     imu as unknown as ImuMonitor,
-    menu as unknown as SettingsMenu,
+    menu as unknown as CapabilityMenu,
     lifecycle,
   ).attach();
   return {
