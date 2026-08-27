@@ -64,6 +64,14 @@ struct MainWindowView: View {
             HStack {
                 Button(showLog ? "Hide Log" : "Show Log") { showLog.toggle() }
                 Button("Open Full Log") { engine.openLog() }
+                // The only recovery a locked-out phone cannot perform itself:
+                // it holds a token this Mac no longer accepts (reinstall,
+                // cleared storage, a different phone), so it cannot
+                // authenticate to ask. The wearer just sees "reconnecting"
+                // forever. Authority here is physical access to the Mac.
+                Button("Forget Glasses") { engine.forgetPairing() }
+                    .help("Re-pair the glasses. Use when the HUD is stuck on "
+                          + "\"reconnecting\" after reinstalling the plugin.")
                 Spacer()
                 Text("\(status.counts.utterances) asked · \(status.counts.cards) cards")
                     .font(.caption).foregroundStyle(.secondary)

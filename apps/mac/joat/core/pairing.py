@@ -61,6 +61,15 @@ class PairingStore:
             self._token = None
         return self._token
 
+    def forget(self) -> bool:
+        """Delete the stored token, re-opening the pairing window."""
+        self._token = None
+        try:
+            self._path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
     @staticmethod
     def mint() -> str:
         """A fresh candidate token — NOT yet trusted or persisted.
