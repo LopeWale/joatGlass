@@ -30,6 +30,7 @@ export class HudPageBuilder {
       borderWidth: 0,
       isEventCapture: 0,
       zOrderIndex: 1,
+      textColor: 2,
       content: '',
     });
   }
@@ -41,7 +42,12 @@ export class HudPageBuilder {
    * for the capturing list. Leaving capture here draws the rows but makes
    * them unnavigable (swipes come back as `textEvent`, presses as `sysEvent`).
    */
-  private main(height: number, isEventCapture: 0 | 1 = 1): TextContainerProperty {
+  private main(
+    height: number,
+    isEventCapture: 0 | 1 = 1,
+    textColor = 4,
+    content = '',
+  ): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.Main,
       containerName: 'main',
@@ -53,7 +59,8 @@ export class HudPageBuilder {
       borderWidth: 0,
       isEventCapture,
       zOrderIndex: 2,
-      content: '',
+      textColor,
+      content,
     });
   }
 
@@ -64,7 +71,7 @@ export class HudPageBuilder {
    */
   private region(
     id: ContainerId, name: string, y: number, height: number,
-    z: number, textColor: number,
+    z: number, textColor: number, content = '',
   ): TextContainerProperty {
     return new TextContainerProperty({
       containerID: id,
@@ -78,7 +85,7 @@ export class HudPageBuilder {
       isEventCapture: 0,
       zOrderIndex: z,
       textColor,
-      content: '',
+      content,
     });
   }
 
@@ -143,14 +150,28 @@ export class HudPageBuilder {
     });
   }
 
-  /** Status bar + short main + scrollable list (max 20 items, 64 chars each). */
-  listLayout(items: string[]): RebuildPageContainer {
+  /**
+   * Full-canvas focus page: status + named title + rows + truthful actions.
+   *
+   * The focus header carries its action copy because a separate 32px footer
+   * leaves room for only four firmware list rows. HudPresenter buffers every
+   * dashboard-only paint while this layout is active, so missing optional
+   * containers can never be mistaken for page corruption.
+   */
+  listLayout(
+    items: string[],
+    chrome: { title?: string; hint?: string } = {},
+  ): RebuildPageContainer {
     const capped = items.slice(0, 20).map((s) => s.slice(0, 64));
+    const header = this.focusHeader(chrome.title, chrome.hint);
     return new RebuildPageContainer({
       containerTotalNum: 3,
       menuObject: this.systemMenu(),
       // Capture moves OFF main and ONTO the list — see main()'s note.
-      textObject: [this.statusBar(), this.main(48, 0)],
+      textObject: [
+        this.statusBar(),
+        this.main(48, 0, 3, header),
+      ],
       listObject: [
         new ListContainerProperty({
           containerID: ContainerId.List,
@@ -173,5 +194,16 @@ export class HudPageBuilder {
         }),
       ],
     });
+  }
+
+  /** Keep the action copy intact; title truncation is safer than hiding Back. */
+  private focusHeader(title = '', hint = ''): string {
+    const action = hint.trim().slice(0, 46);
+    const name = title.trim().slice(0, 46);
+    if (!action) return name;
+    if (!name) return action;
+    const nameBudget = 46 - action.length - 3; // ` · `
+    if (nameBudget <= 0) return action;
+    return `${name.slice(0, nameBudget)} · ${action}`;
   }
 }

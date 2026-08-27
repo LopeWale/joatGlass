@@ -135,6 +135,15 @@ class TestDownlinkWire:
         assert len(wire["items"]) == 20
         assert all(len(s) <= 64 for s in wire["items"])
 
+    def test_hud_list_carries_a_bounded_focus_page_header_and_hint(self) -> None:
+        wire = HudList(
+            items=["Messages"],
+            title="T" * 60,
+            hint="H" * 60,
+        ).to_wire()
+        assert wire["title"] == "T" * 46
+        assert wire["hint"] == "H" * 46
+
     def test_audio_control_omits_source_when_unset(self) -> None:
         assert AudioControl(open=True).to_wire() == {"kind": "audio.control", "open": True}
 

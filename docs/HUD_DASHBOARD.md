@@ -5,10 +5,13 @@ wearer moves between. Written against the real container model and the
 measured constraints in [HUB_PLUGIN.md](HUB_PLUGIN.md); every claim about
 current behaviour carries a file:line.
 
-STATUS: design, not yet built. The build order is at the end — the first
-increment is small and visibly better on its own.
+STATUS: the dashboard foundation is implemented. This document preserves the
+original architecture and sequencing record; its later speculative card and
+debate interactions are not acceptance claims. The current focus-page and
+confirmation contract is canonical in [DESIGN.md](../DESIGN.md) and enforced by
+the Hub plugin tests plus official Even Hub simulator captures.
 
-Three defects in today's single-container HUD motivated this and are worth
+Three defects in the pre-dashboard single-container HUD motivated this and are worth
 fixing regardless of how much of the design lands:
 
 1. A notification card OVERWRITES an in-flight reply — both write MAIN.
@@ -22,7 +25,8 @@ fixing regardless of how much of the design lands:
 
 ### The spine of the design: chrome is plugin-owned, content is Mac-owned
 
-Today the HUD is two containers and everything the Mac says lands in one of them (`HudPageBuilder.ts:53-58`). That has three consequences visible on-glass right now:
+Before this dashboard landed, the HUD was two containers and everything the
+Mac said landed in one of them. That baseline had three consequences:
 
 - A notification card **overwrites the reply**. `SessionManager.notify` → `_show_card` → `hud.show(card)` (`session.py:53-64`) writes the same `ContainerId.MAIN` the reply streams into (`orchestrator.py:149-157`).
 - The wearer's own words are **erased 200 ms after being shown**. `orchestrator.py:149` does `await self._hud.show(query)`, then line 157 does `await self._hud.show(chunk)` on the same container. The proof-of-being-heard is destroyed by the answer to it.
@@ -80,7 +84,11 @@ Four walking-safety choices, deliberately:
 
 ## 2. The other pages, and the gesture map
 
-Three of the four states below are the **same five containers with different content** — `textContainerUpgrade` only, no `rebuildPageContainer`, no flicker (`RULES.md:47`). Only INBOX and SETTINGS rebuild, because a list container must exist and must take the capture flag.
+Dashboard states reuse the same five containers with different content.
+Selectable and read-only focus states rebuild to a three-container surface:
+Status 32px, compact Title/Actions 48px, and List 208px. Confirmation temporarily
+uses the dashboard geometry, preserves Status, blanks Context and Tray, and
+restores the exact interrupted surface on accept, cancel, or timeout.
 
 ### REPLY — conversation
 
@@ -148,38 +156,51 @@ Line 1 and line 2 of `Card.render()` (`cards.py:105-114`) become two *containers
 
 `_verify_visibly` currently appends `» VERIFIER` and per-citation verdicts **into the same stream as the argument** (`session.py:272-286`), which makes both unreadable. Moving verdicts to `CONTEXT` and round/agreement to `TRAY` preserves the wearer's stated requirement that verification is visible, while letting the argument stay legible.
 
-### CONFIRM — an overlay state, not a page
+### CONFIRM — the exclusive decision state
 
 ```
-+----------------------------------------------+  y=224 id6 TRAY    bright0  <- blanked; nothing competes
-|                                              |
-+----------------------------------------------+  y=256 id7 HINT    bright4  <- the ONLY bright chrome
-|TAP RIGHT TEMPLE TO CONFIRM . 8s . ring ok    |
++----------------------------------------------+  y=32  id2 MAIN    bright4
+|CONFIRM ACTION                                |
+|Send the prepared message to Dele?            |
++----------------------------------------------+  y=160 id5 CONTEXT bright0  <- blanked
++----------------------------------------------+  y=224 id6 TRAY    bright0  <- blanked
++----------------------------------------------+  y=256 id7 HINT    bright4
+|RIGHT/RING/NOD accept · LEFT cancel · 8s     |
 +----------------------------------------------+  y=288
 ```
 
-`RULES.md:15` makes this the highest-stakes surface on the device. Blanking `TRAY` to brightness 0 and lifting `HINT` to 4 means that when a confirm is live, exactly one thing on the HUD is bright chrome. Prompt text comes from `ConfirmRequest.prompt` (`protocol.py:236-242`); the hint wording stays `CONFIRM_HINT` (`types.ts:26`) — temple named first because the ring is optional and the nod thresholds are uncalibrated (`types.ts:20-26`).
+`RULES.md:15` makes this the highest-stakes surface on the device. Prompt and
+Hint are the only brightness-4 regions; ordinary content is deferred. Right
+temple, ring, or nod accepts; left cancels; eight seconds without input refuses.
+The gate then restores the interrupted dashboard or focus page.
 
-### INBOX — the one page that rebuilds
+### FOCUS PAGE — named list state that rebuilds
 
 ```
 +----------------------------------------------+  y=0   id1 STATUS  bright2  capture0
-|09:47   Inbox                        3 waiting|
+|09:47   JOAT menu                    bat 86%|
 +----------------------------------------------+  y=32  id2 MAIN    bright3  capture0  (48px header)
-|hold again or tap a row to open               |
+|CAPABILITIES · tap open · left x2 back      |
 +----------------------------------------------+  y=80  id3 LIST    z3  capture1 <-- EVENT (RULES 21)
-|> !! Dele . Call me when you land             |
-|  Battery . MacBook fully charged             |
-|  Calendar . standup in 13 min                |
-|                                              |
-|                                              |
-|                                              |
+|> Messages                                    |
+|  Notifications                               |
+|  Calendar                                    |
+|  Debate                                      |
+|  Settings                                    |
 +----------------------------------------------+  y=288
 ```
 
-Capture **moves to the list** and `main` drops to 0 — that exact swap is the documented "taps do nothing" bug (`docs/HUB_PLUGIN.md:327`). Structure follows `listLayout()` (`HudPageBuilder.ts:69-94`); caps are 20 items × 64 chars, already enforced there and again in `HudList.to_wire` (`protocol.py:196-199`).
+Capture **moves to the list** and `main` drops to 0. The action copy lives in
+the compact header because a separate footer leaves room for only four rows in
+the official simulator. Dashboard-only paints are suspended until Back, which
+prevents absent Context/Tray/Hint containers from triggering a false repair.
 
-### Gesture map — documented inputs only
+### Gesture map — original exploration
+
+This table records the design exploration that preceded implementation. It is
+not the current interaction contract; use [DESIGN.md](../DESIGN.md) and
+`EventRouter.test.ts` for shipped gestures. In particular, card/inbox actions
+below remain future work.
 
 The important finding: **left-temple single press is free today.** `EventRouter.ts:142-147` treats only ring and right temple as confirm; a left single (source 3, type 0) falls through to the bare relay at line 151, and the Mac registers no `on_input` callback at all (only `on_hello` at `__main__.py:148`). So navigation can have its own gesture instead of time-slicing the confirm gesture — which would have been a safety hazard under `RULES.md:15`.
 
@@ -229,7 +250,10 @@ Deferred, not needed for the dashboard: `hud.menu` (`{ items: [{id, label}] }`) 
 
 Mac-side seams that move with them: `HudWriter` (`services/hud.py:16-33`) gains `dash()` / `card()` / `mode()`; `SessionManager.notify` (`session.py:53`) takes a `Card` instead of a rendered `str`; `NotificationChannel`'s `deliver` callback type (`notifications.py:164`) follows.
 
-## 4. Build order
+## 4. Original build order
+
+Historical sequencing follows. Completion of an early step does not imply the
+speculative card, inbox, or debate steps shipped.
 
 **Step 0 — brightness + plugin-composed status line.** Two files, no protocol, no Mac change.
 Add `textColor: 2` to `statusBar()` and `textColor: 4` to `main()` (`HudPageBuilder.ts:19-50`); have `HudPresenter.setStatus` (`HudPresenter.ts:59-61`) compose `HH:MM  <mac text>  bat NN%` from data the plugin already holds — `DeviceMonitor`'s snapshot (`DeviceMonitor.ts:44-54`), `MacLink` state (`MacLink.ts:4`, wired at `main.ts:61-65`), `audio.isOpen` (`main.ts:85`). This is the smallest change that makes the HUD visibly better, and it establishes the chrome/content ownership line. It also means the clock and battery keep rendering when the Mac is down.

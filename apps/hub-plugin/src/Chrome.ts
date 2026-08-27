@@ -15,7 +15,7 @@ import type { LinkState } from './MacLink';
  * Everything here is derived from state the PHONE already has, so it keeps
  * updating through a Mac outage — which is the whole point.
  */
-const HINT = 'left double-tap: menu / back · say \u201cJOAT \u2026\u201d';
+const HINT = 'left x2: menu · long-press: mic · \u201cJOAT \u2026\u201d';
 
 export class Chrome {
   private timer?: ReturnType<typeof setInterval>;

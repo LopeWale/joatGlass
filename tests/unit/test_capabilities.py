@@ -58,24 +58,34 @@ class TestCapabilityViews:
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert lists and lists[0].to_wire()["items"] == [
             "Dele · On my way", "Adaeze · Call me"]
+        assert lists[0].title == "MESSAGES"
+        assert lists[0].hint == "left x2 back"
 
     async def test_messages_without_access_states_the_gap(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, rows=None)
         await router.open("Messages")
-        texts = [m for m in transport.sent if isinstance(m, HudText)]
-        assert any("Full Disk Access" in m.text for m in texts)
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert any("Full Disk Access" in item for item in lists[0].items)
+        assert lists[0].title == "MESSAGES · SETUP"
+        statuses = [m for m in transport.sent
+                    if isinstance(m, HudText)
+                    and m.container_id is ContainerId.STATUS_BAR]
+        assert [m.text for m in statuses] == ["JOAT · messages setup"]
+        assert transport.sent.index(statuses[0]) < transport.sent.index(lists[0])
 
     async def test_notifications_view_lists_recent_cards(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, cards=["!! Adaeze · Messages\nCall me now"])
         await router.open("Notifications")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert lists and "!! Adaeze · Messages" in lists[0].to_wire()["items"][0]
+        assert lists[0].title == "NOTIFICATIONS"
 
     async def test_calendar_admits_it_is_not_connected(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path)
         await router.open("Calendar")
-        texts = [m for m in transport.sent if isinstance(m, HudText)]
-        assert any("not connected" in m.text for m in texts)
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert any("not connected" in item for item in lists[0].items)
+        assert lists[0].title == "CALENDAR"
 
 
 class TestGestureReflexes:

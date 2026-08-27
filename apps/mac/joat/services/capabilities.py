@@ -4,8 +4,8 @@ The plugin's menu is navigation only — the DATA lives here. When the wearer
 picks a row, the plugin sends an `input` event with containerName "capmenu"
 and the row's name; this router draws the view. It also owns the two other
 glasses-initiated requests: the contextual menu's "repeat last reply"
-(containerName "sysmenu") and the repaint after a menu closes (the rebuild
-cleared every region, and a silent Mac means a blank screen).
+(containerName "sysmenu") and the legacy repaint request older plugin builds
+sent after a menu closed. Current builds restore a buffered dashboard locally.
 
 Deterministic by design: these are reflexes to explicit gestures, not model
 decisions.
@@ -25,6 +25,8 @@ from .hud import HudWriter
 from .status import StatusPublisher
 
 log = logging.getLogger(__name__)
+
+BACK_HINT = "left x2 back"
 
 
 def _age(unix: float) -> str:
@@ -70,45 +72,63 @@ class CapabilityRouter:
             case "Notifications":
                 await self._show_notifications()
             case "Debate":
-                await self._hud.show(
-                    'Say: "JOAT, debate <topic>" — codex proposes, claude '
-                    "critiques, streamed here as it happens.")
                 await self._hud.status("JOAT · debate")
+                await self._show_focus(
+                    "DEBATE",
+                    [
+                        'Say: "JOAT, debate <topic>"',
+                        "Codex proposes · Claude critiques · JOAT judges",
+                    ],
+                )
             case "Calendar":
-                await self._hud.show("Calendar is not connected yet.")
                 await self._hud.status("JOAT · calendar")
+                await self._show_focus("CALENDAR", ["Calendar is not connected yet."])
             case _:
                 log.info("unknown capability requested: %s", name)
 
     async def _show_messages(self) -> None:
         if self._messages is None or not self._messages.available:
-            await self._hud.show("Messages needs Full Disk Access on the Mac.")
+            await self._hud.status("JOAT · messages setup")
+            await self._show_focus(
+                "MESSAGES · SETUP",
+                ["Messages needs Full Disk Access on the Mac."],
+            )
             return
-        rows = await asyncio.to_thread(self._messages.recent, 6)
+        rows = await asyncio.to_thread(self._messages.recent, 5)
         if not rows:
-            await self._hud.show("No recent messages.")
             await self._hud.status("JOAT · messages")
+            await self._show_focus("MESSAGES", ["No recent messages."])
             return
-        await self._transport.send(HudList(
-            items=[f"{sender} · {text}" for sender, text, _ in rows]))
         await self._hud.status("JOAT · messages")
+        await self._transport.send(HudList(
+            items=[f"{sender} · {text}" for sender, text, _ in rows],
+            title="MESSAGES",
+            hint=BACK_HINT,
+        ))
 
     async def _show_notifications(self) -> None:
-        entries = self._cards.recent(6)
+        entries = self._cards.recent(5)
         if not entries:
-            await self._hud.show("Nothing shown recently.")
             await self._hud.status("JOAT · notifications")
+            await self._show_focus("NOTIFICATIONS", ["Nothing shown recently."])
             return
-        await self._transport.send(HudList(items=[
-            f"[{_age(at)}] {card.splitlines()[0]}" for at, card in entries]))
         await self._hud.status("JOAT · notifications")
+        await self._transport.send(HudList(
+            items=[f"[{_age(at)}] {card.splitlines()[0]}" for at, card in entries],
+            title="NOTIFICATIONS",
+            hint=BACK_HINT,
+        ))
+
+    async def _show_focus(self, title: str, items: list[str]) -> None:
+        """Render non-dashboard capability states in the shared focus shell."""
+        await self._transport.send(HudList(items=items, title=title, hint=BACK_HINT))
 
     async def _repeat(self) -> None:
         last = self._status.get("last_reply")
         await self._hud.show(last if last else "Nothing to repeat yet.")
 
     async def repaint_home(self) -> None:
-        """Refill the regions the menu's rebuild blanked."""
+        """Compatibility path for older plugins that did not buffer Home."""
         last_reply = self._status.get("last_reply")
         if last_reply:
             await self._hud.show(last_reply)

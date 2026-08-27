@@ -26,6 +26,16 @@ const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'confirm', label: 'Resume mic: ask me first' },
 ];
 
+const CAPABILITY_SURFACE = {
+  title: 'CAPABILITIES',
+  hint: 'tap open · left x2 back',
+} as const;
+
+const SETTINGS_SURFACE = {
+  title: 'LISTENING RESUME',
+  hint: 'tap apply · left x2 back',
+} as const;
+
 export class CapabilityMenu {
   private view: 'closed' | 'caps' | 'settings' | 'data' = 'closed';
   /** Live mic state, injected so the restored status line tells the truth. */
@@ -46,8 +56,8 @@ export class CapabilityMenu {
   toggle(): void {
     if (this.view === 'closed') {
       this.view = 'caps';
-      void this.hud.showList([...CAPABILITIES]);
       void this.hud.setStatus('JOAT · menu');
+      void this.hud.showList([...CAPABILITIES], CAPABILITY_SURFACE);
     } else {
       void this.close();
     }
@@ -78,8 +88,8 @@ export class CapabilityMenu {
     const picked = CAPABILITIES[index];
     if (picked === 'Settings') {
       this.view = 'settings';
-      void this.hud.showList(POLICY_ROWS.map((r) => this.label(r)));
       void this.hud.setStatus('JOAT · settings (tap to pick)');
+      void this.hud.showList(POLICY_ROWS.map((r) => this.label(r)), SETTINGS_SURFACE);
       return true;
     }
     if (picked) {
@@ -102,12 +112,11 @@ export class CapabilityMenu {
 
   private async close(): Promise<void> {
     this.view = 'closed';
-    await this.hud.showDefault();
     // Restore a LIVE home, not a souvenir of the menu — a stale status line
     // over a blank page reads as a dead assistant (observed on hardware).
     await this.hud.setStatus(this.micIsOpen() ? 'JOAT · listening' : 'JOAT · mic off');
-    // Tell the Mac the wearer is back so it repaints the content regions —
-    // the rebuild cleared them, and a silent Mac means a blank screen.
-    this.link.send({ kind: 'input', event: { containerName: 'menu', selectedName: 'closed' } });
+    await this.hud.showDefault();
+    // HudPresenter restores the buffered dashboard atomically. Asking the Mac
+    // to repaint here used to overwrite a newer card with an older last_reply.
   }
 }

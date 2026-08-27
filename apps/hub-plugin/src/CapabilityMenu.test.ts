@@ -14,17 +14,30 @@ import type { MacLink } from './MacLink';
 
 function rig() {
   const lists: string[][] = [];
+  const listOptions: Array<{ title?: string; hint?: string } | undefined> = [];
   const statuses: string[] = [];
+  const operations: string[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
   const hud = {
-    showList: vi.fn(async (items: string[]) => { lists.push(items); return true; }),
-    setStatus: vi.fn(async (t: string) => { statuses.push(t); return true; }),
+    showList: vi.fn(async (
+      items: string[], options?: { title?: string; hint?: string },
+    ) => {
+      operations.push('list');
+      lists.push(items);
+      listOptions.push(options);
+      return true;
+    }),
+    setStatus: vi.fn(async (t: string) => {
+      operations.push('status');
+      statuses.push(t);
+      return true;
+    }),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
-  return { menu, lists, statuses, sent, defaultsCount: () => defaults };
+  return { menu, lists, listOptions, operations, statuses, sent, defaultsCount: () => defaults };
 }
 
 const click = (index: number) =>
@@ -33,9 +46,14 @@ const clickRow0 = () => ({ eventType: undefined, currentSelectItemIndex: undefin
 
 describe('CapabilityMenu', () => {
   it('double-tap from home opens the DESIGNED menu: the five capabilities', () => {
-    const { menu, lists } = rig();
+    const { menu, lists, listOptions, operations } = rig();
     menu.toggle();
     expect(lists[0]).toEqual(['Messages', 'Notifications', 'Calendar', 'Debate', 'Settings']);
+    expect(listOptions[0]).toEqual({
+      title: 'CAPABILITIES',
+      hint: 'tap open · left x2 back',
+    });
+    expect(operations.slice(0, 2)).toEqual(['status', 'list']);
   });
 
   it('picking Messages asks the Mac for the data view and enters data state', () => {
@@ -50,33 +68,36 @@ describe('CapabilityMenu', () => {
     expect(menu.handleList(click(1))).toBe(false);
   });
 
-  it('double-tap is BACK from the data view — home restored, Mac asked to repaint', async () => {
+  it('double-tap is BACK from data — buffered home restores without an obsolete repaint', async () => {
     const { menu, sent, defaultsCount } = rig();
     menu.toggle();
     menu.handleList(clickRow0()); // into Messages
     menu.toggle();                // back
-    await new Promise((r) => setTimeout(r, 0)); // close() awaits two paints first
+    await Promise.resolve();      // close waits for the live status paint first
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(1);
-    expect(sent[sent.length - 1]).toEqual({
-      kind: 'input', event: { containerName: 'menu', selectedName: 'closed' },
-    });
+    expect(sent).toHaveLength(1); // only the capability selection request
   });
 
   it('Settings lives one level down and still applies a policy', () => {
-    const { menu, lists, sent } = rig();
+    const { menu, lists, listOptions, sent } = rig();
     menu.toggle();
     menu.handleList(click(4)); // Settings row
     expect(lists[1]!.some((r) => r.includes('Resume mic'))).toBe(true);
+    expect(listOptions[1]).toEqual({
+      title: 'LISTENING RESUME',
+      hint: 'tap apply · left x2 back',
+    });
     menu.handleList(clickRow0()); // pick 'instantly' (row 0, zero-dropped)
     expect(sent.some((m) => m.kind === 'policy' && (m as { resume?: string }).resume === 'auto')).toBe(true);
     expect(menu.isOpen()).toBe(false); // applied and closed home
   });
 
-  it('double-tap from the capability list is back, not deeper', () => {
+  it('double-tap from the capability list is back, not deeper', async () => {
     const { menu, defaultsCount } = rig();
     menu.toggle();
     menu.toggle();
+    await Promise.resolve();
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(1);
   });

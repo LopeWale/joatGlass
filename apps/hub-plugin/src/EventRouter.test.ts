@@ -11,8 +11,19 @@ import type { UplinkMessage } from './types';
 function make(menuConsumesLists = false) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
-  const audio = { ingest: vi.fn() };
-  const imu = { ingest: vi.fn(), confirmByTap: vi.fn() };
+  const audio = {
+    ingest: vi.fn(),
+    isOpen: true,
+    lastSource: 0,
+    stop: vi.fn(async () => {}),
+    start: vi.fn(async () => true),
+  };
+  const imu = {
+    ingest: vi.fn(),
+    isPending: vi.fn(() => false),
+    confirmByTap: vi.fn(),
+    declineByTap: vi.fn(() => false),
+  };
   const menu = { toggle: vi.fn(), handleList: vi.fn(() => menuConsumesLists) };
   const shutDownPageContainer = vi.fn(async (_mode: number) => true);
   const lifecycle: LifecycleHandler = {
@@ -86,10 +97,28 @@ describe('EventRouter — confirm gestures', () => {
     expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
   });
 
+  it('consumes an accept gesture while a confirmation is active', () => {
+    const { fire, imu, sent } = make();
+    imu.confirmByTap.mockReturnValue(true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
+  });
+
   it('left-temple press does NOT confirm — that side is the menu', () => {
-    const { fire, imu } = make();
+    const { fire, imu, sent } = make();
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
     expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(imu.declineByTap).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1); // no pending gate: raw input still relays
+  });
+
+  it('left-temple press cancels and consumes an active confirmation', () => {
+    const { fire, imu, sent } = make();
+    imu.declineByTap.mockReturnValue(true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+    expect(imu.declineByTap).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
   });
 
   it('an explicit eventType 0 also confirms, for hosts that do send it', () => {
@@ -105,6 +134,28 @@ describe('EventRouter — confirm gestures', () => {
 });
 
 describe('EventRouter — double press', () => {
+  it('does not open a menu or OS dialog behind an active confirmation', () => {
+    const { fire, imu, menu, sent, shutDownPageContainer } = make();
+    imu.isPending.mockReturnValue(true);
+
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+      },
+    });
+
+    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(shutDownPageContainer).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('left temple toggles the settings menu and is consumed', () => {
     const { fire, menu, sent, shutDownPageContainer } = make();
     fire({
@@ -195,5 +246,63 @@ describe('EventRouter — text and list', () => {
     const { fire, sent } = make(false);
     fire({ listEvent: { containerID: 3, currentSelectItemName: 'first' } });
     expect(sent[0]).toMatchObject({ kind: 'input', event: { selectedIndex: 0 } });
+  });
+});
+
+describe('EventRouter — long-press mutes the mic', () => {
+  /**
+   * An earlier build ceded long-press to the glasses OS, believing a
+   * declared menuObject made the OS open its contextual menu on that
+   * gesture. The SDK README says the opposite twice — long press and
+   * release "remain regular list/text/sys events", "delivered inside the
+   * matching list, text, or system event" — there is no bridge verb that
+   * opens a menu, and on hardware the gesture did nothing at all.
+   *
+   * It must therefore be handled in EVERY event class, and BEFORE each
+   * branch's relay: on a text-capture page the textEvent relay would
+   * otherwise forward it to the Mac as an ordinary scroll.
+   */
+  const LONG_PRESS = OsEventTypeList.LONG_PRESS_EVENT;
+  const RELEASE = OsEventTypeList.LONG_PRESS_RELEASE_EVENT;
+
+  it('toggles the mic from a sysEvent', () => {
+    const r = make();
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('toggles the mic from a textEvent — the relay must not swallow it', () => {
+    const r = make();
+    r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.sent).toEqual([]); // not relayed to the Mac as a scroll
+  });
+
+  it('toggles the mic from a listEvent', () => {
+    const r = make();
+    r.fire({ listEvent: { eventType: LONG_PRESS } });
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.sent).toEqual([]);
+  });
+
+  it('un-mutes when the mic is off, reusing lastSource', () => {
+    const r = make();
+    r.audio.isOpen = false;
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    expect(r.audio.start).toHaveBeenCalledWith(r.audio.lastSource);
+  });
+
+  it('release is consumed silently — one press, one toggle, no phantom input', () => {
+    const r = make();
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.audio.start).not.toHaveBeenCalled();
+    expect(r.sent).toEqual([]);
+  });
+
+  it('the contextual-menu mute item takes the SAME path as the gesture', () => {
+    const r = make();
+    r.fire({ menuItemClickEvent: { itemID: 2 } });
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
   });
 });

@@ -228,11 +228,21 @@ class HudRebuild:
 @dataclass(frozen=True, slots=True)
 class HudList:
     items: list[str]
+    title: str | None = None
+    hint: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
         # plugin silently drop the overflow.
-        return {"kind": "hud.list", "items": [s[:64] for s in self.items[:20]]}
+        message: dict[str, Any] = {
+            "kind": "hud.list",
+            "items": [s[:64] for s in self.items[:20]],
+        }
+        if self.title is not None:
+            message["title"] = self.title[:46]
+        if self.hint is not None:
+            message["hint"] = self.hint[:46]
+        return message
 
 
 @dataclass(frozen=True, slots=True)

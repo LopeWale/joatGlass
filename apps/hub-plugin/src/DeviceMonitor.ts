@@ -5,7 +5,6 @@ import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
-import { ContainerId, CONFIRM_HINT } from './types';
 
 /** Fields we track per onDeviceStatusChanged callback. All optional — older hosts omit them. */
 interface Snapshot {
@@ -104,13 +103,23 @@ export class DeviceMonitor {
       case 'mac':
         void this.hud.setStatus('JOAT · glasses on');
         break;
-      case 'confirm':
-        void this.hud.showText(`Resume listening?\n\n${CONFIRM_HINT}`, ContainerId.Main);
-        this.imu.await('local:resume', 8000, (accepted) => {
+      case 'confirm': {
+        const actionId = 'local:resume';
+        const rendered = this.hud.showConfirmation('Resume listening?', actionId);
+        this.imu.prepare(actionId, (accepted) => {
+          void this.hud.dismissConfirmation(actionId);
           if (accepted) void this.audio.start(AudioInputSource.Glasses);
           void this.hud.setStatus(accepted ? 'JOAT · listening' : 'JOAT · mic off');
         });
+        void rendered.then(
+          (ok) => {
+            if (ok) this.imu.activate(actionId, 8000);
+            else this.imu.cancel(actionId);
+          },
+          () => { this.imu.cancel(actionId); },
+        );
         break;
+      }
     }
   }
 }

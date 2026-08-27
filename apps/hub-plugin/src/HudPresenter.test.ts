@@ -3,7 +3,7 @@ import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
-import { ContainerId } from './types';
+import { CONFIRM_HINT, ContainerId } from './types';
 
 /**
  * Streamed paints must be SELF-CONTAINED full frames, throttled to BLE
@@ -17,6 +17,7 @@ const paints: TextContainerUpgrade[] = [];
 let paintOk = true;
 let rebuildOk = true;
 let rebuilds = 0;
+const rebuiltPages: unknown[] = [];
 
 function fakeClient(): BridgeClient {
   return {
@@ -25,8 +26,9 @@ function fakeClient(): BridgeClient {
         paints.push(u);
         return paintOk;
       },
-      rebuildPageContainer: async () => {
+      rebuildPageContainer: async (page: unknown) => {
         rebuilds += 1;
+        rebuiltPages.push(page);
         paintOk = rebuildOk; // a successful rebuild restores the containers
         return rebuildOk;
       },
@@ -51,6 +53,7 @@ afterEach(() => {
   paintOk = true;
   rebuildOk = true;
   rebuilds = 0;
+  rebuiltPages.length = 0;
   vi.useRealTimers();
 });
 
@@ -164,6 +167,176 @@ describe('status-bar single ownership', () => {
     await hud.setStatus('JOAT · connecting');
     const bar = paints.filter((p) => p.containerID === ContainerId.StatusBar);
     expect(bar.length).toBe(1);
+  });
+});
+
+describe('HudPresenter modal surfaces', () => {
+  it('paints a named focus page with a persistent truthful action hint', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showList(['Messages', 'Settings'], {
+      title: 'CAPABILITIES',
+      hint: 'tap open · left x2 back',
+    });
+
+    const page = rebuiltPages[0] as {
+      textObject?: Array<{ containerID?: number; content?: string; textColor?: number }>;
+    };
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toMatchObject({
+      content: 'CAPABILITIES · tap open · left x2 back', textColor: 3,
+    });
+    expect(page.textObject?.some((c) => c.containerID === ContainerId.Hint)).toBe(false);
+
+    // Chrome repaints its home hint on every state/clock change. In a focus
+    // page that write is intentionally ignored so the active gesture map
+    // remains truthful and list movement cannot revert it.
+    await hud.showText('left double-tap: menu / back · say “JOAT …”', ContainerId.Hint);
+    expect(paints.filter((p) => p.containerID === ContainerId.Hint)).toEqual([]);
+  });
+
+  it('repaints the live status immediately across focus and confirmation rebuilds', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('12:34   JOAT listening   bat 80%', ContainerId.StatusBar, 2);
+    await hud.showList(['Messages'], {
+      title: 'CAPABILITIES',
+      hint: 'tap open · left x2 back',
+    });
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.StatusBar))).toMatchObject({
+      content: '12:34   JOAT listening   bat 80%', textColor: 2,
+    });
+
+    await hud.showConfirmation('Send this message?', 'status-proof');
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.StatusBar))).toMatchObject({
+      content: '12:34   JOAT listening   bat 80%', textColor: 2,
+    });
+  });
+
+  it('keeps dashboard paints behind focus, then restores their latest content', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showList(['Messages'], {
+      title: 'CAPABILITIES',
+      hint: 'tap open · left x2 back',
+    });
+
+    await hud.showText('background reply', ContainerId.Main);
+    await hud.showText('background transcript', ContainerId.Context);
+    await hud.showText('background queue', ContainerId.Tray);
+    await hud.showText('dashboard hint', ContainerId.Hint);
+    await hud.appendText('stream tail', ContainerId.Main);
+
+    expect(paints).toEqual([]);
+    expect(rebuilds).toBe(1);
+
+    await hud.showDefault();
+    expect(lastOf(mainPaints()).content).toBe('background replystream tail');
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Context)).content)
+      .toBe('background transcript');
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Tray)).content)
+      .toBe('background queue');
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Hint)).content)
+      .toBe('dashboard hint');
+    expect(rebuilds).toBe(2);
+  });
+
+  it('confirmation is exclusive and restores content received while it was open', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('previous reply', ContainerId.Main, 4);
+    await hud.showText('you  delete the file', ContainerId.Context, 3);
+
+    await hud.showConfirmation('Delete report.pdf permanently?');
+    expect(lastOf(mainPaints())).toMatchObject({
+      content: 'CONFIRM ACTION\nDelete report.pdf permanently?',
+      textColor: 4,
+    });
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Context))).toMatchObject({
+      content: '', textColor: 0,
+    });
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Tray))).toMatchObject({
+      content: '', textColor: 0,
+    });
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Hint))).toMatchObject({
+      content: CONFIRM_HINT, textColor: 4,
+    });
+
+    await hud.showText('reply completed behind the gate', ContainerId.Main, 3);
+    expect(lastOf(mainPaints()).content).toBe('CONFIRM ACTION\nDelete report.pdf permanently?');
+
+    await hud.dismissConfirmation();
+    expect(lastOf(mainPaints())).toMatchObject({
+      content: 'reply completed behind the gate', textColor: 3,
+    });
+    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Context))).toMatchObject({
+      content: 'you  delete the file', textColor: 3,
+    });
+  });
+
+  it('serializes confirmation paints for the single SDK bridge', async () => {
+    let activePaints = 0;
+    let overlapped = false;
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => {
+          activePaints += 1;
+          if (activePaints > 1) overlapped = true;
+          await Promise.resolve();
+          activePaints -= 1;
+          return true;
+        },
+        rebuildPageContainer: async () => true,
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder());
+
+    await hud.showConfirmation('Send this message?');
+
+    expect(overlapped).toBe(false);
+  });
+
+  it('does not trap later content when a focus-to-confirm rebuild fails', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showList(['Messages'], {
+      title: 'CAPABILITIES',
+      hint: 'tap open · left x2 back',
+    });
+    rebuildOk = false;
+
+    expect(await hud.showConfirmation('Send this message?')).toBe(false);
+    rebuildOk = true;
+    expect(await hud.showDefault()).toBe(true);
+    await hud.showText('dashboard write after failed modal', ContainerId.Main);
+
+    expect(lastOf(mainPaints()).content).toBe('dashboard write after failed modal');
+  });
+
+  it('confirmation opened from a focus page returns to that page', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showList(['instant', 'ask me first'], {
+      title: 'LISTENING RESUME',
+      hint: 'tap apply · left x2 back',
+    });
+    await hud.showConfirmation('Resume listening?');
+    await hud.dismissConfirmation();
+
+    expect(rebuilds).toBe(3); // list → confirmation dashboard → restored list
+    expect(rebuiltPages).toHaveLength(3);
+    const restored = rebuiltPages[2] as {
+      textObject?: Array<{ containerID?: number; content?: string }>;
+    };
+    expect(restored.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+      .toBe('LISTENING RESUME · tap apply · left x2 back');
+    expect(restored.textObject?.some((c) => c.containerID === ContainerId.Hint)).toBe(false);
+  });
+
+  it('ignores a stale dismissal after a replacement action claims the modal', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showConfirmation('Approve action A?', 'action-a');
+
+    const replacement = hud.showConfirmation('Approve action B?', 'action-b');
+    const staleDismissal = hud.dismissConfirmation('action-a');
+    await Promise.all([replacement, staleDismissal]);
+
+    expect(lastOf(mainPaints()).content).toBe('CONFIRM ACTION\nApprove action B?');
+    await hud.dismissConfirmation('action-b');
+    expect(lastOf(mainPaints()).content).toBe('');
   });
 });
 
