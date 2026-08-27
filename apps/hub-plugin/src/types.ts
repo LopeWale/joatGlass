@@ -42,7 +42,7 @@ export type UplinkMessage =
   | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string }
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
-  | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string }
+  | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string; mic?: boolean }
   | { kind: 'confirm'; actionId: string; accepted: boolean }
   | { kind: 'policy'; resume: ResumePolicy }
   /** Wearer position via bridge.getAppLocation — the sideload-safe API. */

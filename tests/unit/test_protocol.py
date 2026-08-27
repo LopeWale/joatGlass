@@ -226,3 +226,11 @@ class TestLocationAndIdentity:
     def test_hud_text_color_rides_the_wire_only_when_set(self) -> None:
         assert "textColor" not in HudText(text="x").to_wire()
         assert HudText(text="x", text_color=4).to_wire()["textColor"] == 4
+
+    def test_device_mic_truth_is_optional(self) -> None:
+        msg = parse_uplink({"kind": "device", "connect": "connected", "mic": False})
+        assert isinstance(msg, Device)
+        assert msg.mic is False
+        bare = parse_uplink({"kind": "device", "connect": "connected"})
+        assert isinstance(bare, Device)
+        assert bare.mic is None

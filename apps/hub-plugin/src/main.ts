@@ -111,6 +111,13 @@ async function boot(): Promise<void> {
   setPanel('p-policy', settings.resumePolicy);
   settings.onChange((policy) => setPanel('p-policy', policy));
   const menu = new SettingsMenu(hud, settings, link);
+  menu.micIsOpen = () => audio.isOpen;
+  // Mic truth leaves the phone on every change — the Mac's pill used to
+  // latch "streaming" at hello and never verify.
+  audio.onState = (open) => {
+    setPanel('p-mic', open ? 'streaming' : 'off');
+    link.send({ kind: 'device', connect: 'connected', mic: open });
+  };
 
   const lifecycle: LifecycleHandler = {
     onForegroundEnter: () => {
