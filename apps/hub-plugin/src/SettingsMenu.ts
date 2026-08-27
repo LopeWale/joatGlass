@@ -23,6 +23,8 @@ const ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
  */
 export class SettingsMenu {
   private open = false;
+  /** Live mic state, injected so the restored status line tells the truth. */
+  micIsOpen: () => boolean = () => false;
 
   constructor(
     private readonly hud: HudPresenter,
@@ -70,9 +72,17 @@ export class SettingsMenu {
     return `${active ? '*' : ' '} ${row.label}`;
   }
 
-  private async close(status: string): Promise<void> {
+  private async close(_status: string): Promise<void> {
     this.open = false;
     await this.hud.showDefault();
-    await this.hud.setStatus(status);
+    // Restore a LIVE home, not a souvenir of the menu. Latching the picked
+    // row's label as the status left a blank page + stale line that read as
+    // a dead assistant, with no way out short of killing the phone app
+    // (observed on hardware, wearer's words: "just bad at the moment").
+    await this.hud.setStatus(
+      this.micIsOpen() ? 'JOAT · listening' : 'JOAT · mic off — long-press: menu');
+    // Tell the Mac the wearer is back so it repaints the content regions —
+    // the rebuild cleared them, and a silent Mac means a blank screen.
+    this.link.send({ kind: 'input', event: { containerName: 'menu', selectedName: 'closed' } });
   }
 }

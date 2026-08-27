@@ -19,6 +19,8 @@ export class AudioStreamer {
   private open = false;
   /** Which mic was last (or is currently) hot — the menu's unmute reuses it. */
   lastSource: AudioInputSource = AudioInputSource.Glasses;
+  /** Fired on every real open/close so the Mac's mic pill reflects TRUTH. */
+  onState?: (open: boolean) => void;
   /** Dominant speakerRole across the current batch (SDK 0.0.14). */
   private speaker?: string;
 
@@ -50,6 +52,7 @@ export class AudioStreamer {
     }
     this.open = true;
     this.lastSource = source;
+    this.onState?.(true);
     this.flushTimer = setInterval(() => this.flush(source), this.flushMs);
     return true;
   }
@@ -57,6 +60,7 @@ export class AudioStreamer {
   async stop(): Promise<void> {
     if (!this.open) return;
     this.open = false;
+    this.onState?.(false);
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = undefined;
     this.buffer = [];

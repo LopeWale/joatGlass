@@ -137,6 +137,11 @@ class Device:
     battery: int | None = None
     wearing: bool | None = None
     charging: bool | None = None
+    mic: bool | None = None
+    """The plugin's ACTUAL mic state. The status pill used to latch
+    'streaming' at hello and never verify — a mic that failed to start was
+    indistinguishable from a working one (observed live: a whole session
+    with zero audio while the dashboard said streaming)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +403,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 battery=payload.get("battery"),
                 wearing=payload.get("wearing"),
                 charging=payload.get("charging"),
+                mic=payload.get("mic"),
             )
         case "confirm":
             return Confirm(

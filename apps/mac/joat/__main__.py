@@ -202,7 +202,7 @@ async def main() -> None:
         if hello.user_name and not named["done"] and replier is not None:
             grounding.add(static_fact(f"The wearer's name is {hello.user_name}"))
             named["done"] = True
-        status.set(glasses="connected", device=f"{hello.model} / {hello.sn}", mic="streaming")
+        status.set(glasses="connected", device=f"{hello.model} / {hello.sn}")
         asyncio.get_running_loop().create_task(orchestrator.on_connect())
 
     transport.on_hello(greet)
@@ -218,10 +218,28 @@ async def main() -> None:
         if device.battery is not None:
             charge = "+" if device.charging else ""
             who += f" · {device.battery}%{charge}"
-        status.set(device=who)
+        fields: dict[str, str] = {"device": who}
+        if device.mic is not None:
+            # TRUTH from the plugin, not the hello-latched guess.
+            fields["mic"] = "streaming" if device.mic else "off"
+        status.set(**fields)
 
     transport.on_disconnect(farewell)
     transport.on_device(on_device)
+
+    async def repaint_home() -> None:
+        """Restore the content regions after a menu rebuild blanked them.
+
+        Closing the on-glasses menu rebuilds the page, which CLEARS every
+        region — and a silent Mac then means a blank screen the wearer read
+        as a dead assistant (observed: the only way out was killing the
+        phone app)."""
+        last_reply = status.get("last_reply")
+        if last_reply:
+            await hud.show(last_reply)
+        last_heard = status.get("last_transcript")
+        if last_heard:
+            await hud.context(f"you  {last_heard}")
 
     def on_input(event: InputEvent) -> None:
         # Glasses-OS contextual menu / long-press: "repeat last reply".
@@ -230,6 +248,8 @@ async def main() -> None:
             last = status.get("last_reply")
             asyncio.get_running_loop().create_task(
                 hud.show(last if last else "Nothing to repeat yet."))
+        if event.container_name == "menu" and event.selected_name == "closed":
+            asyncio.get_running_loop().create_task(repaint_home())
 
     transport.on_input(on_input)
 
