@@ -473,3 +473,75 @@ class TestRedactionRegistration:
             assert sum(isinstance(f, _RedactToken) for f in handler.filters) == 1
         finally:
             root.removeHandler(handler)
+
+
+class TestPairingRecovery:
+    """The absorbing states both audit passes confirmed, closed.
+
+    An unpaired Mac facing a token-PRESENTING peer is the recovery case
+    (lost ack, or pairing.json deleted on a working install). Offering a
+    fresh token there strands the wearer — the plugin correctly ignores
+    offers that do not match what it holds — so the Mac adopts instead.
+    """
+
+    async def test_unpaired_mac_adopts_a_presented_token(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        async with websockets.connect(f"{url}/?token=HELD-BY-PHONE") as ws:
+            await ws.send(json.dumps(
+                {"kind": "hello", "sn": "S", "model": "g2", "launchSource": "x"}))
+            await _wait_for(lambda: store.token is not None)
+        assert store.token == "HELD-BY-PHONE"
+        # Window closed: a bare LAN peer is refused again.
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            await websockets.connect(url)
+        assert exc.value.response.status_code == 401
+
+    async def test_adopted_peer_gets_no_offer(self, paired_transport) -> None:
+        t, url, store = paired_transport
+        async with websockets.connect(f"{url}/?token=HELD-BY-PHONE") as ws:
+            await _wait_for(lambda: store.token is not None)
+            await ws.send(json.dumps({"kind": "policy", "resume": "auto"}))
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), 0.3)  # no pairing.set arrives
+
+    async def test_each_unpaired_connection_is_offered_a_fresh_token(
+        self, paired_transport
+    ) -> None:
+        """A prober that connects during the window must not learn the token
+        a later, real phone will ack."""
+        t, url, store = paired_transport
+        async with websockets.connect(url) as ws:
+            first = json.loads(await ws.recv())["token"]  # prober sees this
+        async with websockets.connect(url) as ws:
+            second = json.loads(await ws.recv())["token"]
+            assert second != first
+            # The prober's stale token cannot complete the pairing…
+            await ws.send(json.dumps({"kind": "pairing", "token": first}))
+            await asyncio.sleep(0.2)
+            assert store.token is None
+            # …the current offer can.
+            await ws.send(json.dumps({"kind": "pairing", "token": second}))
+            await _wait_for(lambda: store.token == second)
+
+    async def test_runbook_recovery_delete_file_then_reconnect(
+        self, unused_tcp_port, tmp_path
+    ) -> None:
+        """The exact operator procedure that used to convert a paired install
+        into a permanently open one (adversary-found trigger, pass 2)."""
+        path = tmp_path / "pairing.json"
+        store = PairingStore(path)
+        store.confirm("PHONE-TOKEN")
+        t = HubGatewayTransport(host=HOST, port=unused_tcp_port,
+                                pairing=store, trust_loopback=False)
+        await t.start()
+        try:
+            path.unlink()  # the runbook step, engine still running
+            async with websockets.connect(
+                f"ws://{HOST}:{unused_tcp_port}/?token=PHONE-TOKEN"
+            ) as ws:
+                await _wait_for(lambda: store.token == "PHONE-TOKEN")
+            # Paired again, no restart, no storage wipe; strangers refused.
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
+        finally:
+            await t.stop()

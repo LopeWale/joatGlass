@@ -282,6 +282,14 @@ class HubGatewayTransport(GlassesTransport):
         except (ValueError, IndexError, TypeError):
             return False
 
+    @staticmethod
+    def _presented_token(conn: ServerConnection) -> str:
+        """The ?token= this peer dialed with, or '' when it dialed bare."""
+        request = getattr(conn, "request", None)
+        if request is None:
+            return ""
+        return str(parse_qs(urlsplit(request.path).query).get("token", [""])[-1])
+
     def _authorize(self, conn: ServerConnection, request: Request) -> Response | None:
         """Reject unpaired remote clients before the handshake completes.
 
@@ -323,13 +331,30 @@ class HubGatewayTransport(GlassesTransport):
                 and self._pairing.token is None
                 and not self._peer_is_exempt(conn)
             ):
-                # This first remote peer IS the wearer's phone (it just
-                # scanned the QR). The token stays PROVISIONAL until the
-                # plugin acks storing it — see PairingAck.
-                if self._provisional is None:
+                presented = self._presented_token(conn)
+                if presented:
+                    # ADOPT the token the peer already holds. An unpaired Mac
+                    # facing a token-presenting peer is the RECOVERY case,
+                    # both flavours the audit confirmed as permanent
+                    # lockouts: the phone stored a token whose ack never
+                    # arrived, or the operator deleted pairing.json on a
+                    # working install. Offering a fresh token here strands
+                    # them — the plugin (correctly) ignores offers that do
+                    # not match what it holds. Adoption closes the window
+                    # immediately with the token the wearer's phone already
+                    # has. Trust model unchanged: first remote peer wins,
+                    # exactly as TOFU always worked.
+                    self._pairing.confirm(presented)
+                    self._provisional = None
+                    log.info("pairing: adopted token presented by %s — window closed",
+                             conn.remote_address)
+                else:
+                    # Fresh mint PER CONNECTION, never cached per process: a
+                    # prober that connects during the window must not learn
+                    # the token a later, real phone will ack (audit finding).
                     self._provisional = PairingStore.mint()
-                await conn.send(json.dumps(PairingSet(token=self._provisional).to_wire()))
-                log.info("pairing: token offered to %s", conn.remote_address)
+                    await conn.send(json.dumps(PairingSet(token=self._provisional).to_wire()))
+                    log.info("pairing: token offered to %s", conn.remote_address)
             async for raw in conn:
                 self._dispatch(raw)
         except websockets.ConnectionClosed:
