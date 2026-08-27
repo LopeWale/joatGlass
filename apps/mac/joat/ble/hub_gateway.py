@@ -77,6 +77,27 @@ class _RedactToken(logging.Filter):
         return True
 
 
+def _install_redaction() -> None:
+    """Attach _RedactToken where it actually RUNS: on handlers.
+
+    The first version did logging.getLogger("websockets").addFilter(...) —
+    and never redacted anything, because the token-bearing request line is
+    emitted by the CHILD logger "websockets.server", and Python propagates
+    records to ancestor HANDLERS, never through ancestor FILTERS. The filter
+    was tested in isolation (vacuous — audit finding, verified live) while
+    the registration was inert. Handler-level filters run for every record
+    the handler processes, whichever logger emitted it.
+    """
+    targets = list(logging.getLogger().handlers)
+    # Belt and braces: also the emitting loggers themselves, so a handler
+    # attached directly to them later is covered too.
+    for name in ("websockets.server", "websockets.client"):
+        targets.append(logging.getLogger(name))  # type: ignore[arg-type]
+    for target in targets:
+        if not any(isinstance(f, _RedactToken) for f in target.filters):
+            target.addFilter(_RedactToken())
+
+
 ImuCallback = Callable[[Imu], None]
 ConfirmCallback = Callable[[Confirm], None]
 HelloCallback = Callable[[Hello], None]
@@ -153,7 +174,7 @@ class HubGatewayTransport(GlassesTransport):
             assert last is not None
             raise last
         if self._pairing is not None:
-            logging.getLogger("websockets").addFilter(_RedactToken())
+            _install_redaction()
         log.info("hub gateway listening on ws://%s:%d", self._host, self._port)
 
     async def stop(self) -> None:

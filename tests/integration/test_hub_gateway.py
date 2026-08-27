@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 import websockets
@@ -409,3 +410,66 @@ class TestSendResilience:
         await _wait_for(lambda: t.connected)
         await ws.close()
         assert await t.request_confirm("a1", "ok?", timeout_s=0.2) is False
+
+
+class TestRedactionRegistration:
+    """The filter must be tested WHERE IT IS REGISTERED, not in isolation.
+
+    The first version attached _RedactToken to the parent logger
+    'websockets' while the request line is emitted by the child
+    'websockets.server' — and Python propagates records to ancestor
+    HANDLERS, never through ancestor FILTERS. The unit tests called
+    filter() directly, so they were green while the registration was inert
+    and the pairing token reached brain.log in cleartext (audit finding,
+    reproduced live). This test exercises the real hierarchy end to end.
+    """
+
+    async def test_child_logger_token_is_redacted_at_the_handler(
+        self, unused_tcp_port, tmp_path
+    ) -> None:
+        import io
+
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        old_level = root.level
+        root.setLevel(logging.DEBUG)
+        try:
+            t = HubGatewayTransport(
+                host=HOST, port=unused_tcp_port,
+                pairing=PairingStore(tmp_path / "pairing.json"),
+            )
+            await t.start()  # registration happens here
+            try:
+                # The exact emitter and shape websockets 17 uses for the
+                # request line — the path the token actually rides.
+                logging.getLogger("websockets.server").debug(
+                    "< %s %s %s", "GET", "/glasses?token=SEKRIT-VALUE", "HTTP/1.1")
+            finally:
+                await t.stop()
+            out = buf.getvalue()
+            assert "SEKRIT-VALUE" not in out, "token reached the handler in cleartext"
+            assert "token=<redacted>" in out
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(old_level)
+            for f in list(root.filters):
+                root.removeFilter(f)
+
+    async def test_registration_is_idempotent(self, unused_tcp_port, tmp_path) -> None:
+        handler = logging.StreamHandler()
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            for port_bump in (0, 1):
+                t = HubGatewayTransport(
+                    host=HOST, port=unused_tcp_port + port_bump,
+                    pairing=PairingStore(tmp_path / f"p{port_bump}.json"),
+                )
+                await t.start()
+                await t.stop()
+            from joat.ble.hub_gateway import _RedactToken
+            assert sum(isinstance(f, _RedactToken) for f in handler.filters) == 1
+        finally:
+            root.removeHandler(handler)
