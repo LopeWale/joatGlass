@@ -474,6 +474,72 @@ class TestRedactionRegistration:
         finally:
             root.removeHandler(handler)
 
+    async def test_real_pairing_handshake_never_emits_the_token(
+        self, unused_tcp_port, tmp_path
+    ) -> None:
+        import io
+
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        root = logging.getLogger()
+        server_log = logging.getLogger("websockets.server")
+        client_log = logging.getLogger("websockets.client")
+
+        old_root_level = root.level
+        old_server_level = server_log.level
+        old_client_level = client_log.level
+        old_server_propagate = server_log.propagate
+        old_client_propagate = client_log.propagate
+
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        server_log.setLevel(logging.DEBUG)
+        client_log.setLevel(logging.DEBUG)
+        server_log.propagate = True
+        client_log.propagate = True
+        try:
+            store = PairingStore(tmp_path / "pairing.json")
+            t = HubGatewayTransport(
+                host=HOST,
+                port=unused_tcp_port,
+                pairing=store,
+                trust_loopback=False,
+            )
+            await t.start()
+            try:
+                async with websockets.connect(
+                    f"ws://{HOST}:{unused_tcp_port}/glasses"
+                ) as ws:
+                    offer = json.loads(await ws.recv())
+                    assert offer["kind"] == "pairing.set"
+                    token = str(offer["token"])
+                    await ws.send(json.dumps({"kind": "pairing", "token": token}))
+                    await _wait_for(lambda: store.token == token)
+
+                async with websockets.connect(
+                    f"ws://{HOST}:{unused_tcp_port}/glasses?token={token}"
+                ):
+                    pass
+
+                with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+                    await websockets.connect(f"ws://{HOST}:{unused_tcp_port}/glasses")
+            finally:
+                await t.stop()
+
+            assert exc.value.response.status_code == 401
+            out = buf.getvalue()
+            assert token not in out, "pairing token reached the emitted logs"
+            assert token[:12] not in out, "pairing token prefix reached the emitted logs"
+            assert "token=<redacted>" in out
+            assert '"token": "<redacted>"' in out
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(old_root_level)
+            server_log.setLevel(old_server_level)
+            client_log.setLevel(old_client_level)
+            server_log.propagate = old_server_propagate
+            client_log.propagate = old_client_propagate
+
 
 class TestPairingRecovery:
     """The absorbing states both audit passes confirmed, closed.

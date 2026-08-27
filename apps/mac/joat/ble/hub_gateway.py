@@ -55,25 +55,42 @@ log = logging.getLogger(__name__)
 
 
 class _RedactToken(logging.Filter):
-    """Strip ?token=... from websockets' request-line logging.
+    """Strip pairing tokens from websockets' request and frame logging.
 
-    The library logs the full request target at DEBUG, and our auth rides
-    the query string — so `--verbose` (exactly what an operator enables to
-    debug a pairing failure) would write the long-lived token into
-    ~/Library/Logs/joat/brain.log, which the app surfaces in its UI and
-    which outlives the on-wire exposure.
+    The library logs both the full request target and text-frame payloads at
+    DEBUG. Our auth rides the query string and the TOFU offer/ack rides JSON,
+    so `--verbose` (exactly what an operator enables to debug a pairing
+    failure) would otherwise write the long-lived token into brain.log.
     """
 
-    _PATTERN = re.compile(r"(token=)[^&\s]+")
+    _QUERY_PATTERN = re.compile(r"(token=)[^&\s]+")
+    _JSON_PATTERN = re.compile(r'("token"\s*:\s*")[^"]*')
+
+    @classmethod
+    def _redact(cls, value: str) -> str:
+        value = cls._QUERY_PATTERN.sub(r"\1<redacted>", value)
+        return cls._JSON_PATTERN.sub(r"\1<redacted>", value)
+
+    @classmethod
+    def _redact_arg(cls, value: object, *, render_objects: bool) -> object:
+        if isinstance(value, str):
+            return cls._redact(value)
+        if render_objects:
+            rendered = str(value)
+            redacted = cls._redact(rendered)
+            if redacted != rendered:
+                return redacted
+        return value
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.args:
+            render_objects = record.name in ("websockets.server", "websockets.client")
             record.args = tuple(
-                self._PATTERN.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+                self._redact_arg(a, render_objects=render_objects)
                 for a in (record.args if isinstance(record.args, tuple) else (record.args,))
             )
         if isinstance(record.msg, str):
-            record.msg = self._PATTERN.sub(r"\1<redacted>", record.msg)
+            record.msg = self._redact(record.msg)
         return True
 
 

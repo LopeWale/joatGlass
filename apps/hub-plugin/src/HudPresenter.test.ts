@@ -14,14 +14,22 @@ import { ContainerId } from './types';
 
 const paints: TextContainerUpgrade[] = [];
 
+let paintOk = true;
+let rebuildOk = true;
+let rebuilds = 0;
+
 function fakeClient(): BridgeClient {
   return {
     require: () => ({
       textContainerUpgrade: async (u: TextContainerUpgrade) => {
         paints.push(u);
-        return true;
+        return paintOk;
       },
-      rebuildPageContainer: async () => true,
+      rebuildPageContainer: async () => {
+        rebuilds += 1;
+        paintOk = rebuildOk; // a successful rebuild restores the containers
+        return rebuildOk;
+      },
     }),
   } as unknown as BridgeClient;
 }
@@ -40,6 +48,9 @@ beforeEach(() => {
 
 afterEach(() => {
   paints.length = 0;
+  paintOk = true;
+  rebuildOk = true;
+  rebuilds = 0;
   vi.useRealTimers();
 });
 
@@ -153,5 +164,39 @@ describe('status-bar single ownership', () => {
     await hud.setStatus('JOAT · connecting');
     const bar = paints.filter((p) => p.containerID === ContainerId.StatusBar);
     expect(bar.length).toBe(1);
+  });
+});
+
+
+describe('HudPresenter self-heals a missing page', () => {
+  /**
+   * createStartUpPageContainer is one-shot PER HOST SESSION, so after a
+   * WebView reload it returns `invalid`, BridgeClient's rebuild fallback
+   * reports success without materialising containers, and every paint then
+   * failed silently — 382 consecutive "container not found" warnings behind
+   * a blank display in the simulator, with no recovery for the session.
+   */
+  it('rebuilds and repaints when a paint reports the container is gone', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    paintOk = false;
+    const ok = await hud.showText('hello', ContainerId.Main);
+    expect(rebuilds).toBe(1);
+    expect(ok).toBe(true);
+    expect(lastOf(mainPaints()).content).toBe('hello'); // the text landed
+  });
+
+  it('gives up after ONE rebuild — never recurses', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    paintOk = false;
+    rebuildOk = false; // rebuild does not fix it
+    const ok = await hud.showText('hello', ContainerId.Main);
+    expect(ok).toBe(false);
+    expect(rebuilds).toBe(1);
+  });
+
+  it('a healthy paint never rebuilds', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('fine', ContainerId.Main);
+    expect(rebuilds).toBe(0);
   });
 });
