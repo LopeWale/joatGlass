@@ -39,7 +39,7 @@ function setPanel(id: string, text: string): void {
 async function boot(): Promise<void> {
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
-  // Bridge FIRST: the pairing token prefers HOST storage (finding 20 — the
+  // Bridge FIRST: the pairing token prefers HOST storage (the
   // WebView's localStorage is origin-scoped, so dev-server and packed
   // builds held separate tokens and every switch forced a manual re-pair;
   // host storage is one bucket for both).
@@ -148,7 +148,7 @@ async function boot(): Promise<void> {
         // append streams (debate turns, token-by-token replies) without a
         // full repaint; plain hud.text replaces the container.
         if (msg.append) await hud.appendText(msg.text, msg.containerId);
-        else await hud.showText(msg.text, msg.containerId);
+        else await hud.showText(msg.text, msg.containerId, msg.textColor);
         break;
       case 'hud.list':
         await hud.showList(msg.items);
@@ -208,7 +208,7 @@ async function boot(): Promise<void> {
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
   ]).catch(() => null);
   // Host account name grounds "the wearer's name" with zero configuration
-  // (finding 21). Best-effort: older hosts reject the call.
+  //. Best-effort: older hosts reject the call.
   const user = await client.require().getUserInfo().catch(() => null);
   announce = () => {
     link.send({
@@ -225,7 +225,7 @@ async function boot(): Promise<void> {
 
   // Both starts degrade to false on hosts missing the capability (the desktop
   // simulator has no IMU at all) — boot must survive either being absent.
-  // The boot-time device status was fetched and thrown away (finding 18):
+  // The boot-time device status was fetched and thrown away:
   // glasses sitting in the case had their mic opened anyway. Only an
   // EXPLICIT not-worn skips — unknown must not silence a working mic.
   const worn = device?.status?.isWearing;
@@ -237,7 +237,7 @@ async function boot(): Promise<void> {
     let micOk = await audio.start(AudioInputSource.Glasses);
     let label = 'JOAT · listening';
     if (!micOk) {
-      // The fallback ear (finding 13): the phone mic, NAMED on the status
+      // The fallback ear: the phone mic, NAMED on the status
       // line — a silent source switch on a privacy surface is worse than
       // no fallback.
       micOk = await audio.start(AudioInputSource.Phone);
@@ -261,7 +261,7 @@ async function boot(): Promise<void> {
     await hud.showText('Put the glasses on to start listening.', ContainerId.Main);
   }
 
-  // Wearer position -> Mac (finding 12): weather-without-asking, and the
+  // Wearer position -> Mac: weather-without-asking, and the
   // brain stops answering timezone questions from the Mac's point of view.
   const location = new LocationMonitor(client, link);
   void location.start();

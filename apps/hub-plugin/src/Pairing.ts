@@ -13,7 +13,7 @@ export function loadToken(): string | null {
 /**
  * Handle a pairing.set offer from the Mac.
  *
- * The distinctions here were audit-confirmed by two independent passes:
+ * The distinctions here were each observed live:
  *
  * - Offer of the SAME token we hold → RE-ACK. The Mac's store is empty (a
  *   lost ack, or an operator recovery) and its window is OPEN to the whole

@@ -110,7 +110,7 @@ async def main() -> None:
     status.set(stt="ready" if stt_available else "missing")
 
     # Cards shown on the HUD are remembered here so "what did I miss?" has a
-    # real source instead of a model with no record (audit finding 6).
+    # real source instead of a model with no record.
     card_log = CardLog()
 
     replier: ReplyEngine | None = None
@@ -208,11 +208,11 @@ async def main() -> None:
     transport.on_hello(greet)
 
     def farewell() -> None:
-        # The pills must not lie about a link that is gone (finding 25).
+        # The pills must not lie about a link that is gone.
         status.set(glasses="disconnected", mic="off")
 
     def on_device(device: Device) -> None:
-        # Battery reaches the dashboard, not just the model (finding 2).
+        # Battery reaches the dashboard, not just the model.
         hello = transport.hello
         who = f"{hello.model} / {hello.sn}" if hello else "glasses"
         if device.battery is not None:

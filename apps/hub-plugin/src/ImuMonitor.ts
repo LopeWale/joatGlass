@@ -105,7 +105,18 @@ export class ImuMonitor {
    * is the only confirm surface we actually trust.
    */
   confirmByTap(): void {
-    if (this.pending) this.resolve(true);
+    if (!this.pending) return;
+    // Expiry must hold HERE, not only in ingest(): ingest is driven by IMU
+    // samples, and on a host where imuControl fails (the simulator rejects
+    // it outright) no sample ever arrives — so an armed window lived
+    // forever and a much-later unrelated tap approved an action the Mac
+    // had long since treated as declined (observed live). An
+    // expired window resolves REFUSED, clearing the pending state.
+    if (Date.now() > this.pending.expiresAt) {
+      this.resolve(false);
+      return;
+    }
+    this.resolve(true);
   }
 
   private resolve(accepted: boolean): void {

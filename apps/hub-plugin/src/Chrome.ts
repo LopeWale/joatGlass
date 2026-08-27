@@ -30,6 +30,9 @@ export class Chrome {
 
   /** Paint now, then keep the clock honest. */
   start(): void {
+    // Claim the status bar: every setStatus() anywhere becomes this
+    // Chrome's state word, so container 1 has exactly one writer.
+    this.hud.onStatus = (text) => this.setMacState(text);
     void this.paint();
     // 30s: the clock shows minutes, so this is never more than a minute
     // stale, and it is far below any sane BLE budget.
