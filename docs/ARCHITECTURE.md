@@ -15,7 +15,7 @@
 | Audio pipeline | `joat/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
 | HUD renderer | `joat/display` | 576×288 canvas, text containers, cards, differential page updates |
 | Reasoning | `joat/services` | Orchestrator: route utterances to MLX (fast path) or the debate loop (planning path) |
-| Debate agents | `joat/agents` | `ProposerAgent` (Codex CLI), `CriticAgent` (Claude CLI), `JudgeAgent` (local MLX), `DebateLoop` state machine |
+| Debate agents | `joat/agents` | `SubprocessAgent` (Codex + Claude CLIs), `OpenClawAgent` (local gateway, optional third seat), local MLX judge; `RoundTable` seats them |
 | Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
 | Channels | `joat/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |
 | Computer use | `joat/computeruse` | cua driver in Lume sandbox (Mac), iPhone Mirroring + OCR + Karabiner (iOS) |
@@ -58,15 +58,40 @@ Domain models (dataclasses): `HudPage`, `Transcript`, `DebateTask`, `Plan`, `Cla
 
 ## 5. Debate loop with Verifier Gate
 
-State machine (`DebateLoop`):
+A **round table** of N collaborators, not a fixed proposer/critic pair
+(`services/roundtable.py`, driven by `DebateSession`). One round = every
+seat speaks once, in an order the wearer can redirect by voice; then the
+local judge scores how far apart the room still is.
 
 ```
-Proposer (codex exec --json --output-schema)   ──▶ Verifier Gate ──▶ deny? → repair request → Proposer (retry, capped)
-                                                        │ pass
-Critic (claude -p --output-format json)        ──▶ Verifier Gate ──▶ deny? → repair request → Critic
+seat 1  codex     (proposer)      ──▶ Verifier Gate ──▶ deny? → repair request → same seat (capped)
+seat 2  claude    (critic)        ──▶ Verifier Gate ──▶ deny? → repair request → same seat
+seat 3  openclaw  (third opinion) ──▶ Verifier Gate ──▶ …          [seated only if its gateway answers]
                                                         │ pass
 Judge (local MLX) ── agreement ≥ 0.85 & no blocking issues? ──▶ CONVERGE, else next round (max rounds capped)
 ```
+
+Three properties are structural rather than policy, so a refactor cannot
+quietly drop them:
+
+- **One at a time.** Each speaker's prompt CONTAINS the transcript so far, so
+  turn N+1 has no input until turn N exists. Nothing enforces sequencing —
+  it is the only thing the data allows.
+- **A seat costs a file, not a redesign.** A participant is anything with
+  `stream(prompt) -> AsyncIterator[str]`, which the codex CLI, the claude
+  CLI, and the OpenClaw gateway all already satisfy. Who is actually seated
+  is a runtime fact: absent binaries and unreachable daemons are simply not
+  at the table, and a debate needs two.
+- **A failure is visible but never quotable.** A failing CLI prints its
+  complaint on *stdout* (`claude -p` exits 1 and says "You're out of usage
+  credits"), so only the exit code separates an answer from an error. A
+  turn carrying a `[!]` failure notice streams to the wearer and is then
+  excluded from the transcript — otherwise the next speaker rebuts a
+  billing notice and the judge scores it.
+
+The debate streams to every `TranscriptSink` at once (`services/sinks.py`):
+the glasses, the terminal, and a `DebateStateSink` snapshot that the HUD's
+Debate panel can re-open after the fact.
 
 Plan/critique JSON schema: `{ plan_id, round, role, goal, steps[{id, text, claims[{claim_id, text, citation_ids[]}]}], citations[{id, url, title, quote, accessed_at, type}], open_questions[], verdict }`. Every non-trivial claim needs ≥1 citation; every citation carries a verbatim quote.
 

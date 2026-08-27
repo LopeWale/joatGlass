@@ -1,0 +1,143 @@
+"""Where a debate is watched.
+
+"I wanna see as they're debating ... because then I cannot prove that that
+was debated." Two surfaces with opposite constraints, and neither may be
+able to silence the other.
+"""
+
+from __future__ import annotations
+
+import io
+
+from joat.services.sinks import Broadcast, TerminalSink
+
+
+class Recorder:
+    def __init__(self, fail: bool = False) -> None:
+        self.events: list[tuple[str, object]] = []
+        self._fail = fail
+
+    async def open(self, topic: str, speakers: list[str]) -> None:
+        self._record("open", topic)
+
+    async def turn(self, label: str) -> None:
+        self._record("turn", label)
+
+    async def chunk(self, text: str) -> None:
+        self._record("chunk", text)
+
+    async def close(self, verdict: str) -> None:
+        self._record("close", verdict)
+
+    def _record(self, kind: str, value: object) -> None:
+        if self._fail:
+            raise RuntimeError("sink is down")
+        self.events.append((kind, value))
+
+
+class TestTerminalSink:
+    async def test_streams_turns_and_chunks_as_they_arrive(self) -> None:
+        buf = io.StringIO()
+        sink = TerminalSink(out=buf, use_color=False)
+        await sink.open("tabs or spaces", ["codex", "claude", "openclaw"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("Tabs ")
+        await sink.chunk("indent faster.")
+        await sink.close("converged 0.91")
+        out = buf.getvalue()
+        assert "tabs or spaces" in out
+        assert "codex → claude → openclaw" in out  # the room is named up front
+        assert "» CODEX (proposer)" in out
+        assert "Tabs indent faster." in out
+        assert "converged 0.91" in out
+
+    async def test_writes_without_ansi_when_not_a_tty(self) -> None:
+        buf = io.StringIO()
+        await TerminalSink(out=buf, use_color=False).turn("CODEX (proposer)")
+        assert "\033[" not in buf.getvalue()
+
+
+class TestBroadcast:
+    async def test_every_sink_sees_every_event(self) -> None:
+        a, b = Recorder(), Recorder()
+        cast = Broadcast([a, b])
+        await cast.open("t", ["codex"])
+        await cast.turn("CODEX")
+        await cast.chunk("hi")
+        await cast.close("done")
+        assert [k for k, _ in a.events] == ["open", "turn", "chunk", "close"]
+        assert a.events == b.events
+
+    async def test_a_dead_sink_never_silences_the_others(self) -> None:
+        # A HUD that has gone away must not stop the terminal transcript —
+        # the debate is the product, a surface is not.
+        dead, alive = Recorder(fail=True), Recorder()
+        cast = Broadcast([dead, alive])
+        await cast.open("t", ["codex"])
+        await cast.chunk("still streaming")
+        assert ("chunk", "still streaming") in alive.events
+
+
+class TestDebateStateSink:
+    """The dashboard makes Debate a menu panel the wearer opens later, so
+    someone must hold the debate as STATE — a token stream that has already
+    painted cannot answer "what did they decide?" ten minutes on."""
+
+    async def test_keeps_finished_turns_as_rows(self) -> None:
+        from joat.services.sinks import DebateStateSink
+
+        sink = DebateStateSink()
+        await sink.open("tabs or spaces", ["codex", "claude", "openclaw"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("Tabs ")
+        await sink.chunk("indent faster.")
+        await sink.turn("CLAUDE (critic)")
+        await sink.chunk("Only with consistent width.")
+        await sink.close("converged 0.91")
+
+        snap = sink.snapshot
+        assert snap.topic == "tabs or spaces"
+        assert snap.speakers == ("codex", "claude", "openclaw")
+        assert snap.turns == (
+            ("CODEX (proposer)", "Tabs indent faster."),
+            ("CLAUDE (critic)", "Only with consistent width."),
+        )
+        assert snap.running is False and snap.verdict == "converged 0.91"
+        rows = snap.rows()
+        assert rows[0].startswith("CODEX: Tabs indent faster.")
+        assert rows[-1] == "— converged 0.91"
+
+    async def test_a_live_debate_shows_who_is_speaking_now(self) -> None:
+        from joat.services.sinks import DebateStateSink
+
+        sink = DebateStateSink()
+        await sink.open("t", ["codex", "claude"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("thinking out loud")
+        await sink.turn("CLAUDE (critic)")
+        rows = sink.snapshot.rows()
+        assert rows == ["CODEX: thinking out loud", "CLAUDE: …"]
+
+    async def test_rows_fit_the_list_row_budget(self) -> None:
+        # RULES: list rows are a fixed 40px and the font is not monospaced,
+        # so a row that overflows is a row that silently truncates on glass.
+        from joat.services.sinks import DebateStateSink
+
+        sink = DebateStateSink()
+        await sink.open("t", ["codex"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("word " * 200)
+        await sink.close("done")
+        assert all(len(r) <= 60 for r in sink.snapshot.rows())
+
+
+    async def test_a_failed_seat_reads_as_failed_not_as_an_argument(self) -> None:
+        from joat.services.sinks import DebateStateSink
+
+        sink = DebateStateSink()
+        await sink.open("t", ["codex", "claude"])
+        await sink.turn("CLAUDE (critic)")
+        await sink.chunk("You're out of usage credits. Switch to another model")
+        await sink.chunk("\n[!] claude could not answer: exited 1 — see the log")
+        await sink.close("no debate — 1 of 2 spoke")
+        assert sink.snapshot.rows()[0] == "CLAUDE: could not answer"

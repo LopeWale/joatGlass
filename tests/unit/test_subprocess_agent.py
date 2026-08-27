@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sys
 
+from joat.services.roundtable import is_failure
 from joat.agents.subprocess_agent import _CODEX_NOISE, SubprocessAgent, find_claude_binary
 
 
@@ -62,3 +63,43 @@ class TestDiscovery:
     def test_find_claude_binary_returns_path_or_none(self) -> None:
         found = find_claude_binary()
         assert found is None or found.endswith("claude")
+
+
+class TestFailureIsVisibleButNotQuotable:
+    """A collaborator's failure prints on STDOUT, not stderr.
+
+    Observed live: `claude -p` exits 1 and prints "You're out of usage
+    credits" to stdout. Read as an answer it becomes a position the next
+    speaker argues with and the judge scores — a debate about a billing
+    notice. Only the exit code can tell the two apart.
+    """
+
+    async def test_a_clean_exit_adds_nothing(self) -> None:
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(["/bin/echo"], name="echo")
+        out = "".join([c async for c in agent.stream("a real answer")])
+        assert "a real answer" in out
+        assert not is_failure(out.strip().splitlines()[-1])  # no false alarm
+
+    async def test_a_nonzero_exit_is_marked_even_when_stdout_looks_like_prose(
+        self,
+    ) -> None:
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(
+            ["/bin/sh", "-c", "echo \"You're out of usage credits.\"; exit 1; :"],
+            name="claude",
+        )
+        out = "".join([c async for c in agent.stream("critique this")])
+        assert "out of usage credits" in out          # the wearer still sees it
+        assert is_failure(out.strip().splitlines()[-1])  # but it is not a position
+
+    async def test_a_hung_agent_costs_one_seat_not_the_round(self) -> None:
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(["/bin/sh", "-c", "sleep 30; :"],
+                                timeout_s=0.3, name="codex")
+        out = "".join([c async for c in agent.stream("q")])
+        assert is_failure(out.strip())
+        assert "no answer within" in out
