@@ -28,16 +28,31 @@ export class HudPresenter {
   private streams = new Map<number, string>();
   private lastPaint = new Map<number, number>();
   private pendingPaint = new Map<number, ReturnType<typeof setTimeout>>();
+  private brightness = new Map<number, number>();
 
   constructor(
     private readonly client: BridgeClient,
     private readonly layouts: HudPageBuilder,
   ) {}
 
-  /** Replace a container's full text. Also resets any stream in progress. */
-  async showText(text: string, containerId: ContainerId = ContainerId.Main): Promise<boolean> {
+  /** Replace a container's full text. Also resets any stream in progress.
+   *
+   * `textColor` (firmware brightness 0-4) sticks to the container until the
+   * next showText sets or clears it — the Mac computes it per card (urgent
+   * bright, routine dim) and the old handler silently dropped the field, so
+   * the feature had never worked on glass (observed live). */
+  async showText(
+    text: string,
+    containerId: ContainerId = ContainerId.Main,
+    textColor?: number,
+  ): Promise<boolean> {
     this.cancelPending(containerId);
     this.streams.set(containerId, text);
+    if (textColor !== undefined) {
+      this.brightness.set(containerId, textColor);
+    } else {
+      this.brightness.delete(containerId);
+    }
     return this.paint(containerId);
   }
 
@@ -60,7 +75,22 @@ export class HudPresenter {
     return true;
   }
 
+  /**
+   * Announce a transient state ("listening", "settings"). This does NOT
+   * write container 1 directly any more: the status bar has ONE owner
+   * (Chrome), which composes clock + state + battery. Direct writes from
+   * four call sites were clobbering each other — observed live
+   * and the collision the dashboard design existed to prevent. Until
+   * Chrome registers, announcements fall back to a direct paint so early
+   * boot is never mute.
+   */
+  onStatus?: (text: string) => void;
+
   setStatus(text: string): Promise<boolean> {
+    if (this.onStatus) {
+      this.onStatus(text);
+      return Promise.resolve(true);
+    }
     return this.showText(text, ContainerId.StatusBar);
   }
 
@@ -83,6 +113,7 @@ export class HudPresenter {
     const content = full.length > MAX_UPGRADE_CHARS ? full.slice(-MAX_UPGRADE_CHARS) : full;
     const previous = this.lastLength.get(containerId) ?? 0;
     this.lastPaint.set(containerId, Date.now());
+    const level = this.brightness.get(containerId);
     const ok = await this.client.require().textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: containerId,
@@ -90,6 +121,8 @@ export class HudPresenter {
         // Overwrite whatever was there before, otherwise stale tail text survives.
         contentLength: Math.max(previous, content.length),
         content,
+        // Omitted = keep the container's current brightness (SDK contract).
+        ...(level !== undefined ? { textColor: level } : {}),
       }),
     );
     this.lastLength.set(containerId, content.length);
@@ -109,5 +142,6 @@ export class HudPresenter {
     this.lastLength.clear();
     this.streams.clear();
     this.lastPaint.clear();
+    this.brightness.clear();
   }
 }

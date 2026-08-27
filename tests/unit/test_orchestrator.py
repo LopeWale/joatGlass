@@ -334,8 +334,8 @@ class TestWakeWordGate:
         texts = await self._run("any old speech", wake=None)
         assert texts == ["any old speech", "answer"]
 
-    async def test_debate_trigger_still_works_bare(self) -> None:
-        transport, engine = FakeTransport(), FakeEngine("debate tabs or spaces")
+    def _session_orch(self, heard: str):  # type: ignore[no-untyped-def]
+        transport, engine = FakeTransport(), FakeEngine(heard)
         started: list[str] = []
 
         class S(Session):
@@ -354,5 +354,19 @@ class TestWakeWordGate:
         assert transport.audio_cb is not None
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
+        return started
+
+    async def test_bare_debate_in_room_speech_does_NOT_start_a_session(self) -> None:
+        """The audit's two passes both confirmed this bypass: session routing
+        ran before the wake gate, so overheard speech beginning with
+        'debate ' shipped the rest of the utterance to the cloud CLIs
+        without the wearer ever addressing JOAT. Explicit invocation means
+        triggers see only ADDRESSED text."""
+        started = self._session_orch("debate tabs or spaces")
+        await drain()
+        assert started == []
+
+    async def test_addressed_debate_still_starts_a_session(self) -> None:
+        started = self._session_orch("JOAT, debate tabs or spaces")
         await drain()
         assert started == ["ran"]

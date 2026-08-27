@@ -92,7 +92,7 @@ def weather_tool(coords: CoordsProvider | None = None) -> Tool:
         location = str(args.get("location", "")).strip()
         if location:
             return await asyncio.to_thread(_weather_sync, location)
-        # No city named: use the wearer's reported position (finding 12) —
+        # No city named: use the wearer's reported position —
         # the forecast API takes lat/lon directly, no geocoding hop.
         here = coords() if coords is not None else None
         if here is None:

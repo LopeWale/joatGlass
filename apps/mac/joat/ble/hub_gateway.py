@@ -218,7 +218,7 @@ class HubGatewayTransport(GlassesTransport):
 
         Without this the status pills latched whatever the hello set —
         'connected / streaming' forever, however long the glasses had
-        actually been gone (audit finding 25).
+        actually been gone.
         """
         self._disconnect_cbs.append(callback)
 
@@ -351,7 +351,7 @@ class HubGatewayTransport(GlassesTransport):
                 else:
                     # Fresh mint PER CONNECTION, never cached per process: a
                     # prober that connects during the window must not learn
-                    # the token a later, real phone will ack (audit finding).
+                    # the token a later, real phone will ack.
                     self._provisional = PairingStore.mint()
                     await conn.send(json.dumps(PairingSet(token=self._provisional).to_wire()))
                     log.info("pairing: token offered to %s", conn.remote_address)

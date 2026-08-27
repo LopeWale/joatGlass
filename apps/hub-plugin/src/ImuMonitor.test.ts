@@ -124,3 +124,35 @@ describe('ImuMonitor host degradation', () => {
     await expect(imu.stop()).resolves.toBeUndefined();
   });
 });
+
+describe('confirm window expiry at the tap path', () => {
+  /**
+   * Expiry only lived in ingest(), which is IMU-sample-driven — on a host
+   * where imuControl fails, no sample ever arrives, the window never
+   * expired, and a much-later unrelated tap APPROVED an action the Mac had
+   * long treated as declined (audit finding, verified in code).
+   */
+  it('a tap after the window expires resolves REFUSED, not accepted', () => {
+    vi.useFakeTimers();
+    const sent: Array<{ kind: string; accepted?: boolean }> = [];
+    const link = { send: (m: { kind: string }) => sent.push(m) } as never;
+    const imu = new ImuMonitor({} as never, link);
+    imu.await('a1', 1000);
+    vi.advanceTimersByTime(5000); // window long dead, no IMU samples flowed
+    imu.confirmByTap();
+    expect(sent).toEqual([{ kind: 'confirm', actionId: 'a1', accepted: false }]);
+    vi.useRealTimers();
+  });
+
+  it('a tap inside the window still accepts', () => {
+    vi.useFakeTimers();
+    const sent: Array<{ kind: string; accepted?: boolean }> = [];
+    const link = { send: (m: { kind: string }) => sent.push(m) } as never;
+    const imu = new ImuMonitor({} as never, link);
+    imu.await('a2', 8000);
+    vi.advanceTimersByTime(2000);
+    imu.confirmByTap();
+    expect(sent).toEqual([{ kind: 'confirm', actionId: 'a2', accepted: true }]);
+    vi.useRealTimers();
+  });
+});

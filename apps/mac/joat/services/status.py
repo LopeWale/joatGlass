@@ -44,7 +44,7 @@ class StatusPublisher:
             "last_card": "",
             # "session" and counts.debates were dead schema — written into
             # every snapshot, decoded by the shell, displayed by nothing,
-            # and updated by nothing (audit finding 26).
+            # and updated by nothing.
             "counts": {"utterances": 0, "cards": 0},
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)

@@ -108,3 +108,50 @@ describe('HudPresenter streaming', () => {
     expect(lastOf(status).content).toBe('JOAT · listening');
   });
 });
+
+describe('HudPresenter brightness (textColor)', () => {
+  /**
+   * The Mac computes brightness per card (urgent bright, routine dim) and
+   * the old handler silently dropped the field — the feature had never
+   * worked on glass (confirmed by both audit passes).
+   */
+  it('showText with a level carries textColor on the upgrade', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('!! urgent card', ContainerId.Main, 4);
+    expect(lastOf(mainPaints()).textColor).toBe(4);
+  });
+
+  it('showText without a level omits the field — SDK keeps current brightness', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('plain', ContainerId.Main);
+    expect(lastOf(mainPaints()).textColor).toBeUndefined();
+  });
+
+  it('appends inherit the container brightness set by the last show', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('start ', ContainerId.Main, 3);
+    vi.advanceTimersByTime(400);
+    await hud.appendText('more');
+    vi.advanceTimersByTime(400);
+    expect(lastOf(mainPaints()).textColor).toBe(3);
+    expect(lastOf(mainPaints()).content).toBe('start more');
+  });
+});
+
+describe('status-bar single ownership', () => {
+  it('setStatus routes to the registered owner instead of painting container 1', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    const announced: string[] = [];
+    hud.onStatus = (t) => announced.push(t);
+    await hud.setStatus('JOAT · settings');
+    expect(announced).toEqual(['JOAT · settings']);
+    expect(paints.filter((p) => p.containerID === ContainerId.StatusBar)).toEqual([]);
+  });
+
+  it('falls back to a direct paint before an owner registers (early boot is never mute)', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.setStatus('JOAT · connecting');
+    const bar = paints.filter((p) => p.containerID === ContainerId.StatusBar);
+    expect(bar.length).toBe(1);
+  });
+});

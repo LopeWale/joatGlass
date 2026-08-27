@@ -129,14 +129,19 @@ class VoiceOrchestrator:
             if self._status is not None:
                 self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
                 self._status.bump("utterances")  # type: ignore[attr-defined]
-            # Sessions get first claim: an active session owns the HUD, and a
-            # trigger phrase ("debate ...") starts one that takes over.
-            if self._sessions is not None and self._sessions.handle_transcript(transcript.text):
+            # An ACTIVE session owns the HUD and consumes transcripts
+            # ("stop", turn directions) without needing the wake word — the
+            # wearer already invoked it.
+            if (self._sessions is not None and self._sessions.active
+                    and self._sessions.handle_transcript(transcript.text)):
                 return
-            # Address gate: speech not aimed at the assistant is IGNORED —
-            # no HUD write, no LLM call. The wearer's model, in their words:
-            # "I can let the system know when I need it." Room conversation
-            # is not a prompt.
+            # Address gate BEFORE any trigger phrase: session routing used to
+            # run first, so room speech merely beginning with "debate " (or a
+            # notification read aloud) started a cloud debate and shipped the
+            # rest of the utterance to the codex/claude subprocesses without
+            # the wearer ever addressing JOAT — observed live, and
+            # a direct violation of explicit invocation. Room conversation is
+            # not a prompt.
             addressed = self._strip_wake_word(transcript.text)
             if addressed is None:
                 # Include the text: a wake word misheard by STT is
@@ -147,6 +152,9 @@ class VoiceOrchestrator:
                 await self._hud.show("Yes?")
                 return
             query = addressed
+            # Trigger phrases ("debate <topic>") now see only ADDRESSED text.
+            if self._sessions is not None and self._sessions.handle_transcript(query):
+                return
             # The wearer's words go to their OWN region, so the reply no
             # longer erases the proof they were heard (HUD_DASHBOARD.md).
             await self._hud.context(f"you  {query}")
