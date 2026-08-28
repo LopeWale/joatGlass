@@ -35,6 +35,7 @@ from .core.pairing import PairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.cards import CardLog
 from .channels.imessage import IMessageStore
+from .channels.message_sender import MessagesAppSender
 from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
@@ -43,11 +44,13 @@ from .services.hud import HudWriter
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.capabilities import CapabilityRouter
+from .services.commands import VoiceCommandRouter
+from .services.message_reply import MessageReplyController
 from .services.session import (
     DebateSession, Session, SessionManager, seat_participants,
 )
 from .services.models import (
-    DEFAULT_CODEX_MODEL, ModelRegistry, default_slots, handle_model_command,
+    DEFAULT_CODEX_MODEL, ModelRegistry, default_slots,
 )
 from .services.sinks import Broadcast, DebateStateSink, HudSink, TerminalSink
 from .verifier.fetcher import fetch_page_text, wayback_page_text
@@ -120,6 +123,7 @@ async def main() -> None:
     # Cards shown on the HUD are remembered here so "what did I miss?" has a
     # real source instead of a model with no record.
     card_log = CardLog()
+    imessage = IMessageStore()
 
     replier: ReplyEngine | None = None
     if args.no_llm:
@@ -148,9 +152,8 @@ async def main() -> None:
             return (loc.latitude, loc.longitude) if loc is not None else None
 
         belt_tools = [weather_tool(wearer_coords), notifications_tool(card_log)]
-        tools_store = IMessageStore()
-        if tools_store.available:
-            belt_tools.append(messages_tool(tools_store))
+        if imessage.available:
+            belt_tools.append(messages_tool(imessage))
         belt = ToolBelt(belt_tools)
         replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding,
                                  tools=belt,
@@ -230,6 +233,11 @@ async def main() -> None:
 
     status.set(debate=f"{len(seated)} seats" if len(seated) >= 2 else "unavailable")
     sessions = SessionManager(hud, make_debate, card_log=card_log)
+    message_replies = MessageReplyController(
+        MessagesAppSender(),
+        transport.request_confirm,
+    )
+    voice_commands = VoiceCommandRouter(message_replies, models)
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no
     # context, so "JOAT" comes back as "Jokes"/"Jote"/"Jolt". Rejecting
@@ -241,7 +249,7 @@ async def main() -> None:
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,
         sessions=sessions, wake_words=wake_words, status=status,
-        commands=lambda text: handle_model_command(text, models),
+        commands=voice_commands,
     )
     orchestrator.attach()
 
@@ -280,14 +288,13 @@ async def main() -> None:
 
     # One chat.db reader serves BOTH the notification channel and the
     # capability menu's Messages view.
-    imessage = IMessageStore()
-
     # Glasses gestures in, drawn views out: the capability menu (Messages /
     # Notifications / Calendar / Debate), the contextual menu's repeat, and
     # the repaint after a menu close blanked the regions.
     capabilities = CapabilityRouter(
         hud=hud, transport=transport, status=status,
         messages=imessage if imessage.available else None, cards=card_log,
+        replies=message_replies,
     )
     transport.on_input(capabilities.on_input)
 

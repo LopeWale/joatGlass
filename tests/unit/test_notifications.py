@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import plistlib
 import sqlite3
 from pathlib import Path
@@ -122,14 +123,39 @@ class TestChannel:
         )
         await channel.run()  # returns promptly instead of crashing
 
+    async def test_delivery_log_never_contains_sender_or_message(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        caplog.set_level(logging.INFO)
+        delivered: list[str] = []
+        channel = NotificationChannel(
+            None,  # type: ignore[arg-type] -- _handle is the unit under test
+            None,
+            delivered.append,
+        )
+        notification = Notification(
+            rec_id=1,
+            app="com.apple.MobileSMS",
+            title="Private Sender",
+            subtitle="",
+            body="The private message body",
+            delivered_unix=0.0,
+        )
+
+        await channel._handle(notification)
+
+        assert delivered == ["Private Sender · Messages\nThe private message body"]
+        assert "Private Sender" not in caplog.text
+        assert "The private message body" not in caplog.text
+        assert "channel=Messages" in caplog.text
+
 
 class TestManagerCards:
-    async def test_idle_shows_now_active_queues_and_drains(self) -> None:
+    async def test_idle_shows_now_active_queues_and_drains(self, caplog) -> None:  # type: ignore[no-untyped-def]
         from joat.core.protocol import HudText
         from joat.services.hud import HudWriter
         from joat.services.session import Session, SessionManager
-        from tests.unit.test_session import SinkTransport
+        from test_session import SinkTransport
 
+        caplog.set_level(logging.INFO)
         transport = SinkTransport()
 
         class Gated(Session):
@@ -150,6 +176,8 @@ class TestManagerCards:
         await asyncio.sleep(0)
         mgr.notify("[SMS] queued while debating")
         assert not any("queued while debating" in getattr(m, "text", "") for m in transport.sent)
+        assert "queued while debating" not in caplog.text
+        assert "card queued behind active session chars=" in caplog.text
         sess.gate.set()
         await asyncio.sleep(0); await asyncio.sleep(0); await asyncio.sleep(0)
         assert any("queued while debating" in getattr(m, "text", "") for m in transport.sent)

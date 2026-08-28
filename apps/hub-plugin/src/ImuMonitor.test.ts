@@ -17,6 +17,22 @@ function make() {
 }
 
 describe('ImuMonitor confirms', () => {
+  it('traces prompt visibility and verdict without logging the prompt', () => {
+    const { imu } = make();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+    imu.prepare('message-reply:hud-12:a1');
+    expect(imu.activate('message-reply:hud-12:a1', 1000)).toBe(true);
+    imu.confirmByTap();
+
+    expect(info.mock.calls.map(([line]) => line)).toEqual([
+      '[joat trace] trace=message-reply:hud-12:a1 stage=confirmation-received',
+      '[joat trace] trace=message-reply:hud-12:a1 stage=confirmation-visible',
+      '[joat trace] trace=message-reply:hud-12:a1 stage=confirmation-settled accepted=true',
+    ]);
+    info.mockRestore();
+  });
+
   it('nod swing past threshold resolves a Mac confirm uplink', () => {
     const { imu, sent } = make();
     imu.await('act-1');

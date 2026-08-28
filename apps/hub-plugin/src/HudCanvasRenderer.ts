@@ -7,7 +7,7 @@ import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
 import arrowRightSvg from '@phosphor-icons/core/regular/arrow-right.svg?raw';
 import arrowLeftSvg from '@phosphor-icons/core/regular/arrow-left.svg?raw';
-import { CANVAS } from './types';
+import { CANVAS, type HudContentKind } from './types';
 import {
   splitGray4Tiles,
   type HudFrameRenderer,
@@ -153,6 +153,7 @@ export interface HudLabeledValue {
 export interface HudOverviewInput {
   status: string;
   main: string;
+  mainKind?: HudContentKind;
   context: string;
   tray: string;
 }
@@ -238,7 +239,17 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
 
   return {
     kind: 'content',
-    ...(main ? { main: parseHudLabeledValue(main, 'REPLY') } : {}),
+    ...(main ? {
+      main: input.mainKind === 'notification'
+        ? {
+          label: /(?:^|·)\s*Messages(?:\s|$)/i.test(main.split('\n', 1)[0] ?? '')
+            ? 'MESSAGE'
+            : 'NOTIFICATION',
+          value: main.replace(/\s*\n\s*/g, ' ').trim(),
+          structured: false,
+        }
+        : parseHudLabeledValue(main, input.mainKind === 'calendar' ? 'NEXT' : 'REPLY'),
+    } : {}),
     ...(tray ? { tray } : {}),
     ...(context ? { context: parseHudLabeledValue(context, 'LAST QUERY') } : {}),
   };

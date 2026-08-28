@@ -23,15 +23,40 @@ class HudWriter:
         """Status bar line (top 32px)."""
         await self._transport.send(HudText(text=text, container_id=ContainerId.STATUS_BAR))
 
-    async def show(self, text: str, container: ContainerId = ContainerId.MAIN) -> None:
+    async def show(
+        self,
+        text: str,
+        container: ContainerId = ContainerId.MAIN,
+        *,
+        content_kind: str | None = "assistant",
+        trace_id: str | None = None,
+    ) -> None:
         """Replace the container's content."""
-        await self._transport.send(HudText(text=text, container_id=container))
+        await self._transport.send(HudText(
+            text=text,
+            container_id=container,
+            content_kind=content_kind,  # type: ignore[arg-type]
+            trace_id=trace_id,
+        ))
 
-    async def show_with_brightness(self, text: str, level: int,
-                                   container: ContainerId = ContainerId.MAIN) -> None:
+    async def show_with_brightness(
+        self,
+        text: str,
+        level: int,
+        container: ContainerId = ContainerId.MAIN,
+        *,
+        content_kind: str | None = "assistant",
+        trace_id: str | None = None,
+    ) -> None:
         """Replace content at an explicit firmware brightness (0-4)."""
         await self._transport.send(
-            HudText(text=text, container_id=container, text_color=level))
+            HudText(
+                text=text,
+                container_id=container,
+                text_color=level,
+                content_kind=content_kind,  # type: ignore[arg-type]
+                trace_id=trace_id,
+            ))
 
     async def context(self, text: str) -> None:
         """What the wearer last said (docs/HUD_DASHBOARD.md).

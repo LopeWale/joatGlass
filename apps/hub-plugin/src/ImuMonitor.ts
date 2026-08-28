@@ -76,6 +76,7 @@ export class ImuMonitor {
     if (this.pending) this.resolve(false);
     this.pending = { actionId, active: false, expiresAt: Number.POSITIVE_INFINITY, onResult };
     this.samples = [];
+    console.info(`[joat trace] trace=${actionId} stage=confirmation-received`);
   }
 
   /** Start the decision clock only after the complete prompt is visible. */
@@ -84,6 +85,7 @@ export class ImuMonitor {
     this.pending.active = true;
     this.pending.expiresAt = Date.now() + timeoutMs;
     this.expiryTimer = setTimeout(() => this.resolve(false), Math.max(0, timeoutMs));
+    console.info(`[joat trace] trace=${actionId} stage=confirmation-visible`);
     return true;
   }
 
@@ -182,6 +184,9 @@ export class ImuMonitor {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = undefined;
     this.samples = [];
+    console.info(
+      `[joat trace] trace=${actionId} stage=confirmation-settled accepted=${accepted}`,
+    );
     if (onResult) {
       onResult(accepted);
     } else {

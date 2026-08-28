@@ -164,10 +164,10 @@ async function boot(): Promise<void> {
         // append streams (debate turns, token-by-token replies) without a
         // full repaint; plain hud.text replaces the container.
         if (msg.append) await hud.appendText(msg.text, msg.containerId);
-        else await hud.showText(msg.text, msg.containerId, msg.textColor);
+        else await hud.showText(msg.text, msg.containerId, msg.textColor, msg.contentKind);
         break;
       case 'hud.list':
-        if (menu.acceptsList(msg.title)) {
+        if (menu.acceptsList(msg.title, msg.items.length)) {
           await hud.showList(msg.items, { title: msg.title, hint: msg.hint });
         }
         break;
@@ -328,13 +328,16 @@ async function renderVisualState(
         '[18m ago] Marcus · Heading to the lab in 10.',
         '[1h ago] Team Ops · Standup notes are ready.',
       ],
-      { title: 'MESSAGES · 3', hint: 'swipe move · left x2 overview' },
+      { title: 'MESSAGES · 3', hint: 'tap select · left x2 overview' },
     );
     return;
   }
 
   if (state === 'confirmation') {
-    await hud.showConfirmation('Send reply to Adele?', 'visual-confirmation');
+    await hud.showConfirmation(
+      'Send to Adele? “On my way with the latest mockups”',
+      'visual-confirmation',
+    );
     return;
   }
 

@@ -113,6 +113,7 @@ class InputEvent:
     event_source: int | None = None
     selected_index: int | None = None
     selected_name: str | None = None
+    trace_id: str | None = None
 
     @property
     def is_right_temple_click(self) -> bool:
@@ -199,6 +200,11 @@ class HudText:
     text_color: int | None = None
     """Firmware brightness 0-4 per paint (SDK 0.0.14) — urgency can be
     BRIGHT now, not merely punctuated."""
+    content_kind: Literal["assistant", "notification", "calendar", "system"] | None = None
+    """Semantic provenance for MAIN. The plugin must never guess that an
+    incoming card is an assistant reply merely because both share a region."""
+    trace_id: str | None = None
+    """Privacy-safe correlation id. Content never belongs in an audit key."""
 
     def to_wire(self) -> dict[str, Any]:
         msg: dict[str, Any] = {
@@ -214,6 +220,10 @@ class HudText:
             msg["append"] = True
         if self.text_color is not None:
             msg["textColor"] = self.text_color
+        if self.content_kind is not None:
+            msg["contentKind"] = self.content_kind
+        if self.trace_id is not None:
+            msg["traceId"] = self.trace_id
         return msg
 
 
@@ -396,6 +406,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     event_source=raw.get("eventSource"),
                     selected_index=raw.get("selectedIndex"),
                     selected_name=raw.get("selectedName"),
+                    trace_id=raw.get("traceId"),
                 )
             )
         case "pairing":

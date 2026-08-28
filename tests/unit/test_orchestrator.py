@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 
 from joat.audio.vad import RmsVad
@@ -22,6 +23,7 @@ from joat.core.protocol import (
     HudText,
 )
 from joat.services.orchestrator import VoiceOrchestrator
+from joat.services.greetings import greeting_response
 from joat.services.session import Session
 
 BATCH_SAMPLES = 3200
@@ -92,6 +94,22 @@ async def drain() -> None:
 
 
 class TestVoiceLoop:
+    async def test_connect_clears_stale_content_before_announcing_online(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine()
+
+        await VoiceOrchestrator(transport, engine).on_connect()
+
+        cleared = [
+            message.container_id
+            for message in transport.sent
+            if isinstance(message, HudText) and message.text == ""
+        ]
+        assert cleared == [ContainerId.MAIN, ContainerId.CONTEXT, ContainerId.TRAY]
+        status = region(transport, ContainerId.STATUS_BAR)
+        assert status == ["JOAT · online"]
+        assert isinstance(transport.sent[-1], AudioControl)
+        assert transport.sent[-1].open is True
+
     async def test_utterance_becomes_hud_text(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("turn on the lights")
         orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
@@ -139,11 +157,11 @@ class TestVoiceLoop:
     async def test_greeting_reflects_stt_state_and_requests_ears(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
         await VoiceOrchestrator(transport, engine, stt_available=False).on_connect()
-        assert isinstance(transport.sent[0], HudText)
-        assert "no STT" in transport.sent[0].text
-        assert transport.sent[1:] and isinstance(transport.sent[-1], AudioControl)
+        assert "no STT" in region(transport, ContainerId.STATUS_BAR)[0]
+        assert "Install whisperkit-cli" in region(transport, ContainerId.MAIN)[-1]
+        assert isinstance(transport.sent[-1], AudioControl)
         assert transport.sent[-1].open is True
-        assert len(transport.sent) == 3  # status, install hint, mic on
+        assert len(transport.sent) == 6  # 3 clears, status, install hint, mic on
 
 
 class FakeReplier(ReplyEngine):
@@ -157,6 +175,82 @@ class FakeReplier(ReplyEngine):
 
 
 class TestReplyFlow:
+    async def test_addressed_greeting_uses_command_path_not_reply_engine(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("Good morning, JOATs.")
+        replier = FakeReplier("irrelevant grounded fallback")
+        commands_seen: list[str] = []
+
+        async def commands(text: str) -> str | None:
+            commands_seen.append(text)
+            return greeting_response(text)
+
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=replier,
+            wake_words=("joat",),
+            commands=commands,
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        assert commands_seen == ["Good morning."]
+        assert region(transport, ContainerId.MAIN) == ["Good morning. How can I help?"]
+        assert replier.asked == []
+
+    async def test_greeting_plus_request_reaches_reply_engine_intact(self) -> None:
+        transcript = "Good morning, JOATs, what is on my calendar?"
+        transport, engine = FakeTransport(), FakeEngine(transcript)
+        replier = FakeReplier("You have one event at noon.")
+        commands_seen: list[str] = []
+
+        async def commands(text: str) -> str | None:
+            commands_seen.append(text)
+            return greeting_response(text)
+
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=replier,
+            wake_words=("joat",),
+            commands=commands,
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        expected = "Good morning, what is on my calendar?"
+        assert commands_seen == [expected]
+        assert replier.asked == [expected]
+        assert region(transport, ContainerId.MAIN) == ["You have one event at noon."]
+
+    async def test_unaddressed_greeting_stays_silent_in_wake_word_mode(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("Good morning.")
+        replier = FakeReplier("should not be used")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=replier,
+            wake_words=("joat",),
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        assert replier.asked == []
+        assert region(transport, ContainerId.MAIN) == []
+        assert region(transport, ContainerId.STATUS_BAR)[-1] == "JOAT · listening"
+
     async def test_transcript_then_reply_both_reach_the_hud(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("what is the weather")
         replier = FakeReplier("It is 72 degrees.")
@@ -333,6 +427,26 @@ class TestWakeWordGate:
     async def test_none_gate_answers_everything(self) -> None:
         texts = await self._run("any old speech", wake=None)
         assert texts == ["any old speech", "answer"]
+
+    async def test_spoken_message_draft_never_reaches_logs(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        caplog.set_level(logging.INFO)
+        secret = "reply saying the locker code is indigo"
+        transport, engine = FakeTransport(), FakeEngine(f"JOAT, {secret}")
+
+        async def commands(query: str) -> str | None:
+            assert query == secret
+            return "Reply cancelled."
+
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            wake_words=WAKE,
+            commands=commands,
+        )
+        await orch._handle_utterance(LOUD)
+
+        assert secret not in caplog.text
+        assert "transcript received chars=" in caplog.text
 
     def _session_orch(self, heard: str):  # type: ignore[no-untyped-def]
         transport, engine = FakeTransport(), FakeEngine(heard)

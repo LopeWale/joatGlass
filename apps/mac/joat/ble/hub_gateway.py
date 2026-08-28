@@ -445,6 +445,13 @@ class HubGatewayTransport(GlassesTransport):
                 for imu_cb in self._imu_cbs:
                     imu_cb(message)
             case Input():
+                if message.event.trace_id:
+                    log.info(
+                        "action trace=%s stage=input-received control=%s index=%s",
+                        message.event.trace_id,
+                        message.event.container_name or "unknown",
+                        message.event.selected_index,
+                    )
                 for input_cb in self._input_cbs:
                     input_cb(message.event)
             case Device():
@@ -452,6 +459,11 @@ class HubGatewayTransport(GlassesTransport):
                 for device_cb in self._device_cbs:
                     device_cb(message)
             case Confirm():
+                log.info(
+                    "action trace=%s stage=confirmation-result accepted=%s",
+                    message.action_id,
+                    message.accepted,
+                )
                 future = self._pending_confirms.get(message.action_id)
                 if future is not None and not future.done():
                     future.set_result(message.accepted)

@@ -117,6 +117,23 @@ describe('resolveHudOverview', () => {
     });
   });
 
+  it('labels a typed incoming Messages card as MESSAGE, never REPLY', () => {
+    expect(resolveHudOverview({
+      status: '9:41   JOAT listening',
+      main: '(201) 462-3963 · Messages\nCajun Corner order confirmed',
+      mainKind: 'notification',
+      context: '',
+      tray: '',
+    })).toEqual({
+      kind: 'content',
+      main: {
+        label: 'MESSAGE',
+        value: '(201) 462-3963 · Messages Cajun Corner order confirmed',
+        structured: false,
+      },
+    });
+  });
+
   it('preserves every semantic section in the populated Overview fixture', () => {
     expect(resolveHudOverview({
       status: '9:41   JOAT ready',

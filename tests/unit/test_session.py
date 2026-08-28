@@ -200,6 +200,17 @@ class TestDebateSession:
 
 
 class TestSessionManager:
+    async def test_incoming_card_is_typed_as_notification_not_assistant_reply(self) -> None:
+        transport = SinkTransport()
+        manager = SessionManager(HudWriter(transport), lambda _topic: None)
+
+        manager.notify("Dele · Messages\nOn my way")
+        await asyncio.sleep(0)
+
+        cards = [m for m in transport.sent if isinstance(m, HudText)]
+        assert len(cards) == 1
+        assert cards[0].content_kind == "notification"
+
     async def test_trigger_starts_and_consumes(self) -> None:
         transport = SinkTransport()
         started: list[str] = []

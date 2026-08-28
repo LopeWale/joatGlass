@@ -2,6 +2,57 @@
 
 ## 2026-08-27
 
+- Completed a research-first design gate for Calendar, Reminders/tasks, AI
+  notes, safe write actions, persistence, and notification fan-in. The design
+  records platform permission boundaries, failure states, privacy constraints,
+  adversarial acceptance tests, and deliberately unproven claims in
+  `docs/PRODUCTIVITY_SYSTEM_RESEARCH.md`.
+- Corrected three implementation assumptions before code: query-plus-create
+  needs full Calendar access; ordinary reminders should remain EventKit's
+  system of record rather than a parallel scheduler; and the current audio
+  relay permits only gap-aware capture, not an absolute lossless guarantee.
+- An independent hostile review exposed an untrusted-pairing P0 and upstream
+  data-loss seams. Reordered delivery so transport identity, exact full-preview
+  UX, privacy redaction, durable typed actions, SQLite reconciliation, and a
+  bidirectional native Swift bridge precede Calendar and Reminder writes. No
+  production implementation was started pending owner approval and resolution
+  of the active concurrent worktree changes.
+- Repaired the Messages reply path end to end. Incoming cards now carry
+  explicit notification provenance and render as `MESSAGE`/`NOTIFICATION`
+  instead of the fabricated `REPLY`; selecting a one-to-one Messages row arms
+  a voice draft, shows the exact recipient and full draft on the exclusive
+  Confirmation screen, and reaches Messages.app only after acceptance.
+- Kept group chats explicitly read-only so a group response cannot be
+  misrouted to one participant, and reject drafts that cannot fit completely
+  on the 120-character confirmation surface. The eight-second visible decision
+  window is preserved inside a twelve-second transport envelope so HUD paint
+  time cannot silently shorten wearer consent.
+- Added privacy-safe action correlation across plugin selection, confirmation
+  visibility/verdict, real WebSocket gateway, and final sender outcome. Removed
+  raw notification, transcript, reply, and queued-card content from operational
+  logs; regressions assert that neither message drafts nor recipient handles
+  appear in captured logs.
+- Added a safe ordinary-simulator trace harness that uses the production reply
+  controller and real gateway but a recording final sender. Official simulator
+  evidence reached `confirmation-visible`, accepted one Click, resolved
+  `confirmation-result accepted=True`, and reached exactly one recording-send
+  boundary. The fixture is now visibly named `SIMULATOR TEST (NO SEND)` and
+  contains no real-looking contact or message, so its extra window cannot be
+  confused with the ordinary live JOAT simulator.
+- Routed simple salutations through a deterministic pre-inference command:
+  `Good morning, JOATs.` now yields `Good morning. How can I help?` without
+  requesting personal grounding. Greeting-plus-request speech still reaches
+  the general reply path, unaddressed greetings remain silent, and wake-word
+  punctuation cleanup no longer leaves doubled commas.
+- Cleared unowned Main/Context/Tray content when a fresh Mac brain connects, so
+  a reply painted by an older process cannot masquerade as a new response.
+  Every completed, ignored, or empty utterance now also returns the transient
+  `HEARING YOU` chrome to truthful `LISTENING` state.
+- Current verification: 304 Python tests, including 44 real-gateway integration
+  tests; 183 Hub-plugin tests; strict mypy across 47 source files; clean
+  TypeScript/Vite production build and diff whitespace. Repacked v0.1.11 as a
+  55,849-byte `joat.ehpk` with SHA-256
+  `3f1c56e948fc28048fe6a010610beed0cb5ad2fb84245e7f6035675cbcbb503f`.
 - Repaired the ordinary, fixture-free Overview state that had fabricated
   `REPLY / Nothing scheduled`, an orphan notification bell, and an empty
   `LAST QUERY`. Connecting, reconnecting, offline, and connected-empty sessions

@@ -242,6 +242,27 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
+  it('retains the Mac content kind that distinguishes an incoming card from a reply', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showText(
+      'Dele · Messages\nOn my way',
+      ContainerId.Main,
+      3,
+      'notification',
+    );
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview',
+      mainKind: 'notification',
+      main: 'Dele · Messages\nOn my way',
+    });
+  });
+
   it('renders the transient sidebar over a dim snapshot, then full-focus Messages restores the latest overview', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showText('Next\nDesign review · 4:30', ContainerId.Main, 4);

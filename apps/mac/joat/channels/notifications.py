@@ -254,11 +254,20 @@ class NotificationChannel:
         card = self._policy.admit(Card(source=source, channel=channel,
                                        summary=summary, urgency=level))
         if card is None:
-            log.info("card suppressed (%s): [%s] %s", level.name, channel, summary)
+            log.info(
+                "notification disposition=suppressed urgency=%s channel=%s chars=%d",
+                level.name,
+                channel,
+                len(summary),
+            )
             return
         rendered = card.render()
-        log.info("card delivered (%.1fs after delivery): %s",
-                 time.time() - n.delivered_unix, rendered.replace("\n", " / "))
+        log.info(
+            "notification disposition=delivered channel=%s latency_s=%.1f chars=%d",
+            channel,
+            time.time() - n.delivered_unix,
+            len(rendered),
+        )
         if self._status is not None:
             self._status.set(last_card=rendered)  # type: ignore[attr-defined]
             self._status.bump("cards")  # type: ignore[attr-defined]

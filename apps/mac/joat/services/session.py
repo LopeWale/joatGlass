@@ -72,7 +72,7 @@ class SessionManager:
         queue and drain the moment it ends."""
         if self._active is not None:
             self._pending_cards.append(card)
-            log.info("card queued behind active session: %s", card)
+            log.info("card queued behind active session chars=%d", len(card))
             return
         asyncio.get_running_loop().create_task(self._show_card(card))
 
@@ -82,7 +82,11 @@ class SessionManager:
         # Urgency gets BRIGHTNESS now, not merely punctuation: firmware
         # textColor 4 for "!!" cards, a shade dimmer for routine ones.
         urgent = card.startswith("!!")
-        await self._hud.show_with_brightness(card, 4 if urgent else 3)
+        await self._hud.show_with_brightness(
+            card,
+            4 if urgent else 3,
+            content_kind="notification",
+        )
 
     def _drain_cards(self) -> None:
         if not self._pending_cards:
@@ -105,7 +109,10 @@ class SessionManager:
             if directed is not None:
                 log.info("wearer gave the floor to %s", directed)
             else:
-                log.info("session active — transcript not routed to assistant: %s", text)
+                log.info(
+                    "session active — transcript not routed to assistant chars=%d",
+                    len(text),
+                )
             return True
         for trigger in ("debate ", "debate: "):
             if lowered.startswith(trigger):

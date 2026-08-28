@@ -34,6 +34,8 @@ const SETTINGS_SURFACE = {
 export class CapabilityMenu {
   private view: 'closed' | 'caps' | 'settings' | 'data' = 'closed';
   private selectedIndex = 0;
+  private dataItemCount = 0;
+  private dataMessageSelectable = false;
   private pendingTitle?: string;
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
@@ -51,10 +53,22 @@ export class CapabilityMenu {
   /** A capability response is valid only for the data view that requested it.
    * This prevents a slow Mac reply from reopening a dismissed page or
    * replacing a newer capability selection. */
-  acceptsList(title?: string): boolean {
+  acceptsList(title?: string, itemCount = 0): boolean {
     if (this.view !== 'data' || !this.pendingTitle || !title) return false;
     const normalized = title.trim().toUpperCase();
-    return normalized === this.pendingTitle || normalized.startsWith(`${this.pendingTitle} ·`);
+    const accepted = normalized === this.pendingTitle
+      || normalized.startsWith(`${this.pendingTitle} ·`);
+    if (accepted) {
+      // Only the raw Messages inbox contains actionable conversation rows.
+      // Setup pages, other capabilities, and MESSAGES · REPLY instructions
+      // are display-only and must never be turned into recipient selection.
+      const selectableMessages = this.pendingTitle === 'MESSAGES'
+        && normalized === 'MESSAGES';
+      this.dataItemCount = Math.max(0, itemCount);
+      this.dataMessageSelectable = selectableMessages;
+      this.selectedIndex = 0;
+    }
+    return accepted;
   }
 
   /** Left double-tap. Closed: open the capability menu. Anywhere else: BACK
@@ -96,7 +110,11 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
-      void this.hud.moveSelection(delta);
+      const maximum = Math.max(0, this.dataItemCount - 1);
+      const next = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
+      const applied = next - this.selectedIndex;
+      this.selectedIndex = next;
+      if (applied !== 0) void this.hud.moveSelection(applied);
       return true;
     }
     const rows = this.view === 'settings' ? POLICY_ROWS : CAPABILITIES;
@@ -107,7 +125,26 @@ export class CapabilityMenu {
 
   /** Right temple/ring click selects the highlighted custom-rendered row. */
   handleClick(): boolean {
-    if (this.view === 'closed' || this.view === 'data') return false;
+    if (this.view === 'closed') return false;
+    if (this.view === 'data') {
+      if (!this.dataMessageSelectable || this.dataItemCount === 0) return true;
+      const random = globalThis.crypto?.randomUUID?.()
+        ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      const traceId = `hud-${random}`;
+      console.info(
+        `[joat trace] trace=${traceId} stage=message-selected index=${this.selectedIndex}`,
+      );
+      this.link.send({
+        kind: 'input',
+        event: {
+          containerName: 'capdata',
+          selectedIndex: this.selectedIndex,
+          selectedName: this.pendingTitle,
+          traceId,
+        },
+      });
+      return true;
+    }
     return this.select(this.selectedIndex);
   }
 
@@ -136,6 +173,9 @@ export class CapabilityMenu {
       // double-tap still means back.
       this.view = 'data';
       this.pendingTitle = picked.toUpperCase();
+      this.dataItemCount = 0;
+      this.dataMessageSelectable = false;
+      this.selectedIndex = 0;
       void this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
         title: picked.toUpperCase(),
         hint: 'left x2 overview',
@@ -157,6 +197,8 @@ export class CapabilityMenu {
     this.view = 'closed';
     this.selectedIndex = 0;
     this.pendingTitle = undefined;
+    this.dataItemCount = 0;
+    this.dataMessageSelectable = false;
     // Restore a LIVE home, not a souvenir of the menu — a stale status line
     // over a blank page reads as a dead assistant (observed on hardware).
     await this.hud.showDefault();

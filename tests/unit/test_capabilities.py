@@ -11,6 +11,7 @@ import asyncio
 import time
 
 from joat.channels.cards import CardLog
+from joat.channels.imessage import MessageThread
 from joat.core.protocol import ContainerId, HudList, HudText, InputEvent
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
@@ -34,8 +35,28 @@ class FakeMessages:
     def recent(self, limit: int = 5) -> list[tuple[str, str, float]]:
         return self._rows[:limit]
 
+    def recent_threads(self, limit: int = 5) -> list[MessageThread]:
+        return [
+            MessageThread(
+                row[0],
+                f"handle-{index}",
+                row[1],
+                row[2],
+                row[3] if len(row) > 3 else True,
+            )
+            for index, row in enumerate(self._rows[:limit])
+        ]
 
-def make_router(tmp_path, rows=None, cards=None):  # type: ignore[no-untyped-def]
+
+class FakeReplies:
+    def __init__(self) -> None:
+        self.selected: list[tuple[MessageThread, str]] = []
+
+    def select(self, thread: MessageThread, trace_id: str) -> None:
+        self.selected.append((thread, trace_id))
+
+
+def make_router(tmp_path, rows=None, cards=None, replies=None):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
     log = CardLog()
@@ -47,6 +68,7 @@ def make_router(tmp_path, rows=None, cards=None):  # type: ignore[no-untyped-def
         status=status,
         messages=FakeMessages(rows) if rows is not None else None,  # type: ignore[arg-type]
         cards=log,
+        replies=replies,  # type: ignore[arg-type]
     )
     return router, transport, status
 
@@ -61,7 +83,56 @@ class TestCapabilityViews:
         assert lists and lists[0].to_wire()["items"] == [
             "[now] Dele · On my way", "[now] Adaeze · Call me"]
         assert lists[0].title == "MESSAGES"
-        assert lists[0].hint == "left x2 overview"
+        assert lists[0].hint == "tap select · left x2 overview"
+
+    async def test_selecting_a_message_arms_voice_reply_without_sending(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        now = time.time()
+        replies = FakeReplies()
+        router, transport, _ = make_router(
+            tmp_path,
+            rows=[("Dele", "On my way", now), ("Adaeze", "Call me", now)],
+            replies=replies,
+        )
+        await router.open("Messages")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=1,
+            trace_id="hud-12",
+        ))
+        await asyncio.sleep(0)
+
+        assert replies.selected == [(
+            MessageThread("Adaeze", "handle-1", "Call me", now),
+            "hud-12",
+        )]
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.title == "MESSAGES · REPLY"
+        assert any("JOAT, reply" in item for item in detail.items)
+
+    async def test_group_message_cannot_be_misrouted_to_one_participant(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        now = time.time()
+        replies = FakeReplies()
+        router, transport, _ = make_router(
+            tmp_path,
+            rows=[("Project team", "Ship it", now, False)],
+            replies=replies,
+        )
+        await router.open("Messages")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=0,
+            trace_id="hud-group",
+        ))
+        await asyncio.sleep(0)
+
+        assert replies.selected == []
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.title == "MESSAGES · READ ONLY"
+        assert any("Group replies" in item for item in detail.items)
 
     async def test_messages_without_access_states_the_gap(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, rows=None)
