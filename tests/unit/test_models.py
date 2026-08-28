@@ -23,9 +23,9 @@ class TestSlotsAreReadPerTurn:
     async def test_a_switch_lands_on_the_next_turn_not_the_next_launch(self) -> None:
         reg = registry()
         read = reg.provider("codex")          # what an agent holds from boot
-        assert read() == "gpt-5.3-codex-spark"
-        await reg.select("codex", "terra")
-        assert read() == "gpt-5.6-terra"      # same provider, new answer
+        assert read() == "gpt-5.6-terra"
+        await reg.select("codex", "spark")
+        assert read() == "gpt-5.3-codex-spark"  # same provider, new answer
 
     async def test_default_means_pass_no_flag(self) -> None:
         # Today's behaviour — the claude CLI on its own default — stays
@@ -73,8 +73,8 @@ class TestSpokenCommands:
 
     async def test_switch_phrasing(self) -> None:
         reg = registry()
-        await handle_model_command("switch codex to terra", reg)
-        assert reg.current("codex") == "gpt-5.6-terra"
+        await handle_model_command("switch codex to spark", reg)
+        assert reg.current("codex") == "gpt-5.3-codex-spark"
 
     async def test_an_unambiguous_model_needs_no_seat(self) -> None:
         reg = registry()
@@ -85,7 +85,7 @@ class TestSpokenCommands:
         reg = registry()
         said = await handle_model_command("what models are you using", reg)
         assert said is not None
-        assert "Codex seat: spark" in said and "Speech: turbo" in said
+        assert "Codex seat: terra" in said and "Speech: turbo" in said
 
     @pytest.mark.parametrize("utterance", [
         "what is the weather",
@@ -117,4 +117,4 @@ class TestHudRows:
 
     def test_overview_rows_name_every_slot(self) -> None:
         rows = registry().rows()
-        assert rows == ["Codex seat: spark", "Claude seat: default", "Speech: turbo"]
+        assert rows == ["Codex seat: terra", "Claude seat: default", "Speech: turbo"]

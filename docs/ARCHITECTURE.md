@@ -89,6 +89,26 @@ quietly drop them:
   excluded from the transcript — otherwise the next speaker rebuts a
   billing notice and the judge scores it.
 
+**Models are a setting, not a launch flag** (`services/models.py`). Each
+switchable model is a slot the agents read PER TURN, so a change lands on the
+next turn instead of the next launch. Choices are named the way they are
+spoken ("terra", "sonnet", "turbo") because whisper mangles full model ids,
+and the wearer changes them by voice — "JOAT, use sonnet for the critic",
+"switch codex to spark", "what models are you using" — which needs no menu
+row, no new wire verb, and no plugin change. The grammar is deliberately
+narrow, for the same reason turn-direction is: a config change triggered by
+ordinary conversation is worse than one that needs rephrasing.
+
+Debate seats cost nothing to switch (the model is an argv field on the next
+subprocess call). Whisper holds weights in a resident process, so its slot
+carries an applier that respawns serve and **rolls back on failure** — an
+unknown model name otherwise leaves the glasses silently deaf with no way to
+ask for the old one back.
+
+`ModelRegistry.rows()` renders the same `*`-marked shape as the resume-policy
+menu, so a Settings → Models submenu is a view over existing verbs whenever
+the plugin wants one.
+
 The debate streams to every `TranscriptSink` at once (`services/sinks.py`):
 the glasses, the terminal, and a `DebateStateSink` snapshot that the HUD's
 Debate panel can re-open after the fact.

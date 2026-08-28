@@ -20,6 +20,7 @@ import re
 import shutil
 from collections.abc import AsyncIterator, Callable
 
+from ..services.models import DEFAULT_CODEX_MODEL
 from ..services.roundtable import failure_notice
 
 log = logging.getLogger(__name__)
@@ -166,7 +167,7 @@ def proposer(model: Callable[[], str | None] | None = None) -> SubprocessAgent |
     if binary is None:
         return None
     if model is None:
-        pinned = os.environ.get("CODEX_MODEL", "gpt-5.3-codex-spark")
+        pinned = os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL)
         model = lambda: pinned  # noqa: E731 - a constant provider reads clearer here
     return SubprocessAgent(
         [binary, "exec", "-s", "read-only"],

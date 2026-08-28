@@ -47,7 +47,7 @@ from .services.session import (
     DebateSession, Session, SessionManager, seat_participants,
 )
 from .services.models import (
-    ModelRegistry, default_slots, handle_model_command,
+    DEFAULT_CODEX_MODEL, ModelRegistry, default_slots, handle_model_command,
 )
 from .services.sinks import Broadcast, DebateStateSink, HudSink, TerminalSink
 from .verifier.fetcher import fetch_page_text, wayback_page_text
@@ -182,7 +182,7 @@ async def main() -> None:
         return result
 
     models = ModelRegistry(default_slots(
-        codex_default=os.environ.get("CODEX_MODEL", "gpt-5.3-codex-spark"),
+        codex_default=os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL),
         stt_default=args.stt_model,
         stt_apply=_switch_stt,
     ))
