@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import {
+  ImageRawDataUpdateResult,
+  type TextContainerUpgrade,
+} from '@evenrealities/even_hub_sdk';
 import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
-import { CONFIRM_HINT, ContainerId } from './types';
+import {
+  HudVisualSurface,
+  type HudFrameRenderer,
+  type HudVisualFrame,
+} from './HudVisualSurface';
+import { CANVAS, ContainerId } from './types';
 
 /**
  * Streamed paints must be SELF-CONTAINED full frames, throttled to BLE
@@ -171,6 +179,100 @@ describe('status-bar single ownership', () => {
 });
 
 describe('HudPresenter modal surfaces', () => {
+  it('keeps Mac-owned Overview regions blank during status-only boot', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showText('4:28   JOAT connecting', ContainerId.StatusBar);
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview',
+      status: '4:28   JOAT connecting',
+      main: '',
+      context: '',
+      tray: '',
+    });
+  });
+
+  it('carries Mac urgency brightness into the custom visual frame', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showText('routine', ContainerId.Main, 3);
+    expect(frames[frames.length - 1]).toMatchObject({ mainBrightness: 3 });
+    await hud.showText('urgent', ContainerId.Main, 4);
+    expect(frames[frames.length - 1]).toMatchObject({ mainBrightness: 4 });
+  });
+
+  it('keeps mic privacy state structured instead of inferring it from status copy', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    hud.setMicState(false);
+    await hud.showText('9:41   JOAT connecting', ContainerId.StatusBar);
+    expect(frames[frames.length - 1]).toMatchObject({ micOn: false });
+
+    hud.setMicState(true);
+    await hud.showText('9:41   JOAT paused', ContainerId.StatusBar);
+    expect(frames[frames.length - 1]).toMatchObject({ micOn: true });
+  });
+
+  it('keeps a plain Mac reply and its appended stream in the visual overview frame', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showText('Meeting starts in', ContainerId.Main, 4);
+    vi.advanceTimersByTime(400);
+    await hud.appendText(' 19 minutes.', ContainerId.Main);
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview', main: 'Meeting starts in 19 minutes.',
+    });
+  });
+
+  it('renders the transient sidebar over a dim snapshot, then full-focus Messages restores the latest overview', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await hud.showText('Next\nDesign review · 4:30', ContainerId.Main, 4);
+    await hud.showText('Last query  nearest coffee shop?', ContainerId.Context, 3);
+    await hud.showText('2 notifications', ContainerId.Tray, 2);
+
+    await hud.showSidebar(['Messages', 'Notifications', 'Calendar', 'Debate', 'Settings']);
+    const sidebar = rebuiltPages[0] as {
+      textObject?: Array<{ containerID?: number; content?: string }>;
+      listObject?: Array<{ width?: number }>;
+    };
+    expect(sidebar.listObject?.[0]?.width).toBe(160);
+    expect(sidebar.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+      .toBe('Next\nDesign review · 4:30');
+
+    await hud.showText('Updated overview behind navigation', ContainerId.Main, 3);
+    await hud.showList(['Loading recent messages…'], {
+      title: 'MESSAGES', hint: 'left x2 overview',
+    });
+    const messages = rebuiltPages[1] as {
+      textObject?: Array<{ containerID?: number; content?: string }>;
+      listObject?: Array<{ width?: number }>;
+    };
+    expect(messages.listObject?.[0]?.width).toBe(CANVAS.width);
+    expect(messages.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+      .toBe('MESSAGES');
+
+    await hud.showDefault();
+    expect(lastOf(mainPaints()).content).toBe('Updated overview behind navigation');
+  });
+
   it('paints a named focus page with a persistent truthful action hint', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showList(['Messages', 'Settings'], {
@@ -182,9 +284,11 @@ describe('HudPresenter modal surfaces', () => {
       textObject?: Array<{ containerID?: number; content?: string; textColor?: number }>;
     };
     expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toMatchObject({
-      content: 'CAPABILITIES · tap open · left x2 back', textColor: 3,
+      content: 'CAPABILITIES', textColor: 4,
     });
-    expect(page.textObject?.some((c) => c.containerID === ContainerId.Hint)).toBe(false);
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.Hint)).toMatchObject({
+      content: 'tap open · left x2 back', textColor: 1,
+    });
 
     // Chrome repaints its home hint on every state/clock change. In a focus
     // page that write is intentionally ignored so the active gesture map
@@ -243,22 +347,25 @@ describe('HudPresenter modal surfaces', () => {
     await hud.showText('you  delete the file', ContainerId.Context, 3);
 
     await hud.showConfirmation('Delete report.pdf permanently?');
-    expect(lastOf(mainPaints())).toMatchObject({
-      content: 'CONFIRM ACTION\nDelete report.pdf permanently?',
+    const confirmation = rebuiltPages[0] as {
+      textObject?: Array<{ containerID?: number; content?: string; textColor?: number }>;
+    };
+    expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Main)).toMatchObject({
+      content: 'CONFIRM ACTION\n\nDelete report.pdf permanently?',
       textColor: 4,
     });
-    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Context))).toMatchObject({
-      content: '', textColor: 0,
+    expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Context)).toMatchObject({
+      content: 'RIGHT / RING / NOD  confirm', textColor: 3,
     });
-    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Tray))).toMatchObject({
-      content: '', textColor: 0,
+    expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Tray)).toMatchObject({
+      content: 'LEFT  cancel', textColor: 3,
     });
-    expect(lastOf(paints.filter((p) => p.containerID === ContainerId.Hint))).toMatchObject({
-      content: CONFIRM_HINT, textColor: 4,
+    expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Hint)).toMatchObject({
+      content: '8 seconds · timeout cancels', textColor: 1,
     });
 
     await hud.showText('reply completed behind the gate', ContainerId.Main, 3);
-    expect(lastOf(mainPaints()).content).toBe('CONFIRM ACTION\nDelete report.pdf permanently?');
+    expect(lastOf(mainPaints()).content).toBe('previous reply');
 
     await hud.dismissConfirmation();
     expect(lastOf(mainPaints())).toMatchObject({
@@ -307,6 +414,90 @@ describe('HudPresenter modal surfaces', () => {
     expect(lastOf(mainPaints()).content).toBe('dashboard write after failed modal');
   });
 
+  it('does not trap later content when the first visual confirmation frame fails', async () => {
+    const frames: HudVisualFrame[] = [];
+    const results = [true, false, true];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => {
+        frames.push(frame);
+        return results.shift() ?? true;
+      },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    expect(await hud.showText('home', ContainerId.Main)).toBe(true);
+    rebuildOk = false;
+    expect(await hud.showConfirmation('Send this message?', 'visual-failure')).toBe(false);
+    rebuildOk = true;
+    expect(await hud.showText('after failed gate', ContainerId.Main)).toBe(true);
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview', main: 'after failed gate',
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('actively restores the prior complete frame after a partial confirmation upload', async () => {
+    const updates: number[] = [];
+    const rendered: HudVisualFrame[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async (update: { containerID?: number }) => {
+          updates.push(update.containerID ?? -1);
+          // Home is calls 1-4. Fail the second tile in both the first
+          // confirmation paint and its one bounded self-heal retry.
+          return updates.length === 6 || updates.length === 8
+            ? ImageRawDataUpdateResult.sendFailed
+            : ImageRawDataUpdateResult.success;
+        },
+        rebuildPageContainer: async () => true,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async (frame) => {
+        rendered.push(frame);
+        return [ContainerId.Image, 8, 9, 10].map((containerId) => ({
+          containerId,
+          pixels: new Uint8Array(4),
+        }));
+      },
+    };
+    const hud = new HudPresenter(
+      client,
+      new HudPageBuilder(),
+      new HudVisualSurface(client, renderer),
+    );
+
+    expect(await hud.showText('home', ContainerId.Main)).toBe(true);
+    expect(await hud.showConfirmation('Send this message?', 'partial-frame')).toBe(false);
+
+    expect(updates.slice(-4)).toEqual([ContainerId.Image, 8, 9, 10]);
+    expect(rendered[rendered.length - 1]).toMatchObject({ kind: 'overview', main: 'home' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('starts the visual countdown only after the first complete frame lands', async () => {
+    let finishPaint: ((painted: boolean) => void) | undefined;
+    const visual = {
+      paint: (frame: HudVisualFrame) => frame.kind === 'confirmation'
+        ? new Promise<boolean>((resolve) => { finishPaint = resolve; })
+        : Promise.resolve(true),
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    const opening = hud.showConfirmation('Send this message?', 'timing-proof');
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(finishPaint).toBeDefined();
+
+    finishPaint?.(true);
+    expect(await opening).toBe(true);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await hud.dismissConfirmation('timing-proof');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('confirmation opened from a focus page returns to that page', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showList(['instant', 'ask me first'], {
@@ -322,8 +513,9 @@ describe('HudPresenter modal surfaces', () => {
       textObject?: Array<{ containerID?: number; content?: string }>;
     };
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
-      .toBe('LISTENING RESUME · tap apply · left x2 back');
-    expect(restored.textObject?.some((c) => c.containerID === ContainerId.Hint)).toBe(false);
+      .toBe('LISTENING RESUME');
+    expect(restored.textObject?.find((c) => c.containerID === ContainerId.Hint)?.content)
+      .toBe('tap apply · left x2 back');
   });
 
   it('ignores a stale dismissal after a replacement action claims the modal', async () => {
@@ -334,9 +526,16 @@ describe('HudPresenter modal surfaces', () => {
     const staleDismissal = hud.dismissConfirmation('action-a');
     await Promise.all([replacement, staleDismissal]);
 
-    expect(lastOf(mainPaints()).content).toBe('CONFIRM ACTION\nApprove action B?');
+    const active = rebuiltPages[rebuiltPages.length - 1] as {
+      textObject?: Array<{ containerID?: number; content?: string }>;
+    };
+    expect(active.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+      .toBe('CONFIRM ACTION\n\nApprove action B?');
     await hud.dismissConfirmation('action-b');
-    expect(lastOf(mainPaints()).content).toBe('');
+    const home = rebuiltPages[rebuiltPages.length - 1] as {
+      textObject?: Array<{ containerID?: number; content?: string }>;
+    };
+    expect(home.textObject?.find((c) => c.containerID === ContainerId.Main)?.content).toBe('');
   });
 });
 

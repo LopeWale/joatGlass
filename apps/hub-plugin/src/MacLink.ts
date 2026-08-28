@@ -35,6 +35,7 @@ export class MacLink {
   private closed = false;
   private handler?: (msg: DownlinkMessage) => void;
   private stateHandler?: (state: LinkState) => void;
+  private currentState: LinkState = 'connecting';
   private token: string | null;
 
   private readonly maxQueue: number;
@@ -60,6 +61,11 @@ export class MacLink {
     return this.opts.urls[this.urlIndex % this.opts.urls.length] as string;
   }
 
+  /** Latest lifecycle truth, retained even when the HUD is still booting. */
+  get linkState(): LinkState {
+    return this.currentState;
+  }
+
   /** Adopt a pairing token mid-session (pairing.set); used from the next dial on. */
   setToken(token: string): void {
     this.token = token;
@@ -83,6 +89,11 @@ export class MacLink {
     this.stateHandler = handler;
   }
 
+  private reportState(state: LinkState): void {
+    this.currentState = state;
+    this.stateHandler?.(state);
+  }
+
   connect(): void {
     this.closed = false;
     // Abandon any previous socket BEFORE dialing again. A socket we are
@@ -91,7 +102,7 @@ export class MacLink {
     // drops the older, ITS close dials again — and the loop never settles.
     // Observed on real hardware as ~2 reconnects/second, indefinitely.
     this.abandon();
-    this.stateHandler?.(this.attempt === 0 ? 'connecting' : 'reconnecting');
+    this.reportState(this.attempt === 0 ? 'connecting' : 'reconnecting');
     // Token rides the URL: the gateway authorizes BEFORE the WebSocket
     // handshake, and a WebView WebSocket cannot set headers.
     const url = this.token
@@ -114,7 +125,7 @@ export class MacLink {
       this.clearDialTimer();
       this.attempt = 0;
       this.failedWithToken = 0;
-      this.stateHandler?.('connected');
+      this.reportState('connected');
       for (const msg of this.queue.splice(0)) this.rawSend(msg);
     };
     socket.onmessage = (event) => {
@@ -142,10 +153,10 @@ export class MacLink {
         }
       }
       if (!this.closed) {
-        this.stateHandler?.('reconnecting');
+        this.reportState('reconnecting');
         this.scheduleReconnect();
       } else {
-        this.stateHandler?.('closed');
+        this.reportState('closed');
       }
     };
     socket.onerror = () => socket.close();
@@ -165,6 +176,7 @@ export class MacLink {
     this.clearDialTimer();
     this.abandon();
     this.queue = [];
+    this.reportState('closed');
   }
 
   /** Detach and close the current socket so it can no longer drive state. */

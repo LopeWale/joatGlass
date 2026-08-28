@@ -8,8 +8,11 @@ type Page = {
     containerID?: number;
     isEventCapture?: number;
     zOrderIndex?: number;
+    xPosition?: number;
     yPosition?: number;
+    width?: number;
     height?: number;
+    borderWidth?: number;
     textColor?: number;
     content?: string;
   }>;
@@ -17,8 +20,13 @@ type Page = {
     containerID?: number;
     isEventCapture?: number;
     zOrderIndex?: number;
+    xPosition?: number;
     yPosition?: number;
+    width?: number;
     height?: number;
+    borderWidth?: number;
+    borderColor?: number;
+    itemContainer?: { itemCount?: number; itemName?: string[] };
   }>;
   imageObject?: Array<{ containerID?: number; isEventCapture?: number; zOrderIndex?: number }>;
 };
@@ -31,7 +39,10 @@ const builder = new HudPageBuilder();
 const LAYOUTS: ReadonlyArray<[string, Page]> = [
   ['startup', builder.startup() as Page],
   ['default', builder.defaultLayout() as Page],
+  ['sidebar', builder.sidebarLayout(['a', 'b', 'c'], {}) as Page],
   ['list', builder.listLayout(['a', 'b', 'c']) as Page],
+  ['confirmation', builder.confirmationLayout('Send reply?') as Page],
+  ['visual', builder.visualLayout() as Page],
 ];
 
 describe('HudPageBuilder invariants', () => {
@@ -77,7 +88,7 @@ describe('HudPageBuilder invariants', () => {
     expect(list.yPosition + list.height).toBeLessThanOrEqual(CANVAS.height);
   });
 
-  it('list layout keeps status plus compact title/actions around five focus rows', () => {
+  it('list layout gives full-focus content a title and quiet bottom action rail', () => {
     const page = builder.listLayout(['Messages', 'Settings'], {
       title: 'CAPABILITIES',
       hint: 'SWIPE move · TAP open · LEFT x2 back',
@@ -85,12 +96,84 @@ describe('HudPageBuilder invariants', () => {
     const title = page.textObject?.find((c) => c.containerID === ContainerId.Main);
     const list = page.listObject?.[0];
 
-    expect(page.containerTotalNum).toBe(3);
-    expect(title).toMatchObject({ yPosition: 32, height: 48, textColor: 3 });
-    expect(list).toMatchObject({ yPosition: 80, height: 208 });
-    expect(title?.content?.endsWith('SWIPE move · TAP open · LEFT x2 back')).toBe(true);
-    expect(page.textObject?.some((c) => c.containerID === ContainerId.Hint)).toBe(false);
-    expect((list?.yPosition ?? 0) + (list?.height ?? 0)).toBe(CANVAS.height);
+    const hint = page.textObject?.find((c) => c.containerID === ContainerId.Hint);
+
+    expect(page.containerTotalNum).toBe(4);
+    expect(title).toMatchObject({ yPosition: 32, height: 40, textColor: 4, content: 'CAPABILITIES' });
+    expect(list).toMatchObject({ yPosition: 72, height: 184 });
+    expect(hint).toMatchObject({ yPosition: 256, height: 32, textColor: 1 });
+    expect(hint?.content).toBe('SWIPE move · TAP open · LEFT x2 back');
+    expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
+  });
+
+  it('sidebar layout confines navigation to the left and preserves a dim overview on the right', () => {
+    const page = builder.sidebarLayout(
+      ['Messages', 'Notifications', 'Calendar', 'Debate', 'Settings'],
+      {
+        main: 'Next\nDesign review · 4:30',
+        context: 'Last query  nearest coffee shop?',
+        tray: '2 notifications',
+      },
+    ) as Page;
+    const list = page.listObject?.[0];
+    const main = page.textObject?.find((c) => c.containerID === ContainerId.Main);
+    const context = page.textObject?.find((c) => c.containerID === ContainerId.Context);
+
+    expect(page.containerTotalNum).toBe(6);
+    expect(list).toMatchObject({
+      xPosition: 0, yPosition: 32, width: 160, height: 256,
+      borderWidth: 1, borderColor: 15, isEventCapture: 1,
+    });
+    expect(list?.itemContainer).toMatchObject({ itemCount: 5 });
+    expect(main).toMatchObject({
+      xPosition: 164, yPosition: 32, width: 412, height: 128,
+      textColor: 2, content: 'Next\nDesign review · 4:30', isEventCapture: 0,
+    });
+    expect(context).toMatchObject({ xPosition: 164, width: 412, textColor: 1 });
+    expect(containers(page).filter((c) => c.isEventCapture === 1)).toHaveLength(1);
+  });
+
+  it('confirmation is a dedicated full-screen decision surface with no list or button chrome', () => {
+    const page = builder.confirmationLayout('Send reply to Adele?') as Page;
+    const byId = (id: number) => page.textObject?.find((c) => c.containerID === id);
+
+    expect(page.listObject).toBeUndefined();
+    expect(page.containerTotalNum).toBe(5);
+    expect(byId(ContainerId.Main)).toMatchObject({
+      yPosition: 32, height: 144, textColor: 4,
+      content: 'CONFIRM ACTION\n\nSend reply to Adele?',
+    });
+    expect(byId(ContainerId.Context)?.content).toBe('RIGHT / RING / NOD  confirm');
+    expect(byId(ContainerId.Tray)?.content).toBe('LEFT  cancel');
+    expect(byId(ContainerId.Hint)?.content).toBe('8 seconds · timeout cancels');
+  });
+
+  it('visual layout tiles the full canvas behind one transparent gesture layer', () => {
+    const page = builder.visualLayout() as unknown as {
+      containerTotalNum: number;
+      textObject: Array<{
+        xPosition: number; yPosition: number; width: number; height: number;
+        content: string; textColor: number; isEventCapture: number; zOrderIndex: number;
+      }>;
+      imageObject: Array<{
+        containerID: number; xPosition: number; yPosition: number;
+        width: number; height: number; zOrderIndex: number;
+      }>;
+    };
+
+    expect(page.containerTotalNum).toBe(5);
+    expect(page.textObject).toEqual([
+      expect.objectContaining({
+        xPosition: 0, yPosition: 0, width: 576, height: 288,
+        content: '', textColor: 0, isEventCapture: 1, zOrderIndex: 5,
+      }),
+    ]);
+    expect(page.imageObject).toEqual([
+      expect.objectContaining({ xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 1 }),
+      expect.objectContaining({ xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 2 }),
+      expect.objectContaining({ xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 3 }),
+      expect.objectContaining({ xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 4 }),
+    ]);
   });
 
   it('dashboard encodes brightness hierarchy instead of relying on firmware defaults', () => {

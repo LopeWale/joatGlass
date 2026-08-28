@@ -1,7 +1,8 @@
 import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import type { HudPageBuilder } from './HudPageBuilder';
-import { CONFIRM_HINT, ContainerId } from './types';
+import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
+import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
+import { ContainerId } from './types';
 
 const MAX_UPGRADE_CHARS = 2000;
 
@@ -14,7 +15,7 @@ const MAX_UPGRADE_CHARS = 2000;
 const PAINT_INTERVAL_MS = 300;
 
 const DEFAULT_LIST_TITLE = 'JOAT';
-const DEFAULT_LIST_HINT = 'left x2 back';
+const DEFAULT_LIST_HINT = 'left x2 overview';
 const MAX_FOCUS_COPY_CHARS = 46;
 const MAX_CONFIRM_PROMPT_CHARS = 120;
 
@@ -43,7 +44,13 @@ interface HudContentState {
 
 type HudSurface =
   | { kind: 'default' }
-  | { kind: 'list'; items: string[]; options: ResolvedListSurfaceOptions };
+  | { kind: 'sidebar'; items: string[]; selectedIndex: number }
+  | {
+    kind: 'list';
+    items: string[];
+    options: ResolvedListSurfaceOptions;
+    selectedIndex: number;
+  };
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -71,10 +78,14 @@ export class HudPresenter {
   private focusReturn?: HudContentState;
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
+  private confirmationStartedAt?: number;
+  private confirmationTimer?: ReturnType<typeof setInterval>;
+  private micOn = false;
 
   constructor(
     private readonly client: BridgeClient,
     private readonly layouts: HudPageBuilder,
+    private readonly visual?: HudVisualSurface,
   ) {}
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -96,7 +107,7 @@ export class HudPresenter {
     // transcripts, tray updates, and Chrome's dashboard hint are buffered
     // until Back instead of overwriting its header or targeting containers
     // that intentionally do not exist in this layout.
-    if (this.surface.kind === 'list' && containerId !== ContainerId.StatusBar) {
+    if (this.surface.kind !== 'default' && containerId !== ContainerId.StatusBar) {
       this.deferFocusText(text, containerId, textColor);
       return true;
     }
@@ -125,7 +136,7 @@ export class HudPresenter {
       streams.set(containerId, (streams.get(containerId) ?? '') + chunk);
       return true;
     }
-    if (this.surface.kind === 'list' && containerId !== ContainerId.StatusBar) {
+    if (this.surface.kind !== 'default' && containerId !== ContainerId.StatusBar) {
       const deferred = this.ensureFocusReturn();
       deferred.streams.set(
         containerId,
@@ -169,9 +180,17 @@ export class HudPresenter {
     return this.showText(text, ContainerId.StatusBar);
   }
 
+  /** Privacy state is structured; it must never be inferred from a transient
+   * status word such as "connecting" or "paused". */
+  setMicState(open: boolean): void {
+    this.micOn = open;
+  }
+
   async showList(items: string[], options: ListSurfaceOptions = {}): Promise<boolean> {
     const resolved = this.resolveListOptions(options);
-    const surface: HudSurface = { kind: 'list', items: [...items], options: resolved };
+    const surface: HudSurface = {
+      kind: 'list', items: [...items], options: resolved, selectedIndex: 0,
+    };
     if (this.confirmation) {
       if (this.confirmation.surface.kind === 'default' && !this.focusReturn) {
         this.focusReturn = {
@@ -191,17 +210,107 @@ export class HudPresenter {
     return this.renderList(surface);
   }
 
+  async showSidebar(items: string[], selectedIndex = 0): Promise<boolean> {
+    const surface: HudSurface = { kind: 'sidebar', items: [...items], selectedIndex };
+    if (this.confirmation) {
+      this.confirmation.surface = surface;
+      return true;
+    }
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams),
+        brightness: new Map(this.brightness),
+      };
+    }
+    return this.renderSidebar(surface);
+  }
+
+  async setSelection(index: number): Promise<boolean> {
+    if (this.surface.kind === 'default') return false;
+    const maximum = Math.max(0, this.surface.items.length - 1);
+    const selectedIndex = Math.max(0, Math.min(maximum, index));
+    if (this.surface.kind === 'sidebar') {
+      const surface: HudSurface = { ...this.surface, selectedIndex };
+      return this.renderSidebar(surface);
+    }
+    const surface: HudSurface = { ...this.surface, selectedIndex };
+    return this.renderList(surface);
+  }
+
+  moveSelection(delta: number): Promise<boolean> {
+    if (this.surface.kind === 'default') return Promise.resolve(false);
+    return this.setSelection(this.surface.selectedIndex + delta);
+  }
+
+  private async renderSidebar(
+    surface: Extract<HudSurface, { kind: 'sidebar' }>,
+    content: HudContentState = this.focusReturn ?? {
+      streams: this.streams,
+      brightness: this.brightness,
+    },
+  ): Promise<boolean> {
+    const liveStatus = this.captureLiveStatus();
+    const backdrop = this.sidebarBackdrop(content);
+    const ok = this.visual
+      ? true
+      : await this.client.require()
+        .rebuildPageContainer(this.layouts.sidebarLayout(surface.items, backdrop));
+    if (!ok) return false;
+    this.resetAll();
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, backdrop.main ?? '');
+    this.streams.set(ContainerId.Context, backdrop.context ?? '');
+    this.streams.set(ContainerId.Tray, backdrop.tray ?? '');
+    this.streams.set(ContainerId.Hint, backdrop.hint ?? 'left x2 overview');
+    this.brightness.set(
+      ContainerId.Main,
+      content.brightness.get(ContainerId.Main) ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
+    );
+    this.brightness.set(
+      ContainerId.Context,
+      content.brightness.get(ContainerId.Context) ?? DEFAULT_BRIGHTNESS[ContainerId.Context]!,
+    );
+    this.brightness.set(
+      ContainerId.Tray,
+      content.brightness.get(ContainerId.Tray) ?? DEFAULT_BRIGHTNESS[ContainerId.Tray]!,
+    );
+    this.brightness.set(ContainerId.Hint, DEFAULT_BRIGHTNESS[ContainerId.Hint]!);
+    if (this.visual) {
+      if (liveStatus) {
+        this.streams.set(ContainerId.StatusBar, liveStatus.text);
+        if (liveStatus.brightness !== undefined) {
+          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+        }
+      }
+      return this.paintVisual();
+    }
+    return this.restoreLiveStatus(liveStatus);
+  }
+
   private async renderList(surface: Extract<HudSurface, { kind: 'list' }>): Promise<boolean> {
     const liveStatus = this.captureLiveStatus();
-    const ok = await this.client.require()
-      .rebuildPageContainer(this.layouts.listLayout(surface.items, surface.options));
+    const ok = this.visual
+      ? true
+      : await this.client.require()
+        .rebuildPageContainer(this.layouts.listLayout(surface.items, surface.options));
     if (!ok) return false;
     this.resetAll();
     this.surface = surface;
     // Mirror payload content in presenter state so confirmation restoration
     // and a same-layout self-heal retain the named focus page.
     this.streams.set(ContainerId.Main, surface.options.title);
-    this.brightness.set(ContainerId.Main, 3);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, surface.options.hint);
+    this.brightness.set(ContainerId.Hint, 1);
+    if (this.visual) {
+      if (liveStatus) {
+        this.streams.set(ContainerId.StatusBar, liveStatus.text);
+        if (liveStatus.brightness !== undefined) {
+          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+        }
+      }
+      return this.paintVisual();
+    }
     return this.restoreLiveStatus(liveStatus);
   }
 
@@ -217,6 +326,24 @@ export class HudPresenter {
     }
     const deferred = this.focusReturn;
     const liveStatus = this.captureLiveStatus();
+    if (this.visual) {
+      const content = deferred ?? {
+        streams: new Map(this.streams),
+        brightness: new Map(this.brightness),
+      };
+      this.resetAll();
+      this.surface = { kind: 'default' };
+      this.focusReturn = undefined;
+      this.streams = new Map(content.streams);
+      this.brightness = new Map(content.brightness);
+      if (liveStatus) {
+        this.streams.set(ContainerId.StatusBar, liveStatus.text);
+        if (liveStatus.brightness !== undefined) {
+          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+        }
+      }
+      return this.paintVisual();
+    }
     const ok = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
     if (!ok) return false;
     this.resetAll();
@@ -243,19 +370,18 @@ export class HudPresenter {
   }
 
   /**
-   * The one exclusive app-owned HUD overlay.
+   * The one exclusive app-owned decision surface.
    *
-   * It keeps plugin-owned status visible, suppresses competing regions, and
-   * defers ordinary content until the gate settles. If opened from a list,
-   * the default five-region page is installed temporarily; dismissal rebuilds
-   * the exact focus page rather than dropping the wearer at Home.
+   * It keeps plugin-owned status visible, removes competing navigation and
+   * content, and defers ordinary paints until the gate settles. Dismissal
+   * rebuilds the exact prior surface rather than dropping the wearer at Home.
    */
   showConfirmation(prompt: string, id = 'hud:confirmation'): Promise<boolean> {
     const openedHere = this.confirmation === undefined;
     const safePrompt = (prompt.trim() || 'Confirm requested action.')
       .slice(0, MAX_CONFIRM_PROMPT_CHARS);
     if (!this.confirmation) {
-      const content = this.surface.kind === 'list' && this.focusReturn
+      const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn
         : { streams: this.streams, brightness: this.brightness };
       this.confirmation = {
@@ -272,39 +398,77 @@ export class HudPresenter {
       this.confirmation.prompt = safePrompt;
     }
 
+    if (this.visual) this.stopVisualConfirmationCountdown();
+
     return this.enqueueConfirmation(() => this.renderConfirmation(id, openedHere));
   }
 
   private async renderConfirmation(id: string, openedHere = false): Promise<boolean> {
     const current = this.confirmation;
     if (!current || current.id !== id) return true;
-    if (this.surface.kind === 'list') {
-      const liveStatus = this.captureLiveStatus();
-      const ok = await this.client.require()
-        .rebuildPageContainer(this.layouts.defaultLayout());
-      if (this.confirmation?.id !== id) return true;
-      if (!ok) {
-        if (openedHere) this.confirmation = undefined;
-        return false;
-      }
+    const liveStatus = this.captureLiveStatus();
+    if (this.visual) {
       this.resetAll();
-      this.surface = { kind: 'default' };
-      if (!await this.restoreLiveStatus(liveStatus)) return false;
+      this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
+      this.streams.set(ContainerId.Context, 'RIGHT / RING / NOD  confirm');
+      this.streams.set(ContainerId.Tray, 'LEFT  cancel');
+      this.streams.set(ContainerId.Hint, '8 seconds · timeout cancels');
+      if (liveStatus) {
+        this.streams.set(ContainerId.StatusBar, liveStatus.text);
+        if (liveStatus.brightness !== undefined) {
+          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+        }
+      }
+      const painted = await this.paintVisual();
+      if (painted && this.confirmation?.id === id) {
+        // Match the IMU/tap gate: its eight seconds begin only after this
+        // promise resolves, so the visible countdown begins after the first
+        // complete four-tile decision frame as well.
+        this.startVisualConfirmationCountdown(id);
+      }
+      if (!painted && openedHere && this.confirmation?.id === id) {
+        // A failed first paint must not leave an invisible decision gate owning
+        // every later content update. Restore the logical surface snapshot so
+        // the next healthy frame can recover, while still returning false so
+        // the IMU/tap gate never activates.
+        this.confirmation = undefined;
+        this.stopVisualConfirmationCountdown();
+        this.surface = this.cloneSurface(current.surface);
+        this.streams = new Map(current.streams);
+        this.brightness = new Map(current.brightness);
+        // One failed tile can leave a torn confirmation visible even though
+        // the logical gate has rolled back. Actively repaint the complete
+        // prior frame before returning failure to the input gate.
+        if (liveStatus) {
+          this.streams.set(ContainerId.StatusBar, liveStatus.text);
+          if (liveStatus.brightness !== undefined) {
+            this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+          }
+        }
+        await this.paintVisual();
+      }
+      return painted;
     }
-
-    // The bridge is a single BLE command lane. Sequential paints avoid
-    // interleaved upgrades and finish with the action hint, so the decision
-    // never advertises controls before its prompt exists.
-    let ok = await this.replaceText(
-      `CONFIRM ACTION\n${current.prompt}`, ContainerId.Main, 4,
-    );
+    const ok = await this.client.require()
+      .rebuildPageContainer(this.layouts.confirmationLayout(current.prompt));
     if (this.confirmation?.id !== id) return true;
-    ok = (await this.replaceText('', ContainerId.Context, 0)) && ok;
-    if (this.confirmation?.id !== id) return true;
-    ok = (await this.replaceText('', ContainerId.Tray, 0)) && ok;
-    if (this.confirmation?.id !== id) return true;
-    ok = (await this.replaceText(CONFIRM_HINT, ContainerId.Hint, 4)) && ok;
-    return ok;
+    if (!ok) {
+      if (openedHere) {
+        this.confirmation = undefined;
+        this.stopVisualConfirmationCountdown();
+      }
+      return false;
+    }
+    this.resetAll();
+    this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
+    this.streams.set(ContainerId.Context, 'RIGHT / RING / NOD  confirm');
+    this.streams.set(ContainerId.Tray, 'LEFT  cancel');
+    this.streams.set(ContainerId.Hint, '8 seconds · timeout cancels');
+    this.brightness.set(ContainerId.Main, 4);
+    this.brightness.set(ContainerId.Context, 3);
+    this.brightness.set(ContainerId.Tray, 3);
+    this.brightness.set(ContainerId.Hint, 1);
+    return this.restoreLiveStatus(liveStatus);
   }
 
   dismissConfirmation(id?: string): Promise<boolean> {
@@ -319,6 +483,7 @@ export class HudPresenter {
     // Clear this synchronously before any awaited paint. A replacement
     // confirmation may be queued by a callback in the same event turn.
     this.confirmation = undefined;
+    this.stopVisualConfirmationCountdown();
 
     if (prior.surface.kind === 'list') {
       this.focusReturn = {
@@ -329,18 +494,44 @@ export class HudPresenter {
       return this.repaintReplacementConfirmation(restored);
     }
 
+    if (prior.surface.kind === 'sidebar') {
+      this.focusReturn = {
+        streams: new Map(prior.streams),
+        brightness: new Map(prior.brightness),
+      };
+      const restored = await this.renderSidebar(prior.surface, prior);
+      return this.repaintReplacementConfirmation(restored);
+    }
+
+    const liveStatus = this.captureLiveStatus();
+    if (this.visual) {
+      this.resetAll();
+      this.surface = { kind: 'default' };
+      this.streams = new Map(prior.streams);
+      this.brightness = new Map(prior.brightness);
+      if (liveStatus) {
+        this.streams.set(ContainerId.StatusBar, liveStatus.text);
+        if (liveStatus.brightness !== undefined) {
+          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+        }
+      }
+      return this.repaintReplacementConfirmation(await this.paintVisual());
+    }
+    const rebuilt = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+    if (!rebuilt) return false;
+    this.resetAll();
     this.surface = { kind: 'default' };
     for (const id of this.pendingPaint.keys()) this.cancelPending(id);
 
     // Status can keep changing while the gate is open. Preserve that live
     // plugin-owned line rather than restoring a stale snapshot.
-    const liveStatus = this.streams.get(ContainerId.StatusBar);
-    const liveStatusBrightness = this.brightness.get(ContainerId.StatusBar);
     this.streams = new Map(prior.streams);
     this.brightness = new Map(prior.brightness);
-    if (liveStatus !== undefined) this.streams.set(ContainerId.StatusBar, liveStatus);
-    if (liveStatusBrightness !== undefined) {
-      this.brightness.set(ContainerId.StatusBar, liveStatusBrightness);
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) {
+        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+      }
     }
 
     let ok = true;
@@ -379,13 +570,21 @@ export class HudPresenter {
     if (this.healing) return false; // one attempt; never recurse
     this.healing = true;
     try {
-      const layout = this.surface.kind === 'list'
-        ? this.layouts.listLayout(this.surface.items, this.surface.options)
-        : this.layouts.defaultLayout();
+      const layout = this.visual
+        ? this.layouts.visualLayout()
+        : this.confirmation
+        ? this.layouts.confirmationLayout(this.confirmation.prompt)
+        : this.surface.kind === 'list'
+          ? this.layouts.listLayout(this.surface.items, this.surface.options)
+          : this.surface.kind === 'sidebar'
+            ? this.layouts.sidebarLayout(this.surface.items, this.sidebarBackdrop(
+              this.focusReturn ?? { streams: this.streams, brightness: this.brightness },
+            ))
+            : this.layouts.defaultLayout();
       const rebuilt = await this.client.require().rebuildPageContainer(layout);
       if (!rebuilt) return false;
       console.warn('[HudPresenter] page was missing — rebuilt and repainting');
-      return await this.paint(containerId);
+      return this.visual ? await this.paintVisual() : await this.paint(containerId);
     } catch {
       return false;
     } finally {
@@ -394,6 +593,7 @@ export class HudPresenter {
   }
 
   private async paint(containerId: number): Promise<boolean> {
+    if (this.visual) return this.paintVisual();
     const full = this.streams.get(containerId) ?? '';
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
     // being read; the opening lines are already consumed.
@@ -485,12 +685,105 @@ export class HudPresenter {
     };
   }
 
+  private sidebarBackdrop(content: HudContentState): SidebarBackdrop {
+    return {
+      main: content.streams.get(ContainerId.Main),
+      context: content.streams.get(ContainerId.Context),
+      tray: content.streams.get(ContainerId.Tray),
+      hint: 'left x2 overview',
+    };
+  }
+
+  private visualFrame(): HudVisualFrame {
+    const status = this.streams.get(ContainerId.StatusBar) ?? '';
+    if (this.confirmation) {
+      const elapsed = this.confirmationStartedAt === undefined
+        ? 0
+        : Math.floor((Date.now() - this.confirmationStartedAt) / 1000);
+      return {
+        kind: 'confirmation',
+        status,
+        micOn: this.micOn,
+        prompt: this.confirmation.prompt,
+        secondsRemaining: Math.max(0, 8 - elapsed),
+      };
+    }
+    if (this.surface.kind === 'sidebar') {
+      return {
+        kind: 'sidebar',
+        status,
+        micOn: this.micOn,
+        mainBrightness: this.brightness.get(ContainerId.Main)
+          ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
+        items: [...this.surface.items],
+        selectedIndex: this.surface.selectedIndex,
+        main: this.streams.get(ContainerId.Main) ?? '',
+        context: this.streams.get(ContainerId.Context) ?? '',
+        tray: this.streams.get(ContainerId.Tray) ?? '',
+        hint: this.streams.get(ContainerId.Hint) ?? '',
+      };
+    }
+    if (this.surface.kind === 'list') {
+      return {
+        kind: 'list',
+        status,
+        micOn: this.micOn,
+        title: this.surface.options.title,
+        items: [...this.surface.items],
+        selectedIndex: this.surface.selectedIndex,
+        hint: this.surface.options.hint,
+      };
+    }
+    return {
+      kind: 'overview',
+      status,
+      micOn: this.micOn,
+      mainBrightness: this.brightness.get(ContainerId.Main)
+        ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
+      main: this.streams.get(ContainerId.Main) ?? '',
+      context: this.streams.get(ContainerId.Context) ?? '',
+      tray: this.streams.get(ContainerId.Tray) ?? '',
+      hint: this.streams.get(ContainerId.Hint) ?? '',
+    };
+  }
+
+  private async paintVisual(): Promise<boolean> {
+    if (!this.visual) return false;
+    const ok = await this.visual.paint(this.visualFrame());
+    if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
+    return ok;
+  }
+
+  private startVisualConfirmationCountdown(id: string): void {
+    this.stopVisualConfirmationCountdown();
+    this.confirmationStartedAt = Date.now();
+    this.confirmationTimer = setInterval(() => {
+      if (this.confirmation?.id !== id) {
+        this.stopVisualConfirmationCountdown();
+        return;
+      }
+      void this.paintVisual();
+    }, 1000);
+  }
+
+  private stopVisualConfirmationCountdown(): void {
+    if (this.confirmationTimer !== undefined) clearInterval(this.confirmationTimer);
+    this.confirmationTimer = undefined;
+    this.confirmationStartedAt = undefined;
+  }
+
   private cloneSurface(surface: HudSurface): HudSurface {
     if (surface.kind === 'default') return { kind: 'default' };
+    if (surface.kind === 'sidebar') {
+      return {
+        kind: 'sidebar', items: [...surface.items], selectedIndex: surface.selectedIndex,
+      };
+    }
     return {
       kind: 'list',
       items: [...surface.items],
       options: { ...surface.options },
+      selectedIndex: surface.selectedIndex,
     };
   }
 

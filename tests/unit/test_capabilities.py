@@ -8,6 +8,7 @@ this router is the half that draws each view.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from joat.channels.cards import CardLog
 from joat.core.protocol import ContainerId, HudList, HudText, InputEvent
@@ -52,14 +53,15 @@ def make_router(tmp_path, rows=None, cards=None):  # type: ignore[no-untyped-def
 
 class TestCapabilityViews:
     async def test_messages_view_lists_recent_conversations(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        now = time.time()
         router, transport, _ = make_router(
-            tmp_path, rows=[("Dele", "On my way", 0.0), ("Adaeze", "Call me", 0.0)])
+            tmp_path, rows=[("Dele", "On my way", now), ("Adaeze", "Call me", now)])
         await router.open("Messages")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert lists and lists[0].to_wire()["items"] == [
-            "Dele · On my way", "Adaeze · Call me"]
+            "[now] Dele · On my way", "[now] Adaeze · Call me"]
         assert lists[0].title == "MESSAGES"
-        assert lists[0].hint == "left x2 back"
+        assert lists[0].hint == "left x2 overview"
 
     async def test_messages_without_access_states_the_gap(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, rows=None)
@@ -67,11 +69,13 @@ class TestCapabilityViews:
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert any("Full Disk Access" in item for item in lists[0].items)
         assert lists[0].title == "MESSAGES · SETUP"
+        # The focus title owns capability state. A separate status message can
+        # arrive after Back and stale Home for twelve seconds even when the
+        # plugin correctly rejects the delayed list response.
         statuses = [m for m in transport.sent
                     if isinstance(m, HudText)
                     and m.container_id is ContainerId.STATUS_BAR]
-        assert [m.text for m in statuses] == ["JOAT · messages setup"]
-        assert transport.sent.index(statuses[0]) < transport.sent.index(lists[0])
+        assert statuses == []
 
     async def test_notifications_view_lists_recent_cards(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, cards=["!! Adaeze · Messages\nCall me now"])

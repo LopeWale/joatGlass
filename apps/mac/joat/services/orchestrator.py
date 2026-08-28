@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+from collections.abc import Awaitable, Callable
 import re
 
 from ..audio.vad import RmsVad
@@ -45,10 +46,12 @@ class VoiceOrchestrator:
         sessions: SessionManager | None = None,
         wake_words: tuple[str, ...] | None = None,
         status: object | None = None,
+        commands: Callable[[str], Awaitable[str | None]] | None = None,
         fuzzy_wake: tuple[str, ...] = ("joat",),
         fuzzy_threshold: float = 0.72,
     ) -> None:
         self._transport = transport
+        self._commands = commands
         self._hud = HudWriter(transport)
         self._sessions = sessions
         self._status = status
@@ -155,6 +158,17 @@ class VoiceOrchestrator:
             # Trigger phrases ("debate <topic>") now see only ADDRESSED text.
             if self._sessions is not None and self._sessions.handle_transcript(query):
                 return
+            # Settings the wearer can change by speaking ("use sonnet for the
+            # critic"). Handled BEFORE the reply engine because a config
+            # change is a deterministic action, not something to ask a 3B
+            # model to interpret — and because the LLM would otherwise
+            # cheerfully claim to have switched a model it cannot touch.
+            if self._commands is not None:
+                answer = await self._commands(query)
+                if answer is not None:
+                    await self._hud.context(f"you  {query}")
+                    await self._hud.show(answer)
+                    return
             # The wearer's words go to their OWN region, so the reply no
             # longer erases the proof they were heard (HUD_DASHBOARD.md).
             await self._hud.context(f"you  {query}")

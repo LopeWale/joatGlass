@@ -6,18 +6,19 @@ colors:
   primary: "#00FF00"
 typography:
   mono:
-    fontFamily: "Even G2 firmware text renderer"
+    fontFamily: "SF Mono, SFMono-Regular, Menlo, monospace"
 spacing:
-  status-height: "32px"
-  focus-title-height: "48px"
-  dashboard-hint-height: "32px"
+  status-spine: "36px"
+  sidebar-width: "160px"
+  shell-radius: "20px"
 components:
   dashboard: { }
+  sidebar: { }
   focus-page: { }
   confirmation: { }
 omitted:
-  - section: rounded
-    reason: "The firmware text and list containers own geometry; rounded decoration has no evidenced optical benefit."
+  - section: color-semantics
+    reason: "The G2 emits one green channel; hierarchy must survive in the Gray4 protocol values alone."
 ---
 
 # JOAT G2 HUD Design System
@@ -42,43 +43,59 @@ chrome, and no visual element that asks the wearer to study the glass.
 - **Usage scene:** transparent 576×288 display, often while walking, controlled
   by temple/ring gestures and voice. Attention and optical contrast are scarce.
 - **Register:** instrument-like product UI, not a branded web dashboard.
-- **Memorable signature:** exactly one brightness-4 focal region in a decision
+- **Memorable signature:** exactly one full-intensity focal region in a decision
   state; everything else recedes.
-- **Restraint:** whitespace, truthful verbs, and stable regions win over borders,
-  ornament, animation, or dense telemetry.
+- **Restraint:** whitespace, truthful verbs, and stable regions win over
+  ornament, animation, or dense telemetry. The navigation rail is the one
+  intentional border because it clarifies foreground from dimmed context.
 - **Anti-references:** floating browser dialogs, glassmorphism, card grids,
   decorative icons, and gesture hints for actions the runtime does not implement.
 - **Token ownership/runtime mapping:** this file mirrors the canonical runtime
-  geometry in `apps/hub-plugin/src/HudPageBuilder.ts` and firmware brightness
-  values passed by `apps/hub-plugin/src/HudPresenter.ts`. It does not generate
-  SDK containers. Drift is gated by `HudPageBuilder.test.ts`, presenter behavior
-  tests, the Even Hub simulator, and the premium design audit.
+  geometry in `apps/hub-plugin/src/HudPageBuilder.ts` and the pixels authored by
+  `apps/hub-plugin/src/HudCanvasRenderer.ts`. Drift is gated by builder,
+  presenter, renderer/surface tests, the official Even Hub simulator, and the
+  retained comparison in `design-qa.md`.
 
 ## Colors
 
 The device emits one green channel. `#00FF00` names that physical primary, not
-an authored brand choice. Meaning must never depend on hue. Hierarchy uses the
-firmware's brightness scale: 4 focal, 3 supporting content, 2 persistent chrome,
-1 quiet chrome, and 0 deliberately suppressed content. The background is the
-real world through the optical display, so there is no owned opaque surface.
+an authored brand choice. Meaning never depends on hue. The canvas authors
+8-bit antialiased values—238 focal, 170 support, 102 chrome, 68 quiet, and 51
+hairlines—then quantizes every pixel to the SDK's unpacked Gray4 range 0...15
+before upload (normally 14, 10, 6, 4, and 3). Mac `textColor` levels 0...4 map
+onto that authored scale, so a routine card stays visibly quieter than an
+urgent one. Passing the 8-bit values directly is invalid and clips most of the
+hierarchy to full green. Black pixels are transparent on glass; the black
+simulator composite is a legibility aid, not an owned backdrop.
 
 ## Typography
 
-The G2 firmware owns the typeface, metrics, wrapping, and rasterization. JOAT
-uses sentence case for content and compact uppercase labels for focus-page and
-confirmation titles. Copy is written for a 46-character working line, but that
-number remains an empirical project assumption until measured on physical G2
-hardware. ASCII words carry meaning; optional punctuation is decorative only.
+JOAT rasterizes an SF Mono-first system stack into the image surface. Sentence
+case carries content; compact uppercase labels identify sections and modes.
+The renderer measures text before it can cross a visual boundary. Streaming
+replies show the newest two wrapped lines; confirmation prompts wrap every
+allowed character across as many as three fitted lines rather than hiding the
+decisive suffix. Copy stays short because 576×288 is an attention budget, not a
+miniature web page. Real Phosphor regular icons supplement labels but never
+replace them.
 
 ## Layout
 
-The canvas is fixed at 576×288. The dashboard keeps five horizontal regions:
-Status 32px, Main 128px, Context 64px, Tray 32px, Hint 32px. A focus page uses
-Status 32px, Title/Actions 48px, and List 208px. Exactly one container captures
-events: Main on the dashboard and List on a focus page. The dashboard-only Hint
-paint and all Mac-owned dashboard content paints are suspended while a focus
-page is active, so intentionally absent Context, Tray, and Hint containers can
-never trigger a layout repair or overwrite the focus header.
+The canvas is fixed at 576×288. Four 288×144 Gray4 image containers tile into
+one continuous authored frame. A fifth, empty brightness-zero text container
+sits above them as the sole event-capture owner. This is the SDK-compatible
+way to get custom layout and keep touch/ring events: image containers cannot
+capture input and the SDK permits no image larger than 288×144.
+
+Every state shares a 20px rounded shell and a 36px status spine with a centered
+notch. Overview is sparse and icon-led. A left-temple double-click opens the
+transient 160px Sidebar while the current Overview stays visible at 24% intensity
+to preserve place. Selecting a row removes the rail and gives the destination
+the full frame. Presenter updates are serialized across all four image tiles,
+and pending frames coalesce to the newest complete state so token streams and
+countdowns cannot build a stale BLE backlog. A failed partial frame triggers
+one bounded page rebuild; a failed first Confirmation then actively restores
+the prior four tiles before the input gate stays closed.
 
 Content never relies on pixel-perfect right alignment. Space is attention, not
 unused capacity. A mode that needs more than its visible line budget becomes a
@@ -87,34 +104,45 @@ overflow a title or action strip.
 
 ## Elevation & Depth
 
-There is no shadow, blur, backdrop, or z-index theater on the optical HUD.
-Hierarchy is brightness plus exclusive attention. Focus pages replace the
-dashboard layout. Confirmation is the only app-owned overlay state: it preserves
-the status line, suppresses competing Context and Tray content, and raises the
-prompt and action hint to brightness 4.
+There is no shadow, blur, or simulated glass on the optical HUD. Hierarchy is
+intensity plus progressive disclosure. The Sidebar is the only split surface:
+its selected row uses a bright three-pixel leading edge over a black rail and a
+dimmed, still-recognizable Overview. Full-focus pages replace that split.
+Confirmation preserves the status spine, removes competing content, and gives
+one bright question the wearer's full attention.
 
 ## Shapes
 
-Firmware selection borders identify the active list row. JOAT adds no decorative
-containers or rounded rectangles until physical-device evidence proves they aid
-legibility. Region edges are established through whitespace and fixed geometry.
+One continuous 20px rounded rule makes all four image tiles read as one HUD.
+Rows use only the minimum structure needed for scanning: a selected outline in
+full-focus lists, light separators between inactive rows, and a single vertical
+divider at the Sidebar boundary. There are no floating modal cards.
 
 ## Components
 
 ### Foundational visual states
 
-- **Rest:** Main is brightest; Context supports; Tray and Hint recede.
-- **Focused list:** the compact Title/Actions header is brightness 3 and rows
-  use firmware selection. Combining those two lines preserves room for all five
-  core capability rows without a required scroll.
-- **Confirmation:** prompt and action Hint are brightness 4; Context and Tray
-  are blank at brightness 0; ordinary content updates are deferred. The input
-  gate consumes gestures while rendering but cannot approve until every modal
-  region has painted successfully.
+- **Overview:** Main is brightest; Context supports; Tray and Hint recede. It is
+  the only resting state and never carries permanent navigation chrome.
+- **Transient Sidebar:** appears only after a left-temple double-click. Its five
+  capability rows occupy the left 160px while the current Overview remains
+  visible and dimmed at right. Selecting a row removes the Sidebar immediately.
+- **Full-focus page:** a bright destination title, avatar/initial markers,
+  primary and secondary row text, timestamps, and a quiet action hint use the
+  whole canvas after selection.
+- **Confirmation:** the question is focal intensity; accept is primary, cancel
+  is supporting, and the countdown meter recedes. Ordinary content
+  updates are deferred. The input gate consumes gestures while rendering but
+  cannot approve until the dedicated surface exists successfully.
 - **Timeout/cancel:** fails closed, restores the prior surface, and reports the
   settled state through the plugin-owned status line.
 - **Offline/empty/error:** receives a named focus page with recovery or exit
-  guidance. It is never squeezed into the 48px title while stale rows remain.
+  guidance. It never shares the frame with stale rows.
+
+The microphone indicator is driven by structured audio state, never parsed
+from transient status copy. Capability data is accepted only when its title
+matches the currently requested destination; Back or a newer selection makes
+an older response inert.
 
 ### Buttons and actions
 
@@ -125,33 +153,39 @@ without action times out as refusal.
 
 ### Navigation and data display
 
-Focus-page grammar is `TITLE + ACTION / selectable or readable rows`.
-Capability and Settings rows are actionable. Message and notification lists are
-browse-only until a real detail handler exists, so their footer must not promise
-"open". Left-temple double-tap is Back from every app-owned focus page.
+Navigation grammar is `Overview -> Sidebar -> full-focus destination ->
+Overview`. Only a left-temple double-click opens or closes app navigation; a
+right-temple double-click remains the glasses OS exit confirmation. Capability
+and Settings rows are actionable. Message and notification lists are browse-only
+until a real detail handler exists, so their footer must not promise "open".
 
 ### Forms and overlays
 
-The HUD has no data-entry form. Its two modal families are:
+The HUD has no data-entry form. Its three temporary surface families are:
 
 | Surface | Layout owner | Input owner | Exit and restoration |
 |---|---|---|---|
-| Focus page | Plugin layout; Mac or plugin rows | List selection plus left-double Back | Rebuild dashboard and replay the presenter's buffered, latest regions |
-| Confirmation | Plugin presenter | Right/ring/nod accept; left cancel; timeout refuses | Restore the exact prior dashboard or focus page, including deferred content |
+| Sidebar | Custom image frame with the latest Overview as backdrop | Transparent capture layer; left-double returns to Overview | Selection removes the rail into a full-focus destination |
+| Focus page | Custom image frame; Mac or plugin rows | Transparent capture layer; left-double returns to Overview | Paint Overview and replay the presenter's buffered, latest regions |
+| Confirmation | Plugin presenter | Right/ring/nod confirm; left cancel; timeout refuses | Restore the exact prior Overview, Sidebar, or focus page, including deferred content |
 
 The glasses OS owns the app-exit confirmation. JOAT preserves mode-1 shutdown
 and does not restyle, replace, or pre-empt that platform surface.
 
 ### Iconography
 
-No icon library is available or needed. Short text labels remain mandatory.
-Symbols such as `*` may supplement state but never replace a word or action.
+All interface icons come from `@phosphor-icons/core` regular assets. Calendar,
+messages, notifications, debate, settings, microphone, battery, and directional
+actions use one stroke family and are rasterized with the surrounding frame.
+Short text labels remain mandatory; icons never carry meaning alone.
 
 ### Motion
 
-The firmware owns list movement. JOAT does not animate app-owned regions.
-Content changes use in-place `textContainerUpgrade`; page rebuilds are reserved
-for real layout changes so the display does not flicker.
+JOAT does not animate navigation. Scroll changes move the authored selection
+band in one frame, including a moving three-row window for later results.
+Confirmation repaints its countdown once per second. All four tile uploads are
+serialized because the bridge is a single command lane; queued requests
+coalesce to the newest frame.
 
 ### Content and data visualization
 
@@ -162,9 +196,11 @@ canvas.
 
 ## Do's and Don'ts
 
-- **Do:** keep Status present everywhere and suspend dashboard-only content paints on focus pages.
+- **Do:** keep Status present everywhere and buffer Overview paints behind every temporary surface.
+- **Do:** show the Sidebar only in response to left-temple double-click and remove it after selection.
 - **Do:** make every footer a truthful description of the active gesture map.
 - **Do:** restore the interrupted surface after confirmation settles.
+- **Don't:** leave the Sidebar visible beside destination content.
 - **Don't:** imitate a web modal with a floating bordered card.
 - **Don't:** advertise open, stop, dismiss, or cancel behavior that is not wired.
 - **Don't:** let a Chrome paint rebuild a focus page into a different mode.

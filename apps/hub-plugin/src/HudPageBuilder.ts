@@ -2,12 +2,20 @@ import {
   CreateStartUpPageContainer,
   RebuildPageContainer,
   TextContainerProperty,
+  ImageContainerProperty,
   ListContainerProperty,
   ListItemContainerProperty,
   MenuContainerProperty,
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
 import { CANVAS, ContainerId } from './types';
+
+export interface SidebarBackdrop {
+  main?: string;
+  context?: string;
+  tray?: string;
+  hint?: string;
+}
 
 /**
  * Declares HUD layouts against the 576x288 canvas.
@@ -47,13 +55,14 @@ export class HudPageBuilder {
     isEventCapture: 0 | 1 = 1,
     textColor = 4,
     content = '',
+    geometry: { x?: number; y?: number; width?: number } = {},
   ): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.Main,
       containerName: 'main',
-      xPosition: 0,
-      yPosition: 32,
-      width: CANVAS.width,
+      xPosition: geometry.x ?? 0,
+      yPosition: geometry.y ?? 32,
+      width: geometry.width ?? CANVAS.width,
       height,
       paddingLength: 8,
       borderWidth: 0,
@@ -72,17 +81,18 @@ export class HudPageBuilder {
   private region(
     id: ContainerId, name: string, y: number, height: number,
     z: number, textColor: number, content = '',
+    geometry: { x?: number; width?: number; isEventCapture?: 0 | 1 } = {},
   ): TextContainerProperty {
     return new TextContainerProperty({
       containerID: id,
       containerName: name,
-      xPosition: 0,
+      xPosition: geometry.x ?? 0,
       yPosition: y,
-      width: CANVAS.width,
+      width: geometry.width ?? CANVAS.width,
       height,
       paddingLength: 8,
       borderWidth: 0,
-      isEventCapture: 0,
+      isEventCapture: geometry.isEventCapture ?? 0,
       zOrderIndex: z,
       textColor,
       content,
@@ -151,35 +161,153 @@ export class HudPageBuilder {
   }
 
   /**
-   * Full-canvas focus page: status + named title + rows + truthful actions.
-   *
-   * The focus header carries its action copy because a separate 32px footer
-   * leaves room for only four firmware list rows. HudPresenter buffers every
-   * dashboard-only paint while this layout is active, so missing optional
-   * containers can never be mistaken for page corruption.
+   * Pixel-designed HUD: four maximum-size image tiles form one 576x288 frame.
+   * Images cannot capture events, so one empty brightness-0 text container
+   * spans the canvas above them and preserves sys/text gesture delivery.
+   */
+  private visualObjects(): {
+    textObject: TextContainerProperty[];
+    imageObject: ImageContainerProperty[];
+  } {
+    return {
+      textObject: [new TextContainerProperty({
+        containerID: ContainerId.Main,
+        containerName: 'visual-gesture-layer',
+        xPosition: 0,
+        yPosition: 0,
+        width: CANVAS.width,
+        height: CANVAS.height,
+        paddingLength: 0,
+        borderWidth: 0,
+        isEventCapture: 1,
+        zOrderIndex: 5,
+        textColor: 0,
+        content: '',
+      })],
+      imageObject: [
+        new ImageContainerProperty({
+          containerID: ContainerId.Image,
+          containerName: 'visual-top-left',
+          xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 1,
+        }),
+        new ImageContainerProperty({
+          containerID: ContainerId.VisualTopRight,
+          containerName: 'visual-top-right',
+          xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 2,
+        }),
+        new ImageContainerProperty({
+          containerID: ContainerId.VisualBottomLeft,
+          containerName: 'visual-bottom-left',
+          xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 3,
+        }),
+        new ImageContainerProperty({
+          containerID: ContainerId.VisualBottomRight,
+          containerName: 'visual-bottom-right',
+          xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 4,
+        }),
+      ],
+    };
+  }
+
+  visualStartup(): CreateStartUpPageContainer {
+    return new CreateStartUpPageContainer({
+      containerTotalNum: 5,
+      ...this.visualObjects(),
+      menuObject: this.systemMenu(),
+    });
+  }
+
+  visualLayout(): RebuildPageContainer {
+    return new RebuildPageContainer({
+      containerTotalNum: 5,
+      ...this.visualObjects(),
+      menuObject: this.systemMenu(),
+    });
+  }
+
+  /**
+   * Navigation is progressive disclosure, not the application's resting shell.
+   * Left double-click temporarily gives the left 160px to the firmware list;
+   * the current overview remains visible, dimmed, in the remaining 412px.
+   */
+  sidebarLayout(items: string[], backdrop: SidebarBackdrop = {}): RebuildPageContainer {
+    const sidebarWidth = 160;
+    const contentX = 164;
+    const contentWidth = CANVAS.width - contentX;
+    const capped = items.slice(0, 5).map((s) => s.slice(0, 24));
+    return new RebuildPageContainer({
+      containerTotalNum: 6,
+      menuObject: this.systemMenu(),
+      textObject: [
+        this.statusBar(),
+        this.main(128, 0, 2, backdrop.main ?? '', {
+          x: contentX, width: contentWidth,
+        }),
+        this.region(ContainerId.Context, 'context', 160, 64, 3, 1, backdrop.context ?? '', {
+          x: contentX, width: contentWidth,
+        }),
+        this.region(ContainerId.Tray, 'tray', 224, 32, 4, 1, backdrop.tray ?? '', {
+          x: contentX, width: contentWidth,
+        }),
+        this.region(
+          ContainerId.Hint, 'hint', 256, 32, 5, 1,
+          backdrop.hint ?? 'left x2 overview',
+          { x: contentX, width: contentWidth },
+        ),
+      ],
+      listObject: [
+        new ListContainerProperty({
+          containerID: ContainerId.List,
+          containerName: 'capabilities',
+          xPosition: 0,
+          yPosition: 32,
+          width: sidebarWidth,
+          height: CANVAS.height - 32,
+          paddingLength: 6,
+          borderWidth: 1,
+          borderColor: 15,
+          borderRadius: 0,
+          isEventCapture: 1,
+          zOrderIndex: 6,
+          itemContainer: new ListItemContainerProperty({
+            itemCount: capped.length,
+            itemWidth: 0,
+            isItemSelectBorderEn: 1,
+            itemName: capped,
+          }),
+        }),
+      ],
+    });
+  }
+
+  /**
+   * Full-canvas focus page: status + named title + rows + quiet action rail.
+   * The sidebar has disappeared by this point; content receives the canvas.
    */
   listLayout(
     items: string[],
     chrome: { title?: string; hint?: string } = {},
   ): RebuildPageContainer {
     const capped = items.slice(0, 20).map((s) => s.slice(0, 64));
-    const header = this.focusHeader(chrome.title, chrome.hint);
+    const title = (chrome.title?.trim() || 'JOAT').slice(0, 46);
+    const hint = (chrome.hint?.trim() || 'left x2 overview').slice(0, 46);
     return new RebuildPageContainer({
-      containerTotalNum: 3,
+      containerTotalNum: 4,
       menuObject: this.systemMenu(),
       // Capture moves OFF main and ONTO the list — see main()'s note.
       textObject: [
         this.statusBar(),
-        this.main(48, 0, 3, header),
+        this.main(40, 0, 4, title),
+        this.region(ContainerId.Hint, 'hint', 256, 32, 4, 1, hint),
       ],
       listObject: [
         new ListContainerProperty({
           containerID: ContainerId.List,
           containerName: 'list',
           xPosition: 0,
-          yPosition: 80,
+          yPosition: 72,
           width: CANVAS.width,
-          height: CANVAS.height - 80,
+          height: 184,
           paddingLength: 6,
           // The capturing container for this layout: firmware scrolls the
           // highlight on swipe and reports the pick as `listEvent`.
@@ -196,14 +324,22 @@ export class HudPageBuilder {
     });
   }
 
-  /** Keep the action copy intact; title truncation is safer than hiding Back. */
-  private focusHeader(title = '', hint = ''): string {
-    const action = hint.trim().slice(0, 46);
-    const name = title.trim().slice(0, 46);
-    if (!action) return name;
-    if (!name) return action;
-    const nameBudget = 46 - action.length - 3; // ` · `
-    if (nameBudget <= 0) return action;
-    return `${name.slice(0, nameBudget)} · ${action}`;
+  /** Dedicated decision surface: one bright question, two textual outcomes. */
+  confirmationLayout(prompt: string): RebuildPageContainer {
+    const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
+    return new RebuildPageContainer({
+      containerTotalNum: 5,
+      menuObject: this.systemMenu(),
+      textObject: [
+        this.statusBar(),
+        this.main(144, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`),
+        this.region(
+          ContainerId.Context, 'context', 176, 48, 3, 3,
+          'RIGHT / RING / NOD  confirm',
+        ),
+        this.region(ContainerId.Tray, 'tray', 224, 32, 4, 3, 'LEFT  cancel'),
+        this.region(ContainerId.Hint, 'hint', 256, 32, 5, 1, '8 seconds · timeout cancels'),
+      ],
+    });
   }
 }

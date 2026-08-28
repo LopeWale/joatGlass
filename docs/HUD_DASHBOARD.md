@@ -5,11 +5,30 @@ wearer moves between. Written against the real container model and the
 measured constraints in [HUB_PLUGIN.md](HUB_PLUGIN.md); every claim about
 current behaviour carries a file:line.
 
-STATUS: the dashboard foundation is implemented. This document preserves the
-original architecture and sequencing record; its later speculative card and
-debate interactions are not acceptance claims. The current focus-page and
-confirmation contract is canonical in [DESIGN.md](../DESIGN.md) and enforced by
-the Hub plugin tests plus official Even Hub simulator captures.
+STATUS: the custom visual dashboard is implemented. The current runtime uses
+four 288×144 Gray4 image containers as one authored 576×288 frame and one empty
+brightness-zero text container as the sole gesture-capture layer. The semantic
+Main/Context/Tray streams below remain presenter inputs; their old firmware text
+container diagrams are the architecture record, not the current render path.
+The canonical contract is [DESIGN.md](../DESIGN.md), with visual acceptance in
+[design-qa.md](../design-qa.md) and official Even Hub simulator captures.
+
+### Current visual container map
+
+| id | role | x,y,w,h | z | capture |
+|---|---|---|---|---|
+| 4 | top-left Gray4 tile | 0,0,288,144 | 1 | 0 |
+| 8 | top-right Gray4 tile | 288,0,288,144 | 2 | 0 |
+| 9 | bottom-left Gray4 tile | 0,144,288,144 | 3 | 0 |
+| 10 | bottom-right Gray4 tile | 288,144,288,144 | 4 | 0 |
+| 2 | transparent gesture layer | 0,0,576,288 | 5 | **1** |
+
+`HudCanvasRenderer.ts` paints the rounded shell, status spine, Phosphor icons,
+Sidebar, focus rows, and confirmation. `HudVisualSurface.ts` splits the frame
+and serializes all four uploads on the bridge's single command lane. Pending
+frames coalesce to the newest state, a partial failed decision frame is actively
+rolled back, mic truth is structured, and the Mac's 0...4 urgency level remains
+visible after the authored 8-bit canvas is quantized to Gray4 output.
 
 Three defects in the pre-dashboard single-container HUD motivated this and are worth
 fixing regardless of how much of the design lands:
@@ -34,13 +53,16 @@ Mac said landed in one of them. That baseline had three consequences:
 
 So the dashboard is not "more text on the HUD". It is: **split MAIN into fixed regions, give each region one owner, and let the plugin render its own chrome without the Mac.**
 
-### The grid
+### The original text-container grid
 
 576×288, 4-bit greyscale (`docs/HUB_PLUGIN.md:31`), ~46 chars/line (`cards.py:25`), 32 px/line.
 
 > **Both numbers are project assumptions, not SDK facts.** 46 comes from `cards.py:14-15` ("roughly 46 characters per line at the status font"); 32 px/line is inferred from `HudPageBuilder.ts:26` (a one-line status bar declared 32 px tall). The SDK exposes no font metric. Measure on device before locking: paint `MAIN` with `"0123456789" * 6` and count where it wraps, then with 9 lines of `"X"` and count where it clips.
 
-There are **no divider primitives**. Image containers are min 20×20 (`even_hub_sdk/dist/index.d.ts:447-450`), so a 2 px rule is impossible. Hierarchy comes only from `textColor` (0-4) and whitespace.
+The following diagram explains the presenter streams that fixed content
+clobbering. It is not the current SDK layout. The custom raster surface can draw
+hairlines, dividers, rounded geometry, and measured type while retaining those
+same ownership boundaries.
 
 ### DASH — the resting page
 
@@ -71,9 +93,9 @@ There are **no divider primitives**. Image containers are min 20×20 (`even_hub_
 | 6 | `tray` | 0,224,576,32 | 4 | 0 | 2 | Mac | `_pending_cards` depth (`session.py:47`), `counts` (`status.py:45`) |
 | 7 | `hint` | 0,256,576,32 | 5 | 0 | 1 | plugin | active gesture map; blank at rest |
 
-`containerTotalNum: 5`, 5 text objects — inside the 8-text / 12-total caps (`docs/RULES.md:44`). Ids 3 (LIST) and 4 (IMAGE) stay reserved as in `types.ts:7-12`; one text id and all 4 image slots stay free.
-
-**`isEventCapture: 1` is on `main` (id 2)** — unchanged from `HudPageBuilder.ts:46`, so scroll events keep arriving as `textEvent` on the container that holds the scrollable content, and `RULES.md:43` (exactly one) holds by construction.
+The shipped visual page instead uses the five-object map above. `main` (id 2)
+is empty and invisible but keeps `isEventCapture: 1`, so scroll events arrive as
+`textEvent` and right/ring presses as `sysEvent`; the image tiles stay visual-only.
 
 Four walking-safety choices, deliberately:
 
@@ -84,11 +106,12 @@ Four walking-safety choices, deliberately:
 
 ## 2. The other pages, and the gesture map
 
-Dashboard states reuse the same five containers with different content.
-Selectable and read-only focus states rebuild to a three-container surface:
-Status 32px, compact Title/Actions 48px, and List 208px. Confirmation temporarily
-uses the dashboard geometry, preserves Status, blanks Context and Tray, and
-restores the exact interrupted surface on accept, cancel, or timeout.
+Dashboard states reuse the same five visual containers with different pixels. App
+navigation is progressive disclosure: only a left-temple double-click opens the
+temporary 160px Sidebar, with the current Overview dimmed but visible at right.
+A selection removes the Sidebar into a full-focus frame with structured rows.
+Confirmation paints an exclusive decision frame and restores the exact interrupted
+Overview, Sidebar, or focus page on confirm, cancel, or timeout.
 
 ### REPLY — conversation
 
@@ -156,44 +179,73 @@ Line 1 and line 2 of `Card.render()` (`cards.py:105-114`) become two *containers
 
 `_verify_visibly` currently appends `» VERIFIER` and per-citation verdicts **into the same stream as the argument** (`session.py:272-286`), which makes both unreadable. Moving verdicts to `CONTEXT` and round/agreement to `TRAY` preserves the wearer's stated requirement that verification is visible, while letting the argument stay legible.
 
+### SIDEBAR — transient navigation over Overview
+
+```
++-----------------+----------------------------+  y=0   STATUS  bright2
+|09:47 JOAT ready                              |
++-----------------+----------------------------+  y=32
+|> Messages       |NEXT                        |
+|  Notifications  |Design review · 4:30        |
+|  Calendar       |                            |
+|  Debate         |LAST QUERY                  |
+|  Settings       |Where is the nearest coffee|
+|                 |2 notifications waiting     |
++-----------------+----------------------------+  y=288
+  x=0..160 Sidebar   x=164..576 dim Overview
+  authored pixels   one shared capture layer
+```
+
+The Sidebar is not the app shell and is not a full-width menu. It exists only
+between a left-temple double-click and either a selection or a second
+left-temple double-click. The full-frame transparent layer remains the sole
+event capture; the Overview is retained as spatial context at 24% intensity. Selecting a capability
+removes the rail before its content is requested from the Mac.
+
 ### CONFIRM — the exclusive decision state
 
 ```
-+----------------------------------------------+  y=32  id2 MAIN    bright4
++----------------------------------------------+  status spine
+|09:47 JOAT ready                     bat 86%  |
++----------------------------------------------+
 |CONFIRM ACTION                                |
+|                                              |
 |Send the prepared message to Dele?            |
-+----------------------------------------------+  y=160 id5 CONTEXT bright0  <- blanked
-+----------------------------------------------+  y=224 id6 TRAY    bright0  <- blanked
-+----------------------------------------------+  y=256 id7 HINT    bright4
-|RIGHT/RING/NOD accept · LEFT cancel · 8s     |
++----------------------------------------------+
+|RIGHT / RING / NOD  confirm                   |
++----------------------------------------------+
+|LEFT  cancel                                  |
++----------------------------------------------+
+|8 seconds · timeout cancels                   |
 +----------------------------------------------+  y=288
 ```
 
-`RULES.md:15` makes this the highest-stakes surface on the device. Prompt and
-Hint are the only brightness-4 regions; ordinary content is deferred. Right
-temple, ring, or nod accepts; left cancels; eight seconds without input refuses.
-The gate then restores the interrupted dashboard or focus page.
+`RULES.md:15` makes this the highest-stakes surface on the device. The question
+is the only full-intensity content; outcomes are explicit but visually
+secondary. Ordinary content is deferred. Right temple, ring, or nod confirms;
+left cancels; eight seconds without input refuses. The gate then restores the
+interrupted Overview, Sidebar, or focus page.
 
-### FOCUS PAGE — named list state that rebuilds
+### FULL-FOCUS PAGE — destination after Sidebar selection
 
 ```
-+----------------------------------------------+  y=0   id1 STATUS  bright2  capture0
-|09:47   JOAT menu                    bat 86%|
-+----------------------------------------------+  y=32  id2 MAIN    bright3  capture0  (48px header)
-|CAPABILITIES · tap open · left x2 back      |
-+----------------------------------------------+  y=80  id3 LIST    z3  capture1 <-- EVENT (RULES 21)
-|> Messages                                    |
-|  Notifications                               |
-|  Calendar                                    |
-|  Debate                                      |
-|  Settings                                    |
++----------------------------------------------+  status spine
+|09:47 JOAT ready                     bat 86%  |
++----------------------------------------------+
+|MESSAGES · 3                                  |
++----------------------------------------------+
+|> Adele · Can you send the latest mockups?    |
+|  Marcus · Heading to the lab in 10.          |
+|  Team Ops · Standup notes are ready.         |
++----------------------------------------------+
+|swipe move · left x2 overview                 |
 +----------------------------------------------+  y=288
 ```
 
-Capture **moves to the list** and `main` drops to 0. The action copy lives in
-the compact header because a separate footer leaves room for only four rows in
-the official simulator. Dashboard-only paints are suspended until Back, which
-prevents absent Context/Tray/Hint containers from triggering a false repair.
+The shared transparent layer owns capture; the Sidebar and dimmed Overview are
+gone, so the destination owns the whole canvas. Scroll moves the custom-selected
+row and right/ring click selects it. Overview paints are buffered until return.
+Browse-only pages do not advertise a nonexistent open action.
 
 ### Gesture map — original exploration
 
