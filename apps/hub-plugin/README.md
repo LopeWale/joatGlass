@@ -33,5 +33,5 @@ npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities
 npm run dev                                  # serve the plugin
 evenhub-simulator http://localhost:5190      # desktop simulator (injects the bridge)
 evenhub qr                                   # QR sideload to the phone (auto-detects LAN IP)
-npm run build && evenhub pack app.json dist  # .ehpk for submission (not needed for dev)
+npm run pack                                 # isolated .ehpk production snapshot
 ```

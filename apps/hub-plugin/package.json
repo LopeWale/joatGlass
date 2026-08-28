@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "pack": "npm run build && evenhub pack app.json dist -o joat.ehpk --sdk-ver 0.0.14"
+    "pack": "zsh scripts/pack.sh"
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.14",

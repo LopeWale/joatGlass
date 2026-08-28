@@ -30,12 +30,13 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import textwrap
 import time
 import urllib.error
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -54,8 +55,11 @@ from joat.services.productivity_actions import ProductivityActionController
 
 log = logging.getLogger("joat.simulator_productivity_native_acceptance")
 
-RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v1"
+RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v2"
 TITLE_PREFIX = "JOAT ACCEPTANCE"
+EVENT_TITLE_SUFFIX = "EVENT"
+REMINDER_TITLE_SUFFIX = "REMINDER"
+ACCEPTANCE_BRIDGE_NAME = "acceptance-native-bridge.sock"
 DEFAULT_BRIDGE = Path.home() / "Library/Application Support/JOAT/native-bridge.sock"
 DEFAULT_NOTIFICATION_FEED = (
     Path.home() / "Library/Application Support/JOAT/notifications.jsonl"
@@ -99,6 +103,46 @@ class AcceptanceSchedule:
 
 
 @dataclass(frozen=True, slots=True)
+class AcceptanceTitles:
+    event: str
+    reminder: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeItemIdentity:
+    calendar_item_identifier: str
+    calendar_item_external_identifier: str | None
+    calendar_identifier: str
+
+
+@dataclass(frozen=True, slots=True)
+class EngineStubSpec:
+    repo: Path
+    bridge_path: Path
+    authorized_client_pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationPreflightEvidence:
+    operator_assertion: str
+    diagnostic_focus_active: bool | None
+    focus_diagnostic_authoritative: bool
+    expect_banner: bool
+    expect_focus_suppression: bool
+    mutated_settings: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AlarmDeliveryClassification:
+    category: str
+    confidence: str
+    alarm_fired: bool
+    notification_submitted: bool
+    focus_suppressed: bool
+    retained_raw_log: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AlarmDeliveryEvidence:
     observed_at_unix_ms: int
     source_digest: str
@@ -108,9 +152,9 @@ class AlarmDeliveryEvidence:
 @dataclass(frozen=True, slots=True)
 class CleanupOutcome:
     calendar_removed_count: int
-    calendar_target_removed_count: int
-    calendar_other_removed_count: int
     reminder_removed_count: int
+    scheduled_reminder_projection_count_before: int
+    scheduled_reminder_projection_count_after: int
     errors: tuple[str, ...]
 
 
@@ -191,23 +235,124 @@ def _read_repo_preference(bundle_id: str) -> DefaultsPreference:
     )
 
 
-def create_engine_stub_repo(parent: Path) -> Path:
-    """Create an inert child executable accepted by EngineController.isRepo."""
+def create_engine_stub_repo(
+    parent: Path,
+    *,
+    authorized_client_pid: int,
+    proxy_root: Path | None = None,
+) -> EngineStubSpec:
+    """Create a PID-bound relay owned by the exact app-authorized engine child."""
 
+    if authorized_client_pid <= 0:
+        raise AcceptanceSafetyError("acceptance bridge client PID must be positive")
     repo = parent / "native-bridge-only-repo"
+    bridge_path = (proxy_root or repo) / ACCEPTANCE_BRIDGE_NAME
     executable = repo / ".venv/bin/python"
     executable.parent.mkdir(parents=True, mode=0o700)
+    source = f"""\
+#!/usr/bin/python3
+import asyncio
+import os
+import signal
+import socket
+import stat
+import struct
+
+SOL_LOCAL = 0
+LOCAL_PEERPID = 0x002
+AUTHORIZED_CLIENT_PID = {authorized_client_pid}
+PROXY_PATH = {str(bridge_path)!r}
+
+
+def peer_pid(writer):
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return None
+    raw = sock.getsockopt(SOL_LOCAL, LOCAL_PEERPID, struct.calcsize("i"))
+    return struct.unpack("i", raw)[0]
+
+
+async def relay(reader, writer):
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (BrokenPipeError, ConnectionError):
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (BrokenPipeError, ConnectionError):
+            pass
+
+
+async def handle(client_reader, client_writer):
+    try:
+        if peer_pid(client_writer) != AUTHORIZED_CLIENT_PID:
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
+        native_path = os.environ.get("JOAT_NATIVE_BRIDGE")
+        if not native_path:
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
+        native_reader, native_writer = await asyncio.open_unix_connection(native_path)
+        await asyncio.gather(
+            relay(client_reader, native_writer),
+            relay(native_reader, client_writer),
+        )
+    except (OSError, ConnectionError):
+        client_writer.close()
+        try:
+            await client_writer.wait_closed()
+        except (BrokenPipeError, ConnectionError):
+            pass
+
+
+async def main():
+    try:
+        info = os.lstat(PROXY_PATH)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
+            raise SystemExit(65)
+        os.unlink(PROXY_PATH)
+    server = await asyncio.start_unix_server(handle, path=PROXY_PATH)
+    os.chmod(PROXY_PATH, 0o600)
+    stopped = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stopped.set)
+    try:
+        async with server:
+            await stopped.wait()
+    finally:
+        server.close()
+        await server.wait_closed()
+        try:
+            os.unlink(PROXY_PATH)
+        except FileNotFoundError:
+            pass
+
+
+asyncio.run(main())
+"""
     executable.write_text(
-        "#!/usr/bin/python3\n"
-        "import signal\n"
-        "import sys\n"
-        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
-        "signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n"
-        "signal.pause()\n",
+        textwrap.dedent(source),
         encoding="utf-8",
     )
     executable.chmod(0o700)
-    return repo
+    return EngineStubSpec(
+        repo=repo,
+        bridge_path=bridge_path,
+        authorized_client_pid=authorized_client_pid,
+    )
 
 
 def _network_whitelist(manifest_path: Path) -> list[str]:
@@ -247,6 +392,19 @@ def _port_is_listening(port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _owned_private_socket(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        not path.is_symlink()
+        and stat.S_ISSOCK(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and info.st_mode & 0o077 == 0
+    )
 
 
 def _app_process_is_running(app_path: Path) -> bool:
@@ -326,14 +484,16 @@ class MacAppNativeBridgeLease:
         bundle_id: str,
         bridge_path: Path,
         gateway_port: int,
-        stub_repo: Path,
+        stub: EngineStubSpec,
         recovery_guard: Path,
     ) -> None:
         self.app_path = app_path
         self.bundle_id = bundle_id
         self.bridge_path = bridge_path
         self.gateway_port = gateway_port
-        self.stub_repo = stub_repo
+        self.stub_repo = stub.repo
+        self.acceptance_bridge_path = stub.bridge_path
+        self.authorized_client_pid = stub.authorized_client_pid
         self.recovery_guard = recovery_guard
         self.preference: DefaultsPreference | None = None
         self.preference_changed = False
@@ -547,6 +707,11 @@ class MacAppNativeBridgeLease:
         )
         self.preference_changed = True
         await self._open_app(expected_port=None)
+        await _wait_until(
+            lambda: _owned_private_socket(self.acceptance_bridge_path),
+            timeout_s=20,
+            description="the PID-bound acceptance bridge relay",
+        )
         if _port_is_listening(self.gateway_port):
             raise AcceptanceBlocked(
                 "production_gateway_port_busy",
@@ -597,10 +762,156 @@ def plan_acceptance_schedule(
     )
 
 
-def validate_acceptance_title(title: str, run_id: str) -> None:
-    expected = f"{TITLE_PREFIX} {run_id}"
-    if title != expected or len(run_id) != 8 or any(c not in "0123456789abcdef" for c in run_id):
+def build_acceptance_titles(run_id: str) -> AcceptanceTitles:
+    if len(run_id) != 8 or any(c not in "0123456789abcdef" for c in run_id):
+        raise AcceptanceSafetyError("acceptance run identity must be eight lowercase hex characters")
+    return AcceptanceTitles(
+        event=f"{TITLE_PREFIX} {run_id} {EVENT_TITLE_SUFFIX}",
+        reminder=f"{TITLE_PREFIX} {run_id} {REMINDER_TITLE_SUFFIX}",
+    )
+
+
+def validate_acceptance_title(title: str, run_id: str, *, kind: str) -> None:
+    titles = build_acceptance_titles(run_id)
+    expected = titles.event if kind == "event" else titles.reminder if kind == "reminder" else None
+    if expected is None or title != expected:
         raise AcceptanceSafetyError("cleanup requires the exact randomized acceptance title")
+
+
+def evaluate_notification_preflight(
+    operator_assertion: str | None,
+    *,
+    diagnostic_focus_active: bool | None,
+) -> NotificationPreflightEvidence:
+    """Validate an operator-owned notification condition without changing settings."""
+
+    if operator_assertion not in {"focus-off", "reminders-allowed", "focus-suppressed"}:
+        raise AcceptanceBlocked(
+            "notification_precondition_unconfirmed",
+            "the Reminders presentation condition must be explicitly confirmed",
+        )
+    if operator_assertion == "focus-off" and diagnostic_focus_active is not False:
+        raise AcceptanceBlocked(
+            "focus_preflight_mismatch",
+            "the read-only Focus diagnostic does not match the asserted focus-off condition",
+        )
+    if operator_assertion == "focus-suppressed" and diagnostic_focus_active is not True:
+        raise AcceptanceBlocked(
+            "focus_preflight_mismatch",
+            "the read-only Focus diagnostic does not match the asserted focus-suppressed condition",
+        )
+    expect_suppression = operator_assertion == "focus-suppressed"
+    return NotificationPreflightEvidence(
+        operator_assertion=operator_assertion,
+        diagnostic_focus_active=diagnostic_focus_active,
+        focus_diagnostic_authoritative=False,
+        expect_banner=not expect_suppression,
+        expect_focus_suppression=expect_suppression,
+    )
+
+
+def _read_focus_diagnostic() -> bool | None:
+    """Best-effort legacy DND signal; retained evidence never calls it authoritative."""
+
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/notifyutil", "-g", "doNotDisturb"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = re.fullmatch(r"\s*doNotDisturb\s+([01])\s*", completed.stdout)
+    return None if match is None else match.group(1) == "1"
+
+
+def classify_alarm_delivery_failure(
+    log_text: str,
+    *,
+    due: datetime,
+) -> AlarmDeliveryClassification:
+    """Classify a bounded native-delivery trace without retaining its content."""
+
+    due_utc = due.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S +0000")
+    alarm_fired = "RDTimeAlarmProducer expiredAlarm" in log_text and due_utc in log_text
+    notification_submitted = (
+        "Added notification request: [ hasError: 0" in log_text
+        or "Added notification request: [hasError: 0" in log_text
+    )
+    focus_suppressed = any(
+        marker in log_text
+        for marker in (
+            "interruptionSuppression: delay delivery",
+            "muted by DND suppression: delay",
+        )
+    )
+    if not alarm_fired:
+        category, confidence = "alarm_not_fired", "medium"
+    elif not notification_submitted:
+        category, confidence = "notification_submission_failed", "medium"
+    elif focus_suppressed:
+        category, confidence = "focus_suppressed", "high"
+    else:
+        category, confidence = "ax_capture_missed", "medium"
+    return AlarmDeliveryClassification(
+        category=category,
+        confidence=confidence,
+        alarm_fired=alarm_fired,
+        notification_submitted=notification_submitted,
+        focus_suppressed=focus_suppressed,
+    )
+
+
+def collect_alarm_delivery_failure(
+    *,
+    due: datetime,
+    observed_until: datetime,
+) -> AlarmDeliveryClassification:
+    """Read a tight unified-log window and retain only a content-free classification."""
+
+    start = (due - timedelta(seconds=10)).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    end = (observed_until + timedelta(seconds=2)).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    predicate = '(process == "remindd" OR process == "usernoted" OR process == "NotificationCenter")'
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/log",
+                "show",
+                "--style",
+                "compact",
+                "--start",
+                start,
+                "--end",
+                end,
+                "--predicate",
+                predicate,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return AlarmDeliveryClassification(
+            category="classification_unavailable",
+            confidence="low",
+            alarm_fired=False,
+            notification_submitted=False,
+            focus_suppressed=False,
+        )
+    if completed.returncode != 0:
+        return AlarmDeliveryClassification(
+            category="classification_unavailable",
+            confidence="low",
+            alarm_fired=False,
+            notification_submitted=False,
+            focus_suppressed=False,
+        )
+    return classify_alarm_delivery_failure(completed.stdout, due=due)
 
 
 def _digest(value: str | bytes) -> str:
@@ -859,9 +1170,9 @@ def _start_process(name: str, command: list[str], *, cwd: Path, env: dict[str, s
     return ManagedProcess(name=name, process=process)
 
 
-def _osascript(script: str, title: str) -> int:
+def _osascript(script: str, *arguments: str) -> int:
     completed = subprocess.run(
-        ["/usr/bin/osascript", "-e", script, title],
+        ["/usr/bin/osascript", "-e", script, *arguments],
         check=True,
         capture_output=True,
         text=True,
@@ -871,28 +1182,26 @@ def _osascript(script: str, title: str) -> int:
     return int(value) if value else 0
 
 
-def _cleanup_calendar_items(
+def _cleanup_calendar_item(
     script: str,
     title: str,
-    event_calendar_identifier: str | None,
-) -> tuple[int, int]:
-    completed = subprocess.run(
-        [
-            "/usr/bin/osascript",
-            "-e",
-            script,
-            title,
-            event_calendar_identifier or "",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    fields = [field.strip() for field in completed.stdout.strip().split(",")]
-    if len(fields) != 2 or any(not field.isdecimal() for field in fields):
-        raise AcceptanceSafetyError("Calendar cleanup returned invalid cardinality evidence")
-    return int(fields[0]), int(fields[1])
+    calendar_identifier: str,
+    external_identifier: str,
+) -> int:
+    return _osascript(script, title, calendar_identifier, external_identifier)
+
+
+def _cleanup_reminder_item(
+    script: str,
+    title: str,
+    list_identifier: str,
+    item_identifier: str,
+) -> int:
+    return _osascript(script, title, list_identifier, item_identifier)
+
+
+def _count_calendar_projection(script: str, reminder_title: str) -> int:
+    return _osascript(script, reminder_title)
 
 
 def _native_app_is_running(name: str) -> bool:
@@ -942,52 +1251,80 @@ def _quit_native_app(name: str) -> None:
 
 
 def cleanup_test_items(
-    title: str,
+    titles: AcceptanceTitles,
     run_id: str,
     *,
-    event_calendar_identifier: str | None = None,
+    event_identity: NativeItemIdentity | None,
+    reminder_identity: NativeItemIdentity | None,
     include_reminder: bool = True,
 ) -> CleanupOutcome:
-    """Delete exact synthetic items through their native macOS applications."""
+    """Delete only identities read back from EventKit; never delete title-wide."""
 
-    validate_acceptance_title(title, run_id)
+    validate_acceptance_title(titles.event, run_id, kind="event")
+    validate_acceptance_title(titles.reminder, run_id, kind="reminder")
+    if (
+        event_identity is None
+        or not event_identity.calendar_identifier
+        or not event_identity.calendar_item_external_identifier
+    ):
+        raise AcceptanceSafetyError("cleanup requires the native event identity")
+    if include_reminder and (
+        reminder_identity is None
+        or not reminder_identity.calendar_identifier
+        or not reminder_identity.calendar_item_identifier
+    ):
+        raise AcceptanceSafetyError("cleanup requires the native reminder identity")
     started_apps: list[str] = []
     calendar_script = """
 on run argv
-  set wanted to item 1 of argv
+  set wantedTitle to item 1 of argv
   set wantedCalendarIdentifier to item 2 of argv
-  set targetRemoved to 0
-  set otherRemoved to 0
+  set wantedUID to item 3 of argv
+  set removed to 0
   tell application "Calendar"
     repeat with targetCalendar in calendars
-      set matches to (every event of targetCalendar whose summary is wanted)
-      repeat with targetEvent in matches
-        delete targetEvent
-        if wantedCalendarIdentifier is not "" and calendarIdentifier of targetCalendar is wantedCalendarIdentifier then
-          set targetRemoved to targetRemoved + 1
-        else
-          set otherRemoved to otherRemoved + 1
-        end if
-      end repeat
+      if calendarIdentifier of targetCalendar is wantedCalendarIdentifier then
+        set matches to (every event of targetCalendar whose summary is wantedTitle and uid is wantedUID)
+        repeat with targetEvent in matches
+          delete targetEvent
+          set removed to removed + 1
+        end repeat
+      end if
     end repeat
   end tell
-  return (targetRemoved as text) & "," & (otherRemoved as text)
+  return removed
 end run
 """
     reminders_script = """
 on run argv
-  set wanted to item 1 of argv
+  set wantedTitle to item 1 of argv
+  set wantedListIdentifier to item 2 of argv
+  set wantedItemIdentifier to item 3 of argv
   set removed to 0
   tell application "Reminders"
     repeat with targetList in lists
-      set matches to (every reminder of targetList whose name is wanted)
-      repeat with targetReminder in matches
-        delete targetReminder
-        set removed to removed + 1
-      end repeat
+      if id of targetList is wantedListIdentifier then
+        set matches to (every reminder of targetList whose name is wantedTitle and id is wantedItemIdentifier)
+        repeat with targetReminder in matches
+          delete targetReminder
+          set removed to removed + 1
+        end repeat
+      end if
     end repeat
   end tell
   return removed
+end run
+"""
+    projection_script = """
+on run argv
+  set wantedTitle to item 1 of argv
+  set matched to 0
+  tell application "Calendar"
+    repeat with targetCalendar in calendars
+      set matched to matched + (count of (every event of targetCalendar whose summary is wantedTitle))
+    end repeat
+  end tell
+  return matched
 end run
 """
     try:
@@ -996,33 +1333,49 @@ end run
             if _ensure_native_app_running(name):
                 started_apps.append(name)
         errors: list[str] = []
-        try:
-            calendar_target_removed_count, calendar_other_removed_count = (
-                _cleanup_calendar_items(
-                    calendar_script,
-                    title,
-                    event_calendar_identifier,
+        projection_before = 0
+        projection_after = 0
+        if include_reminder:
+            try:
+                projection_before = _count_calendar_projection(
+                    projection_script,
+                    titles.reminder,
                 )
-            )
-            calendar_removed_count = (
-                calendar_target_removed_count + calendar_other_removed_count
+            except Exception as exc:
+                errors.append(f"calendar_projection_before_{type(exc).__name__}")
+        try:
+            calendar_removed_count = _cleanup_calendar_item(
+                calendar_script,
+                titles.event,
+                event_identity.calendar_identifier,
+                cast(str, event_identity.calendar_item_external_identifier),
             )
         except Exception as exc:
             calendar_removed_count = 0
-            calendar_target_removed_count = 0
-            calendar_other_removed_count = 0
             errors.append(f"calendar_delete_{type(exc).__name__}")
         reminder_removed_count = 0
-        if include_reminder:
+        if include_reminder and reminder_identity is not None:
             try:
-                reminder_removed_count = _osascript(reminders_script, title)
+                reminder_removed_count = _cleanup_reminder_item(
+                    reminders_script,
+                    titles.reminder,
+                    reminder_identity.calendar_identifier,
+                    reminder_identity.calendar_item_identifier,
+                )
             except Exception as exc:
                 errors.append(f"reminder_delete_{type(exc).__name__}")
+            try:
+                projection_after = _count_calendar_projection(
+                    projection_script,
+                    titles.reminder,
+                )
+            except Exception as exc:
+                errors.append(f"calendar_projection_after_{type(exc).__name__}")
         return CleanupOutcome(
             calendar_removed_count=calendar_removed_count,
-            calendar_target_removed_count=calendar_target_removed_count,
-            calendar_other_removed_count=calendar_other_removed_count,
             reminder_removed_count=reminder_removed_count,
+            scheduled_reminder_projection_count_before=projection_before,
+            scheduled_reminder_projection_count_after=projection_after,
             errors=tuple(errors),
         )
     finally:
@@ -1033,7 +1386,7 @@ end run
 async def _query_exact_items(
     bridge: NativeBridgeClient,
     *,
-    title: str,
+    titles: AcceptanceTitles,
     schedule: AcceptanceSchedule,
     include_reminder: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1050,7 +1403,7 @@ async def _query_exact_items(
     )
     events = [
         item for item in (events_response.result if isinstance(events_response.result, list) else [])
-        if isinstance(item, dict) and item.get("title") == title
+        if isinstance(item, dict) and item.get("title") == titles.event
     ]
     reminders: list[dict[str, Any]] = []
     if include_reminder:
@@ -1067,9 +1420,39 @@ async def _query_exact_items(
             for item in (
                 reminders_response.result if isinstance(reminders_response.result, list) else []
             )
-            if isinstance(item, dict) and item.get("title") == title
+            if isinstance(item, dict) and item.get("title") == titles.reminder
         ]
     return events, reminders
+
+
+def _native_item_identity(
+    item: dict[str, Any],
+    *,
+    require_external_identifier: bool,
+) -> NativeItemIdentity:
+    item_identifier = item.get("calendar_item_identifier")
+    external_identifier = item.get("calendar_item_external_identifier")
+    calendar_identifier = item.get("calendar_identifier")
+    if (
+        not isinstance(item_identifier, str)
+        or not item_identifier
+        or not isinstance(calendar_identifier, str)
+        or not calendar_identifier
+        or (
+            require_external_identifier
+            and (not isinstance(external_identifier, str) or not external_identifier)
+        )
+        or (external_identifier is not None and not isinstance(external_identifier, str))
+    ):
+        raise AcceptanceFailed(
+            "native_cleanup_identity_missing",
+            "native read-back omitted an identifier required for scoped cleanup",
+        )
+    return NativeItemIdentity(
+        calendar_item_identifier=item_identifier,
+        calendar_item_external_identifier=external_identifier,
+        calendar_identifier=calendar_identifier,
+    )
 
 
 def _verify_native_readback(
@@ -1238,7 +1621,7 @@ async def _wait_for_alarm(
 async def _wait_for_cleanup_absence(
     bridge: NativeBridgeClient,
     *,
-    title: str,
+    titles: AcceptanceTitles,
     schedule: AcceptanceSchedule,
     include_reminder: bool = True,
     timeout_s: float = 12.0,
@@ -1247,7 +1630,7 @@ async def _wait_for_cleanup_absence(
     while time.monotonic() < deadline:
         events, reminders = await _query_exact_items(
             bridge,
-            title=title,
+            titles=titles,
             schedule=schedule,
             include_reminder=include_reminder,
         )
@@ -1286,8 +1669,9 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
     except ZoneInfoNotFoundError as exc:
         raise AcceptanceSafetyError("unknown IANA time zone") from exc
     run_id = uuid.uuid4().hex[:8]
-    title = f"{TITLE_PREFIX} {run_id}"
-    validate_acceptance_title(title, run_id)
+    titles = build_acceptance_titles(run_id)
+    validate_acceptance_title(titles.event, run_id, kind="event")
+    validate_acceptance_title(titles.reminder, run_id, kind="reminder")
     include_reminder = not args.calendar_only
     schedule: AcceptanceSchedule | None = None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1301,10 +1685,19 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
         "started_at_unix_ms": int(time.time() * 1_000),
         "result": "running",
         "scenario": "calendar_and_reminder" if include_reminder else "calendar_only",
+        "synthetic_identities": {
+            "event_title_digest": _digest(titles.event),
+            "reminder_title_digest": _digest(titles.reminder),
+            "titles_are_distinct": titles.event != titles.reminder,
+        },
         "permissions": {},
+        "notification_preflight": {
+            "required": include_reminder,
+            "mutated_settings": False,
+        },
         "mac_app_isolation": {
             "gateway_port": args.ws_port,
-            "inert_engine_stub": True,
+            "pid_bound_bridge_proxy": True,
             "repo_preference_restored": False,
         },
         "simulator": {},
@@ -1314,35 +1707,53 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
         "durable_actions": [],
         "cleanup": {
             "calendar_removed_count": 0,
-            "calendar_target_removed_count": 0,
-            "calendar_other_removed_count": 0,
             "reminder_removed_count": 0,
+            "scheduled_reminder_projection_count_before": 0,
+            "scheduled_reminder_projection_count_after": 0,
             "native_absence_verified": False,
         },
         "blockers": [],
     }
     write_private_receipt(receipt_path, receipt)
 
-    bridge = NativeBridgeClient(args.bridge)
     store: DurableStore | None = None
     gateway: HubGatewayTransport | None = None
     managed: list[ManagedProcess] = []
-    temp_context = tempfile.TemporaryDirectory(prefix="joat-productivity-acceptance-")
+    temp_context = tempfile.TemporaryDirectory(prefix="joat-acc-", dir="/tmp")
     temp_dir = Path(temp_context.name)
     diagnostics_path = evidence_dir / "g2-diagnostic.json"
+    stub = create_engine_stub_repo(
+        evidence_dir,
+        authorized_client_pid=os.getpid(),
+        proxy_root=temp_dir,
+    )
+    bridge = NativeBridgeClient(stub.bridge_path)
     app_lease = MacAppNativeBridgeLease(
         app_path=args.app,
         bundle_id=args.app_bundle_id,
         bridge_path=args.bridge,
         gateway_port=args.ws_port,
-        stub_repo=create_engine_stub_repo(evidence_dir),
+        stub=stub,
         recovery_guard=args.recovery_guard,
     )
     wrote_native = False
     native_readback_verified = False
-    event_calendar_identifier: str | None = None
+    event_identity: NativeItemIdentity | None = None
+    reminder_identity: NativeItemIdentity | None = None
+    notification_preflight: NotificationPreflightEvidence | None = None
     exit_code = 1
     try:
+        if include_reminder:
+            notification_preflight = evaluate_notification_preflight(
+                args.notification_mode,
+                diagnostic_focus_active=_read_focus_diagnostic(),
+            )
+            receipt["notification_preflight"] = {
+                **asdict(notification_preflight),
+                "required": True,
+                "condition_source": "operator assertion plus read-only diagnostic",
+            }
+            write_private_receipt(receipt_path, receipt)
         simulator_ws_url = resolve_simulator_ws_url(
             args.repo / "apps/hub-plugin/app.json",
             gateway_port=args.ws_port,

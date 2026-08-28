@@ -102,16 +102,18 @@ from stranding the HUD at `VERIFYING` or inviting a duplicate retry.
   the external identifier. Both may change, so automatic reconciliation still
   needs multiple identifiers plus a cached fingerprint and explicit ambiguity
   handling.
-- The owner-only Unix socket prevents other macOS accounts from connecting,
-  but it does not prove that a same-account client is the JOAT Python child.
-  A stronger child-process authentication or capability channel is required
-  before treating the bridge itself as an authorization boundary.
+- The owner-only Unix socket now admits only the exact engine PID launched by
+  the signed JOAT app and revokes that identity on exit. This prevents an
+  arbitrary same-account client from using the bridge; it does not protect
+  against a compromised admitted engine.
 - Raw `ws://` remains available. Pairing, URL-credential rejection, and bound
   confirmation are implemented, but production write traffic still needs WSS
   or a Tailscale Serve/tailnet-certificate deployment proven end to end.
-- The signed app has the EventKit entitlement and both full-access usage
-  strings, but no TCC prompt/grant/denial, real event/reminder write, sleep/wake
-  catch-up, simulator, or physical-G2 acceptance was exercised.
+- The installed signed app has Calendar and Reminders full access. One
+  OpenClaw/Hermes candidate traversed exact simulator confirmation, EventKit
+  create, independent read-back, durable receipt, payload purge, exact-title
+  cleanup, and native absence verification. Reminder banner delivery,
+  sleep/wake catch-up, and physical-G2 acceptance remain open.
 - QuickNote soft deletion intentionally retains text for undo. Permanent erase,
   bounded notification/note retention, export cleanup, and backup behavior
   remain product/privacy policy work.
@@ -632,18 +634,19 @@ alone is not identity or authorization.
   TypeScript/Vite production build. Native verification passed 18 XCTest tests
   plus 3 Swift Testing tests, including strict local-time, bridge digest,
   cancellation, socket replacement, and first-sweep notification cases.
-- A Developer ID archive/export completed and strict signature verification
-  passed. The app is universal `x86_64 arm64`; its signed entitlement contains
+- A Developer ID archive/export completed, passed strict signature verification,
+  and was installed atomically with a retained prior bundle. The app is
+  universal `x86_64 arm64`; its signed entitlement contains
   `com.apple.security.personal-information.calendars`, and its Info.plist
   contains both Calendar and Reminders full-access explanations. It is not
-  notarized or installed. The separate `/Applications/JOAT.app` is the stale
-  August 26 build and does not contain this EventKit bridge configuration.
+  notarized.
 - The current Python SQLite build reports SQLite 3.53.2 with FTS5 and JSON
   support. The V1 implementation deliberately uses rollback journaling rather
   than assuming WAL solves cross-system atomicity.
-- No EventKit permission was requested and no real event or reminder was
-  created. No fresh simulator or physical-G2 proof was collected for these six
-  capabilities.
+- Existing EventKit full-access grants were observed. A randomized synthetic
+  Calendar event was created and read back through the installed production
+  engine, then removed with zero exact-title matches remaining. Official
+  simulator confirmation was captured; physical-G2 proof remains open.
 - Taskplane onboarding failed before touching the repository because its
   installed package is missing `taskplane/collision_registry.json`; this
   document manually preserves its research-only and human-approval boundary.
