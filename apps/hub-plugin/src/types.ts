@@ -28,6 +28,7 @@ export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
  * Wearer-configurable on the G2 (left-temple double-tap → settings list).
  */
 export type ResumePolicy = 'auto' | 'mac' | 'confirm';
+export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system';
 
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
@@ -45,7 +46,7 @@ export type UplinkMessage =
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
-  | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number }
+  | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image' }
   | { kind: 'hud.list'; items: string[]; title?: string; hint?: string }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
@@ -66,6 +67,8 @@ export interface InputEventPayload {
   eventSource?: number;
   selectedIndex?: number;
   selectedName?: string;
+  /** Privacy-safe action correlation. Never derived from message content. */
+  traceId?: string;
 }
 
 export type Unsubscribe = () => void;

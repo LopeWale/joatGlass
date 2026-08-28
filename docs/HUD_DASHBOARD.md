@@ -113,6 +113,13 @@ A selection removes the Sidebar into a full-focus frame with structured rows.
 Confirmation paints an exclusive decision frame and restores the exact interrupted
 Overview, Sidebar, or focus page on confirm, cancel, or timeout.
 
+When a fresh Mac brain connects with no active session, it clears the Mac-owned
+Main, Context, and Tray streams before announcing itself. This deliberately
+returns the plugin to its connected-empty `Ready` surface instead of retaining
+a reply from an older brain process. Active sessions retain their surface, and
+the transient `HEARING YOU` status always settles back to `LISTENING` after an
+utterance, including empty or unaddressed speech.
+
 ### REPLY — conversation
 
 ```
@@ -238,14 +245,18 @@ interrupted Overview, Sidebar, or focus page.
 |  Marcus · Heading to the lab in 10.          |
 |  Team Ops · Standup notes are ready.         |
 +----------------------------------------------+
-|swipe move · left x2 overview                 |
+|tap select · left x2 overview                 |
 +----------------------------------------------+  y=288
 ```
 
 The shared transparent layer owns capture; the Sidebar and dimmed Overview are
 gone, so the destination owns the whole canvas. Scroll moves the custom-selected
-row and right/ring click selects it. Overview paints are buffered until return.
-Browse-only pages do not advertise a nonexistent open action.
+row and right/ring click selects it. Selecting a one-to-one Messages row arms a
+voice draft (`JOAT, reply saying ...`); it does not send. The full draft and
+recipient must then fit on the exclusive Confirmation screen before the guarded
+Messages.app boundary can run. Group rows remain explicitly read-only rather
+than silently routing a group reply to one participant. Overview paints are
+buffered until return. Browse-only pages do not advertise a nonexistent action.
 
 ### Gesture map — original exploration
 

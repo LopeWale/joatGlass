@@ -87,6 +87,13 @@ class Confirmer(ABC):
     async def confirm(self, prompt: str, timeout_s: float = 8.0) -> bool: ...
 
 
+class MessageSender(ABC):
+    """Consequential Messages.app write behind an injectable boundary."""
+
+    @abstractmethod
+    async def send(self, recipient: str, text: str) -> None: ...
+
+
 class ReplyEngine(ABC):
     """The fast-path local LLM (MAC_APP.md): transcript in, terse reply out.
 

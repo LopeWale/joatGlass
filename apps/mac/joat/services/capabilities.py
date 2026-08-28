@@ -18,11 +18,12 @@ import logging
 import time
 
 from ..channels.cards import CardLog
-from ..channels.imessage import IMessageStore
+from ..channels.imessage import IMessageStore, MessageThread
 from ..core.protocol import HudList, InputEvent
 from ..core.interfaces import GlassesTransport
 from .hud import HudWriter
 from .status import StatusPublisher
+from .message_reply import MessageReplyController
 
 log = logging.getLogger(__name__)
 
@@ -49,17 +50,27 @@ class CapabilityRouter:
         status: StatusPublisher,
         messages: IMessageStore | None,
         cards: CardLog,
+        replies: MessageReplyController | None = None,
     ) -> None:
         self._hud = hud
         self._transport = transport
         self._status = status
         self._messages = messages
         self._cards = cards
+        self._replies = replies
+        self._message_rows: list[MessageThread] = []
 
     def on_input(self, event: InputEvent) -> None:
         """Transport callback — synchronous, so work is scheduled."""
         if event.container_name == "capmenu" and event.selected_name:
             asyncio.get_running_loop().create_task(self.open(event.selected_name))
+        elif (event.container_name == "capdata"
+              and event.selected_name == "MESSAGES"
+              and event.selected_index is not None):
+            asyncio.get_running_loop().create_task(self._select_message(
+                event.selected_index,
+                event.trace_id or "hud",
+            ))
         elif event.container_name == "sysmenu" and event.selected_index == 1:
             asyncio.get_running_loop().create_task(self._repeat())
         elif event.container_name == "menu" and event.selected_name == "closed":
@@ -91,14 +102,43 @@ class CapabilityRouter:
                 ["Messages needs Full Disk Access on the Mac."],
             )
             return
-        rows = await asyncio.to_thread(self._messages.recent, 5)
+        rows = await asyncio.to_thread(self._messages.recent_threads, 5)
+        self._message_rows = rows
         if not rows:
             await self._show_focus("MESSAGES", ["No recent messages."])
             return
         await self._transport.send(HudList(
-            items=[f"[{_age(at)}] {sender} · {text}" for sender, text, at in rows],
+            items=[
+                f"[{_age(row.at)}] {row.sender}"
+                f"{' (group · read only)' if not row.replyable else ''} · {row.text}"
+                for row in rows
+            ],
             title="MESSAGES",
-            hint=BACK_HINT,
+            hint="tap select · left x2 overview",
+        ))
+
+    async def _select_message(self, index: int, trace_id: str) -> None:
+        if self._replies is None or not 0 <= index < len(self._message_rows):
+            return
+        thread = self._message_rows[index]
+        if not thread.replyable:
+            await self._transport.send(HudList(
+                items=[
+                    "Group replies stay read-only for now.",
+                    "Open Messages on the Mac to reply.",
+                ],
+                title="MESSAGES · READ ONLY",
+                hint=BACK_HINT,
+            ))
+            return
+        self._replies.select(thread, trace_id)
+        await self._transport.send(HudList(
+            items=[
+                f"{thread.sender} · {thread.text}",
+                'Say “JOAT, reply saying …”',
+            ],
+            title="MESSAGES · REPLY",
+            hint="voice draft · left x2 overview",
         ))
 
     async def _show_notifications(self) -> None:

@@ -108,9 +108,59 @@ describe('CapabilityMenu', () => {
     const { menu, moves } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
+    menu.acceptsList('MESSAGES', 5);
 
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(moves).toEqual([1]);
+  });
+
+  it('clicking a selected Messages row emits one traced reply-selection event', async () => {
+    const { menu, sent } = rig();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    expect(menu.acceptsList('MESSAGES', 3)).toBe(true);
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+
+    expect(menu.handleClick()).toBe(true);
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capdata',
+        selectedIndex: 1,
+        selectedName: 'MESSAGES',
+      },
+    });
+    const traceId = (sent[1]?.event as { traceId?: string }).traceId;
+    expect(traceId).toMatch(/^hud-/);
+    expect(info).toHaveBeenCalledWith(
+      `[joat trace] trace=${traceId} stage=message-selected index=1`,
+    );
+    info.mockRestore();
+  });
+
+  it('does not mislabel non-Messages data clicks as message selections', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick(); // Notifications capability
+    expect(menu.acceptsList('NOTIFICATIONS', 2)).toBe(true);
+
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(1); // capability request only; no capdata event
+  });
+
+  it('the armed reply instructions cannot be reinterpreted as message rows', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    expect(menu.acceptsList('MESSAGES', 3)).toBe(true);
+    menu.handleClick();
+    expect(sent).toHaveLength(2);
+
+    expect(menu.acceptsList('MESSAGES · REPLY', 2)).toBe(true);
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(2); // no second/stale conversation selection
   });
 
   it('double-tap is BACK from data — buffered home restores without an obsolete repaint', async () => {

@@ -16,6 +16,8 @@ import pytest
 import websockets
 
 from joat.ble.hub_gateway import HubGatewayTransport
+from joat.channels.imessage import MessageThread
+from joat.core.interfaces import MessageSender
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
     Device,
@@ -25,6 +27,7 @@ from joat.core.protocol import (
     Imu,
     InputEvent,
 )
+from joat.services.message_reply import MessageReplyController
 
 HOST = "127.0.0.1"
 
@@ -122,6 +125,30 @@ class TestUplink:
             await _wait_for(lambda: bool(got))
         assert got[0].is_right_temple_click
 
+    async def test_traced_message_selection_is_observable_without_content(
+        self, transport, caplog
+    ) -> None:
+        t, url = transport
+        caplog.set_level(logging.INFO)
+        got: list[InputEvent] = []
+        t.on_input(got.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "input",
+                "event": {
+                    "containerName": "capdata",
+                    "selectedIndex": 1,
+                    "selectedName": "MESSAGES",
+                    "traceId": "hud-real-gateway-1",
+                },
+            }))
+            await _wait_for(lambda: bool(got))
+
+        assert got[0].trace_id == "hud-real-gateway-1"
+        assert "trace=hud-real-gateway-1" in caplog.text
+        assert "stage=input-received" in caplog.text
+        assert "MESSAGES" not in caplog.text
+
     async def test_device_reaches_subscribers(self, transport) -> None:
         t, url = transport
         got: list[Device] = []
@@ -208,6 +235,56 @@ class TestConfirm:
             await ws.recv()
             await ws.send(json.dumps({"kind": "confirm", "actionId": "stale", "accepted": True}))
             assert await task is False
+
+    async def test_selected_reply_crosses_the_real_gateway_and_logs_no_message_content(
+        self, transport, caplog
+    ) -> None:
+        """Real server + real protocol + controller; only Messages.app is faked.
+
+        This is the regression boundary the simulator uses. It proves the
+        actual confirm request/uplink resolves the same future that guards
+        the send, while the operational trace contains no private content.
+        """
+        class RecordingSender(MessageSender):
+            def __init__(self) -> None:
+                self.sent: list[tuple[str, str]] = []
+
+            async def send(self, recipient: str, text: str) -> None:
+                self.sent.append((recipient, text))
+
+        t, url = transport
+        caplog.set_level(logging.INFO)
+        sender = RecordingSender()
+        replies = MessageReplyController(sender, t.request_confirm)
+        secret_handle = "+14055559876"
+        secret_body = "Bring the obsidian notebook"
+        replies.select(MessageThread(
+            sender="Cajun Corner",
+            handle=secret_handle,
+            text="Order confirmed",
+            at=123.0,
+        ), trace_id="hud-real-reply-2")
+
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            task = asyncio.create_task(
+                replies.handle_command(f"reply saying {secret_body}")
+            )
+            request = json.loads(await ws.recv())
+            assert request["kind"] == "confirm.request"
+            assert request["actionId"].startswith("message-reply:hud-real-reply-2:")
+            await ws.send(json.dumps({
+                "kind": "confirm",
+                "actionId": request["actionId"],
+                "accepted": True,
+            }))
+            assert await task == "Sent to Cajun Corner."
+
+        assert sender.sent == [(secret_handle, secret_body)]
+        assert "stage=confirmation-result accepted=True" in caplog.text
+        assert "stage=sent" in caplog.text
+        assert secret_body not in caplog.text
+        assert secret_handle not in caplog.text
 
 
 class TestReviewRegressions:

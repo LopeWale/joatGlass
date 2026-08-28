@@ -3,7 +3,7 @@ import {
   ImageRawDataUpdateResult,
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import { CANVAS, ContainerId } from './types';
+import { CANVAS, ContainerId, type HudContentKind } from './types';
 
 const TILE_WIDTH = 288;
 const TILE_HEIGHT = 144;
@@ -20,6 +20,7 @@ export type HudVisualFrame =
     micOn: boolean;
     mainBrightness: number;
     main: string;
+    mainKind?: HudContentKind;
     context: string;
     tray: string;
     hint: string;
@@ -29,6 +30,7 @@ export type HudVisualFrame =
     status: string;
     micOn: boolean;
     mainBrightness: number;
+    mainKind?: HudContentKind;
     items: string[];
     selectedIndex: number;
     main: string;

@@ -130,6 +130,15 @@ class TestDownlinkWire:
         wire = HudText(text="hi", offset=3, length=2).to_wire()
         assert wire["offset"] == 3 and wire["length"] == 2
 
+    def test_hud_text_carries_content_provenance_and_trace_id(self) -> None:
+        wire = HudText(
+            text="Dele · Messages\nOn my way",
+            content_kind="notification",
+            trace_id="msg-7",
+        ).to_wire()
+        assert wire["contentKind"] == "notification"
+        assert wire["traceId"] == "msg-7"
+
     def test_hud_list_enforces_sdk_caps(self) -> None:
         wire = HudList(items=[f"item {i}" * 20 for i in range(30)]).to_wire()
         assert len(wire["items"]) == 20
@@ -165,6 +174,18 @@ class TestDownlinkWire:
         msg = parse_uplink({"kind": "pairing", "token": "tok"})
         assert isinstance(msg, PairingAck)
         assert msg.token == "tok"
+
+    def test_input_trace_id_survives_the_gateway_parser(self) -> None:
+        message = parse_uplink({
+            "kind": "input",
+            "event": {
+                "containerName": "capdata",
+                "selectedIndex": 2,
+                "selectedName": "MESSAGES",
+                "traceId": "hud-11",
+            },
+        })
+        assert message.event.trace_id == "hud-11"  # type: ignore[attr-defined]
 
     def test_pairing_ack_requires_a_token(self) -> None:
         with pytest.raises(ProtocolError):

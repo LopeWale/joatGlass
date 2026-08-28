@@ -58,8 +58,38 @@ Actions available: `up`, `down`, `click`, `double_click`, and (simulator ≥0.9.
 `POST /api/input` takes an **action only — no source field**, and (verified empirically,
 v0.9.3) every injected event arrives as `eventSource: 1` — **always the right temple**. So
 the simulator cannot exercise the left-temple settings menu or the ring at all, and cannot
-test confirm routing. It verifies the app boots, renders, and responds to clicks; source
-discrimination is Tier 1 (vitest) and Tier 3 (hardware) only.
+prove source discrimination. It *can* exercise the known right-temple Click acceptance
+path once a real gateway has made a confirmation visible. Source discrimination remains
+Tier 1 (vitest) and Tier 3 (hardware).
+
+### Safe real-gateway reply trace
+
+This drives the production reply controller and a real `HubGatewayTransport`
+through the ordinary simulator URL. The last Messages.app boundary is replaced
+with a recording sender, so the evidence run cannot contact a real recipient.
+Its confirmation is deliberately labeled `SIMULATOR TEST (NO SEND)` and uses
+no real-looking person or message, so the extra test window cannot be mistaken
+for the ordinary live JOAT simulator:
+
+```bash
+# terminal 1
+cd apps/hub-plugin
+VITE_MAC_WS_URL=ws://127.0.0.1:18790/glasses npm run dev -- --host 127.0.0.1 --port 5192
+
+# terminal 2 — start this before the simulator
+PYTHONPATH=apps/mac .venv/bin/python -u scripts/simulator_reply_trace.py --port 18790
+
+# terminal 3
+evenhub-simulator http://127.0.0.1:5192 --automation-port 9900
+curl -sS -X POST http://127.0.0.1:9900/api/input \
+  -H 'Content-Type: application/json' -d '{"action":"click"}'
+```
+
+Expected trace stages are `selected`, `confirmation-requested`,
+`confirmation-received`, `confirmation-visible`, `confirmation-result`,
+`confirmation-settled`, `recording-sender-reached`, and `sent`. Logs include
+only action IDs, character counts, and a recipient hash—not message text or the
+recipient handle.
 
 ### Simulator findings (verified against 0.9.3 — expect these, they are not bugs)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,18 @@ DEFAULT_DB = Path("~/Library/Messages/chat.db").expanduser()
 # Apple epoch (2001-01-01) in unix seconds; `date` is nanoseconds since then
 # on modern macOS, seconds on very old databases.
 APPLE_EPOCH = 978_307_200
+
+
+@dataclass(frozen=True, slots=True)
+class MessageThread:
+    """One recent incoming conversation with its private send handle."""
+
+    sender: str
+    handle: str
+    text: str
+    at: float
+    replyable: bool = True
+    """False for group chats until Messages.app group targeting is proven."""
 
 
 def _unix_time(raw: int | None) -> float:
@@ -123,6 +136,14 @@ class IMessageStore:
         answered by a model that had never seen it. Tool-facing: the reply
         loop calls this when the wearer asks about their messages.
         """
+        return [(row.sender, row.text, row.at) for row in self.recent_threads(limit)]
+
+    def recent_threads(self, limit: int = 5) -> list[MessageThread]:
+        """Newest incoming message per sender, retaining the send handle.
+
+        The handle remains Mac-side. The HUD receives only sender and preview,
+        so a forged plugin row cannot redirect a reply to a different address.
+        """
         limit = max(1, min(int(limit), 10))
         with self._connect() as conn:
             rows = conn.execute(
@@ -130,7 +151,12 @@ class IMessageStore:
                 SELECT COALESCE(h.id, ''),
                        COALESCE(m.text, ''),
                        m.date,
-                       COALESCE(c.display_name, '')
+                       COALESCE(c.display_name, ''),
+                       COALESCE((
+                           SELECT COUNT(*)
+                           FROM chat_handle_join chj
+                           WHERE chj.chat_id = c.ROWID
+                       ), 1)
                 FROM message m
                 LEFT JOIN handle h ON m.handle_id = h.ROWID
                 LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
@@ -141,14 +167,20 @@ class IMessageStore:
                 LIMIT 60
                 """
             ).fetchall()
-        out: list[tuple[str, str, float]] = []
+        out: list[MessageThread] = []
         seen: set[str] = set()
-        for handle, text, raw_date, display in rows:
+        for handle, text, raw_date, display, participant_count in rows:
             sender = display or self._contacts.name_for(handle)
             if sender in seen:
                 continue  # newest message per sender only
             seen.add(sender)
-            out.append((sender, str(text), _unix_time(raw_date)))
+            out.append(MessageThread(
+                sender=sender,
+                handle=str(handle),
+                text=str(text),
+                at=_unix_time(raw_date),
+                replyable=int(participant_count) <= 1,
+            ))
             if len(out) >= limit:
                 break
         return out

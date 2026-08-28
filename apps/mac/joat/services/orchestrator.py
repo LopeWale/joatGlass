@@ -78,6 +78,20 @@ class VoiceOrchestrator:
 
     async def on_connect(self) -> None:
         """Greet the wearer so a live brain is visibly different from none."""
+        # A plugin can outlive the Mac brain. Its image containers retain the
+        # previous process's reply across that reconnect, so painting only a
+        # fresh status makes stale copy look like a new answer. With no live
+        # session owning the surface, clear those regions and let the plugin
+        # render its intentional connected-empty (Ready) surface.
+        if self._sessions is None or not self._sessions.active:
+            for container_id in (
+                ContainerId.MAIN,
+                ContainerId.CONTEXT,
+                ContainerId.TRAY,
+            ):
+                await self._transport.send(
+                    HudText(text="", container_id=container_id)
+                )
         wake_hint = " — say 'JOAT ...'" if self._wake_words else ""
         status = (f"JOAT · online{wake_hint}" if self._stt_available
                   else "JOAT · online (no STT)")
@@ -128,7 +142,7 @@ class VoiceOrchestrator:
             if transcript is None or not transcript.text:
                 log.info("STT produced no text")
                 return
-            log.info("transcript: %s", transcript.text)
+            log.info("transcript received chars=%d", len(transcript.text))
             if self._status is not None:
                 self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
                 self._status.bump("utterances")  # type: ignore[attr-defined]
@@ -147,9 +161,7 @@ class VoiceOrchestrator:
             # not a prompt.
             addressed = self._strip_wake_word(transcript.text)
             if addressed is None:
-                # Include the text: a wake word misheard by STT is
-                # indistinguishable from room noise without it.
-                log.info("unaddressed speech ignored: %s", transcript.text)
+                log.info("unaddressed speech ignored chars=%d", len(transcript.text))
                 return
             if not addressed:
                 await self._hud.show("Yes?")
@@ -183,11 +195,15 @@ class VoiceOrchestrator:
                 parts.append(chunk)
             if parts:
                 reply_text = "".join(parts)
-                log.info("reply: %s", reply_text)
+                log.info("reply emitted chars=%d", len(reply_text))
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
             self._busy = False
+            # "hearing you" is transient. Empty STT, unaddressed room speech,
+            # a deterministic command, and a normal model reply must all
+            # return the chrome to its truthful idle state.
+            await self._hud.status("JOAT · listening")
 
     async def watch_loop_lag(self, interval_s: float = 0.5,
                              warn_s: float = 0.75) -> None:
@@ -240,6 +256,7 @@ class VoiceOrchestrator:
                 # and drop the orphan, but NEVER strip terminal ?/! — they
                 # carry meaning the model should see.
                 query = re.sub(r"\s+([,.!?])", r"\1", query)
+                query = re.sub(r",{2,}", ",", query)
                 query = re.sub(r",+([.!?])", r"\1", query)
                 query = re.sub(r"^[\s,.\-—]+", "", query)
                 return query.rstrip(" ,-—")
@@ -258,6 +275,7 @@ class VoiceOrchestrator:
                                count=1, flags=re.IGNORECASE)
                 query = re.sub(r"\s+", " ", query)
                 query = re.sub(r"\s+([,.!?])", r"\1", query)
+                query = re.sub(r",{2,}", ",", query)
                 query = re.sub(r",+([.!?])", r"\1", query)
                 query = re.sub(r"^[\s,.\-—]+", "", query)
                 return query.rstrip(" ,-—")

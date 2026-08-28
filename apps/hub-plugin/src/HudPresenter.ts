@@ -2,7 +2,7 @@ import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
 import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
-import { ContainerId } from './types';
+import { ContainerId, type HudContentKind } from './types';
 
 const MAX_UPGRADE_CHARS = 2000;
 
@@ -40,6 +40,7 @@ interface ResolvedListSurfaceOptions {
 interface HudContentState {
   streams: Map<number, string>;
   brightness: Map<number, number>;
+  kinds: Map<number, HudContentKind>;
 }
 
 type HudSurface =
@@ -74,6 +75,7 @@ export class HudPresenter {
   private lastPaint = new Map<number, number>();
   private pendingPaint = new Map<number, ReturnType<typeof setTimeout>>();
   private brightness = new Map<number, number>();
+  private kinds = new Map<number, HudContentKind>();
   private surface: HudSurface = { kind: 'default' };
   private focusReturn?: HudContentState;
   private confirmation?: ConfirmationReturnState;
@@ -98,9 +100,10 @@ export class HudPresenter {
     text: string,
     containerId: ContainerId = ContainerId.Main,
     textColor?: number,
+    contentKind?: HudContentKind,
   ): Promise<boolean> {
     if (this.confirmation && containerId !== ContainerId.StatusBar) {
-      this.deferText(text, containerId, textColor);
+      this.deferText(text, containerId, textColor, contentKind);
       return true;
     }
     // A focus page owns the entire non-status canvas. Background replies,
@@ -108,16 +111,17 @@ export class HudPresenter {
     // until Back instead of overwriting its header or targeting containers
     // that intentionally do not exist in this layout.
     if (this.surface.kind !== 'default' && containerId !== ContainerId.StatusBar) {
-      this.deferFocusText(text, containerId, textColor);
+      this.deferFocusText(text, containerId, textColor, contentKind);
       return true;
     }
-    return this.replaceText(text, containerId, textColor);
+    return this.replaceText(text, containerId, textColor, contentKind);
   }
 
   private async replaceText(
     text: string,
     containerId: ContainerId,
     textColor?: number,
+    contentKind?: HudContentKind,
   ): Promise<boolean> {
     this.cancelPending(containerId);
     this.streams.set(containerId, text);
@@ -125,6 +129,9 @@ export class HudPresenter {
       this.brightness.set(containerId, textColor);
     } else {
       this.brightness.delete(containerId);
+    }
+    if (containerId === ContainerId.Main) {
+      this.kinds.set(containerId, contentKind ?? 'assistant');
     }
     return this.paint(containerId);
   }
@@ -196,6 +203,7 @@ export class HudPresenter {
         this.focusReturn = {
           streams: new Map(this.confirmation.streams),
           brightness: new Map(this.confirmation.brightness),
+          kinds: new Map(this.confirmation.kinds),
         };
       }
       this.confirmation.surface = surface;
@@ -205,6 +213,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds),
       };
     }
     return this.renderList(surface);
@@ -220,6 +229,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds),
       };
     }
     return this.renderSidebar(surface);
@@ -247,6 +257,7 @@ export class HudPresenter {
     content: HudContentState = this.focusReturn ?? {
       streams: this.streams,
       brightness: this.brightness,
+      kinds: this.kinds,
     },
   ): Promise<boolean> {
     const liveStatus = this.captureLiveStatus();
@@ -259,6 +270,8 @@ export class HudPresenter {
     this.resetAll();
     this.surface = surface;
     this.streams.set(ContainerId.Main, backdrop.main ?? '');
+    const mainKind = content.kinds.get(ContainerId.Main);
+    if (mainKind) this.kinds.set(ContainerId.Main, mainKind);
     this.streams.set(ContainerId.Context, backdrop.context ?? '');
     this.streams.set(ContainerId.Tray, backdrop.tray ?? '');
     this.streams.set(ContainerId.Hint, backdrop.hint ?? 'left x2 overview');
@@ -320,6 +333,7 @@ export class HudPresenter {
       if (this.focusReturn) {
         this.confirmation.streams = new Map(this.focusReturn.streams);
         this.confirmation.brightness = new Map(this.focusReturn.brightness);
+        this.confirmation.kinds = new Map(this.focusReturn.kinds);
         this.focusReturn = undefined;
       }
       return true;
@@ -330,12 +344,14 @@ export class HudPresenter {
       const content = deferred ?? {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds),
       };
       this.resetAll();
       this.surface = { kind: 'default' };
       this.focusReturn = undefined;
       this.streams = new Map(content.streams);
       this.brightness = new Map(content.brightness);
+      this.kinds = new Map(content.kinds);
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -357,6 +373,9 @@ export class HudPresenter {
     }
     for (const [id, level] of deferred.brightness) {
       if (id !== ContainerId.StatusBar) this.brightness.set(id, level);
+    }
+    for (const [id, kind] of deferred.kinds) {
+      if (id !== ContainerId.StatusBar) this.kinds.set(id, kind);
     }
     for (const id of [
       ContainerId.Main,
@@ -383,13 +402,14 @@ export class HudPresenter {
     if (!this.confirmation) {
       const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn
-        : { streams: this.streams, brightness: this.brightness };
+        : { streams: this.streams, brightness: this.brightness, kinds: this.kinds };
       this.confirmation = {
         id,
         prompt: safePrompt,
         surface: this.cloneSurface(this.surface),
         streams: new Map(content.streams),
         brightness: new Map(content.brightness),
+        kinds: new Map(content.kinds),
       };
     } else {
       // Claim ownership synchronously, before an awaited bridge call. A stale
@@ -436,6 +456,7 @@ export class HudPresenter {
         this.surface = this.cloneSurface(current.surface);
         this.streams = new Map(current.streams);
         this.brightness = new Map(current.brightness);
+        this.kinds = new Map(current.kinds);
         // One failed tile can leave a torn confirmation visible even though
         // the logical gate has rolled back. Actively repaint the complete
         // prior frame before returning failure to the input gate.
@@ -489,6 +510,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
+        kinds: new Map(prior.kinds),
       };
       const restored = await this.renderList(prior.surface);
       return this.repaintReplacementConfirmation(restored);
@@ -498,6 +520,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
+        kinds: new Map(prior.kinds),
       };
       const restored = await this.renderSidebar(prior.surface, prior);
       return this.repaintReplacementConfirmation(restored);
@@ -509,6 +532,7 @@ export class HudPresenter {
       this.surface = { kind: 'default' };
       this.streams = new Map(prior.streams);
       this.brightness = new Map(prior.brightness);
+      this.kinds = new Map(prior.kinds);
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -527,6 +551,7 @@ export class HudPresenter {
     // plugin-owned line rather than restoring a stale snapshot.
     this.streams = new Map(prior.streams);
     this.brightness = new Map(prior.brightness);
+    this.kinds = new Map(prior.kinds);
     if (liveStatus) {
       this.streams.set(ContainerId.StatusBar, liveStatus.text);
       if (liveStatus.brightness !== undefined) {
@@ -578,7 +603,11 @@ export class HudPresenter {
           ? this.layouts.listLayout(this.surface.items, this.surface.options)
           : this.surface.kind === 'sidebar'
             ? this.layouts.sidebarLayout(this.surface.items, this.sidebarBackdrop(
-              this.focusReturn ?? { streams: this.streams, brightness: this.brightness },
+              this.focusReturn ?? {
+                streams: this.streams,
+                brightness: this.brightness,
+                kinds: this.kinds,
+              },
             ))
             : this.layouts.defaultLayout();
       const rebuilt = await this.client.require().rebuildPageContainer(layout);
@@ -629,23 +658,39 @@ export class HudPresenter {
     }
   }
 
-  private deferText(text: string, containerId: ContainerId, textColor?: number): void {
+  private deferText(
+    text: string,
+    containerId: ContainerId,
+    textColor?: number,
+    contentKind?: HudContentKind,
+  ): void {
     const deferred = this.confirmation;
     if (!deferred) return;
     deferred.streams.set(containerId, text);
     if (textColor !== undefined) deferred.brightness.set(containerId, textColor);
     else deferred.brightness.delete(containerId);
+    if (containerId === ContainerId.Main) {
+      deferred.kinds.set(containerId, contentKind ?? 'assistant');
+    }
   }
 
-  private deferFocusText(text: string, containerId: ContainerId, textColor?: number): void {
+  private deferFocusText(
+    text: string,
+    containerId: ContainerId,
+    textColor?: number,
+    contentKind?: HudContentKind,
+  ): void {
     const deferred = this.ensureFocusReturn();
     deferred.streams.set(containerId, text);
     if (textColor !== undefined) deferred.brightness.set(containerId, textColor);
     else deferred.brightness.delete(containerId);
+    if (containerId === ContainerId.Main) {
+      deferred.kinds.set(containerId, contentKind ?? 'assistant');
+    }
   }
 
   private ensureFocusReturn(): HudContentState {
-    this.focusReturn ??= { streams: new Map(), brightness: new Map() };
+    this.focusReturn ??= { streams: new Map(), brightness: new Map(), kinds: new Map() };
     return this.focusReturn;
   }
 
@@ -718,6 +763,7 @@ export class HudPresenter {
         items: [...this.surface.items],
         selectedIndex: this.surface.selectedIndex,
         main: this.streams.get(ContainerId.Main) ?? '',
+        mainKind: this.kinds.get(ContainerId.Main),
         context: this.streams.get(ContainerId.Context) ?? '',
         tray: this.streams.get(ContainerId.Tray) ?? '',
         hint: this.streams.get(ContainerId.Hint) ?? '',
@@ -741,6 +787,7 @@ export class HudPresenter {
       mainBrightness: this.brightness.get(ContainerId.Main)
         ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
       main: this.streams.get(ContainerId.Main) ?? '',
+      mainKind: this.kinds.get(ContainerId.Main),
       context: this.streams.get(ContainerId.Context) ?? '',
       tray: this.streams.get(ContainerId.Tray) ?? '',
       hint: this.streams.get(ContainerId.Hint) ?? '',
@@ -793,5 +840,6 @@ export class HudPresenter {
     this.streams.clear();
     this.lastPaint.clear();
     this.brightness.clear();
+    this.kinds.clear();
   }
 }
