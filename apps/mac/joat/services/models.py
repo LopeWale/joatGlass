@@ -27,6 +27,14 @@ log = logging.getLogger(__name__)
 
 Applier = Callable[[str | None], Awaitable[bool]]
 
+DEFAULT_CODEX_MODEL = "gpt-5.6-terra"
+"""Verified 2026-08-27: terra answers, and spark is refusing with "You've hit
+your usage limit … try again at Aug 31st". Both stay selectable — which is
+the point of the slot — but the DEFAULT has to be a seat that can speak, or
+the proposer is silent at boot for a reason no log explains."""
+
+DEFAULT_STT_MODEL = "large-v3_turbo"
+
 
 @dataclass(frozen=True)
 class ModelOption:
@@ -210,8 +218,8 @@ async def handle_model_command(text: str, registry: ModelRegistry) -> str | None
 # ── defaults ────────────────────────────────────────────────────────────────
 
 def default_slots(
-    codex_default: str = "gpt-5.3-codex-spark",
-    stt_default: str = "large-v3_turbo",
+    codex_default: str = DEFAULT_CODEX_MODEL,
+    stt_default: str = DEFAULT_STT_MODEL,
     stt_apply: Applier | None = None,
 ) -> list[ModelSlot]:
     """The seats worth switching, named as they are spoken.
@@ -221,8 +229,8 @@ def default_slots(
     carries an applier that respawns it.
     """
     codex = [
-        ModelOption("spark", "gpt-5.3-codex-spark", "fast, current default"),
-        ModelOption("terra", "gpt-5.6-terra", "stronger, costs credits"),
+        ModelOption("terra", "gpt-5.6-terra", "default"),
+        ModelOption("spark", "gpt-5.3-codex-spark", "faster; limit resets Aug 31"),
     ]
     if codex_default not in [o.id for o in codex]:
         codex.insert(0, ModelOption(codex_default.split("-")[-1], codex_default))
