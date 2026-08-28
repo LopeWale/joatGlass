@@ -256,7 +256,10 @@ struct MainWindowView: View {
         case "gateway_not_ready":
             return "Agent Terminal remains unavailable until the Gateway connection is proven."
         default:
-            return nil
+            guard ["ready", "running"].contains(status.agentTerminal.state) else {
+                return nil
+            }
+            return "JOAT selects only its separate no-tool session; it does not address Telegram or Hermes’s main transcript."
         }
     }
 
