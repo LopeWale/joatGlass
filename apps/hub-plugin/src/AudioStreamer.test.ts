@@ -1,3 +1,4 @@
+import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AudioStreamer } from './AudioStreamer';
 import type { BridgeClient } from './BridgeClient';
@@ -52,5 +53,37 @@ describe('AudioStreamer byte decoding', () => {
     const msg = sent[0];
     if (msg?.kind !== 'audio') throw new Error('expected audio');
     expect(msg.pcm).toEqual([258]);
+  });
+
+  it('a new stop invalidates and compensates an older pending start', async () => {
+    let releaseStart!: (started: boolean) => void;
+    const pendingStart = new Promise<boolean>((resolve) => { releaseStart = resolve; });
+    const controls: boolean[] = [];
+    const client = {
+      assertStarted: () => ({
+        audioControl: async (open: boolean) => {
+          controls.push(open);
+          if (open) return pendingStart;
+          return true;
+        },
+      }),
+      require: () => ({
+        audioControl: async (open: boolean) => {
+          controls.push(open);
+          return true;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const audio = new AudioStreamer(client, { send: () => undefined } as unknown as MacLink);
+    const oldGeneration = new AbortController();
+
+    const starting = audio.start(AudioInputSource.Glasses, oldGeneration.signal);
+    oldGeneration.abort();
+    await audio.stop();
+    releaseStart(true);
+
+    await expect(starting).resolves.toBe(false);
+    expect(audio.isOpen).toBe(false);
+    expect(controls).toEqual([true, false, false]);
   });
 });

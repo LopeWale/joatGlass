@@ -2,19 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from joat.core.confirmation import ConfirmationResult
 from joat.native.bridge import NativeBridgeUnavailable
 from joat.persistence.actions import ActionJournal
 from joat.persistence.store import DurableStore
+from joat.persistence.tasks import TaskOccurrenceStore
 from joat.services.productivity_actions import ProductivityActionController
+from joat.services.productivity_actions import ActionOrigin, CalendarEventIntent
 
 
 class FakeBridge:
-    def __init__(self, *, containers, resolution=None, write_result=None) -> None:  # type: ignore[no-untyped-def]
+    def __init__(
+        self,
+        *,
+        containers,
+        resolution=None,
+        write_result=None,
+        reminder_query=None,
+        complete_result=None,
+        write_commit_phase="committed_readback",
+    ) -> None:  # type: ignore[no-untyped-def]
         self.containers = containers
         self.resolution = resolution or {
             "status": "unique",
@@ -29,7 +43,15 @@ class FakeBridge:
             "start_unix_ms": 1_788_274_200_000,
             "end_unix_ms": 1_788_276_900_000,
             "time_zone_id": "America/Chicago",
+            "alarms": [],
         }
+        self.reminder_query = reminder_query or []
+        self.complete_result = complete_result or {
+            "calendar_item_identifier": "reminder-1",
+            "calendar_identifier": "list-personal",
+            "is_completed": True,
+        }
+        self.write_commit_phase = write_commit_phase
         self.calls: list[tuple[str, dict[str, object], str | None, str | None]] = []
         self.write_error: Exception | None = None
         self.bump_generation_on_resolve = False
@@ -51,6 +73,12 @@ class FakeBridge:
             result = self.containers
         elif method == "localTime.resolve":
             result = self.resolution
+        elif method == "reminders.query":
+            result = self.reminder_query
+        elif method == "reminders.complete":
+            if self.write_error is not None:
+                raise self.write_error
+            result = self.complete_result
         elif method.endswith("create"):
             if self.write_error is not None:
                 raise self.write_error
@@ -61,7 +89,11 @@ class FakeBridge:
             store_instance_id="store-A",
             store_generation=generation,
             authorization=SimpleNamespace(calendar="full_access", reminders="full_access"),
-            commit_phase="read_only" if not method.endswith("create") else "committed_readback",
+            commit_phase=(
+                self.write_commit_phase
+                if method in ("calendar.create", "reminders.create", "reminders.complete")
+                else "read_only"
+            ),
             result=result,
         )
 
@@ -112,15 +144,156 @@ def reminder_container(title: str, identifier: str, *, default: bool = False):  
     return calendar_container(title, identifier, default=default)
 
 
-def rig(tmp_path: Path, bridge: FakeBridge, *, accept: bool = True):
+def rig(
+    tmp_path: Path,
+    bridge: FakeBridge,
+    *,
+    accept: bool = True,
+    updates: list[tuple[str, str]] | None = None,
+):
     store = DurableStore(tmp_path / "joat.sqlite3")
     journal = ActionJournal(store)
     confirms = ConfirmationHarness(accept=accept)
-    controller = ProductivityActionController(bridge, confirms, journal)  # type: ignore[arg-type]
+    async def publish(title: str, message: str) -> None:
+        assert updates is not None
+        updates.append((title, message))
+
+    controller = ProductivityActionController(
+        bridge,
+        confirms,
+        journal,
+        TaskOccurrenceStore(store),
+        publish_status=publish if updates is not None else None,
+    )  # type: ignore[arg-type]
     return controller, confirms, journal, store
 
 
 class TestCalendarCreation:
+    async def test_unicode_direction_controls_never_reach_preview_or_eventkit(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[calendar_container("Work", "cal-work", default=True)]
+        )
+        controller, confirms, _, store = rig(tmp_path, bridge)
+
+        result = await controller.create_calendar_event(CalendarEventIntent(
+            title="Design review\u202eHidden",
+            date="2026-09-01",
+            time="09:30",
+            duration_minutes=45,
+            time_zone="America/Chicago",
+            calendar_title="Work",
+        ))
+
+        assert result == "Calendar event title must be 1 to 200 visible characters."
+        assert confirms.prompts == []
+        assert bridge.calls == []
+        assert store.execute("SELECT count(*) FROM actions").fetchone()[0] == 0
+        store.close()
+
+    async def test_typed_hermes_proposal_keeps_local_confirmation_and_origin_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
+        controller, confirms, _, store = rig(tmp_path, bridge)
+
+        result = await controller.create_calendar_event(
+            CalendarEventIntent(
+                title="Design review",
+                date="2026-09-01",
+                time="09:30",
+                duration_minutes=45,
+                time_zone="America/Chicago",
+                calendar_title="Work",
+            ),
+            origin=ActionOrigin(
+                kind="openclaw.hermes.proposal",
+                identifier="proposal-1",
+                ordinal=0,
+            ),
+        )
+
+        assert result == "Created Calendar event: Design review."
+        assert confirms.prompts == [
+            "Create event “Design review”? Work · Sep 1, 2026 at 09:30 · 45m · America/Chicago"
+        ]
+        assert store.execute(
+            "SELECT origin_kind,origin_id,origin_ordinal FROM actions"
+        ).fetchone() == ("openclaw.hermes.proposal", "proposal-1", 0)
+        store.close()
+
+    async def test_action_lifecycle_reports_verification_and_receipt(self, tmp_path: Path) -> None:
+        updates: list[tuple[str, str]] = []
+        bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
+        controller, _, _, store = rig(tmp_path, bridge, updates=updates)
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert result == "Created Calendar event: Design review."
+        assert updates == [
+            ("ACTION · VERIFYING", "Calendar create · Checking native read-back…"),
+            ("ACTION · DONE", "Calendar create · Saved and verified"),
+        ]
+        store.close()
+
+    async def test_receipt_persistence_failure_after_native_commit_becomes_uncertain(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        updates: list[tuple[str, str]] = []
+        bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
+        controller, _, journal, store = rig(tmp_path, bridge, updates=updates)
+
+        def fail_receipt(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del args, kwargs
+            raise OSError("disk full")
+
+        monkeypatch.setattr(journal, "record_success", fail_receipt)
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert "may have created" in str(result)
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
+        assert updates[-1] == (
+            "ACTION · CHECK",
+            "Calendar create · Check native app before retrying",
+        )
+        store.close()
+
+    async def test_committed_receipt_that_raises_still_purges_payload(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        updates: list[tuple[str, str]] = []
+        bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
+        controller, _, journal, store = rig(tmp_path, bridge, updates=updates)
+        record_success = journal.record_success
+
+        def commit_then_raise(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            record_success(*args, **kwargs)
+            raise OSError("late fsync report")
+
+        monkeypatch.setattr(journal, "record_success", commit_then_raise)
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert result == "Created Calendar event: Design review."
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "succeeded"
+        assert store.execute("SELECT count(*) FROM action_payloads").fetchone()[0] == 0
+        assert updates[-1] == (
+            "ACTION · DONE",
+            "Calendar create · Saved and verified",
+        )
+        store.close()
+
     async def test_exact_event_is_confirmed_committed_and_read_back(self, tmp_path: Path) -> None:
         bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
         controller, confirms, journal, store = rig(tmp_path, bridge)
@@ -132,7 +305,7 @@ class TestCalendarCreation:
 
         assert result == "Created Calendar event: Design review."
         assert confirms.prompts == [
-            "Create event “Design review”? Work · Sep 1, 09:30 · 45m · America/Chicago"
+            "Create event “Design review”? Work · Sep 1, 2026 at 09:30 · 45m · America/Chicago"
         ]
         create = bridge.calls[-1]
         assert create[0] == "calendar.create"
@@ -154,6 +327,84 @@ class TestCalendarCreation:
             "awaiting_confirmation", "approved", "dispatching", "succeeded",
         )
         assert store.execute("SELECT count(*) FROM action_payloads").fetchone()[0] == 0
+        assert store.execute(
+            "SELECT x.identifier_kind,x.identifier_value "
+            "FROM action_receipts r JOIN external_identifiers x "
+            "ON x.external_item_id=r.external_item_id"
+        ).fetchone() == ("eventkit.calendar_item_identifier", "native-123")
+        store.close()
+
+    async def test_noncommitted_response_cannot_be_reported_as_calendar_success(
+        self, tmp_path: Path
+    ) -> None:
+        updates: list[tuple[str, str]] = []
+        bridge = FakeBridge(
+            containers=[calendar_container("Work", "cal-work", default=True)],
+            write_commit_phase="read_only",
+        )
+        controller, _, _, store = rig(tmp_path, bridge, updates=updates)
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert "may have created" in str(result)
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
+        assert updates[-1] == (
+            "ACTION · CHECK",
+            "Calendar create · Check native app before retrying",
+        )
+        store.close()
+
+    async def test_precommit_native_failure_is_visible_but_never_claims_uncertainty(
+        self, tmp_path: Path
+    ) -> None:
+        updates: list[tuple[str, str]] = []
+        bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
+        bridge.write_error = NativeBridgeUnavailable(
+            "not dispatched",
+            possible_external_commit=False,
+        )
+        controller, _, _, store = rig(tmp_path, bridge, updates=updates)
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert result == "Calendar did not create the event. Check JOAT on the Mac."
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "failed"
+        assert updates[-1] == (
+            "ACTION · FAILED",
+            "Calendar create · Native write failed",
+        )
+        store.close()
+
+    async def test_missing_calendar_item_identifier_cannot_be_success(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[calendar_container("Work", "cal-work", default=True)],
+            write_result={
+                "calendar_identifier": "cal-work",
+                "title": "Design review",
+                "is_all_day": False,
+                "start_unix_ms": 1_788_274_200_000,
+                "end_unix_ms": 1_788_276_900_000,
+                "time_zone_id": "America/Chicago",
+                "alarms": [],
+            },
+        )
+        controller, _, _, store = rig(tmp_path, bridge)
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert "may have created" in str(result)
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         store.close()
 
     async def test_decline_never_calls_eventkit_write(self, tmp_path: Path) -> None:
@@ -168,6 +419,42 @@ class TestCalendarCreation:
         assert result == "Calendar event cancelled."
         assert all(method != "calendar.create" for method, *_ in bridge.calls)
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "rejected"
+        store.close()
+
+    async def test_confirmation_task_cancellation_purges_uncommitted_payload(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[calendar_container("Work", "cal-work", default=True)]
+        )
+        store = DurableStore(tmp_path / "joat.sqlite3")
+        journal = ActionJournal(store)
+        confirmation_started = asyncio.Event()
+
+        async def never_confirm(*args, **kwargs) -> ConfirmationResult:  # type: ignore[no-untyped-def]
+            del args, kwargs
+            confirmation_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        controller = ProductivityActionController(
+            bridge,
+            never_confirm,
+            journal,
+            TaskOccurrenceStore(store),
+        )  # type: ignore[arg-type]
+        task = asyncio.create_task(controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        ))
+        await confirmation_started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "cancelled"
+        assert store.execute("SELECT count(*) FROM action_payloads").fetchone()[0] == 0
+        assert all(method != "calendar.create" for method, *_ in bridge.calls)
         store.close()
 
     async def test_ambiguous_container_is_clarified_before_draft(self, tmp_path: Path) -> None:
@@ -242,6 +529,11 @@ class TestReminderCreation:
                     "time_zone_id": "America/Chicago",
                     "repeated_time_choice": None,
                 },
+                "alarms": [{
+                    "relative_offset_seconds": None,
+                    "absolute_unix_ms": 1_788_274_200_000,
+                }],
+                "is_completed": False,
             },
         )
         controller, confirms, _, store = rig(tmp_path, bridge)
@@ -252,12 +544,55 @@ class TestReminderCreation:
 
         assert result == "Created Reminder: Buy filters."
         assert confirms.prompts == [
-            "Create reminder “Buy filters”? Personal · Sep 1, 18:00 · America/Chicago"
+            "Create reminder + JOAT alert “Buy filters”? Personal · "
+            "Sep 1, 2026 at 18:00 · America/Chicago"
         ]
         create = bridge.calls[-1]
         assert create[0] == "reminders.create"
         assert create[1]["calendar_identifier"] == "list-personal"
         assert create[1]["alarm_offsets_seconds"] == [0]
+        assert create[1]["resolved_due_unix_ms"] == 1_788_274_200_000
+        occurrence = store.execute(
+            "SELECT external_item_id,due_unix_ms,state FROM task_occurrences"
+        ).fetchone()
+        assert occurrence == ("reminder-1", 1_788_274_200_000, "pending")
+        assert store.execute(
+            "SELECT count(*) FROM action_receipts WHERE external_item_id IS NOT NULL"
+        ).fetchone()[0] == 1
+        store.close()
+
+    async def test_missing_native_alarm_is_uncertain_after_possible_commit(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+            write_result={
+                "calendar_item_identifier": "reminder-1",
+                "calendar_identifier": "list-personal",
+                "title": "Buy filters",
+                "due": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 1,
+                    "hour": 18,
+                    "minute": 0,
+                    "second": 0,
+                    "time_zone_id": "America/Chicago",
+                    "repeated_time_choice": None,
+                },
+                "alarms": [],
+                "is_completed": False,
+            },
+        )
+        controller, _, _, store = rig(tmp_path, bridge)
+
+        result = await controller.handle_command(
+            "remind me to Buy filters on 2026-09-01 at 18:00 in America/Chicago"
+        )
+
+        assert "may have been created" in str(result)
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
+        assert store.execute("SELECT count(*) FROM task_occurrences").fetchone()[0] == 0
         store.close()
 
     async def test_write_disconnect_stays_uncertain_and_is_not_retried(self, tmp_path: Path) -> None:
@@ -284,4 +619,81 @@ class TestReminderCreation:
 
         assert result is not None and "YYYY-MM-DD" in result
         assert bridge.calls == []
+        store.close()
+
+    async def test_exact_nonrecurring_reminder_can_be_completed_with_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+            reminder_query=[{
+                "calendar_item_identifier": "reminder-1",
+                "calendar_identifier": "list-personal",
+                "title": "Buy filters",
+                "is_completed": False,
+                "has_recurrence_rules": False,
+            }],
+        )
+        controller, confirms, _, store = rig(tmp_path, bridge)
+
+        result = await controller.handle_command("complete reminder Buy filters")
+
+        assert result == "Completed Reminder: Buy filters."
+        assert confirms.prompts == ["Complete reminder “Buy filters”? Personal"]
+        assert bridge.calls[-1][0] == "reminders.complete"
+        assert bridge.calls[-1][1]["calendar_item_identifier"] == "reminder-1"
+        assert bridge.calls[-1][1]["calendar_identifier"] == "list-personal"
+        store.close()
+
+    async def test_completion_readback_from_another_list_is_uncertain(
+        self, tmp_path: Path
+    ) -> None:
+        updates: list[tuple[str, str]] = []
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+            reminder_query=[{
+                "calendar_item_identifier": "reminder-1",
+                "calendar_identifier": "list-personal",
+                "title": "Buy filters",
+                "is_completed": False,
+                "has_recurrence_rules": False,
+            }],
+            complete_result={
+                "calendar_item_identifier": "reminder-1",
+                "calendar_identifier": "list-work",
+                "is_completed": True,
+            },
+        )
+        controller, _, _, store = rig(tmp_path, bridge, updates=updates)
+
+        result = await controller.handle_command("complete reminder Buy filters")
+
+        assert "may have been completed" in str(result)
+        assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
+        assert updates[-1] == (
+            "ACTION · CHECK",
+            "Reminders complete · Check native app before retrying",
+        )
+        store.close()
+
+    async def test_recurring_completion_is_refused_until_occurrence_semantics_are_proven(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+            reminder_query=[{
+                "calendar_item_identifier": "series-1",
+                "calendar_identifier": "list-personal",
+                "title": "Water plants",
+                "is_completed": False,
+                "has_recurrence_rules": True,
+            }],
+        )
+        controller, confirms, _, store = rig(tmp_path, bridge)
+
+        result = await controller.handle_command("complete reminder Water plants")
+
+        assert "Recurring reminder completion is not enabled" in str(result)
+        assert confirms.prompts == []
+        assert all(call[0] != "reminders.complete" for call in bridge.calls)
         store.close()

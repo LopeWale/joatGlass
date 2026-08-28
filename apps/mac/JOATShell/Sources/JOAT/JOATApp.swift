@@ -7,6 +7,9 @@ import SwiftUI
 /// `.terminateLater` + reply, not fire-and-forget SIGTERM.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard EngineController.shouldRunAppServices(
+            environment: ProcessInfo.processInfo.environment
+        ) else { return }
         // Reference established unconditionally at launch — never in a lazy
         // menu's onAppear, which may not run before logout (audit §C1).
         _ = EngineController.shared

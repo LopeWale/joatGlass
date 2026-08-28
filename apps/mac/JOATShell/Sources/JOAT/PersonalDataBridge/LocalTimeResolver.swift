@@ -14,6 +14,22 @@ struct CivilTime: Codable, Equatable, Sendable {
         case year, month, day, hour, minute, second, repeatedTimeChoice
         case timeZoneID = "timeZoneId"
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(year, forKey: .year)
+        try container.encode(month, forKey: .month)
+        try container.encode(day, forKey: .day)
+        try container.encode(hour, forKey: .hour)
+        try container.encode(minute, forKey: .minute)
+        try container.encode(second, forKey: .second)
+        try container.encode(timeZoneID, forKey: .timeZoneID)
+        if let repeatedTimeChoice {
+            try container.encode(repeatedTimeChoice, forKey: .repeatedTimeChoice)
+        } else {
+            try container.encodeNil(forKey: .repeatedTimeChoice)
+        }
+    }
 }
 
 enum RepeatedTimeChoice: String, Codable, Sendable {

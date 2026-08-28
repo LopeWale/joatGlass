@@ -45,6 +45,17 @@ class ActionRecord:
 
 
 @dataclass(frozen=True)
+class ActionActivity:
+    """Payload-free action metadata safe for a glanceable activity view."""
+
+    action_id: str
+    kind: str
+    state: str
+    created_at_us: int
+    updated_at_us: int
+
+
+@dataclass(frozen=True)
 class ConfirmationEvidence:
     """Evidence returned by the authenticated, exact-preview channel."""
 
@@ -60,6 +71,17 @@ class ConfirmationEvidence:
     preview_completed_at_us: int
     decided_at_us: int
     accepted: bool
+
+
+@dataclass(frozen=True)
+class ExternalReference:
+    """One read-back identity bound atomically to a successful receipt."""
+
+    system: str
+    kind: str
+    identifier_kind: str
+    identifier_value: str
+    scope_digest: bytes
 
 
 @dataclass(frozen=True)
@@ -159,6 +181,29 @@ class ActionJournal:
 
     def get(self, action_id: str) -> ActionRecord:
         return self._get_with(self._store._db, action_id)
+
+    def recent(self, *, limit: int = 5) -> tuple[ActionActivity, ...]:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 20
+        ):
+            raise ValueError("limit must be between 1 and 20")
+        rows = self._store.execute(
+            "SELECT action_id,kind,state,created_at_us,updated_at_us "
+            "FROM actions ORDER BY updated_at_us DESC,action_id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return tuple(
+            ActionActivity(
+                action_id=str(row[0]),
+                kind=str(row[1]),
+                state=str(row[2]),
+                created_at_us=int(row[3]),
+                updated_at_us=int(row[4]),
+            )
+            for row in rows
+        )
 
     @staticmethod
     def _get_with(db: sqlite3.Connection, action_id: str) -> ActionRecord:
@@ -364,8 +409,23 @@ class ActionJournal:
         evidence_digest: bytes,
         now_us: int,
         external_item_id: str | None = None,
+        external_reference: ExternalReference | None = None,
     ) -> None:
         _require_digest("evidence_digest", evidence_digest)
+        if external_item_id is not None and external_reference is not None:
+            raise ValueError("provide an external item id or reference, not both")
+        if external_reference is not None:
+            _require_digest("external scope_digest", external_reference.scope_digest)
+            if any(
+                not value or value != value.strip()
+                for value in (
+                    external_reference.system,
+                    external_reference.kind,
+                    external_reference.identifier_kind,
+                    external_reference.identifier_value,
+                )
+            ):
+                raise ValueError("external reference fields must be non-empty and unpadded")
         with self._store.transaction() as db:
             attempt = db.execute(
                 "SELECT state FROM action_attempts WHERE attempt_id=? AND action_id=?",
@@ -378,6 +438,13 @@ class ActionJournal:
                 "result_digest=? WHERE attempt_id=?",
                 (now_us, evidence_digest, attempt_id),
             )
+            if external_reference is not None:
+                external_item_id = self._upsert_external_reference(
+                    db,
+                    external_reference,
+                    fingerprint=evidence_digest,
+                    now_us=now_us,
+                )
             receipt_id = str(uuid.uuid4())
             try:
                 db.execute(
@@ -406,6 +473,67 @@ class ActionJournal:
                 reason_code=f"receipt_{verification_level}",
                 now_us=now_us,
             )
+
+    @staticmethod
+    def _upsert_external_reference(
+        db: sqlite3.Connection,
+        reference: ExternalReference,
+        *,
+        fingerprint: bytes,
+        now_us: int,
+    ) -> str:
+        row = db.execute(
+            "SELECT x.external_item_id,e.system,e.kind,e.scope_digest "
+            "FROM external_identifiers x JOIN external_items e "
+            "ON e.external_item_id=x.external_item_id "
+            "WHERE x.identifier_kind=? AND x.identifier_value=? "
+            "AND x.valid_to_us IS NULL",
+            (reference.identifier_kind, reference.identifier_value),
+        ).fetchone()
+        if row is not None:
+            if (
+                str(row[1]) != reference.system
+                or str(row[2]) != reference.kind
+            ):
+                raise ActionConflictError(
+                    "external identifier already names a different object kind"
+                )
+            external_item_id = str(row[0])
+            db.execute(
+                "UPDATE external_items SET scope_digest=?,fingerprint=?,last_seen_us=? "
+                "WHERE external_item_id=?",
+                (reference.scope_digest, fingerprint, now_us, external_item_id),
+            )
+            return external_item_id
+
+        external_item_id = str(uuid.uuid4())
+        try:
+            db.execute(
+                "INSERT INTO external_items(external_item_id,system,kind,scope_digest,"
+                "fingerprint,first_seen_us,last_seen_us) VALUES (?,?,?,?,?,?,?)",
+                (
+                    external_item_id,
+                    reference.system,
+                    reference.kind,
+                    reference.scope_digest,
+                    fingerprint,
+                    now_us,
+                    now_us,
+                ),
+            )
+            db.execute(
+                "INSERT INTO external_identifiers(external_item_id,identifier_kind,"
+                "identifier_value,valid_from_us) VALUES (?,?,?,?)",
+                (
+                    external_item_id,
+                    reference.identifier_kind,
+                    reference.identifier_value,
+                    now_us,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ActionConflictError("external reference conflicts with durable state") from exc
+        return external_item_id
 
     def record_failure(
         self,
@@ -492,7 +620,7 @@ class ActionJournal:
         with self._store.transaction() as db:
             rows = db.execute(
                 "SELECT action_id,state FROM actions WHERE state IN ("
-                "'awaiting_confirmation','approved','dispatching','verifying') "
+                "'ready','awaiting_confirmation','approved','dispatching','verifying') "
                 "ORDER BY created_at_us,action_id"
             ).fetchall()
             for raw_action_id, raw_state in rows:
@@ -514,6 +642,11 @@ class ActionJournal:
                     reason_code=reason,
                     now_us=now_us,
                 )
+                if target == "invalidated":
+                    db.execute(
+                        "DELETE FROM action_payloads WHERE action_id=?",
+                        (action_id,),
+                    )
                 recovered[action_id] = target
         return recovered
 

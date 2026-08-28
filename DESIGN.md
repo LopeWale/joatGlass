@@ -114,9 +114,10 @@ one bright question the wearer's full attention.
 ## Shapes
 
 One continuous 20px rounded rule makes all four image tiles read as one HUD.
-Rows use only the minimum structure needed for scanning: a selected outline in
-full-focus lists, light separators between inactive rows, and a single vertical
-divider at the Sidebar boundary. There are no floating modal cards.
+Rows use only the minimum structure needed for scanning: a selected outline on
+collection rows that actually accept a tap, light separators on read-only
+detail/receipt rows, and a single vertical divider at the Sidebar boundary.
+There are no floating modal cards.
 
 ## Components
 
@@ -127,9 +128,10 @@ divider at the Sidebar boundary. There are no floating modal cards.
 - **Transient Sidebar:** appears only after a left-temple double-click. Its five
   capability rows occupy the left 160px while the current Overview remains
   visible and dimmed at right. Selecting a row removes the Sidebar immediately.
-- **Full-focus page:** a bright destination title, avatar/initial markers,
+- **Full-focus page:** a bright destination title, semantic Phosphor markers,
   primary and secondary row text, timestamps, and a quiet action hint use the
-  whole canvas after selection.
+  whole canvas after selection. Messages may use a sender initial; Calendar,
+  Tasks, Notifications, QuickNotes, and Activity keep their domain glyph.
 - **Confirmation:** the question is focal intensity; accept is primary, cancel
   is supporting, and the countdown meter recedes. Ordinary content
   updates are deferred. The input gate consumes gestures while rendering but
@@ -140,24 +142,36 @@ divider at the Sidebar boundary. There are no floating modal cards.
   guidance. It never shares the frame with stale rows.
 
 The microphone indicator is driven by structured audio state, never parsed
-from transient status copy. Capability data is accepted only when its title
-matches the currently requested destination; Back or a newer selection makes
-an older response inert.
+from transient status copy. Capability data is accepted only when its unique
+request generation matches the currently visible destination; titles describe
+content but are not response identity. Back or a newer selection makes an
+older response and its row snapshot inert. Whether a focus page accepts row
+taps is explicit protocol state, never inferred from title copy.
 
 ### Buttons and actions
 
-There are no visual buttons. Gesture copy is the action system. Use explicit
-verbs and keep one primary action per decision area. A confirmation names both
-outcomes: right temple/ring/nod accepts, left temple cancels, and eight seconds
-without action times out as refusal.
+There are no ordinary visual buttons. Gesture copy is the action system. Use
+explicit verbs and keep one primary action per decision area. Confirmation is
+the exception: it names both outcomes as `TAP · Confirm` and `SWIPE · Cancel`;
+either built-in temple tap confirms, either swipe refuses, and eight seconds
+without action also refuses. Nod is not an approval path.
 
 ### Navigation and data display
 
-Navigation grammar is `Overview -> Sidebar -> full-focus destination ->
-Overview`. Only a left-temple double-click opens or closes app navigation; a
-right-temple double-click remains the glasses OS exit confirmation. Capability
-and Settings rows are actionable. Message and notification lists are browse-only
-until a real detail handler exists, so their footer must not promise "open".
+Navigation grammar is `Overview -> Sidebar -> full-focus destination -> detail
+-> Overview`. The fifth root row is `More`, which opens the same transient rail
+for `QuickNotes`, `Brainstorm`, and `Activity`; it is hierarchy, not a different
+visual language. Only a left-temple double-click opens or closes app navigation;
+a right-temple double-click remains the glasses OS exit confirmation. Populated
+Messages, Notifications, Calendar, Tasks, QuickNotes, and Activity collections
+accept a tap. Setup, empty, detail, and action-lifecycle pages are read-only and
+therefore draw no selection outline or tap promise. A navigation state becomes
+interactive only after its visual paint succeeds; a failed paint restores
+Overview instead of exposing invisible controls.
+
+Brainstorm is the wearer-facing capability name; `debate` remains a legacy
+voice alias, while Agent Terminal and OpenClaw are backend seat/status concepts,
+not additional HUD destinations.
 
 ### Forms and overlays
 
@@ -167,7 +181,7 @@ The HUD has no data-entry form. Its three temporary surface families are:
 |---|---|---|---|
 | Sidebar | Custom image frame with the latest Overview as backdrop | Transparent capture layer; left-double returns to Overview | Selection removes the rail into a full-focus destination |
 | Focus page | Custom image frame; Mac or plugin rows | Transparent capture layer; left-double returns to Overview | Paint Overview and replay the presenter's buffered, latest regions |
-| Confirmation | Plugin presenter | Right/ring/nod confirm; left cancel; timeout refuses | Restore the exact prior Overview, Sidebar, or focus page, including deferred content |
+| Confirmation | Plugin presenter | Built-in temple tap confirms; either swipe or timeout refuses | Restore the exact prior Overview, Sidebar, or focus page, including deferred content |
 
 The glasses OS owns the app-exit confirmation. JOAT preserves mode-1 shutdown
 and does not restyle, replace, or pre-empt that platform surface.
@@ -175,9 +189,10 @@ and does not restyle, replace, or pre-empt that platform surface.
 ### Iconography
 
 All interface icons come from `@phosphor-icons/core` regular assets. Calendar,
-messages, notifications, debate, settings, microphone, battery, and directional
-actions use one stroke family and are rasterized with the surrounding frame.
-Short text labels remain mandatory; icons never carry meaning alone.
+Messages, Notifications, Tasks, More, QuickNotes, Brainstorm, Activity,
+Settings, microphone, and battery use one stroke family and are rasterized with
+the surrounding frame. Short text labels remain mandatory; icons never carry
+meaning alone.
 
 ### Motion
 

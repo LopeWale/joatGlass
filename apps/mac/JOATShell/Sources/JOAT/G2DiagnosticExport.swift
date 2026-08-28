@@ -37,7 +37,8 @@ enum G2DiagnosticExport {
 
     static func redactedArchive(from data: Data, exportedAtMs: Int64) throws -> Data {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              root["schema"] as? String == "joat.g2-diagnostic.v1",
+              let sourceSchema = root["schema"] as? String,
+              ["joat.g2-diagnostic.v1", "joat.g2-diagnostic.v2"].contains(sourceSchema),
               let rawEvents = root["events"] as? [[String: Any]]
         else { throw ExportError.malformed }
 
@@ -45,7 +46,7 @@ enum G2DiagnosticExport {
         guard events.count == rawEvents.count else { throw ExportError.malformed }
         return try JSONSerialization.data(
             withJSONObject: [
-                "schema": "joat.g2-diagnostic-export.v1",
+                "schema": "joat.g2-diagnostic-export.v2",
                 "exportedAtMs": exportedAtMs,
                 "events": events,
             ],
@@ -96,6 +97,35 @@ enum G2DiagnosticExport {
             else { return nil }
             output["surface"] = surface; output["target"] = target
             output["decision"] = decision; output["containerId"] = containerId
+        case "location_probe_state":
+            guard hasExactly(event, [
+                "sequence", "recordedAtMs", "type", "requested", "outcome",
+            ]),
+                  let requested = one(of: event["requested"], ["high", "ambient"]),
+                  let outcome = one(of: event["outcome"], ["success", "failed"])
+            else { return nil }
+            output["requested"] = requested; output["outcome"] = outcome
+        case "location_probe":
+            guard hasExactly(event, [
+                "sequence", "recordedAtMs", "type", "sampleSequence", "profile",
+                "lifecycle", "fields", "cadenceMs", "accuracy", "timestampAge",
+                "displacement", "headingDelta",
+            ]),
+                  let sampleSequence = positiveInt(event["sampleSequence"]),
+                  let profile = one(of: event["profile"], ["high"]),
+                  let lifecycle = one(of: event["lifecycle"], ["foreground", "background"]),
+                  let fields = boundedInt(event["fields"], 0...7),
+                  let cadenceMs = boundedInt(event["cadenceMs"], 0...600_000),
+                  let accuracy = one(of: event["accuracy"], ["unknown", "lte5", "lte10", "lte25", "gt25"]),
+                  let timestampAge = one(of: event["timestampAge"], ["missing", "future", "fresh", "stale"]),
+                  let displacement = one(of: event["displacement"], ["first", "lt5", "5_20", "20_100", "gt100"]),
+                  let headingDelta = one(of: event["headingDelta"], ["unavailable", "insufficient_motion", "0_30", "31_90", "91_180"])
+            else { return nil }
+            output["sampleSequence"] = sampleSequence; output["profile"] = profile
+            output["lifecycle"] = lifecycle; output["fields"] = fields
+            output["cadenceMs"] = cadenceMs; output["accuracy"] = accuracy
+            output["timestampAge"] = timestampAge; output["displacement"] = displacement
+            output["headingDelta"] = headingDelta
         default:
             return nil
         }
@@ -113,6 +143,11 @@ enum G2DiagnosticExport {
 
     private static func positiveInt(_ value: Any?) -> Int? {
         guard let value = value as? Int, value > 0 else { return nil }
+        return value
+    }
+
+    private static func boundedInt(_ value: Any?, _ range: ClosedRange<Int>) -> Int? {
+        guard let value = value as? Int, range.contains(value) else { return nil }
         return value
     }
 

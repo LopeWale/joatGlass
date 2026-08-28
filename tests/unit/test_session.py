@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
-from joat.core.protocol import ContainerId, DownlinkMessage, HudText
+from joat.core.protocol import ContainerId, DownlinkMessage, HudRebuild, HudText
 from joat.services.hud import HudWriter
 from joat.services.roundtable import Participant, RoundTable
 from joat.services.session import DebateSession, Session, SessionManager
@@ -70,6 +70,37 @@ def hud_texts(transport: SinkTransport) -> list[tuple[str, bool, int]]:
 
 
 class TestDebateSession:
+    async def test_brainstorm_releases_focus_before_first_visible_frame(self) -> None:
+        transport = SinkTransport()
+
+        await debate(
+            transport,
+            pair(agent(["one"]), agent(["two"])),
+            None,
+            topic="plan the week",
+        ).run()
+
+        assert isinstance(transport.sent[0], HudRebuild)
+        assert transport.sent[0].layout == "default"
+        visible_copy = "\n".join(
+            message.text for message in transport.sent if isinstance(message, HudText)
+        )
+        assert "BRAINSTORM · plan the week" in visible_copy
+        assert "debate" not in visible_copy.casefold()
+
+    async def test_publishes_opening_turn_and_closing_phases(self) -> None:
+        transport = SinkTransport()
+        phases: list[str] = []
+
+        await debate(
+            transport,
+            pair(agent(["one"]), agent(["two"])),
+            None,
+            on_phase=phases.append,
+        ).run()
+
+        assert phases == ["opening", "turn", "closing"]
+
     async def test_turns_stream_in_order_visibly(self) -> None:
         transport = SinkTransport()
         session = debate(
@@ -179,7 +210,7 @@ class TestDebateSession:
         )
         await debate(transport, seats, OneShotJudge()).run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
-        assert "no debate — 1 of 2 spoke (claude silent)" in joined
+        assert "insufficient collaborators — 1 of 2 spoke (claude silent)" in joined
         assert "JUDGE" not in joined  # nothing to score, so no verdict is faked
 
     async def test_cancel_stops_midstream(self) -> None:
@@ -200,6 +231,136 @@ class TestDebateSession:
 
 
 class TestSessionManager:
+    async def test_registered_session_starter_and_active_correction_share_one_owner(self) -> None:
+        received: list[str] = []
+        states: list[str] = []
+        running = asyncio.Event()
+
+        class NavigationSession(Session):
+            async def run(self) -> None:
+                running.set()
+                await asyncio.Event().wait()
+
+            def cancel(self) -> None:
+                return None
+
+            def consume_transcript(self, text: str) -> bool:
+                received.append(text)
+                return True
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: None,
+            starters=[
+                lambda text: NavigationSession()
+                if text.lower().startswith("navigate to ") else None,
+            ],
+            on_state=states.append,
+        )
+        assert manager.handle_transcript("navigate to Cajun Corner") is True
+        await running.wait()
+        assert manager.handle_transcript("the street number is 2301") is True
+        assert received == ["the street number is 2301"]
+        assert states == []
+        await manager.close(timeout_s=0.01)
+
+    async def test_publishes_running_and_settled_lifecycle(self) -> None:
+        states: list[str] = []
+
+        class FastSession(Session):
+            async def run(self) -> None: ...
+
+            def cancel(self) -> None: ...
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: FastSession(),
+            on_state=states.append,
+        )
+
+        assert manager.handle_transcript("brainstorm a launch")
+        await asyncio.sleep(0)
+        assert states == ["running", "settled"]
+
+    async def test_crashed_session_publishes_failed_not_settled(self) -> None:
+        states: list[str] = []
+
+        class CrashedSession(Session):
+            async def run(self) -> None:
+                raise RuntimeError("boom")
+
+            def cancel(self) -> None: ...
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: CrashedSession(),
+            on_state=states.append,
+        )
+
+        assert manager.handle_transcript("brainstorm a launch")
+        await asyncio.sleep(0)
+        assert states == ["running", "failed"]
+
+    async def test_close_cancels_and_awaits_active_session(self) -> None:
+        states: list[str] = []
+
+        class ActiveSession(Session):
+            def __init__(self) -> None:
+                self.cancelled = asyncio.Event()
+
+            async def run(self) -> None:
+                await self.cancelled.wait()
+
+            def cancel(self) -> None:
+                self.cancelled.set()
+
+            @property
+            def completion_state(self) -> str:
+                return "cancelled"
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: ActiveSession(),
+            on_state=states.append,
+        )
+
+        assert manager.handle_transcript("brainstorm a launch")
+        await asyncio.sleep(0)
+        await manager.close()
+
+        assert not manager.active
+        assert states == ["running", "cancelled"]
+
+    async def test_spoken_stop_interrupts_a_session_blocked_in_remote_io(self) -> None:
+        entered = asyncio.Event()
+        exited = asyncio.Event()
+
+        class BlockedSession(Session):
+            async def run(self) -> None:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    exited.set()
+
+            def cancel(self) -> None:
+                return None
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: BlockedSession(),
+        )
+
+        assert manager.handle_transcript("brainstorm a launch")
+        await entered.wait()
+        assert manager.handle_transcript("stop")
+        async with asyncio.timeout(0.1):
+            await exited.wait()
+            while manager.active:
+                await asyncio.sleep(0)
+
+        assert not manager.active
+
     async def test_incoming_card_is_typed_as_notification_not_assistant_reply(self) -> None:
         transport = SinkTransport()
         manager = SessionManager(HudWriter(transport), lambda _topic: None)
@@ -210,6 +371,25 @@ class TestSessionManager:
         cards = [m for m in transport.sent if isinstance(m, HudText)]
         assert len(cards) == 1
         assert cards[0].content_kind == "notification"
+
+    async def test_notify_and_wait_completes_only_after_hud_write(self) -> None:
+        gate = asyncio.Event()
+
+        class GatedTransport(SinkTransport):
+            async def send(self, message: DownlinkMessage) -> None:
+                await gate.wait()
+                await super().send(message)
+
+        transport = GatedTransport()
+        manager = SessionManager(HudWriter(transport), lambda _topic: None)
+        delivery = asyncio.create_task(manager.notify_and_wait("Ada · Messages\nHi"))
+        await asyncio.sleep(0)
+
+        assert not delivery.done()
+        assert transport.sent == []
+        gate.set()
+        await delivery
+        assert len(transport.sent) == 1
 
     async def test_trigger_starts_and_consumes(self) -> None:
         transport = SinkTransport()
@@ -453,3 +633,20 @@ class TestCapabilityNaming:
         assert mgr.handle_transcript("debate heat pumps") is True
         await asyncio.sleep(0)
         assert started == ["heat pumps", "heat pumps"]
+
+    async def test_spoken_comma_after_brainstorm_starts_the_session(self) -> None:
+        started: list[str] = []
+
+        class Noop(Session):
+            def __init__(self, topic: str) -> None:
+                started.append(topic)
+
+            async def run(self) -> None: ...
+            def cancel(self) -> None: ...
+
+        mgr = SessionManager(HudWriter(SinkTransport()), lambda t: Noop(t))
+        assert mgr.handle_transcript(
+            "brainstorm, confirm system readiness using Copper Falcon."
+        ) is True
+        await asyncio.sleep(0)
+        assert started == ["confirm system readiness using Copper Falcon"]

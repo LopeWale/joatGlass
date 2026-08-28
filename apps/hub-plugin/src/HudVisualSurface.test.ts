@@ -125,6 +125,42 @@ describe('HudVisualSurface', () => {
     expect(rendered).toEqual(['first', 'latest']);
   });
 
+  it('never coalesces generation-bound navigation frames', async () => {
+    const rendered: string[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => ImageRawDataUpdateResult.success,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async (candidate) => {
+        if (candidate.kind === 'navigation') rendered.push(candidate.navigation.primary);
+        await Promise.resolve();
+        return [
+          { containerId: ContainerId.Image, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(4) },
+        ];
+      },
+    };
+    const frame = (primary: string): HudVisualFrame => ({
+      kind: 'navigation', status: '', micOn: false,
+      navigation: {
+        view: 'guidance', primary, secondary: 'onto Test Ave', hint: 'continue',
+        interaction: 'none', options: [], selectedIndex: 0,
+      },
+    });
+    const surface = new HudVisualSurface(client, renderer);
+
+    expect(await Promise.all([
+      surface.paint(frame('first')),
+      surface.paint(frame('middle')),
+      surface.paint(frame('latest')),
+    ])).toEqual([true, true, true]);
+    expect(rendered).toEqual(['first', 'middle', 'latest']);
+  });
+
   it('records the serial tile order and result without retaining pixels', async () => {
     const events: unknown[] = [];
     const client = {

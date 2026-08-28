@@ -8,11 +8,14 @@ an attempt before EventKit is called.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,9 +34,12 @@ from ..persistence.actions import (
     ActionDraft,
     ActionJournal,
     ConfirmationEvidence,
+    ExternalReference,
 )
+from ..persistence.tasks import TaskOccurrenceStore
 
 Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
+ActionStatusPublisher = Callable[[str, str], Awaitable[None]]
 
 _ZONE = r"[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)*"
 _EVENT = re.compile(
@@ -53,6 +59,7 @@ _REMINDER = re.compile(
     rf"(?:\s+in list\s+(?P<container>.+))?$",
     re.IGNORECASE,
 )
+_COMPLETE_REMINDER = re.compile(r"^complete reminder\s+(?P<title>.+)$", re.IGNORECASE)
 
 _EVENT_USAGE = (
     "Say: schedule TITLE on YYYY-MM-DD at HH:MM for MINUTES minutes "
@@ -62,6 +69,7 @@ _REMINDER_USAGE = (
     "Say: remind me to TITLE on YYYY-MM-DD at HH:MM in America/Chicago."
 )
 _CONFIRM_SECONDS = 12.0
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,6 +78,27 @@ class _ResolvedContainer:
     title: str
     store_instance_id: str
     store_generation: int
+
+
+@dataclass(frozen=True)
+class ActionOrigin:
+    """Opaque local provenance for a proposed consequential action."""
+
+    kind: str
+    identifier: str
+    ordinal: int = 0
+
+
+@dataclass(frozen=True)
+class CalendarEventIntent:
+    """Validated-shape candidate; EventKit remains authoritative for meaning."""
+
+    title: str
+    date: str
+    time: str
+    duration_minutes: int
+    time_zone: str
+    calendar_title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,7 +119,10 @@ class _CivilIntent:
         }
 
     def display(self) -> str:
-        return f"{self.date.strftime('%b')} {self.date.day}, {self.date:%H:%M}"
+        return (
+            f"{self.date.strftime('%b')} {self.date.day}, {self.date.year} "
+            f"at {self.date:%H:%M}"
+        )
 
 
 class ProductivityActionController:
@@ -101,10 +133,15 @@ class ProductivityActionController:
         bridge: NativeBridgeClient | None,
         confirm: Confirm,
         journal: ActionJournal,
+        task_occurrences: TaskOccurrenceStore | None = None,
+        *,
+        publish_status: ActionStatusPublisher | None = None,
     ) -> None:
         self._bridge = bridge
         self._confirm = confirm
         self._journal = journal
+        self._task_occurrences = task_occurrences
+        self._publish_status = publish_status
 
     async def handle_command(self, text: str) -> str | None:
         normalized = " ".join(text.strip().split())
@@ -114,30 +151,70 @@ class ProductivityActionController:
         reminder = _REMINDER.fullmatch(normalized)
         if reminder is not None:
             return await self._create_reminder(reminder)
+        completion = _COMPLETE_REMINDER.fullmatch(normalized)
+        if completion is not None:
+            return await self._complete_reminder(completion.group("title"))
         lowered = normalized.casefold()
         if lowered.startswith(("schedule ", "create calendar event ")):
             return _EVENT_USAGE
         if lowered.startswith("remind me"):
             return _REMINDER_USAGE
+        if lowered.startswith("complete reminder"):
+            return "Say: complete reminder EXACT TITLE."
         return None
 
     async def _create_event(self, match: re.Match[str]) -> str:
+        return await self.create_calendar_event(CalendarEventIntent(
+            title=match.group("title"),
+            date=match.group("date"),
+            time=match.group("time"),
+            duration_minutes=int(match.group("minutes")),
+            time_zone=match.group("zone"),
+            calendar_title=match.group("container"),
+        ))
+
+    async def create_calendar_event(
+        self,
+        intent: CalendarEventIntent,
+        *,
+        origin: ActionOrigin | None = None,
+    ) -> str:
+        """Validate a typed candidate, then use the same confirmed native path."""
         if self._bridge is None:
             return "Open JOAT on the Mac and connect Calendar first."
-        title = self._valid_title(match.group("title"))
+        title = self._valid_title(intent.title)
         if title is None:
             return "Calendar event title must be 1 to 200 visible characters."
         try:
-            minutes = int(match.group("minutes"))
+            minutes = intent.duration_minutes
+            if isinstance(minutes, bool) or not isinstance(minutes, int):
+                raise ValueError
             if not 1 <= minutes <= 1_440:
                 return "Calendar event duration must be 1 to 1440 minutes."
-            civil = self._civil(match.group("date"), match.group("time"), match.group("zone"))
+            if re.fullmatch(_ZONE, intent.time_zone) is None or len(intent.time_zone) > 128:
+                raise ValueError
+            civil = self._civil(intent.date, intent.time, intent.time_zone)
         except ValueError:
             return _EVENT_USAGE
+        selected_calendar = intent.calendar_title
+        if selected_calendar is not None:
+            selected_calendar = self._valid_title(selected_calendar)
+            if selected_calendar is None:
+                return "Calendar name must be 1 to 200 visible characters."
+        if origin is not None and (
+            not origin.kind
+            or len(origin.kind) > 128
+            or not origin.identifier
+            or len(origin.identifier) > 256
+            or isinstance(origin.ordinal, bool)
+            or not isinstance(origin.ordinal, int)
+            or origin.ordinal < 0
+        ):
+            return "Calendar event proposal provenance was invalid. Nothing was created."
 
         prepared = await self._prepare(
             entity="calendar",
-            selected_title=match.group("container"),
+            selected_title=selected_calendar,
             civil=civil,
         )
         if isinstance(prepared, str):
@@ -168,6 +245,8 @@ class ProductivityActionController:
             cancelled="Calendar event cancelled.",
             uncertain="Calendar may have created the event. Check Calendar before retrying.",
             failed="Calendar did not create the event. Check JOAT on the Mac.",
+            monitor_due_unix_ms=None,
+            origin=origin,
         )
 
     async def _create_reminder(self, match: re.Match[str]) -> str:
@@ -188,18 +267,19 @@ class ProductivityActionController:
         )
         if isinstance(prepared, str):
             return prepared
-        container, _chosen_ms = prepared
+        container, chosen_ms = prepared
         body: dict[str, object] = {
             "store_instance_id": container.store_instance_id,
             "store_generation": container.store_generation,
             "calendar_identifier": container.identifier,
             "title": title,
             "due": civil.to_wire(),
+            "resolved_due_unix_ms": chosen_ms,
             # EventKit owns the due alarm; JOAT monitors are a separate overlay.
             "alarm_offsets_seconds": [0],
         }
         prompt = (
-            f"Create reminder “{title}”? {container.title} · "
+            f"Create reminder + JOAT alert “{title}”? {container.title} · "
             f"{civil.display()} · {civil.zone}"
         )
         return await self._confirm_and_write(
@@ -212,6 +292,92 @@ class ProductivityActionController:
             cancelled="Reminder cancelled.",
             uncertain="The reminder may have been created. Check Reminders before retrying.",
             failed="Reminders did not create the reminder. Check JOAT on the Mac.",
+            monitor_due_unix_ms=chosen_ms,
+        )
+
+    async def _complete_reminder(self, raw_title: str) -> str:
+        if self._bridge is None:
+            return "Open JOAT on the Mac and connect Reminders first."
+        title = self._valid_title(raw_title)
+        if title is None:
+            return "Reminder title must be 1 to 200 visible characters."
+        try:
+            listed = await self._bridge.call("reminders.listContainers")
+            containers = listed.result if isinstance(listed.result, list) else []
+            identifiers = [
+                item["calendar_identifier"]
+                for item in containers
+                if isinstance(item, dict)
+                and isinstance(item.get("calendar_identifier"), str)
+            ]
+            queried = await self._bridge.call(
+                "reminders.query",
+                {
+                    "calendar_identifiers": identifiers,
+                    "include_completed": False,
+                    "limit": 500,
+                },
+            )
+        except NativeBridgeError as exc:
+            if exc.code == "full_access_required":
+                return "Open JOAT on the Mac and connect Reminders first."
+            return f"Reminders is unavailable: {exc}."
+        except (NativeBridgeUnavailable, NativeBridgeProtocolError):
+            return "Reminders is unavailable. Check JOAT on the Mac."
+        if (
+            listed.store_instance_id != queried.store_instance_id
+            or listed.store_generation != queried.store_generation
+        ):
+            return "Reminders changed while I prepared the completion. Please try again."
+        reminders = queried.result if isinstance(queried.result, list) else []
+        matches = [
+            item for item in reminders
+            if isinstance(item, dict)
+            and str(item.get("title") or "").casefold() == title.casefold()
+            and item.get("is_completed") is False
+        ]
+        if not matches:
+            return f"No incomplete reminder is exactly named {title}."
+        if len(matches) > 1:
+            return f"More than one incomplete reminder is named {title}. Complete it on the Mac."
+        reminder = matches[0]
+        if reminder.get("has_recurrence_rules") is True:
+            return "Recurring reminder completion is not enabled until occurrence behavior is device-verified."
+        item_id = reminder.get("calendar_item_identifier")
+        calendar_id = reminder.get("calendar_identifier")
+        if not isinstance(item_id, str) or not isinstance(calendar_id, str):
+            return "Reminders returned an invalid item identity. Nothing was completed."
+        container_titles = {
+            item.get("calendar_identifier"): item.get("title")
+            for item in containers
+            if isinstance(item, dict)
+        }
+        container_title = container_titles.get(calendar_id)
+        if not isinstance(container_title, str):
+            return "The reminder list changed. Please try again."
+        container = _ResolvedContainer(
+            identifier=calendar_id,
+            title=container_title,
+            store_instance_id=queried.store_instance_id,
+            store_generation=queried.store_generation,
+        )
+        body: dict[str, object] = {
+            "store_instance_id": container.store_instance_id,
+            "store_generation": container.store_generation,
+            "calendar_identifier": container.identifier,
+            "calendar_item_identifier": item_id,
+        }
+        return await self._confirm_and_write(
+            kind="reminders.complete",
+            method="reminders.complete",
+            body=body,
+            target=container,
+            prompt=f"Complete reminder “{title}”? {container.title}",
+            success=f"Completed Reminder: {title}.",
+            cancelled="Reminder completion cancelled.",
+            uncertain="The reminder may have been completed. Check Reminders before retrying.",
+            failed="Reminders did not complete the reminder. Check JOAT on the Mac.",
+            monitor_due_unix_ms=None,
         )
 
     async def _prepare(
@@ -314,6 +480,8 @@ class ProductivityActionController:
         cancelled: str,
         uncertain: str,
         failed: str,
+        monitor_due_unix_ms: int | None,
+        origin: ActionOrigin | None = None,
     ) -> str:
         assert self._bridge is not None
         if utf16_units(prompt) > CONFIRM_PROMPT_MAX_UTF16_UNITS:
@@ -328,7 +496,14 @@ class ProductivityActionController:
                     b"joat-eventkit-container-v1\0"
                     + target.identifier.encode("utf-8")
                 ).digest(),
-                idempotency_key=f"{kind}:{secrets.token_hex(16)}",
+                idempotency_key=(
+                    f"{kind}:{origin.kind}:{origin.identifier}:{origin.ordinal}"
+                    if origin is not None
+                    else f"{kind}:{secrets.token_hex(16)}"
+                ),
+                origin_kind=origin.kind if origin is not None else None,
+                origin_id=origin.identifier if origin is not None else None,
+                origin_ordinal=origin.ordinal if origin is not None else None,
             ),
             now_us=now_us,
         )
@@ -344,6 +519,14 @@ class ProductivityActionController:
                 _CONFIRM_SECONDS,
                 payload_digest=record.payload_digest.hex(),
             )
+        except asyncio.CancelledError:
+            self._journal.cancel_unconfirmed(
+                record.action_id,
+                reason_code="confirmation_cancelled",
+                now_us=time.time_ns() // 1_000,
+            )
+            self._journal.purge_payload(record.action_id)
+            raise
         except Exception:
             self._journal.cancel_unconfirmed(
                 record.action_id,
@@ -388,6 +571,11 @@ class ProductivityActionController:
             request_id=f"native:{record.action_id}",
             now_us=time.time_ns() // 1_000,
         )
+        action_label = self._action_label(kind)
+        await self._publish_action_status(
+            "ACTION · VERIFYING",
+            f"{action_label} · Checking native read-back…",
+        )
         try:
             response = await self._bridge.call(
                 method,
@@ -395,14 +583,58 @@ class ProductivityActionController:
                 attempt_id=attempt.attempt_id,
                 payload_digest=record.payload_digest.hex(),
             )
+            if response.commit_phase != "committed_readback":
+                raise NativeBridgeUnavailable(
+                    "native write response did not prove committed read-back",
+                    possible_external_commit=True,
+                )
             if not self._readback_matches(body, response.result):
                 raise NativeBridgeUnavailable(
                     "native read-back did not match the confirmed payload",
                     possible_external_commit=True,
                 )
+            if monitor_due_unix_ms is not None and self._task_occurrences is not None:
+                result = response.result
+                assert isinstance(result, dict)
+                external_item_id = result.get("calendar_item_identifier")
+                if not isinstance(external_item_id, str) or not external_item_id:
+                    raise NativeBridgeUnavailable(
+                        "native reminder read-back omitted its identifier",
+                        possible_external_commit=True,
+                    )
+                due = body.get("due")
+                zone = due.get("time_zone_id") if isinstance(due, dict) else None
+                if not isinstance(zone, str):
+                    raise NativeBridgeUnavailable(
+                        "native reminder read-back omitted its time zone",
+                        possible_external_commit=True,
+                    )
+                self._task_occurrences.register(
+                    action_id=record.action_id,
+                    external_item_id=external_item_id,
+                    calendar_identifier=target.identifier,
+                    title=str(body["title"]),
+                    due_unix_ms=monitor_due_unix_ms,
+                    time_zone_id=zone,
+                    now_us=time.time_ns() // 1_000,
+                )
+            elif method == "reminders.complete" and self._task_occurrences is not None:
+                result = response.result
+                assert isinstance(result, dict)
+                external_item_id = result.get("calendar_item_identifier")
+                if not isinstance(external_item_id, str):
+                    raise NativeBridgeUnavailable(
+                        "native reminder completion omitted its identifier",
+                        possible_external_commit=True,
+                    )
+                self._task_occurrences.mark_completed_external_if_present(
+                    external_item_id,
+                    now_us=time.time_ns() // 1_000,
+                )
         except NativeBridgeError as exc:
             possible = exc.commit_phase.startswith("committed")
             self._record_write_failure(record.action_id, attempt.attempt_id, exc.code, possible)
+            await self._publish_write_failure(action_label, possible)
             return uncertain if possible else failed
         except NativeBridgeUnavailable as exc:
             self._record_write_failure(
@@ -411,6 +643,7 @@ class ProductivityActionController:
                 "native_bridge_unavailable",
                 exc.possible_external_commit,
             )
+            await self._publish_write_failure(action_label, exc.possible_external_commit)
             return uncertain if exc.possible_external_commit else failed
         except NativeBridgeProtocolError:
             # A malformed receipt arrived only after the framed write was sent.
@@ -420,19 +653,113 @@ class ProductivityActionController:
                 "native_bridge_invalid_receipt",
                 True,
             )
+            await self._publish_write_failure(action_label, True)
+            return uncertain
+        except Exception:
+            # EventKit may already have committed even if local occurrence
+            # registration or receipt validation failed. Never offer a retry.
+            self._record_write_failure(
+                record.action_id,
+                attempt.attempt_id,
+                "post_commit_local_failure",
+                True,
+            )
+            await self._publish_write_failure(action_label, True)
             return uncertain
 
-        evidence = self._canonical(response.result)
-        self._journal.record_success(
-            record.action_id,
-            attempt.attempt_id,
-            outcome="eventkit_saved_and_read_back",
-            verification_level="read_back_matched",
-            evidence_digest=hashlib.sha256(evidence).digest(),
-            now_us=time.time_ns() // 1_000,
+        try:
+            evidence = self._canonical(response.result)
+            result = response.result
+            assert isinstance(result, dict)
+            external_identifier = result.get("calendar_item_identifier")
+            external_reference = None
+            if isinstance(external_identifier, str) and external_identifier:
+                external_reference = ExternalReference(
+                    system="eventkit",
+                    kind=(
+                        "calendar.event"
+                        if method == "calendar.create"
+                        else "reminders.reminder"
+                    ),
+                    identifier_kind="eventkit.calendar_item_identifier",
+                    identifier_value=external_identifier,
+                    scope_digest=record.target_digest,
+                )
+            self._journal.record_success(
+                record.action_id,
+                attempt.attempt_id,
+                outcome="eventkit_saved_and_read_back",
+                verification_level="read_back_matched",
+                evidence_digest=hashlib.sha256(evidence).digest(),
+                now_us=time.time_ns() // 1_000,
+                external_reference=external_reference,
+            )
+        except Exception:
+            # EventKit already proved the external commit. If canonical receipt
+            # construction or durable success recording fails, convert the
+            # still-dispatching action to uncertainty before telling the HUD.
+            # A blind retry could duplicate the native object.
+            try:
+                self._record_write_failure(
+                    record.action_id,
+                    attempt.attempt_id,
+                    "post_commit_receipt_failure",
+                    True,
+                )
+            except Exception:
+                # A store may fail after committing record_success. In that
+                # narrow case the durable success is authoritative; otherwise
+                # retain the original exception in logs for crash recovery.
+                try:
+                    if self._journal.get(record.action_id).state == "succeeded":
+                        self._purge_payload_best_effort(record.action_id)
+                        await self._publish_action_status(
+                            "ACTION · DONE",
+                            f"{action_label} · Saved and verified",
+                        )
+                        return success
+                except Exception:
+                    pass
+                log.exception("could not persist terminal state for action %s", record.action_id)
+            await self._publish_write_failure(action_label, True)
+            return uncertain
+
+        self._purge_payload_best_effort(record.action_id)
+        await self._publish_action_status(
+            "ACTION · DONE",
+            f"{action_label} · Saved and verified",
         )
-        self._journal.purge_payload(record.action_id)
         return success
+
+    async def _publish_write_failure(
+        self,
+        action_label: str,
+        possible_external_commit: bool,
+    ) -> None:
+        if possible_external_commit:
+            await self._publish_action_status(
+                "ACTION · CHECK",
+                f"{action_label} · Check native app before retrying",
+            )
+        else:
+            await self._publish_action_status(
+                "ACTION · FAILED",
+                f"{action_label} · Native write failed",
+            )
+
+    async def _publish_action_status(self, title: str, message: str) -> None:
+        if self._publish_status is None:
+            return
+        try:
+            await self._publish_status(title, message)
+        except Exception:
+            # HUD feedback is evidence presentation, never write authority.
+            # A disconnected display must not corrupt the durable outcome.
+            return
+
+    @staticmethod
+    def _action_label(kind: str) -> str:
+        return kind.replace(".", " ").capitalize()
 
     def _record_write_failure(
         self,
@@ -451,24 +778,94 @@ class ProductivityActionController:
         if not possible_external_commit:
             self._journal.purge_payload(action_id)
 
+    def _purge_payload_best_effort(self, action_id: str) -> None:
+        try:
+            self._journal.purge_payload(action_id)
+        except Exception:
+            # The receipt is already durable and authoritative. Payload cleanup
+            # is retriable maintenance and must not turn a verified save into a
+            # false uncertainty or strand the HUD at VERIFYING.
+            log.exception("could not purge payload for succeeded action %s", action_id)
+
     @staticmethod
     def _readback_matches(body: dict[str, object], result: Any) -> bool:
         if not isinstance(result, dict):
             return False
+        if "calendar_item_identifier" in body:
+            return (
+                result.get("calendar_item_identifier")
+                == body.get("calendar_item_identifier")
+                and result.get("calendar_identifier")
+                == body.get("calendar_identifier")
+                and result.get("is_completed") is True
+            )
         required = ("calendar_identifier", "title")
         if any(result.get(key) != body.get(key) for key in required):
             return False
+        external_identifier = result.get("calendar_item_identifier")
+        if not isinstance(external_identifier, str) or not external_identifier:
+            return False
         if "start_unix_ms" in body:
-            return all(
+            fields_match = all(
                 result.get(key) == body.get(key)
                 for key in ("start_unix_ms", "end_unix_ms", "is_all_day", "time_zone_id")
             )
-        return result.get("due") == body.get("due")
+        else:
+            fields_match = (
+                result.get("due") == body.get("due")
+                and result.get("is_completed") is False
+            )
+        if not fields_match:
+            return False
+        requested_alarms = body.get("alarm_offsets_seconds")
+        actual_alarms = result.get("alarms")
+        if not isinstance(requested_alarms, list) or not isinstance(actual_alarms, list):
+            return False
+        try:
+            offsets = sorted({int(offset) for offset in requested_alarms})
+        except (TypeError, ValueError):
+            return False
+        if "due" in body:
+            due_unix_ms = body.get("resolved_due_unix_ms")
+            if isinstance(due_unix_ms, bool) or not isinstance(due_unix_ms, int):
+                return False
+            expected_absolute = sorted(due_unix_ms - offset * 1_000 for offset in offsets)
+            actual_absolute: list[int] = []
+            for alarm in actual_alarms:
+                if (
+                    not isinstance(alarm, dict)
+                    or alarm.get("relative_offset_seconds") is not None
+                    or isinstance(alarm.get("absolute_unix_ms"), bool)
+                    or not isinstance(alarm.get("absolute_unix_ms"), int)
+                ):
+                    return False
+                actual_absolute.append(alarm["absolute_unix_ms"])
+            return sorted(actual_absolute) == expected_absolute
+
+        expected_relative = sorted(-offset for offset in offsets)
+        actual_relative: list[int] = []
+        for alarm in actual_alarms:
+            if (
+                not isinstance(alarm, dict)
+                or alarm.get("absolute_unix_ms") is not None
+                or isinstance(alarm.get("relative_offset_seconds"), bool)
+                or not isinstance(alarm.get("relative_offset_seconds"), int)
+            ):
+                return False
+            actual_relative.append(alarm["relative_offset_seconds"])
+        return sorted(actual_relative) == expected_relative
 
     @staticmethod
     def _valid_title(raw: str) -> str | None:
         title = raw.strip()
-        if not title or len(title) > 200 or any(ord(char) < 32 for char in title):
+        if (
+            not title
+            or len(title) > 200
+            or any(
+                unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+                for character in title
+            )
+        ):
             return None
         return title
 

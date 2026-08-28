@@ -13,6 +13,12 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from .protocol import Device, DownlinkMessage, InputEvent
+from .navigation import (
+    NavigationCandidate,
+    NavigationMode,
+    NavigationPoint,
+    ProviderRoute,
+)
 
 AudioCallback = Callable[[bytes, int], None]
 """(pcm_bytes, seq). A jump in seq means frames were dropped upstream."""
@@ -58,6 +64,25 @@ class GlassesTransport(ABC):
 
     @abstractmethod
     def on_device(self, callback: DeviceCallback) -> None: ...
+
+
+class NavigationProvider(ABC):
+    """Search/routing boundary; concrete Mapbox/Apple adapters live elsewhere."""
+
+    @abstractmethod
+    async def search(
+        self,
+        query: str,
+        proximity: NavigationPoint | None,
+    ) -> list[NavigationCandidate]: ...
+
+    @abstractmethod
+    async def route(
+        self,
+        origin: NavigationPoint,
+        destination: NavigationCandidate,
+        mode: NavigationMode,
+    ) -> ProviderRoute: ...
 
 
 class SttEngine(ABC):

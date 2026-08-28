@@ -8,7 +8,7 @@ final class NativeBridgeServerTests: XCTestCase {
         let directory = URL(fileURLWithPath: "/tmp/jb-\(UUID().uuidString)", isDirectory: true)
         let path = directory.appendingPathComponent("bridge.sock")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let server = NativeBridgeServer(socketURL: path)
+        let server = NativeBridgeServer(socketURL: path, authorizedPeerPID: getpid())
         try server.start()
         defer { server.stop() }
 
@@ -36,7 +36,7 @@ final class NativeBridgeServerTests: XCTestCase {
         let directory = URL(fileURLWithPath: "/tmp/jb-\(UUID().uuidString)", isDirectory: true)
         let path = directory.appendingPathComponent("bridge.sock")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let server = NativeBridgeServer(socketURL: path)
+        let server = NativeBridgeServer(socketURL: path, authorizedPeerPID: getpid())
         try server.start()
         defer { server.stop() }
 
@@ -67,7 +67,7 @@ final class NativeBridgeServerTests: XCTestCase {
         let directory = URL(fileURLWithPath: "/tmp/jb-\(UUID().uuidString)", isDirectory: true)
         let path = directory.appendingPathComponent("bridge.sock")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let server = NativeBridgeServer(socketURL: path)
+        let server = NativeBridgeServer(socketURL: path, authorizedPeerPID: getpid())
         try server.start()
         defer { server.stop() }
 
@@ -93,9 +93,95 @@ final class NativeBridgeServerTests: XCTestCase {
         XCTAssertEqual(replacementResponse.requestID, "replacement")
         XCTAssertNil(replacementResponse.error)
 
-        try setReceiveTimeout(first, seconds: 1)
-        var byte: UInt8 = 0
-        XCTAssertEqual(Darwin.recv(first, &byte, 1, MSG_PEEK), 0)
+        XCTAssertTrue(waitForPeerClose(first, timeoutMS: 1_000))
+    }
+
+    func testConcurrentStartIsIdempotentAndLeavesOneUsableListener() throws {
+        let directory = URL(fileURLWithPath: "/tmp/jb-\(UUID().uuidString)", isDirectory: true)
+        let path = directory.appendingPathComponent("bridge.sock")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = NativeBridgeServer(socketURL: path, authorizedPeerPID: getpid())
+        defer { server.stop() }
+        let failures = LockedErrors()
+
+        DispatchQueue.concurrentPerform(iterations: 8) { _ in
+            do {
+                try server.start()
+            } catch {
+                failures.append(error)
+            }
+        }
+        XCTAssertTrue(failures.all().isEmpty)
+        XCTAssertTrue(server.isRunning)
+
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { Darwin.close(fd) }
+        try connect(fd, path: path.path)
+        let response = try exchange(
+            makeRequest(requestID: "concurrent-start", method: "capabilities"),
+            on: fd
+        )
+        XCTAssertNil(response.error)
+    }
+
+    func testStopThenRestartServesANewConnection() throws {
+        let directory = URL(fileURLWithPath: "/tmp/jb-\(UUID().uuidString)", isDirectory: true)
+        let path = directory.appendingPathComponent("bridge.sock")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = NativeBridgeServer(socketURL: path, authorizedPeerPID: getpid())
+        try server.start()
+
+        let first = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(first, 0)
+        defer { Darwin.close(first) }
+        try connect(first, path: path.path)
+        XCTAssertNil(try exchange(
+            makeRequest(requestID: "before-restart", method: "capabilities"),
+            on: first
+        ).error)
+
+        server.stop()
+        XCTAssertTrue(waitForPeerClose(first, timeoutMS: 1_000))
+        try server.start()
+        defer { server.stop() }
+
+        let second = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(second, 0)
+        defer { Darwin.close(second) }
+        try setReceiveTimeout(second, seconds: 1)
+        try connect(second, path: path.path)
+        let response = try exchange(
+            makeRequest(requestID: "after-restart", method: "capabilities"),
+            on: second
+        )
+        XCTAssertEqual(response.requestID, "after-restart")
+        XCTAssertNil(response.error)
+    }
+
+    func testRejectsSameUIDPeerUntilExactProcessIsAuthorized() throws {
+        let directory = URL(fileURLWithPath: "/tmp/jb-\(UUID().uuidString)", isDirectory: true)
+        let path = directory.appendingPathComponent("bridge.sock")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = NativeBridgeServer(socketURL: path)
+        try server.start()
+        defer { server.stop() }
+
+        let rejected = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(rejected, 0)
+        defer { Darwin.close(rejected) }
+        try connect(rejected, path: path.path)
+        XCTAssertTrue(waitForPeerClose(rejected, timeoutMS: 1_000))
+
+        server.authorizePeerProcessID(getpid())
+        let authorized = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(authorized, 0)
+        defer { Darwin.close(authorized) }
+        try connect(authorized, path: path.path)
+        XCTAssertNil(try exchange(
+            makeRequest(requestID: "authorized", method: "capabilities"),
+            on: authorized
+        ).error)
     }
 
     private func makeRequest(
@@ -139,6 +225,13 @@ final class NativeBridgeServerTests: XCTestCase {
         if result != 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
+    }
+
+    private func waitForPeerClose(_ fd: Int32, timeoutMS: Int32) -> Bool {
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLHUP), revents: 0)
+        guard Darwin.poll(&descriptor, 1, timeoutMS) == 1 else { return false }
+        var byte: UInt8 = 0
+        return Darwin.recv(fd, &byte, 1, MSG_PEEK) == 0
     }
 
     private func connect(_ fd: Int32, path: String) throws {
@@ -187,5 +280,18 @@ final class NativeBridgeServerTests: XCTestCase {
             return true
         }
         return success ? data : nil
+    }
+}
+
+private final class LockedErrors: @unchecked Sendable {
+    private let lock = NSLock()
+    private var errors: [Error] = []
+
+    func append(_ error: Error) {
+        lock.withLock { errors.append(error) }
+    }
+
+    func all() -> [Error] {
+        lock.withLock { errors }
     }
 }

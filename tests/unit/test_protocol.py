@@ -30,6 +30,18 @@ from joat.core.protocol import (
     Imu,
     ImuTrace,
     Location,
+    LocationProbeControl,
+    NavigationAction,
+    NavigationCoordinate,
+    NavigationHudView,
+    NavigationOriginFailure,
+    NavigationProgressPolicy,
+    NavigationOriginRequest,
+    NavigationRoute,
+    NavigationRoutePlan,
+    NavigationRouteStep,
+    NavigationViewAck,
+    NavigationView,
     PairingAck,
     PairingSet,
     Input,
@@ -41,6 +53,111 @@ from joat.core.protocol import (
 
 
 class TestParseUplink:
+    def test_navigation_action_is_bound_to_exact_visible_generation(self) -> None:
+        assert parse_uplink({
+            "kind": "navigation.action",
+            "sessionId": "nav-1",
+            "requestId": "mode-2",
+            "generation": 8,
+            "action": "select_mode",
+            "choiceId": "walking",
+        }) == NavigationAction(
+            session_id="nav-1",
+            request_id="mode-2",
+            generation=8,
+            action="select_mode",
+            choice_id="walking",
+        )
+
+    def test_navigation_route_ack_and_semantic_state_are_content_free(self) -> None:
+        ack = parse_uplink({
+            "kind": "navigation.route.ack", "sessionId": "nav-1",
+            "routeId": "route-1", "revision": 2, "outcome": "installed",
+        })
+        assert ack.outcome == "installed"  # type: ignore[attr-defined]
+        state = parse_uplink({
+            "kind": "navigation.state", "sessionId": "nav-1", "routeId": "route-1",
+            "revision": 2, "sequence": 7, "state": "wrong_way",
+        })
+        assert state.state == "wrong_way"  # type: ignore[attr-defined]
+
+    def test_reroute_request_is_the_only_navigation_uplink_with_a_coordinate(self) -> None:
+        message = parse_uplink({
+            "kind": "navigation.reroute.request",
+            "sessionId": "nav-1", "routeId": "route-1", "baseRevision": 2,
+            "requestId": "route-1:2:reroute", "latitude": 41.9, "longitude": -87.65,
+        })
+        assert message.latitude == 41.9  # type: ignore[attr-defined]
+        assert message.longitude == -87.65  # type: ignore[attr-defined]
+
+    def test_navigation_origin_is_bound_to_the_explicit_request(self) -> None:
+        message = parse_uplink({
+            "kind": "navigation.origin", "sessionId": "nav-1",
+            "requestId": "origin-1", "generation": 6,
+            "latitude": 41.9, "longitude": -87.65, "accuracy": 6,
+        })
+        assert message.request_id == "origin-1"  # type: ignore[attr-defined]
+
+    def test_navigation_view_and_origin_failure_receipts_are_generation_bound(self) -> None:
+        assert parse_uplink({
+            "kind": "navigation.view.ack", "sessionId": "nav-1",
+            "requestId": "mode-2", "generation": 8,
+            "outcome": "bridge_acknowledged",
+        }) == NavigationViewAck(
+            session_id="nav-1", request_id="mode-2", generation=8,
+            outcome="bridge_acknowledged",
+        )
+        assert parse_uplink({
+            "kind": "navigation.origin.failed", "sessionId": "nav-1",
+            "requestId": "origin-1", "generation": 9, "reason": "unavailable",
+        }) == NavigationOriginFailure(
+            session_id="nav-1", request_id="origin-1", generation=9,
+            reason="unavailable",
+        )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "kind": "navigation.view.ack", "sessionId": "nav-1",
+                "requestId": "mode-2", "generation": 8, "outcome": "visible",
+            },
+            {
+                "kind": "navigation.origin.failed", "sessionId": "nav-1",
+                "requestId": "origin-1", "generation": 9, "reason": "denied",
+            },
+        ],
+    )
+    def test_navigation_failure_receipts_reject_unallowlisted_outcomes(
+        self, payload: dict[str, object],
+    ) -> None:
+        with pytest.raises(ProtocolError):
+            parse_uplink(payload)
+
+    @pytest.mark.parametrize(
+        ("mutated", "match"),
+        [
+            ({"generation": True}, "generation"),
+            ({"action": "teleport"}, "action"),
+            ({"choiceId": ""}, "choiceId"),
+            ({"privateAddress": "2301 N Lincoln"}, "unsupported fields"),
+        ],
+    )
+    def test_navigation_action_rejects_unbound_or_content_fields(
+        self, mutated: dict[str, object], match: str,
+    ) -> None:
+        payload: dict[str, object] = {
+            "kind": "navigation.action",
+            "sessionId": "nav-1",
+            "requestId": "mode-2",
+            "generation": 8,
+            "action": "select_mode",
+            "choiceId": "walking",
+        }
+        payload.update(mutated)
+        with pytest.raises(ProtocolError, match=match):
+            parse_uplink(payload)  # type: ignore[arg-type]
+
     def test_auth_carries_token_in_a_frame_not_the_url(self) -> None:
         assert parse_uplink({"kind": "auth", "token": "secret"}) == Auth(token="secret")
 
@@ -144,6 +261,24 @@ class TestParseUplink:
             "containerId": 9, "outcome": "success",
         })
 
+    def test_g2_diagnostic_accepts_content_free_navigation_page_transition(self) -> None:
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "page_transition",
+                "from": "overview",
+                "to": "navigation",
+                "reason": "show_navigation",
+                "outcome": "success",
+            },
+        }) == G2Diagnostic(event={
+            "type": "page_transition",
+            "from": "overview",
+            "to": "navigation",
+            "reason": "show_navigation",
+            "outcome": "success",
+        })
+
     def test_g2_diagnostic_rejects_content_and_unknown_fields(self) -> None:
         with pytest.raises(ProtocolError, match="unsupported fields"):
             parse_uplink({
@@ -151,6 +286,77 @@ class TestParseUplink:
                 "event": {
                     "type": "gesture", "gesture": "tap", "delivery": "sys",
                     "text": "private message",
+                },
+            })
+
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "gesture", "gesture": "tap", "delivery": "sys",
+                },
+                "text": "private message",
+            })
+
+    def test_location_probe_diagnostic_accepts_only_bounded_derived_metadata(self) -> None:
+        message = parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "location_probe",
+                "sampleSequence": 7,
+                "profile": "high",
+                "lifecycle": "foreground",
+                "fields": 7,
+                "cadenceMs": 998,
+                "accuracy": "lte10",
+                "timestampAge": "fresh",
+                "displacement": "5_20",
+                "headingDelta": "0_30",
+            },
+        })
+        assert message == G2Diagnostic(event={
+            "type": "location_probe",
+            "sampleSequence": 7,
+            "profile": "high",
+            "lifecycle": "foreground",
+            "fields": 7,
+            "cadenceMs": 998,
+            "accuracy": "lte10",
+            "timestampAge": "fresh",
+            "displacement": "5_20",
+            "headingDelta": "0_30",
+        })
+
+    def test_location_probe_state_distinguishes_start_failure_from_missing_fixes(self) -> None:
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "location_probe_state",
+                "requested": "high",
+                "outcome": "failed",
+            },
+        }) == G2Diagnostic(event={
+            "type": "location_probe_state",
+            "requested": "high",
+            "outcome": "failed",
+        })
+
+    def test_location_probe_diagnostic_rejects_raw_coordinates(self) -> None:
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "location_probe",
+                    "sampleSequence": 1,
+                    "profile": "high",
+                    "lifecycle": "foreground",
+                    "fields": 0,
+                    "cadenceMs": 0,
+                    "accuracy": "unknown",
+                    "timestampAge": "missing",
+                    "displacement": "first",
+                    "headingDelta": "unavailable",
+                    "latitude": 41.88,
                 },
             })
 
@@ -204,9 +410,13 @@ class TestDownlinkWire:
             items=["Messages"],
             title="T" * 60,
             hint="H" * 60,
+            request_id="hud-request-7",
+            selectable=True,
         ).to_wire()
         assert wire["title"] == "T" * 46
         assert wire["hint"] == "H" * 46
+        assert wire["requestId"] == "hud-request-7"
+        assert wire["selectable"] is True
 
     def test_audio_control_omits_source_when_unset(self) -> None:
         assert AudioControl(open=True).to_wire() == {"kind": "audio.control", "open": True}
@@ -217,6 +427,83 @@ class TestDownlinkWire:
     def test_g2_diagnostic_control(self) -> None:
         assert G2DiagnosticControl(enabled=True).to_wire() == {
             "kind": "g2.diagnostic.control", "enabled": True,
+        }
+
+    def test_location_probe_control(self) -> None:
+        assert LocationProbeControl(enabled=True).to_wire() == {
+            "kind": "location.probe.control", "enabled": True,
+        }
+
+    def test_navigation_view_is_structured_bounded_and_generation_bound(self) -> None:
+        wire = NavigationView(
+            session_id="nav-1",
+            request_id="mode-2",
+            generation=8,
+            navigation=NavigationHudView(
+                view="mode",
+                primary="Choose travel mode",
+                secondary="Cajun Corner · 1.2 km",
+                hint="swipe choose · tap continue",
+                interaction="stationary",
+                options=["Walk · 18 min", "Cycle · 7 min"],
+                choice_ids=["walking", "cycling"],
+                selected_index=0,
+            ),
+        ).to_wire()
+        assert wire == {
+            "kind": "navigation.view",
+            "sessionId": "nav-1",
+            "requestId": "mode-2",
+            "generation": 8,
+            "navigation": {
+                "view": "mode",
+                "primary": "Choose travel mode",
+                "secondary": "Cajun Corner · 1.2 km",
+                "hint": "swipe choose · tap continue",
+                "interaction": "stationary",
+                "options": ["Walk · 18 min", "Cycle · 7 min"],
+                "choiceIds": ["walking", "cycling"],
+                "selectedIndex": 0,
+            },
+        }
+
+    def test_navigation_route_prefetches_geometry_steps_and_explicit_policy(self) -> None:
+        policy = NavigationProgressPolicy(
+            max_accuracy_m=20, stale_after_ms=5000, corridor_radius_m=30,
+            ambiguity_margin_m=5, ambiguity_progress_delta_m=100,
+            search_back_m=120, search_forward_m=500, min_course_displacement_m=5,
+            wrong_way_angle_deg=120, wrong_way_min_backtrack_m=15,
+            wrong_way_samples=2, off_route_samples=3, arrival_radius_m=15,
+            arrival_samples=2, u_turn_suppression_m=50,
+        )
+        wire = NavigationRoute(
+            session_id="nav-1", request_id="route-request-1", generation=10,
+            route_id="route-1", revision=1, destination_label="Cajun Corner",
+            eta_minutes=18,
+            plan=NavigationRoutePlan(
+                mode="walking",
+                geometry=[
+                    NavigationCoordinate(latitude=41.9, longitude=-87.65),
+                    NavigationCoordinate(latitude=41.901, longitude=-87.64),
+                ],
+                steps=[NavigationRouteStep(
+                    id="step-1", maneuver="turn_right",
+                    instruction="onto Test Ave", distance_along_route_m=500,
+                )],
+                policy=policy,
+            ),
+        ).to_wire()
+        assert wire["kind"] == "navigation.route"
+        assert wire["plan"]["mode"] == "walking"  # type: ignore[index]
+        assert wire["plan"]["steps"][0]["maneuver"] == "turn_right"  # type: ignore[index]
+        assert wire["plan"]["policy"]["offRouteSamples"] == 3  # type: ignore[index]
+
+    def test_navigation_origin_request_is_generation_bound(self) -> None:
+        assert NavigationOriginRequest(
+            session_id="nav-1", request_id="origin-1", generation=6,
+        ).to_wire() == {
+            "kind": "navigation.origin.request", "sessionId": "nav-1",
+            "requestId": "origin-1", "generation": 6,
         }
 
     def test_confirm_request_uses_camel_case_action_id(self) -> None:
@@ -260,9 +547,25 @@ class TestDownlinkWire:
                 "selectedIndex": 2,
                 "selectedName": "MESSAGES",
                 "traceId": "hud-11",
+                "requestId": "hud-request-7",
             },
         })
         assert message.event.trace_id == "hud-11"  # type: ignore[attr-defined]
+        assert message.event.request_id == "hud-request-7"  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize("request_id", ["", 7, "x" * 129])
+    def test_input_request_id_rejects_invalid_generation_identity(
+        self, request_id: object
+    ) -> None:
+        with pytest.raises(ProtocolError, match="requestId"):
+            parse_uplink({
+                "kind": "input",
+                "event": {
+                    "containerName": "capmenu",
+                    "selectedName": "Messages",
+                    "requestId": request_id,
+                },
+            })
 
     def test_pairing_ack_requires_a_token(self) -> None:
         with pytest.raises(ProtocolError):

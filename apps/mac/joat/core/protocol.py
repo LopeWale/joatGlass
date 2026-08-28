@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
+import math
 from typing import Any, Literal
 
 # ── Constants mirrored from the SDK ──────────────────────────────────────────
@@ -70,6 +71,18 @@ ResumePolicy = Literal["auto", "mac", "confirm"]
 AudioSource = Literal["glasses", "phone"]
 
 RESUME_POLICIES: tuple[str, ...] = ("auto", "mac", "confirm")
+NAVIGATION_ACTIONS: tuple[str, ...] = (
+    "confirm_destination",
+    "retry_destination",
+    "select_destination",
+    "select_mode",
+    "start",
+    "change_mode",
+    "change_destination",
+    "finish",
+    "retry",
+    "cancel",
+)
 
 
 # ── Uplink: plugin → Mac ─────────────────────────────────────────────────────
@@ -127,6 +140,7 @@ class InputEvent:
     selected_index: int | None = None
     selected_name: str | None = None
     trace_id: str | None = None
+    request_id: str | None = None
 
     @property
     def is_right_temple_click(self) -> bool:
@@ -204,8 +218,75 @@ class G2Diagnostic:
     event: dict[str, str | int]
 
 
+@dataclass(frozen=True, slots=True)
+class NavigationAction:
+    """A semantic gesture bound to the exact navigation view it acted on."""
+
+    session_id: str
+    request_id: str
+    generation: int
+    action: str
+    choice_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationRouteAck:
+    session_id: str
+    route_id: str
+    revision: int
+    outcome: Literal["installed", "rejected"]
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationViewAck:
+    session_id: str
+    request_id: str
+    generation: int
+    outcome: Literal["bridge_acknowledged", "rejected"]
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationState:
+    session_id: str
+    route_id: str
+    revision: int
+    sequence: int
+    state: Literal["guidance", "uncertain", "wrong_way", "off_route", "arrived"]
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationRerouteRequest:
+    session_id: str
+    route_id: str
+    base_revision: int
+    request_id: str
+    latitude: float
+    longitude: float
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationOrigin:
+    session_id: str
+    request_id: str
+    generation: int
+    latitude: float
+    longitude: float
+    accuracy: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationOriginFailure:
+    session_id: str
+    request_id: str
+    generation: int
+    reason: Literal["unavailable"]
+
+
 UplinkMessage = (
-    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck | Location | G2Diagnostic
+    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
+    | Location | G2Diagnostic | NavigationAction | NavigationRouteAck
+    | NavigationViewAck | NavigationState | NavigationRerouteRequest
+    | NavigationOrigin | NavigationOriginFailure
 )
 
 
@@ -260,9 +341,13 @@ class HudText:
 @dataclass(frozen=True, slots=True)
 class HudRebuild:
     layout: Literal["default", "list", "image"] = "default"
+    reason: Literal["brainstorm"] | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {"kind": "hud.rebuild", "layout": self.layout}
+        message: dict[str, Any] = {"kind": "hud.rebuild", "layout": self.layout}
+        if self.reason is not None:
+            message["reason"] = self.reason
+        return message
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +355,8 @@ class HudList:
     items: list[str]
     title: str | None = None
     hint: str | None = None
+    request_id: str | None = None
+    selectable: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -277,11 +364,14 @@ class HudList:
         message: dict[str, Any] = {
             "kind": "hud.list",
             "items": [s[:64] for s in self.items[:20]],
+            "selectable": self.selectable,
         }
         if self.title is not None:
             message["title"] = self.title[:46]
         if self.hint is not None:
             message["hint"] = self.hint[:46]
+        if self.request_id is not None:
+            message["requestId"] = self.request_id[:128]
         return message
 
 
@@ -327,6 +417,156 @@ class G2DiagnosticControl:
 
     def to_wire(self) -> dict[str, Any]:
         return {"kind": "g2.diagnostic.control", "enabled": self.enabled}
+
+
+@dataclass(frozen=True, slots=True)
+class LocationProbeControl:
+    """Explicit high-accuracy Gate-0 session; never inferred from movement."""
+
+    enabled: bool
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": "location.probe.control", "enabled": self.enabled}
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationHudView:
+    view: Literal[
+        "destination", "repair", "mode", "preview", "guidance", "uncertain",
+        "wrong_way", "off_route", "rerouting", "arrived", "error",
+    ]
+    primary: str
+    secondary: str
+    hint: str
+    interaction: Literal["stationary", "none"]
+    options: list[str] = field(default_factory=list)
+    selected_index: int = 0
+    choice_ids: list[str] | None = None
+    mode: Literal["walking", "cycling"] | None = None
+    maneuver: Literal[
+        "depart", "continue", "turn_left", "turn_right", "slight_left",
+        "slight_right", "u_turn", "arrive",
+    ] | None = None
+    maneuver_distance_m: float | None = None
+    remaining_distance_m: float | None = None
+    eta_minutes: float | None = None
+    progress: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationView:
+    session_id: str
+    request_id: str
+    generation: int
+    navigation: NavigationHudView
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "navigation.view",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+            "requestId": _navigation_identifier(self.request_id, "requestId"),
+            "generation": _navigation_generation(self.generation),
+            "navigation": _navigation_hud_to_wire(self.navigation),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationOriginRequest:
+    session_id: str
+    request_id: str
+    generation: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "navigation.origin.request",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+            "requestId": _navigation_identifier(self.request_id, "requestId"),
+            "generation": _navigation_generation(self.generation),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationCoordinate:
+    latitude: float
+    longitude: float
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationRouteStep:
+    id: str
+    maneuver: Literal[
+        "depart", "continue", "turn_left", "turn_right", "slight_left",
+        "slight_right", "u_turn", "arrive",
+    ]
+    instruction: str
+    distance_along_route_m: float
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationProgressPolicy:
+    max_accuracy_m: float
+    stale_after_ms: float
+    corridor_radius_m: float
+    ambiguity_margin_m: float
+    ambiguity_progress_delta_m: float
+    search_back_m: float
+    search_forward_m: float
+    min_course_displacement_m: float
+    wrong_way_angle_deg: float
+    wrong_way_min_backtrack_m: float
+    wrong_way_samples: int
+    off_route_samples: int
+    arrival_radius_m: float
+    arrival_samples: int
+    u_turn_suppression_m: float
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationRoutePlan:
+    mode: Literal["walking", "cycling"]
+    geometry: list[NavigationCoordinate]
+    steps: list[NavigationRouteStep]
+    policy: NavigationProgressPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationRoute:
+    session_id: str
+    request_id: str
+    generation: int
+    route_id: str
+    revision: int
+    destination_label: str
+    eta_minutes: float
+    plan: NavigationRoutePlan
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "navigation.route",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+            "requestId": _navigation_identifier(self.request_id, "requestId"),
+            "generation": _navigation_generation(self.generation),
+            "routeId": _navigation_identifier(self.route_id, "routeId"),
+            "revision": _navigation_generation(self.revision),
+            "destinationLabel": _navigation_text(
+                self.destination_label, "destinationLabel", 96,
+            ),
+            "etaMinutes": _navigation_number(
+                self.eta_minutes, "etaMinutes", minimum=0, maximum=1_000_000,
+            ),
+            "plan": _navigation_route_plan_to_wire(self.plan),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationStop:
+    session_id: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "navigation.stop",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +631,11 @@ DownlinkMessage = (
     | ImuControl
     | ImuTrace
     | G2DiagnosticControl
+    | LocationProbeControl
+    | NavigationView
+    | NavigationOriginRequest
+    | NavigationRoute
+    | NavigationStop
     | ConfirmRequest
     | PolicySet
     | Shutdown
@@ -409,6 +654,165 @@ def _require(payload: dict[str, Any], key: str, kind: str) -> Any:
     if key not in payload:
         raise ProtocolError(f"{kind!r} message missing required field {key!r}")
     return payload[key]
+
+
+def _navigation_identifier(value: Any, name: str, maximum: int = 128) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise ProtocolError(
+            f"navigation {name} must be a non-empty string of at most {maximum} characters"
+        )
+    return value
+
+
+def _navigation_generation(value: Any) -> int:
+    if type(value) is not int or not 0 <= value <= 2_147_483_647:
+        raise ProtocolError("navigation generation is invalid")
+    return value
+
+
+def _navigation_text(value: Any, name: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise ProtocolError(f"navigation {name} is invalid")
+    return value
+
+
+def _navigation_number(value: Any, name: str, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtocolError(f"navigation {name} is invalid")
+    resolved = float(value)
+    if not math.isfinite(resolved) or not minimum <= resolved <= maximum:
+        raise ProtocolError(f"navigation {name} is invalid")
+    return resolved
+
+
+def _navigation_hud_to_wire(view: NavigationHudView) -> dict[str, Any]:
+    allowed_views = (
+        "destination", "repair", "mode", "preview", "guidance", "uncertain",
+        "wrong_way", "off_route", "rerouting", "arrived", "error",
+    )
+    if view.view not in allowed_views:
+        raise ProtocolError("navigation view is invalid")
+    if view.interaction not in ("stationary", "none"):
+        raise ProtocolError("navigation interaction is invalid")
+    if len(view.options) > 3:
+        raise ProtocolError("navigation options exceed HUD capacity")
+    options = [_navigation_text(value, "option", 64) for value in view.options]
+    if options:
+        if not 0 <= view.selected_index < len(options):
+            raise ProtocolError("navigation selectedIndex is invalid")
+    elif view.selected_index != 0:
+        raise ProtocolError("navigation selectedIndex is invalid")
+    if view.choice_ids is not None and len(view.choice_ids) != len(options):
+        raise ProtocolError("navigation choiceIds must match options")
+
+    message: dict[str, Any] = {
+        "view": view.view,
+        "primary": _navigation_text(view.primary, "primary", 96),
+        "secondary": _navigation_text(view.secondary, "secondary", 128),
+        "hint": _navigation_text(view.hint, "hint", 80),
+        "interaction": view.interaction,
+        "options": options,
+        "selectedIndex": view.selected_index,
+    }
+    if view.choice_ids is not None:
+        message["choiceIds"] = [
+            _navigation_identifier(value, "choiceId", 64) for value in view.choice_ids
+        ]
+    if view.mode is not None:
+        if view.mode not in ("walking", "cycling"):
+            raise ProtocolError("navigation mode is invalid")
+        message["mode"] = view.mode
+    if view.maneuver is not None:
+        if view.maneuver not in (
+            "depart", "continue", "turn_left", "turn_right", "slight_left",
+            "slight_right", "u_turn", "arrive",
+        ):
+            raise ProtocolError("navigation maneuver is invalid")
+        message["maneuver"] = view.maneuver
+    for wire_name, value, maximum in (
+        ("maneuverDistanceM", view.maneuver_distance_m, 10_000_000.0),
+        ("remainingDistanceM", view.remaining_distance_m, 10_000_000.0),
+        ("etaMinutes", view.eta_minutes, 1_000_000.0),
+        ("progress", view.progress, 1.0),
+    ):
+        if value is not None:
+            message[wire_name] = _navigation_number(
+                value, wire_name, minimum=0.0, maximum=maximum,
+            )
+    return message
+
+
+def _navigation_coordinate_to_wire(coordinate: NavigationCoordinate) -> dict[str, float]:
+    latitude = _navigation_number(
+        coordinate.latitude, "latitude", minimum=-90, maximum=90,
+    )
+    longitude = _navigation_number(
+        coordinate.longitude, "longitude", minimum=-180, maximum=180,
+    )
+    return {"latitude": latitude, "longitude": longitude}
+
+
+def _navigation_route_plan_to_wire(plan: NavigationRoutePlan) -> dict[str, Any]:
+    if plan.mode not in ("walking", "cycling"):
+        raise ProtocolError("navigation route mode is invalid")
+    if not 2 <= len(plan.geometry) <= 4_096:
+        raise ProtocolError("navigation route geometry size is invalid")
+    if not 1 <= len(plan.steps) <= 512:
+        raise ProtocolError("navigation route steps size is invalid")
+    maneuvers = (
+        "depart", "continue", "turn_left", "turn_right", "slight_left",
+        "slight_right", "u_turn", "arrive",
+    )
+    steps: list[dict[str, Any]] = []
+    for step in plan.steps:
+        if step.maneuver not in maneuvers:
+            raise ProtocolError("navigation route maneuver is invalid")
+        steps.append({
+            "id": _navigation_identifier(step.id, "stepId", 64),
+            "maneuver": step.maneuver,
+            "instruction": _navigation_text(step.instruction, "instruction", 128),
+            "distanceAlongRouteM": _navigation_number(
+                step.distance_along_route_m,
+                "distanceAlongRouteM",
+                minimum=0,
+                maximum=10_000_000,
+            ),
+        })
+    policy = plan.policy
+    policy_wire: dict[str, int | float] = {}
+    for wire_name, value, maximum in (
+        ("maxAccuracyM", policy.max_accuracy_m, 1_000.0),
+        ("staleAfterMs", policy.stale_after_ms, 600_000.0),
+        ("corridorRadiusM", policy.corridor_radius_m, 10_000.0),
+        ("ambiguityMarginM", policy.ambiguity_margin_m, 10_000.0),
+        ("ambiguityProgressDeltaM", policy.ambiguity_progress_delta_m, 100_000.0),
+        ("searchBackM", policy.search_back_m, 100_000.0),
+        ("searchForwardM", policy.search_forward_m, 100_000.0),
+        ("minCourseDisplacementM", policy.min_course_displacement_m, 1_000.0),
+        ("wrongWayAngleDeg", policy.wrong_way_angle_deg, 180.0),
+        ("wrongWayMinBacktrackM", policy.wrong_way_min_backtrack_m, 100_000.0),
+        ("arrivalRadiusM", policy.arrival_radius_m, 10_000.0),
+        ("uTurnSuppressionM", policy.u_turn_suppression_m, 10_000.0),
+    ):
+        policy_wire[wire_name] = _navigation_number(
+            value, wire_name, minimum=0.0001, maximum=maximum,
+        )
+    for wire_name, value in (
+        ("wrongWaySamples", policy.wrong_way_samples),
+        ("offRouteSamples", policy.off_route_samples),
+        ("arrivalSamples", policy.arrival_samples),
+    ):
+        if type(value) is not int or not 1 <= value <= 100:
+            raise ProtocolError(f"navigation {wire_name} is invalid")
+        policy_wire[wire_name] = value
+    if not 90 < policy.wrong_way_angle_deg <= 180:
+        raise ProtocolError("navigation wrongWayAngleDeg is invalid")
+    return {
+        "mode": plan.mode,
+        "geometry": [_navigation_coordinate_to_wire(value) for value in plan.geometry],
+        "steps": steps,
+        "policy": policy_wire,
+    }
 
 
 def _trace_enum(value: Any, name: str, allowed: tuple[str, ...]) -> str:
@@ -446,9 +850,9 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
         _trace_shape(event, {"type", "from", "to", "reason", "outcome"})
         return {
             "type": "page_transition",
-            "from": _trace_enum(event["from"], "from", ("overview", "sidebar", "list", "confirmation")),
-            "to": _trace_enum(event["to"], "to", ("overview", "sidebar", "list", "confirmation")),
-            "reason": _trace_enum(event["reason"], "reason", ("show_sidebar", "show_list", "show_overview", "show_confirmation", "dismiss_confirmation")),
+            "from": _trace_enum(event["from"], "from", ("overview", "sidebar", "list", "confirmation", "navigation")),
+            "to": _trace_enum(event["to"], "to", ("overview", "sidebar", "list", "confirmation", "navigation")),
+            "reason": _trace_enum(event["reason"], "reason", ("show_sidebar", "show_list", "show_overview", "show_confirmation", "show_navigation", "dismiss_confirmation")),
             "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed")),
         }
     if event_type == "gesture":
@@ -475,6 +879,49 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "target": _trace_enum(event["target"], "target", ("text", "visual")),
             "decision": _trace_enum(event["decision"], "decision", ("attempt", "recovered", "abandoned", "skipped")),
             "containerId": _trace_int(event["containerId"], "containerId", minimum=1, maximum=10),
+        }
+    if event_type == "location_probe_state":
+        _trace_shape(event, {"type", "requested", "outcome"})
+        return {
+            "type": "location_probe_state",
+            "requested": _trace_enum(
+                event["requested"], "requested", ("high", "ambient"),
+            ),
+            "outcome": _trace_enum(
+                event["outcome"], "outcome", ("success", "failed"),
+            ),
+        }
+    if event_type == "location_probe":
+        _trace_shape(event, {
+            "type", "sampleSequence", "profile", "lifecycle", "fields", "cadenceMs",
+            "accuracy", "timestampAge", "displacement", "headingDelta",
+        })
+        return {
+            "type": "location_probe",
+            "sampleSequence": _trace_int(
+                event["sampleSequence"], "sampleSequence", minimum=1, maximum=2_147_483_647,
+            ),
+            "profile": _trace_enum(event["profile"], "profile", ("high",)),
+            "lifecycle": _trace_enum(
+                event["lifecycle"], "lifecycle", ("foreground", "background"),
+            ),
+            "fields": _trace_int(event["fields"], "fields", minimum=0, maximum=7),
+            "cadenceMs": _trace_int(
+                event["cadenceMs"], "cadenceMs", minimum=0, maximum=600_000,
+            ),
+            "accuracy": _trace_enum(
+                event["accuracy"], "accuracy", ("unknown", "lte5", "lte10", "lte25", "gt25"),
+            ),
+            "timestampAge": _trace_enum(
+                event["timestampAge"], "timestampAge", ("missing", "future", "fresh", "stale"),
+            ),
+            "displacement": _trace_enum(
+                event["displacement"], "displacement", ("first", "lt5", "5_20", "20_100", "gt100"),
+            ),
+            "headingDelta": _trace_enum(
+                event["headingDelta"], "headingDelta",
+                ("unavailable", "insufficient_motion", "0_30", "31_90", "91_180"),
+            ),
         }
     raise ProtocolError("g2 diagnostic type is invalid")
 
@@ -527,6 +974,15 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             )
         case "input":
             raw = payload.get("event") or {}
+            request_id = raw.get("requestId")
+            if request_id is not None and (
+                not isinstance(request_id, str)
+                or not request_id
+                or len(request_id) > 128
+            ):
+                raise ProtocolError(
+                    "input requestId must be a non-empty string of at most 128 characters"
+                )
             return Input(
                 event=InputEvent(
                     container_id=raw.get("containerId"),
@@ -536,12 +992,167 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     selected_index=raw.get("selectedIndex"),
                     selected_name=raw.get("selectedName"),
                     trace_id=raw.get("traceId"),
+                    request_id=request_id,
                 )
             )
         case "pairing":
             return PairingAck(token=str(_require(payload, "token", kind)))
         case "g2.diagnostic":
+            _trace_shape(payload, {"kind", "event"})
             return G2Diagnostic(event=_parse_g2_diagnostic(_require(payload, "event", kind)))
+        case "navigation.action":
+            allowed = {
+                "kind", "sessionId", "requestId", "generation", "action", "choiceId",
+            }
+            if not set(payload) <= allowed:
+                raise ProtocolError("navigation action has unsupported fields")
+            action = _require(payload, "action", kind)
+            if not isinstance(action, str) or action not in NAVIGATION_ACTIONS:
+                raise ProtocolError("navigation action is invalid")
+            choice_id = payload.get("choiceId")
+            if action in ("select_destination", "select_mode"):
+                choice_id = _navigation_identifier(choice_id, "choiceId", 64)
+            elif choice_id is not None:
+                raise ProtocolError("navigation choiceId is invalid for action")
+            return NavigationAction(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                request_id=_navigation_identifier(
+                    _require(payload, "requestId", kind), "requestId",
+                ),
+                generation=_navigation_generation(
+                    _require(payload, "generation", kind),
+                ),
+                action=action,
+                choice_id=choice_id,
+            )
+        case "navigation.route.ack":
+            if set(payload) != {"kind", "sessionId", "routeId", "revision", "outcome"}:
+                raise ProtocolError("navigation route ack has unsupported fields")
+            outcome = payload.get("outcome")
+            if outcome not in ("installed", "rejected"):
+                raise ProtocolError("navigation route ack outcome is invalid")
+            return NavigationRouteAck(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                route_id=_navigation_identifier(
+                    _require(payload, "routeId", kind), "routeId",
+                ),
+                revision=_navigation_generation(_require(payload, "revision", kind)),
+                outcome=outcome,
+            )
+        case "navigation.view.ack":
+            if set(payload) != {"kind", "sessionId", "requestId", "generation", "outcome"}:
+                raise ProtocolError("navigation view ack has unsupported fields")
+            outcome = payload.get("outcome")
+            if outcome not in ("bridge_acknowledged", "rejected"):
+                raise ProtocolError("navigation view ack outcome is invalid")
+            return NavigationViewAck(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                request_id=_navigation_identifier(
+                    _require(payload, "requestId", kind), "requestId",
+                ),
+                generation=_navigation_generation(
+                    _require(payload, "generation", kind),
+                ),
+                outcome=outcome,
+            )
+        case "navigation.state":
+            if set(payload) != {
+                "kind", "sessionId", "routeId", "revision", "sequence", "state",
+            }:
+                raise ProtocolError("navigation state has unsupported fields")
+            state = payload.get("state")
+            if state not in ("guidance", "uncertain", "wrong_way", "off_route", "arrived"):
+                raise ProtocolError("navigation state is invalid")
+            return NavigationState(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                route_id=_navigation_identifier(
+                    _require(payload, "routeId", kind), "routeId",
+                ),
+                revision=_navigation_generation(_require(payload, "revision", kind)),
+                sequence=_navigation_generation(_require(payload, "sequence", kind)),
+                state=state,
+            )
+        case "navigation.reroute.request":
+            if set(payload) != {
+                "kind", "sessionId", "routeId", "baseRevision", "requestId",
+                "latitude", "longitude",
+            }:
+                raise ProtocolError("navigation reroute request has unsupported fields")
+            return NavigationRerouteRequest(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                route_id=_navigation_identifier(
+                    _require(payload, "routeId", kind), "routeId",
+                ),
+                base_revision=_navigation_generation(
+                    _require(payload, "baseRevision", kind),
+                ),
+                request_id=_navigation_identifier(
+                    _require(payload, "requestId", kind), "requestId",
+                ),
+                latitude=_navigation_number(
+                    _require(payload, "latitude", kind), "latitude", minimum=-90, maximum=90,
+                ),
+                longitude=_navigation_number(
+                    _require(payload, "longitude", kind), "longitude", minimum=-180, maximum=180,
+                ),
+            )
+        case "navigation.origin":
+            allowed = {
+                "kind", "sessionId", "requestId", "generation",
+                "latitude", "longitude", "accuracy",
+            }
+            if not set(payload) <= allowed:
+                raise ProtocolError("navigation origin has unsupported fields")
+            accuracy_value = payload.get("accuracy")
+            accuracy = None if accuracy_value is None else _navigation_number(
+                accuracy_value, "accuracy", minimum=0, maximum=100_000,
+            )
+            return NavigationOrigin(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                request_id=_navigation_identifier(
+                    _require(payload, "requestId", kind), "requestId",
+                ),
+                generation=_navigation_generation(
+                    _require(payload, "generation", kind),
+                ),
+                latitude=_navigation_number(
+                    _require(payload, "latitude", kind), "latitude", minimum=-90, maximum=90,
+                ),
+                longitude=_navigation_number(
+                    _require(payload, "longitude", kind), "longitude", minimum=-180, maximum=180,
+                ),
+                accuracy=accuracy,
+            )
+        case "navigation.origin.failed":
+            if set(payload) != {"kind", "sessionId", "requestId", "generation", "reason"}:
+                raise ProtocolError("navigation origin failure has unsupported fields")
+            reason = payload.get("reason")
+            if reason != "unavailable":
+                raise ProtocolError("navigation origin failure reason is invalid")
+            return NavigationOriginFailure(
+                session_id=_navigation_identifier(
+                    _require(payload, "sessionId", kind), "sessionId",
+                ),
+                request_id=_navigation_identifier(
+                    _require(payload, "requestId", kind), "requestId",
+                ),
+                generation=_navigation_generation(
+                    _require(payload, "generation", kind),
+                ),
+                reason=reason,
+            )
         case "location":
             acc = payload.get("accuracy")
             return Location(

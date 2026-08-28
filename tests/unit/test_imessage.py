@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from joat.channels.imessage import IMessageStore
 
 
@@ -57,6 +59,16 @@ def test_read_new_does_not_repeat_rows_after_unchanged_backlog_is_drained(
     assert len(observed_ids) == len(set(observed_ids))
     assert after_drain == []
     assert final_cursor == 45
+
+
+def test_source_disappearance_is_a_health_failure_not_an_empty_poll(tmp_path: Path) -> None:
+    path = _incoming_message_db(tmp_path / "chat.db", 1)
+    store = IMessageStore(path)
+    _, cursor = store.read_new(0)
+    path.unlink()
+
+    with pytest.raises(FileNotFoundError):
+        store.read_new(cursor)
 
 
 def test_recent_threads_marks_group_chats_non_replyable(tmp_path) -> None:  # type: ignore[no-untyped-def]

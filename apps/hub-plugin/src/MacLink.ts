@@ -3,6 +3,34 @@ import type { DownlinkMessage, UplinkMessage } from './types';
 /** Observable link lifecycle, for status surfaces (webview panel, HUD). */
 export type LinkState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
+/**
+ * Lifetime of one socket dispatcher. Handlers must check the signal after
+ * every awaited host/HUD operation before publishing follow-up state.
+ */
+export interface DownlinkContext {
+  readonly generation: number;
+  readonly signal: AbortSignal;
+}
+
+type DownlinkHandler = (
+  msg: DownlinkMessage,
+  context: DownlinkContext,
+) => void | Promise<void>;
+
+type NavigationUplinkMessage = Extract<UplinkMessage, {
+  kind: 'navigation.action' | 'navigation.route.ack' | 'navigation.view.ack'
+    | 'navigation.state' | 'navigation.reroute.request' | 'navigation.origin'
+    | 'navigation.origin.failed';
+}>;
+
+interface DownlinkDispatcher {
+  readonly socket: WebSocket;
+  readonly generation: number;
+  readonly controller: AbortController;
+  tail: Promise<void>;
+  deadline?: ReturnType<typeof setTimeout>;
+}
+
 export interface MacLinkOptions {
   /**
    * Candidate brain URLs, tried in order with rotation on failure. Every
@@ -18,6 +46,8 @@ export interface MacLinkOptions {
   reconnectMaxMs?: number;
   /** Give up on a dial that has not opened, and rotate. */
   dialTimeoutMs?: number;
+  /** Abort and replace a connection whose downlink handler stops settling. */
+  downlinkHandlerTimeoutMs?: number;
 }
 
 /**
@@ -33,7 +63,9 @@ export class MacLink {
   private attempt = 0;
   private urlIndex = 0;
   private closed = false;
-  private handler?: (msg: DownlinkMessage) => void;
+  private handler?: DownlinkHandler;
+  private downlinkDispatcher?: DownlinkDispatcher;
+  private nextDownlinkGeneration = 0;
   private stateHandler?: (state: LinkState) => void;
   private currentState: LinkState = 'connecting';
   private token: string | null;
@@ -43,6 +75,7 @@ export class MacLink {
   private readonly baseMs: number;
   private readonly capMs: number;
   private readonly dialMs: number;
+  private readonly downlinkMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
   private reconnectPending = false;
   private failedWithToken = 0;
@@ -55,6 +88,7 @@ export class MacLink {
     this.baseMs = opts.reconnectBaseMs ?? 500;
     this.capMs = opts.reconnectMaxMs ?? 15_000;
     this.dialMs = opts.dialTimeoutMs ?? 4_000;
+    this.downlinkMs = opts.downlinkHandlerTimeoutMs ?? 15_000;
   }
 
   /** The URL currently being dialed (for status surfaces). */
@@ -82,7 +116,7 @@ export class MacLink {
     this.staleTokenHandler = handler;
   }
 
-  onMessage(handler: (msg: DownlinkMessage) => void): void {
+  onMessage(handler: DownlinkHandler): void {
     this.handler = handler;
   }
 
@@ -108,6 +142,13 @@ export class MacLink {
     // Credentials never ride a request target: URL strings are copied into
     // browser history, proxy/access logs, diagnostics, and exception text.
     const socket = new WebSocket(this.activeUrl);
+    const dispatcher: DownlinkDispatcher = {
+      socket,
+      generation: ++this.nextDownlinkGeneration,
+      controller: new AbortController(),
+      tail: Promise.resolve(),
+    };
+    this.downlinkDispatcher = dispatcher;
     this.socket = socket;
 
     // A host that DROPS packets (wrong subnet, asleep, AP isolation) never
@@ -147,7 +188,39 @@ export class MacLink {
         // A new client must store and ack pairing.set before the session is
         // authenticated. Every other pre-auth downlink is ignored.
         if (!this.authenticated && message.kind !== 'pairing.set') return;
-        this.handler?.(message);
+        const handler = this.handler;
+        if (handler !== undefined) {
+          // WebSocket invokes callbacks synchronously, but HUD operations are
+          // asynchronous. Preserve wire order so a rebuild cannot race the
+          // status/text frames that follow it, and contain one rejected
+          // render without poisoning later downlinks.
+          const context: DownlinkContext = {
+            generation: dispatcher.generation,
+            signal: dispatcher.controller.signal,
+          };
+          dispatcher.tail = dispatcher.tail
+            .then(async () => {
+              if (
+                this.socket !== socket
+                || this.downlinkDispatcher !== dispatcher
+                || context.signal.aborted
+              ) return;
+              dispatcher.deadline = setTimeout(() => {
+                if (this.downlinkDispatcher !== dispatcher) return;
+                this.revokeDownlinkDispatcher(socket);
+                socket.close();
+              }, this.downlinkMs);
+              try {
+                await handler(message, context);
+              } finally {
+                if (dispatcher.deadline !== undefined) {
+                  clearTimeout(dispatcher.deadline);
+                  dispatcher.deadline = undefined;
+                }
+              }
+            })
+            .catch(() => undefined);
+        }
       } catch {
         // Ignore malformed frames rather than killing the link.
       }
@@ -155,6 +228,7 @@ export class MacLink {
     socket.onclose = (event) => {
       if (this.socket !== socket) return; // a superseded socket is not news
       this.clearDialTimer();
+      this.revokeDownlinkDispatcher(socket);
       const wasAuthenticated = this.authenticated;
       this.authenticated = false;
       // Post-handshake auth gives an explicit close code. Never discard a
@@ -203,6 +277,21 @@ export class MacLink {
     }
   }
 
+  /**
+   * Navigation messages are valid only for the currently authenticated Mac
+   * session. Never queue them across reconnects: origin/reroute can contain
+   * coordinates, and even content-free receipts are generation-bound.
+   */
+  sendNavigation(msg: NavigationUplinkMessage): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN || !this.authenticated) return false;
+    try {
+      this.rawSend(msg);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   close(): void {
     this.closed = true;
     this.authenticated = false;
@@ -216,6 +305,7 @@ export class MacLink {
   private abandon(): void {
     const prev = this.socket;
     if (prev === undefined) return;
+    this.revokeDownlinkDispatcher(prev);
     this.socket = undefined;
     prev.onopen = null;
     prev.onmessage = null;
@@ -226,6 +316,17 @@ export class MacLink {
     } catch {
       // Already closing/closed — nothing to do.
     }
+  }
+
+  private revokeDownlinkDispatcher(socket: WebSocket): void {
+    const dispatcher = this.downlinkDispatcher;
+    if (dispatcher?.socket !== socket) return;
+    this.downlinkDispatcher = undefined;
+    if (dispatcher.deadline !== undefined) {
+      clearTimeout(dispatcher.deadline);
+      dispatcher.deadline = undefined;
+    }
+    dispatcher.controller.abort();
   }
 
   private clearDialTimer(): void {

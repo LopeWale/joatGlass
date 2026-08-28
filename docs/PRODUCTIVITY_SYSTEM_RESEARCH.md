@@ -1,9 +1,127 @@
 # JOAT Productivity System: Research and Design Gate
 
-**Status:** research complete; implementation requires human approval  
+**Status:** research complete; approved safe V1 implemented at contract/build level;
+live TCC, simulator, and physical-G2 acceptance remain open
 **Scope:** Calendar, Reminders/tasks, AI notes, safe write actions, persistence,
 and notification fan-in  
 **Evidence date:** 2026-08-27
+
+## Approved implementation snapshot
+
+The owner approved the dependency-first plan. The repository now contains:
+
+- an owner-only, single-writer SQLite store with immutable migration checks,
+  a replay-resistant action journal, bound confirmation evidence, attempts
+  committed before external calls, and honest success/failure/uncertain
+  receipts;
+- hardened pairing and session-bound exact-preview confirmation for Messages,
+  Calendar, and Reminders writes;
+- a typed, versioned, owner-only Swift Unix-socket bridge with one long-lived
+  `EKEventStore`, explicit Mac-UI permission requests, store-generation
+  invalidation, strict civil-time resolution, exact writable-container IDs,
+  nonrecurring event/reminder creation, reminder completion, and normalized
+  read-back;
+- deterministic voice forms for `schedule … on YYYY-MM-DD at HH:MM for …
+  minutes in IANA/Zone`, `remind me to … on … at … in IANA/Zone`, and
+  `complete reminder EXACT TITLE`. Ambiguous calendars/lists, DST gaps,
+  repeated local times, stale generations, duplicate titles, and recurring
+  completion all refuse before a write;
+- EventKit alarms as the primary reminder delivery plus persisted JOAT-created
+  one-off occurrences for bounded overdue catch-up after restart. Before the
+  overlay alerts, it verifies that the native Reminder is still incomplete;
+  unknown evidence defers instead of producing a false alert. JOAT records
+  `alert_enqueued` after the Mac HUD write, not a false wearer-seen receipt;
+- text-only QuickNotes with exact visible transcript retention, local Unicode
+  search, immediate reversible undo/restore, and owner-only Markdown export.
+  Explicit export includes every active note rather than a hidden 100-note cap.
+  Meeting recording, raw audio retention, and AI-generated summaries remain
+  disabled because the existing audio relay cannot prove complete capture;
+- independent Messages, Accessibility-banner, and available metadata lanes
+  feeding a durable source-cursor/observation/outbox mux. Raw observations are
+  retained; each best-effort Messages presentation can consume at most one
+  nearby authoritative observation with identical sender and content, so event
+  cardinality is preserved. Stable native identities survive overlapping or
+  reordered batches, JSONL rewrites, and Biome timestamp ties; payload digests
+  are verified on load; metadata-only rows never become opaque HUD cards; a
+  native heartbeat exposes a stale Accessibility watcher; and the production
+  path uses deterministic raw delivery without model-triage head-of-line delay;
+  restart holds old fallback observations until authoritative catch-up, while
+  malformed complete feed lines mark the source `parse_degraded`; and
+- owner-only status, banner, debug, brain-log, database, note-export, and lock
+  file modes. Accessibility diagnostics no longer persist title/body content.
+
+Contract acceptance currently includes restart recovery, corrupted-schema
+rejection, 45-row Messages backlog drain, independent source failure, raw
+duplicate retention, strict DST cases, stale EventKit generations, exact
+read-back and alarm mismatch, ambiguous post-write disconnect, 101-note export,
+externally completed reminders, overdue catch-up, corrupted notification
+payloads, stalled triage, and delivery acknowledgement at the Mac transport
+boundary. These tests do not establish TCC, notification display, simulator,
+or physical-G2 behavior.
+
+### HUD flow delivered on 2026-08-28
+
+The capability UI now uses one shared 576×288 shell and one explicit flow:
+
+| Area | Collection state | Selection state | Write/result state |
+|---|---|---|---|
+| Notifications | recent card headers with age | complete two-line card detail | read-only |
+| Calendar | next seven days | title, start, and end detail | exact preview, `VERIFYING`, then `DONE`, `CHECK`, or `FAILED` |
+| Tasks | incomplete reminders with due metadata | due detail plus exact-title completion guidance | same durable write states as Calendar |
+| QuickNotes | newest exact-text notes | complete exact text | local reversible note commands; no ambient recording claim |
+| Activity/persistence | payload-free durable action summaries | state plus short action reference | no payload, target, or confirmation secret appears |
+
+The root Sidebar remains five rows: Messages, Notifications, Calendar, Tasks,
+and More. More opens QuickNotes, Brainstorm, and Activity with the same rail,
+type scale, Gray4 hierarchy, and Phosphor regular icon family. Populated
+collections show `tap detail`; setup, empty, detail, and action-lifecycle pages
+are read-only. Development fixtures exercise the production presenter and
+renderer and stitch its actual four Gray4 tiles into a native-size browser
+preview. This is visual renderer evidence, not official Even simulator or
+physical-G2 acceptance.
+
+The review hardening pass binds each list render and row tap to a unique HUD
+generation, rather than trusting capability titles or one mutable snapshot.
+Selectability is a protocol boolean shared by the Mac, menu, presenter, and
+renderer. Failed Sidebar/focus paints close to Overview before any hidden UI
+state can accept input, and populated rows activate only after their complete
+replacement frame paints successfully. Reminder completion now binds both the EventKit item ID
+and the exact list ID shown in the preview; Swift refuses a moved reminder and
+Python requires the same list in normalized read-back. Finally, failures while
+canonicalizing or persisting a post-EventKit receipt transition the attempt to
+`uncertain` and publish `ACTION · CHECK`, preventing a verified native commit
+from stranding the HUD at `VERIFYING` or inviting a duplicate retry.
+
+### Known release blockers and exclusions
+
+- A crash after EventKit commits but before Python records the read-back is
+  correctly quarantined as `uncertain`, but automatic EventKit reconciliation
+  is not implemented. Clean success receipts atomically retain the external
+  identifier; uncertain actions still require manual inspection.
+- The current receipt retains EventKit's local calendar-item identifier, not
+  the external identifier. Both may change, so automatic reconciliation still
+  needs multiple identifiers plus a cached fingerprint and explicit ambiguity
+  handling.
+- The owner-only Unix socket prevents other macOS accounts from connecting,
+  but it does not prove that a same-account client is the JOAT Python child.
+  A stronger child-process authentication or capability channel is required
+  before treating the bridge itself as an authorization boundary.
+- Raw `ws://` remains available. Pairing, URL-credential rejection, and bound
+  confirmation are implemented, but production write traffic still needs WSS
+  or a Tailscale Serve/tailnet-certificate deployment proven end to end.
+- The signed app has the EventKit entitlement and both full-access usage
+  strings, but no TCC prompt/grant/denial, real event/reminder write, sleep/wake
+  catch-up, simulator, or physical-G2 acceptance was exercised.
+- QuickNote soft deletion intentionally retains text for undo. Permanent erase,
+  bounded notification/note retention, export cleanup, and backup behavior
+  remain product/privacy policy work.
+- The Accessibility startup tail is bounded rather than lossless, malformed
+  lines are discarded after health is degraded, and source reads have no
+  per-poll timeout. A producer/consumer acknowledgement protocol, quarantine,
+  rotation/TTL, and a bounded authoritative-read deadline remain required for
+  a strong notification guarantee.
+- MeetingNote, raw-audio journaling, recurrence, snooze, Calendar invitations,
+  guaranteed Mail coverage, and plugin render acknowledgement remain excluded.
 
 ## Why this document exists
 
@@ -33,7 +151,11 @@ Contract tests do not substitute for native, simulator, or physical-device
 evidence. Tests should include counterexamples selected to falsify the design,
 not only examples copied from the implementation.
 
-## Existing system constraints
+## Baseline repo facts at research start
+
+The bullets in this section record why the original recommendation was not
+safe to implement literally. The approved implementation snapshot above
+supersedes the gaps that were subsequently closed.
 
 - The Calendar capability is still a placeholder in
   `apps/mac/joat/services/capabilities.py`.
@@ -343,26 +465,27 @@ transaction.
 - Cross-system writes use a saga: durable intent, native commit, read-back,
   durable receipt. An interrupted saga becomes `uncertain` and reconciles.
 - `status.json` remains a persistent operational projection until redesigned.
-  Before notes ship, remove or TTL sensitive content, redact `brain.log`, and
+  Before release, remove or TTL sensitive content, redact `brain.log`, and
   define cleanup for SQLite journals, free pages, FTS shadow tables, exports,
   and backups. Card history becomes a query projection backed by the database.
 
-Initial tables:
+Implemented V1 tables:
 
 - `schema_migrations`
-- `action_drafts`, `action_attempts`, `action_receipts`
-- `external_items`
-- `notes`, `note_segments`
-- `notification_events`, `source_cursors`, `delivery_attempts`
-- `monitors`, `monitor_occurrences`
+- `actions`, `action_payloads`, `action_events`, `confirmation_challenges`,
+  `action_attempts`, `action_receipts`
+- `external_items`, `external_identifiers`
+- `quick_notes`
+- `notification_sources`, `notification_observations`, `notification_outbox`
+- `task_occurrences`, `task_alert_receipts`
 
 The default database location is
 `~/Library/Application Support/JOAT/joat.sqlite3`, created with user-only
-permissions, versioned migrations, backup/restore documentation, bounded
-content retention, and content-free operational logs. SQLite is not encryption
-at rest; the initial privacy claim depends on macOS account protection and
-FileVault. Stronger field or database encryption requires a separate threat
-model and key-recovery design.
+permissions and versioned migrations. Backup/restore behavior and bounded
+content retention remain release work. SQLite is not encryption at rest; the
+initial privacy claim depends on macOS account protection and FileVault.
+Stronger field or database encryption requires a separate threat model and
+key-recovery design.
 
 `secure_delete` alone cannot guarantee erasure across APFS copy-on-write,
 backups, exports, and synchronized copies. The product must describe retention
@@ -403,25 +526,37 @@ Mail-specific adapter ---- optional, permissioned -------+       v
                                                urgent overlay   routine queue
 ```
 
-- Authoritative sources own their domain. Catch-all adapters suppress domains
-  already covered by a healthy authoritative adapter.
-- Redesign every adapter to emit `(source, opaque_native_id, cursor, has_more,
-  observed_at, source_health)` before building the mux. The current AX watcher
-  suppresses repeated text upstream, JSONL fabricates timestamp IDs, Biome can
-  lose equal-timestamp rows, and Messages can stop with an undrained backlog.
-  A downstream mux cannot recover events or identities already discarded.
+- Authoritative sources own their domain, but health alone is never evidence
+  that a particular event was observed. Exact nearby matches are consumed by
+  cardinality: `N` authoritative observations can suppress at most `N`
+  identical fallback appearances; any additional appearance remains visible.
+- Every adapter emits a stable source-local native identity and durable cursor.
+  The implemented fixes preserve repeated AX appearances, use JSONL byte
+  identities bound to a detected file generation, retain all Biome identities
+  at the timestamp boundary, and fully drain Messages pages. On first startup,
+  JSONL scans only a five-second/256 KiB tail and requires a fresh content-free
+  native heartbeat. That narrows the observed baseline-at-EOF race but does not
+  turn an unsupported Accessibility scrape into a completeness guarantee. In
+  particular, a same-launch line older than that bounded window can still be
+  lost; a producer-generation/acknowledged-offset handshake is the robust fix.
 - Deduplicate first by native ID. Cross-source reconciliation then uses bundle,
   sender, normalized content, and a narrow time window. A global text hash is
   unsafe because legitimate repeated alerts can have identical text.
-- Persist source cursors and health. Restart performs bounded catch-up into a
-  “What did I miss?” view rather than replaying everything as urgent.
+- Persist source cursors, health, observations, and outbox state. Restart now
+  performs bounded pending delivery; a durable “What did I miss?” query view is
+  still future work.
 - Deterministic Calendar/Reminder due events bypass model triage. A model may
   summarize routine content, but it does not decide whether an alarm existed.
 - Urgent events may overlay an active session; routine events queue. The current
   all-cards queue does not meet this requirement.
-- Use bounded per-source queues, fairness, backpressure, and a HUD render
-  acknowledgement. The current best-effort gateway send cannot prove delivery
-  merely because a frame was submitted while connected.
+- Independent ingestion prevents delivery work from stalling source cursors.
+  Production currently bypasses model triage entirely, and durable outbox state
+  advances only after the Mac transport write. The Hub/plugin protocol still
+  lacks a render acknowledgement, so this is not wearer-seen proof.
+- On restart, an authoritative source is `stale` until its first successful
+  cursor commit, so old fallback rows cannot outrun catch-up. Malformed complete
+  Accessibility lines advance the cursor but make health `parse_degraded`;
+  content-free quarantine and replay tooling remain future work.
 - Replace the unbounded full-content Accessibility JSONL with private IPC or a
   rotated, permission-restricted buffer and explicit retention.
 - Mail completeness is not a V1 claim. A separately permissioned Mail adapter
@@ -492,28 +627,23 @@ alone is not identity or authorization.
 
 ## Verification snapshots and limitations
 
-- The repository stayed dirty and changed concurrently throughout research at
-  committed `HEAD 6f130ca39a2dcc600793ace1c7b486c8e543fa2f`. An earlier focused
-  Python run passed 105 unit and real-gateway integration tests in 2.19s; the
-  hostile reviewer later observed 299 passing Python tests on a different dirty
-  snapshot.
-- A final full Python rerun did **not** pass: collection failed because the new
-  untracked `tests/unit/test_commands.py` imports absent
-  `joat.services.commands`. This is retained as an unstable-worktree blocker,
-  not papered over with the earlier green result.
-- On that final snapshot, `.venv/bin/mypy apps/mac/joat` passed 47 source files,
-  Hub `npm test -- --run` passed 183 tests, `npm run typecheck` passed, and
-  `git diff --check` passed.
+- The current dirty shared checkout passed 422 Python tests and strict mypy
+  across 61 source files. Hub verification passed 198 tests plus the
+  TypeScript/Vite production build. Native verification passed 18 XCTest tests
+  plus 3 Swift Testing tests, including strict local-time, bridge digest,
+  cancellation, socket replacement, and first-sweep notification cases.
+- A Developer ID archive/export completed and strict signature verification
+  passed. The app is universal `x86_64 arm64`; its signed entitlement contains
+  `com.apple.security.personal-information.calendars`, and its Info.plist
+  contains both Calendar and Reminders full-access explanations. It is not
+  notarized or installed. The separate `/Applications/JOAT.app` is the stale
+  August 26 build and does not contain this EventKit bridge configuration.
 - The current Python SQLite build reports SQLite 3.53.2 with FTS5 and JSON
-  support. Swift compilation probes covered EventKit imports, recurrence APIs,
-  and explicit DST gap/repetition behavior.
-- The signed app bundle was inspected for hardened runtime, usage descriptions,
-  and entitlements.
+  support. The V1 implementation deliberately uses rollback journaling rather
+  than assuming WAL solves cross-system atomicity.
 - No EventKit permission was requested and no real event or reminder was
   created. No fresh simulator or physical-G2 proof was collected for these six
   capabilities.
-- Two requested read-only research subagents could not start because the
-  mandated model quota was exhausted. No alternate model was substituted.
 - Taskplane onboarding failed before touching the repository because its
   installed package is missing `taskplane/collision_registry.json`; this
   document manually preserves its research-only and human-approval boundary.
@@ -521,10 +651,12 @@ alone is not identity or authorization.
   and ZzzOps exposed no callable capability in this session. Wolfram's detailed
   evaluator did not return usable results, so direct Foundation probes supplied
   the date-time evidence.
-- An independent hostile repository review found the untrusted pairing window,
-  upstream notification loss, discarded audio provenance, persistent privacy
-  artifacts, and incomplete asynchronous bridge requirements. Those findings
-  changed the architecture and implementation order above.
+- Three independent hostile reviews found the untrusted pairing window,
+  upstream notification loss, missing Reminder alarm evidence, notification
+  identity/integrity bugs, truncated note export, discarded audio provenance,
+  persistent privacy artifacts, and asynchronous bridge races. Those findings
+  changed both the architecture and implementation; unresolved release gates
+  are listed above instead of being converted into success claims.
 
 ## Primary references
 
@@ -546,9 +678,9 @@ alone is not identity or authorization.
 - Tailscale: [Grants versus ACLs](https://tailscale.com/docs/reference/grants-vs-acls)
 - NIST: [Zero Trust Architecture](https://csrc.nist.gov/pubs/sp/800/207/final)
 
-## Human approval gate
+## Human approval outcome
 
-Implementation must not start until the owner approves:
+The owner approved:
 
 1. the dependency-first implementation order;
 2. transport/pairing and full-preview hardening before any external write;
@@ -558,3 +690,7 @@ Implementation must not start until the owner approves:
 6. local reversible QuickNote semantics (save-plus-undo) versus confirmation for
    every note; and
 7. the stated V1 exclusions.
+
+That approval authorized implementation, not live TCC grants, real Calendar or
+Reminders writes, Tailscale Serve changes, app installation, notarization, or
+physical-G2 acceptance. Those remain explicit operator-driven proof steps.

@@ -131,6 +131,7 @@ export class HudPageBuilder {
   static readonly MENU_REPEAT = 1;
   static readonly MENU_MUTE = 2;
   static readonly MENU_REDIAL = 3;
+  static readonly MENU_SETTINGS = 4;
 
   private systemMenu(): MenuContainerProperty {
     return new MenuContainerProperty({
@@ -138,6 +139,7 @@ export class HudPageBuilder {
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_REDIAL, itemName: 'Reconnect brain' }),
+        new MenuItemProperty({ itemID: HudPageBuilder.MENU_SETTINGS, itemName: 'Listening settings' }),
       ],
     });
   }

@@ -461,6 +461,14 @@ class TestWakeWordGate:
         texts = await self._run("I'm so tired of repeating this to the team.")
         assert texts == []  # no HUD write, no reply, nothing
 
+    async def test_ambient_rhymes_do_not_cross_the_wake_boundary(self) -> None:
+        for speech in (
+            "Coat, note payroll cutoff",
+            "Goat, export notes",
+            "Boat, complete reminder taxes",
+        ):
+            assert await self._run(speech) == []
+
     async def test_addressed_speech_answers_with_wake_word_stripped(self) -> None:
         texts = await self._run("JOAT, what time is sunset?")
         assert texts == ["what time is sunset?", "answer"]

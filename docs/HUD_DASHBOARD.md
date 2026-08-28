@@ -195,8 +195,8 @@ Line 1 and line 2 of `Card.render()` (`cards.py:105-114`) become two *containers
 |> Messages       |NEXT                        |
 |  Notifications  |Design review · 4:30        |
 |  Calendar       |                            |
-|  Debate         |LAST QUERY                  |
-|  Settings       |Where is the nearest coffee|
+|  Tasks          |LAST QUERY                  |
+|  More           |Where is the nearest coffee|
 |                 |2 notifications waiting     |
 +-----------------+----------------------------+  y=288
   x=0..160 Sidebar   x=164..576 dim Overview
@@ -208,6 +208,27 @@ between a left-temple double-click and either a selection or a second
 left-temple double-click. The full-frame transparent layer remains the sole
 event capture; the Overview is retained as spatial context at 24% intensity. Selecting a capability
 removes the rail before its content is requested from the Mac.
+
+`More` keeps the five-row root stable without making secondary capabilities
+look like settings. It reuses the same rail for `QuickNotes`, `Brainstorm`, and
+`Activity`; selecting one still removes the rail into the same full-focus shell.
+
+Every capability open now carries a unique `requestId` through `capmenu`, the
+Mac's `hud.list` response, and any later `capdata` row selection. The Mac drops
+a superseded generation before it can replace row snapshots, and the plugin
+rejects a response that does not match the currently visible generation. This
+matters even when the wearer reopens the *same* capability: title equality is
+not response identity. `hud.list.selectable` is also explicit protocol data;
+the renderer and event router no longer infer a tappable row from title copy.
+Setup, empty, detail, and receipt frames therefore cannot acquire an invisible
+action merely because their title happens to resemble a collection.
+
+Navigation commits only after the corresponding visual paint succeeds. While
+Sidebar, More, Settings, or a loading focus page is being painted, input is
+consumed by a transition state. A rejected paint closes back to the restored
+Overview; it cannot leave an invisible Settings or More state accepting taps.
+The same two-phase rule applies when Mac data replaces a loading page: matching
+generation first, complete four-tile paint second, row activation last.
 
 ### CONFIRM — the exclusive decision state
 
@@ -251,12 +272,15 @@ Overview, Sidebar, or focus page.
 
 The shared transparent layer owns capture; the Sidebar and dimmed Overview are
 gone, so the destination owns the whole canvas. Scroll moves the custom-selected
-row and right/ring click selects it. Selecting a one-to-one Messages row arms a
+row and a tap/click selects it. Selecting a one-to-one Messages row arms a
 voice draft (`JOAT, reply saying ...`); it does not send. The full draft and
 recipient must then fit on the exclusive Confirmation screen before the guarded
 Messages.app boundary can run. Group rows remain explicitly read-only rather
 than silently routing a group reply to one participant. Overview paints are
-buffered until return. Browse-only pages do not advertise a nonexistent action.
+buffered until return. Notifications, Calendar, Tasks, QuickNotes, and Activity
+rows now open deterministic read-only detail states. Setup, empty, detail, and
+write-lifecycle pages do not draw a selected outline or advertise a nonexistent
+tap action.
 
 ### Gesture map — original exploration
 

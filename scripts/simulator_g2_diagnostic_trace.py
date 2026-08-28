@@ -22,19 +22,34 @@ from joat.services.g2_diagnostics import G2DiagnosticStore
 log = logging.getLogger("joat.simulator_g2_diagnostic_trace")
 
 
-async def run(port: int, out: Path, timeout_s: float) -> None:
+async def run(
+    port: int,
+    out: Path,
+    timeout_s: float,
+    pre_confirm_delay_s: float,
+) -> None:
     connected = asyncio.Event()
     gateway = HubGatewayTransport(
         host="127.0.0.1",
         port=port,
         pairing=PairingStore(path=out.with_name("simulator-g2-diagnostic-pairing.json")),
         g2_diagnostics=G2DiagnosticStore(path=out),
+        # Exercise the same explicit Gate-0 downlink as the packaged run. The
+        # simulator may reject or omit location support; that result is kept
+        # as simulator-only evidence and must not be promoted to a G2 finding.
+        location_probe=True,
     )
     gateway.on_hello(lambda _hello: connected.set())
     await gateway.start()
     try:
         log.info("waiting for the ordinary simulator plugin on port=%d", port)
         await asyncio.wait_for(connected.wait(), timeout_s)
+        if pre_confirm_delay_s > 0:
+            log.info(
+                "plugin connected; holding normal HUD for %.1fs before confirmation",
+                pre_confirm_delay_s,
+            )
+            await asyncio.sleep(pre_confirm_delay_s)
         accepted = await gateway.request_confirm(
             "simulator-g2-diagnostic",
             "Simulator diagnostic capture. Click confirms no external action.",
@@ -54,9 +69,15 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=18791)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--pre-confirm-delay",
+        type=float,
+        default=10.0,
+        help="seconds to retain the normal HUD for a pre-confirmation screenshot",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-    asyncio.run(run(args.port, args.out, args.timeout))
+    asyncio.run(run(args.port, args.out, args.timeout, max(0.0, args.pre_confirm_delay)))
 
 
 if __name__ == "__main__":

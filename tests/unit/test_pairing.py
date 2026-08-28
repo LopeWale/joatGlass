@@ -133,6 +133,26 @@ class TestTokenRedaction:
         _RedactToken().filter(rec)
         assert rec.getMessage() == "< GET /glasses"
 
+    def test_navigation_frame_content_and_precise_geometry_are_redacted(self) -> None:
+        class FrameLike:
+            data = (
+                '{"kind":"navigation.route","sessionId":"nav-1",'
+                '"destinationLabel":"Private Clinic","etaMinutes":4,'
+                '"plan":{"geometry":[{"latitude":41.9,"longitude":-87.6}],'
+                '"steps":[{"instruction":"Turn onto Private Street"}]}}'
+            )
+
+            def __str__(self) -> str:
+                return self.data
+
+        rec = self._record("< %s", FrameLike())
+        _RedactToken().filter(rec)
+        rendered = rec.getMessage()
+        assert "Private Clinic" not in rendered
+        assert "Private Street" not in rendered
+        assert "41.9" not in rendered
+        assert '"plan": "<redacted>"' in rendered
+
 
 class TestRecovery:
     """Recovery requires an explicit local action and no engine restart."""

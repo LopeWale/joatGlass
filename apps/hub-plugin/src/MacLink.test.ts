@@ -114,6 +114,207 @@ describe('MacLink diagnostic delivery', () => {
   });
 });
 
+describe('MacLink navigation delivery', () => {
+  it('drops session-bound navigation uplinks instead of crossing reconnects', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.sendNavigation({
+      kind: 'navigation.origin', sessionId: 'nav-old', requestId: 'origin-old',
+      generation: 1, latitude: 41.9, longitude: -87.65,
+    });
+
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    expect(sockets[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: null }),
+    ]);
+  });
+
+  it('sends session-bound navigation uplinks only on the authenticated socket', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    link.sendNavigation({
+      kind: 'navigation.view.ack', sessionId: 'nav-1', requestId: 'mode-1',
+      generation: 1, outcome: 'bridge_acknowledged',
+    });
+
+    expect(sockets[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: null }),
+      JSON.stringify({
+        kind: 'navigation.view.ack', sessionId: 'nav-1', requestId: 'mode-1',
+        generation: 1, outcome: 'bridge_acknowledged',
+      }),
+    ]);
+  });
+});
+
+describe('MacLink downlink ordering', () => {
+  it('awaits each async HUD handler before dispatching the next frame', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const order: string[] = [];
+    let releaseRebuild!: () => void;
+    const rebuildBlocked = new Promise<void>((resolve) => { releaseRebuild = resolve; });
+    link.onMessage(async (message) => {
+      order.push(`start:${message.kind}`);
+      if (message.kind === 'hud.rebuild') await rebuildBlocked;
+      order.push(`end:${message.kind}`);
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    sockets[0]!.receive({ kind: 'hud.rebuild', reason: 'brainstorm' });
+    sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'first turn' });
+    await Promise.resolve();
+    expect(order).toEqual(['start:hud.rebuild']);
+
+    releaseRebuild();
+    await rebuildBlocked;
+    await vi.waitFor(() => {
+      expect(order).toEqual([
+        'start:hud.rebuild',
+        'end:hud.rebuild',
+        'start:hud.text',
+        'end:hud.text',
+      ]);
+    });
+  });
+
+  it('contains a rejected handler and continues with later frames', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const handled: string[] = [];
+    link.onMessage(async (message) => {
+      if (message.kind === 'hud.rebuild') throw new Error('render failed');
+      handled.push(message.kind);
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    sockets[0]!.receive({ kind: 'hud.rebuild', reason: 'brainstorm' });
+    sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'still handled' });
+    await vi.waitFor(() => expect(handled).toEqual(['hud.text']));
+  });
+
+  it('a hung old connection does not wedge downlinks after reconnect', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const handled: string[] = [];
+    const neverFinishes = new Promise<void>(() => {});
+    link.onMessage(async (message) => {
+      if (message.kind !== 'hud.text') return;
+      if (message.text === 'old') await neverFinishes;
+      handled.push(message.text);
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'old' });
+    await Promise.resolve();
+
+    link.connect();
+    sockets[1]!.open();
+    sockets[1]!.receive({ kind: 'auth.accepted' });
+    sockets[1]!.receive({ kind: 'hud.text', containerId: 4, text: 'new' });
+
+    await vi.waitFor(() => expect(handled).toEqual(['new']));
+  });
+
+  it('aborts an in-flight generation before it can commit after reconnect', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const commits: string[] = [];
+    const contexts: Array<{ generation: number; signal: AbortSignal }> = [];
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    link.onMessage(async (message, context) => {
+      contexts.push(context);
+      if (message.kind === 'hud.text' && message.text === 'old') await oldBlocked;
+      context.signal.throwIfAborted();
+      commits.push(message.kind === 'hud.text' ? message.text : message.kind);
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'old' });
+    await Promise.resolve();
+
+    link.connect();
+    sockets[1]!.open();
+    sockets[1]!.receive({ kind: 'auth.accepted' });
+    sockets[1]!.receive({ kind: 'hud.text', containerId: 4, text: 'new' });
+    await vi.waitFor(() => expect(commits).toEqual(['new']));
+
+    releaseOld();
+    await oldBlocked;
+    await Promise.resolve();
+    expect(commits).toEqual(['new']);
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]!.signal.aborted).toBe(true);
+    expect(contexts[1]!.signal.aborted).toBe(false);
+    expect(contexts[1]!.generation).toBeGreaterThan(contexts[0]!.generation);
+  });
+
+  it('never starts queued work from an abandoned generation', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const started: string[] = [];
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    link.onMessage(async (message) => {
+      if (message.kind !== 'hud.text') return;
+      started.push(message.text);
+      if (message.text === 'old-running') await oldBlocked;
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'old-running' });
+    sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'old-queued' });
+    await Promise.resolve();
+
+    link.connect();
+    sockets[1]!.open();
+    sockets[1]!.receive({ kind: 'auth.accepted' });
+    sockets[1]!.receive({ kind: 'hud.text', containerId: 4, text: 'new' });
+    await vi.waitFor(() => expect(started).toEqual(['old-running', 'new']));
+
+    releaseOld();
+    await oldBlocked;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(started).toEqual(['old-running', 'new']);
+  });
+
+  it('expires a hung handler by aborting its generation and reconnecting', async () => {
+    vi.useFakeTimers();
+    const link = new MacLink({
+      urls: ['ws://m:1/g'],
+      reconnectBaseMs: 10,
+      reconnectMaxMs: 10,
+      downlinkHandlerTimeoutMs: 50,
+    });
+    let signal: AbortSignal | undefined;
+    link.onMessage(async (_message, context) => {
+      signal = context.signal;
+      await new Promise<void>(() => {});
+    });
+    link.connect();
+    const first = sockets[0]!;
+    first.open();
+    first.receive({ kind: 'auth.accepted' });
+    first.receive({ kind: 'hud.text', containerId: 4, text: 'wedged' });
+    await Promise.resolve();
+
+    vi.advanceTimersByTime(50);
+    expect(signal?.aborted).toBe(true);
+    expect(first.closed).toBe(true);
+
+    vi.advanceTimersByTime(20);
+    expect(sockets).toHaveLength(2);
+  });
+});
+
 
 describe('MacLink reconnect storm', () => {
   /**

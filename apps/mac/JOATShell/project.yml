@@ -42,7 +42,10 @@ targets:
       - path: Resources
     entitlements:
       path: JOAT.entitlements
-      properties: {}   # no sandbox, no relaxations — hardened runtime only
+      properties:
+        # Hardened Runtime resource access still requires this entitlement;
+        # it does not replace the separate Calendar/Reminders TCC decisions.
+        com.apple.security.personal-information.calendars: true
     settings:
       base:
         # Let Xcode synthesize Info.plist from INFOPLIST_KEY_* settings —
@@ -79,3 +82,39 @@ targets:
         # Access and Accessibility grants to the signing identity, so an
         # ad-hoc or churning signature makes the user re-grant every build.
         DEVELOPMENT_TEAM: J2XU5XWJM9
+      configs:
+        Debug:
+          # Never let an unsigned Xcode build replace the installed app's
+          # Files & Folders TCC decision. Debug and production are distinct
+          # apps even when both are present on the same development Mac.
+          PRODUCT_BUNDLE_IDENTIFIER: com.joat.shell.debug
+          INFOPLIST_KEY_CFBundleDisplayName: "JOAT Debug"
+  JOATOpenClawTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/JOATTests/EngineControllerIdentityTests.swift
+      - path: Tests/JOATTests/OpenClawCredentialServiceTests.swift
+      - path: Tests/JOATTests/EngineStatusOpenClawTests.swift
+    dependencies:
+      - target: JOAT
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.joat.shell.openclaw-tests
+        # Hosted tests are injected into the signed Debug app. Signing the
+        # bundle with the same team avoids a runtime team-ID mismatch while
+        # preserving the Debug app's distinct TCC identity.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: J2XU5XWJM9
+
+schemes:
+  JOAT:
+    build:
+      targets:
+        JOAT: all
+        JOATOpenClawTests: [test]
+    test:
+      targets:
+        - JOATOpenClawTests

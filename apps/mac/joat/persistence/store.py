@@ -287,9 +287,115 @@ _MIGRATION_2 = (
     """,
 )
 
+_MIGRATION_3 = (
+    """
+    CREATE TABLE task_occurrences (
+        occurrence_id TEXT PRIMARY KEY CHECK (
+            typeof(occurrence_id) = 'text' AND length(occurrence_id) > 0
+        ),
+        action_id TEXT NOT NULL UNIQUE REFERENCES actions(action_id) ON DELETE RESTRICT,
+        external_system TEXT NOT NULL CHECK (external_system = 'eventkit.reminders'),
+        external_item_id TEXT NOT NULL UNIQUE CHECK (
+            typeof(external_item_id) = 'text' AND length(external_item_id) > 0
+        ),
+        calendar_identifier TEXT NOT NULL CHECK (
+            typeof(calendar_identifier) = 'text' AND length(calendar_identifier) > 0
+        ),
+        title TEXT NOT NULL CHECK (
+            typeof(title) = 'text' AND length(title) > 0
+        ),
+        due_unix_ms INTEGER NOT NULL CHECK (due_unix_ms >= 0),
+        time_zone_id TEXT NOT NULL CHECK (
+            typeof(time_zone_id) = 'text' AND length(time_zone_id) > 0
+        ),
+        state TEXT NOT NULL CHECK (
+            state IN ('pending','alerted','completed','dismissed','cancelled')
+        ),
+        created_at_us INTEGER NOT NULL CHECK (created_at_us >= 0),
+        updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),
+        alerted_at_us INTEGER,
+        completed_at_us INTEGER,
+        CHECK ((state = 'alerted') = (alerted_at_us IS NOT NULL)),
+        CHECK ((state = 'completed') = (completed_at_us IS NOT NULL)),
+        CHECK (alerted_at_us IS NULL OR alerted_at_us >= created_at_us),
+        CHECK (completed_at_us IS NULL OR completed_at_us >= created_at_us)
+    ) STRICT
+    """,
+    """
+    CREATE INDEX pending_task_occurrences_due
+    ON task_occurrences(due_unix_ms, occurrence_id)
+    WHERE state = 'pending'
+    """,
+)
+
+_MIGRATION_4 = (
+    """
+    CREATE TABLE notification_sources (
+        source_id TEXT PRIMARY KEY,
+        coverage_scope TEXT NOT NULL,
+        authority_level TEXT NOT NULL CHECK (
+            authority_level IN ('authoritative','best_effort','metadata_only')
+        ),
+        cursor_json BLOB NOT NULL,
+        health TEXT NOT NULL CHECK (health IN (
+            'healthy_complete_for_scope','healthy_best_effort','permission_denied',
+            'unsupported','stale','cursor_reset_required','parse_degraded','failed'
+        )),
+        initialized_at_us INTEGER NOT NULL,
+        updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= initialized_at_us)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE notification_observations (
+        observation_id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES notification_sources(source_id) ON DELETE RESTRICT,
+        native_id TEXT NOT NULL,
+        event_class TEXT NOT NULL,
+        occurred_at_us INTEGER,
+        observed_at_us INTEGER NOT NULL,
+        payload BLOB NOT NULL,
+        payload_digest BLOB NOT NULL CHECK (
+            typeof(payload_digest) = 'blob' AND length(payload_digest) = 32
+        ),
+        completeness TEXT NOT NULL CHECK (
+            completeness IN ('complete_for_scope','best_effort','metadata_only')
+        ),
+        UNIQUE (source_id, native_id)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE notification_outbox (
+        observation_id TEXT PRIMARY KEY REFERENCES notification_observations(observation_id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK (state IN ('pending','enqueued','suppressed')),
+        reason_code TEXT,
+        updated_at_us INTEGER NOT NULL,
+        CHECK ((state = 'pending' AND reason_code IS NULL)
+               OR (state != 'pending' AND reason_code IS NOT NULL))
+    ) STRICT
+    """,
+    """
+    CREATE INDEX pending_notification_outbox
+    ON notification_outbox(updated_at_us, observation_id)
+    WHERE state = 'pending'
+    """,
+)
+
+_MIGRATION_5 = (
+    """
+    CREATE TABLE task_alert_receipts (
+        occurrence_id TEXT PRIMARY KEY
+            REFERENCES task_occurrences(occurrence_id) ON DELETE CASCADE,
+        alerted_at_us INTEGER NOT NULL CHECK (alerted_at_us >= 0)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
+    (3, "eventkit_task_occurrences", _MIGRATION_3),
+    (4, "durable_notification_observations", _MIGRATION_4),
+    (5, "retain_task_alert_history", _MIGRATION_5),
 )
 
 

@@ -154,11 +154,13 @@ struct ReminderCreateRequest: Codable, Sendable {
     let calendarIdentifier: String
     let title: String
     let due: CivilTime?
+    let resolvedDueUnixMS: Int64?
     let alarmOffsetsSeconds: [Int]
 
     enum CodingKeys: String, CodingKey {
         case storeInstanceID = "storeInstanceId"
         case storeGeneration, calendarIdentifier, title, due, alarmOffsetsSeconds
+        case resolvedDueUnixMS = "resolvedDueUnixMs"
     }
 }
 
@@ -171,11 +173,12 @@ struct ReminderQueryRequest: Codable, Sendable {
 struct ReminderCompleteRequest: Codable, Sendable {
     let storeInstanceID: String
     let storeGeneration: UInt64
+    let calendarIdentifier: String
     let calendarItemIdentifier: String
 
     enum CodingKeys: String, CodingKey {
         case storeInstanceID = "storeInstanceId"
-        case storeGeneration, calendarItemIdentifier
+        case storeGeneration, calendarIdentifier, calendarItemIdentifier
     }
 }
 

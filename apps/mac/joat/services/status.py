@@ -15,14 +15,55 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 DEFAULT_PATH = Path(
     "~/Library/Application Support/JOAT/status.json"
 ).expanduser()
+
+_RESERVED_SAFE_PROJECTIONS = frozenset({"openclaw", "agent_terminal", "brainstorm"})
+_OPENCLAW_STATES = frozenset({
+    "not_configured",
+    "checking",
+    "approval_required",
+    "connected_read_only",
+    "connected_operator",
+    "disconnected",
+    "failed",
+})
+_AGENT_TERMINAL_STATES = frozenset({
+    "unavailable",
+    "approval_required",
+    "ready",
+    "running",
+    "blocked",
+})
+_BRAINSTORM_STATES = frozenset({
+    "unavailable", "ready", "running", "settled", "cancelled", "failed",
+})
+_BRAINSTORM_PHASES = frozenset({"idle", "opening", "turn", "closing"})
+_SAFE_REASONS = frozenset({
+    "",
+    "endpoint_missing",
+    "checking_pairing",
+    "device_approval_required",
+    "write_scope_required",
+    "gateway_not_ready",
+    "dedicated_session_not_proven",
+    "tools_enabled",
+    "history_recovery_required",
+    "connection_closed",
+    "protocol_rejected",
+    "native_credentials_unavailable",
+})
+_HOST_PATTERN = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"
+)
 
 
 class StatusPublisher:
@@ -39,6 +80,21 @@ class StatusPublisher:
             "stt": "off",
             "llm": "off",
             "debate": "off",
+            "openclaw": {
+                "state": "not_configured",
+                "endpoint_host": "",
+                "scopes": [],
+                "reason": "endpoint_missing",
+            },
+            "agent_terminal": {
+                "state": "unavailable",
+                "reason": "gateway_not_ready",
+            },
+            "brainstorm": {
+                "state": "unavailable",
+                "seat_count": 0,
+                "phase": "idle",
+            },
             "last_transcript": "",
             "last_reply": "",
             "last_card": "",
@@ -47,7 +103,8 @@ class StatusPublisher:
             # and updated by nothing.
             "counts": {"utterances": 0, "cards": 0},
         }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self._path.parent, 0o700)
         self.flush()
 
     def get(self, key: str, default: str = "") -> str:
@@ -57,7 +114,66 @@ class StatusPublisher:
         return value if isinstance(value, str) else default
 
     def set(self, **fields: Any) -> None:
+        if _RESERVED_SAFE_PROJECTIONS.intersection(fields):
+            raise ValueError("OpenClaw fields require dedicated status methods")
         self._state.update(fields)
+        self.flush()
+
+    def set_openclaw(
+        self,
+        *,
+        state: str,
+        endpoint_host: str,
+        scopes: Sequence[str],
+        reason: str,
+    ) -> None:
+        """Publish connection proof without accepting secret-bearing text."""
+
+        normalized_host = endpoint_host.lower().rstrip(".")
+        safe_scopes = list(scopes)
+        if state not in _OPENCLAW_STATES:
+            raise ValueError("invalid OpenClaw state")
+        if normalized_host and not _HOST_PATTERN.fullmatch(normalized_host):
+            raise ValueError("invalid OpenClaw endpoint host")
+        if (
+            len(set(safe_scopes)) != len(safe_scopes)
+            or any(scope not in {"operator.read", "operator.write"} for scope in safe_scopes)
+        ):
+            raise ValueError("invalid OpenClaw scopes")
+        if reason not in _SAFE_REASONS:
+            raise ValueError("invalid OpenClaw reason")
+        self._state["openclaw"] = {
+            "state": state,
+            "endpoint_host": normalized_host,
+            "scopes": safe_scopes,
+            "reason": reason,
+        }
+        self.flush()
+
+    def set_agent_terminal(self, *, state: str, reason: str) -> None:
+        """Publish capability state using fixed, non-sensitive reason codes."""
+
+        if state not in _AGENT_TERMINAL_STATES:
+            raise ValueError("invalid Agent Terminal state")
+        if reason not in _SAFE_REASONS:
+            raise ValueError("invalid Agent Terminal reason")
+        self._state["agent_terminal"] = {"state": state, "reason": reason}
+        self.flush()
+
+    def set_brainstorm(self, *, state: str, seat_count: int, phase: str) -> None:
+        """Publish lifecycle metadata, never prompt or transcript content."""
+
+        if state not in _BRAINSTORM_STATES:
+            raise ValueError("invalid Brainstorm state")
+        if isinstance(seat_count, bool) or not 0 <= seat_count <= 16:
+            raise ValueError("invalid Brainstorm seat count")
+        if phase not in _BRAINSTORM_PHASES:
+            raise ValueError("invalid Brainstorm phase")
+        self._state["brainstorm"] = {
+            "state": state,
+            "seat_count": seat_count,
+            "phase": phase,
+        }
         self.flush()
 
     def bump(self, counter: str) -> None:
@@ -83,8 +199,10 @@ class StatusPublisher:
         self._state["at"] = time.time()
         try:
             fd, tmp = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
+            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w") as fh:
                 json.dump(self._state, fh)
             os.replace(tmp, self._path)  # atomic for the reader
+            os.chmod(self._path, 0o600)
         except OSError:
             pass  # status is best-effort; never take the engine down for it

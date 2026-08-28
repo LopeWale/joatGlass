@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import sys
@@ -12,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from joat.audio.whisper_serve import MIN_UTTERANCE_BYTES, WhisperServeEngine, is_prompt_echo
+from joat.audio.whisper_serve import (
+    DEFAULT_READY_TIMEOUT_S,
+    MIN_UTTERANCE_BYTES,
+    WhisperServeEngine,
+    is_prompt_echo,
+)
 
 
 def free_port() -> int:
@@ -110,6 +116,12 @@ STUB_SERVER_SCRIPT = textwrap.dedent("""
 
 
 class TestLifecycle:
+    def test_default_readiness_budget_does_not_block_other_capabilities(self) -> None:
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1")
+
+        assert DEFAULT_READY_TIMEOUT_S == 30.0
+        assert engine._ready_timeout_s == DEFAULT_READY_TIMEOUT_S
+
     async def test_spawns_waits_ready_and_terminates(self, tmp_path: Path) -> None:
         script = tmp_path / "stub_serve.py"
         script.write_text(STUB_SERVER_SCRIPT)
@@ -134,6 +146,24 @@ class TestLifecycle:
             ready_timeout_s=2.0,
         )
         assert await engine.start() is False  # returned, not raised
+
+    async def test_shutdown_interrupts_readiness_and_reaps_child(self, tmp_path: Path) -> None:
+        script = tmp_path / "never_ready.py"
+        script.write_text("import time\ntime.sleep(60)\n")
+        shutdown = asyncio.Event()
+        engine = WhisperServeEngine(
+            command=[sys.executable, str(script)],
+            port=free_port(),
+            ready_timeout_s=60.0,
+        )
+        starting = asyncio.create_task(engine.start(shutdown=shutdown))
+        await asyncio.sleep(0.1)
+
+        shutdown.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert engine._proc is None
 
 
 class TestPromptEcho:

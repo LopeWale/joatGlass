@@ -17,6 +17,8 @@ export class AudioStreamer {
   private buffer: number[] = [];
   private flushTimer?: ReturnType<typeof setInterval>;
   private open = false;
+  private controlEpoch = 0;
+  private desiredOpen = false;
   /** Which mic was last (or is currently) hot — the menu's unmute reuses it. */
   lastSource: AudioInputSource = AudioInputSource.Glasses;
   /** Fired on every real open/close so the Mac's mic pill reflects TRUTH. */
@@ -36,7 +38,12 @@ export class AudioStreamer {
   }
 
   /** Glasses mic requires a successful startup page; phone mic does not. */
-  async start(source: AudioInputSource = AudioInputSource.Glasses): Promise<boolean> {
+  async start(
+    source: AudioInputSource = AudioInputSource.Glasses,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const epoch = ++this.controlEpoch;
+    this.desiredOpen = true;
     // Idempotent: a second start while open must not stack another flush
     // timer (the overwritten handle would leak and flush forever).
     if (this.open) return true;
@@ -50,6 +57,17 @@ export class AudioStreamer {
       console.warn('[AudioStreamer] audioControl unavailable on this host:', err);
       return false;
     }
+    if (signal?.aborted || epoch !== this.controlEpoch || !this.desiredOpen) {
+      // A stop/reconnect overtook this start while the native call was in
+      // flight. Turn it off again after the late success; merely ignoring the
+      // result would leave a hot microphone behind false local state.
+      try {
+        await this.client.require().audioControl(false);
+      } catch {
+        // Best-effort compensation; link-loss cleanup will retry stop.
+      }
+      return false;
+    }
     this.open = true;
     this.lastSource = source;
     this.onState?.(true);
@@ -58,7 +76,8 @@ export class AudioStreamer {
   }
 
   async stop(): Promise<void> {
-    if (!this.open) return;
+    this.controlEpoch += 1;
+    this.desiredOpen = false;
     this.open = false;
     this.onState?.(false);
     if (this.flushTimer) clearInterval(this.flushTimer);

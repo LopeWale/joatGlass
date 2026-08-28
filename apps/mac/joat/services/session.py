@@ -45,27 +45,45 @@ class Session(ABC):
         """
         return None
 
+    def consume_transcript(self, text: str) -> bool:
+        """Consume correction/retry speech while this session owns focus."""
+        return False
+
     @property
     def status(self) -> str:
         """Status chrome to restore after transient voice/link feedback."""
         return "JOAT · session active"
 
+    @property
+    def completion_state(self) -> str:
+        """Safe status projection after run() returns normally."""
+        return "settled"
+
 
 SessionFactory = Callable[[str], Session | None]
 """topic → Session, or None when the trigger can't be honored (missing agents)."""
+SessionStarter = Callable[[str], Session | None]
 
 
 class SessionManager:
     """Routes transcripts; enforces the one-active-session invariant."""
 
-    def __init__(self, hud: HudWriter, factory: SessionFactory,
-                 card_log: CardLog | None = None) -> None:
+    def __init__(
+        self,
+        hud: HudWriter,
+        factory: SessionFactory,
+        card_log: CardLog | None = None,
+        on_state: Callable[[str], None] | None = None,
+        starters: Sequence[SessionStarter] = (),
+    ) -> None:
         self._hud = hud
         self._factory = factory
         self._active: Session | None = None
         self._task: asyncio.Task[None] | None = None
-        self._pending_cards: list[str] = []
+        self._pending_cards: list[tuple[str, asyncio.Future[None] | None]] = []
         self._card_log = card_log
+        self._on_state = on_state
+        self._starters = list(starters)
 
     @property
     def active(self) -> bool:
@@ -75,19 +93,37 @@ class SessionManager:
     def active_status(self) -> str | None:
         return self._active.status if self._active is not None else None
 
+    @property
+    def active_session(self) -> Session | None:
+        """Typed event-routing seam; ownership remains read-only to callers."""
+        return self._active
+
     def notify(self, card: str) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
         shows the card now; an active session is never interrupted — cards
         queue and drain the moment it ends."""
         if self._active is not None:
-            self._pending_cards.append(card)
+            self._pending_cards.append((card, None))
             log.info("card queued behind active session chars=%d", len(card))
             return
         asyncio.get_running_loop().create_task(self._show_card(card))
 
+    async def notify_and_wait(self, card: str) -> None:
+        """Return only after the Mac HUD write completes.
+
+        This is the durable-outbox seam. It still is not physical-G2 proof,
+        but it prevents a volatile active-session queue from being mistaken
+        for a completed write.
+        """
+        if self._active is None:
+            await self._show_card(card)
+            return
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._pending_cards.append((card, future))
+        log.info("card queued behind active session chars=%d", len(card))
+        await future
+
     async def _show_card(self, card: str) -> None:
-        if self._card_log is not None:
-            self._card_log.add(card)
         # Urgency gets BRIGHTNESS now, not merely punctuation: firmware
         # textColor 4 for "!!" cards, a shade dimmer for routine ones.
         urgent = card.startswith("!!")
@@ -96,13 +132,35 @@ class SessionManager:
             4 if urgent else 3,
             content_kind="notification",
         )
+        if self._card_log is not None:
+            self._card_log.add(card)
 
     def _drain_cards(self) -> None:
         if not self._pending_cards:
             return
-        cards, self._pending_cards = self._pending_cards, []
-        combined = "\n".join(cards[-6:])  # HUD is small; newest wins
-        asyncio.get_running_loop().create_task(self._show_card(combined))
+        pending, self._pending_cards = self._pending_cards, []
+        selected = pending[-6:]
+        for _, future in pending[:-6]:
+            if future is not None and not future.done():
+                future.set_exception(
+                    RuntimeError("notification queue overflowed before HUD write")
+                )
+        combined = "\n".join(card for card, _ in selected)
+
+        async def show_and_resolve() -> None:
+            try:
+                await self._show_card(combined)
+            except BaseException as exc:
+                for _, future in selected:
+                    if future is not None and not future.done():
+                        future.set_exception(exc)
+                log.exception("queued notification HUD write failed")
+            else:
+                for _, future in selected:
+                    if future is not None and not future.done():
+                        future.set_result(None)
+
+        asyncio.get_running_loop().create_task(show_and_resolve())
 
     def handle_transcript(self, text: str) -> bool:
         """True = consumed (session active or started); False = default flow."""
@@ -111,6 +169,14 @@ class SessionManager:
             if lowered in ("stop", "cancel", "stop the debate"):
                 log.info("wearer cancelled the active session")
                 self._active.cancel()
+                task = self._task
+                if task is not None and not task.done():
+                    # A cooperative flag cannot wake an agent stream blocked
+                    # in network I/O. Propagate cancellation into the active
+                    # iterator now; each remote adapter owns its bounded abort.
+                    task.cancel()
+                return True
+            if self._active.consume_transcript(text):
                 return True
             # Chairing the room is not an interruption: "claude, respond"
             # steers who speaks next without ending anything.
@@ -123,15 +189,25 @@ class SessionManager:
                     len(text),
                 )
             return True
+        for starter in self._starters:
+            session = starter(text)
+            if session is not None:
+                return self._start_session(session, publish_state=False)
         # "brainstorm" is what the capability is called; "debate" stays a
         # synonym because it is one of the MOVES inside a brainstorm (relay
         # a turn to be torn apart rather than built on), it is what the
         # wearer already says, and older plugin builds still send it.
-        for trigger in ("brainstorm ", "brainstorm: ", "debate ", "debate: "):
-            if lowered.startswith(trigger):
-                # Whisper ends utterances with punctuation; keep topics clean.
-                topic = text.strip()[len(trigger):].strip().rstrip(".!?")
-                return self._start(topic)
+        # Natural speech transcription commonly inserts a comma after the
+        # capability name ("brainstorm, compare these"). Keep the delimiter
+        # grammar narrow so "brainstorming" cannot become an invocation.
+        request = text.strip().rstrip(".!?")
+        trigger = re.match(
+            r"^(?:brainstorm|debate)(?:\s*[:,]\s*|\s+)(.+)$",
+            request,
+            flags=re.IGNORECASE,
+        )
+        if trigger is not None:
+            return self._start(trigger.group(1).strip())
         return False
 
     def _start(self, topic: str) -> bool:
@@ -139,20 +215,48 @@ class SessionManager:
         if session is None:
             log.warning("debate requested but agents unavailable")
             return False
+        return self._start_session(session, publish_state=True)
+
+    def _start_session(self, session: Session, *, publish_state: bool) -> bool:
         self._active = session
+        if publish_state and self._on_state is not None:
+            self._on_state("running")
 
         async def runner() -> None:
+            completion_state = "settled"
             try:
                 await session.run()
+            except asyncio.CancelledError:
+                completion_state = "cancelled"
+                raise
             except Exception:
+                completion_state = "failed"
                 log.exception("session crashed")
+            else:
+                completion_state = session.completion_state
             finally:
                 self._active = None
                 self._task = None
+                if publish_state and self._on_state is not None:
+                    self._on_state(completion_state)
                 self._drain_cards()
 
         self._task = asyncio.get_running_loop().create_task(runner())
         return True
+
+    async def close(self, timeout_s: float = 5.0) -> None:
+        """Cancel and await the active session before transports close."""
+        session = self._active
+        task = self._task
+        if session is not None:
+            session.cancel()
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout_s)
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 class DebateSession(Session):
@@ -187,6 +291,7 @@ class DebateSession(Session):
         max_repairs: int = 1,
         max_rounds: int = 2,
         agreement_threshold: float = 0.85,
+        on_phase: Callable[[str], None] | None = None,
     ) -> None:
         self._topic = topic
         self._table = table
@@ -196,6 +301,7 @@ class DebateSession(Session):
         self._max_repairs = max_repairs
         self._max_rounds = max_rounds
         self._agreement_threshold = agreement_threshold
+        self._on_phase = on_phase
         self._verify_summary: list[str] = []
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
@@ -206,7 +312,11 @@ class DebateSession(Session):
 
     @property
     def status(self) -> str:
-        return f"DEBATE · {self._topic[:34]}"
+        return f"BRAINSTORM · {self._topic[:30]}"
+
+    @property
+    def completion_state(self) -> str:
+        return "cancelled" if self._cancelled else "settled"
 
     def direct(self, text: str) -> str | None:
         """Give the floor to a named seat. Returns the name, or None."""
@@ -223,7 +333,9 @@ class DebateSession(Session):
         agreement, and the loop CONVERGES at ≥ threshold with no blocking
         issues — otherwise the room goes around again, capped at max_rounds.
         """
+        self._set_phase("opening")
         await self._sink.open(self._topic, self._table.names)
+        self._set_phase("turn")
         outcome = "no judge — one round"
         for round_no in range(1, self._max_rounds + 1):
             for _ in range(len(self._table)):
@@ -246,7 +358,7 @@ class DebateSession(Session):
             if len(self._transcript) < 2:
                 spoke = len(self._transcript)
                 await self._finish(
-                    f"no debate — {spoke} of {len(self._table)} spoke"
+                    f"insufficient collaborators — {spoke} of {len(self._table)} spoke"
                     + (f" ({', '.join(self._silenced)} silent)" if self._silenced else "")
                 )
                 return
@@ -354,7 +466,12 @@ class DebateSession(Session):
         return "".join(collected).strip()
 
     async def _finish(self, status: str) -> None:
+        self._set_phase("closing")
         await self._sink.close(status)
+
+    def _set_phase(self, phase: str) -> None:
+        if self._on_phase is not None:
+            self._on_phase(phase)
 
 
 def seat_participants(

@@ -12,6 +12,7 @@ import {
   type HudVisualFrame,
 } from './HudVisualSurface';
 import { CANVAS, ContainerId } from './types';
+import { navigationVisualFixture } from './NavigationHud';
 
 /**
  * Streamed paints must be SELF-CONTAINED full frames, throttled to BLE
@@ -179,6 +180,122 @@ describe('status-bar single ownership', () => {
 });
 
 describe('HudPresenter modal surfaces', () => {
+  it('serializes an old blocked visual paint before the newer final frame', async () => {
+    const rendered: string[] = [];
+    let releaseOld!: () => void;
+    const oldUploadBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let firstUpload = true;
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => {
+          if (firstUpload) {
+            firstUpload = false;
+            await oldUploadBlocked;
+          }
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async (frame) => {
+        rendered.push(frame.kind === 'overview' ? frame.main : frame.kind);
+        return [{ containerId: ContainerId.Image, pixels: new Uint8Array(4) }];
+      },
+    };
+    const hud = new HudPresenter(
+      client,
+      new HudPageBuilder(),
+      new HudVisualSurface(client, renderer),
+    );
+
+    const oldPaint = hud.showText('old generation', ContainerId.Main);
+    await Promise.resolve();
+    const newPaint = hud.showText('new generation', ContainerId.Main);
+    await Promise.resolve();
+    expect(rendered).toEqual(['old generation']);
+
+    releaseOld();
+    await Promise.all([oldPaint, newPaint]);
+    expect(rendered).toEqual(['old generation', 'new generation']);
+  });
+
+  it('renders navigation as a dedicated focus surface and restores deferred overview content', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showText('9:41   JOAT ready', ContainerId.StatusBar);
+    await hud.showText('home before navigation', ContainerId.Main);
+    await hud.showNavigation(navigationVisualFixture('nav-guidance'));
+    await hud.showText('home updated behind navigation', ContainerId.Main);
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'navigation',
+      status: '9:41   JOAT ready',
+      navigation: { view: 'guidance', primary: 'Turn right' },
+    });
+
+    await hud.showDefault();
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview', main: 'home updated behind navigation',
+    });
+  });
+
+  it('restores the prior frame when a navigation paint and bounded heal both fail', async () => {
+    const frames: HudVisualFrame[] = [];
+    const results = [true, false, false, true];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => {
+        frames.push(frame);
+        return results.shift() ?? true;
+      },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    expect(await hud.showText('home before failed navigation', ContainerId.Main)).toBe(true);
+    expect(await hud.showNavigation(navigationVisualFixture('nav-guidance'))).toBe(false);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview', main: 'home before failed navigation',
+    });
+    expect(await hud.showText('home remains interactive', ContainerId.Main)).toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview', main: 'home remains interactive',
+    });
+  });
+
+  it('restores the exact navigation frame after canonical-place confirmation', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const destination = navigationVisualFixture('nav-destination');
+
+    await hud.showNavigation(destination);
+    await hud.showConfirmation('Navigate to Cajun Corner, 2301 N Lincoln Ave?', 'nav-place');
+    await hud.dismissConfirmation('nav-place');
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'navigation', navigation: destination,
+    });
+  });
+
+  it('rejects a navigation view while confirmation owns the visible HUD', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showConfirmation('Send this message?', 'active-confirmation');
+    expect(await hud.showNavigation(navigationVisualFixture('nav-mode'))).toBe(false);
+    await hud.dismissConfirmation('active-confirmation');
+
+    expect(frames.some((frame) => frame.kind === 'navigation')).toBe(false);
+  });
+
   it('keeps Mac-owned Overview regions blank during status-only boot', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {

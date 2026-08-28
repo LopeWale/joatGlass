@@ -3,6 +3,10 @@ import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
 import calendarSvg from '@phosphor-icons/core/regular/calendar-dots.svg?raw';
 import scalesSvg from '@phosphor-icons/core/regular/scales.svg?raw';
 import gearSvg from '@phosphor-icons/core/regular/gear.svg?raw';
+import taskSvg from '@phosphor-icons/core/regular/check-square-offset.svg?raw';
+import moreSvg from '@phosphor-icons/core/regular/dots-three-circle.svg?raw';
+import quickNoteSvg from '@phosphor-icons/core/regular/note-pencil.svg?raw';
+import activitySvg from '@phosphor-icons/core/regular/pulse.svg?raw';
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
 import { CANVAS, type HudContentKind } from './types';
@@ -12,6 +16,11 @@ import {
   type HudImageTile,
   type HudVisualFrame,
 } from './HudVisualSurface';
+import {
+  formatNavigationDistance,
+  type NavigationHudModel,
+  type NavigationManeuver,
+} from './NavigationHud';
 
 const BRIGHT = 238;
 const SUPPORT = 170;
@@ -40,24 +49,68 @@ export const HUD_VISUAL_GEOMETRY = {
   confirmationProgressWidth: 367,
 } as const;
 
-type IconName =
+export type HudIconName =
   | 'messages'
   | 'notifications'
   | 'calendar'
-  | 'debate'
+  | 'tasks'
+  | 'more'
+  | 'quicknotes'
+  | 'brainstorm'
+  | 'activity'
   | 'settings'
   | 'microphone'
   | 'battery';
 
-const ICON_SOURCES: Readonly<Record<IconName, string>> = {
+const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   messages: chatCircleSvg,
   notifications: bellSvg,
   calendar: calendarSvg,
-  debate: scalesSvg,
+  tasks: taskSvg,
+  more: moreSvg,
+  quicknotes: quickNoteSvg,
+  brainstorm: scalesSvg,
+  activity: activitySvg,
   settings: gearSvg,
   microphone: microphoneSvg,
   battery: batteryHighSvg,
 };
+
+export type HudListKind =
+  | 'messages'
+  | 'notifications'
+  | 'calendar'
+  | 'tasks'
+  | 'quicknotes'
+  | 'activity'
+  | 'generic';
+
+export function hudSidebarIconName(item: string): HudIconName {
+  const normalized = item.trim().toLowerCase();
+  const icons: Readonly<Record<string, HudIconName>> = {
+    messages: 'messages',
+    notifications: 'notifications',
+    calendar: 'calendar',
+    tasks: 'tasks',
+    more: 'more',
+    quicknotes: 'quicknotes',
+    brainstorm: 'brainstorm',
+    debate: 'brainstorm',
+    activity: 'activity',
+  };
+  return icons[normalized] ?? 'settings';
+}
+
+export function resolveHudListKind(title: string): HudListKind {
+  const normalized = title.trim().toUpperCase();
+  if (normalized.startsWith('MESSAGES')) return 'messages';
+  if (normalized.startsWith('NOTIFICATIONS')) return 'notifications';
+  if (normalized.startsWith('CALENDAR')) return 'calendar';
+  if (normalized.startsWith('TASKS')) return 'tasks';
+  if (normalized.startsWith('QUICKNOTES')) return 'quicknotes';
+  if (normalized.startsWith('ACTIVITY') || normalized.startsWith('ACTION ·')) return 'activity';
+  return 'generic';
+}
 
 interface StatusParts {
   time: string;
@@ -88,6 +141,7 @@ export function hudDisplayTitle(value: string): string {
   if (!normalized || normalized !== normalized.toUpperCase()) return normalized;
   return normalized.split(' · ').map((part) => {
     if (part === 'JOAT' || /^\d+$/.test(part)) return part;
+    if (part === 'QUICKNOTES') return 'QuickNotes';
     const lower = part.toLowerCase();
     return lower.charAt(0).toUpperCase() + lower.slice(1);
   }).join(' · ');
@@ -346,13 +400,13 @@ export function visibleHudListItems(
 }
 
 export class HudCanvasRenderer implements HudFrameRenderer {
-  private readonly icons: Promise<Record<IconName, HTMLImageElement>>;
+  private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
 
   constructor() {
     this.icons = Promise.all(
-      (Object.entries(ICON_SOURCES) as Array<[IconName, string]>)
+      (Object.entries(ICON_SOURCES) as Array<[HudIconName, string]>)
         .map(async ([name, source]) => [name, await loadSvg(source)] as const),
-    ).then((entries) => Object.fromEntries(entries) as Record<IconName, HTMLImageElement>);
+    ).then((entries) => Object.fromEntries(entries) as Record<HudIconName, HTMLImageElement>);
   }
 
   async render(frame: HudVisualFrame): Promise<readonly HudImageTile[]> {
@@ -366,7 +420,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = '#000000';
     context.fillRect(0, 0, CANVAS.width, CANVAS.height);
     context.imageSmoothingEnabled = true;
-    this.drawShell(context, frame.status, frame.micOn, icons);
 
     switch (frame.kind) {
       case 'overview':
@@ -376,12 +429,19 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawSidebar(context, frame, icons);
         break;
       case 'list':
-        this.drawList(context, frame);
+        this.drawList(context, frame, icons);
         break;
       case 'confirmation':
         this.drawConfirmation(context, frame);
         break;
+      case 'navigation':
+        this.drawNavigation(context, frame.navigation);
+        break;
     }
+    // Chrome is the final compositing layer. Besides making ownership
+    // explicit, this prevents state-specific paths from ever obscuring the
+    // clock/privacy/battery spine on host canvas implementations.
+    this.drawShell(context, frame.status, frame.micOn, icons);
 
     const rgba = context.getImageData(0, 0, CANVAS.width, CANVAS.height).data;
     const pixels = new Uint8Array(CANVAS.width * CANVAS.height);
@@ -397,7 +457,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     statusText: string,
     micOn: boolean,
-    icons: Record<IconName, HTMLImageElement>,
+    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
     context.strokeStyle = gray(HAIRLINE);
     context.lineWidth = 1;
@@ -448,7 +508,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       tray: string;
       hint: string;
     },
-    icons: Record<IconName, HTMLImageElement>,
+    icons: Record<HudIconName, HTMLImageElement>,
     opacity = 1,
     offsetX = 0,
   ): void {
@@ -554,7 +614,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawSidebar(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'sidebar' }>,
-    icons: Record<IconName, HTMLImageElement>,
+    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
     this.drawOverview(
       context,
@@ -577,7 +637,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.lineTo(HUD_VISUAL_GEOMETRY.sidebarWidth + 0.5, 250);
     context.stroke();
 
-    const iconNames: IconName[] = ['messages', 'notifications', 'calendar', 'debate', 'settings'];
     frame.items.slice(0, 5).forEach((item, index) => {
       const y = 70 + index * 39;
       if (index === frame.selectedIndex) {
@@ -587,7 +646,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context.fillRect(12, y - 17, 3, 34);
       }
       const level = index === frame.selectedIndex ? BRIGHT : SUPPORT;
-      const icon = icons[iconNames[index] ?? 'messages'];
+      const icon = icons[hudSidebarIconName(item)];
       this.drawIcon(context, icon, 26, y - 9, 18, level);
       context.fillStyle = gray(level);
       context.textAlign = 'left';
@@ -600,6 +659,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawList(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
+    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
@@ -607,11 +667,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `20px ${HUD_FONT}`;
     context.fillText(hudDisplayTitle(frame.title), 36, 64);
 
+    const listKind = resolveHudListKind(frame.title);
     visibleHudListItems(frame.items, frame.selectedIndex).forEach((visible, row) => {
       const { item, index } = visible;
       const { primary: name, secondary: message, age } = parseHudListItem(item);
       const top = 82 + row * 56;
-      if (index === frame.selectedIndex) {
+      if (frame.selectable && index === frame.selectedIndex) {
         context.strokeStyle = gray(BRIGHT);
         context.lineWidth = 1.2;
         roundedRect(context, 23, top - 8, 527, 48, 5);
@@ -630,10 +691,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.beginPath();
       context.arc(56, top + 16, 14, 0, Math.PI * 2);
       context.stroke();
-      context.fillStyle = gray(SUPPORT);
-      context.textAlign = 'center';
-      context.font = `14px ${HUD_FONT}`;
-      context.fillText((name || item).charAt(0).toUpperCase(), 56, top + 16);
+      if (listKind === 'messages' || listKind === 'generic') {
+        context.fillStyle = gray(SUPPORT);
+        context.textAlign = 'center';
+        context.font = `14px ${HUD_FONT}`;
+        context.fillText((name || item).charAt(0).toUpperCase(), 56, top + 16);
+      } else {
+        this.drawIcon(context, icons[listKind], 47, top + 7, 18, SUPPORT);
+      }
 
       context.textAlign = 'left';
       context.fillStyle = gray(index === frame.selectedIndex ? BRIGHT : SUPPORT);
@@ -719,6 +784,375 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
     context.fillText(`${frame.secondsRemaining}s remaining`, 288, 267);
+  }
+
+  private drawNavigation(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    if (navigation.view === 'guidance') {
+      this.drawActiveNavigation(context, navigation);
+      return;
+    }
+    if (
+      navigation.view === 'uncertain'
+      || navigation.view === 'wrong_way'
+      || navigation.view === 'off_route'
+      || navigation.view === 'rerouting'
+    ) {
+      this.drawNavigationWarning(context, navigation);
+      return;
+    }
+    if (navigation.view === 'preview') {
+      this.drawNavigationPreview(context, navigation);
+      return;
+    }
+    if (navigation.view === 'arrived') {
+      this.drawNavigationArrival(context, navigation);
+      return;
+    }
+    this.drawNavigationDecision(context, navigation);
+  }
+
+  private drawNavigationDecision(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    const labels: Readonly<Record<string, string>> = {
+      destination: 'Confirm destination',
+      repair: 'Repair destination',
+      mode: 'Travel mode',
+      error: 'Navigation',
+    };
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(labels[navigation.view] ?? 'Navigation', 36, 59);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `21px ${HUD_FONT}`;
+    this.fitText(context, navigation.primary, 36, 84, 504);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `11px ${HUD_FONT}`;
+    this.fitText(context, navigation.secondary, 36, 108, 504);
+
+    if (navigation.options.length > 0) {
+      const rowHeight = navigation.options.length > 2 ? 36 : 45;
+      const firstY = navigation.options.length > 2 ? 124 : 130;
+      navigation.options.slice(0, 3).forEach((option, index) => {
+        const y = firstY + index * rowHeight;
+        const selected = index === navigation.selectedIndex;
+        context.strokeStyle = gray(selected ? BRIGHT : HAIRLINE);
+        context.lineWidth = selected ? 1.2 : 0.8;
+        roundedRect(context, 36, y, 504, rowHeight - 7, 5);
+        context.stroke();
+        if (selected) {
+          context.fillStyle = gray(BRIGHT);
+          context.fillRect(36, y, 3, rowHeight - 7);
+        }
+        context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
+        context.font = `${navigation.options.length > 2 ? 11 : 14}px ${HUD_FONT}`;
+        this.fitText(context, option, 52, y + (rowHeight - 7) / 2, 470);
+      });
+    } else {
+      context.strokeStyle = gray(navigation.view === 'error' ? SUPPORT : CHROME);
+      context.lineWidth = 1;
+      roundedRect(context, 36, 130, 504, 78, 8);
+      context.stroke();
+      if (navigation.view === 'destination') {
+        this.drawMapPin(context, 67, 169, BRIGHT);
+        context.fillStyle = gray(CHROME);
+        context.font = `9px ${HUD_FONT}`;
+        context.fillText('CANONICAL PLACE', 99, 153);
+        context.fillStyle = gray(BRIGHT);
+        context.font = `16px ${HUD_FONT}`;
+        this.fitText(context, navigation.primary, 99, 177, 420);
+        context.fillStyle = gray(SUPPORT);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(context, navigation.secondary, 99, 197, 420);
+      } else {
+        this.drawWarningMark(context, 76, 169, SUPPORT);
+        context.fillStyle = gray(SUPPORT);
+        context.font = `13px ${HUD_FONT}`;
+        this.drawWrappedText(context, navigation.secondary, 112, 157, 390, 18, 2);
+      }
+    }
+    this.drawNavigationFooter(context, navigation.hint);
+  }
+
+  private drawNavigationPreview(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLE' : 'WALK'} · ROUTE PREVIEW`, 36, 59);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `21px ${HUD_FONT}`;
+    this.fitText(context, navigation.primary, 36, 85, 504);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `11px ${HUD_FONT}`;
+    this.fitText(context, navigation.secondary, 36, 108, 504);
+
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 7;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    context.moveTo(71, 202);
+    context.lineTo(71, 153);
+    context.lineTo(156, 153);
+    context.lineTo(156, 187);
+    context.lineTo(251, 187);
+    context.stroke();
+    context.strokeStyle = gray(BRIGHT);
+    context.lineWidth = 3;
+    context.setLineDash([7, 7]);
+    context.stroke();
+    context.setLineDash([]);
+    this.drawMapPin(context, 251, 177, BRIGHT);
+
+    context.fillStyle = gray(CHROME);
+    context.font = `9px ${HUD_FONT}`;
+    context.fillText('DISTANCE', 322, 148);
+    context.fillText('ETA', 322, 190);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `18px ${HUD_FONT}`;
+    context.fillText(formatNavigationDistance(navigation.remainingDistanceM ?? 0), 409, 148);
+    context.fillText(`${navigation.etaMinutes ?? 0} min`, 409, 190);
+    this.drawNavigationFooter(context, navigation.hint);
+  }
+
+  private drawActiveNavigation(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 59);
+
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 1;
+    roundedRect(context, 36, 76, 92, 108, 12);
+    context.stroke();
+    this.drawManeuver(context, navigation.maneuver ?? 'continue', 82, 118, BRIGHT);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `16px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 82, 164);
+
+    context.textAlign = 'left';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `25px ${HUD_FONT}`;
+    this.fitText(context, navigation.primary, 156, 95, 384);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `16px ${HUD_FONT}`;
+    this.drawWrappedText(context, navigation.secondary, 156, 128, 384, 21, 2);
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    this.fitText(context, navigation.hint, 156, 190, 384);
+
+    this.drawNavigationProgress(context, navigation.progress ?? 0);
+    const footer = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
+    this.drawNavigationFooter(context, footer);
+  }
+
+  private drawNavigationWarning(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    const warning = navigation.view !== 'rerouting';
+    context.textBaseline = 'middle';
+    context.textAlign = 'center';
+    context.fillStyle = gray(warning ? BRIGHT : SUPPORT);
+    context.font = `11px ${HUD_FONT}`;
+    context.fillText(navigation.view.replace('_', ' ').toUpperCase(), 288, 63);
+    if (navigation.view === 'wrong_way') {
+      this.drawManeuver(context, 'u_turn', 288, 105, BRIGHT);
+    } else if (navigation.view === 'rerouting') {
+      this.drawRerouteMark(context, 288, 105, SUPPORT);
+    } else {
+      this.drawWarningMark(context, 288, 105, warning ? BRIGHT : SUPPORT);
+    }
+    context.fillStyle = gray(BRIGHT);
+    context.font = `24px ${HUD_FONT}`;
+    context.fillText(navigation.primary, 288, 155);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `13px ${HUD_FONT}`;
+    context.fillText(navigation.secondary, 288, 184);
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(navigation.hint, 288, 211);
+    this.drawNavigationFooter(
+      context,
+      navigation.remainingDistanceM === undefined
+        ? 'Route held'
+        : `${formatNavigationDistance(navigation.remainingDistanceM)} left`,
+    );
+  }
+
+  private drawNavigationArrival(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    this.drawArrivalMark(context, 288, 97, BRIGHT);
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `25px ${HUD_FONT}`;
+    context.fillText(navigation.primary, 288, 151);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `13px ${HUD_FONT}`;
+    this.drawFittedWrappedText(context, navigation.secondary, 288, 183, 470, 2);
+    this.drawNavigationFooter(context, navigation.hint);
+  }
+
+  private drawNavigationFooter(context: CanvasRenderingContext2D, copy: string): void {
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    this.fitText(context, copy, 288, 267, 500);
+  }
+
+  private drawNavigationProgress(context: CanvasRenderingContext2D, progress: number): void {
+    const normalized = Math.max(0, Math.min(1, progress));
+    context.fillStyle = gray(HAIRLINE);
+    context.fillRect(36, 228, 504, 3);
+    context.fillStyle = gray(SUPPORT);
+    context.fillRect(36, 228, Math.round(504 * normalized), 3);
+  }
+
+  private drawMapPin(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    level: number,
+  ): void {
+    context.strokeStyle = gray(level);
+    context.lineWidth = 2;
+    context.beginPath();
+    context.arc(x, y - 5, 10, Math.PI * 0.15, Math.PI * 0.85, true);
+    context.lineTo(x, y + 16);
+    context.closePath();
+    context.stroke();
+    context.beginPath();
+    context.arc(x, y - 5, 3, 0, Math.PI * 2);
+    context.stroke();
+  }
+
+  private drawWarningMark(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    level: number,
+  ): void {
+    context.strokeStyle = gray(level);
+    context.fillStyle = gray(level);
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(x, y - 26);
+    context.lineTo(x + 25, y + 20);
+    context.lineTo(x - 25, y + 20);
+    context.closePath();
+    context.stroke();
+    context.fillRect(x - 1.5, y - 9, 3, 17);
+    context.beginPath();
+    context.arc(x, y + 14, 2, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  private drawRerouteMark(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    level: number,
+  ): void {
+    context.strokeStyle = gray(level);
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(x, y, 22, -Math.PI * 0.25, Math.PI * 1.4);
+    context.stroke();
+    context.fillStyle = gray(level);
+    context.beginPath();
+    context.moveTo(x + 20, y - 17);
+    context.lineTo(x + 30, y - 18);
+    context.lineTo(x + 25, y - 8);
+    context.closePath();
+    context.fill();
+  }
+
+  private drawArrivalMark(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    level: number,
+  ): void {
+    context.strokeStyle = gray(level);
+    context.lineWidth = 2;
+    context.beginPath();
+    context.arc(x, y, 25, 0, Math.PI * 2);
+    context.stroke();
+    context.beginPath();
+    context.moveTo(x - 12, y);
+    context.lineTo(x - 3, y + 9);
+    context.lineTo(x + 14, y - 11);
+    context.stroke();
+  }
+
+  private drawManeuver(
+    context: CanvasRenderingContext2D,
+    maneuver: NavigationManeuver,
+    x: number,
+    y: number,
+    level: number,
+  ): void {
+    context.save();
+    context.translate(x, y);
+    if (maneuver === 'turn_left' || maneuver === 'slight_left') context.scale(-1, 1);
+    context.strokeStyle = gray(level);
+    context.fillStyle = gray(level);
+    context.lineWidth = 5;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    if (maneuver === 'turn_left' || maneuver === 'turn_right') {
+      context.moveTo(0, 25);
+      context.lineTo(0, -8);
+      context.quadraticCurveTo(0, -21, 13, -21);
+      context.lineTo(23, -21);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(18, -30);
+      context.lineTo(29, -21);
+      context.lineTo(18, -12);
+      context.fill();
+    } else if (maneuver === 'u_turn') {
+      context.moveTo(16, 24);
+      context.lineTo(16, -7);
+      context.quadraticCurveTo(16, -25, 0, -25);
+      context.quadraticCurveTo(-16, -25, -16, -7);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(-25, -12);
+      context.lineTo(-16, -1);
+      context.lineTo(-7, -12);
+      context.fill();
+    } else {
+      context.moveTo(0, 27);
+      context.lineTo(0, -24);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(-9, -14);
+      context.lineTo(0, -28);
+      context.lineTo(9, -14);
+      context.fill();
+    }
+    context.restore();
   }
 
   private drawIcon(

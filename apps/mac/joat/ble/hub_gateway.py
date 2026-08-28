@@ -16,7 +16,6 @@ import errno
 import hashlib
 import json
 import logging
-import re
 import secrets
 import struct
 import time
@@ -36,6 +35,10 @@ from ..core.interfaces import (
     GlassesTransport,
     InputCallback,
 )
+from ..core.log_redaction import (
+    SecretRedactionFilter as _RedactToken,
+    install_websocket_secret_redaction as _install_redaction,
+)
 from ..core.confirmation import ConfirmationResult
 from ..core.pairing import PairingStore
 from ..core.protocol import (
@@ -52,6 +55,14 @@ from ..core.protocol import (
     Imu,
     Input,
     Location,
+    LocationProbeControl,
+    NavigationAction,
+    NavigationOrigin,
+    NavigationOriginFailure,
+    NavigationRerouteRequest,
+    NavigationRouteAck,
+    NavigationState,
+    NavigationViewAck,
     PairingAck,
     PairingSet,
     Policy,
@@ -65,70 +76,16 @@ from ..services.g2_diagnostics import G2DiagnosticStore
 log = logging.getLogger(__name__)
 
 
-class _RedactToken(logging.Filter):
-    """Strip pairing tokens from websockets' request and frame logging.
-
-    The library logs both the full request target and text-frame payloads at
-    DEBUG. Auth and pairing tokens ride JSON frames; stale plugin builds may
-    still try the former query-string shape. `--verbose` (exactly what an
-    operator enables during pairing) must not write either into brain.log.
-    """
-
-    _QUERY_PATTERN = re.compile(r"(token=)[^&\s]+")
-    _JSON_PATTERN = re.compile(r'("(?:token|challengeId)"\s*:\s*")[^"]*')
-
-    @classmethod
-    def _redact(cls, value: str) -> str:
-        value = cls._QUERY_PATTERN.sub(r"\1<redacted>", value)
-        return cls._JSON_PATTERN.sub(r"\1<redacted>", value)
-
-    @classmethod
-    def _redact_arg(cls, value: object, *, render_objects: bool) -> object:
-        if isinstance(value, str):
-            return cls._redact(value)
-        if render_objects:
-            rendered = str(value)
-            redacted = cls._redact(rendered)
-            if redacted != rendered:
-                return redacted
-        return value
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.args:
-            render_objects = record.name in ("websockets.server", "websockets.client")
-            record.args = tuple(
-                self._redact_arg(a, render_objects=render_objects)
-                for a in (record.args if isinstance(record.args, tuple) else (record.args,))
-            )
-        if isinstance(record.msg, str):
-            record.msg = self._redact(record.msg)
-        return True
-
-
-def _install_redaction() -> None:
-    """Attach _RedactToken where it actually RUNS: on handlers.
-
-    The first version did logging.getLogger("websockets").addFilter(...) —
-    and never redacted anything, because the token-bearing request line is
-    emitted by the CHILD logger "websockets.server", and Python propagates
-    records to ancestor HANDLERS, never through ancestor FILTERS. The filter
-    was tested in isolation (vacuous — audit finding, verified live) while
-    the registration was inert. Handler-level filters run for every record
-    the handler processes, whichever logger emitted it.
-    """
-    targets = list(logging.getLogger().handlers)
-    # Belt and braces: also the emitting loggers themselves, so a handler
-    # attached directly to them later is covered too.
-    for name in ("websockets.server", "websockets.client"):
-        targets.append(logging.getLogger(name))  # type: ignore[arg-type]
-    for target in targets:
-        if not any(isinstance(f, _RedactToken) for f in target.filters):
-            target.addFilter(_RedactToken())
-
-
 ImuCallback = Callable[[Imu], None]
 ConfirmCallback = Callable[[Confirm], None]
 HelloCallback = Callable[[Hello], None]
+NavigationActionCallback = Callable[[NavigationAction], None]
+NavigationRouteAckCallback = Callable[[NavigationRouteAck], None]
+NavigationViewAckCallback = Callable[[NavigationViewAck], None]
+NavigationStateCallback = Callable[[NavigationState], None]
+NavigationRerouteCallback = Callable[[NavigationRerouteRequest], None]
+NavigationOriginCallback = Callable[[NavigationOrigin], None]
+NavigationOriginFailureCallback = Callable[[NavigationOriginFailure], None]
 
 
 @dataclass(slots=True)
@@ -159,13 +116,17 @@ class HubGatewayTransport(GlassesTransport):
         trust_loopback: bool = True,
         auth_timeout_s: float = 4.0,
         g2_diagnostics: G2DiagnosticStore | None = None,
+        location_probe: bool = False,
     ) -> None:
+        if location_probe and g2_diagnostics is None:
+            raise ValueError("location_probe requires g2_diagnostics receipt storage")
         self._host = host
         self._port = port
         self._pairing = pairing
         self._trust_loopback = trust_loopback
         self._auth_timeout_s = auth_timeout_s
         self._g2_diagnostics = g2_diagnostics
+        self._location_probe = location_probe
         self._auth_lock = asyncio.Lock()
         self._refusals: dict[str, int] = {}
         self._lockout_warned = False
@@ -178,6 +139,13 @@ class HubGatewayTransport(GlassesTransport):
         self._imu_cbs: list[ImuCallback] = []
         self._confirm_cbs: list[ConfirmCallback] = []
         self._hello_cbs: list[HelloCallback] = []
+        self._navigation_action_cbs: list[NavigationActionCallback] = []
+        self._navigation_route_ack_cbs: list[NavigationRouteAckCallback] = []
+        self._navigation_view_ack_cbs: list[NavigationViewAckCallback] = []
+        self._navigation_state_cbs: list[NavigationStateCallback] = []
+        self._navigation_reroute_cbs: list[NavigationRerouteCallback] = []
+        self._navigation_origin_cbs: list[NavigationOriginCallback] = []
+        self._navigation_origin_failure_cbs: list[NavigationOriginFailureCallback] = []
         self._disconnect_cbs: list[Callable[[], None]] = []
 
         self._pending_confirms: dict[str, _PendingConfirm] = {}
@@ -274,6 +242,30 @@ class HubGatewayTransport(GlassesTransport):
         actually been gone.
         """
         self._disconnect_cbs.append(callback)
+
+    def on_navigation_action(self, callback: NavigationActionCallback) -> None:
+        """Semantic HUD actions, already schema- and generation-bound."""
+        self._navigation_action_cbs.append(callback)
+
+    def on_navigation_route_ack(self, callback: NavigationRouteAckCallback) -> None:
+        self._navigation_route_ack_cbs.append(callback)
+
+    def on_navigation_view_ack(self, callback: NavigationViewAckCallback) -> None:
+        self._navigation_view_ack_cbs.append(callback)
+
+    def on_navigation_state(self, callback: NavigationStateCallback) -> None:
+        self._navigation_state_cbs.append(callback)
+
+    def on_navigation_reroute(self, callback: NavigationRerouteCallback) -> None:
+        self._navigation_reroute_cbs.append(callback)
+
+    def on_navigation_origin(self, callback: NavigationOriginCallback) -> None:
+        self._navigation_origin_cbs.append(callback)
+
+    def on_navigation_origin_failure(
+        self, callback: NavigationOriginFailureCallback,
+    ) -> None:
+        self._navigation_origin_failure_cbs.append(callback)
 
     # ── sending ──────────────────────────────────────────────────────────────
 
@@ -614,6 +606,8 @@ class HubGatewayTransport(GlassesTransport):
         try:
             if self._g2_diagnostics is not None:
                 await conn.send(json.dumps(G2DiagnosticControl(enabled=True).to_wire()))
+            if self._location_probe:
+                await conn.send(json.dumps(LocationProbeControl(enabled=True).to_wire()))
             async for raw in conn:
                 self._dispatch(raw, session_id)
         except websockets.ConnectionClosed:
@@ -727,6 +721,27 @@ class HubGatewayTransport(GlassesTransport):
                         # Support capture is optional. A custom or degraded
                         # recorder must not drop a real G2 control session.
                         log.warning("dropping G2 diagnostic after %s", type(exc).__name__)
+            case NavigationAction():
+                for navigation_cb in self._navigation_action_cbs:
+                    navigation_cb(message)
+            case NavigationRouteAck():
+                for navigation_ack_cb in self._navigation_route_ack_cbs:
+                    navigation_ack_cb(message)
+            case NavigationViewAck():
+                for navigation_view_ack_cb in self._navigation_view_ack_cbs:
+                    navigation_view_ack_cb(message)
+            case NavigationState():
+                for navigation_state_cb in self._navigation_state_cbs:
+                    navigation_state_cb(message)
+            case NavigationRerouteRequest():
+                for navigation_reroute_cb in self._navigation_reroute_cbs:
+                    navigation_reroute_cb(message)
+            case NavigationOrigin():
+                for navigation_origin_cb in self._navigation_origin_cbs:
+                    navigation_origin_cb(message)
+            case NavigationOriginFailure():
+                for navigation_origin_failure_cb in self._navigation_origin_failure_cbs:
+                    navigation_origin_failure_cb(message)
 
     def _handle_audio(self, message: Audio) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:

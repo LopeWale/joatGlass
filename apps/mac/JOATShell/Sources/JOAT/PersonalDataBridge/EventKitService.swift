@@ -103,7 +103,9 @@ actor EventKitService {
 
     func listContainers(entity: String) throws -> [EventKitContainerDTO] {
         let entityType = try requireFullAccess(entity)
-        let defaultIdentifier = store.defaultCalendarForNewEvents?.calendarIdentifier
+        let defaultIdentifier = entityType == .event
+            ? store.defaultCalendarForNewEvents?.calendarIdentifier
+            : store.defaultCalendarForNewReminders()?.calendarIdentifier
         return store.calendars(for: entityType).map { calendar in
             EventKitContainerDTO(
                 calendarIdentifier: calendar.calendarIdentifier,
@@ -225,6 +227,7 @@ actor EventKitService {
         let reminder = EKReminder(eventStore: store)
         reminder.calendar = calendar
         reminder.title = request.title
+        var resolvedDueUnixMS: Int64?
         if let due = request.due {
             let resolution = LocalTimeResolver.resolve(due)
             guard resolution.status == .unique,
@@ -233,6 +236,13 @@ actor EventKitService {
             else {
                 throw NativeBridgeError("unresolved_local_time", "reminder due time is not uniquely resolved")
             }
+            guard request.resolvedDueUnixMS == chosen else {
+                throw NativeBridgeError(
+                    "stale_time_resolution",
+                    "reminder due instant no longer matches the confirmed request"
+                )
+            }
+            resolvedDueUnixMS = chosen
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = zone
             reminder.dueDateComponents = calendar.dateComponents(
@@ -240,7 +250,10 @@ actor EventKitService {
                 from: date(chosen)
             )
         }
-        reminder.alarms = try normalizedAlarms(request.alarmOffsetsSeconds)
+        reminder.alarms = try normalizedReminderAlarms(
+            request.alarmOffsetsSeconds,
+            dueUnixMS: resolvedDueUnixMS
+        )
         try store.save(reminder, commit: true)
         storeGeneration &+= 1
         let normalized = normalize(reminder: reminder)
@@ -260,23 +273,41 @@ actor EventKitService {
             requireWritable: false
         )
         let predicate = store.predicateForReminders(in: calendars.isEmpty ? nil : calendars)
-        let reminders: [EKReminder] = try await withCheckedThrowingContinuation { continuation in
-            store.fetchReminders(matching: predicate) { reminders in
-                guard let reminders else {
-                    continuation.resume(throwing: NativeBridgeError(
-                        "reminder_fetch_unknown",
-                        "EventKit returned no reminder result"
-                    ))
+        let fetch = CancellableEventKitFetch<UncheckedEventKitTransfer<[EKReminder]>>(
+            cancel: { identifier in
+                let transferredIdentifier = UncheckedEventKitTransfer(value: identifier)
+                Task { await self.cancelReminderFetch(transferredIdentifier) }
+            },
+            nilResultError: NativeBridgeError(
+                "reminder_fetch_unknown",
+                "EventKit returned no reminder result"
+            )
+        )
+        let transferredReminders = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                guard fetch.install(continuation) else {
+                    continuation.resume(throwing: CancellationError())
                     return
                 }
-                continuation.resume(returning: reminders)
+                let identifier = store.fetchReminders(matching: predicate) { reminders in
+                    fetch.finish(with: reminders.map(UncheckedEventKitTransfer.init(value:)))
+                }
+                fetch.install(fetchIdentifier: identifier)
             }
+        } onCancel: {
+            fetch.cancel()
         }
+        let reminders = transferredReminders.value
         return reminders
             .filter { request.includeCompleted || !$0.isCompleted }
             .sorted { reminderSortKey($0) < reminderSortKey($1) }
             .prefix(request.limit)
             .map(normalize(reminder:))
+    }
+
+    private func cancelReminderFetch(_ identifier: UncheckedEventKitTransfer<Any>) {
+        store.cancelFetchRequest(identifier.value)
     }
 
     func completeReminder(
@@ -296,6 +327,12 @@ actor EventKitService {
             withIdentifier: request.calendarItemIdentifier
         ) as? EKReminder else {
             throw NativeBridgeError("reminder_not_found", "reminder no longer exists")
+        }
+        guard reminder.calendar.calendarIdentifier == request.calendarIdentifier else {
+            throw NativeBridgeError(
+                "reminder_container_changed",
+                "reminder moved to another list after confirmation"
+            )
         }
         guard reminder.calendar.allowsContentModifications else {
             throw NativeBridgeError("container_read_only", "reminder list is no longer writable")
@@ -378,6 +415,22 @@ actor EventKitService {
         else { throw NativeBridgeError("invalid_alarms", "alarm offsets are outside V1 bounds") }
         return Array(Set(secondsBefore)).sorted().map {
             EKAlarm(relativeOffset: -TimeInterval($0))
+        }
+    }
+
+    private func normalizedReminderAlarms(
+        _ secondsBefore: [Int],
+        dueUnixMS: Int64?
+    ) throws -> [EKAlarm] {
+        guard secondsBefore.count <= 8,
+              secondsBefore.allSatisfy({ $0 >= 0 && $0 <= 31_536_000 })
+        else { throw NativeBridgeError("invalid_alarms", "alarm offsets are outside V1 bounds") }
+        if secondsBefore.isEmpty { return [] }
+        guard let dueUnixMS else {
+            throw NativeBridgeError("invalid_alarms", "reminder alarms require an exact due time")
+        }
+        return Array(Set(secondsBefore)).sorted().map { seconds in
+            EKAlarm(absoluteDate: date(dueUnixMS - Int64(seconds) * 1_000))
         }
     }
 

@@ -38,4 +38,39 @@ describe('MacG2DiagnosticTrace', () => {
       type: 'tile_upload', frame: 1, order: 0, containerId: 4, outcome: 'success',
     })).not.toThrow();
   });
+
+  it('forwards the privacy-bucketed location probe shape without expanding it', () => {
+    const sent: UplinkMessage[] = [];
+    const trace = new MacG2DiagnosticTrace({ sendDiagnostic: (message) => sent.push(message) });
+    trace.setEnabled(true);
+
+    trace.record({
+      type: 'location_probe',
+      sampleSequence: 3,
+      profile: 'high',
+      lifecycle: 'foreground',
+      fields: 5,
+      cadenceMs: 1001,
+      accuracy: 'lte25',
+      timestampAge: 'fresh',
+      displacement: '20_100',
+      headingDelta: '31_90',
+    });
+
+    expect(sent).toEqual([{
+      kind: 'g2.diagnostic',
+      event: {
+        type: 'location_probe',
+        sampleSequence: 3,
+        profile: 'high',
+        lifecycle: 'foreground',
+        fields: 5,
+        cadenceMs: 1001,
+        accuracy: 'lte25',
+        timestampAge: 'fresh',
+        displacement: '20_100',
+        headingDelta: '31_90',
+      },
+    }]);
+  });
 });

@@ -75,6 +75,31 @@ def test_idempotency_replays_only_the_identical_draft(tmp_path: Path) -> None:
             journal.create_draft(changed, now_us=3)
 
 
+def test_recent_activity_is_newest_first_and_never_exposes_payload(tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        journal = ActionJournal(store)
+        first = journal.create_draft(draft(), now_us=1)
+        second = journal.create_draft(draft("message:trace-2"), now_us=2)
+        journal.mark_ready(second.action_id, reason_code="schema_valid", now_us=3)
+
+        activity = journal.recent(limit=2)
+
+        assert [item.action_id for item in activity] == [second.action_id, first.action_id]
+        assert [(item.kind, item.state) for item in activity] == [
+            ("message.reply", "ready"),
+            ("message.reply", "drafted"),
+        ]
+        assert not hasattr(activity[0], "canonical_payload")
+        assert not hasattr(activity[0], "payload_digest")
+
+
+def test_recent_activity_rejects_unbounded_limits(tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        journal = ActionJournal(store)
+        with pytest.raises(ValueError, match="between 1 and 20"):
+            journal.recent(limit=21)
+
+
 def test_confirmation_is_exact_bound_single_use_and_expiring(tmp_path: Path) -> None:
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         journal = ActionJournal(store)
@@ -220,14 +245,37 @@ def test_restart_invalidates_unspent_authority_and_marks_ambiguous_dispatch(
             request_id="request-crash",
             now_us=2_000_005,
         )
+        ready = journal.create_draft(
+            ActionDraft(
+                kind="calendar_event",
+                canonical_payload=b'{"title":"unconfirmed"}',
+                target_digest=digest("calendar"),
+                idempotency_key="calendar:ready-before-restart",
+            ),
+            now_us=2_000_006,
+        )
+        journal.mark_ready(
+            ready.action_id,
+            reason_code="schema_valid",
+            now_us=2_000_007,
+        )
 
     with DurableStore(path) as reopened:
         recovered = ActionJournal(reopened).recover_after_restart(now_us=3_000_000)
-        assert recovered == {approved: "invalidated", second.action_id: "uncertain"}
+        assert recovered == {
+            approved: "invalidated",
+            second.action_id: "uncertain",
+            ready.action_id: "invalidated",
+        }
 
         journal = ActionJournal(reopened)
         assert journal.get(approved).state == "invalidated"
         assert journal.get(second.action_id).state == "uncertain"
+        assert journal.get(ready.action_id).state == "invalidated"
+        assert reopened.execute(
+            "SELECT count(*) FROM action_payloads WHERE action_id IN (?,?)",
+            (approved, ready.action_id),
+        ).fetchone()[0] == 0
         assert journal.attempt_state(attempt.attempt_id) == "uncertain"
         with pytest.raises(ActionConflictError, match="approved"):
             journal.begin_attempt(

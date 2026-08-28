@@ -16,29 +16,49 @@ enum BridgeServerError: Error, LocalizedError {
 }
 
 /// Private, framed IPC from the Python engine to the app-owned EventKit actor.
-/// Only one same-user connection is accepted; a replacement closes the old one.
+/// Only the exact app-launched engine PID is accepted; replacing or revoking that
+/// authorization closes the prior connection.
 final class NativeBridgeServer: @unchecked Sendable {
+    private struct Listener {
+        let id: UInt64
+        let fd: Int32
+    }
+
+    private struct ActiveConnection {
+        let id: UInt64
+        let connection: BridgeConnection
+    }
+
     static let shared = NativeBridgeServer()
 
     let socketURL: URL
 
     private let router: BridgeRouter
     private let acceptQueue = DispatchQueue(label: "com.joat.native-bridge.accept")
+    private let connectionQueue = DispatchQueue(
+        label: "com.joat.native-bridge.connection",
+        attributes: .concurrent
+    )
+    private let lifecycleLock = NSLock()
     private let stateLock = NSLock()
-    private var listenerFD: Int32 = -1
-    private var connectionFD: Int32 = -1
+    private var listener: Listener?
+    private var activeConnection: ActiveConnection?
+    private var authorizedPeerPID: pid_t?
+    private var nextIdentity: UInt64 = 0
 
     init(
         socketURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/JOAT/native-bridge.sock"),
-        router: BridgeRouter = BridgeRouter()
+        router: BridgeRouter = BridgeRouter(),
+        authorizedPeerPID: pid_t? = nil
     ) {
         self.socketURL = socketURL
         self.router = router
+        self.authorizedPeerPID = authorizedPeerPID.flatMap { $0 > 0 ? $0 : nil }
     }
 
     var isRunning: Bool {
-        stateLock.withLock { listenerFD >= 0 }
+        stateLock.withLock { listener != nil }
     }
 
     func authorizationSnapshot() async -> EventKitAuthorizationSnapshot {
@@ -49,8 +69,24 @@ final class NativeBridgeServer: @unchecked Sendable {
         try await router.requestFullAccessFromMacUI(entity: entity)
     }
 
+    /// Admit only the exact app-launched engine process. A same-UID process
+    /// cannot replace the engine merely by discovering the owner-only path.
+    /// Changing or revoking the PID also invalidates the existing connection.
+    func authorizePeerProcessID(_ pid: pid_t?) {
+        let revoked = stateLock.withLock { () -> ActiveConnection? in
+            authorizedPeerPID = pid.flatMap { $0 > 0 ? $0 : nil }
+            let previous = activeConnection
+            activeConnection = nil
+            return previous
+        }
+        revoked?.connection.cancel()
+    }
+
     func start() throws {
-        if isRunning { return }
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        if stateLock.withLock({ listener != nil }) { return }
+
         let directory = socketURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,
@@ -65,8 +101,10 @@ final class NativeBridgeServer: @unchecked Sendable {
 
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw BridgeServerError.systemCall("socket", errno) }
+        var didBind = false
         do {
             try bindSocket(fd)
+            didBind = true
             guard Darwin.chmod(socketURL.path, 0o600) == 0 else {
                 throw BridgeServerError.systemCall("chmod", errno)
             }
@@ -75,57 +113,112 @@ final class NativeBridgeServer: @unchecked Sendable {
             }
         } catch {
             Darwin.close(fd)
-            Darwin.unlink(socketURL.path)
+            if didBind { Darwin.unlink(socketURL.path) }
             throw error
         }
-        stateLock.withLock { listenerFD = fd }
+        let newListener = stateLock.withLock { () -> Listener in
+            nextIdentity &+= 1
+            let value = Listener(id: nextIdentity, fd: fd)
+            listener = value
+            return value
+        }
         Task { await router.start() }
-        acceptQueue.async { [weak self] in self?.acceptLoop(fd) }
+        acceptQueue.async { [weak self] in self?.acceptLoop(newListener) }
     }
 
     func stop() {
-        let descriptors = stateLock.withLock { () -> (Int32, Int32) in
-            let result = (listenerFD, connectionFD)
-            listenerFD = -1
-            connectionFD = -1
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
+        let stopped = stateLock.withLock { () -> (Listener?, ActiveConnection?) in
+            let result = (listener, activeConnection)
+            listener = nil
+            activeConnection = nil
             return result
         }
-        if descriptors.1 >= 0 { Darwin.shutdown(descriptors.1, SHUT_RDWR) }
-        if descriptors.0 >= 0 { Darwin.shutdown(descriptors.0, SHUT_RDWR) }
-        if descriptors.1 >= 0 { Darwin.close(descriptors.1) }
-        if descriptors.0 >= 0 { Darwin.close(descriptors.0) }
+        stopped.1?.connection.cancel()
+        if let stoppedListener = stopped.0 {
+            Darwin.shutdown(stoppedListener.fd, SHUT_RDWR)
+            Darwin.close(stoppedListener.fd)
+        }
         Darwin.unlink(socketURL.path)
     }
 
-    private func acceptLoop(_ listener: Int32) {
-        while stateLock.withLock({ listenerFD == listener }) {
-            let client = Darwin.accept(listener, nil, nil)
+    private func acceptLoop(_ acceptedListener: Listener) {
+        while isCurrent(acceptedListener) {
+            let client = Darwin.accept(acceptedListener.fd, nil, nil)
             if client < 0 {
                 if errno == EINTR { continue }
                 return
             }
             var peerUID: uid_t = 0
             var peerGID: gid_t = 0
+            var peerPID: pid_t = 0
+            var peerPIDSize = socklen_t(MemoryLayout<pid_t>.size)
             guard getpeereid(client, &peerUID, &peerGID) == 0,
-                  peerUID == geteuid()
+                  peerUID == geteuid(),
+                  getsockopt(
+                      client,
+                      SOL_LOCAL,
+                      LOCAL_PEERPID,
+                      &peerPID,
+                      &peerPIDSize
+                  ) == 0,
+                  peerPID > 0
             else {
                 Darwin.close(client)
                 continue
             }
-            let old = stateLock.withLock { () -> Int32 in
-                let old = connectionFD
-                connectionFD = client
-                return old
+
+            var noSigPipe: Int32 = 1
+            guard setsockopt(
+                client,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                &noSigPipe,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0 else {
+                Darwin.close(client)
+                continue
             }
-            if old >= 0 {
-                Darwin.shutdown(old, SHUT_RDWR)
-                Darwin.close(old)
-            }
-            BridgeConnection(fd: client, router: router) { [weak self] closed in
-                self?.stateLock.withLock {
-                    if self?.connectionFD == closed { self?.connectionFD = -1 }
+
+            let installed = stateLock.withLock { () -> (
+                connection: BridgeConnection,
+                replaced: ActiveConnection?
+            )? in
+                guard listener?.id == acceptedListener.id,
+                      authorizedPeerPID == peerPID
+                else { return nil }
+                nextIdentity &+= 1
+                let identity = nextIdentity
+                let connection = BridgeConnection(
+                    identity: identity,
+                    fd: client,
+                    router: router
+                ) { [weak self] closedIdentity in
+                    self?.connectionDidClose(identity: closedIdentity)
                 }
-            }.run()
+                let replaced = activeConnection
+                activeConnection = ActiveConnection(id: identity, connection: connection)
+                return (connection, replaced)
+            }
+            guard let installed else {
+                Darwin.close(client)
+                if !isCurrent(acceptedListener) { return }
+                continue
+            }
+            installed.replaced?.connection.cancel()
+            connectionQueue.async { installed.connection.run() }
+        }
+    }
+
+    private func isCurrent(_ candidate: Listener) -> Bool {
+        stateLock.withLock { listener?.id == candidate.id }
+    }
+
+    private func connectionDidClose(identity: UInt64) {
+        stateLock.withLock {
+            if activeConnection?.id == identity { activeConnection = nil }
         }
     }
 
@@ -165,27 +258,42 @@ final class NativeBridgeServer: @unchecked Sendable {
 }
 
 private final class BridgeConnection: @unchecked Sendable {
+    private let identity: UInt64
     private let fd: Int32
     private let router: BridgeRouter
-    private let onClose: @Sendable (Int32) -> Void
+    private let stateLock = NSLock()
+    private var isCancelled = false
+    private var currentTask: Task<Void, Never>?
+    private let onClose: @Sendable (UInt64) -> Void
 
     init(
+        identity: UInt64,
         fd: Int32,
         router: BridgeRouter,
-        onClose: @escaping @Sendable (Int32) -> Void
+        onClose: @escaping @Sendable (UInt64) -> Void
     ) {
+        self.identity = identity
         self.fd = fd
         self.router = router
         self.onClose = onClose
+    }
+
+    func cancel() {
+        let task = stateLock.withLock { () -> Task<Void, Never>? in
+            isCancelled = true
+            return currentTask
+        }
+        task?.cancel()
+        Darwin.shutdown(fd, SHUT_RDWR)
     }
 
     func run() {
         defer {
             Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
-            onClose(fd)
+            onClose(identity)
         }
-        while let header = readExactly(4) {
+        while !stateLock.withLock({ isCancelled }), let header = readExactly(4) {
             let length = header.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
             guard length > 0, length <= BridgeContract.maximumFrameBytes,
                   let payload = readExactly(Int(length))
@@ -200,12 +308,21 @@ private final class BridgeConnection: @unchecked Sendable {
             }
             let semaphore = DispatchSemaphore(value: 0)
             let result = LockedValue<BridgeResponse>()
-            Task {
+            let task = Task {
+                defer { semaphore.signal() }
+                guard !Task.isCancelled else { return }
                 let response = await router.handle(request)
                 result.set(response)
-                semaphore.signal()
             }
+            let shouldRun = stateLock.withLock { () -> Bool in
+                guard !isCancelled else { return false }
+                currentTask = task
+                return true
+            }
+            if !shouldRun { task.cancel() }
             semaphore.wait()
+            stateLock.withLock { currentTask = nil }
+            guard shouldRun else { return }
             guard let response = result.get(),
                   writeFrame(response)
             else { return }
@@ -252,7 +369,7 @@ private final class BridgeConnection: @unchecked Sendable {
             guard let base = raw.baseAddress else { return false }
             while offset < data.count {
                 let sent = Darwin.write(fd, base.advanced(by: offset), data.count - offset)
-                if sent < 0 {
+                if sent <= 0 {
                     if errno == EINTR { continue }
                     return false
                 }

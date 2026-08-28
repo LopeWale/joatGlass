@@ -11,6 +11,7 @@ import type { UplinkMessage } from './types';
 function make(
   menuConsumesLists = false,
   diagnostics?: { record: (event: unknown) => void },
+  navigationActive = false,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -32,6 +33,12 @@ function make(
     handleList: vi.fn(() => menuConsumesLists),
     handleScroll: vi.fn(() => menuConsumesLists),
     handleClick: vi.fn(() => menuConsumesLists),
+    openSettings: vi.fn(),
+  };
+  const navigation = {
+    isActive: vi.fn(() => navigationActive),
+    handleClick: vi.fn(() => navigationActive),
+    handleScroll: vi.fn(async () => navigationActive),
   };
   const shutDownPageContainer = vi.fn(async (_mode: number) => true);
   const lifecycle: LifecycleHandler = {
@@ -57,6 +64,7 @@ function make(
     menu as unknown as CapabilityMenu,
     lifecycle,
     diagnostics,
+    navigation,
   ).attach();
   return {
     fire: (e: unknown) => dispatch(e as EvenHubEvent),
@@ -64,6 +72,7 @@ function make(
     audio,
     imu,
     menu,
+    navigation,
     lifecycle,
     shutDownPageContainer,
   };
@@ -279,6 +288,22 @@ describe('EventRouter — lifecycle', () => {
 });
 
 describe('EventRouter — text and list', () => {
+  it('maps a single G2 tap to the active navigation action owner before menu or relay', () => {
+    const { fire, sent, menu, navigation } = make(false, undefined, true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    expect(navigation.handleClick).toHaveBeenCalledTimes(1);
+    expect(menu.handleClick).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('maps G2 swipes to the active navigation choice owner before menu or relay', () => {
+    const { fire, sent, menu, navigation } = make(false, undefined, true);
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(navigation.handleScroll).toHaveBeenCalledWith('down');
+    expect(menu.handleScroll).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('scrolls arrive as textEvent and relay', () => {
     const { fire, sent, imu } = make();
     fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
@@ -377,6 +402,12 @@ describe('EventRouter — long-press mutes the mic', () => {
     const r = make();
     r.fire({ menuItemClickEvent: { itemID: 2 } });
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens listening settings from contextual-menu item four', () => {
+    const r = make();
+    r.fire({ menuItemClickEvent: { itemID: 4 } });
+    expect(r.menu.openSettings).toHaveBeenCalledTimes(1);
   });
 
   it('classifies the delivered gesture without forwarding source or content', () => {

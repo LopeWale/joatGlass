@@ -16,9 +16,11 @@ export class ImuMonitor {
     active: boolean;
     expiresAt: number;
     onResult?: (accepted: boolean) => void;
+    abort?: { signal: AbortSignal; handler: () => void };
   };
   private expiryTimer?: ReturnType<typeof setTimeout>;
-  private open = false;
+  private controlEpoch = 0;
+  private desiredOpen = false;
   private trace = false;
 
   constructor(
@@ -26,24 +28,35 @@ export class ImuMonitor {
     private readonly link: MacLink,
   ) {}
 
-  async start(pace: ImuReportPace = ImuReportPace.P100): Promise<boolean> {
+  async start(
+    pace: ImuReportPace = ImuReportPace.P100,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const epoch = ++this.controlEpoch;
+    this.desiredOpen = true;
     try {
       const ok = await this.client.assertStarted().imuControl(true, pace);
-      this.open = ok;
+      if (signal?.aborted || epoch !== this.controlEpoch || !this.desiredOpen) {
+        try {
+          await this.client.require().imuControl(false);
+        } catch {
+          // Best-effort compensation; link-loss cleanup will retry stop.
+        }
+        return false;
+      }
       return ok;
     } catch (err) {
       // Hosts without IMU reject the call outright — the desktop simulator's
       // bridge implements no `imuControl` variant at all. Degrade instead of
       // killing boot: diagnostic IMU is unavailable, tap confirmation still works.
       console.warn('[ImuMonitor] imuControl unavailable on this host:', err);
-      this.open = false;
       return false;
     }
   }
 
   async stop(): Promise<void> {
-    if (!this.open) return;
-    this.open = false;
+    this.controlEpoch += 1;
+    this.desiredOpen = false;
     try {
       await this.client.require().imuControl(false);
     } catch {
@@ -65,12 +78,32 @@ export class ImuMonitor {
   }
 
   /** Reserve exclusive input ownership while its HUD prompt is rendering. */
-  prepare(actionId: string, onResult?: (accepted: boolean) => void): void {
+  prepare(
+    actionId: string,
+    onResult?: (accepted: boolean) => void,
+    signal?: AbortSignal,
+  ): void {
     // One decision surface at a time. Replacing a pending request refuses it
     // before the new prompt is armed, so an old action can never be approved
     // by a gesture intended for the new one.
     if (this.pending) this.resolve(false);
-    this.pending = { actionId, active: false, expiresAt: Number.POSITIVE_INFINITY, onResult };
+    const pending = {
+      actionId,
+      active: false,
+      expiresAt: Number.POSITIVE_INFINITY,
+      ...(onResult ? { onResult } : {}),
+      ...(signal ? {
+        abort: {
+          signal,
+          handler: () => { this.cancel(actionId); },
+        },
+      } : {}),
+    };
+    this.pending = pending;
+    if (pending.abort) {
+      if (pending.abort.signal.aborted) pending.abort.handler();
+      else pending.abort.signal.addEventListener('abort', pending.abort.handler, { once: true });
+    }
     console.info(`[joat trace] trace=${actionId} stage=confirmation-received`);
   }
 
@@ -109,6 +142,7 @@ export class ImuMonitor {
   dispose(): void {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = undefined;
+    this.detachAbort(this.pending);
     this.pending = undefined;
   }
 
@@ -167,8 +201,10 @@ export class ImuMonitor {
 
   private resolve(accepted: boolean): void {
     if (!this.pending) return;
-    const { actionId, onResult } = this.pending;
+    const pending = this.pending;
+    const { actionId, onResult } = pending;
     this.pending = undefined;
+    this.detachAbort(pending);
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = undefined;
     console.info(
@@ -179,5 +215,10 @@ export class ImuMonitor {
     } else {
       this.link.send({ kind: 'confirm', actionId, accepted });
     }
+  }
+
+  private detachAbort(pending: typeof this.pending): void {
+    if (!pending?.abort) return;
+    pending.abort.signal.removeEventListener('abort', pending.abort.handler);
   }
 }

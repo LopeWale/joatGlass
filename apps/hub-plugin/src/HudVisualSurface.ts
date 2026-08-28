@@ -4,6 +4,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
+import type { NavigationHudModel } from './NavigationHud';
 import { CANVAS, ContainerId, type HudContentKind } from './types';
 
 const TILE_WIDTH = 288;
@@ -46,6 +47,7 @@ export type HudVisualFrame =
     title: string;
     items: string[];
     selectedIndex: number;
+    selectable: boolean;
     hint: string;
   }
   | {
@@ -54,10 +56,20 @@ export type HudVisualFrame =
     micOn: boolean;
     prompt: string;
     secondsRemaining: number;
+  }
+  | {
+    kind: 'navigation';
+    status: string;
+    micOn: boolean;
+    navigation: NavigationHudModel;
   };
 
 export interface HudFrameRenderer {
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
+}
+
+export interface HudFramePainter {
+  paint(frame: HudVisualFrame): Promise<boolean>;
 }
 
 interface PendingPaint {
@@ -87,9 +99,9 @@ export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
   });
 }
 
-export class HudVisualSurface {
+export class HudVisualSurface implements HudFramePainter {
   private painting = false;
-  private pending?: PendingPaint;
+  private readonly queue: PendingPaint[] = [];
   private frameNumber = 0;
 
   constructor(
@@ -105,14 +117,18 @@ export class HudVisualSurface {
         void this.drain({ frame, resolve: [resolve] });
         return;
       }
-      if (this.pending) {
+      const pending = this.queue[this.queue.length - 1];
+      if (pending && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation') {
         // A full frame supersedes every older not-yet-started frame. Keeping
         // only the latest prevents streamed text/countdown ticks from building
         // a stale multi-second BLE backlog while preserving one command lane.
-        this.pending.frame = frame;
-        this.pending.resolve.push(resolve);
+        // Navigation is excluded: its caller emits a semantic receipt only
+        // after this exact four-tile frame finishes, so acknowledging a newer
+        // generation on behalf of an older one would corrupt HUD/input truth.
+        pending.frame = frame;
+        pending.resolve.push(resolve);
       } else {
-        this.pending = { frame, resolve: [resolve] };
+        this.queue.push({ frame, resolve: [resolve] });
       }
     });
   }
@@ -122,8 +138,7 @@ export class HudVisualSurface {
     while (next) {
       const painted = await this.paintNow(next.frame);
       next.resolve.forEach((resolve) => resolve(painted));
-      next = this.pending;
-      this.pending = undefined;
+      next = this.queue.shift();
     }
     this.painting = false;
   }
@@ -150,6 +165,9 @@ export class HudVisualSurface {
           outcome,
         });
         if (outcome === 'failed') return false;
+      }
+      if (import.meta.env.DEV) {
+        console.info(`[HudVisualSurface] frame ${frameNumber} bridge-ack`);
       }
       return true;
     } catch {

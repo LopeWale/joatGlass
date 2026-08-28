@@ -37,7 +37,8 @@ class HudSink:
         self._hud = hud
 
     async def open(self, topic: str, speakers: list[str]) -> None:
-        await self._hud.status(f"DEBATE · {topic[:34]}")
+        await self._hud.begin_brainstorm()
+        await self._hud.status(f"BRAINSTORM · {topic[:30]}")
         await self._hud.show(f"{' · '.join(speakers)}\ndiscussing…")
 
     async def turn(self, label: str) -> None:
@@ -49,7 +50,7 @@ class HudSink:
         await self._hud.append(text)
 
     async def close(self, verdict: str) -> None:
-        await self._hud.status(f"DEBATE · {verdict}")
+        await self._hud.status(f"BRAINSTORM · {verdict}")
 
 
 class TerminalSink:
@@ -72,7 +73,7 @@ class TerminalSink:
         return f"\033[1m{text}\033[0m" if self._color else text
 
     async def open(self, topic: str, speakers: list[str]) -> None:
-        self._write(f"\n{self._bold('DEBATE')} {topic}\n")
+        self._write(f"\n{self._bold('BRAINSTORM')} {topic}\n")
         self._write(self._dim(f"  round table: {' → '.join(speakers)}\n"))
 
     async def turn(self, label: str) -> None:
@@ -131,10 +132,10 @@ class DebateSnapshot:
     def headline(self) -> str:
         """The panel header, in the dashboard's "Messages · 3" shape."""
         if not self.topic:
-            return "Debate"
+            return "Brainstorm"
         if self.running:
-            return f"Debate · {len(self.speakers)} seats"
-        return f"Debate · {self.verdict}" if self.verdict else "Debate"
+            return f"Brainstorm · {len(self.speakers)} seats"
+        return f"Brainstorm · {self.verdict}" if self.verdict else "Brainstorm"
 
     def rows(self, width: int = 60, limit: int = 8) -> list[str]:
         """Newest-last list rows for the HUD's fixed 40px list layout.

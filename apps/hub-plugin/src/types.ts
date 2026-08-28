@@ -32,6 +32,19 @@ export const CONFIRM_PROMPT_MAX_UNITS = 120;
 export type ResumePolicy = 'auto' | 'mac' | 'confirm';
 export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system';
 export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
+export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
+export type NavigationRoutePlan = import('./NavigationProgress').NavigationRoutePlan;
+export type NavigationAction =
+  | 'confirm_destination'
+  | 'retry_destination'
+  | 'select_destination'
+  | 'select_mode'
+  | 'start'
+  | 'change_mode'
+  | 'change_destination'
+  | 'finish'
+  | 'retry'
+  | 'cancel';
 
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
@@ -49,15 +62,70 @@ export type UplinkMessage =
   /** Confirms a freshly issued pairing token was PERSISTED (not merely received). */
   | { kind: 'pairing'; token: string }
   /** Opt-in and content-free; the Mac validates this allowlisted schema again. */
-  | { kind: 'g2.diagnostic'; event: G2DiagnosticEvent };
+  | { kind: 'g2.diagnostic'; event: G2DiagnosticEvent }
+  | {
+    kind: 'navigation.action';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+    action: NavigationAction;
+    choiceId?: string;
+  }
+  | {
+    kind: 'navigation.route.ack';
+    sessionId: string;
+    routeId: string;
+    revision: number;
+    outcome: 'installed' | 'rejected';
+  }
+  | {
+    kind: 'navigation.view.ack';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+    outcome: 'bridge_acknowledged' | 'rejected';
+  }
+  | {
+    kind: 'navigation.state';
+    sessionId: string;
+    routeId: string;
+    revision: number;
+    sequence: number;
+    state: 'guidance' | 'uncertain' | 'wrong_way' | 'off_route' | 'arrived';
+  }
+  | {
+    kind: 'navigation.reroute.request';
+    sessionId: string;
+    routeId: string;
+    baseRevision: number;
+    requestId: string;
+    latitude: number;
+    longitude: number;
+  }
+  | {
+    kind: 'navigation.origin';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+  }
+  | {
+    kind: 'navigation.origin.failed';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+    reason: 'unavailable';
+  };
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
-  | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image' }
-  | { kind: 'hud.list'; items: string[]; title?: string; hint?: string }
+  | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
+  | { kind: 'hud.list'; items: string[]; title?: string; hint?: string; requestId?: string; selectable?: boolean }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */
@@ -68,6 +136,33 @@ export type DownlinkMessage =
   | { kind: 'pairing.set'; token: string }
   /** The Mac shell enables this only for an explicit support capture. */
   | { kind: 'g2.diagnostic.control'; enabled: boolean }
+  /** Gate-0 only: switch the one phone-location stream to/from high accuracy. */
+  | { kind: 'location.probe.control'; enabled: boolean }
+  | {
+    kind: 'navigation.view';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+    navigation: NavigationHudModel;
+  }
+  | {
+    kind: 'navigation.origin.request';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+  }
+  | {
+    kind: 'navigation.route';
+    sessionId: string;
+    requestId: string;
+    generation: number;
+    routeId: string;
+    revision: number;
+    destinationLabel: string;
+    etaMinutes: number;
+    plan: NavigationRoutePlan;
+  }
+  | { kind: 'navigation.stop'; sessionId: string }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
 export interface InputEventPayload {
@@ -80,6 +175,8 @@ export interface InputEventPayload {
   selectedName?: string;
   /** Privacy-safe action correlation. Never derived from message content. */
   traceId?: string;
+  /** Binds a row selection to the exact list generation that was rendered. */
+  requestId?: string;
 }
 
 export type Unsubscribe = () => void;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import { CapabilityMenu } from './CapabilityMenu';
+import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
@@ -12,7 +12,12 @@ import type { MacLink } from './MacLink';
  * down, and double-tap ALWAYS means back once anything is open.
  */
 
-function rig(sidebarResult = true) {
+type PaintResult = boolean | Promise<boolean>;
+
+function rig(
+  sidebarResult: boolean | boolean[] = true,
+  listResult: PaintResult | PaintResult[] = true,
+) {
   const sidebars: string[][] = [];
   const lists: string[][] = [];
   const listOptions: Array<{ title?: string; hint?: string } | undefined> = [];
@@ -22,11 +27,17 @@ function rig(sidebarResult = true) {
   const moves: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
+  let sidebarCall = 0;
+  let listCall = 0;
   const hud = {
     showSidebar: vi.fn(async (items: string[]) => {
       operations.push('sidebar');
       sidebars.push(items);
-      return sidebarResult;
+      const result = Array.isArray(sidebarResult)
+        ? (sidebarResult[sidebarCall] ?? true)
+        : sidebarResult;
+      sidebarCall += 1;
+      return result;
     }),
     showList: vi.fn(async (
       items: string[], options?: { title?: string; hint?: string },
@@ -34,7 +45,11 @@ function rig(sidebarResult = true) {
       operations.push('list');
       lists.push(items);
       listOptions.push(options);
-      return true;
+      const result = Array.isArray(listResult)
+        ? (listResult[listCall] ?? true)
+        : listResult;
+      listCall += 1;
+      return result;
     }),
     setStatus: vi.fn(async (t: string) => {
       operations.push('status');
@@ -63,11 +78,27 @@ const click = (index: number) =>
   ({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index }) as never;
 const clickRow0 = () => ({ eventType: undefined, currentSelectItemIndex: undefined }) as never;
 
+function latestRequestId(sent: Array<Record<string, unknown>>): string {
+  const request = [...sent].reverse().find((message) => {
+    const event = message.event as { containerName?: string } | undefined;
+    return message.kind === 'input' && event?.containerName === 'capmenu';
+  });
+  return ((request?.event as { requestId?: string } | undefined)?.requestId) ?? '';
+}
+
+const rows = (count: number) => Array.from({ length: count }, (_, index) => `Row ${index + 1}`);
+
 describe('CapabilityMenu', () => {
+  it('recognizes only the explicit safe-action lifecycle namespace', () => {
+    expect(isActionLifecycleTitle('ACTION · VERIFYING')).toBe(true);
+    expect(isActionLifecycleTitle('ACTION · DONE')).toBe(true);
+    expect(isActionLifecycleTitle('ACTIVITY')).toBe(false);
+  });
+
   it('double-tap from home opens the five capabilities in the transient sidebar', async () => {
     const { menu, sidebars, lists, operations } = rig();
     await menu.toggle();
-    expect(sidebars[0]).toEqual(['Messages', 'Notifications', 'Calendar', 'Tasks', 'Brainstorm']);
+    expect(sidebars[0]).toEqual(['Messages', 'Notifications', 'Calendar', 'Tasks', 'More']);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
   });
@@ -83,13 +114,15 @@ describe('CapabilityMenu', () => {
     const { menu, lists, listOptions, operations, sent } = rig();
     await menu.toggle();
     expect(menu.handleList(clickRow0())).toBe(true); // protobuf zero-drop: row 0
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
     expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2 overview' });
     expect(operations).toEqual(['sidebar', 'list']);
-    expect(sent[0]).toEqual({
+    expect(sent[0]).toMatchObject({
       kind: 'input',
       event: { containerName: 'capmenu', eventType: 0, selectedIndex: 0, selectedName: 'Messages' },
     });
+    expect(latestRequestId(sent)).toMatch(/^hud-request-/);
     // In the data view, list events are the Mac's business, not the menu's.
     expect(menu.handleList(click(1))).toBe(false);
   });
@@ -100,15 +133,37 @@ describe('CapabilityMenu', () => {
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(selections).toEqual([1]);
     expect(menu.handleClick()).toBe(true);
+    await vi.waitFor(() => expect(lists).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent notifications…']);
     expect(listOptions[0]?.title).toBe('NOTIFICATIONS');
   });
 
+  it('uses More as a scalable second level for QuickNotes, Brainstorm, and Activity', async () => {
+    const { menu, sidebars, lists, listOptions, sent } = rig();
+    await menu.toggle();
+    for (let index = 0; index < 4; index += 1) {
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    }
+    menu.handleClick();
+    await vi.waitFor(() => expect(sidebars[1]).toEqual(['QuickNotes', 'Brainstorm', 'Activity']));
+    menu.handleClick();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(lists[0]).toEqual(['Loading recent quicknotes…']);
+    expect(listOptions[0]?.title).toBe('QUICKNOTES');
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capmenu', eventType: 0, selectedIndex: 0, selectedName: 'QuickNotes',
+      },
+    });
+  });
+
   it('keeps rows four and five reachable after the Mac replaces the loading view', async () => {
-    const { menu, moves } = rig();
+    const { menu, moves, sent } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
-    menu.acceptsList('MESSAGES', 5);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    await menu.presentList('MESSAGES', rows(5), latestRequestId(sent), true);
 
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(moves).toEqual([1]);
@@ -119,7 +174,10 @@ describe('CapabilityMenu', () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     await menu.toggle();
     menu.handleList(clickRow0());
-    expect(menu.acceptsList('MESSAGES', 3)).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList(
+      'MESSAGES', rows(3), latestRequestId(sent), true,
+    )).toBe(true);
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
 
     expect(menu.handleClick()).toBe(true);
@@ -132,6 +190,7 @@ describe('CapabilityMenu', () => {
       },
     });
     const traceId = (sent[1]?.event as { traceId?: string }).traceId;
+    expect((sent[1]?.event as { requestId?: string }).requestId).toBe(latestRequestId(sent));
     expect(traceId).toMatch(/^hud-/);
     expect(info).toHaveBeenCalledWith(
       `[joat trace] trace=${traceId} stage=message-selected index=1`,
@@ -139,26 +198,58 @@ describe('CapabilityMenu', () => {
     info.mockRestore();
   });
 
-  it('does not mislabel non-Messages data clicks as message selections', async () => {
+  it('routes non-Messages data clicks as capability detail selections', async () => {
     const { menu, sent } = rig();
     await menu.toggle();
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     menu.handleClick(); // Notifications capability
-    expect(menu.acceptsList('NOTIFICATIONS', 2)).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList(
+      'NOTIFICATIONS', rows(2), latestRequestId(sent), true,
+    )).toBe(true);
 
     expect(menu.handleClick()).toBe(true);
-    expect(sent).toHaveLength(1); // capability request only; no capdata event
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capdata',
+        selectedIndex: 0,
+        selectedName: 'NOTIFICATIONS',
+      },
+    });
+  });
+
+  it('keeps setup and action lifecycle lists read-only', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList(
+      'NOTIFICATIONS · SETUP', rows(2), latestRequestId(sent), false,
+    )).toBe(true);
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(1);
+
+    await menu.toggle();
+    expect(await menu.presentLifecycle('ACTION · VERIFYING', rows(1))).toBe(true);
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(1);
   });
 
   it('the armed reply instructions cannot be reinterpreted as message rows', async () => {
     const { menu, sent } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
-    expect(menu.acceptsList('MESSAGES', 3)).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
     menu.handleClick();
     expect(sent).toHaveLength(2);
 
-    expect(menu.acceptsList('MESSAGES · REPLY', 2)).toBe(true);
+    expect(await menu.presentList(
+      'MESSAGES · REPLY', rows(2), requestId, false,
+    )).toBe(true);
     expect(menu.handleClick()).toBe(true);
     expect(sent).toHaveLength(2); // no second/stale conversation selection
   });
@@ -167,38 +258,134 @@ describe('CapabilityMenu', () => {
     const { menu, sent, defaultsCount } = rig();
     await menu.toggle();
     menu.handleList(clickRow0()); // into Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.toggle();          // back
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(1);
     expect(sent).toHaveLength(1); // only the capability selection request
   });
 
+  it('a live Brainstorm atomically releases its instruction page and menu input', async () => {
+    const { menu, sent, defaultsCount } = rig();
+    await menu.toggle();
+    for (let index = 0; index < 4; index += 1) {
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    }
+    menu.handleClick();
+    await vi.waitFor(() => expect(menu.isOpen()).toBe(true));
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList(
+      'BRAINSTORM',
+      ['Say: “JOAT, brainstorm <question>”'],
+      latestRequestId(sent),
+      false,
+    )).toBe(true);
+
+    await menu.beginLiveSession('brainstorm');
+
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(1);
+    expect(menu.handleClick()).toBe(false);
+  });
+
   it('rejects a delayed capability response after the wearer returns home', async () => {
-    const { menu } = rig();
+    const { menu, sent } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
-    expect(menu.acceptsList('MESSAGES')).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(1), requestId, true)).toBe(true);
     await menu.toggle();
-    expect(menu.acceptsList('MESSAGES')).toBe(false);
+    expect(await menu.presentList('MESSAGES', rows(1), requestId, true)).toBe(false);
   });
 
   it('accepts only the newest capability response, including its setup suffix', async () => {
-    const { menu } = rig();
+    const { menu, sent } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const oldRequest = latestRequestId(sent);
     await menu.toggle();
     await menu.toggle();
     menu.handleList(click(1));
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    const newRequest = latestRequestId(sent);
 
-    expect(menu.acceptsList('MESSAGES')).toBe(false);
-    expect(menu.acceptsList('NOTIFICATIONS')).toBe(true);
-    expect(menu.acceptsList('NOTIFICATIONS · SETUP')).toBe(true);
+    expect(newRequest).not.toBe(oldRequest);
+    expect(await menu.presentList('MESSAGES', rows(1), oldRequest, true)).toBe(false);
+    expect(await menu.presentList('NOTIFICATIONS', rows(1), oldRequest, true)).toBe(false);
+    expect(await menu.presentList('NOTIFICATIONS', rows(1), newRequest, true)).toBe(true);
+    expect(await menu.presentList(
+      'NOTIFICATIONS · SETUP', rows(1), newRequest, false,
+    )).toBe(true);
+  });
+
+  it('does not expose settings controls when their focus page fails to paint', async () => {
+    const { menu, sent, defaultsCount } = rig(true, false);
+
+    await menu.openSettings();
+
+    expect(menu.isOpen()).toBe(false);
+    expect(menu.handleList(clickRow0())).toBe(false);
+    expect(sent).toEqual([]);
+    expect(defaultsCount()).toBe(1);
+  });
+
+  it('closes instead of entering an invisible More menu after a paint failure', async () => {
+    const { menu, defaultsCount } = rig([true, false]);
+    await menu.toggle();
+    for (let index = 0; index < 4; index += 1) {
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    }
+
+    menu.handleClick();
+    await vi.waitFor(() => expect(menu.isOpen()).toBe(false));
+
+    expect(defaultsCount()).toBe(1);
+    expect(menu.handleClick()).toBe(false);
+  });
+
+  it('does not request Mac data when the loading page fails to paint', async () => {
+    const { menu, sent, defaultsCount } = rig(true, false);
+    await menu.toggle();
+
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(menu.isOpen()).toBe(false));
+
+    expect(sent).toEqual([]);
+    expect(defaultsCount()).toBe(1);
+  });
+
+  it('does not activate response rows until their complete frame paints', async () => {
+    let finishResponsePaint: ((shown: boolean) => void) | undefined;
+    const responsePaint = new Promise<boolean>((resolve) => {
+      finishResponsePaint = resolve;
+    });
+    const { menu, sent, lists, defaultsCount } = rig(true, [true, responsePaint]);
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    const presenting = menu.presentList(
+      'MESSAGES', rows(3), latestRequestId(sent), true,
+    );
+    await vi.waitFor(() => expect(lists).toHaveLength(2));
+
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(1); // no capdata selection while pixels are pending
+
+    finishResponsePaint?.(false);
+    expect(await presenting).toBe(true);
+    expect(menu.isOpen()).toBe(false);
+    expect(menu.handleClick()).toBe(false);
+    expect(defaultsCount()).toBe(1);
   });
 
   it('Settings lives one level down and still applies a policy', async () => {
     const { menu, lists, listOptions, sent } = rig();
-    await menu.toggle();
-    menu.handleList(click(4)); // Settings row
+    await menu.openSettings(); // contextual-menu item
     expect(lists[0]!.some((r) => r.includes('Resume mic'))).toBe(true);
     expect(listOptions[0]).toEqual({
       title: 'LISTENING RESUME',

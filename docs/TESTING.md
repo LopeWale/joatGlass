@@ -71,6 +71,76 @@ it arms the production confirmation gate without connecting to the Mac or any
 external sender. Click accepts; Up or Down refuses; either verdict dismisses
 the fixture back to its prior safe HUD state.
 
+Navigation has its own production-renderer visual matrix: `nav-destination`,
+`nav-repair`, `nav-mode`, `nav-preview`, `nav-guidance`, `nav-uncertain`,
+`nav-wrong-way`, `nav-off-route`, `nav-rerouting`, `nav-arrived`, and
+`nav-error`. Capture every state through the official simulator with:
+
+```bash
+PYTHONPATH=apps/mac .venv/bin/python scripts/simulator_navigation_visual_acceptance.py \
+  --base-url http://127.0.0.1:5194/ \
+  --out /tmp/joat-navigation-visual-evidence
+```
+
+The summary keeps four-tile bridge acknowledgement separate from the raw
+576x288 simulator framebuffer. After the bridge callback, the harness polls
+until that framebuffer has remained byte-identical for at least one second;
+this is necessary because a callback can precede one or more visible tile
+updates. The alpha extraction is only a readable view of that framebuffer.
+All three remain simulator evidence; synchronized video through the physical
+lens is the separate real-G2 visibility gate.
+
+The production-path replay tests drive timestamped synthetic walking and
+cycling fixes through `NavigationController` → `NavigationProgressTracker` →
+`HudPresenter` → `HudVisualSurface`. They prove uncertainty/off-route debounce,
+one reroute request, cycling wrong-way recovery, stable arrival, location
+release, and that four ordered tile callbacks precede every semantic state
+receipt:
+
+```bash
+npm --prefix apps/hub-plugin test -- --run NavigationReplay
+.venv/bin/python -m pytest -q tests/unit/test_navigation.py \
+  tests/unit/test_mapbox_navigation.py tests/unit/test_navigation_policies.py
+```
+
+These are deterministic synthetic replays, not field recordings and not
+threshold calibration. The simulator matrix remains a static renderer matrix;
+it does not claim that Mapbox, phone GPS, or physical lens latency participated
+in the run.
+
+Live provider testing is opt-in on the Mac:
+
+```bash
+JOAT_EXPERIMENTAL_NAVIGATION=1 MAPBOX_ACCESS_TOKEN=... \
+  PYTHONPATH=apps/mac .venv/bin/python -m joat
+```
+
+Candidate search sends the spoken destination and approximate proximity to
+Mapbox before JOAT can show the provider's canonical place for confirmation.
+Directions are requested only after canonical confirmation, explicit mode
+choice, and a fresh origin. Never put the token in a package, screenshot, log,
+or retained evidence file.
+
+For a fast native-size renderer review without an Even host, add
+`&joatPreview=browser`. For example,
+`/?joatVisual=calendar&joatPreview=browser` draws the production presenter's
+four Gray4 tiles into one exact 576×288 canvas. Available productivity states
+include `sidebar`, `more`, `notifications`, `notification-detail`, `calendar`,
+`calendar-detail`, `tasks`, `task-detail`, `quicknotes`, `quicknote-detail`,
+`activity`, `activity-detail`, `action`, and `confirmation`. This route is
+development-only and proves layout/renderer output; it does not prove BLE tile
+upload, Even input delivery, or physical-glasses legibility.
+
+Capability navigation falsification is covered at both protocol ends. The Hub
+suite forces rejected Sidebar, More, Settings, and loading-focus paints and
+asserts that no invisible view remains interactive. It also rejects delayed
+responses with the wrong `requestId` and obeys only the Mac's explicit
+`selectable` bit. Python tests complete two concurrent Messages opens in reverse
+order, prove that only the newest generation renders, and reject a row tap from
+the superseded snapshot. Productivity tests additionally inject a completion
+read-back from a different reminder list and a local receipt-persistence
+failure after native commit; both must finish `uncertain` with `ACTION · CHECK`.
+
 ### Safe real-gateway reply trace
 
 This drives the production reply controller and a real `HubGatewayTransport`
@@ -109,6 +179,76 @@ names, gesture classes, four-tile order/results, and self-heal decisions —
 never HUD text, pixels, audio, URLs, tokens, device IDs, or input payloads.
 Use **Export Redacted G2 Trace…** in JOAT.app to choose an archive location.
 
+#### Packaged location capability probe (Gate 0)
+
+Ordinary **Record G2 trace** capture does not change location accuracy. The
+high-accuracy probe is a separate, explicit terminal opt-in because it consumes
+more phone battery and the Even host exposes one unkeyed location stream:
+
+```bash
+PYTHONPATH=apps/mac .venv/bin/python -m joat \
+  --g2-diagnostics --location-probe
+```
+
+The authenticated gateway first enables the diagnostic receipt and then sends
+`location.probe.control`. The plugin's single location-session owner switches
+from the existing medium/60-second/250-metre ambient profile to a high-accuracy
+1-second/1-metre *measurement request*. Those probe settings are not production
+walking or cycling thresholds. Disconnect, shutdown, or an explicit disable
+returns the owner to ambient mode, and teardown stops the host stream.
+
+Use an installed `.ehpk` on a physical phone and G2 for evidence; simulator or
+sideload findings are not evidence about packaged host delivery. Receipt schema
+`joat.g2-diagnostic.v2` first records a `location_probe_state` with the requested
+profile and start outcome, then records only bounded sample metadata: sample
+order, foreground or background lifecycle, field-presence bits (timestamp=1,
+speed=2, heading=4), cadence, accuracy, timestamp age, displacement, and
+heading/course-delta buckets. It never records probe coordinates, raw speed,
+raw heading, or the host timestamp. The pre-existing coarse `location` uplink
+remains a separate ambient grounding contract.
+
+A failed `high` state is a profile-start failure. A successful `high` state with
+no following samples is inconclusive host-delivery evidence rather than a pass.
+Interpret missing optional fields on delivered samples as a measured host
+capability result, not a parser failure. In particular, absent heading means
+later wrong-way logic must derive course from successive accepted fixes. Record
+foreground walking and cycling separately; background/locked delivery is a
+stretch observation, not a release assumption. For later cue-latency
+acceptance, film the lens beside a synchronized clock and compare fix timestamp
+to pixels becoming visible—bridge acknowledgment alone is not visible-time
+evidence.
+
+For a retained physical run, quit the ordinary JOAT.app engine first so port
+8787 is free, start the synchronized lens recording, and run the dedicated
+harness from the repository root. It reuses the production authenticated
+gateway and existing pairing, shows one fixed marker that must be tapped while
+stationary, then records the requested movement interval:
+
+```bash
+mkdir -m 700 -p /absolute/private/evidence/gate0-real-g2
+
+PYTHONPATH=apps/mac .venv/bin/python -u \
+  scripts/real_g2_location_probe_trace.py \
+  --mode walking \
+  --out /absolute/private/evidence/gate0-real-g2/walking-receipt.json \
+  --duration 120
+
+PYTHONPATH=apps/mac .venv/bin/python -u \
+  scripts/real_g2_location_probe_trace.py \
+  --mode cycling \
+  --out /absolute/private/evidence/gate0-real-g2/cycling-receipt.json \
+  --duration 120
+```
+
+Keep the phone foreground and unlocked for both runs. The harness refuses to
+overwrite an existing receipt or summary and writes both with owner-only
+permissions. Its summary reports `pass` only when a `high/success` state is
+followed by at least one privacy-bucketed sample; `high/success` without a
+sample remains `inconclusive`, and `high/failed` is `fail`. Page, gesture, and
+tile counts are bridge evidence. Preserve the synchronized lens video as the
+separate proof that the fixed marker and restored HUD were physically visible.
+Do not tap while moving, and do not interpret this capture as route guidance.
+
 The following provides the simulator receipt using exactly that production
 gateway and protocol, but writes to a disposable path instead of the Mac-shell
 support file:
@@ -120,7 +260,7 @@ VITE_MAC_WS_URL=ws://127.0.0.1:18791/glasses npm run dev -- --host 127.0.0.1 --p
 
 # terminal 2
 PYTHONPATH=apps/mac .venv/bin/python -u scripts/simulator_g2_diagnostic_trace.py \
-  --port 18791 --out /tmp/joat-g2-diagnostic.json
+  --port 18791 --out /tmp/joat-g2-diagnostic.json --pre-confirm-delay 10
 
 # terminal 3
 evenhub-simulator http://127.0.0.1:5193 --automation-port 9901
@@ -130,9 +270,29 @@ curl -sS -X POST http://127.0.0.1:9901/api/input \
 jq . /tmp/joat-g2-diagnostic.json
 ```
 
-The receipt must contain `page_transition`, `gesture`, and four ordered
-`tile_upload` records. Self-heal decisions are covered by focused tests; do
-not manufacture a failed HUD page merely to collect them from a simulator.
+The receipt must contain a `location_probe_state` record plus
+`page_transition`, `gesture`, and four ordered `tile_upload` records. A failed
+`high` state is the simulator bridge rejecting the location request; a
+successful state with no samples is still inconclusive. Neither outcome says
+what an installed package delivers on a phone and G2. Keep bridge receipts and
+screenshots separate: the receipt proves callback/control results, while
+`GET /api/screenshot/glasses` proves the simulator pixels for the initial,
+confirmation, and restored HUD states. Self-heal decisions are covered by
+focused tests; do not manufacture a failed HUD page merely to collect them
+from a simulator.
+
+Simulator 0.9.3 returns a 576x288 RGBA PNG whose monochrome HUD mask is in the
+alpha channel. Retain that raw file as the authoritative capture. Some ordinary
+image viewers composite its constant green RGB plane and appear blank; create a
+human-readable derivative without replacing the raw evidence:
+
+```bash
+ffmpeg -y -loglevel error -i gate0-hud.rgba.png \
+  -vf alphaextract gate0-hud.png
+```
+
+The extracted grayscale image is only a view of the same simulator framebuffer,
+not a new renderer and not physical-lens evidence.
 
 ### Simulator findings (verified against 0.9.3 — expect these, they are not bugs)
 

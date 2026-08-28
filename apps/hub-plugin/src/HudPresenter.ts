@@ -1,8 +1,9 @@
 import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
-import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
+import type { HudFramePainter, HudVisualFrame } from './HudVisualSurface';
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
+import type { NavigationHudModel } from './NavigationHud';
 import { CONFIRM_PROMPT_MAX_UNITS, ContainerId, type HudContentKind } from './types';
 
 const MAX_UPGRADE_CHARS = 2000;
@@ -30,17 +31,24 @@ const DEFAULT_BRIGHTNESS: Readonly<Record<number, number>> = {
 export interface ListSurfaceOptions {
   title?: string;
   hint?: string;
+  selectable?: boolean;
 }
 
 interface ResolvedListSurfaceOptions {
   title: string;
   hint: string;
+  selectable: boolean;
 }
 
 interface HudContentState {
   streams: Map<number, string>;
   brightness: Map<number, number>;
   kinds: Map<number, HudContentKind>;
+}
+
+interface PresenterSnapshot extends HudContentState {
+  surface: HudSurface;
+  focusReturn?: HudContentState;
 }
 
 type HudSurface =
@@ -51,7 +59,8 @@ type HudSurface =
     items: string[];
     options: ResolvedListSurfaceOptions;
     selectedIndex: number;
-  };
+  }
+  | { kind: 'navigation'; navigation: NavigationHudModel };
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -87,7 +96,7 @@ export class HudPresenter {
   constructor(
     private readonly client: BridgeClient,
     private readonly layouts: HudPageBuilder,
-    private readonly visual?: HudVisualSurface,
+    private readonly visual?: HudFramePainter,
     private readonly diagnostics?: G2DiagnosticTrace,
   ) {}
 
@@ -236,8 +245,33 @@ export class HudPresenter {
     return this.renderSidebar(surface);
   }
 
+  /** Paint a complete navigation snapshot. The Mac/session owns the state;
+   * this presenter only gives it exclusive focus and exact restoration. */
+  async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
+    if (!this.visual) return false;
+    const prior = this.capturePresenterSnapshot();
+    const surface: HudSurface = {
+      kind: 'navigation',
+      navigation: this.cloneNavigation(navigation),
+    };
+    if (this.confirmation) {
+      // A deferred surface has not crossed the SDK bridge. Navigation relies
+      // on an exact generation-bound bridge receipt, so reject instead of
+      // reporting a paint that never happened or resurrecting it on dismiss.
+      return false;
+    }
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams),
+        brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds),
+      };
+    }
+    return this.renderNavigation(surface, statusOverride, prior);
+  }
+
   async setSelection(index: number): Promise<boolean> {
-    if (this.surface.kind === 'default') return false;
+    if (this.surface.kind === 'default' || this.surface.kind === 'navigation') return false;
     const maximum = Math.max(0, this.surface.items.length - 1);
     const selectedIndex = Math.max(0, Math.min(maximum, index));
     if (this.surface.kind === 'sidebar') {
@@ -249,8 +283,39 @@ export class HudPresenter {
   }
 
   moveSelection(delta: number): Promise<boolean> {
-    if (this.surface.kind === 'default') return Promise.resolve(false);
+    if (this.surface.kind === 'default' || this.surface.kind === 'navigation') {
+      return Promise.resolve(false);
+    }
     return this.setSelection(this.surface.selectedIndex + delta);
+  }
+
+  private async renderNavigation(
+    surface: Extract<HudSurface, { kind: 'navigation' }>,
+    statusOverride?: string,
+    prior?: PresenterSnapshot,
+  ): Promise<boolean> {
+    const from = this.tracePage();
+    const liveStatus = statusOverride === undefined
+      ? this.captureLiveStatus()
+      : { text: statusOverride, brightness: 2 };
+    this.resetAll();
+    this.surface = surface;
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) {
+        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+      }
+    }
+    const painted = await this.paintVisual();
+    if (!painted && prior) {
+      this.restorePresenterSnapshot(prior);
+      // paintVisual already spent its one bounded self-heal on the failed new
+      // frame. Make one direct rollback paint so pixels and input ownership
+      // converge on the same prior surface, but keep the caller result false.
+      await this.visual?.paint(this.visualFrame());
+    }
+    this.recordPageTransition(from, 'navigation', 'show_navigation', painted ? 'success' : 'failed');
+    return painted;
   }
 
   private async renderSidebar(
@@ -569,6 +634,18 @@ export class HudPresenter {
       return result;
     }
 
+    if (prior.surface.kind === 'navigation') {
+      this.focusReturn = {
+        streams: new Map(prior.streams),
+        brightness: new Map(prior.brightness),
+        kinds: new Map(prior.kinds),
+      };
+      const restored = await this.renderNavigation(prior.surface);
+      const result = await this.repaintReplacementConfirmation(restored);
+      this.recordPageTransition('confirmation', 'navigation', 'dismiss_confirmation', result ? 'success' : 'failed');
+      return result;
+    }
+
     const liveStatus = this.captureLiveStatus();
     if (this.visual) {
       this.resetAll();
@@ -718,7 +795,7 @@ export class HudPresenter {
   private recordPageTransition(
     from: G2TracePage,
     to: G2TracePage,
-    reason: 'show_sidebar' | 'show_list' | 'show_overview' | 'show_confirmation' | 'dismiss_confirmation',
+    reason: 'show_sidebar' | 'show_list' | 'show_overview' | 'show_confirmation' | 'show_navigation' | 'dismiss_confirmation',
     outcome: 'success' | 'failed',
   ): void {
     if (from === to) return;
@@ -815,6 +892,7 @@ export class HudPresenter {
     return {
       title: (options.title?.trim() || DEFAULT_LIST_TITLE).slice(0, MAX_FOCUS_COPY_CHARS),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_COPY_CHARS),
+      selectable: options.selectable ?? false,
     };
   }
 
@@ -865,7 +943,16 @@ export class HudPresenter {
         title: this.surface.options.title,
         items: [...this.surface.items],
         selectedIndex: this.surface.selectedIndex,
+        selectable: this.surface.options.selectable,
         hint: this.surface.options.hint,
+      };
+    }
+    if (this.surface.kind === 'navigation') {
+      return {
+        kind: 'navigation',
+        status,
+        micOn: this.micOn,
+        navigation: this.cloneNavigation(this.surface.navigation),
       };
     }
     return {
@@ -909,6 +996,9 @@ export class HudPresenter {
 
   private cloneSurface(surface: HudSurface): HudSurface {
     if (surface.kind === 'default') return { kind: 'default' };
+    if (surface.kind === 'navigation') {
+      return { kind: 'navigation', navigation: this.cloneNavigation(surface.navigation) };
+    }
     if (surface.kind === 'sidebar') {
       return {
         kind: 'sidebar', items: [...surface.items], selectedIndex: surface.selectedIndex,
@@ -920,6 +1010,38 @@ export class HudPresenter {
       options: { ...surface.options },
       selectedIndex: surface.selectedIndex,
     };
+  }
+
+  private cloneContentState(content: HudContentState): HudContentState {
+    return {
+      streams: new Map(content.streams),
+      brightness: new Map(content.brightness),
+      kinds: new Map(content.kinds),
+    };
+  }
+
+  private capturePresenterSnapshot(): PresenterSnapshot {
+    return {
+      surface: this.cloneSurface(this.surface),
+      streams: new Map(this.streams),
+      brightness: new Map(this.brightness),
+      kinds: new Map(this.kinds),
+      ...(this.focusReturn ? { focusReturn: this.cloneContentState(this.focusReturn) } : {}),
+    };
+  }
+
+  private restorePresenterSnapshot(snapshot: PresenterSnapshot): void {
+    this.surface = this.cloneSurface(snapshot.surface);
+    this.streams = new Map(snapshot.streams);
+    this.brightness = new Map(snapshot.brightness);
+    this.kinds = new Map(snapshot.kinds);
+    this.focusReturn = snapshot.focusReturn
+      ? this.cloneContentState(snapshot.focusReturn)
+      : undefined;
+  }
+
+  private cloneNavigation(navigation: NavigationHudModel): NavigationHudModel {
+    return { ...navigation, options: [...navigation.options] };
   }
 
   private resetAll(): void {

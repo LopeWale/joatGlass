@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-TRACE_SCHEMA = "joat.g2-diagnostic.v1"
+TRACE_SCHEMA = "joat.g2-diagnostic.v2"
 MAX_EVENTS = 512
 log = logging.getLogger(__name__)
 
