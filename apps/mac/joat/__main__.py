@@ -192,7 +192,12 @@ async def main() -> None:
     log.info("switchable models — %s", models.summary())
 
     openclaw = OpenClawAgent()
-    openclaw_up = openclaw.available()
+    openclaw_up, openclaw_why = openclaw.readiness()
+    if not openclaw_up:
+        # Named, not merely absent: OpenClaw ships with Chat Completions
+        # DISABLED, so the most likely reason the third seat is empty is a
+        # config key nobody would guess from "openclaw: missing".
+        log.info("openclaw seat empty — %s", openclaw_why)
     seats: list[tuple[str, str, object]] = [
         ("codex", "proposer", proposer(models.provider("codex"))),
         ("claude", "critic", critic(models.provider("claude"))),

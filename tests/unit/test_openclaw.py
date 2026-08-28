@@ -91,21 +91,66 @@ class TestStreaming:
 
 
 class TestAvailability:
-    def test_unreachable_gateway_is_simply_unavailable(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        def boom(req, timeout=None):  # type: ignore[no-untyped-def]
-            raise OSError("Connection refused")
+    """Probed against the endpoint the debate actually calls.
 
-        monkeypatch.setattr("urllib.request.urlopen", boom)
-        assert OpenClawAgent().available() is False
+    An earlier version probed GET /healthz — a path OpenClaw does not
+    document. On a real gateway that probe always failed, so the third seat
+    was never filled, silently. The stub tests could not see it because the
+    stub implemented the invented endpoint too.
+    """
 
-    def test_healthy_gateway_is_available(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_probes_the_chat_completions_endpoint_not_an_invented_one(
+        self, monkeypatch  # type: ignore[no-untyped-def]
+    ) -> None:
+        seen: list[str] = []
+
         class Resp:
             status = 200
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: Resp())
+        def spy(req, timeout=None):  # type: ignore[no-untyped-def]
+            seen.append(req.full_url)
+            return Resp()
+
+        monkeypatch.setattr("urllib.request.urlopen", spy)
         assert OpenClawAgent().available() is True
+        assert seen == ["http://127.0.0.1:18789/v1/chat/completions"]
+        assert not any("healthz" in u for u in seen)
+
+    def test_unreachable_gateway_says_it_is_not_running(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        def boom(req, timeout=None):  # type: ignore[no-untyped-def]
+            raise OSError("Connection refused")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        ok, why = OpenClawAgent().readiness()
+        assert ok is False and "not reachable" in why
+
+    def test_404_names_the_config_key_that_fixes_it(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        # Chat Completions is DISABLED by default in OpenClaw, so this is
+        # the likeliest reason a running gateway refuses the seat.
+        def gone(req, timeout=None):  # type: ignore[no-untyped-def]
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("urllib.request.urlopen", gone)
+        ok, why = OpenClawAgent().readiness()
+        assert ok is False
+        assert "chatCompletions.enabled" in why
+
+    def test_401_names_the_token(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        def denied(req, timeout=None):  # type: ignore[no-untyped-def]
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("urllib.request.urlopen", denied)
+        ok, why = OpenClawAgent().readiness()
+        assert ok is False and "OPENCLAW_GATEWAY_TOKEN" in why
+
+    def test_the_password_auth_mode_env_var_also_supplies_the_bearer(
+        self, monkeypatch  # type: ignore[no-untyped-def]
+    ) -> None:
+        monkeypatch.delenv("OPENCLAW_GATEWAY_TOKEN", raising=False)
+        monkeypatch.setenv("OPENCLAW_GATEWAY_PASSWORD", "pw")
+        assert OpenClawAgent()._token == "pw"
 
     def test_base_url_comes_from_the_environment_when_unset(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         monkeypatch.setenv("OPENCLAW_BASE_URL", "http://127.0.0.1:9999")
