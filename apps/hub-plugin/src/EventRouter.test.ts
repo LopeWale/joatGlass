@@ -91,43 +91,92 @@ describe('EventRouter — audio and IMU', () => {
 describe('EventRouter — confirm gestures', () => {
   it('right-temple press confirms, with eventType omitted as the device sends it', () => {
     const { fire, imu, sent } = make();
-    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
-    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
-    expect(sent).toHaveLength(1);
-  });
-
-  it('ring press confirms', () => {
-    const { fire, imu } = make();
-    fire(click(EventSourceType.TOUCH_EVENT_FROM_RING));
-    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
-  });
-
-  it('consumes an accept gesture while a confirmation is active', () => {
-    const { fire, imu, sent } = make();
-    imu.confirmByTap.mockReturnValue(true);
+    imu.isPending.mockReturnValue(true);
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
     expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
     expect(sent).toEqual([]);
   });
 
-  it('left-temple press does NOT confirm — that side is the menu', () => {
+  it('ring press confirms', () => {
+    const { fire, imu } = make();
+    imu.isPending.mockReturnValue(true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_RING));
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
+  });
+
+  it('a non-decision temple press remains ordinary input', () => {
     const { fire, imu, sent } = make();
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
     expect(imu.confirmByTap).not.toHaveBeenCalled();
-    expect(imu.declineByTap).toHaveBeenCalledTimes(1);
-    expect(sent).toHaveLength(1); // no pending gate: raw input still relays
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
   });
 
-  it('left-temple press cancels and consumes an active confirmation', () => {
+  it.each([
+    EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+  ])('G2 temple source %s confirms exactly once and is consumed', (eventSource) => {
     const { fire, imu, sent } = make();
-    imu.declineByTap.mockReturnValue(true);
-    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+    imu.isPending.mockReturnValue(true);
+
+    fire(click(eventSource));
+
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it.each([
+    OsEventTypeList.SCROLL_TOP_EVENT,
+    OsEventTypeList.SCROLL_BOTTOM_EVENT,
+  ])('a G2 swipe (%s) cancels and consumes an active confirmation', (eventType) => {
+    const { fire, imu, sent } = make();
+    imu.isPending.mockReturnValue(true);
+
+    fire({ textEvent: { containerID: 2, eventType } });
+
     expect(imu.declineByTap).toHaveBeenCalledTimes(1);
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('accepts the capturing text container click shape while a confirmation is active', () => {
+    const { fire, imu, sent } = make();
+    imu.isPending.mockReturnValue(true);
+
+    // CLICK_EVENT is protobuf zero and is omitted on the wire.
+    fire({ textEvent: { containerID: 2 } });
+
+    expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('never approves an active confirmation from an unknown sysEvent source', () => {
+    const { fire, imu, sent } = make();
+    imu.isPending.mockReturnValue(true);
+
+    fire(click(EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL));
+
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('consumes long press without toggling the mic behind an active confirmation', () => {
+    const { fire, imu, audio, sent } = make();
+    imu.isPending.mockReturnValue(true);
+
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(audio.start).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
   it('an explicit eventType 0 also confirms, for hosts that do send it', () => {
     const { fire, imu } = make();
+    imu.isPending.mockReturnValue(true);
     fire({
       sysEvent: {
         eventType: OsEventTypeList.CLICK_EVENT,

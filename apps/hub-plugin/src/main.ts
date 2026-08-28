@@ -15,6 +15,7 @@ import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
 import { ContainerId, type DownlinkMessage } from './types';
+import { runVisualConfirmationFixture } from './VisualFixtures';
 
 /**
  * Comma-separated candidate brain URLs — every host must be an exact-match
@@ -142,7 +143,7 @@ async function boot(): Promise<void> {
   // production presenter/menu/event methods as the real gesture and Mac paths;
   // it does not ship in the packed plugin or introduce an alternate renderer.
   if (VISUAL_STATE) {
-    await renderVisualState(hud, menu, VISUAL_STATE);
+    await renderVisualState(hud, menu, imu, VISUAL_STATE);
     setPanel('p-status', `visual: ${VISUAL_STATE}`);
     return;
   }
@@ -316,6 +317,7 @@ async function boot(): Promise<void> {
 async function renderVisualState(
   hud: HudPresenter,
   menu: CapabilityMenu,
+  imu: ImuMonitor,
   state: VisualState,
 ): Promise<void> {
   hud.setMicState(true);
@@ -334,10 +336,7 @@ async function renderVisualState(
   }
 
   if (state === 'confirmation') {
-    await hud.showConfirmation(
-      'Send to Adele? “On my way with the latest mockups”',
-      'visual-confirmation',
-    );
+    await runVisualConfirmationFixture(hud, imu);
     return;
   }
 

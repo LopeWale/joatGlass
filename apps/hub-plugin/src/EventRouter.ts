@@ -103,10 +103,23 @@ export class EventRouter {
       this.audio.ingest(event.audioEvent.audioPcm, event.audioEvent.speakerRole);
     }
 
-    // The decision surface owns every non-lifecycle input. Audio may keep
-    // flowing, but list rows, text scrolls, and contextual-menu items cannot
-    // mutate state behind the prompt.
-    if (this.imu.isPending() && !event.sysEvent) return;
+    // The decision surface owns every non-lifecycle input. A G2 swipe is the
+    // explicit refusal gesture; all other non-system input is consumed so no
+    // list or contextual-menu state can mutate behind the prompt.
+    if (this.imu.isPending() && !event.sysEvent) {
+      if (event.textEvent) {
+        const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
+        if (eventType === OsEventTypeList.CLICK_EVENT) {
+          this.imu.confirmByTap();
+        } else if (
+          eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
+          eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+        ) {
+          this.imu.declineByTap();
+        }
+      }
+      return;
+    }
 
     // Contextual-menu clicks (SDK 0.0.14). Without this branch a declared
     // menu renders but every selection vanishes silently — the event has
@@ -117,7 +130,11 @@ export class EventRouter {
     }
 
     if (event.sysEvent) {
-      if (this.handleLongPress(event.sysEvent.eventType, 'sysEvent')) return;
+      // Confirmation owns long press too; it must not toggle the microphone
+      // behind a decision or make the visible TAP/SWIPE contract incomplete.
+      if (!this.imu.isPending() && this.handleLongPress(event.sysEvent.eventType, 'sysEvent')) {
+        return;
+      }
       this.handleSys(event.sysEvent);
       return;
     }
@@ -184,18 +201,19 @@ export class EventRouter {
     }
 
     // Confirmation is exclusive: no menu navigation, OS exit dialog, or
-    // generic Mac input may occur behind it. Only a single-click verdict is
-    // meaningful; every other wearer gesture is consumed until settlement.
+    // generic Mac input may occur behind it. Either built-in G2 temple is the
+    // same source-agnostic TAP action. Optional R1 input remains compatible,
+    // but the decision never depends on owning that accessory.
     if (this.imu.isPending()) {
-      if (type === OsEventTypeList.CLICK_EVENT) {
-        if (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L) {
-          this.imu.declineByTap();
-        } else if (
+      if (
+        type === OsEventTypeList.CLICK_EVENT &&
+        (
+          source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L ||
           source === EventSourceType.TOUCH_EVENT_FROM_RING ||
           source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
-        ) {
-          this.imu.confirmByTap();
-        }
+        )
+      ) {
+        this.imu.confirmByTap();
       }
       return;
     }
@@ -229,28 +247,6 @@ export class EventRouter {
     // long-press handler competed with that — double-firing where the OS
     // passed the event through, dead where the OS consumed it — so repeat
     // now lives ONLY as contextual-menu item 1.
-
-    if (type === OsEventTypeList.CLICK_EVENT) {
-      // Left is the explicit refusal path only while a decision is pending.
-      // Otherwise it remains free and the raw input continues to the Mac.
-      if (
-        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L &&
-        this.imu.declineByTap()
-      ) {
-        return;
-      }
-      // Deliberate taps are clean confirm signals — no nod heuristics needed.
-      // Right temple matters most: a wearer with no R1 ring has no other
-      // trustworthy way to confirm, since the nod thresholds are uncalibrated.
-      if (
-        source === EventSourceType.TOUCH_EVENT_FROM_RING ||
-        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
-      ) {
-        // A decision gesture is consumed by the gate. Relaying the same tap
-        // as generic Mac input could trigger a second, unrelated action.
-        if (this.imu.confirmByTap()) return;
-      }
-    }
 
     // Relayed after local handling — the Mac may want the raw input too.
     this.link.send({ kind: 'input', event: { eventType: type, eventSource: source } });

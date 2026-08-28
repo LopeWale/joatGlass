@@ -2,6 +2,22 @@
 
 ## 2026-08-27
 
+- Replaced the Confirmation surface's stacked `RIGHT / RING / NOD` and `LEFT`
+  instructions with one horizontal, source-agnostic CTA row: `TAP · Confirm`
+  and `SWIPE · Cancel`. Either built-in G2 temple now confirms, either swipe
+  direction cancels, and optional R1 compatibility remains invisible so the
+  decision never implies that a ring is required.
+- Wired the explicit simulator Confirmation fixture through the production
+  decision gate instead of merely painting it. Simulator Click now accepts and
+  dismisses; Up/Down refuses and dismisses; timeout remains fail-closed. IMU
+  motion is diagnostic-only and can no longer silently approve an action that
+  advertises TAP as its sole acceptance gesture.
+- Verified the corrected fixture in the official Even Hub simulator: the live
+  trace reached `confirmation-visible`, Click settled `accepted=true`, and a
+  fresh run's Up gesture settled `accepted=false`; both restored the prior HUD.
+  All 189 Hub-plugin tests and the production TypeScript/Vite build pass.
+  Repacked v0.1.11 as a 55,731-byte `joat.ehpk` with SHA-256
+  `78925309946a28bcbdbbcf3002b9aa7e5cf85f745092c6e85544b425cd6e6705`.
 - Completed a research-first design gate for Calendar, Reminders/tasks, AI
   notes, safe write actions, persistence, and notification fan-in. The design
   records platform permission boundaries, failure states, privacy constraints,
@@ -38,7 +54,8 @@
   `confirmation-result accepted=True`, and reached exactly one recording-send
   boundary. The fixture is now visibly named `SIMULATOR TEST (NO SEND)` and
   contains no real-looking contact or message, so its extra window cannot be
-  confused with the ordinary live JOAT simulator.
+  confused with the ordinary live JOAT simulator; the built-in confirmation
+  visual state uses the same unmistakable copy.
 - Routed simple salutations through a deterministic pre-inference command:
   `Good morning, JOATs.` now yields `Good morning. How can I help?` without
   requesting personal grounding. Greeting-plus-request speech still reaches
@@ -47,9 +64,10 @@
 - Cleared unowned Main/Context/Tray content when a fresh Mac brain connects, so
   a reply painted by an older process cannot masquerade as a new response.
   Every completed, ignored, or empty utterance now also returns the transient
-  `HEARING YOU` chrome to truthful `LISTENING` state.
-- Current verification: 304 Python tests, including 44 real-gateway integration
-  tests; 183 Hub-plugin tests; strict mypy across 47 source files; clean
+  `HEARING YOU` chrome to truthful `LISTENING` state, while an active session
+  retains its own status through speech and reconnects.
+- Current verification: 309 Python tests, including 44 real-gateway integration
+  tests; 184 Hub-plugin tests; strict mypy across 47 source files; clean
   TypeScript/Vite production build and diff whitespace. Repacked v0.1.11 as a
   55,849-byte `joat.ehpk` with SHA-256
   `3f1c56e948fc28048fe6a010610beed0cb5ad2fb84245e7f6035675cbcbb503f`.
