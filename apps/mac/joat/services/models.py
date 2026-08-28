@@ -236,8 +236,8 @@ def default_slots(
         codex.insert(0, ModelOption(codex_default.split("-")[-1], codex_default))
     stt = [
         ModelOption("turbo", "large-v3_turbo", "default, ~1s"),
-        ModelOption("large", "large-v3", "most accurate, slower"),
-        ModelOption("small", "small", "fastest, least accurate"),
+        ModelOption("large", "large-v3", "most accurate; downloads on first use"),
+        ModelOption("small", "small", "fastest; downloads on first use"),
         ModelOption("base", "base", "smallest"),
     ]
     return [
@@ -252,9 +252,13 @@ def default_slots(
                 # None keeps the CLI's own default — today's behaviour, made
                 # an explicit choice instead of an unnamed fallback.
                 ModelOption("default", None, "whatever the CLI picks"),
+                # Only aliases this CLI's own --help documents. An alias it
+                # rejects is worse than a missing option: a debate seat has
+                # no applier to roll back, so a bad name is not caught until
+                # the seat silently fails mid-debate.
                 ModelOption("sonnet", "sonnet", "balanced"),
                 ModelOption("opus", "opus", "strongest"),
-                ModelOption("haiku", "haiku", "fastest"),
+                ModelOption("fable", "fable", "newest"),
             ),
         ),
         ModelSlot(

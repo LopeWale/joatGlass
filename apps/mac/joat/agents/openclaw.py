@@ -58,25 +58,61 @@ class OpenClawAgent:
         self._base_url = (base_url or os.environ.get("OPENCLAW_BASE_URL")
                           or DEFAULT_BASE_URL).rstrip("/")
         self._model = model
-        self._token = token or os.environ.get("OPENCLAW_GATEWAY_TOKEN") or ""
+        # gateway.auth.mode may be "token" or "password"; both are sent as the
+        # bearer credential, from their own documented env vars.
+        self._token = (token or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+                       or os.environ.get("OPENCLAW_GATEWAY_PASSWORD") or "")
         self._timeout_s = timeout_s
         self._system = system
 
     # ── availability ─────────────────────────────────────────────────────
 
-    def available(self, timeout_s: float = 1.5) -> bool:
-        """True when the gateway answers its liveness probe.
+    def available(self, timeout_s: float = 2.5) -> bool:
+        return self.readiness(timeout_s)[0]
 
-        Checked at wiring time so a missing daemon costs one fast probe, not
-        a 240s timeout in the middle of a debate the wearer is watching.
+    def readiness(self, timeout_s: float = 2.5) -> tuple[bool, str]:
+        """(seatable, why-not) — probed against the endpoint we actually use.
+
+        An earlier version probed GET /healthz. OpenClaw documents no such
+        path, so on a REAL gateway the probe always failed and the third
+        seat was never filled — silently, and invisibly to the tests,
+        because the stub they ran against implemented the invented endpoint.
+        The only probe that proves anything is the endpoint the debate will
+        call.
+
+        The distinctions matter because they have different fixes, and
+        "openclaw is absent" hides all of them:
+
+          refused → the gateway is not running
+          404     → running, but Chat Completions is DISABLED, which is
+                    OpenClaw's default. Fix is one config key, and a wearer
+                    who is not told that will never guess it.
+          401/403 → running, wrong or missing token
         """
-        req = urllib.request.Request(f"{self._base_url}/healthz", method="GET")
+        body = json.dumps({
+            "model": self._model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(
+            f"{self._base_url}/v1/chat/completions", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
         self._authorize(req)
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                return bool(200 <= resp.status < 300)
-        except Exception:
-            return False
+                if 200 <= resp.status < 300:
+                    return True, ""
+                return False, f"gateway answered {resp.status}"
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False, ("Chat Completions is disabled (OpenClaw's default) — "
+                               "set gateway.http.endpoints.chatCompletions.enabled")
+            if exc.code in (401, 403):
+                return False, "unauthorized — check OPENCLAW_GATEWAY_TOKEN"
+            return False, f"gateway answered {exc.code}"
+        except Exception as exc:
+            return False, f"gateway not reachable at {self._base_url} ({exc})"
 
     # ── participant contract ─────────────────────────────────────────────
 
