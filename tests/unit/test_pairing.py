@@ -13,7 +13,9 @@ from joat.core.pairing import PairingStore
 
 class TestPairingStore:
     def test_fresh_store_has_no_token(self, tmp_path: Path) -> None:
-        assert PairingStore(tmp_path / "pairing.json").token is None
+        store = PairingStore(tmp_path / "pairing.json")
+        assert store.token is None
+        assert store.window_open is False
 
     def test_mint_does_not_persist(self, tmp_path: Path) -> None:
         # A minted-but-unconfirmed token must leave the store unpaired, or a
@@ -41,10 +43,12 @@ class TestPairingStore:
         store.confirm(PairingStore.mint())
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
-    def test_corrupt_file_means_unpaired_not_crashed(self, tmp_path: Path) -> None:
+    def test_corrupt_file_fails_closed_without_reopening_pairing(self, tmp_path: Path) -> None:
         path = tmp_path / "pairing.json"
         path.write_text("not json{")
-        assert PairingStore(path).token is None
+        store = PairingStore(path)
+        assert store.token is None
+        assert store.window_open is False
 
     def test_blank_token_in_file_means_unpaired(self, tmp_path: Path) -> None:
         # An empty token would make compare_digest("") a universal key.
@@ -59,13 +63,34 @@ class TestPairingStore:
         store.confirm(token)
         assert json.loads(path.read_text())["token"] == token
 
-    def test_delete_file_reopens_pairing(self, tmp_path: Path) -> None:
-        # The documented re-pair procedure: rm the file, reconnect.
+    def test_delete_file_does_not_reopen_pairing(self, tmp_path: Path) -> None:
+        # Filesystem loss is not physical-user consent to trust the next LAN peer.
         path = tmp_path / "pairing.json"
         store = PairingStore(path)
         store.confirm(PairingStore.mint())
         path.unlink()
         assert PairingStore(path).token is None
+        assert store.window_open is False
+
+    def test_explicit_window_is_time_bounded_and_owner_only(self, tmp_path: Path) -> None:
+        now = [1_000.0]
+        store = PairingStore(tmp_path / "pairing.json", clock=lambda: now[0])
+
+        store.begin_pairing(duration_s=30)
+
+        assert store.window_open is True
+        assert stat.S_IMODE(store.window_path.stat().st_mode) == 0o600
+        now[0] = 1_031.0
+        assert store.window_open is False
+
+    def test_confirming_pairing_consumes_the_window(self, tmp_path: Path) -> None:
+        store = PairingStore(tmp_path / "pairing.json")
+        store.begin_pairing()
+        assert store.window_open is True
+
+        store.confirm(PairingStore.mint())
+
+        assert store.window_open is False
 
 
 class TestTokenRedaction:
@@ -91,6 +116,12 @@ class TestTokenRedaction:
         _RedactToken().filter(rec)
         assert "s3cr3t-value" not in rec.getMessage()
 
+    def test_one_time_confirmation_challenge_is_redacted(self) -> None:
+        rec = self._record('{"kind":"confirm.request","challengeId":"one-time-secret"}')
+        _RedactToken().filter(rec)
+        assert "one-time-secret" not in rec.getMessage()
+        assert '"challengeId":"<redacted>"' in rec.getMessage()
+
     def test_other_query_params_survive(self) -> None:
         rec = self._record("< %s %s", "GET", "/glasses?a=1&token=s3cr3t&b=2")
         _RedactToken().filter(rec)
@@ -104,15 +135,26 @@ class TestTokenRedaction:
 
 
 class TestRecovery:
-    """The documented recovery must work WITHOUT restarting the engine."""
+    """Recovery requires an explicit local action and no engine restart."""
 
-    def test_deleting_the_file_reopens_the_window(self, tmp_path: Path) -> None:
+    def test_deleting_the_file_keeps_the_window_closed(self, tmp_path: Path) -> None:
         path = tmp_path / "pairing.json"
         store = PairingStore(path)
         store.confirm(PairingStore.mint())
         assert store.token is not None
         path.unlink()
-        assert store.token is None  # not a stale in-memory copy
+        assert store.token is None
+        assert store.window_open is False
+
+    def test_begin_pairing_reopens_the_window(self, tmp_path: Path) -> None:
+        path = tmp_path / "pairing.json"
+        store = PairingStore(path)
+        store.confirm(PairingStore.mint())
+
+        store.begin_pairing()
+
+        assert store.token is None
+        assert store.window_open is True
 
     def test_a_present_file_still_enforces_its_token(self, tmp_path: Path) -> None:
         path = tmp_path / "pairing.json"

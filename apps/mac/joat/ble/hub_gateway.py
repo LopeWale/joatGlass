@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import re
 import secrets
 import struct
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from http import HTTPStatus
 from ipaddress import ip_address
 from urllib.parse import parse_qs, urlsplit
@@ -33,13 +36,18 @@ from ..core.interfaces import (
     GlassesTransport,
     InputCallback,
 )
+from ..core.confirmation import ConfirmationResult
 from ..core.pairing import PairingStore
 from ..core.protocol import (
     Audio,
+    Auth,
+    AuthAccepted,
     Confirm,
     ConfirmRequest,
     Device,
     DownlinkMessage,
+    G2Diagnostic,
+    G2DiagnosticControl,
     Hello,
     Imu,
     Input,
@@ -48,8 +56,11 @@ from ..core.protocol import (
     PairingSet,
     Policy,
     ProtocolError,
+    CONFIRM_PROMPT_MAX_UTF16_UNITS,
     parse_uplink,
+    utf16_units,
 )
+from ..services.g2_diagnostics import G2DiagnosticStore
 
 log = logging.getLogger(__name__)
 
@@ -58,13 +69,13 @@ class _RedactToken(logging.Filter):
     """Strip pairing tokens from websockets' request and frame logging.
 
     The library logs both the full request target and text-frame payloads at
-    DEBUG. Our auth rides the query string and the TOFU offer/ack rides JSON,
-    so `--verbose` (exactly what an operator enables to debug a pairing
-    failure) would otherwise write the long-lived token into brain.log.
+    DEBUG. Auth and pairing tokens ride JSON frames; stale plugin builds may
+    still try the former query-string shape. `--verbose` (exactly what an
+    operator enables during pairing) must not write either into brain.log.
     """
 
     _QUERY_PATTERN = re.compile(r"(token=)[^&\s]+")
-    _JSON_PATTERN = re.compile(r'("token"\s*:\s*")[^"]*')
+    _JSON_PATTERN = re.compile(r'("(?:token|challengeId)"\s*:\s*")[^"]*')
 
     @classmethod
     def _redact(cls, value: str) -> str:
@@ -120,6 +131,17 @@ ConfirmCallback = Callable[[Confirm], None]
 HelloCallback = Callable[[Hello], None]
 
 
+@dataclass(slots=True)
+class _PendingConfirm:
+    future: asyncio.Future[bool | None]
+    session_id: str
+    challenge_id: str
+    payload_digest: str
+    preview_digest: str
+    pairing_identity_digest: bytes
+    expires_at_s: float
+
+
 class HubGatewayTransport(GlassesTransport):
     """Accepts one plugin connection at a time.
 
@@ -135,12 +157,16 @@ class HubGatewayTransport(GlassesTransport):
         port: int = 8787,
         pairing: PairingStore | None = None,
         trust_loopback: bool = True,
+        auth_timeout_s: float = 4.0,
+        g2_diagnostics: G2DiagnosticStore | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._pairing = pairing
         self._trust_loopback = trust_loopback
-        self._provisional: str | None = None
+        self._auth_timeout_s = auth_timeout_s
+        self._g2_diagnostics = g2_diagnostics
+        self._auth_lock = asyncio.Lock()
         self._refusals: dict[str, int] = {}
         self._lockout_warned = False
         self._server: object | None = None
@@ -154,7 +180,9 @@ class HubGatewayTransport(GlassesTransport):
         self._hello_cbs: list[HelloCallback] = []
         self._disconnect_cbs: list[Callable[[], None]] = []
 
-        self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
+        self._pending_confirms: dict[str, _PendingConfirm] = {}
+        self._session_id: str | None = None
+        self._session_pairing_identity_digest: bytes | None = None
         self._last_seq: int | None = None
         self.device: Device | None = None
         self.hello: Hello | None = None
@@ -198,13 +226,19 @@ class HubGatewayTransport(GlassesTransport):
 
     async def stop(self) -> None:
         if self._conn is not None:
+            if self._session_id is not None:
+                self._invalidate_confirms(self._session_id)
             await self._conn.close()
             self._conn = None
+            self._session_id = None
+            self._session_pairing_identity_digest = None
         server = self._server
         if server is not None:
             server.close()  # type: ignore[attr-defined]
             await server.wait_closed()  # type: ignore[attr-defined]
             self._server = None
+        if self._g2_diagnostics is not None:
+            await self._g2_diagnostics.flush()
 
     @property
     def connected(self) -> bool:
@@ -260,7 +294,12 @@ class HubGatewayTransport(GlassesTransport):
                      type(message).__name__)
 
     async def request_confirm(
-        self, action_id: str, prompt: str, timeout_s: float = 8.0
+        self,
+        action_id: str,
+        prompt: str,
+        timeout_s: float = 8.0,
+        *,
+        payload_digest: str | None = None,
     ) -> bool:
         """Ask the wearer to approve an action; await their answer.
 
@@ -268,24 +307,132 @@ class HubGatewayTransport(GlassesTransport):
         gate protecting consequential actions (RULES.md #6) — silence is not
         consent, and the wearer may simply not be looking at the HUD.
         """
-        if self._conn is None:
+        result = await self.request_confirmation(
+            action_id,
+            prompt,
+            timeout_s,
+            payload_digest=payload_digest,
+        )
+        return result.accepted if result is not None else False
+
+    async def request_confirmation(
+        self,
+        action_id: str,
+        prompt: str,
+        timeout_s: float = 8.0,
+        *,
+        payload_digest: str | None = None,
+    ) -> ConfirmationResult | None:
+        """Return durable evidence only for an explicit bound HUD decision."""
+
+        if utf16_units(prompt) > CONFIRM_PROMPT_MAX_UTF16_UNITS:
+            log.warning(
+                "confirm %s declined — exact preview exceeds HUD capacity",
+                action_id,
+            )
+            return None
+        conn = self._conn
+        session_id = self._session_id
+        pairing_identity_digest = self._session_pairing_identity_digest
+        if conn is None or session_id is None or pairing_identity_digest is None:
             # No plugin, no wearer to ask. The answer is already determined;
             # stalling the orchestrator for the full timeout helps nobody.
             log.info("confirm %s declined — no plugin connected", action_id)
-            return False
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bool] = loop.create_future()
-        self._pending_confirms[action_id] = future
+            return None
+        if action_id in self._pending_confirms:
+            log.warning("confirm %s declined — action id already pending", action_id)
+            return None
+        if payload_digest is None:
+            payload_digest = hashlib.sha256(
+                b"joat-action-payload-v1\0" + prompt.encode("utf-8")
+            ).hexdigest()
         try:
-            await self.send(ConfirmRequest(action_id=action_id, prompt=prompt))
-            return await asyncio.wait_for(future, timeout_s)
+            payload_digest_bytes = bytes.fromhex(payload_digest)
+        except ValueError:
+            log.warning("confirm %s declined — payload digest is not hexadecimal", action_id)
+            return None
+        if len(payload_digest_bytes) != 32:
+            log.warning("confirm %s declined — payload digest is not SHA-256", action_id)
+            return None
+        preview_digest = hashlib.sha256(
+            b"joat-hud-confirm-v1\0" + prompt.encode("utf-8")
+        ).hexdigest()
+        challenge_id = secrets.token_urlsafe(32)
+        issued_at_s = time.time()
+        expires_at_s = issued_at_s + timeout_s
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[bool | None] = loop.create_future()
+        pending = _PendingConfirm(
+            future=future,
+            session_id=session_id,
+            challenge_id=challenge_id,
+            payload_digest=payload_digest,
+            preview_digest=preview_digest,
+            pairing_identity_digest=pairing_identity_digest,
+            expires_at_s=expires_at_s,
+        )
+        self._pending_confirms[action_id] = pending
+        try:
+            await conn.send(json.dumps(ConfirmRequest(
+                action_id=action_id,
+                prompt=prompt,
+                challenge_id=challenge_id,
+                session_id=session_id,
+                payload_digest=payload_digest,
+                preview_digest=preview_digest,
+                expires_at_ms=int(expires_at_s * 1000),
+            ).to_wire()))
+            if self._conn is not conn or self._session_id != session_id:
+                return None
+            accepted = await asyncio.wait_for(future, timeout_s)
+            if accepted is None:
+                return None
+            decided_at_s = time.time()
+            authorization_digest = hashlib.sha256(
+                b"joat-confirmation-authorization-v1\0"
+                + action_id.encode("utf-8")
+                + b"\0"
+                + session_id.encode("utf-8")
+                + b"\0"
+                + challenge_id.encode("utf-8")
+                + b"\0"
+                + payload_digest.encode("ascii")
+                + b"\0"
+                + preview_digest.encode("ascii")
+            ).digest()
+            return ConfirmationResult(
+                action_id=action_id,
+                accepted=accepted,
+                challenge_id=challenge_id,
+                session_id=session_id,
+                payload_digest=payload_digest_bytes,
+                preview_digest=bytes.fromhex(preview_digest),
+                pairing_identity_digest=pending.pairing_identity_digest,
+                authorization_digest=authorization_digest,
+                issued_at_us=int(issued_at_s * 1_000_000),
+                expires_at_us=int(expires_at_s * 1_000_000),
+                preview_completed_at_us=int(decided_at_s * 1_000_000),
+                decided_at_us=int(decided_at_s * 1_000_000),
+            )
+        except websockets.ConnectionClosed:
+            log.info("confirm %s declined — plugin disconnected during challenge", action_id)
+            return None
         # asyncio.TimeoutError explicitly: only on 3.11+ is it an alias of the
         # builtin, and a miss here would leak the exception past the gate.
         except asyncio.TimeoutError:
             log.info("confirm %s timed out — treating as declined", action_id)
-            return False
+            return None
         finally:
-            self._pending_confirms.pop(action_id, None)
+            if self._pending_confirms.get(action_id) is pending:
+                self._pending_confirms.pop(action_id, None)
+
+    def _invalidate_confirms(self, session_id: str) -> None:
+        for pending in tuple(self._pending_confirms.values()):
+            if (
+                pending.session_id == session_id
+                and not pending.future.done()
+            ):
+                pending.future.set_result(None)
 
     # ── pairing ──────────────────────────────────────────────────────────────
 
@@ -302,51 +449,52 @@ class HubGatewayTransport(GlassesTransport):
             return False
 
     def forget_pairing(self) -> bool:
-        """Drop the paired token so the next phone to connect re-pairs.
+        """Open an explicit, time-bounded local pairing window.
 
         The recovery for the OPPOSITE asymmetry from token adoption: the Mac
         is paired and the phone holds a different token (reinstall, cleared
         storage, a second phone). Nothing the phone does can fix that — it
         cannot authenticate to ask — so the authority has to be physical
-        access to the Mac. Safe: it only re-opens the TOFU window.
+        access to the Mac. Merely deleting or corrupting the token file is not
+        enough; the native app must call this local-authority operation.
         """
         if self._pairing is None:
             return False
-        forgotten = self._pairing.forget()
-        if forgotten:
-            self._provisional = None
-            self._refusals.clear()
-            self._lockout_warned = False
-            log.info("pairing forgotten — the next remote peer will re-pair")
-        return forgotten
-
-    @staticmethod
-    def _presented_token(conn: ServerConnection) -> str:
-        """The ?token= this peer dialed with, or '' when it dialed bare."""
-        request = getattr(conn, "request", None)
-        if request is None:
-            return ""
-        return str(parse_qs(urlsplit(request.path).query).get("token", [""])[-1])
+        self._pairing.begin_pairing()
+        self._refusals.clear()
+        self._lockout_warned = False
+        log.info("pairing window opened locally for 120 seconds")
+        return True
 
     def _authorize(self, conn: ServerConnection, request: Request) -> Response | None:
-        """Reject unpaired remote clients before the handshake completes.
+        """Reject closed pairing windows and credentials in request targets.
 
-        None = proceed. A 401 here is what the wearer sees as "socket never
-        opens" on an unpaired phone — the runbook's re-pair procedure (delete
-        the store file) is the fix.
+        A paired peer authenticates in the first application frame because a
+        WebView WebSocket cannot attach a private header. This hook still
+        rejects a missing/corrupt local credential unless the Mac explicitly
+        opened a pairing window.
         """
+        if "token" in parse_qs(urlsplit(request.path).query):
+            log.warning("rejected credential in WebSocket URL")
+            return conn.respond(
+                HTTPStatus.BAD_REQUEST,
+                "send credentials in the auth frame, never the URL\n",
+            )
         if self._pairing is None or self._peer_is_exempt(conn):
             return None
         expected = self._pairing.token
         if expected is None:
-            return None  # pairing window: first remote peer, token issued in _session
-        supplied = parse_qs(urlsplit(request.path).query).get("token", [""])[-1]
-        # Compare as BYTES: compare_digest raises TypeError on non-ASCII str,
-        # which websockets turns into a 500 + ERROR traceback instead of our
-        # 401 — letting any LAN peer spam the log and muddy the runbook's
-        # "401 means unpaired" diagnostic.
-        if secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
-            return None
+            if self._pairing.window_open:
+                return None
+            log.warning("rejected pairing attempt — local pairing window is closed")
+            return conn.respond(
+                HTTPStatus.FORBIDDEN,
+                "open Pair Glasses on the Mac before connecting\n",
+            )
+        return None
+
+    def _record_refusal(self, conn: ServerConnection) -> None:
+        """Record an app-auth failure without logging credential material."""
         # A wearer whose phone cannot authenticate sees only "reconnecting"
         # forever; the log said "rejected unpaired connection" and nothing
         # about what to DO. Count refusals per peer and, once it is clearly
@@ -358,73 +506,129 @@ class HubGatewayTransport(GlassesTransport):
             log.error(
                 "PAIRING LOCKOUT: %s has been refused %d times — its token does "
                 "not match this Mac's. The wearer sees 'reconnecting' forever. "
-                "Fix: delete %s (no restart needed) and it re-pairs on the next "
-                "dial, or use Forget paired glasses in JOAT.app.",
+                "Fix: use Pair / Replace Glasses in JOAT.app to open a local "
+                "120-second pairing window.",
                 host, self._refusals[host],
-                self._pairing._path if self._pairing else "the pairing store",
             )
         else:
             log.warning("rejected unpaired connection from %s", conn.remote_address)
-        return conn.respond(HTTPStatus.UNAUTHORIZED, "pairing token required\n")
+
+    async def _receive_auth_message(self, conn: ServerConnection) -> Auth | PairingAck:
+        raw = await asyncio.wait_for(conn.recv(), timeout=self._auth_timeout_s)
+        try:
+            payload = json.loads(raw)
+            message = parse_uplink(payload)
+        except (json.JSONDecodeError, ProtocolError, TypeError) as exc:
+            raise ProtocolError(f"invalid authentication frame: {exc}") from exc
+        if not isinstance(message, (Auth, PairingAck)):
+            raise ProtocolError("first application frame must be auth")
+        return message
+
+    @staticmethod
+    def _pairing_identity(token: str | None) -> bytes:
+        material = token.encode("utf-8") if token is not None else b"local-loopback"
+        return hashlib.sha256(b"joat-pairing-identity-v1\0" + material).digest()
+
+    async def _authenticate(self, conn: ServerConnection) -> bytes | None:
+        """Authenticate before the peer can replace the active HUD session."""
+        if self._pairing is None:
+            return self._pairing_identity(None)
+        if self._peer_is_exempt(conn):
+            await conn.send(json.dumps(AuthAccepted().to_wire()))
+            return self._pairing_identity(None)
+
+        async with self._auth_lock:
+            try:
+                first = await self._receive_auth_message(conn)
+                if not isinstance(first, Auth):
+                    raise ProtocolError("first application frame must be auth")
+
+                expected = self._pairing.token
+                if expected is not None:
+                    supplied = first.token
+                    if supplied is None or not secrets.compare_digest(
+                        supplied.encode("utf-8"), expected.encode("utf-8")
+                    ):
+                        self._record_refusal(conn)
+                        await conn.close(code=4401, reason="authentication failed")
+                        return None
+                    await conn.send(json.dumps(AuthAccepted().to_wire()))
+                    return self._pairing_identity(expected)
+
+                if not self._pairing.window_open:
+                    await conn.close(code=4403, reason="pairing window closed")
+                    return None
+
+                if first.token is not None:
+                    # Recovery adoption is safe only because a local user
+                    # explicitly opened this bounded window.
+                    self._pairing.confirm(first.token)
+                    log.info("pairing: adopted a persisted peer token — window closed")
+                    await conn.send(json.dumps(AuthAccepted().to_wire()))
+                    return self._pairing_identity(first.token)
+
+                candidate = PairingStore.mint()
+                await conn.send(json.dumps(PairingSet(token=candidate).to_wire()))
+                log.info("pairing: token offered to %s", conn.remote_address)
+                ack = await self._receive_auth_message(conn)
+                if (
+                    not isinstance(ack, PairingAck)
+                    or not self._pairing.window_open
+                    or not secrets.compare_digest(
+                        ack.token.encode("utf-8"), candidate.encode("utf-8")
+                    )
+                ):
+                    await conn.close(code=4401, reason="pairing acknowledgement failed")
+                    return None
+                self._pairing.confirm(candidate)
+                log.info("pairing: confirmed — remote peers now require auth")
+                await conn.send(json.dumps(AuthAccepted().to_wire()))
+                return self._pairing_identity(candidate)
+            except (asyncio.TimeoutError, ProtocolError, websockets.ConnectionClosed):
+                try:
+                    await conn.close(code=4401, reason="authentication required")
+                except websockets.ConnectionClosed:
+                    pass
+                return None
 
     # ── receiving ────────────────────────────────────────────────────────────
 
     async def _session(self, conn: ServerConnection) -> None:
+        pairing_identity_digest = await self._authenticate(conn)
+        if pairing_identity_digest is None:
+            return
+        session_id = secrets.token_urlsafe(18)
         if self._conn is not None:
             log.info("replacing existing plugin connection")
+            if self._session_id is not None:
+                self._invalidate_confirms(self._session_id)
             await self._conn.close()
         self._conn = conn
+        self._session_id = session_id
+        self._session_pairing_identity_digest = pairing_identity_digest
         self._last_seq = None
         host = str(conn.remote_address[0]) if conn.remote_address else "?"
         self._refusals.pop(host, None)
         self._lockout_warned = False
         log.info("plugin connected")
         try:
-            # TOFU offer INSIDE the try: minting touches the disk and the send
-            # can hit a dropped socket, and an escape here would skip the
-            # finally — leaving a stale _conn that reports connected while
-            # every send (including the fail-closed confirm gate) raises.
-            if (
-                self._pairing is not None
-                and self._pairing.token is None
-                and not self._peer_is_exempt(conn)
-            ):
-                presented = self._presented_token(conn)
-                if presented:
-                    # ADOPT the token the peer already holds. An unpaired Mac
-                    # facing a token-presenting peer is the RECOVERY case,
-                    # both flavours the audit confirmed as permanent
-                    # lockouts: the phone stored a token whose ack never
-                    # arrived, or the operator deleted pairing.json on a
-                    # working install. Offering a fresh token here strands
-                    # them — the plugin (correctly) ignores offers that do
-                    # not match what it holds. Adoption closes the window
-                    # immediately with the token the wearer's phone already
-                    # has. Trust model unchanged: first remote peer wins,
-                    # exactly as TOFU always worked.
-                    self._pairing.confirm(presented)
-                    self._provisional = None
-                    log.info("pairing: adopted token presented by %s — window closed",
-                             conn.remote_address)
-                else:
-                    # Fresh mint PER CONNECTION, never cached per process: a
-                    # prober that connects during the window must not learn
-                    # the token a later, real phone will ack.
-                    self._provisional = PairingStore.mint()
-                    await conn.send(json.dumps(PairingSet(token=self._provisional).to_wire()))
-                    log.info("pairing: token offered to %s", conn.remote_address)
+            if self._g2_diagnostics is not None:
+                await conn.send(json.dumps(G2DiagnosticControl(enabled=True).to_wire()))
             async for raw in conn:
-                self._dispatch(raw)
+                self._dispatch(raw, session_id)
         except websockets.ConnectionClosed:
             pass
         finally:
             if self._conn is conn:
+                self._invalidate_confirms(session_id)
                 self._conn = None
+                self._session_id = None
+                self._session_pairing_identity_digest = None
                 for cb in self._disconnect_cbs:
                     cb()
             log.info("plugin disconnected")
 
-    def _dispatch(self, raw: str | bytes) -> None:
+    def _dispatch(self, raw: str | bytes, session_id: str) -> None:
         try:
             payload = json.loads(raw)
             message = parse_uplink(payload)
@@ -434,6 +638,9 @@ class HubGatewayTransport(GlassesTransport):
             return
 
         match message:
+            case Auth():
+                # Replays on an established session are inert.
+                return
             case Hello():
                 self.hello = message
                 log.info("device %s / %s", message.model, message.sn)
@@ -459,14 +666,44 @@ class HubGatewayTransport(GlassesTransport):
                 for device_cb in self._device_cbs:
                     device_cb(message)
             case Confirm():
+                pending = self._pending_confirms.get(message.action_id)
+                fields_match = (
+                    pending is not None
+                    and pending.session_id == session_id == self._session_id
+                    and time.time() <= pending.expires_at_s
+                    and message.challenge_id is not None
+                    and secrets.compare_digest(
+                        message.challenge_id.encode("utf-8"),
+                        pending.challenge_id.encode("utf-8"),
+                    )
+                    and message.session_id is not None
+                    and secrets.compare_digest(
+                        message.session_id.encode("utf-8"),
+                        pending.session_id.encode("utf-8"),
+                    )
+                    and message.payload_digest is not None
+                    and secrets.compare_digest(
+                        message.payload_digest.encode("utf-8"),
+                        pending.payload_digest.encode("utf-8"),
+                    )
+                    and message.preview_digest is not None
+                    and secrets.compare_digest(
+                        message.preview_digest.encode("utf-8"),
+                        pending.preview_digest.encode("utf-8"),
+                    )
+                )
+                if pending is None or pending.future.done() or not fields_match:
+                    log.warning(
+                        "action trace=%s stage=confirmation-ignored reason=binding-mismatch",
+                        message.action_id,
+                    )
+                    return
                 log.info(
                     "action trace=%s stage=confirmation-result accepted=%s",
                     message.action_id,
                     message.accepted,
                 )
-                future = self._pending_confirms.get(message.action_id)
-                if future is not None and not future.done():
-                    future.set_result(message.accepted)
+                pending.future.set_result(message.accepted)
                 for confirm_cb in self._confirm_cbs:
                     confirm_cb(message)
             case Policy():
@@ -478,18 +715,18 @@ class HubGatewayTransport(GlassesTransport):
                     log.info("wearer location known (±%sm)",
                              int(message.accuracy) if message.accuracy else "?")
             case PairingAck():
-                # Only now is the token real: the phone has it on disk, so
-                # locking out every other peer can no longer strand the wearer.
-                if (
-                    self._pairing is not None
-                    and self._provisional is not None
-                    and secrets.compare_digest(
-                        message.token.encode("utf-8"), self._provisional.encode("utf-8")
-                    )
-                ):
-                    self._pairing.confirm(self._provisional)
-                    self._provisional = None
-                    log.info("pairing: confirmed — remote peers now require the token")
+                # Pairing acks are consumed before a connection becomes active.
+                return
+            case G2Diagnostic():
+                # The protocol parser is the redaction firewall. Never log
+                # or persist arbitrary plugin fields, even when opted in.
+                if self._g2_diagnostics is not None:
+                    try:
+                        self._g2_diagnostics.record(message.event)
+                    except Exception as exc:
+                        # Support capture is optional. A custom or degraded
+                        # recorder must not drop a real G2 control session.
+                        log.warning("dropping G2 diagnostic after %s", type(exc).__name__)
 
     def _handle_audio(self, message: Audio) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:

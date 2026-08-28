@@ -200,62 +200,59 @@ first.
 5. Left-temple double-tap — settings menu opens on the glasses.
 6. Lock the phone 5 minutes, unlock — page state intact (the store QA gate).
 
-### Pairing (transport auth — RULES.md #5, implemented 2026-08-26)
+### Pairing and application auth (RULES.md #5)
 
-The gateway no longer trusts the LAN. Trust-on-first-use, in three steps:
+The gateway no longer treats missing state as consent. Pairing begins only
+after the wearer presses **Pair / Replace Glasses** in JOAT.app, which creates
+an owner-only marker that expires after 120 seconds. During that window:
 
-1. The first remote client to connect is **offered** a token (`pairing.set`
-   downlink). That client is your phone at QR-scan time.
-2. The plugin persists it to localStorage and **acks** (`pairing` uplink) —
-   only on a successful write.
-3. The Mac persists on the ack, and from then on every remote dial must
-   carry `?token=` or is rejected 401 before the handshake completes.
+1. Every socket sends an `auth` frame first. A new client sends a null token.
+2. The Mac offers a token (`pairing.set`). The plugin persists it locally and
+   acks (`pairing`) only after the write succeeds.
+3. The Mac persists on the ack, consumes the pairing window, and sends
+   `auth.accepted`. Only then does the plugin report `connected` or flush
+   queued audio and commands.
+4. On later dials the stored token is sent in the first `auth` frame. It never
+   appears in the WebSocket URL, access logs, browser history, or status UI.
 
 The offer/ack split exists because persisting at offer time strands the
 wearer: a Wi-Fi blip during the pairing frame would leave the Mac holding a
 token no phone has, 401-ing the real phone forever. Unacked offers keep the
 window open, so a failed pairing costs a retry, not a manual reset.
 
-Loopback is exempt — the simulator and `speak_test.py` run on the Mac
-itself, and a local process could read the token file anyway.
+Loopback is exempt from token comparison — the simulator and `speak_test.py`
+run on the Mac itself, and a local process could read the token file anyway.
 
 - Token store: `~/Library/Application Support/JOAT/pairing.json` (0600).
-- **Re-pair**: delete that file, reconnect. No restart needed (the store
-  re-checks the file on every connection), and no phone-side wipe either:
-  an unpaired Mac **adopts** the token the connecting phone presents, so a
-  phone that used to work re-pairs itself on its next dial. A genuinely new
-  phone (no token) pairs through the offer/ack flow. First remote peer to
-  connect wins the window — the same trust-on-first-use as ever.
+- Pairing-window marker:
+  `~/Library/Application Support/JOAT/pairing-window.json` (0600, 120 seconds).
+- **Re-pair**: press **Pair / Replace Glasses** in JOAT.app, then connect the
+  intended glasses within 120 seconds. Deleting or corrupting `pairing.json`
+  leaves pairing closed; filesystem loss is never authorization.
 - **Stuck on "reconnecting" after reinstalling the plugin**: the Mac is
   paired to a token the phone no longer has (reinstall, cleared storage, a
   different phone). The phone cannot fix this itself — it cannot
   authenticate to ask — so the authority is physical access to the Mac:
-  press **Forget Glasses** in JOAT.app (or delete `pairing.json`), and the
-  next dial re-pairs by adopting the phone's own token. The engine logs a
+  press **Pair / Replace Glasses** in JOAT.app. During that explicit window,
+  the next dial can adopt the phone's already-persisted token. The engine logs a
   PAIRING LOCKOUT error naming this fix after five consecutive refusals.
-- **Lost-ack self-heal**: if the pairing ack ever fails to land, the phone
-  re-acks when the Mac re-offers the identical token, and the Mac adopts a
-  presented token when its store is empty — the "stored but never acked"
-  state is no longer absorbing (this was a two-pass audit finding: the old
-  guard dropped the re-offer, leaving the window open to the whole LAN for
-  the life of the install).
-  Symptom you need a re-pair at all: the plugin's socket never opens on a
-  phone that used to work, while the simulator connects fine.
+- **Lost-ack recovery**: the token is not real on the Mac until the ack lands.
+  If the phone stored a token but the ack was lost, press **Pair / Replace
+  Glasses**; its first auth frame lets the Mac adopt that already-persisted
+  token inside the bounded window.
 - **Dev server ↔ packed build**: localStorage is origin-scoped, so Path A and
   Path B hold *separate* tokens. Switching between them hits the same 401
   symptom — and looks exactly like the undocumented `ws://` risk below.
-  Delete `pairing.json` and let the build you are using re-pair; the other
-  build's stored token is then stale. Pick one path per bring-up session.
+  Use **Pair / Replace Glasses** with the build you are testing. Pick one path
+  per bring-up session.
 - The plugin **ignores a second `pairing.set`** while it already holds a
   token. Without that guard, any LAN peer answering the plain-`ws` mDNS name
   in the whitelist could overwrite the good token and lock the wearer out of
   their own brain until localStorage was wiped by hand.
-- Honest limits: the token rides the URL over plain `ws://`, so an *active*
-  LAN sniffer can capture it, and TOFU means a hostile first-connect during
-  the pairing window wins. `--verbose` request-line logging is redacted, but
-  the wire is not. This closes "anyone on the LAN owns the HUD and the
-  confirm gate"; the strong path is still the tailnet (`wss` via Tailscale)
-  once TLS lands.
+- Honest limit: moving the token into an application frame removes URL/log
+  leakage but does not encrypt plain `ws://`. An active LAN observer can still
+  read frames. Consequential writes require the tailnet `wss://` path; the
+  current machine has Tailscale HTTPS capability but no Serve route configured.
 
 ### Wrong screen: "asking for an auth token"
 
@@ -291,7 +288,7 @@ Three readings decide nearly everything: the **phone panel** (`p-url`, `p-link`,
 
 1. **Read the phone panel.** Body replaced by `boot failed: …` → go to *"boot failed: …"*. `p-url` still `—` → *No JOAT page at all*. `p-url` filled but `p-link` stuck `idle` → bridge hang, *No JOAT page at all*. Panel intact and cycling `reconnecting` → continue.
 2. **Tail the engine log.** Which line appears: nothing at all, `plugin connected`, or `rejected unpaired connection from …`? That fork routes almost every remaining case.
-3. **If `rejected unpaired`:** `rm ~/Library/Application\ Support/JOAT/pairing.json`, then reconnect. Most common real-world failure — fixed in one command.
+3. **If `PAIRING LOCKOUT` or auth code 4401 repeats:** press **Pair / Replace Glasses** in JOAT.app, then reconnect within 120 seconds. Do not delete the store file.
 4. **If the log is silent:** `sudo tcpdump -ni any tcp port 8787` while the plugin retries. **Zero SYNs** = blocked before the network (whitelist / iOS Local Network / AP isolation). **SYNs present** = it reaches the Mac; the problem is auth or the app.
 5. **Check the dial target against reality:** compare `p-url` literally to `apps/hub-plugin/app.json`, then `ipconfig getifaddr en0` and `lsof -nP -iTCP:8787 -sTCP:LISTEN` (IPv4-only listed is itself a cause — see *Stuck on "connecting"*).
 6. **Reload the plugin page**, then `lsof -nP -iTCP:8787` — expect exactly one remote peer. Clears `outOfMemory`, a stale WebView, and a second client flapping the link.
@@ -331,7 +328,7 @@ The engine log fork does most of the work: `rejected unpaired connection` = it r
 
 | Cause | Distinguisher | Fix |
 |---|---|---|
-| **Mac holds a pairing token, plugin doesn't** (WebView data cleared, reinstall, or Path A ↔ Path B origins hold separate tokens) | `rejected unpaired connection from ('<phone ip>', …)` once per backoff tick, **and** `ls -l ~/Library/Application\ Support/JOAT/pairing.json` exists | `rm ~/Library/Application\ Support/JOAT/pairing.json`, reconnect. Pick one delivery path per session; key the stored token by host |
+| **Mac holds a pairing token, plugin doesn't** (WebView data cleared, reinstall, or Path A ↔ Path B origins hold separate tokens) | Auth closes with code 4401 once per backoff cycle, and `pairing.json` exists | Press **Pair / Replace Glasses**, reconnect within 120 seconds. Pick one delivery path per session; key the stored token by host |
 | **Rotation + backoff stall** (rotates off the good candidate on every close; no per-dial timeout — a blackholed IP wedges ~75 s) | Gap between `plugin disconnected` and the next `plugin connected` is tens of seconds while `lsof -nP -iTCP:8787 -sTCP:LISTEN` shows the listener up | Dial watchdog (~3 s in CONNECTING), sticky last-known-good candidate, reset `attempt` on FOREGROUND_ENTER |
 | Dial URL not in the app.json whitelist (Hub blocks silently) | Compare `p-url` literally to `apps/hub-plugin/app.json`. Log shows `hub gateway listening` but never `plugin connected`; tcpdump shows zero SYNs | Import app.json at boot and assert every candidate's origin is whitelisted; fail loud on-glass |
 | Built with no `.env` → `wss://mac.local:8787/glasses` fallback (wrong scheme, wrong host, not whitelisted) | `grep -o 'wss\?://[^"]*' apps/hub-plugin/dist/assets/*.js` prints `mac.local` | Commit a `.env.defaults`; make the fallback a loud boot error |
@@ -376,7 +373,11 @@ The engine log fork does most of the work: `rejected unpaired connection` = it r
 
 #### Silent today, arms a failure later
 
-- **Pairing never confirmed.** Log shows `pairing: token offered to <addr>` on *every* connect and never `pairing: confirmed …`, while `pairing.json` does not exist. Everything works, the TOFU window stays open to any LAN peer, and the day another peer acks first the real phone is 401'd forever. Fix: re-ack when the offered token equals the stored one; only ignore a *different* token.
+- **Pairing never confirmed.** Log shows `pairing: token offered to <addr>` and
+  never `pairing: confirmed …`, while `pairing.json` does not exist. The link
+  stays `connecting`, queued uplinks do not flush, and the local pairing marker
+  expires after 120 seconds. Re-open **Pair / Replace Glasses** and retry; do
+  not widen the window or persist before the phone's ack.
 - **HudPageBuilder invariants are documented but unenforced** and the SDK validates only z-order/menu/brightness. A layout edit will land silently and surface later as a blank HUD via the masked `invalid` path.
 
 ### Known unknowns (test on device, in this order)

@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Owns the Python engine as a child process (docs/MAC_APP.md §Native shell).
 ///
@@ -28,6 +29,11 @@ final class EngineController: ObservableObject {
     @Published var state: State = .stopped
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
     @Published var accessibilityTrusted: Bool = AXIsProcessTrusted()
+    @Published var pairingNotice: String?
+    @Published var calendarAccess = "not determined"
+    @Published var remindersAccess = "not determined"
+    @Published var g2DiagnosticsEnabled: Bool
+    @Published var g2DiagnosticNotice: String?
 
     private var process: Process?
     private var userStopped = false
@@ -35,6 +41,7 @@ final class EngineController: ObservableObject {
     private var pendingStopCompletion: (() -> Void)?
 
     private let defaults = UserDefaults.standard
+    private let g2DiagnosticsKey = "G2DiagnosticsEnabled"
     private let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/joat/brain.log")
 
@@ -48,6 +55,13 @@ final class EngineController: ObservableObject {
     }
 
     init() {
+        g2DiagnosticsEnabled = UserDefaults.standard.bool(forKey: "G2DiagnosticsEnabled")
+        do {
+            try NativeBridgeServer.shared.start()
+            refreshPersonalDataAccess()
+        } catch {
+            appendLog("[shell] native personal-data bridge unavailable: \(error.localizedDescription)")
+        }
         start()
         // The AX watcher is started from applicationDidFinishLaunching, NOT
         // here: this initializer can run inside SwiftUI's App.init(), and
@@ -61,6 +75,46 @@ final class EngineController: ObservableObject {
 
     func requestAccessibility() {
         NotificationWatcher.shared.requestAccess()
+    }
+
+    func refreshPersonalDataAccess() {
+        Task { @MainActor in
+            let snapshot = await NativeBridgeServer.shared.authorizationSnapshot()
+            calendarAccess = display(snapshot.calendar)
+            remindersAccess = display(snapshot.reminders)
+        }
+    }
+
+    func requestCalendarAccess() {
+        requestPersonalDataAccess(entity: "calendar")
+    }
+
+    func requestRemindersAccess() {
+        requestPersonalDataAccess(entity: "reminders")
+    }
+
+    private func requestPersonalDataAccess(entity: String) {
+        Task { @MainActor in
+            do {
+                let snapshot = try await NativeBridgeServer.shared.requestFullAccess(entity: entity)
+                calendarAccess = display(snapshot.calendar)
+                remindersAccess = display(snapshot.reminders)
+            } catch {
+                appendLog("[shell] \(entity) permission request failed: \(error.localizedDescription)")
+                refreshPersonalDataAccess()
+            }
+        }
+    }
+
+    private func display(_ status: NativeAuthorization) -> String {
+        switch status {
+        case .notDetermined: "not determined"
+        case .restricted: "restricted"
+        case .denied: "denied"
+        case .writeOnly: "write only"
+        case .fullAccess: "full access"
+        case .unknown: "unknown"
+        }
     }
 
     // MARK: repo discovery — user-chosen, never hardcoded
@@ -157,6 +211,7 @@ final class EngineController: ObservableObject {
         let p = Process()
         p.executableURL = repo.appendingPathComponent(".venv/bin/python")
         p.arguments = ["-u", "-m", "joat", "--port", String(Self.enginePort)]
+            + (g2DiagnosticsEnabled ? ["--g2-diagnostics"] : [])
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
         // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
@@ -164,6 +219,9 @@ final class EngineController: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:"
             + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+        if NativeBridgeServer.shared.isRunning {
+            env["JOAT_NATIVE_BRIDGE"] = NativeBridgeServer.shared.socketURL.path
+        }
         p.environment = env
         p.standardOutput = log
         p.standardError = log
@@ -242,17 +300,62 @@ final class EngineController: ObservableObject {
 
     // MARK: conveniences
 
-    /// Delete the pairing token so the next phone to connect re-pairs.
+    /// Open the only path by which a remote peer may become trusted.
     ///
-    /// Deliberately a file operation rather than an engine RPC: the engine
-    /// re-reads the store on every connection, so removing the file takes
-    /// effect immediately with no restart and works even if the engine is
-    /// wedged. The gateway re-opens its TOFU window on the next dial.
-    func forgetPairing() {
-        let store = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/JOAT/pairing.json")
-        try? FileManager.default.removeItem(at: store)
-        appendLog("pairing forgotten — put the glasses on and they will re-pair")
+    /// The marker is local-user authority and expires after 120 seconds. The
+    /// Python gateway fails closed when the token is absent or corrupt unless
+    /// this marker exists, so deleting pairing.json can never authorize a peer.
+    func openPairingWindow() {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/JOAT")
+        do {
+            let expiresAt = try PairingWindowStore(directory: directory).open()
+            let time = expiresAt.formatted(date: .omitted, time: .shortened)
+            pairingNotice = "Pairing open until \(time). Connect the intended glasses now."
+            appendLog("pairing window opened locally for 120 seconds")
+        } catch {
+            pairingNotice = "Pairing stayed closed: \(error.localizedDescription)"
+            appendLog("pairing window failed closed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Enable a bounded, content-free G2 support capture. Changing the mode
+    /// restarts the child so the authenticated gateway can inform the plugin;
+    /// ordinary HUD rendering remains on its production path throughout.
+    func setG2DiagnosticsEnabled(_ enabled: Bool) {
+        guard enabled != g2DiagnosticsEnabled else { return }
+        if enabled {
+            do {
+                try G2DiagnosticExport.clear()
+            } catch {
+                g2DiagnosticNotice = "Trace stayed off: \(error.localizedDescription)"
+                appendLog("G2 diagnostic trace stayed off: \(error.localizedDescription)")
+                return
+            }
+        }
+        defaults.set(enabled, forKey: g2DiagnosticsKey)
+        g2DiagnosticsEnabled = enabled
+        g2DiagnosticNotice = enabled
+            ? "G2 diagnostic trace is on. The engine restarted for this support capture."
+            : "G2 diagnostic trace is off. The redacted capture remains available to export."
+        appendLog(enabled ? "G2 diagnostic trace enabled" : "G2 diagnostic trace disabled")
+        if state == .running { restart() }
+    }
+
+    func exportG2Diagnostics() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "joat-g2-diagnostics-redacted.json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            try G2DiagnosticExport.export(to: destination)
+            g2DiagnosticNotice = "Redacted G2 trace exported to \(destination.lastPathComponent)."
+            appendLog("redacted G2 diagnostic trace exported")
+        } catch {
+            g2DiagnosticNotice = "G2 trace export failed: \(error.localizedDescription)"
+            appendLog("G2 diagnostic trace export failed: \(error.localizedDescription)")
+        }
     }
 
     func openLog() {

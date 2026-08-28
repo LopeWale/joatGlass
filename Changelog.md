@@ -2,6 +2,18 @@
 
 ## 2026-08-27
 
+- Added a production-safe, default-off G2 diagnostic receipt. An authenticated
+  Mac opt-in now captures only page transitions, gesture classes, ordered
+  four-tile upload outcomes, and HUD self-heal decisions; the Mac shell exports
+  a separately allowlisted, content-free archive. The official Even Hub
+  simulator exercised the real gateway/plugin path and retained a 576×288
+  confirmation frame plus ordered upload, tap, show, and dismiss receipts.
+  The trace drops while disconnected and persists via a coalesced background
+  writer, so it cannot evict real uplinks or block a control session. Focused
+  plugin coverage is 88 passing tests; Python unit/integration, strict mypy,
+  and Swift shell tests all pass. The unrelated shared menu-label
+  edit currently leaves the broad Hub-plugin suite with one stale expectation.
+
 - Replaced the Confirmation surface's stacked `RIGHT / RING / NOD` and `LEFT`
   instructions with one horizontal, source-agnostic CTA row: `TAP · Confirm`
   and `SWIPE · Cancel`. Either built-in G2 temple now confirms, either swipe

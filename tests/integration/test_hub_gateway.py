@@ -46,6 +46,19 @@ async def _wait_for(predicate, timeout: float = 2.0) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
+def _confirm_reply(request: dict[str, object], accepted: bool) -> str:
+    """Echo every server-bound challenge field exactly as the plugin must."""
+    return json.dumps({
+        "kind": "confirm",
+        "actionId": request["actionId"],
+        "accepted": accepted,
+        "challengeId": request["challengeId"],
+        "sessionId": request["sessionId"],
+        "payloadDigest": request["payloadDigest"],
+        "previewDigest": request["previewDigest"],
+    })
+
+
 @pytest.fixture
 async def transport(unused_tcp_port: int):
     t = HubGatewayTransport(host=HOST, port=unused_tcp_port)
@@ -198,6 +211,46 @@ class TestDownlink:
 
 
 class TestConfirm:
+    async def test_explicit_decision_returns_bound_durable_evidence(self, transport) -> None:
+        t, url = transport
+        payload_digest = "ab" * 32
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            task = asyncio.create_task(
+                t.request_confirmation(
+                    "act-evidence",
+                    "Send it?",
+                    payload_digest=payload_digest,
+                )
+            )
+            request = json.loads(await ws.recv())
+            await ws.send(_confirm_reply(request, True))
+            result = await task
+
+        assert result is not None
+        assert result.accepted is True
+        assert result.action_id == "act-evidence"
+        assert result.challenge_id == request["challengeId"]
+        assert result.session_id == request["sessionId"]
+        assert result.payload_digest == bytes.fromhex(payload_digest)
+        assert len(result.preview_digest) == 32
+        assert len(result.pairing_identity_digest) == 32
+        assert len(result.authorization_digest) == 32
+        assert result.issued_at_us <= result.preview_completed_at_us
+        assert result.preview_completed_at_us == result.decided_at_us
+
+    async def test_non_sha256_payload_binding_fails_before_hud_send(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            assert await t.request_confirmation(
+                "act-bad-digest",
+                "Send it?",
+                payload_digest="not-a-digest",
+            ) is None
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.05)
+
     async def test_accepted_confirm_resolves_true(self, transport) -> None:
         t, url = transport
         async with websockets.connect(url) as ws:
@@ -205,7 +258,7 @@ class TestConfirm:
             task = asyncio.create_task(t.request_confirm("act-1", "Delete?"))
             request = json.loads(await ws.recv())
             assert request["kind"] == "confirm.request"
-            await ws.send(json.dumps({"kind": "confirm", "actionId": "act-1", "accepted": True}))
+            await ws.send(_confirm_reply(request, True))
             assert await task is True
 
     async def test_declined_confirm_resolves_false(self, transport) -> None:
@@ -213,8 +266,8 @@ class TestConfirm:
         async with websockets.connect(url) as ws:
             await _wait_for(lambda: t.connected)
             task = asyncio.create_task(t.request_confirm("act-2", "Delete?"))
-            await ws.recv()
-            await ws.send(json.dumps({"kind": "confirm", "actionId": "act-2", "accepted": False}))
+            request = json.loads(await ws.recv())
+            await ws.send(_confirm_reply(request, False))
             assert await task is False
 
     async def test_timeout_fails_closed(self, transport) -> None:
@@ -232,9 +285,45 @@ class TestConfirm:
         async with websockets.connect(url) as ws:
             await _wait_for(lambda: t.connected)
             task = asyncio.create_task(t.request_confirm("act-4", "Delete?", timeout_s=0.3))
-            await ws.recv()
-            await ws.send(json.dumps({"kind": "confirm", "actionId": "stale", "accepted": True}))
+            request = json.loads(await ws.recv())
+            stale = dict(request)
+            stale["actionId"] = "stale"
+            await ws.send(_confirm_reply(stale, True))
             assert await task is False
+
+    @pytest.mark.parametrize(
+        "field",
+        ["challengeId", "sessionId", "payloadDigest", "previewDigest"],
+    )
+    async def test_tampered_confirmation_binding_cannot_approve(
+        self, transport, field: str
+    ) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            task = asyncio.create_task(
+                t.request_confirm(f"act-bound-{field}", "Delete?", 0.1)
+            )
+            request = json.loads(await ws.recv())
+            request[field] = "tampered"
+            await ws.send(_confirm_reply(request, True))
+            assert await task is False
+
+    async def test_connection_replacement_invalidates_a_visible_challenge(
+        self, transport
+    ) -> None:
+        t, url = transport
+        first = await websockets.connect(url)
+        try:
+            await _wait_for(lambda: t.connected)
+            task = asyncio.create_task(t.request_confirm("act-session", "Delete?", 2.0))
+            request = json.loads(await first.recv())
+            assert request["sessionId"] == t._session_id
+
+            async with websockets.connect(url):
+                assert await task is False
+        finally:
+            await first.close()
 
     async def test_selected_reply_crosses_the_real_gateway_and_logs_no_message_content(
         self, transport, caplog
@@ -277,12 +366,18 @@ class TestConfirm:
                 "kind": "confirm",
                 "actionId": request["actionId"],
                 "accepted": True,
+                "challengeId": request["challengeId"],
+                "sessionId": request["sessionId"],
+                "payloadDigest": request["payloadDigest"],
+                "previewDigest": request["previewDigest"],
             }))
-            assert await task == "Sent to Cajun Corner."
+            assert await task == (
+                "Submitted to Messages for Cajun Corner; delivery unverified."
+            )
 
         assert sender.sent == [(secret_handle, secret_body)]
         assert "stage=confirmation-result accepted=True" in caplog.text
-        assert "stage=sent" in caplog.text
+        assert "stage=submitted delivery=unverified" in caplog.text
         assert secret_body not in caplog.text
         assert secret_handle not in caplog.text
 
@@ -314,6 +409,7 @@ async def paired_transport(unused_tcp_port: int, tmp_path):
     """Gateway with pairing REQUIRED even from loopback, so the token paths
     are exercisable from a test that can only connect via 127.0.0.1."""
     store = PairingStore(tmp_path / "pairing.json")
+    store.begin_pairing()
     t = HubGatewayTransport(
         host=HOST, port=unused_tcp_port, pairing=store, trust_loopback=False
     )
@@ -327,11 +423,29 @@ async def paired_transport(unused_tcp_port: int, tmp_path):
 async def _pair(url: str) -> str:
     """Complete a full pairing handshake and return the confirmed token."""
     async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({"kind": "auth", "token": None}))
         frame = json.loads(await ws.recv())
+        assert frame["kind"] == "pairing.set"
         token = frame["token"]
         await ws.send(json.dumps({"kind": "pairing", "token": token}))
-        await asyncio.sleep(0.05)  # let the ack land before the socket closes
+        assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
     return str(token)
+
+
+async def _authenticate(ws, token: str) -> None:
+    await ws.send(json.dumps({"kind": "auth", "token": token}))
+    assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+
+
+async def _expect_auth_rejected(url: str, token: str | None) -> None:
+    ws = await websockets.connect(url)
+    try:
+        await ws.send(json.dumps({"kind": "auth", "token": token}))
+        with pytest.raises(websockets.ConnectionClosed):
+            await ws.recv()
+        assert ws.close_code == 4401
+    finally:
+        await ws.close()
 
 
 class TestPairing:
@@ -340,15 +454,55 @@ class TestPairing:
     async def test_first_client_is_offered_a_token(self, paired_transport) -> None:
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
             frame = json.loads(await ws.recv())
         assert frame["kind"] == "pairing.set"
         assert frame["token"]
+
+    async def test_fresh_store_refuses_remote_peer_until_mac_opens_window(
+        self, unused_tcp_port: int, tmp_path
+    ) -> None:
+        store = PairingStore(tmp_path / "pairing.json")
+        t = HubGatewayTransport(
+            host=HOST,
+            port=unused_tcp_port,
+            pairing=store,
+            trust_loopback=False,
+        )
+        await t.start()
+        try:
+            with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+                await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
+            assert exc.value.response.status_code == 403
+        finally:
+            await t.stop()
+
+    async def test_corrupt_store_refuses_remote_peer_until_explicit_repair(
+        self, unused_tcp_port: int, tmp_path
+    ) -> None:
+        path = tmp_path / "pairing.json"
+        path.write_text("not-json")
+        store = PairingStore(path)
+        t = HubGatewayTransport(
+            host=HOST,
+            port=unused_tcp_port,
+            pairing=store,
+            trust_loopback=False,
+        )
+        await t.start()
+        try:
+            with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+                await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
+            assert exc.value.response.status_code == 403
+        finally:
+            await t.stop()
 
     async def test_offer_is_not_persisted_until_acked(self, paired_transport) -> None:
         """The strand-the-wearer bug: a lost pairing frame must NOT burn the
         token, or the phone that never got it is 401'd forever."""
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
             await ws.recv()  # offer received, deliberately not acked
         assert store.token is None
         # The window is still open: a retry pairs cleanly.
@@ -359,44 +513,87 @@ class TestPairing:
         t, url, store = paired_transport
         token = await _pair(url)
         assert store.token == token
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            await websockets.connect(url)
-        assert exc.value.response.status_code == 401
+        await _expect_auth_rejected(url, None)
 
     async def test_mismatched_ack_is_ignored(self, paired_transport) -> None:
         """A forged ack must not pair a token the real phone never stored."""
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
             await ws.recv()
             await ws.send(json.dumps({"kind": "pairing", "token": "forged-token"}))
             await asyncio.sleep(0.05)
         assert store.token is None
 
-    async def test_wrong_token_is_rejected(self, paired_transport) -> None:
+    async def test_credentials_in_the_url_are_rejected(self, paired_transport) -> None:
         t, url, store = paired_transport
         await _pair(url)
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
             await websockets.connect(f"{url}/?token=not-the-token")
-        assert exc.value.response.status_code == 401
+        assert exc.value.response.status_code == 400
 
-    async def test_non_ascii_token_is_rejected_cleanly(self, paired_transport) -> None:
-        """compare_digest raises TypeError on non-ASCII str — which would
-        surface as a 500 + ERROR traceback any LAN peer could trigger."""
+    async def test_wrong_auth_frame_token_is_rejected(self, paired_transport) -> None:
         t, url, store = paired_transport
         await _pair(url)
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            await websockets.connect(f"{url}/?token=%C3%A9")
-        assert exc.value.response.status_code == 401
+        await _expect_auth_rejected(url, "not-the-token")
+
+    async def test_non_ascii_token_is_rejected_cleanly(self, paired_transport) -> None:
+        """compare_digest receives bytes so non-ASCII input fails cleanly."""
+        t, url, store = paired_transport
+        await _pair(url)
+        await _expect_auth_rejected(url, "é")
 
     async def test_paired_client_reconnects_with_token(self, paired_transport) -> None:
         t, url, store = paired_transport
         token = await _pair(url)
-        async with websockets.connect(f"{url}/?token={token}") as ws:
+        async with websockets.connect(url) as ws:
+            await _authenticate(ws, token)
             await ws.send(
                 json.dumps({"kind": "hello", "sn": "SN2", "model": "g2", "launchSource": "x"})
             )
             await _wait_for(lambda: t.hello is not None)
         assert t.hello.sn == "SN2"
+
+    async def test_unauthenticated_socket_cannot_replace_the_active_peer(
+        self, paired_transport
+    ) -> None:
+        t, url, store = paired_transport
+        token = await _pair(url)
+        async with websockets.connect(url) as trusted:
+            await _authenticate(trusted, token)
+            active = t._conn
+
+            await _expect_auth_rejected(url, "attacker-token")
+
+            assert t._conn is active
+            await trusted.send(json.dumps({
+                "kind": "device",
+                "connect": "connected",
+                "battery": 73,
+            }))
+            await _wait_for(lambda: t.device is not None)
+            assert t.device is not None and t.device.battery == 73
+
+    async def test_non_auth_first_frame_is_never_dispatched(
+        self, paired_transport
+    ) -> None:
+        t, url, store = paired_transport
+        await _pair(url)
+        ws = await websockets.connect(url)
+        try:
+            await ws.send(json.dumps({
+                "kind": "hello",
+                "sn": "ATTACKER",
+                "model": "g2",
+                "launchSource": "x",
+            }))
+            with pytest.raises(websockets.ConnectionClosed):
+                await ws.recv()
+            assert ws.close_code == 4401
+            assert t.hello is None
+            assert not t.connected
+        finally:
+            await ws.close()
 
     async def test_already_paired_store_never_reissues(self, unused_tcp_port, tmp_path) -> None:
         """A restart must not hand the token to the next comer."""
@@ -408,8 +605,7 @@ class TestPairing:
         )
         await t.start()
         try:
-            with pytest.raises(websockets.exceptions.InvalidStatus):
-                await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
+            await _expect_auth_rejected(f"ws://{HOST}:{unused_tcp_port}", None)
             assert store.token == first
         finally:
             await t.stop()
@@ -576,6 +772,7 @@ class TestRedactionRegistration:
         client_log.propagate = True
         try:
             store = PairingStore(tmp_path / "pairing.json")
+            store.begin_pairing()
             t = HubGatewayTransport(
                 host=HOST,
                 port=unused_tcp_port,
@@ -587,27 +784,28 @@ class TestRedactionRegistration:
                 async with websockets.connect(
                     f"ws://{HOST}:{unused_tcp_port}/glasses"
                 ) as ws:
+                    await ws.send(json.dumps({"kind": "auth", "token": None}))
                     offer = json.loads(await ws.recv())
                     assert offer["kind"] == "pairing.set"
                     token = str(offer["token"])
                     await ws.send(json.dumps({"kind": "pairing", "token": token}))
-                    await _wait_for(lambda: store.token == token)
+                    assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
 
                 async with websockets.connect(
-                    f"ws://{HOST}:{unused_tcp_port}/glasses?token={token}"
-                ):
-                    pass
+                    f"ws://{HOST}:{unused_tcp_port}/glasses"
+                ) as ws:
+                    await _authenticate(ws, token)
 
-                with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-                    await websockets.connect(f"ws://{HOST}:{unused_tcp_port}/glasses")
+                await _expect_auth_rejected(
+                    f"ws://{HOST}:{unused_tcp_port}/glasses", None
+                )
             finally:
                 await t.stop()
 
-            assert exc.value.response.status_code == 401
             out = buf.getvalue()
             assert token not in out, "pairing token reached the emitted logs"
             assert token[:12] not in out, "pairing token prefix reached the emitted logs"
-            assert "token=<redacted>" in out
+            assert "?token=" not in out
             assert '"token": "<redacted>"' in out
         finally:
             root.removeHandler(handler)
@@ -619,29 +817,28 @@ class TestRedactionRegistration:
 
 
 class TestPairingRecovery:
-    """The absorbing states both audit passes confirmed, closed.
+    """The absorbing states both audit passes confirmed, closed explicitly.
 
-    An unpaired Mac facing a token-PRESENTING peer is the recovery case
-    (lost ack, or pairing.json deleted on a working install). Offering a
-    fresh token there strands the wearer — the plugin correctly ignores
-    offers that do not match what it holds — so the Mac adopts instead.
+    During a Mac-authorized window, a token-presenting phone is the recovery
+    case (for example, a lost ack). Outside that window, missing local state
+    is not authority to adopt anything.
     """
 
     async def test_unpaired_mac_adopts_a_presented_token(self, paired_transport) -> None:
         t, url, store = paired_transport
-        async with websockets.connect(f"{url}/?token=HELD-BY-PHONE") as ws:
+        async with websockets.connect(url) as ws:
+            await _authenticate(ws, "HELD-BY-PHONE")
             await ws.send(json.dumps(
                 {"kind": "hello", "sn": "S", "model": "g2", "launchSource": "x"}))
             await _wait_for(lambda: store.token is not None)
         assert store.token == "HELD-BY-PHONE"
         # Window closed: a bare LAN peer is refused again.
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            await websockets.connect(url)
-        assert exc.value.response.status_code == 401
+        await _expect_auth_rejected(url, None)
 
     async def test_adopted_peer_gets_no_offer(self, paired_transport) -> None:
         t, url, store = paired_transport
-        async with websockets.connect(f"{url}/?token=HELD-BY-PHONE") as ws:
+        async with websockets.connect(url) as ws:
+            await _authenticate(ws, "HELD-BY-PHONE")
             await _wait_for(lambda: store.token is not None)
             await ws.send(json.dumps({"kind": "policy", "resume": "auto"}))
             with pytest.raises(asyncio.TimeoutError):
@@ -654,23 +851,20 @@ class TestPairingRecovery:
         a later, real phone will ack."""
         t, url, store = paired_transport
         async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
             first = json.loads(await ws.recv())["token"]  # prober sees this
         async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
             second = json.loads(await ws.recv())["token"]
             assert second != first
-            # The prober's stale token cannot complete the pairing…
-            await ws.send(json.dumps({"kind": "pairing", "token": first}))
-            await asyncio.sleep(0.2)
-            assert store.token is None
-            # …the current offer can.
             await ws.send(json.dumps({"kind": "pairing", "token": second}))
-            await _wait_for(lambda: store.token == second)
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+        assert store.token == second
 
-    async def test_runbook_recovery_delete_file_then_reconnect(
+    async def test_deleting_pairing_file_does_not_reopen_window(
         self, unused_tcp_port, tmp_path
     ) -> None:
-        """The exact operator procedure that used to convert a paired install
-        into a permanently open one (adversary-found trigger, pass 2)."""
+        """Filesystem loss must not turn the next LAN peer into the owner."""
         path = tmp_path / "pairing.json"
         store = PairingStore(path)
         store.confirm("PHONE-TOKEN")
@@ -678,14 +872,10 @@ class TestPairingRecovery:
                                 pairing=store, trust_loopback=False)
         await t.start()
         try:
-            path.unlink()  # the runbook step, engine still running
-            async with websockets.connect(
-                f"ws://{HOST}:{unused_tcp_port}/?token=PHONE-TOKEN"
-            ) as ws:
-                await _wait_for(lambda: store.token == "PHONE-TOKEN")
-            # Paired again, no restart, no storage wipe; strangers refused.
-            with pytest.raises(websockets.exceptions.InvalidStatus):
+            path.unlink()
+            with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
                 await websockets.connect(f"ws://{HOST}:{unused_tcp_port}")
+            assert exc.value.response.status_code == 403
         finally:
             await t.stop()
 
@@ -702,22 +892,20 @@ class TestLockoutRecovery:
     ) -> None:
         t, url, store = paired_transport
         store.confirm("MAC-SIDE-TOKEN")
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            await websockets.connect(f"{url}/?token=PHONE-SIDE-DIFFERENT")
-        assert exc.value.response.status_code == 401
+        await _expect_auth_rejected(url, "PHONE-SIDE-DIFFERENT")
 
     async def test_forget_pairing_reopens_the_window(self, paired_transport) -> None:
         t, url, store = paired_transport
         store.confirm("MAC-SIDE-TOKEN")
         assert t.forget_pairing() is True
         # The phone's own token is now adopted on its next dial — no wipe.
-        async with websockets.connect(f"{url}/?token=PHONE-SIDE-DIFFERENT") as ws:
+        async with websockets.connect(url) as ws:
+            await _authenticate(ws, "PHONE-SIDE-DIFFERENT")
             await ws.send(json.dumps(
                 {"kind": "hello", "sn": "S", "model": "g2", "launchSource": "x"}))
             await _wait_for(lambda: store.token == "PHONE-SIDE-DIFFERENT")
         # And strangers are refused again immediately.
-        with pytest.raises(websockets.exceptions.InvalidStatus):
-            await websockets.connect(url)
+        await _expect_auth_rejected(url, None)
 
     async def test_repeated_refusals_log_an_actionable_lockout_warning(
         self, paired_transport, caplog
@@ -726,12 +914,14 @@ class TestLockoutRecovery:
         store.confirm("MAC-SIDE-TOKEN")
         with caplog.at_level(logging.ERROR):
             for _ in range(5):
-                with pytest.raises(websockets.exceptions.InvalidStatus):
-                    await websockets.connect(f"{url}/?token=WRONG")
+                await _expect_auth_rejected(url, "WRONG")
         assert "PAIRING LOCKOUT" in caplog.text
-        assert "delete" in caplog.text  # tells the operator what to DO
+        assert "Pair / Replace Glasses" in caplog.text
 
-    async def test_forget_on_an_unpaired_store_is_a_no_op(self, paired_transport) -> None:
+    async def test_pair_action_on_an_unpaired_store_opens_a_fresh_window(
+        self, paired_transport
+    ) -> None:
         t, url, store = paired_transport
         assert store.token is None
-        assert t.forget_pairing() is False
+        assert t.forget_pairing() is True
+        assert store.window_open is True

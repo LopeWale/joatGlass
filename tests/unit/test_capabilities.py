@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 from joat.channels.cards import CardLog
 from joat.channels.imessage import MessageThread
@@ -56,7 +57,24 @@ class FakeReplies:
         self.selected.append((thread, trace_id))
 
 
-def make_router(tmp_path, rows=None, cards=None, replies=None):  # type: ignore[no-untyped-def]
+class FakePersonalData:
+    def __init__(self, responses):  # type: ignore[no-untyped-def]
+        self._responses = responses
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
+
+    async def call(self, method: str, body=None):  # type: ignore[no-untyped-def]
+        self.calls.append((method, body))
+        return self._responses[method]
+
+
+def bridge_response(*, calendar="full_access", reminders="full_access", result=None):  # type: ignore[no-untyped-def]
+    return SimpleNamespace(
+        authorization=SimpleNamespace(calendar=calendar, reminders=reminders),
+        result=result,
+    )
+
+
+def make_router(tmp_path, rows=None, cards=None, replies=None, personal_data=None):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
     log = CardLog()
@@ -69,6 +87,7 @@ def make_router(tmp_path, rows=None, cards=None, replies=None):  # type: ignore[
         messages=FakeMessages(rows) if rows is not None else None,  # type: ignore[arg-type]
         cards=log,
         replies=replies,  # type: ignore[arg-type]
+        personal_data=personal_data,  # type: ignore[arg-type]
     )
     return router, transport, status
 
@@ -155,12 +174,62 @@ class TestCapabilityViews:
         assert lists and "!! Adaeze · Messages" in lists[0].to_wire()["items"][0]
         assert lists[0].title == "NOTIFICATIONS"
 
-    async def test_calendar_admits_it_is_not_connected(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_calendar_directs_setup_to_the_explicit_mac_control(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path)
         await router.open("Calendar")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert any("not connected" in item for item in lists[0].items)
-        assert lists[0].title == "CALENDAR"
+        assert any("connect Calendar" in item for item in lists[0].items)
+        assert lists[0].title == "CALENDAR · SETUP"
+
+    async def test_calendar_queries_authorized_native_store_by_identifier(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        now_ms = int(time.time() * 1000)
+        personal = FakePersonalData({
+            "authorization.status": bridge_response(),
+            "calendar.listContainers": bridge_response(result=[
+                {"calendar_identifier": "cal-work", "title": "Work"},
+            ]),
+            "calendar.query": bridge_response(result=[
+                {"title": "Design review", "start_unix_ms": now_ms},
+            ]),
+        })
+        router, transport, _ = make_router(tmp_path, personal_data=personal)
+
+        await router.open("Calendar")
+
+        query = personal.calls[-1]
+        assert query[0] == "calendar.query"
+        assert query[1]["calendar_identifiers"] == ["cal-work"]
+        assert query[1]["limit"] == 5
+        rendered = [m for m in transport.sent if isinstance(m, HudList)][0]
+        assert rendered.title == "CALENDAR · 7 DAYS"
+        assert "Design review" in rendered.items[0]
+
+    async def test_tasks_queries_incomplete_reminders(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        personal = FakePersonalData({
+            "authorization.status": bridge_response(),
+            "reminders.listContainers": bridge_response(result=[
+                {"calendar_identifier": "list-home", "title": "Home"},
+            ]),
+            "reminders.query": bridge_response(result=[
+                {"title": "Buy filters"},
+            ]),
+        })
+        router, transport, _ = make_router(tmp_path, personal_data=personal)
+
+        await router.open("Tasks")
+
+        query = personal.calls[-1]
+        assert query == (
+            "reminders.query",
+            {
+                "calendar_identifiers": ["list-home"],
+                "include_completed": False,
+                "limit": 5,
+            },
+        )
+        rendered = [m for m in transport.sent if isinstance(m, HudList)][0]
+        assert rendered.title == "TASKS"
+        assert rendered.items == ["Buy filters"]
 
 
 class TestGestureReflexes:

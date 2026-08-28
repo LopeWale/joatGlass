@@ -20,6 +20,12 @@ from typing import Any, Literal
 CANVAS_WIDTH = 576
 CANVAS_HEIGHT = 288
 CANVAS_GREY_LEVELS = 16
+CONFIRM_PROMPT_MAX_UTF16_UNITS = 120
+
+
+def utf16_units(text: str) -> int:
+    """Match JavaScript String.length so the plugin cannot truncate a preview."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 class ContainerId(IntEnum):
@@ -67,6 +73,13 @@ RESUME_POLICIES: tuple[str, ...] = ("auto", "mac", "confirm")
 
 
 # ── Uplink: plugin → Mac ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class Auth:
+    """First application frame on every protected socket."""
+
+    token: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +162,10 @@ class Device:
 class Confirm:
     action_id: str
     accepted: bool
+    challenge_id: str | None = None
+    session_id: str | None = None
+    payload_digest: str | None = None
+    preview_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,12 +197,25 @@ class PairingAck:
     token: str
 
 
+@dataclass(frozen=True, slots=True)
+class G2Diagnostic:
+    """A content-free, allowlisted real-G2 support event."""
+
+    event: dict[str, str | int]
+
+
 UplinkMessage = (
-    Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck | Location
+    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck | Location | G2Diagnostic
 )
 
 
 # ── Downlink: Mac → plugin ───────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class AuthAccepted:
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": "auth.accepted"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,12 +320,36 @@ class ImuTrace:
 
 
 @dataclass(frozen=True, slots=True)
+class G2DiagnosticControl:
+    """Explicit Mac-shell opt-in for the otherwise dormant G2 trace."""
+
+    enabled: bool
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": "g2.diagnostic.control", "enabled": self.enabled}
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmRequest:
     action_id: str
     prompt: str
+    challenge_id: str
+    session_id: str
+    payload_digest: str
+    preview_digest: str
+    expires_at_ms: int
 
     def to_wire(self) -> dict[str, Any]:
-        return {"kind": "confirm.request", "actionId": self.action_id, "prompt": self.prompt}
+        return {
+            "kind": "confirm.request",
+            "actionId": self.action_id,
+            "prompt": self.prompt,
+            "challengeId": self.challenge_id,
+            "sessionId": self.session_id,
+            "payloadDigest": self.payload_digest,
+            "previewDigest": self.preview_digest,
+            "expiresAtMs": self.expires_at_ms,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,10 +370,10 @@ class Shutdown:
 
 @dataclass(frozen=True, slots=True)
 class PairingSet:
-    """Issued once, to the first remote client (TOFU — see core/pairing.py).
+    """Issued during an explicit pairing window after a null auth frame.
 
-    The plugin persists it in localStorage and presents it as ?token= on
-    every later dial; the gateway rejects remote peers without it.
+    The plugin persists it in localStorage and presents it in the first
+    application frame on later dials; the gateway rejects mismatches.
     """
 
     token: str
@@ -329,12 +383,14 @@ class PairingSet:
 
 
 DownlinkMessage = (
-    HudText
+    AuthAccepted
+    | HudText
     | HudRebuild
     | HudList
     | AudioControl
     | ImuControl
     | ImuTrace
+    | G2DiagnosticControl
     | ConfirmRequest
     | PolicySet
     | Shutdown
@@ -355,6 +411,74 @@ def _require(payload: dict[str, Any], key: str, kind: str) -> Any:
     return payload[key]
 
 
+def _trace_enum(value: Any, name: str, allowed: tuple[str, ...]) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ProtocolError(f"g2 diagnostic {name} is invalid")
+    return value
+
+
+def _trace_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+    # bool is an int subclass, but a boolean tile order is not a valid receipt.
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ProtocolError(f"g2 diagnostic {name} is invalid")
+    return value
+
+
+def _trace_shape(payload: dict[str, Any], expected: set[str]) -> None:
+    if set(payload) != expected:
+        raise ProtocolError("g2 diagnostic has unsupported fields")
+
+
+def _trace_tile_container(value: Any) -> int:
+    container_id = _trace_int(value, "containerId", minimum=4, maximum=10)
+    if container_id not in (4, 8, 9, 10):
+        raise ProtocolError("g2 diagnostic containerId is invalid")
+    return container_id
+
+
+def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
+    """Return only safe diagnostic metadata; reject arbitrary plugin fields."""
+
+    if not isinstance(event, dict):
+        raise ProtocolError("g2 diagnostic event must be an object")
+    event_type = event.get("type")
+    if event_type == "page_transition":
+        _trace_shape(event, {"type", "from", "to", "reason", "outcome"})
+        return {
+            "type": "page_transition",
+            "from": _trace_enum(event["from"], "from", ("overview", "sidebar", "list", "confirmation")),
+            "to": _trace_enum(event["to"], "to", ("overview", "sidebar", "list", "confirmation")),
+            "reason": _trace_enum(event["reason"], "reason", ("show_sidebar", "show_list", "show_overview", "show_confirmation", "dismiss_confirmation")),
+            "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed")),
+        }
+    if event_type == "gesture":
+        _trace_shape(event, {"type", "gesture", "delivery"})
+        return {
+            "type": "gesture",
+            "gesture": _trace_enum(event["gesture"], "gesture", ("tap", "double_press", "long_press", "long_press_release", "scroll_up", "scroll_down", "menu_item", "foreground_enter", "foreground_exit", "system_exit", "abnormal_exit", "imu_report", "unknown")),
+            "delivery": _trace_enum(event["delivery"], "delivery", ("sys", "text", "list", "menu")),
+        }
+    if event_type == "tile_upload":
+        _trace_shape(event, {"type", "frame", "order", "containerId", "outcome"})
+        return {
+            "type": "tile_upload",
+            "frame": _trace_int(event["frame"], "frame", minimum=1, maximum=2_147_483_647),
+            "order": _trace_int(event["order"], "order", minimum=0, maximum=3),
+            "containerId": _trace_tile_container(event["containerId"]),
+            "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed", "error")),
+        }
+    if event_type == "self_heal":
+        _trace_shape(event, {"type", "surface", "target", "decision", "containerId"})
+        return {
+            "type": "self_heal",
+            "surface": _trace_enum(event["surface"], "surface", ("overview", "sidebar", "list", "confirmation")),
+            "target": _trace_enum(event["target"], "target", ("text", "visual")),
+            "decision": _trace_enum(event["decision"], "decision", ("attempt", "recovered", "abandoned", "skipped")),
+            "containerId": _trace_int(event["containerId"], "containerId", minimum=1, maximum=10),
+        }
+    raise ProtocolError("g2 diagnostic type is invalid")
+
+
 def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
     """Turn a decoded JSON object into a typed uplink message.
 
@@ -367,6 +491,11 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
         raise ProtocolError(f"message has no string 'kind': {payload!r}")
 
     match kind:
+        case "auth":
+            token = _require(payload, "token", kind)
+            if token is not None and (not isinstance(token, str) or not token):
+                raise ProtocolError("auth token must be a non-empty string or null")
+            return Auth(token=token)
         case "hello":
             return Hello(
                 sn=_require(payload, "sn", kind),
@@ -411,6 +540,8 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             )
         case "pairing":
             return PairingAck(token=str(_require(payload, "token", kind)))
+        case "g2.diagnostic":
+            return G2Diagnostic(event=_parse_g2_diagnostic(_require(payload, "event", kind)))
         case "location":
             acc = payload.get("accuracy")
             return Location(
@@ -427,9 +558,30 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 mic=payload.get("mic"),
             )
         case "confirm":
+            action_id = _require(payload, "actionId", kind)
+            accepted = _require(payload, "accepted", kind)
+            if not isinstance(action_id, str) or not action_id:
+                raise ProtocolError("confirm actionId must be a non-empty string")
+            if not isinstance(accepted, bool):
+                raise ProtocolError("confirm accepted must be a boolean")
+            binding: dict[str, str | None] = {}
+            for wire_key, field_name in (
+                ("challengeId", "challenge_id"),
+                ("sessionId", "session_id"),
+                ("payloadDigest", "payload_digest"),
+                ("previewDigest", "preview_digest"),
+            ):
+                value = payload.get(wire_key)
+                if value is not None and (not isinstance(value, str) or not value):
+                    raise ProtocolError(f"confirm {wire_key} must be a non-empty string")
+                binding[field_name] = value
             return Confirm(
-                action_id=_require(payload, "actionId", kind),
-                accepted=bool(_require(payload, "accepted", kind)),
+                action_id=action_id,
+                accepted=accepted,
+                challenge_id=binding["challenge_id"],
+                session_id=binding["session_id"],
+                payload_digest=binding["payload_digest"],
+                preview_digest=binding["preview_digest"],
             )
         case "policy":
             resume = payload.get("resume")

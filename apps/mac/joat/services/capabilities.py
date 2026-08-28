@@ -16,11 +16,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
+from typing import Any
 
 from ..channels.cards import CardLog
 from ..channels.imessage import IMessageStore, MessageThread
 from ..core.protocol import HudList, InputEvent
 from ..core.interfaces import GlassesTransport
+from ..native.bridge import NativeBridgeClient, NativeBridgeError, NativeBridgeUnavailable
 from .hud import HudWriter
 from .status import StatusPublisher
 from .message_reply import MessageReplyController
@@ -51,6 +54,7 @@ class CapabilityRouter:
         messages: IMessageStore | None,
         cards: CardLog,
         replies: MessageReplyController | None = None,
+        personal_data: NativeBridgeClient | None = None,
     ) -> None:
         self._hud = hud
         self._transport = transport
@@ -58,6 +62,7 @@ class CapabilityRouter:
         self._messages = messages
         self._cards = cards
         self._replies = replies
+        self._personal_data = personal_data
         self._message_rows: list[MessageThread] = []
 
     def on_input(self, event: InputEvent) -> None:
@@ -93,7 +98,9 @@ class CapabilityRouter:
                     ],
                 )
             case "Calendar":
-                await self._show_focus("CALENDAR", ["Calendar is not connected yet."])
+                await self._show_calendar()
+            case "Tasks" | "Reminders":
+                await self._show_tasks()
             case _:
                 log.info("unknown capability requested: %s", name)
 
@@ -153,6 +160,101 @@ class CapabilityRouter:
             title="NOTIFICATIONS",
             hint=BACK_HINT,
         ))
+
+    async def _show_calendar(self) -> None:
+        client = self._personal_data
+        if client is None:
+            await self._show_focus(
+                "CALENDAR · SETUP",
+                ["Open JOAT on the Mac to connect Calendar."],
+            )
+            return
+        try:
+            status = await client.call("authorization.status")
+            if status.authorization.calendar != "full_access":
+                await self._show_focus(
+                    "CALENDAR · SETUP",
+                    ["Open JOAT on the Mac and connect Calendar."],
+                )
+                return
+            containers = await client.call("calendar.listContainers")
+            calendars = containers.result if isinstance(containers.result, list) else []
+            identifiers = [
+                item["calendar_identifier"]
+                for item in calendars
+                if isinstance(item, dict) and isinstance(item.get("calendar_identifier"), str)
+            ]
+            now_ms = int(time.time() * 1000)
+            upcoming = await client.call(
+                "calendar.query",
+                {
+                    "start_unix_ms": now_ms,
+                    "end_unix_ms": now_ms + 7 * 24 * 60 * 60 * 1000,
+                    "calendar_identifiers": identifiers,
+                    "limit": 5,
+                },
+            )
+            events = upcoming.result if isinstance(upcoming.result, list) else []
+            rows = [self._calendar_row(item) for item in events if isinstance(item, dict)]
+            await self._show_focus("CALENDAR · 7 DAYS", rows or ["No upcoming events."])
+        except (NativeBridgeUnavailable, NativeBridgeError):
+            await self._show_focus(
+                "CALENDAR · UNAVAILABLE",
+                ["Check Calendar access in JOAT on the Mac."],
+            )
+
+    async def _show_tasks(self) -> None:
+        client = self._personal_data
+        if client is None:
+            await self._show_focus(
+                "TASKS · SETUP",
+                ["Open JOAT on the Mac to connect Reminders."],
+            )
+            return
+        try:
+            status = await client.call("authorization.status")
+            if status.authorization.reminders != "full_access":
+                await self._show_focus(
+                    "TASKS · SETUP",
+                    ["Open JOAT on the Mac and connect Reminders."],
+                )
+                return
+            containers = await client.call("reminders.listContainers")
+            lists = containers.result if isinstance(containers.result, list) else []
+            identifiers = [
+                item["calendar_identifier"]
+                for item in lists
+                if isinstance(item, dict) and isinstance(item.get("calendar_identifier"), str)
+            ]
+            pending = await client.call(
+                "reminders.query",
+                {
+                    "calendar_identifiers": identifiers,
+                    "include_completed": False,
+                    "limit": 5,
+                },
+            )
+            reminders = pending.result if isinstance(pending.result, list) else []
+            rows = [
+                str(item.get("title") or "Untitled reminder")
+                for item in reminders
+                if isinstance(item, dict)
+            ]
+            await self._show_focus("TASKS", rows or ["No incomplete reminders."])
+        except (NativeBridgeUnavailable, NativeBridgeError):
+            await self._show_focus(
+                "TASKS · UNAVAILABLE",
+                ["Check Reminders access in JOAT on the Mac."],
+            )
+
+    @staticmethod
+    def _calendar_row(item: dict[str, Any]) -> str:
+        title = str(item.get("title") or "Untitled event")
+        start = item.get("start_unix_ms")
+        if not isinstance(start, (int, float)):
+            return title
+        when = datetime.fromtimestamp(start / 1000).astimezone().strftime("%a %H:%M")
+        return f"{when} · {title}"
 
     async def _show_focus(self, title: str, items: list[str]) -> None:
         """Render non-dashboard capability states in the shared focus shell."""

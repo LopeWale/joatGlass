@@ -100,6 +100,40 @@ Expected trace stages are `selected`, `confirmation-requested`,
 only action IDs, character counts, and a recipient hash—not message text or the
 recipient handle.
 
+### Opt-in G2 diagnostic receipt
+
+The Mac shell’s **Record G2 trace** switch is off by default. When enabled it
+restarts the engine with `--g2-diagnostics`; the gateway then enables the
+plugin capture for that authenticated session. The trace contains only page
+names, gesture classes, four-tile order/results, and self-heal decisions —
+never HUD text, pixels, audio, URLs, tokens, device IDs, or input payloads.
+Use **Export Redacted G2 Trace…** in JOAT.app to choose an archive location.
+
+The following provides the simulator receipt using exactly that production
+gateway and protocol, but writes to a disposable path instead of the Mac-shell
+support file:
+
+```bash
+# terminal 1
+cd apps/hub-plugin
+VITE_MAC_WS_URL=ws://127.0.0.1:18791/glasses npm run dev -- --host 127.0.0.1 --port 5193
+
+# terminal 2
+PYTHONPATH=apps/mac .venv/bin/python -u scripts/simulator_g2_diagnostic_trace.py \
+  --port 18791 --out /tmp/joat-g2-diagnostic.json
+
+# terminal 3
+evenhub-simulator http://127.0.0.1:5193 --automation-port 9901
+curl -sS -X POST http://127.0.0.1:9901/api/input \
+  -H 'Content-Type: application/json' -d '{"action":"click"}'
+
+jq . /tmp/joat-g2-diagnostic.json
+```
+
+The receipt must contain `page_transition`, `gesture`, and four ordered
+`tile_upload` records. Self-heal decisions are covered by focused tests; do
+not manufacture a failed HUD page merely to collect them from a simulator.
+
 ### Simulator findings (verified against 0.9.3 — expect these, they are not bugs)
 
 - **No IMU.** The host bridge implements only `getUserInfo`, `getGlassesInfo`,

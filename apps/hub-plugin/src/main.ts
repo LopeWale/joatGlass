@@ -16,6 +16,7 @@ import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
 import { ContainerId, type DownlinkMessage } from './types';
 import { runVisualConfirmationFixture } from './VisualFixtures';
+import { MacG2DiagnosticTrace } from './G2DiagnosticTrace';
 
 /**
  * Comma-separated candidate brain URLs — every host must be an exact-match
@@ -66,6 +67,9 @@ async function boot(): Promise<void> {
     // Older host: WebView storage remains the fallback.
   }
   const link = new MacLink({ urls: MAC_WS_URLS, token });
+  // Disabled by default. Only the local Mac shell can enable this support
+  // capture, and the gateway independently redacts every event it accepts.
+  const g2Diagnostics = new MacG2DiagnosticTrace(link);
 
   // A token the Mac no longer honours must not outlive the session, or
   // every relaunch dials with it and is refused again.
@@ -100,7 +104,8 @@ async function boot(): Promise<void> {
   const hud = new HudPresenter(
     client,
     layouts,
-    new HudVisualSurface(client, new HudCanvasRenderer()),
+    new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics),
+    g2Diagnostics,
   );
   const audio = new AudioStreamer(client, link);
   const imu = new ImuMonitor(client, link);
@@ -137,7 +142,7 @@ async function boot(): Promise<void> {
     },
   };
 
-  new EventRouter(client, link, audio, imu, menu, lifecycle).attach();
+  new EventRouter(client, link, audio, imu, menu, lifecycle, g2Diagnostics).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
   // production presenter/menu/event methods as the real gesture and Mac paths;
@@ -154,6 +159,9 @@ async function boot(): Promise<void> {
 
   link.onMessage(async (msg: DownlinkMessage) => {
     switch (msg.kind) {
+      case 'g2.diagnostic.control':
+        g2Diagnostics.setEnabled(msg.enabled);
+        break;
       case 'hud.text':
         // Status-bar writes become the STATE WORD, not the whole line: the
         // bar has one owner (Chrome), so the clock and battery survive what
@@ -196,7 +204,15 @@ async function boot(): Promise<void> {
         const rendered = hud.showConfirmation(msg.prompt, msg.actionId);
         imu.prepare(msg.actionId, (accepted) => {
           void hud.dismissConfirmation(msg.actionId);
-          link.send({ kind: 'confirm', actionId: msg.actionId, accepted });
+          link.send({
+            kind: 'confirm',
+            actionId: msg.actionId,
+            accepted,
+            challengeId: msg.challengeId,
+            sessionId: msg.sessionId,
+            payloadDigest: msg.payloadDigest,
+            previewDigest: msg.previewDigest,
+          });
         });
         let visible = false;
         try {

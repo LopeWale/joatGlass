@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 
 from ..channels.imessage import MessageThread
 from ..channels.message_sender import MessageSendError
 from ..core.interfaces import MessageSender
+from ..core.confirmation import ConfirmationResult
+from ..core.protocol import CONFIRM_PROMPT_MAX_UTF16_UNITS, utf16_units
+from ..persistence.actions import (
+    ActionDraft,
+    ActionJournal,
+    ConfirmationEvidence,
+)
 
 log = logging.getLogger(__name__)
 
-Confirm = Callable[[str, str, float], Awaitable[bool]]
+Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
 _REPLY = re.compile(r"^reply(?:\s+(?:saying|with))?\s+(?P<body>.+)$", re.IGNORECASE)
 # The plugin begins its eight-second decision clock only after the complete
 # frame is visible. The gateway envelope also has to include that BLE paint.
 CONFIRM_TRANSPORT_SECONDS = 12.0
-MAX_CONFIRM_PROMPT_CHARS = 120
 
 
 def _recipient_key(handle: str) -> str:
@@ -29,9 +37,15 @@ def _recipient_key(handle: str) -> str:
 class MessageReplyController:
     """One selected conversation; one explicitly confirmed send at a time."""
 
-    def __init__(self, sender: MessageSender, confirm: Confirm) -> None:
+    def __init__(
+        self,
+        sender: MessageSender,
+        confirm: Confirm,
+        journal: ActionJournal | None = None,
+    ) -> None:
         self._sender = sender
         self._confirm = confirm
+        self._journal = journal
         self._selection: tuple[MessageThread, str] | None = None
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
@@ -54,9 +68,10 @@ class MessageReplyController:
             return "Say what you want the reply to contain."
 
         thread, trace_id = self._selection
-        action_id = f"message-reply:{trace_id}:{secrets.token_hex(4)}"
+        idempotency_key = f"message-reply:{trace_id}:{secrets.token_hex(4)}"
+        action_id = idempotency_key
         prompt = f"Send to {thread.sender}? “{body}”"
-        if len(prompt) > MAX_CONFIRM_PROMPT_CHARS:
+        if utf16_units(prompt) > CONFIRM_PROMPT_MAX_UTF16_UNITS:
             log.info(
                 "message reply trace=%s stage=draft-rejected reason=confirmation-overflow chars=%d",
                 action_id,
@@ -66,28 +81,122 @@ class MessageReplyController:
                 "Reply is too long for the confirmation screen. "
                 "Shorten it and try again."
             )
+        payload = json.dumps(
+            {"body": body, "recipient": thread.handle},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        payload_digest = hashlib.sha256(payload).digest()
+        if self._journal is not None:
+            now_us = time.time_ns() // 1000
+            durable = self._journal.create_draft(
+                ActionDraft(
+                    kind="message.reply",
+                    canonical_payload=payload,
+                    target_digest=hashlib.sha256(
+                        b"joat-message-recipient-v1\0" + thread.handle.encode("utf-8")
+                    ).digest(),
+                    idempotency_key=idempotency_key,
+                    origin_kind="messages.selection",
+                    origin_id=trace_id,
+                    origin_ordinal=now_us,
+                ),
+                now_us=now_us,
+            )
+            action_id = durable.action_id
+            self._journal.mark_ready(
+                action_id,
+                reason_code="message_schema_valid",
+                now_us=now_us + 1,
+            )
         log.info(
             "message reply trace=%s stage=confirmation-requested recipient=%s chars=%d",
             action_id,
             _recipient_key(thread.handle),
             len(body),
         )
-        accepted = await self._confirm(
+        decision = await self._confirm(
             action_id,
             prompt,
             CONFIRM_TRANSPORT_SECONDS,
+            payload_digest=payload_digest.hex(),
         )
+        accepted = decision.accepted if isinstance(decision, ConfirmationResult) else bool(decision)
+        if self._journal is not None:
+            if not isinstance(decision, ConfirmationResult):
+                self._journal.cancel_unconfirmed(
+                    action_id,
+                    reason_code="confirmation_missing_evidence",
+                    now_us=time.time_ns() // 1000,
+                )
+                self._journal.purge_payload(action_id)
+                accepted = False
+            else:
+                self._journal.record_confirmation(
+                    action_id,
+                    ConfirmationEvidence(
+                        challenge_id=decision.challenge_id,
+                        challenge_token=decision.challenge_id,
+                        session_id=decision.session_id,
+                        pairing_identity_digest=decision.pairing_identity_digest,
+                        authorization_digest=decision.authorization_digest,
+                        payload_digest=decision.payload_digest,
+                        preview_digest=decision.preview_digest,
+                        issued_at_us=decision.issued_at_us,
+                        expires_at_us=decision.expires_at_us,
+                        preview_completed_at_us=decision.preview_completed_at_us,
+                        decided_at_us=decision.decided_at_us,
+                        accepted=decision.accepted,
+                    ),
+                )
+                accepted = self._journal.get(action_id).state == "approved"
         if not accepted:
             log.info("message reply trace=%s stage=cancelled", action_id)
+            if self._journal is not None:
+                state = self._journal.get(action_id).state
+                if state in ("rejected", "expired"):
+                    self._journal.purge_payload(action_id)
             return "Reply cancelled."
+        attempt = None
+        if self._journal is not None:
+            attempt = self._journal.begin_attempt(
+                action_id,
+                adapter="messages.applescript",
+                adapter_version="1",
+                request_id=f"messages:{action_id}",
+                now_us=time.time_ns() // 1000,
+            )
         try:
             await self._sender.send(thread.handle, body)
         except MessageSendError as exc:
+            if self._journal is not None and attempt is not None:
+                self._journal.record_failure(
+                    action_id,
+                    attempt.attempt_id,
+                    error_code=type(exc).__name__,
+                    possible_external_commit=exc.possible_external_commit,
+                    now_us=time.time_ns() // 1000,
+                )
+                if not exc.possible_external_commit:
+                    self._journal.purge_payload(action_id)
             log.warning(
                 "message reply trace=%s stage=send-failed error=%s",
                 action_id,
                 type(exc).__name__,
             )
             return f"Could not send to {thread.sender}. Check Messages on your Mac."
-        log.info("message reply trace=%s stage=sent", action_id)
-        return f"Sent to {thread.sender}."
+        if self._journal is not None and attempt is not None:
+            self._journal.record_success(
+                action_id,
+                attempt.attempt_id,
+                outcome="submitted_to_messages",
+                verification_level="delivery_unverified",
+                evidence_digest=hashlib.sha256(
+                    b"joat-messages-osascript-exit-zero-v1\0" + action_id.encode("utf-8")
+                ).digest(),
+                now_us=time.time_ns() // 1000,
+            )
+            self._journal.purge_payload(action_id)
+        log.info("message reply trace=%s stage=submitted delivery=unverified", action_id)
+        return f"Submitted to Messages for {thread.sender}; delivery unverified."

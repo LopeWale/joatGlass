@@ -10,6 +10,15 @@ from ..core.interfaces import MessageSender
 class MessageSendError(RuntimeError):
     """Messages.app did not accept the outbound message."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        possible_external_commit: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.possible_external_commit = possible_external_commit
+
 
 _SEND_SCRIPT = """
 on run argv
@@ -37,16 +46,25 @@ class MessagesAppSender(MessageSender):
         handle = recipient.strip()
         body = text.strip()
         if not handle or not body:
-            raise MessageSendError("recipient and message are required")
-        process = await asyncio.create_subprocess_exec(
-            "osascript",
-            "-e",
-            _SEND_SCRIPT,
-            handle,
-            body,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+            raise MessageSendError(
+                "recipient and message are required",
+                possible_external_commit=False,
+            )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "osascript",
+                "-e",
+                _SEND_SCRIPT,
+                handle,
+                body,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise MessageSendError(
+                "Messages executor could not start",
+                possible_external_commit=False,
+            ) from exc
         _stdout, stderr = await process.communicate()
         if process.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()
