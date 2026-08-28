@@ -26,7 +26,7 @@ from .status import StatusPublisher
 
 log = logging.getLogger(__name__)
 
-BACK_HINT = "left x2 back"
+BACK_HINT = "left x2 overview"
 
 
 def _age(unix: float) -> str:
@@ -72,7 +72,6 @@ class CapabilityRouter:
             case "Notifications":
                 await self._show_notifications()
             case "Debate":
-                await self._hud.status("JOAT · debate")
                 await self._show_focus(
                     "DEBATE",
                     [
@@ -81,14 +80,12 @@ class CapabilityRouter:
                     ],
                 )
             case "Calendar":
-                await self._hud.status("JOAT · calendar")
                 await self._show_focus("CALENDAR", ["Calendar is not connected yet."])
             case _:
                 log.info("unknown capability requested: %s", name)
 
     async def _show_messages(self) -> None:
         if self._messages is None or not self._messages.available:
-            await self._hud.status("JOAT · messages setup")
             await self._show_focus(
                 "MESSAGES · SETUP",
                 ["Messages needs Full Disk Access on the Mac."],
@@ -96,12 +93,10 @@ class CapabilityRouter:
             return
         rows = await asyncio.to_thread(self._messages.recent, 5)
         if not rows:
-            await self._hud.status("JOAT · messages")
             await self._show_focus("MESSAGES", ["No recent messages."])
             return
-        await self._hud.status("JOAT · messages")
         await self._transport.send(HudList(
-            items=[f"{sender} · {text}" for sender, text, _ in rows],
+            items=[f"[{_age(at)}] {sender} · {text}" for sender, text, at in rows],
             title="MESSAGES",
             hint=BACK_HINT,
         ))
@@ -109,10 +104,8 @@ class CapabilityRouter:
     async def _show_notifications(self) -> None:
         entries = self._cards.recent(5)
         if not entries:
-            await self._hud.status("JOAT · notifications")
             await self._show_focus("NOTIFICATIONS", ["Nothing shown recently."])
             return
-        await self._hud.status("JOAT · notifications")
         await self._transport.send(HudList(
             items=[f"[{_age(at)}] {card.splitlines()[0]}" for at, card in entries],
             title="NOTIFICATIONS",

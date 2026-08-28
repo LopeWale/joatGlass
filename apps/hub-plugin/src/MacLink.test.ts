@@ -99,6 +99,13 @@ describe('MacLink reconnect storm', () => {
    */
   const SETTLE_MS = 1_000; // base backoff 500ms + up to 20% jitter
 
+  it('retains a fast connection state for a HUD observer created later', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    sockets[0]!.open();
+    expect(link.linkState).toBe('connected');
+  });
+
   it('abandons the previous socket when dialing again', () => {
     const link = new MacLink({ urls: ['ws://m:1/g'] });
     link.connect();

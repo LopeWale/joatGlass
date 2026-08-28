@@ -26,18 +26,15 @@ const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'confirm', label: 'Resume mic: ask me first' },
 ];
 
-const CAPABILITY_SURFACE = {
-  title: 'CAPABILITIES',
-  hint: 'tap open · left x2 back',
-} as const;
-
 const SETTINGS_SURFACE = {
   title: 'LISTENING RESUME',
-  hint: 'tap apply · left x2 back',
+  hint: 'tap apply · left x2 overview',
 } as const;
 
 export class CapabilityMenu {
   private view: 'closed' | 'caps' | 'settings' | 'data' = 'closed';
+  private selectedIndex = 0;
+  private pendingTitle?: string;
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
 
@@ -51,15 +48,25 @@ export class CapabilityMenu {
     return this.view !== 'closed';
   }
 
+  /** A capability response is valid only for the data view that requested it.
+   * This prevents a slow Mac reply from reopening a dismissed page or
+   * replacing a newer capability selection. */
+  acceptsList(title?: string): boolean {
+    if (this.view !== 'data' || !this.pendingTitle || !title) return false;
+    const normalized = title.trim().toUpperCase();
+    return normalized === this.pendingTitle || normalized.startsWith(`${this.pendingTitle} ·`);
+  }
+
   /** Left double-tap. Closed: open the capability menu. Anywhere else: BACK
    *  home — one gesture, one meaning, matching the hint line. */
-  toggle(): void {
+  async toggle(): Promise<void> {
     if (this.view === 'closed') {
       this.view = 'caps';
-      void this.hud.setStatus('JOAT · menu');
-      void this.hud.showList([...CAPABILITIES], CAPABILITY_SURFACE);
+      this.selectedIndex = 0;
+      const shown = await this.hud.showSidebar([...CAPABILITIES], this.selectedIndex);
+      if (!shown && this.view === 'caps') this.view = 'closed';
     } else {
-      void this.close();
+      await this.close();
     }
   }
 
@@ -74,7 +81,37 @@ export class CapabilityMenu {
       return true; // scrolls: host moves the highlight; keep them off the uplink
     }
     const index = list.currentSelectItemIndex ?? 0;
+    this.selectedIndex = index;
+    return this.select(index);
+  }
 
+  /** Custom image surfaces use the transparent text capture layer, so JOAT
+   * owns selection movement instead of the firmware List widget. */
+  handleScroll(eventType: number): boolean {
+    if (this.view === 'closed') return false;
+    const delta = eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+      ? 1
+      : eventType === OsEventTypeList.SCROLL_TOP_EVENT
+        ? -1
+        : 0;
+    if (delta === 0) return true;
+    if (this.view === 'data') {
+      void this.hud.moveSelection(delta);
+      return true;
+    }
+    const rows = this.view === 'settings' ? POLICY_ROWS : CAPABILITIES;
+    this.selectedIndex = Math.max(0, Math.min(rows.length - 1, this.selectedIndex + delta));
+    void this.hud.setSelection(this.selectedIndex);
+    return true;
+  }
+
+  /** Right temple/ring click selects the highlighted custom-rendered row. */
+  handleClick(): boolean {
+    if (this.view === 'closed' || this.view === 'data') return false;
+    return this.select(this.selectedIndex);
+  }
+
+  private select(index: number): boolean {
     if (this.view === 'settings') {
       const row = POLICY_ROWS[index];
       if (row) {
@@ -87,8 +124,9 @@ export class CapabilityMenu {
 
     const picked = CAPABILITIES[index];
     if (picked === 'Settings') {
+      this.pendingTitle = undefined;
       this.view = 'settings';
-      void this.hud.setStatus('JOAT · settings (tap to pick)');
+      this.selectedIndex = 0;
       void this.hud.showList(POLICY_ROWS.map((r) => this.label(r)), SETTINGS_SURFACE);
       return true;
     }
@@ -97,6 +135,11 @@ export class CapabilityMenu {
       // with hud.list / hud.text, which lands in the 'data' state where
       // double-tap still means back.
       this.view = 'data';
+      this.pendingTitle = picked.toUpperCase();
+      void this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
+        title: picked.toUpperCase(),
+        hint: 'left x2 overview',
+      });
       this.link.send({
         kind: 'input',
         event: { containerName: 'capmenu', eventType: 0, selectedIndex: index, selectedName: picked },
@@ -112,10 +155,12 @@ export class CapabilityMenu {
 
   private async close(): Promise<void> {
     this.view = 'closed';
+    this.selectedIndex = 0;
+    this.pendingTitle = undefined;
     // Restore a LIVE home, not a souvenir of the menu — a stale status line
     // over a blank page reads as a dead assistant (observed on hardware).
-    await this.hud.setStatus(this.micIsOpen() ? 'JOAT · listening' : 'JOAT · mic off');
     await this.hud.showDefault();
+    await this.hud.setStatus(this.micIsOpen() ? 'JOAT · listening' : 'JOAT · mic off');
     // HudPresenter restores the buffered dashboard atomically. Asking the Mac
     // to repaint here used to overwrite a newer card with an older last_reply.
   }

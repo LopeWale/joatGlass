@@ -18,7 +18,7 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from ..services.roundtable import failure_notice
 
@@ -52,18 +52,31 @@ class SubprocessAgent:
 
     def __init__(self, command: list[str], env_strip: tuple[str, ...] = (),
                  timeout_s: float = 240.0, noise: re.Pattern[str] | None = None,
-                 name: str | None = None) -> None:
+                 name: str | None = None,
+                 model: Callable[[], str | None] | None = None,
+                 model_flag: str = "-m") -> None:
         self._command = command
         self._name = name or os.path.basename(command[0])
         self._env_strip = env_strip
         self._timeout_s = timeout_s
         self._noise = noise
+        # Read PER CALL, not at construction. Boot-time capture is what made
+        # the model a launch flag: the wearer could not change a seat without
+        # restarting the engine. A provider returning None passes no flag and
+        # leaves the tool on its own default.
+        self._model = model
+        self._model_flag = model_flag
+
+    def _argv(self, prompt: str) -> list[str]:
+        chosen = self._model() if self._model is not None else None
+        flag = [self._model_flag, chosen] if chosen else []
+        return [*self._command, *flag, prompt]
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         env = {k: v for k, v in os.environ.items() if k not in self._env_strip}
         env["OTEL_SDK_DISABLED"] = "true"
         proc = await asyncio.create_subprocess_exec(
-            *self._command, prompt,
+            *self._argv(prompt),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             stdin=asyncio.subprocess.DEVNULL,
@@ -142,18 +155,26 @@ class SubprocessAgent:
         return bool(self._noise and self._noise.match(line.strip()))
 
 
-def proposer(model: str | None = None) -> SubprocessAgent | None:
-    """Codex proposes. Read-only sandbox; model pinned the same way the
-    collab bridge pins it (spark until terra credits reset)."""
+def proposer(model: Callable[[], str | None] | None = None) -> SubprocessAgent | None:
+    """Codex proposes, in a read-only sandbox.
+
+    `model` is a late-bound reader (normally ModelRegistry.provider("codex"))
+    so a switch takes effect on the next turn. With none supplied it falls
+    back to the boot-time env pin, preserving the previous behaviour.
+    """
     binary = shutil.which("codex")
     if binary is None:
         return None
-    codex_model = model or os.environ.get("CODEX_MODEL", "gpt-5.3-codex-spark")
+    if model is None:
+        pinned = os.environ.get("CODEX_MODEL", "gpt-5.3-codex-spark")
+        model = lambda: pinned  # noqa: E731 - a constant provider reads clearer here
     return SubprocessAgent(
-        [binary, "exec", "-m", codex_model, "-s", "read-only"],
+        [binary, "exec", "-s", "read-only"],
         env_strip=("OPENAI_API_KEY",),
         noise=_CODEX_NOISE,
         name="codex",
+        model=model,
+        model_flag="-m",
     )
 
 
@@ -161,7 +182,7 @@ def proposer(model: str | None = None) -> SubprocessAgent | None:
 _CLAUDE_NOISE = re.compile(r"^Client\.\w+\(\) called but server does not advertise")
 
 
-def critic() -> SubprocessAgent | None:
+def critic(model: Callable[[], str | None] | None = None) -> SubprocessAgent | None:
     """Claude critiques, via the official binary only (RULES.md #9).
 
     ANTHROPIC_API_KEY is stripped so the critic always runs on the
@@ -171,5 +192,8 @@ def critic() -> SubprocessAgent | None:
     binary = find_claude_binary()
     if binary is None:
         return None
+    # `claude --model <alias|full-name>` (verified against --help). No
+    # provider, or one returning None, leaves the CLI on its own default.
     return SubprocessAgent([binary, "-p"], env_strip=("ANTHROPIC_API_KEY",),
-                           noise=_CLAUDE_NOISE, name="claude")
+                           noise=_CLAUDE_NOISE, name="claude",
+                           model=model, model_flag="--model")

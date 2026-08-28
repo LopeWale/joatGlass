@@ -68,6 +68,7 @@ export class Chrome {
 
   setMic(open: boolean): void {
     this.mic = open;
+    this.hud.setMicState(open);
     void this.paint();
   }
 

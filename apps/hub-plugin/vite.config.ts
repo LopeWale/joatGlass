@@ -22,6 +22,7 @@ export default defineConfig({
     outDir: 'dist',
     // The plugin runs in the Even app's iOS WebView, not a desktop browser.
     target: 'safari15',
-    sourcemap: true,
+    // DEV visual fixtures must not be recoverable from a production map.
+    sourcemap: false,
   },
 });

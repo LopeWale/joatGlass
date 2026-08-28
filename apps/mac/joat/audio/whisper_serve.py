@@ -229,6 +229,30 @@ class WhisperServeEngine(SttEngine):
 
     # ── internals ────────────────────────────────────────────────────────────
 
+    async def set_model(self, model: str) -> bool:
+        """Swap the resident model, keeping the old one if the new one fails.
+
+        Unlike a debate seat — where the model is just an argv field on the
+        next call — serve holds weights in the ANE, so switching means
+        killing and respawning, and the first use of an undownloaded model
+        also downloads it. Failure is the case that matters: an unknown name
+        leaves serve unable to start, and a wearer whose glasses have gone
+        silently deaf cannot ask for the old model back. So a failed switch
+        restores the previous one before returning False.
+        """
+        if self._external:
+            log.info("STT model is owned by an external server — not switching")
+            return False
+        if model == self._model:
+            return True
+        previous, self._model = self._model, model
+        if await self._respawn():
+            log.info("whisper serve now on %s", model)
+            return True
+        self._model = previous
+        log.warning("whisper serve could not load %s — restoring %s", model, previous)
+        return await self._respawn()
+
     async def _respawn(self) -> bool:
         if self._external:
             return False  # nothing we own to restart

@@ -24,7 +24,12 @@ function make(menuConsumesLists = false) {
     confirmByTap: vi.fn(),
     declineByTap: vi.fn(() => false),
   };
-  const menu = { toggle: vi.fn(), handleList: vi.fn(() => menuConsumesLists) };
+  const menu = {
+    toggle: vi.fn(),
+    handleList: vi.fn(() => menuConsumesLists),
+    handleScroll: vi.fn(() => menuConsumesLists),
+    handleClick: vi.fn(() => menuConsumesLists),
+  };
   const shutDownPageContainer = vi.fn(async (_mode: number) => true);
   const lifecycle: LifecycleHandler = {
     onForegroundEnter: vi.fn(),
@@ -227,6 +232,21 @@ describe('EventRouter — text and list', () => {
     expect(sent).toHaveLength(1);
     // Clicks never arrive as textEvent, so this must not confirm.
     expect(imu.confirmByTap).not.toHaveBeenCalled();
+  });
+
+  it('custom-surface scrolls are consumed by the open capability menu', () => {
+    const { fire, sent, menu } = make(true);
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(menu.handleScroll).toHaveBeenCalledWith(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(sent).toEqual([]);
+  });
+
+  it('right click selects the custom menu row instead of confirming or relaying', () => {
+    const { fire, sent, menu, imu } = make(true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    expect(menu.handleClick).toHaveBeenCalledTimes(1);
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
   });
 
   it('list events: consumed by an open menu, relayed otherwise', () => {

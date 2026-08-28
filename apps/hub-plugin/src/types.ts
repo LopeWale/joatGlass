@@ -13,21 +13,14 @@ export const ContainerId = {
   Context: 5,
   Tray: 6,
   Hint: 7,
+  VisualTopRight: 8,
+  VisualBottomLeft: 9,
+  VisualBottomRight: 10,
 } as const;
 export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
-
-/**
- * Confirmation prompt hint. Lives here, not in main.ts, so DeviceMonitor can
- * use it without a circular import.
- *
- * Names every implemented outcome: the right temple is always present, the
- * ring is optional, nod thresholds are still uncalibrated, and left is an
- * explicit refusal rather than silence.
- */
-export const CONFIRM_HINT = 'RIGHT/RING/NOD accept · LEFT cancel · 8s';
 
 /**
  * How listening resumes after the wearer puts the glasses back on.

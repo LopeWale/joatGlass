@@ -46,6 +46,9 @@ from .services.capabilities import CapabilityRouter
 from .services.session import (
     DebateSession, Session, SessionManager, seat_participants,
 )
+from .services.models import (
+    ModelRegistry, default_slots, handle_model_command,
+)
 from .services.sinks import Broadcast, DebateStateSink, HudSink, TerminalSink
 from .verifier.fetcher import fetch_page_text, wayback_page_text
 from .verifier.nli import MiniCheckJudge, minicheck_available
@@ -166,11 +169,30 @@ async def main() -> None:
     # a daemon that may simply not be installed. OpenClaw is the optional
     # third seat, so it is probed rather than assumed — an unreachable
     # gateway costs the debate a voice, never the debate itself.
+    # Models the wearer can change by voice while this is running. Slots are
+    # read PER TURN, so a switch lands on the next turn instead of the next
+    # launch. Whisper is the one that needs work to apply: it holds weights
+    # in a resident process, so its slot respawns serve and rolls back if
+    # the new model will not load.
+    async def _switch_stt(model: str | None) -> bool:
+        setter = getattr(stt, "set_model", None)
+        if model is None or setter is None:
+            return False
+        result: bool = await setter(model)
+        return result
+
+    models = ModelRegistry(default_slots(
+        codex_default=os.environ.get("CODEX_MODEL", "gpt-5.3-codex-spark"),
+        stt_default=args.stt_model,
+        stt_apply=_switch_stt,
+    ))
+    log.info("switchable models — %s", models.summary())
+
     openclaw = OpenClawAgent()
     openclaw_up = openclaw.available()
     seats: list[tuple[str, str, object]] = [
-        ("codex", "proposer", proposer()),
-        ("claude", "critic", critic()),
+        ("codex", "proposer", proposer(models.provider("codex"))),
+        ("claude", "critic", critic(models.provider("claude"))),
         ("openclaw", "third opinion", openclaw if openclaw_up else None),
     ]
     seated = [(name, role, a) for name, role, a in seats if a]
@@ -218,7 +240,8 @@ async def main() -> None:
     )
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,
-        sessions=sessions, wake_words=wake_words, status=status
+        sessions=sessions, wake_words=wake_words, status=status,
+        commands=lambda text: handle_model_command(text, models),
     )
     orchestrator.attach()
 

@@ -126,6 +126,7 @@ export class EventRouter {
       // Long-press first: on a text-capture page the SDK delivers 9/10
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
+      if (this.menu.handleScroll(event.textEvent.eventType ?? 0)) return;
       // Scrolls and clicks: clicks on a text container arrive as sysEvent,
       // so what reaches this line is a scroll.
       this.link.send({
@@ -200,9 +201,10 @@ export class EventRouter {
     }
 
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      // Left temple: our settings menu. Consumed locally, never relayed.
+      // Left temple: the transient capability sidebar. Consumed locally,
+      // never relayed to the Mac or confused with the OS exit gesture.
       if (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L) {
-        this.menu.toggle();
+        void this.menu.toggle();
         return;
       }
       // Anything else: the SDK's own exit dialog. The platform expects every
@@ -210,6 +212,15 @@ export class EventRouter {
       // Mode 1 shows a confirmation — do NOT tear down here, the wearer can
       // still cancel. Cleanup happens in onExit when SYSTEM_EXIT arrives.
       void this.client.require().shutDownPageContainer(1);
+      return;
+    }
+
+    if (
+      type === OsEventTypeList.CLICK_EVENT &&
+      (source === EventSourceType.TOUCH_EVENT_FROM_RING ||
+        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) &&
+      this.menu.handleClick()
+    ) {
       return;
     }
 

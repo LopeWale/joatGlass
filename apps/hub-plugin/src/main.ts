@@ -2,6 +2,8 @@ import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
+import { HudCanvasRenderer } from './HudCanvasRenderer';
+import { HudVisualSurface } from './HudVisualSurface';
 import { Chrome } from './Chrome';
 import { TOKEN_KEY, handlePairingOffer, loadToken } from './Pairing';
 import { LocationMonitor } from './LocationMonitor';
@@ -27,6 +29,17 @@ const MAC_WS_URLS = ((): readonly string[] => {
   // Fall back AFTER filtering: an empty or whitespace-only env var survives
   // `??` and would otherwise leave zero candidates and abort boot.
   return parsed.length > 0 ? parsed : ['wss://mac.local:8787/glasses'];
+})();
+
+type VisualState = 'overview' | 'sidebar' | 'messages' | 'confirmation';
+
+const VISUAL_STATE = ((): VisualState | undefined => {
+  if (!import.meta.env.DEV) return undefined;
+  const requested = new URLSearchParams(window.location.search).get('joatVisual');
+  return requested === 'overview' || requested === 'sidebar'
+    || requested === 'messages' || requested === 'confirmation'
+    ? requested
+    : undefined;
 })();
 
 
@@ -75,26 +88,19 @@ async function boot(): Promise<void> {
   link.onState((state) => {
     setPanel('p-link', state);
     chromeRef?.setLink(state);
-    // A token the Mac no longer honours must not outlive the session, or
-  // every relaunch dials with it and is refused again.
-  link.onStaleToken(() => {
-    try {
-      localStorage.removeItem(TOKEN_KEY);
-    } catch {
-      // Storage unavailable — the in-memory drop already unblocked us.
-    }
-    void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
-  });
-
-  setPanel('p-url', link.activeUrl); // failover rotation, made visible
+    setPanel('p-url', link.activeUrl); // failover rotation, made visible
     if (state === 'connected') announce?.();
   });
 
   // Startup page (one-shot; bridge already initialized above). The second
   // argument lets a reloaded WebView adopt the host's existing page.
-  await client.start(layouts.startup(), layouts.defaultLayout());
+  await client.start(layouts.visualStartup(), layouts.visualLayout());
 
-  const hud = new HudPresenter(client, layouts);
+  const hud = new HudPresenter(
+    client,
+    layouts,
+    new HudVisualSurface(client, new HudCanvasRenderer()),
+  );
   const audio = new AudioStreamer(client, link);
   const imu = new ImuMonitor(client, link);
   const settings = new Settings();
@@ -131,6 +137,16 @@ async function boot(): Promise<void> {
   };
 
   new EventRouter(client, link, audio, imu, menu, lifecycle).attach();
+
+  // Official-simulator visual gate. This is DEV-only and drives the same
+  // production presenter/menu/event methods as the real gesture and Mac paths;
+  // it does not ship in the packed plugin or introduce an alternate renderer.
+  if (VISUAL_STATE) {
+    await renderVisualState(hud, menu, VISUAL_STATE);
+    setPanel('p-status', `visual: ${VISUAL_STATE}`);
+    return;
+  }
+
   const devices = new DeviceMonitor(client, link, audio, imu, hud, settings);
   devices.onBattery = (level, charging) => chromeRef?.setBattery(level, charging);
   devices.attach();
@@ -151,7 +167,9 @@ async function boot(): Promise<void> {
         else await hud.showText(msg.text, msg.containerId, msg.textColor);
         break;
       case 'hud.list':
-        await hud.showList(msg.items, { title: msg.title, hint: msg.hint });
+        if (menu.acceptsList(msg.title)) {
+          await hud.showList(msg.items, { title: msg.title, hint: msg.hint });
+        }
         break;
       case 'hud.rebuild':
         await hud.showDefault();
@@ -264,6 +282,10 @@ async function boot(): Promise<void> {
   // through a Mac outage instead of going blank.
   const chrome = new Chrome(hud);
   chromeRef = chrome;
+  // A fast local gateway can connect while device/mic discovery is still in
+  // flight. Replay the retained link truth instead of leaving Chrome at its
+  // constructor default of `connecting` for the rest of the session.
+  chrome.setLink(link.linkState);
   chrome.setMic(audio.isOpen);
   chrome.setBattery(device?.status?.batteryLevel, device?.status?.isCharging === true);
   chrome.start();
@@ -289,6 +311,42 @@ async function boot(): Promise<void> {
   }
 
   window.addEventListener('beforeunload', () => { void teardown(); });
+}
+
+async function renderVisualState(
+  hud: HudPresenter,
+  menu: CapabilityMenu,
+  state: VisualState,
+): Promise<void> {
+  hud.setMicState(true);
+  await hud.showText('9:41       JOAT ready       bat 87%', ContainerId.StatusBar, 2);
+
+  if (state === 'messages') {
+    await hud.showList(
+      [
+        '[2m ago] Adele · Can you send the latest mockups?',
+        '[18m ago] Marcus · Heading to the lab in 10.',
+        '[1h ago] Team Ops · Standup notes are ready.',
+      ],
+      { title: 'MESSAGES · 3', hint: 'swipe move · left x2 overview' },
+    );
+    return;
+  }
+
+  if (state === 'confirmation') {
+    await hud.showConfirmation('Send reply to Adele?', 'visual-confirmation');
+    return;
+  }
+
+  await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
+  await hud.showText(
+    'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
+  );
+  await hud.showText('2 notifications waiting', ContainerId.Tray, 2);
+  await hud.showText('left x2 menu · long-press mic', ContainerId.Hint, 1);
+  if (state === 'sidebar') {
+    await menu.toggle();
+  }
 }
 
 void boot().catch((err) => {

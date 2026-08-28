@@ -103,3 +103,28 @@ class TestFailureIsVisibleButNotQuotable:
         out = "".join([c async for c in agent.stream("q")])
         assert is_failure(out.strip())
         assert "no answer within" in out
+
+
+class TestModelIsChosenPerCall:
+    """Boot-time capture is what made the model a launch flag."""
+
+    async def test_the_flag_reflects_the_provider_at_call_time(self) -> None:
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        chosen: list[str | None] = ["spark"]
+        agent = SubprocessAgent(["/bin/echo", "ran"], name="codex",
+                                model=lambda: chosen[0], model_flag="-m")
+        first = "".join([c async for c in agent.stream("q")])
+        assert "-m spark" in first
+
+        chosen[0] = "terra"                      # the wearer switches mid-session
+        second = "".join([c async for c in agent.stream("q")])
+        assert "-m terra" in second              # next call, no restart
+
+    async def test_no_model_means_no_flag(self) -> None:
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(["/bin/echo", "ran"], name="claude",
+                                model=lambda: None, model_flag="--model")
+        out = "".join([c async for c in agent.stream("q")])
+        assert "--model" not in out              # the CLI keeps its own default

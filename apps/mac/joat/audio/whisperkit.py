@@ -52,6 +52,12 @@ class WhisperKitEngine(SttEngine):
     def available(self) -> bool:
         return shutil.which(self._binary) is not None
 
+    async def set_model(self, model: str) -> bool:
+        """No resident process here — the model is the next call's argv."""
+        self._model = model
+        log.info("whisperkit batch model now %s", model)
+        return True
+
     async def feed(self, pcm: bytes) -> Transcript | None:
         self._buffer.extend(pcm)
         if len(self._buffer) > self._max_bytes:
