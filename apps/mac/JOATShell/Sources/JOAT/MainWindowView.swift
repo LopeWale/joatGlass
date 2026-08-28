@@ -59,22 +59,59 @@ struct MainWindowView: View {
                 }
             }
 
+            GroupBox("Calendar & Reminders") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        LabeledContent("Calendar", value: engine.calendarAccess)
+                        Button("Connect…") { engine.requestCalendarAccess() }
+                            .disabled(engine.calendarAccess == "full access")
+                    }
+                    HStack {
+                        LabeledContent("Reminders", value: engine.remindersAccess)
+                        Button("Connect…") { engine.requestRemindersAccess() }
+                            .disabled(engine.remindersAccess == "full access")
+                    }
+                    Text("Access is requested only from these buttons. You can revoke it in System Settings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(4)
+            }
+
             Spacer(minLength: 0)
 
             HStack {
                 Button(showLog ? "Hide Log" : "Show Log") { showLog.toggle() }
                 Button("Open Full Log") { engine.openLog() }
+                Toggle("Record G2 trace", isOn: Binding(
+                    get: { engine.g2DiagnosticsEnabled },
+                    set: { engine.setG2DiagnosticsEnabled($0) }
+                ))
+                .help("Records only page, gesture, tile, and recovery metadata. Enabling restarts the engine.")
+                Button("Export Redacted G2 Trace…") { engine.exportG2Diagnostics() }
                 // The only recovery a locked-out phone cannot perform itself:
                 // it holds a token this Mac no longer accepts (reinstall,
                 // cleared storage, a different phone), so it cannot
                 // authenticate to ask. The wearer just sees "reconnecting"
                 // forever. Authority here is physical access to the Mac.
-                Button("Forget Glasses") { engine.forgetPairing() }
-                    .help("Re-pair the glasses. Use when the HUD is stuck on "
-                          + "\"reconnecting\" after reinstalling the plugin.")
+                Button("Pair / Replace Glasses") { engine.openPairingWindow() }
+                    .help("Open a private 120-second pairing window. Use when "
+                          + "the HUD is stuck on \"reconnecting\" or when replacing glasses.")
                 Spacer()
                 Text("\(status.counts.utterances) asked · \(status.counts.cards) cards")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if let notice = engine.pairingNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(notice.hasPrefix("Pairing stayed closed") ? .red : .secondary)
+            }
+
+            if let notice = engine.g2DiagnosticNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(notice.hasPrefix("G2 trace export failed") || notice.hasPrefix("Trace stayed off") ? .red : .secondary)
             }
 
             if showLog {
@@ -87,7 +124,10 @@ struct MainWindowView: View {
         }
         .padding(16)
         .frame(minWidth: 460, minHeight: 420)
-        .onAppear(perform: refresh)
+        .onAppear {
+            refresh()
+            engine.refreshPersonalDataAccess()
+        }
         .onReceive(tick) { _ in refresh() }
     }
 

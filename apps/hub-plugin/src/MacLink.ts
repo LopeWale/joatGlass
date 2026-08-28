@@ -11,7 +11,7 @@ export interface MacLinkOptions {
    * whitelisted Mac and the plugin finds it, no rebuild needed.
    */
   urls: readonly string[];
-  /** Pairing token (from a previous pairing.set), appended as ?token= on dial. */
+  /** Pairing token (from a previous pairing.set), sent as the first app frame. */
   token?: string | null;
   maxQueue?: number;
   reconnectBaseMs?: number;
@@ -37,6 +37,7 @@ export class MacLink {
   private stateHandler?: (state: LinkState) => void;
   private currentState: LinkState = 'connecting';
   private token: string | null;
+  private authenticated = false;
 
   private readonly maxQueue: number;
   private readonly baseMs: number;
@@ -102,13 +103,11 @@ export class MacLink {
     // drops the older, ITS close dials again — and the loop never settles.
     // Observed on real hardware as ~2 reconnects/second, indefinitely.
     this.abandon();
+    this.authenticated = false;
     this.reportState(this.attempt === 0 ? 'connecting' : 'reconnecting');
-    // Token rides the URL: the gateway authorizes BEFORE the WebSocket
-    // handshake, and a WebView WebSocket cannot set headers.
-    const url = this.token
-      ? `${this.activeUrl}${this.activeUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(this.token)}`
-      : this.activeUrl;
-    const socket = new WebSocket(url);
+    // Credentials never ride a request target: URL strings are copied into
+    // browser history, proxy/access logs, diagnostics, and exception text.
+    const socket = new WebSocket(this.activeUrl);
     this.socket = socket;
 
     // A host that DROPS packets (wrong subnet, asleep, AP isolation) never
@@ -123,28 +122,44 @@ export class MacLink {
     socket.onopen = () => {
       if (this.socket !== socket) return; // superseded by a newer dial
       this.clearDialTimer();
-      this.attempt = 0;
-      this.failedWithToken = 0;
-      this.reportState('connected');
-      for (const msg of this.queue.splice(0)) this.rawSend(msg);
+      this.rawSend({ kind: 'auth', token: this.token });
+      // TCP/WebSocket open is not application authentication. Bound the
+      // second phase too, or a peer can leave the HUD connecting forever.
+      this.dialTimer = setTimeout(() => {
+        if (this.socket === socket && !this.authenticated) socket.close();
+      }, this.dialMs);
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
       try {
-        this.handler?.(JSON.parse(String(event.data)) as DownlinkMessage);
+        const message = JSON.parse(String(event.data)) as DownlinkMessage;
+        if (message.kind === 'auth.accepted') {
+          if (!this.authenticated) {
+            this.authenticated = true;
+            this.clearDialTimer();
+            this.attempt = 0;
+            this.failedWithToken = 0;
+            this.reportState('connected');
+            for (const queued of this.queue.splice(0)) this.rawSend(queued);
+          }
+          return;
+        }
+        // A new client must store and ack pairing.set before the session is
+        // authenticated. Every other pre-auth downlink is ignored.
+        if (!this.authenticated && message.kind !== 'pairing.set') return;
+        this.handler?.(message);
       } catch {
         // Ignore malformed frames rather than killing the link.
       }
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket !== socket) return; // a superseded socket is not news
       this.clearDialTimer();
-      // A rejected token looks EXACTLY like an unreachable Mac from here —
-      // a WebView socket never sees the 401. So if a held token has failed
-      // a full rotation and then some, assume the Mac re-paired without us
-      // and dial bare: the Mac only ever offers a token while unpaired, so
-      // this re-pairs instead of leaving the wearer locked out forever.
-      if (this.token !== null && socket.readyState !== WebSocket.OPEN) {
+      const wasAuthenticated = this.authenticated;
+      this.authenticated = false;
+      // Post-handshake auth gives an explicit close code. Never discard a
+      // durable token for generic network failure, sleep, or a dead endpoint.
+      if (this.token !== null && !wasAuthenticated && event.code === 4401) {
         this.failedWithToken += 1;
         if (this.failedWithToken >= this.opts.urls.length * 2) {
           this.token = null;
@@ -163,7 +178,10 @@ export class MacLink {
   }
 
   send(msg: UplinkMessage): void {
-    if (this.socket?.readyState === WebSocket.OPEN) {
+    if (
+      this.socket?.readyState === WebSocket.OPEN
+      && (this.authenticated || msg.kind === 'pairing')
+    ) {
       this.rawSend(msg);
       return;
     }
@@ -171,8 +189,23 @@ export class MacLink {
     this.queue.push(msg);
   }
 
+  /**
+   * Observational G2 support metadata is intentionally lossy. It must not
+   * consume the normal queue while offline, where it could otherwise evict a
+   * confirmation or wearer input before the next authenticated session.
+   */
+  sendDiagnostic(msg: Extract<UplinkMessage, { kind: 'g2.diagnostic' }>): void {
+    if (this.socket?.readyState !== WebSocket.OPEN || !this.authenticated) return;
+    try {
+      this.rawSend(msg);
+    } catch {
+      // A socket can close after the readiness check. Trace loss is safe.
+    }
+  }
+
   close(): void {
     this.closed = true;
+    this.authenticated = false;
     this.clearDialTimer();
     this.abandon();
     this.queue = [];

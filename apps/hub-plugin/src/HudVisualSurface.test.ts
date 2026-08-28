@@ -124,4 +124,36 @@ describe('HudVisualSurface', () => {
 
     expect(rendered).toEqual(['first', 'latest']);
   });
+
+  it('records the serial tile order and result without retaining pixels', async () => {
+    const events: unknown[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => ImageRawDataUpdateResult.success,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([9, 8, 7]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([6]) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([5]) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
+      ],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+
+    await new HudVisualSurface(client, renderer, {
+      record: (event) => events.push(event),
+    }).paint(frame);
+
+    expect(events).toEqual([
+      { type: 'tile_upload', frame: 1, order: 0, containerId: 4, outcome: 'success' },
+      { type: 'tile_upload', frame: 1, order: 1, containerId: 8, outcome: 'success' },
+      { type: 'tile_upload', frame: 1, order: 2, containerId: 9, outcome: 'success' },
+      { type: 'tile_upload', frame: 1, order: 3, containerId: 10, outcome: 'success' },
+    ]);
+  });
 });

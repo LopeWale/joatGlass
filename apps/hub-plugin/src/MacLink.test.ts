@@ -14,22 +14,27 @@ class FakeWebSocket {
   readyState = 0;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
+  sent: string[] = [];
   constructor(url: string) {
     dialed.push(url);
     sockets.push(this);
   }
-  send(_data: string): void {}
-  close(): void {
+  send(data: string): void { this.sent.push(data); }
+  close(code = 1006): void {
     this.closed = true;
-    this.onclose?.();
+    this.readyState = 3;
+    this.onclose?.({ code } as never);
   }
   /** Simulate the server accepting this dial. */
   open(): void {
     this.readyState = FakeWebSocket.OPEN;
     this.onopen?.();
+  }
+  receive(message: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(message) });
   }
 }
 
@@ -42,47 +47,70 @@ afterEach(() => {
 });
 
 describe('MacLink pairing token', () => {
-  it('dials bare when unpaired — the TOFU window depends on it', () => {
+  it('dials bare when unpaired — auth belongs in the first frame', () => {
     new MacLink({ urls: ['ws://mac.local:8787/glasses'] }).connect();
     expect(dialed).toEqual(['ws://mac.local:8787/glasses']);
   });
 
-  it('appends ?token= when constructed with one (reconnect after pairing)', () => {
+  it('never puts a credential in the WebSocket URL', () => {
     new MacLink({ urls: ['ws://mac.local:8787/glasses'], token: 'abc123' }).connect();
-    expect(dialed).toEqual(['ws://mac.local:8787/glasses?token=abc123']);
+    expect(dialed).toEqual(['ws://mac.local:8787/glasses']);
   });
 
-  it('uses & when the candidate already carries a query', () => {
-    new MacLink({ urls: ['ws://mac.local:8787/glasses?x=1'], token: 't' }).connect();
-    expect(dialed).toEqual(['ws://mac.local:8787/glasses?x=1&token=t']);
-  });
-
-  it('URL-encodes the token — it rides a URL component', () => {
+  it('sends the held credential as the first application frame', () => {
     new MacLink({ urls: ['ws://m:1/g'], token: 'a/b+c' }).connect();
-    expect(dialed[0]).toBe('ws://m:1/g?token=a%2Fb%2Bc');
+    sockets[0]!.open();
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ kind: 'auth', token: 'a/b+c' })]);
   });
 
-  it('setToken applies from the next dial on (pairing.set mid-session)', () => {
+  it('sends an explicit null credential when unpaired', () => {
     const link = new MacLink({ urls: ['ws://m:1/g'] });
     link.connect();
-    link.setToken('fresh');
-    link.connect();
-    expect(dialed).toEqual(['ws://m:1/g', 'ws://m:1/g?token=fresh']);
+    sockets[0]!.open();
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ kind: 'auth', token: null })]);
   });
 
-  it('carries the token across URL rotation (failover keeps auth)', () => {
-    const link = new MacLink({ urls: ['ws://a:1/g', 'ws://b:1/g'], token: 't' });
+  it('does not report connected or flush uplinks before auth is accepted', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'], token: 't' });
+    link.send({ kind: 'policy', resume: 'auto' });
     link.connect();
-    // scheduleReconnect rotates urlIndex; simulate by closing the socket.
-    (link as unknown as { urlIndex: number }).urlIndex = 1;
-    link.connect();
-    expect(dialed).toEqual(['ws://a:1/g?token=t', 'ws://b:1/g?token=t']);
+    sockets[0]!.open();
+    expect(link.linkState).toBe('connecting');
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ kind: 'auth', token: 't' })]);
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    expect(link.linkState).toBe('connected');
+    expect(sockets[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: 't' }),
+      JSON.stringify({ kind: 'policy', resume: 'auto' }),
+    ]);
   });
 
   it('keeps activeUrl clean for status surfaces — no token leak to the panel', () => {
     const link = new MacLink({ urls: ['ws://m:1/g'], token: 'secret' });
     link.connect();
     expect(link.activeUrl).toBe('ws://m:1/g');
+  });
+});
+
+describe('MacLink diagnostic delivery', () => {
+  it('drops offline diagnostic bursts without evicting queued wearer input', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.send({ kind: 'input', event: { eventType: 0 } });
+    for (let frame = 1; frame <= 400; frame += 1) {
+      link.sendDiagnostic({
+        kind: 'g2.diagnostic',
+        event: { type: 'tile_upload', frame, order: 0, containerId: 4, outcome: 'success' },
+      });
+    }
+
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    expect(sockets[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: null }),
+      JSON.stringify({ kind: 'input', event: { eventType: 0 } }),
+    ]);
   });
 });
 
@@ -103,6 +131,7 @@ describe('MacLink reconnect storm', () => {
     const link = new MacLink({ urls: ['ws://m:1/g'] });
     link.connect();
     sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
     expect(link.linkState).toBe('connected');
   });
 
@@ -122,7 +151,7 @@ describe('MacLink reconnect storm', () => {
     const stale = sockets[0]!;
     link.connect();
     const before = dialed.length;
-    stale.onclose?.(); // the server dropped the older socket, late
+    stale.onclose?.({ code: 1006 }); // the server dropped the older socket, late
     vi.advanceTimersByTime(SETTLE_MS);
     expect(dialed.length).toBe(before); // no dial from a socket we replaced
   });
@@ -134,8 +163,8 @@ describe('MacLink reconnect storm', () => {
     const before = dialed.length;
     const live = sockets[0]!;
     live.close();
-    live.onclose?.(); // spurious repeats must not compound
-    live.onclose?.();
+    live.onclose?.({ code: 1006 }); // spurious repeats must not compound
+    live.onclose?.({ code: 1006 });
     vi.advanceTimersByTime(SETTLE_MS);
     expect(dialed.length).toBe(before + 1);
   });
@@ -164,10 +193,8 @@ describe('MacLink reconnect storm', () => {
 
 describe('MacLink stale pairing token', () => {
   /**
-   * A rejected token is indistinguishable from an unreachable Mac inside a
-   * WebView — the socket just never opens, no 401 is visible. Without
-   * self-healing the wearer stays locked out of their own brain until
-   * someone clears localStorage by hand (which happened, twice).
+   * Application auth closes with 4401 after the WebSocket opens. Generic
+   * network failures must never be mistaken for stale credentials.
    */
   // Long enough for one backoff (500ms + jitter), short enough that the 4s
   // dial watchdog does not fire and count a failure of its own.
@@ -180,7 +207,8 @@ describe('MacLink stale pairing token', () => {
     link.onStaleToken(() => { forgotten += 1; });
     link.connect();
     for (let i = 0; i < 5; i += 1) {
-      sockets[sockets.length - 1]!.close();
+      sockets[sockets.length - 1]!.open();
+      sockets[sockets.length - 1]!.close(4401);
       vi.advanceTimersByTime(RETRY_MS);
     }
     expect(forgotten).toBe(1);
@@ -193,9 +221,11 @@ describe('MacLink stale pairing token', () => {
     let forgotten = 0;
     link.onStaleToken(() => { forgotten += 1; });
     link.connect();
-    sockets[0]!.close();                   // one failure
+    sockets[0]!.open();
+    sockets[0]!.close(4401);               // one explicit auth failure
     vi.advanceTimersByTime(RETRY_MS);
-    sockets[sockets.length - 1]!.open();    // Mac came back — count resets
+    sockets[sockets.length - 1]!.open();
+    sockets[sockets.length - 1]!.receive({ kind: 'auth.accepted' }); // resets
     sockets[sockets.length - 1]!.close();   // and dropped again later
     vi.advanceTimersByTime(RETRY_MS);
     expect(forgotten).toBe(0); // intermittency is not staleness

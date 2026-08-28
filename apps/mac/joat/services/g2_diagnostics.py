@@ -9,62 +9,121 @@ file is safe for the Mac shell's support export.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 TRACE_SCHEMA = "joat.g2-diagnostic.v1"
 MAX_EVENTS = 512
+log = logging.getLogger(__name__)
+
+WriteReceipt = Callable[[Path, list[dict[str, Any]]], None]
 
 
 def default_g2_diagnostics_path() -> Path:
     return Path.home() / "Library/Application Support/JOAT/g2-diagnostics.json"
 
 
+def write_receipt(path: Path, events: list[dict[str, Any]]) -> None:
+    """Atomically publish one already-redacted support receipt."""
+
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"schema": TRACE_SCHEMA, "events": events},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 @dataclass(slots=True)
 class G2DiagnosticStore:
-    """Append in memory and atomically replace one content-free support trace."""
+    """Bounded, content-free support storage that cannot block the gateway."""
 
     path: Path = field(default_factory=default_g2_diagnostics_path)
+    writer: WriteReceipt = field(default=write_receipt, repr=False)
     _events: list[dict[str, Any]] = field(default_factory=list, init=False)
+    _persist_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _dirty: bool = field(default=False, init=False)
+    _disabled: bool = field(default=False, init=False)
 
     def record(self, event: dict[str, str | int]) -> None:
-        """Persist a protocol-sanitized event. Callers cannot inject raw data."""
+        """Queue one protocol-sanitized event without blocking the gateway."""
 
         # protocol.py has already whitelisted every event field. Copy it so a
         # caller cannot mutate a stored record after this method returns.
-        record = {"sequence": len(self._events) + 1, "recordedAtMs": int(time.time() * 1000)}
+        if self._disabled:
+            return
+        record: dict[str, Any] = {
+            "sequence": len(self._events) + 1,
+            "recordedAtMs": int(time.time() * 1000),
+        }
         record.update(event)
         self._events.append(record)
         if len(self._events) > MAX_EVENTS:
             self._events = self._events[-MAX_EVENTS:]
             for index, retained in enumerate(self._events, start=1):
                 retained["sequence"] = index
-        self._write()
-
-    def _write(self) -> None:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        payload = json.dumps(
-            {"schema": TRACE_SCHEMA, "events": self._events},
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        temporary = self.path.with_name(f".{self.path.name}.tmp")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        self._dirty = True
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            os.chmod(self.path, 0o600)
-        finally:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Unit callers have no event loop. Production dispatch always does,
+            # so this synchronous branch cannot delay a glasses session.
+            self._persist_synchronously()
+            return
+        if self._persist_task is None or self._persist_task.done():
+            self._persist_task = loop.create_task(self._persist_pending())
+
+    async def flush(self) -> None:
+        """Finish a pending receipt write during normal gateway shutdown."""
+
+        if self._persist_task is not None:
+            await self._persist_task
+
+    async def _persist_pending(self) -> None:
+        while self._dirty and not self._disabled:
+            self._dirty = False
             try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+                await asyncio.to_thread(self.writer, self.path, self._snapshot())
+            except Exception as exc:
+                self._disable(exc)
+                return
+
+    def _persist_synchronously(self) -> None:
+        try:
+            self.writer(self.path, self._snapshot())
+        except Exception as exc:
+            self._disable(exc)
+            return
+        self._dirty = False
+
+    def _snapshot(self) -> list[dict[str, Any]]:
+        return [dict(event) for event in self._events]
+
+    def _disable(self, exc: Exception) -> None:
+        self._disabled = True
+        self._dirty = False
+        # The class is enough for a support operator; paths and exception text
+        # can carry user- or machine-specific data and do not belong in logs.
+        log.warning("G2 diagnostic persistence disabled after %s", type(exc).__name__)

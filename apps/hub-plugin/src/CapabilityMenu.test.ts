@@ -67,7 +67,7 @@ describe('CapabilityMenu', () => {
   it('double-tap from home opens the five capabilities in the transient sidebar', async () => {
     const { menu, sidebars, lists, operations } = rig();
     await menu.toggle();
-    expect(sidebars[0]).toEqual(['Messages', 'Notifications', 'Calendar', 'Brainstorm', 'Settings']);
+    expect(sidebars[0]).toEqual(['Messages', 'Notifications', 'Calendar', 'Tasks', 'Brainstorm']);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
   });

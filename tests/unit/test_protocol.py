@@ -12,6 +12,8 @@ import pytest
 
 from joat.ble.hub_gateway import pack_pcm
 from joat.core.protocol import (
+    Auth,
+    AuthAccepted,
     Audio,
     AudioControl,
     Confirm,
@@ -21,6 +23,8 @@ from joat.core.protocol import (
     EventSource,
     EventType,
     Hello,
+    G2Diagnostic,
+    G2DiagnosticControl,
     HudList,
     HudText,
     Imu,
@@ -37,6 +41,12 @@ from joat.core.protocol import (
 
 
 class TestParseUplink:
+    def test_auth_carries_token_in_a_frame_not_the_url(self) -> None:
+        assert parse_uplink({"kind": "auth", "token": "secret"}) == Auth(token="secret")
+
+    def test_auth_allows_an_explicit_unpaired_client(self) -> None:
+        assert parse_uplink({"kind": "auth", "token": None}) == Auth(token=None)
+
     def test_hello(self) -> None:
         msg = parse_uplink(
             {"kind": "hello", "sn": "ABC123", "model": "g2", "launchSource": "appMenu"}
@@ -93,11 +103,56 @@ class TestParseUplink:
         assert msg == Device(connect="connected", battery=None, wearing=True, charging=None)
 
     def test_confirm(self) -> None:
-        msg = parse_uplink({"kind": "confirm", "actionId": "act-1", "accepted": True})
-        assert msg == Confirm(action_id="act-1", accepted=True)
+        msg = parse_uplink({
+            "kind": "confirm",
+            "actionId": "act-1",
+            "accepted": True,
+            "challengeId": "challenge-1",
+            "sessionId": "session-1",
+            "payloadDigest": "payload-digest",
+            "previewDigest": "preview-digest",
+        })
+        assert msg == Confirm(
+            action_id="act-1",
+            accepted=True,
+            challenge_id="challenge-1",
+            session_id="session-1",
+            payload_digest="payload-digest",
+            preview_digest="preview-digest",
+        )
+
+    def test_confirm_requires_a_real_boolean(self) -> None:
+        with pytest.raises(ProtocolError, match="accepted must be a boolean"):
+            parse_uplink({"kind": "confirm", "actionId": "act-1", "accepted": "false"})
 
     def test_policy(self) -> None:
         assert parse_uplink({"kind": "policy", "resume": "confirm"}) == Policy(resume="confirm")
+
+    def test_g2_diagnostic_is_a_fixed_content_free_schema(self) -> None:
+        message = parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "tile_upload",
+                "frame": 4,
+                "order": 2,
+                "containerId": 9,
+                "outcome": "success",
+            },
+        })
+        assert message == G2Diagnostic(event={
+            "type": "tile_upload", "frame": 4, "order": 2,
+            "containerId": 9, "outcome": "success",
+        })
+
+    def test_g2_diagnostic_rejects_content_and_unknown_fields(self) -> None:
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "gesture", "gesture": "tap", "delivery": "sys",
+                    "text": "private message",
+                },
+            })
 
     def test_unknown_policy_rejected(self) -> None:
         with pytest.raises(ProtocolError, match="unknown resume policy"):
@@ -159,9 +214,31 @@ class TestDownlinkWire:
     def test_imu_trace(self) -> None:
         assert ImuTrace(enabled=True).to_wire() == {"kind": "imu.trace", "enabled": True}
 
+    def test_g2_diagnostic_control(self) -> None:
+        assert G2DiagnosticControl(enabled=True).to_wire() == {
+            "kind": "g2.diagnostic.control", "enabled": True,
+        }
+
     def test_confirm_request_uses_camel_case_action_id(self) -> None:
-        wire = ConfirmRequest(action_id="a1", prompt="Delete?").to_wire()
-        assert wire == {"kind": "confirm.request", "actionId": "a1", "prompt": "Delete?"}
+        wire = ConfirmRequest(
+            action_id="a1",
+            prompt="Delete?",
+            challenge_id="c1",
+            session_id="s1",
+            payload_digest="pd",
+            preview_digest="vd",
+            expires_at_ms=1234,
+        ).to_wire()
+        assert wire == {
+            "kind": "confirm.request",
+            "actionId": "a1",
+            "prompt": "Delete?",
+            "challengeId": "c1",
+            "sessionId": "s1",
+            "payloadDigest": "pd",
+            "previewDigest": "vd",
+            "expiresAtMs": 1234,
+        }
 
     def test_shutdown_defaults_to_confirmation_dialog(self) -> None:
         # exitMode 1 = show a dialog. Defaulting to 0 would close the app out
@@ -264,3 +341,5 @@ class TestLocationAndIdentity:
         bare = parse_uplink({"kind": "device", "connect": "connected"})
         assert isinstance(bare, Device)
         assert bare.mic is None
+    def test_auth_accepted_wire_shape(self) -> None:
+        assert AuthAccepted().to_wire() == {"kind": "auth.accepted"}

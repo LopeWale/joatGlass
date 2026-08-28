@@ -18,8 +18,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let engine = EngineController.shared
-        guard engine.state == .running else { return .terminateNow }
+        guard engine.state == .running else {
+            NativeBridgeServer.shared.stop()
+            return .terminateNow
+        }
         engine.stop {
+            NativeBridgeServer.shared.stop()
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

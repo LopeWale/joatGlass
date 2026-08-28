@@ -11,6 +11,7 @@ let package = Package(
     name: "JOAT",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "JOAT", path: "Sources/JOAT")
+        .executableTarget(name: "JOAT", path: "Sources/JOAT"),
+        .testTarget(name: "JOATTests", dependencies: ["JOAT"])
     ]
 )

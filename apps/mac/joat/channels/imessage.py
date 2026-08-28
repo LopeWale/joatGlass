@@ -29,6 +29,7 @@ DEFAULT_DB = Path("~/Library/Messages/chat.db").expanduser()
 # Apple epoch (2001-01-01) in unix seconds; `date` is nanoseconds since then
 # on modern macOS, seconds on very old databases.
 APPLE_EPOCH = 978_307_200
+_READ_PAGE_SIZE = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,10 @@ class IMessageStore:
     def __init__(self, db_path: Path = DEFAULT_DB) -> None:
         self._path = db_path
         self._last_change = 0.0
+        # An mtime is only an edge signal. Once an edge reveals more than one
+        # page, the returned ROWID becomes the durable in-process signal that
+        # the caller must keep draining even if the filesystem is unchanged.
+        self._drain_after: int | None = None
         # Messages stores only the raw handle; the wearer needs a name.
         self._contacts = ContactResolver()
 
@@ -92,8 +97,13 @@ class IMessageStore:
 
     def read_new(self, watermark: Any) -> tuple[list[Notification], Any]:
         last = int(watermark)
-        if not self._changed():
+        if self._drain_after != last and not self._changed():
             return [], last
+
+        # Preserve this continuation before opening the live store. If a
+        # transient read fails after _changed() consumes the mtime edge, a
+        # retry with the same watermark can still recover the page.
+        self._drain_after = last
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -110,13 +120,13 @@ class IMessageStore:
                   AND m.is_from_me = 0
                   AND m.text IS NOT NULL AND m.text != ''
                 ORDER BY m.ROWID
-                LIMIT 20
+                LIMIT ?
                 """,
-                (last,),
+                (last, _READ_PAGE_SIZE + 1),
             ).fetchall()
 
         out: list[Notification] = []
-        for rowid, text, sender, date, chat_name in rows:
+        for rowid, text, sender, date, chat_name in rows[:_READ_PAGE_SIZE]:
             last = max(last, int(rowid))
             who = chat_name or self._contacts.name_for(sender) or "unknown"
             out.append(Notification(
@@ -127,6 +137,7 @@ class IMessageStore:
                 body=text,
                 delivered_unix=_unix_time(date),
             ))
+        self._drain_after = last if len(rows) > _READ_PAGE_SIZE else None
         return out, last
 
     def recent(self, limit: int = 5) -> list[tuple[str, str, float]]:

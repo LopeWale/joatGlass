@@ -67,6 +67,10 @@ targets:
           "JOAT reads notifications and controls apps you explicitly ask it to."
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription:
           "JOAT transcribes your speech on-device to answer on the HUD."
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription:
+          "JOAT reads and creates calendar events only when you explicitly ask it to."
+        INFOPLIST_KEY_NSRemindersFullAccessUsageDescription:
+          "JOAT reads, creates, and completes reminders only when you explicitly ask it to."
         # macOS must always give the app a chance to stop its engine child.
         INFOPLIST_KEY_NSSupportsSuddenTermination: NO
         CODE_SIGN_STYLE: Manual

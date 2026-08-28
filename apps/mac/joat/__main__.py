@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import logging
 import os
+import time
+from pathlib import Path
 
 from .agents.builtin_tools import (
     messages_tool,
@@ -40,12 +42,17 @@ from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notifications import NotificationChannel, NotificationSource, NotificationStore
 from .core.interfaces import ReplyEngine, SttEngine
 from .core.protocol import Device, Hello, InputEvent
+from .native.bridge import NativeBridgeClient
+from .persistence.actions import ActionJournal
+from .persistence.store import DurableStore
 from .services.hud import HudWriter
+from .services.g2_diagnostics import G2DiagnosticStore
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.capabilities import CapabilityRouter
 from .services.commands import VoiceCommandRouter
 from .services.message_reply import MessageReplyController
+from .services.productivity_actions import ProductivityActionController
 from .services.session import (
     DebateSession, Session, SessionManager, seat_participants,
 )
@@ -82,6 +89,8 @@ async def main() -> None:
     parser.add_argument("--no-llm", action="store_true", help="echo transcripts only")
     parser.add_argument("--no-notifications", action="store_true",
                         help="disable the Notification Center channel")
+    parser.add_argument("--g2-diagnostics", action="store_true",
+                        help="opt in to a content-free real-G2 support trace")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -91,8 +100,30 @@ async def main() -> None:
     )
 
     status = StatusPublisher()
-    transport = HubGatewayTransport(host=args.host, port=args.port,
-                                    pairing=PairingStore())
+    durable_store = DurableStore(
+        Path.home() / "Library/Application Support/JOAT/joat.sqlite3"
+    )
+    action_journal = ActionJournal(durable_store)
+    recovered = action_journal.recover_after_restart(
+        now_us=time.time_ns() // 1000
+    )
+    if recovered:
+        counts: dict[str, int] = {}
+        for recovered_state in recovered.values():
+            counts[recovered_state] = counts.get(recovered_state, 0) + 1
+        log.warning("durable action recovery states=%s", counts)
+    transport = HubGatewayTransport(
+        host=args.host,
+        port=args.port,
+        pairing=PairingStore(),
+        g2_diagnostics=G2DiagnosticStore() if args.g2_diagnostics else None,
+    )
+    native_bridge_path = os.environ.get("JOAT_NATIVE_BRIDGE")
+    personal_data = (
+        NativeBridgeClient(Path(native_bridge_path))
+        if native_bridge_path
+        else None
+    )
 
     serve_engine: WhisperServeEngine | None = None
     stt: SttEngine
@@ -240,9 +271,19 @@ async def main() -> None:
     sessions = SessionManager(hud, make_debate, card_log=card_log)
     message_replies = MessageReplyController(
         MessagesAppSender(),
-        transport.request_confirm,
+        transport.request_confirmation,
+        action_journal,
     )
-    voice_commands = VoiceCommandRouter(message_replies, models)
+    productivity_actions = ProductivityActionController(
+        personal_data,
+        transport.request_confirmation,
+        action_journal,
+    )
+    voice_commands = VoiceCommandRouter(
+        message_replies,
+        models,
+        productivity=productivity_actions,
+    )
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no
     # context, so "JOAT" comes back as "Jokes"/"Jote"/"Jolt". Rejecting
@@ -294,12 +335,13 @@ async def main() -> None:
     # One chat.db reader serves BOTH the notification channel and the
     # capability menu's Messages view.
     # Glasses gestures in, drawn views out: the capability menu (Messages /
-    # Notifications / Calendar / Debate), the contextual menu's repeat, and
+    # Notifications / Calendar / Tasks / Brainstorm), the contextual menu's repeat, and
     # the repaint after a menu close blanked the regions.
     capabilities = CapabilityRouter(
         hud=hud, transport=transport, status=status,
         messages=imessage if imessage.available else None, cards=card_log,
         replies=message_replies,
+        personal_data=personal_data,
     )
     transport.on_input(capabilities.on_input)
 
@@ -359,6 +401,9 @@ async def main() -> None:
             notif_task.cancel()
         if serve_engine is not None:
             await serve_engine.close()
+        if personal_data is not None:
+            await personal_data.close()
+        durable_store.close()
 
 
 if __name__ == "__main__":

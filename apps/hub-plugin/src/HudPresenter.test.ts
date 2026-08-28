@@ -419,6 +419,13 @@ describe('HudPresenter modal surfaces', () => {
     expect(overlapped).toBe(false);
   });
 
+  it('fails closed instead of truncating an over-capacity exact preview', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+
+    expect(await hud.showConfirmation('🥽'.repeat(61))).toBe(false);
+    expect(mainPaints()).toHaveLength(0);
+  });
+
   it('does not trap later content when a focus-to-confirm rebuild fails', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showList(['Messages'], {
@@ -591,5 +598,36 @@ describe('HudPresenter self-heals a missing page', () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showText('fine', ContainerId.Main);
     expect(rebuilds).toBe(0);
+  });
+
+  it('records the one permitted self-heal decision sequence', async () => {
+    const events: unknown[] = [];
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), undefined, {
+      record: (event) => events.push(event),
+    });
+    paintOk = false;
+
+    await hud.showText('hello', ContainerId.Main);
+
+    expect(events).toEqual([
+      { type: 'self_heal', surface: 'overview', target: 'text', decision: 'attempt', containerId: 2 },
+      { type: 'self_heal', surface: 'overview', target: 'text', decision: 'recovered', containerId: 2 },
+    ]);
+  });
+});
+
+describe('HudPresenter diagnostic page transitions', () => {
+  it('records the layout transition but never list text', async () => {
+    const events: unknown[] = [];
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), undefined, {
+      record: (event) => events.push(event),
+    });
+
+    await hud.showList(['A private message body'], { title: 'MESSAGES' });
+
+    expect(events).toEqual([{
+      type: 'page_transition',
+      from: 'overview', to: 'list', reason: 'show_list', outcome: 'success',
+    }]);
   });
 });

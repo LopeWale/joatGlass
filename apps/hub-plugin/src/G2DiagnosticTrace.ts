@@ -49,7 +49,7 @@ export interface G2DiagnosticTrace {
 export class MacG2DiagnosticTrace implements G2DiagnosticTrace {
   private enabled = false;
 
-  constructor(private readonly link: Pick<MacLink, 'send'>) {}
+  constructor(private readonly link: Pick<MacLink, 'sendDiagnostic'>) {}
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
@@ -57,6 +57,11 @@ export class MacG2DiagnosticTrace implements G2DiagnosticTrace {
 
   record(event: G2TraceEvent): void {
     if (!this.enabled) return;
-    this.link.send({ kind: 'g2.diagnostic', event } satisfies UplinkMessage);
+    try {
+      this.link.sendDiagnostic({ kind: 'g2.diagnostic', event } satisfies UplinkMessage);
+    } catch {
+      // Diagnostics are strictly observational. A socket that closes between
+      // MacLink's open-state check and send must never change HUD control flow.
+    }
   }
 }

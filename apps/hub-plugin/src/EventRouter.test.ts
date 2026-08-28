@@ -8,7 +8,10 @@ import type { ImuMonitor } from './ImuMonitor';
 import type { CapabilityMenu } from './CapabilityMenu';
 import type { UplinkMessage } from './types';
 
-function make(menuConsumesLists = false) {
+function make(
+  menuConsumesLists = false,
+  diagnostics?: { record: (event: unknown) => void },
+) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
   const audio = {
@@ -53,6 +56,7 @@ function make(menuConsumesLists = false) {
     imu as unknown as ImuMonitor,
     menu as unknown as CapabilityMenu,
     lifecycle,
+    diagnostics,
   ).attach();
   return {
     fire: (e: unknown) => dispatch(e as EvenHubEvent),
@@ -373,5 +377,16 @@ describe('EventRouter — long-press mutes the mic', () => {
     const r = make();
     r.fire({ menuItemClickEvent: { itemID: 2 } });
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies the delivered gesture without forwarding source or content', () => {
+    const events: unknown[] = [];
+    const r = make(false, { record: (event) => events.push(event) });
+
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+
+    expect(events).toEqual([{
+      type: 'gesture', gesture: 'long_press', delivery: 'sys',
+    }]);
   });
 });

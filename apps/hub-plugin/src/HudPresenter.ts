@@ -2,7 +2,8 @@ import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
 import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
-import { ContainerId, type HudContentKind } from './types';
+import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
+import { CONFIRM_PROMPT_MAX_UNITS, ContainerId, type HudContentKind } from './types';
 
 const MAX_UPGRADE_CHARS = 2000;
 
@@ -17,7 +18,6 @@ const PAINT_INTERVAL_MS = 300;
 const DEFAULT_LIST_TITLE = 'JOAT';
 const DEFAULT_LIST_HINT = 'left x2 overview';
 const MAX_FOCUS_COPY_CHARS = 46;
-const MAX_CONFIRM_PROMPT_CHARS = 120;
 
 const DEFAULT_BRIGHTNESS: Readonly<Record<number, number>> = {
   [ContainerId.StatusBar]: 2,
@@ -88,6 +88,7 @@ export class HudPresenter {
     private readonly client: BridgeClient,
     private readonly layouts: HudPageBuilder,
     private readonly visual?: HudVisualSurface,
+    private readonly diagnostics?: G2DiagnosticTrace,
   ) {}
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -260,13 +261,17 @@ export class HudPresenter {
       kinds: this.kinds,
     },
   ): Promise<boolean> {
+    const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     const backdrop = this.sidebarBackdrop(content);
     const ok = this.visual
       ? true
       : await this.client.require()
         .rebuildPageContainer(this.layouts.sidebarLayout(surface.items, backdrop));
-    if (!ok) return false;
+    if (!ok) {
+      this.recordPageTransition(from, 'sidebar', 'show_sidebar', 'failed');
+      return false;
+    }
     this.resetAll();
     this.surface = surface;
     this.streams.set(ContainerId.Main, backdrop.main ?? '');
@@ -295,18 +300,26 @@ export class HudPresenter {
           this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
         }
       }
-      return this.paintVisual();
+      const painted = await this.paintVisual();
+      this.recordPageTransition(from, 'sidebar', 'show_sidebar', painted ? 'success' : 'failed');
+      return painted;
     }
-    return this.restoreLiveStatus(liveStatus);
+    const restored = await this.restoreLiveStatus(liveStatus);
+    this.recordPageTransition(from, 'sidebar', 'show_sidebar', restored ? 'success' : 'failed');
+    return restored;
   }
 
   private async renderList(surface: Extract<HudSurface, { kind: 'list' }>): Promise<boolean> {
+    const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     const ok = this.visual
       ? true
       : await this.client.require()
         .rebuildPageContainer(this.layouts.listLayout(surface.items, surface.options));
-    if (!ok) return false;
+    if (!ok) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
     this.resetAll();
     this.surface = surface;
     // Mirror payload content in presenter state so confirmation restoration
@@ -322,9 +335,13 @@ export class HudPresenter {
           this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
         }
       }
-      return this.paintVisual();
+      const painted = await this.paintVisual();
+      this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
+      return painted;
     }
-    return this.restoreLiveStatus(liveStatus);
+    const restored = await this.restoreLiveStatus(liveStatus);
+    this.recordPageTransition(from, 'list', 'show_list', restored ? 'success' : 'failed');
+    return restored;
   }
 
   async showDefault(): Promise<boolean> {
@@ -338,6 +355,7 @@ export class HudPresenter {
       }
       return true;
     }
+    const from = this.tracePage();
     const deferred = this.focusReturn;
     const liveStatus = this.captureLiveStatus();
     if (this.visual) {
@@ -358,15 +376,23 @@ export class HudPresenter {
           this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
         }
       }
-      return this.paintVisual();
+      const painted = await this.paintVisual();
+      this.recordPageTransition(from, 'overview', 'show_overview', painted ? 'success' : 'failed');
+      return painted;
     }
     const ok = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
-    if (!ok) return false;
+    if (!ok) {
+      this.recordPageTransition(from, 'overview', 'show_overview', 'failed');
+      return false;
+    }
     this.resetAll();
     this.surface = { kind: 'default' };
     this.focusReturn = undefined;
     let restored = await this.restoreLiveStatus(liveStatus);
-    if (!deferred) return restored;
+    if (!deferred) {
+      this.recordPageTransition(from, 'overview', 'show_overview', restored ? 'success' : 'failed');
+      return restored;
+    }
 
     for (const [id, text] of deferred.streams) {
       if (id !== ContainerId.StatusBar) this.streams.set(id, text);
@@ -385,6 +411,7 @@ export class HudPresenter {
     ] as const) {
       if (this.streams.has(id)) restored = (await this.paint(id)) && restored;
     }
+    this.recordPageTransition(from, 'overview', 'show_overview', restored ? 'success' : 'failed');
     return restored;
   }
 
@@ -396,9 +423,13 @@ export class HudPresenter {
    * rebuilds the exact prior surface rather than dropping the wearer at Home.
    */
   showConfirmation(prompt: string, id = 'hud:confirmation'): Promise<boolean> {
+    const priorPage = this.tracePage();
     const openedHere = this.confirmation === undefined;
-    const safePrompt = (prompt.trim() || 'Confirm requested action.')
-      .slice(0, MAX_CONFIRM_PROMPT_CHARS);
+    const safePrompt = prompt.trim() || 'Confirm requested action.';
+    if (safePrompt.length > CONFIRM_PROMPT_MAX_UNITS) {
+      console.error('[HudPresenter] exact confirmation preview exceeds HUD capacity');
+      return Promise.resolve(false);
+    }
     if (!this.confirmation) {
       const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn
@@ -420,10 +451,14 @@ export class HudPresenter {
 
     if (this.visual) this.stopVisualConfirmationCountdown();
 
-    return this.enqueueConfirmation(() => this.renderConfirmation(id, openedHere));
+    return this.enqueueConfirmation(() => this.renderConfirmation(id, openedHere, priorPage));
   }
 
-  private async renderConfirmation(id: string, openedHere = false): Promise<boolean> {
+  private async renderConfirmation(
+    id: string,
+    openedHere = false,
+    from: G2TracePage = this.tracePage(),
+  ): Promise<boolean> {
     const current = this.confirmation;
     if (!current || current.id !== id) return true;
     const liveStatus = this.captureLiveStatus();
@@ -468,6 +503,7 @@ export class HudPresenter {
         }
         await this.paintVisual();
       }
+      this.recordPageTransition(from, 'confirmation', 'show_confirmation', painted ? 'success' : 'failed');
       return painted;
     }
     const ok = await this.client.require()
@@ -478,6 +514,7 @@ export class HudPresenter {
         this.confirmation = undefined;
         this.stopVisualConfirmationCountdown();
       }
+      this.recordPageTransition(from, 'confirmation', 'show_confirmation', 'failed');
       return false;
     }
     this.resetAll();
@@ -489,7 +526,9 @@ export class HudPresenter {
     this.brightness.set(ContainerId.Context, 3);
     this.brightness.set(ContainerId.Tray, 3);
     this.brightness.set(ContainerId.Hint, 1);
-    return this.restoreLiveStatus(liveStatus);
+    const restored = await this.restoreLiveStatus(liveStatus);
+    this.recordPageTransition(from, 'confirmation', 'show_confirmation', restored ? 'success' : 'failed');
+    return restored;
   }
 
   dismissConfirmation(id?: string): Promise<boolean> {
@@ -513,7 +552,9 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.renderList(prior.surface);
-      return this.repaintReplacementConfirmation(restored);
+      const result = await this.repaintReplacementConfirmation(restored);
+      this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
+      return result;
     }
 
     if (prior.surface.kind === 'sidebar') {
@@ -523,7 +564,9 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.renderSidebar(prior.surface, prior);
-      return this.repaintReplacementConfirmation(restored);
+      const result = await this.repaintReplacementConfirmation(restored);
+      this.recordPageTransition('confirmation', 'sidebar', 'dismiss_confirmation', result ? 'success' : 'failed');
+      return result;
     }
 
     const liveStatus = this.captureLiveStatus();
@@ -539,10 +582,15 @@ export class HudPresenter {
           this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
         }
       }
-      return this.repaintReplacementConfirmation(await this.paintVisual());
+      const result = await this.repaintReplacementConfirmation(await this.paintVisual());
+      this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', result ? 'success' : 'failed');
+      return result;
     }
     const rebuilt = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
-    if (!rebuilt) return false;
+    if (!rebuilt) {
+      this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', 'failed');
+      return false;
+    }
     this.resetAll();
     this.surface = { kind: 'default' };
     for (const id of this.pendingPaint.keys()) this.cancelPending(id);
@@ -570,7 +618,9 @@ export class HudPresenter {
       this.brightness.set(id, this.brightness.get(id) ?? DEFAULT_BRIGHTNESS[id]!);
       ok = (await this.paint(id)) && ok;
     }
-    return this.repaintReplacementConfirmation(ok);
+    const result = await this.repaintReplacementConfirmation(ok);
+    this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', result ? 'success' : 'failed');
+    return result;
   }
 
   /**
@@ -592,8 +642,12 @@ export class HudPresenter {
   private healing = false;
 
   private async healAndRetry(containerId: number): Promise<boolean> {
-    if (this.healing) return false; // one attempt; never recurse
+    if (this.healing) {
+      this.recordSelfHeal('skipped', containerId);
+      return false; // one attempt; never recurse
+    }
     this.healing = true;
+    this.recordSelfHeal('attempt', containerId);
     try {
       const layout = this.visual
         ? this.layouts.visualLayout()
@@ -611,10 +665,16 @@ export class HudPresenter {
             ))
             : this.layouts.defaultLayout();
       const rebuilt = await this.client.require().rebuildPageContainer(layout);
-      if (!rebuilt) return false;
+      if (!rebuilt) {
+        this.recordSelfHeal('abandoned', containerId);
+        return false;
+      }
       console.warn('[HudPresenter] page was missing — rebuilt and repainting');
-      return this.visual ? await this.paintVisual() : await this.paint(containerId);
+      const recovered = this.visual ? await this.paintVisual() : await this.paint(containerId);
+      this.recordSelfHeal(recovered ? 'recovered' : 'abandoned', containerId);
+      return recovered;
     } catch {
+      this.recordSelfHeal('abandoned', containerId);
       return false;
     } finally {
       this.healing = false;
@@ -648,6 +708,34 @@ export class HudPresenter {
       return this.healAndRetry(containerId);
     }
     return ok;
+  }
+
+  private tracePage(): G2TracePage {
+    if (this.confirmation) return 'confirmation';
+    return this.surface.kind === 'default' ? 'overview' : this.surface.kind;
+  }
+
+  private recordPageTransition(
+    from: G2TracePage,
+    to: G2TracePage,
+    reason: 'show_sidebar' | 'show_list' | 'show_overview' | 'show_confirmation' | 'dismiss_confirmation',
+    outcome: 'success' | 'failed',
+  ): void {
+    if (from === to) return;
+    this.diagnostics?.record({ type: 'page_transition', from, to, reason, outcome });
+  }
+
+  private recordSelfHeal(
+    decision: 'attempt' | 'recovered' | 'abandoned' | 'skipped',
+    containerId: number,
+  ): void {
+    this.diagnostics?.record({
+      type: 'self_heal',
+      surface: this.tracePage(),
+      target: this.visual ? 'visual' : 'text',
+      decision,
+      containerId,
+    });
   }
 
   private cancelPending(containerId: number): void {
