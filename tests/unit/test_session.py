@@ -424,3 +424,32 @@ class TestParseJudgment:
         from joat.services.session import parse_judgment
         agreement, blocking = parse_judgment("great job everyone")
         assert agreement is None and blocking is True
+
+
+class TestCapabilityNaming:
+    """One capability, called Brainstorm; debate is a move inside it.
+
+    The wearer's own framing: "the debate feature is just a brainstorming
+    capability". So the umbrella is the brainstorm and 'debate' names the
+    adversarial relay — not a second feature with its own session type.
+    """
+
+    async def test_both_words_start_the_same_session(self) -> None:
+        started: list[str] = []
+
+        class Noop(Session):
+            def __init__(self, topic: str) -> None:
+                started.append(topic)
+
+            async def run(self) -> None: ...
+            def cancel(self) -> None: ...
+
+        mgr = SessionManager(HudWriter(SinkTransport()), lambda t: Noop(t))
+        assert mgr.handle_transcript("brainstorm heat pumps") is True
+        await asyncio.sleep(0)
+        mgr._active = None  # end it, so the next trigger is accepted
+        # "debate" survives as a synonym: it is what the wearer already says,
+        # and an older plugin build still sends it.
+        assert mgr.handle_transcript("debate heat pumps") is True
+        await asyncio.sleep(0)
+        assert started == ["heat pumps", "heat pumps"]

@@ -45,6 +45,11 @@ class Session(ABC):
         """
         return None
 
+    @property
+    def status(self) -> str:
+        """Status chrome to restore after transient voice/link feedback."""
+        return "JOAT · session active"
+
 
 SessionFactory = Callable[[str], Session | None]
 """topic → Session, or None when the trigger can't be honored (missing agents)."""
@@ -65,6 +70,10 @@ class SessionManager:
     @property
     def active(self) -> bool:
         return self._active is not None
+
+    @property
+    def active_status(self) -> str | None:
+        return self._active.status if self._active is not None else None
 
     def notify(self, card: str) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
@@ -114,7 +123,11 @@ class SessionManager:
                     len(text),
                 )
             return True
-        for trigger in ("debate ", "debate: "):
+        # "brainstorm" is what the capability is called; "debate" stays a
+        # synonym because it is one of the MOVES inside a brainstorm (relay
+        # a turn to be torn apart rather than built on), it is what the
+        # wearer already says, and older plugin builds still send it.
+        for trigger in ("brainstorm ", "brainstorm: ", "debate ", "debate: "):
             if lowered.startswith(trigger):
                 # Whisper ends utterances with punctuation; keep topics clean.
                 topic = text.strip()[len(trigger):].strip().rstrip(".!?")
@@ -190,6 +203,10 @@ class DebateSession(Session):
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    @property
+    def status(self) -> str:
+        return f"DEBATE · {self._topic[:34]}"
 
     def direct(self, text: str) -> str | None:
         """Give the floor to a named seat. Returns the name, or None."""

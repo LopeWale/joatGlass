@@ -4,6 +4,10 @@ import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import type { CapabilityMenu } from './CapabilityMenu';
+import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
+
+type G2Gesture = Extract<G2TraceEvent, { type: 'gesture' }>['gesture'];
+type G2GestureDelivery = Extract<G2TraceEvent, { type: 'gesture' }>['delivery'];
 
 /**
  * Lifecycle hooks. The SDK reports app suspend/resume/exit as sysEvents, and
@@ -50,6 +54,7 @@ export class EventRouter {
     private readonly imu: ImuMonitor,
     private readonly menu: CapabilityMenu,
     private readonly lifecycle?: LifecycleHandler,
+    private readonly diagnostics?: G2DiagnosticTrace,
   ) {}
 
   attach(): void {
@@ -108,6 +113,7 @@ export class EventRouter {
     // list or contextual-menu state can mutate behind the prompt.
     if (this.imu.isPending() && !event.sysEvent) {
       if (event.textEvent) {
+        this.recordGesture(this.classify(event.textEvent.eventType), 'text');
         const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (eventType === OsEventTypeList.CLICK_EVENT) {
           this.imu.confirmByTap();
@@ -125,11 +131,13 @@ export class EventRouter {
     // menu renders but every selection vanishes silently — the event has
     // its own field and matches none of the other branches.
     if (event.menuItemClickEvent) {
+      this.recordGesture('menu_item', 'menu');
       this.handleMenu(event.menuItemClickEvent.itemID ?? 0);
       return;
     }
 
     if (event.sysEvent) {
+      this.recordGesture(this.classify(event.sysEvent.eventType), 'sys');
       // Confirmation owns long press too; it must not toggle the microphone
       // behind a decision or make the visible TAP/SWIPE contract incomplete.
       if (!this.imu.isPending() && this.handleLongPress(event.sysEvent.eventType, 'sysEvent')) {
@@ -140,6 +148,7 @@ export class EventRouter {
     }
 
     if (event.textEvent) {
+      this.recordGesture(this.classify(event.textEvent.eventType), 'text');
       // Long-press first: on a text-capture page the SDK delivers 9/10
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
@@ -158,6 +167,7 @@ export class EventRouter {
     }
 
     if (event.listEvent) {
+      this.recordGesture(this.classify(event.listEvent.eventType), 'list');
       if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
       // Settings menu open → selection is a local concern, not Mac input.
       if (this.menu.handleList(event.listEvent)) return;
@@ -172,6 +182,28 @@ export class EventRouter {
         },
       });
     }
+  }
+
+  /** Classify raw SDK events without retaining source IDs or user content. */
+  private classify(eventType: number | undefined): G2Gesture {
+    switch (eventType ?? OsEventTypeList.CLICK_EVENT) {
+      case OsEventTypeList.CLICK_EVENT: return 'tap';
+      case OsEventTypeList.DOUBLE_CLICK_EVENT: return 'double_press';
+      case OsEventTypeList.LONG_PRESS_EVENT: return 'long_press';
+      case OsEventTypeList.LONG_PRESS_RELEASE_EVENT: return 'long_press_release';
+      case OsEventTypeList.SCROLL_TOP_EVENT: return 'scroll_up';
+      case OsEventTypeList.SCROLL_BOTTOM_EVENT: return 'scroll_down';
+      case OsEventTypeList.FOREGROUND_ENTER_EVENT: return 'foreground_enter';
+      case OsEventTypeList.FOREGROUND_EXIT_EVENT: return 'foreground_exit';
+      case OsEventTypeList.SYSTEM_EXIT_EVENT: return 'system_exit';
+      case OsEventTypeList.ABNORMAL_EXIT_EVENT: return 'abnormal_exit';
+      case OsEventTypeList.IMU_DATA_REPORT: return 'imu_report';
+      default: return 'unknown';
+    }
+  }
+
+  private recordGesture(gesture: G2Gesture, delivery: G2GestureDelivery): void {
+    this.diagnostics?.record({ type: 'gesture', gesture, delivery });
   }
 
   private handleSys(sys: NonNullable<EvenHubEvent['sysEvent']>): void {

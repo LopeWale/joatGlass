@@ -110,6 +110,32 @@ class TestVoiceLoop:
         assert isinstance(transport.sent[-1], AudioControl)
         assert transport.sent[-1].open is True
 
+    async def test_connect_restores_active_session_status_after_opening_mic(self) -> None:
+        class ActiveSessions:
+            active = True
+            active_status = "DEBATE · battery policy"
+
+            def handle_transcript(self, _text: str) -> bool:
+                return True
+
+        transport, engine = FakeTransport(), FakeEngine()
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            sessions=ActiveSessions(),  # type: ignore[arg-type]
+        )
+
+        await orch.on_connect()
+
+        assert not [
+            message
+            for message in transport.sent
+            if isinstance(message, HudText) and message.text == ""
+        ]
+        assert region(transport, ContainerId.STATUS_BAR)[-1] == "DEBATE · battery policy"
+        assert isinstance(transport.sent[-2], AudioControl)
+        assert transport.sent[-2].open is True
+
     async def test_utterance_becomes_hud_text(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("turn on the lights")
         orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
@@ -250,6 +276,29 @@ class TestReplyFlow:
         assert replier.asked == []
         assert region(transport, ContainerId.MAIN) == []
         assert region(transport, ContainerId.STATUS_BAR)[-1] == "JOAT · listening"
+
+    async def test_active_session_keeps_its_status_after_consuming_speech(self) -> None:
+        class ActiveSessions:
+            active = True
+            active_status = "DEBATE · battery policy"
+
+            def handle_transcript(self, _text: str) -> bool:
+                return True
+
+        transport, engine = FakeTransport(), FakeEngine("Claude, respond.")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            sessions=ActiveSessions(),  # type: ignore[arg-type]
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        assert region(transport, ContainerId.STATUS_BAR)[-1] == "DEBATE · battery policy"
 
     async def test_transcript_then_reply_both_reach_the_hud(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("what is the weather")

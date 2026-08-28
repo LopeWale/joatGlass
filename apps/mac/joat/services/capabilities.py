@@ -82,12 +82,14 @@ class CapabilityRouter:
                 await self._show_messages()
             case "Notifications":
                 await self._show_notifications()
-            case "Debate":
+            # Both spellings: a wearer's installed plugin build may still send
+            # "Debate", and a rename must not make the menu row inert.
+            case "Brainstorm" | "Debate":
                 await self._show_focus(
-                    "DEBATE",
+                    "BRAINSTORM",
                     [
-                        'Say: "JOAT, debate <topic>"',
-                        "Codex proposes · Claude critiques · JOAT judges",
+                        'Say: "JOAT, brainstorm <question>"',
+                        "Codex and Claude answer · you route each turn",
                     ],
                 )
             case "Calendar":
