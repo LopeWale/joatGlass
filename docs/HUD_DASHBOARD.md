@@ -219,9 +219,7 @@ removes the rail before its content is requested from the Mac.
 |                                              |
 |Send the prepared message to Dele?            |
 +----------------------------------------------+
-|RIGHT / RING / NOD  confirm                   |
-+----------------------------------------------+
-|LEFT  cancel                                  |
+|   [ TAP · Confirm ]   [ SWIPE · Cancel ]     |
 +----------------------------------------------+
 |8 seconds · timeout cancels                   |
 +----------------------------------------------+  y=288
@@ -229,9 +227,11 @@ removes the rail before its content is requested from the Mac.
 
 `RULES.md:15` makes this the highest-stakes surface on the device. The question
 is the only full-intensity content; outcomes are explicit but visually
-secondary. Ordinary content is deferred. Right temple, ring, or nod confirms;
-left cancels; eight seconds without input refuses. The gate then restores the
-interrupted Overview, Sidebar, or focus page.
+secondary. Ordinary content is deferred. A single press on either built-in G2
+temple confirms, while a swipe in either direction cancels. An optional R1
+press remains compatible but is deliberately not advertised or required;
+eight seconds without input refuses. The gate then restores the interrupted
+Overview, Sidebar, or focus page.
 
 ### FULL-FOCUS PAGE — destination after Sidebar selection
 

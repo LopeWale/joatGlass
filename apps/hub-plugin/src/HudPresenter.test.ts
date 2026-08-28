@@ -376,10 +376,10 @@ describe('HudPresenter modal surfaces', () => {
       textColor: 4,
     });
     expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Context)).toMatchObject({
-      content: 'RIGHT / RING / NOD  confirm', textColor: 3,
+      content: 'TAP · confirm   SWIPE · cancel', textColor: 3,
     });
     expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Tray)).toMatchObject({
-      content: 'LEFT  cancel', textColor: 3,
+      content: '', textColor: 3,
     });
     expect(confirmation.textObject?.find((c) => c.containerID === ContainerId.Hint)).toMatchObject({
       content: '8 seconds · timeout cancels', textColor: 1,

@@ -430,8 +430,8 @@ export class HudPresenter {
     if (this.visual) {
       this.resetAll();
       this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
-      this.streams.set(ContainerId.Context, 'RIGHT / RING / NOD  confirm');
-      this.streams.set(ContainerId.Tray, 'LEFT  cancel');
+      this.streams.set(ContainerId.Context, 'TAP · confirm   SWIPE · cancel');
+      this.streams.set(ContainerId.Tray, '');
       this.streams.set(ContainerId.Hint, '8 seconds · timeout cancels');
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
@@ -482,8 +482,8 @@ export class HudPresenter {
     }
     this.resetAll();
     this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
-    this.streams.set(ContainerId.Context, 'RIGHT / RING / NOD  confirm');
-    this.streams.set(ContainerId.Tray, 'LEFT  cancel');
+    this.streams.set(ContainerId.Context, 'TAP · confirm   SWIPE · cancel');
+    this.streams.set(ContainerId.Tray, '');
     this.streams.set(ContainerId.Hint, '8 seconds · timeout cancels');
     this.brightness.set(ContainerId.Main, 4);
     this.brightness.set(ContainerId.Context, 3);

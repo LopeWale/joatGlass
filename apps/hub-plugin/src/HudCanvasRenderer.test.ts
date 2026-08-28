@@ -37,7 +37,11 @@ describe('selected visual geometry', () => {
       sidebarWidth: 160,
       sidebarBackdropOffsetX: 78,
       listContentX: 93,
-      confirmationActionX: 194,
+      confirmationActionsY: 178,
+      confirmationPrimaryX: 112,
+      confirmationSecondaryX: 294,
+      confirmationActionWidth: 170,
+      confirmationActionHeight: 36,
       confirmationProgressX: 97,
       confirmationProgressWidth: 367,
     });

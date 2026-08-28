@@ -14,7 +14,11 @@ Three tiers, cheapest first. Each catches a different class of bug, and **none o
 cd apps/hub-plugin && npm test
 ```
 
-Covers the confirm paths without hardware, because `confirmByTap()` is just a method — no ring required to call it. `EventRouter.test.ts` asserts the source routing: left temple → settings menu, right temple → confirm, ring → confirm, and that a left-temple *single* click does not confirm.
+Covers the confirmation paths without hardware. `EventRouter.test.ts` asserts
+that either built-in G2 temple press confirms while the decision surface is
+active, either swipe direction cancels, unknown event sources fail closed, and
+every verdict gesture is consumed instead of leaking into menus or Mac input.
+The optional R1 remains compatible but is not required.
 
 > If you're on Linux/CI and hit `Cannot find native binding`, the `node_modules` was installed on a different platform. Remove `node_modules` and `package-lock.json`, then `npm i`.
 
@@ -58,9 +62,14 @@ Actions available: `up`, `down`, `click`, `double_click`, and (simulator ≥0.9.
 `POST /api/input` takes an **action only — no source field**, and (verified empirically,
 v0.9.3) every injected event arrives as `eventSource: 1` — **always the right temple**. So
 the simulator cannot exercise the left-temple settings menu or the ring at all, and cannot
-prove source discrimination. It *can* exercise the known right-temple Click acceptance
-path once a real gateway has made a confirmation visible. Source discrimination remains
-Tier 1 (vitest) and Tier 3 (hardware).
+prove source discrimination. It *can* prove that Click accepts and Up/Down refuse once
+the production confirmation gate is visible. Source discrimination remains Tier 1
+(Vitest) and Tier 3 (hardware).
+
+The explicit `?joatVisual=confirmation` development surface is interactive:
+it arms the production confirmation gate without connecting to the Mac or any
+external sender. Click accepts; Up or Down refuses; either verdict dismisses
+the fixture back to its prior safe HUD state.
 
 ### Safe real-gateway reply trace
 
@@ -98,7 +107,7 @@ recipient handle.
   `rebuildPageContainer`, `updateImageRawData`, `textContainerUpgrade`,
   `shutDownPageContainer`, `audioControl` — no `imuControl` variant. The plugin logs
   `[ImuMonitor] imuControl unavailable on this host` and boots on regardless (mic still
-  works). Nod paths are Tier 1/3 only.
+  works). IMU motion is diagnostic only and never approves an action.
 - **Hot reload boots twice per host session.** `createStartUpPageContainer` is one-shot
   per simulator session, so a vite reload's second boot gets `invalid`; `BridgeClient`
   falls back to `rebuildPageContainer` and adopts the existing page. If you see
@@ -118,9 +127,16 @@ recipient handle.
 
 ## Tier 3 — Real glasses
 
-**The event-shape question is now answered — no probe needed.** A single press on a text container arrives as `sysEvent`, not `textEvent` (only scrolls arrive as `textEvent`), so `eventSource` is available and left/right/ring routing works as designed. The earlier `textEvent` CLICK fallback was dead code and has been deleted.
+**The hardware event shape is known.** A single press on the tested text
+container arrived as `sysEvent`, so `eventSource` was available. The router
+also keeps a source-agnostic `textEvent` CLICK compatibility path for hosts
+that deliver the capturing-container event shape described by the SDK; unknown
+`sysEvent` sources still fail closed.
 
-What still needs hardware confirmation is narrower: that the **right** temple reports `eventSource: 1` and the **left** reports `3`, rather than the reverse. If they're swapped, settings and confirm swap sides — annoying, one-line fix, but you want to know before muscle memory sets in.
+What still needs hardware confirmation is narrower: that a single press from
+each built-in temple reaches the same active confirmation gate, and that both
+swipe directions refuse exactly once. Outside confirmation, the double-press
+source split still matters for the JOAT Sidebar versus the system exit dialog.
 
 Run the probe to check:
 

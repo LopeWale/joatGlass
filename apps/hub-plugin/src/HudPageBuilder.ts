@@ -324,7 +324,7 @@ export class HudPageBuilder {
     });
   }
 
-  /** Dedicated decision surface: one bright question, two textual outcomes. */
+  /** Dedicated decision surface: one bright question, one horizontal CTA row. */
   confirmationLayout(prompt: string): RebuildPageContainer {
     const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
     return new RebuildPageContainer({
@@ -335,9 +335,9 @@ export class HudPageBuilder {
         this.main(144, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`),
         this.region(
           ContainerId.Context, 'context', 176, 48, 3, 3,
-          'RIGHT / RING / NOD  confirm',
+          'TAP · confirm   SWIPE · cancel',
         ),
-        this.region(ContainerId.Tray, 'tray', 224, 32, 4, 3, 'LEFT  cancel'),
+        this.region(ContainerId.Tray, 'tray', 224, 32, 4, 3, ''),
         this.region(ContainerId.Hint, 'hint', 256, 32, 5, 1, '8 seconds · timeout cancels'),
       ],
     });

@@ -143,9 +143,11 @@ describe('HudPageBuilder invariants', () => {
       yPosition: 32, height: 144, textColor: 4,
       content: 'CONFIRM ACTION\n\nSend reply to Adele?',
     });
-    expect(byId(ContainerId.Context)?.content).toBe('RIGHT / RING / NOD  confirm');
-    expect(byId(ContainerId.Tray)?.content).toBe('LEFT  cancel');
+    expect(byId(ContainerId.Context)?.content).toBe('TAP · confirm   SWIPE · cancel');
+    expect(byId(ContainerId.Tray)?.content).toBe('');
     expect(byId(ContainerId.Hint)?.content).toBe('8 seconds · timeout cancels');
+    expect(page.textObject?.map((container) => container.content).join(' '))
+      .not.toMatch(/\b(?:left|right|ring|nod)\b/i);
   });
 
   it('visual layout tiles the full canvas behind one transparent gesture layer', () => {

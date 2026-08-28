@@ -4,15 +4,13 @@ import type { MacLink } from './MacLink';
 import type { IMU_Report_Data } from '@evenrealities/even_hub_sdk';
 
 /**
- * IMU-based nod detection — our Confirmer for consequential actions
- * (RULES.md #6: every computer-use action needs explicit confirmation).
+ * Exclusive confirmation gate for consequential actions (RULES.md #6).
  *
- * At P100 (10 Hz) a deliberate nod is a pitch swing beyond threshold and back
- * within the window. Thresholds need calibration against real hardware; the
- * defaults are a starting point, not tuned values.
+ * IMU samples are available only for opt-in diagnostics. Uncalibrated motion
+ * must never approve an action: the visible contract requires a deliberate
+ * G2 touchpad press, while a swipe or timeout refuses.
  */
 export class ImuMonitor {
-  private samples: Array<{ y: number; at: number }> = [];
   private pending?: {
     actionId: string;
     active: boolean;
@@ -26,8 +24,6 @@ export class ImuMonitor {
   constructor(
     private readonly client: BridgeClient,
     private readonly link: MacLink,
-    private readonly threshold = 0.35,
-    private readonly windowMs = 1200,
   ) {}
 
   async start(pace: ImuReportPace = ImuReportPace.P100): Promise<boolean> {
@@ -38,7 +34,7 @@ export class ImuMonitor {
     } catch (err) {
       // Hosts without IMU reject the call outright — the desktop simulator's
       // bridge implements no `imuControl` variant at all. Degrade instead of
-      // killing boot: nod-confirm is unavailable, tap-confirm still works.
+      // killing boot: diagnostic IMU is unavailable, tap confirmation still works.
       console.warn('[ImuMonitor] imuControl unavailable on this host:', err);
       this.open = false;
       return false;
@@ -75,7 +71,6 @@ export class ImuMonitor {
     // by a gesture intended for the new one.
     if (this.pending) this.resolve(false);
     this.pending = { actionId, active: false, expiresAt: Number.POSITIVE_INFINITY, onResult };
-    this.samples = [];
     console.info(`[joat trace] trace=${actionId} stage=confirmation-received`);
   }
 
@@ -115,7 +110,6 @@ export class ImuMonitor {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = undefined;
     this.pending = undefined;
-    this.samples = [];
   }
 
   /** Called by EventRouter for each sysEvent carrying imuData. */
@@ -135,21 +129,15 @@ export class ImuMonitor {
       return;
     }
 
-    this.samples.push({ y: imu.y ?? 0, at: now });
-    this.samples = this.samples.filter((s) => now - s.at <= this.windowMs);
-
-    const values = this.samples.map((s) => s.y);
-    const swing = Math.max(...values) - Math.min(...values);
-    if (swing >= this.threshold) this.resolve(true);
+    // Motion is intentionally observational only. It can expire a stale gate
+    // above, but it cannot produce an approval verdict.
   }
 
   /**
    * Explicit accept path — a deliberate tap is unambiguous, unlike a nod.
    *
-   * Fed by the R1 ring click and by a right-temple click. The temple is the
-   * one confirm gesture available to a wearer with no ring, so it is not a
-   * fallback: until the nod thresholds are calibrated against real traces it
-   * is the only confirm surface we actually trust.
+   * Fed by either built-in G2 temple click. Optional R1 input may route here
+   * too, but is never required or advertised.
    */
   confirmByTap(): boolean {
     if (!this.pending) return false;
@@ -170,7 +158,7 @@ export class ImuMonitor {
     return true;
   }
 
-  /** Explicit refusal: the left temple is otherwise unused while a gate is live. */
+  /** Explicit refusal routed from a G2 swipe while a gate is live. */
   declineByTap(): boolean {
     if (!this.pending) return false;
     this.resolve(false);
@@ -183,7 +171,6 @@ export class ImuMonitor {
     this.pending = undefined;
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = undefined;
-    this.samples = [];
     console.info(
       `[joat trace] trace=${actionId} stage=confirmation-settled accepted=${accepted}`,
     );

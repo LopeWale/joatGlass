@@ -5,8 +5,6 @@ import scalesSvg from '@phosphor-icons/core/regular/scales.svg?raw';
 import gearSvg from '@phosphor-icons/core/regular/gear.svg?raw';
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
-import arrowRightSvg from '@phosphor-icons/core/regular/arrow-right.svg?raw';
-import arrowLeftSvg from '@phosphor-icons/core/regular/arrow-left.svg?raw';
 import { CANVAS, type HudContentKind } from './types';
 import {
   splitGray4Tiles,
@@ -33,7 +31,11 @@ export const HUD_VISUAL_GEOMETRY = {
   sidebarWidth: 160,
   sidebarBackdropOffsetX: 78,
   listContentX: 93,
-  confirmationActionX: 194,
+  confirmationActionsY: 178,
+  confirmationPrimaryX: 112,
+  confirmationSecondaryX: 294,
+  confirmationActionWidth: 170,
+  confirmationActionHeight: 36,
   confirmationProgressX: 97,
   confirmationProgressWidth: 367,
 } as const;
@@ -45,9 +47,7 @@ type IconName =
   | 'debate'
   | 'settings'
   | 'microphone'
-  | 'battery'
-  | 'arrowRight'
-  | 'arrowLeft';
+  | 'battery';
 
 const ICON_SOURCES: Readonly<Record<IconName, string>> = {
   messages: chatCircleSvg,
@@ -57,8 +57,6 @@ const ICON_SOURCES: Readonly<Record<IconName, string>> = {
   settings: gearSvg,
   microphone: microphoneSvg,
   battery: batteryHighSvg,
-  arrowRight: arrowRightSvg,
-  arrowLeft: arrowLeftSvg,
 };
 
 interface StatusParts {
@@ -381,7 +379,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawList(context, frame);
         break;
       case 'confirmation':
-        this.drawConfirmation(context, frame, icons);
+        this.drawConfirmation(context, frame);
         break;
     }
 
@@ -661,7 +659,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawConfirmation(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'confirmation' }>,
-    icons: Record<IconName, HTMLImageElement>,
   ): void {
     context.textAlign = 'center';
     context.textBaseline = 'middle';
@@ -677,19 +674,31 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(BRIGHT);
     this.drawFittedWrappedText(context, frame.prompt, 288, 127, 470, 3);
 
-    this.drawIcon(context, icons.arrowRight, 153, 164, 22, BRIGHT);
-    context.textAlign = 'left';
-    context.fillStyle = gray(BRIGHT);
-    context.font = `10px ${HUD_FONT}`;
-    context.fillText('RIGHT / RING / NOD', HUD_VISUAL_GEOMETRY.confirmationActionX, 177);
-    context.fillStyle = gray(SUPPORT);
-    context.fillText('Confirm', 359, 177);
+    const drawAction = (x: number, copy: string, level: number): void => {
+      context.strokeStyle = gray(level);
+      context.lineWidth = 1;
+      context.beginPath();
+      context.roundRect(
+        x,
+        HUD_VISUAL_GEOMETRY.confirmationActionsY,
+        HUD_VISUAL_GEOMETRY.confirmationActionWidth,
+        HUD_VISUAL_GEOMETRY.confirmationActionHeight,
+        8,
+      );
+      context.stroke();
+      context.fillStyle = gray(level);
+      context.font = `10px ${HUD_FONT}`;
+      context.textAlign = 'center';
+      context.fillText(
+        copy,
+        x + HUD_VISUAL_GEOMETRY.confirmationActionWidth / 2,
+        HUD_VISUAL_GEOMETRY.confirmationActionsY
+          + HUD_VISUAL_GEOMETRY.confirmationActionHeight / 2,
+      );
+    };
 
-    this.drawIcon(context, icons.arrowLeft, 153, 200, 22, SUPPORT);
-    context.fillStyle = gray(SUPPORT);
-    context.fillText('LEFT', HUD_VISUAL_GEOMETRY.confirmationActionX, 213);
-    context.fillStyle = gray(CHROME);
-    context.fillText('Cancel', 247, 213);
+    drawAction(HUD_VISUAL_GEOMETRY.confirmationPrimaryX, 'TAP · Confirm', BRIGHT);
+    drawAction(HUD_VISUAL_GEOMETRY.confirmationSecondaryX, 'SWIPE · Cancel', SUPPORT);
 
     const progress = Math.max(0, Math.min(1, frame.secondsRemaining / 8));
     context.fillStyle = gray(38);

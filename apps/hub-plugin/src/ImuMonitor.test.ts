@@ -12,7 +12,7 @@ function make() {
   const sent: UplinkMessage[] = [];
   const link = { send: (m: UplinkMessage) => sent.push(m) } as unknown as MacLink;
   const client = {} as BridgeClient; // start()/stop() untouched in these tests
-  const imu = new ImuMonitor(client, link, 0.35, 1200);
+  const imu = new ImuMonitor(client, link);
   return { imu, sent };
 }
 
@@ -33,12 +33,14 @@ describe('ImuMonitor confirms', () => {
     info.mockRestore();
   });
 
-  it('nod swing past threshold resolves a Mac confirm uplink', () => {
+  it('motion never approves a decision that advertises TAP as its only accept gesture', () => {
     const { imu, sent } = make();
     imu.await('act-1');
     imu.ingest(sample(0.0));
-    imu.ingest(sample(0.4)); // swing 0.4 >= 0.35
-    expect(sent).toEqual([{ kind: 'confirm', actionId: 'act-1', accepted: true }]);
+    imu.ingest(sample(1.0));
+    expect(sent).toEqual([]);
+    expect(imu.isPending()).toBe(true);
+    imu.dispose();
   });
 
   it('local onResult gets the verdict and NOTHING goes uplink', () => {
@@ -63,7 +65,7 @@ describe('ImuMonitor confirms', () => {
     expect(sent).toEqual([]);
   });
 
-  it('left-temple decline resolves false', () => {
+  it('explicit decline resolves false', () => {
     const { imu, sent } = make();
     imu.await('cancel-me');
     expect(imu.isPending()).toBe(true);
@@ -134,16 +136,16 @@ describe('ImuMonitor trace mode', () => {
     expect(sent[0]).toMatchObject({ kind: 'imu', x: 0, y: 0.5, z: 0 });
   });
 
-  it('tracing does not suppress the confirm it is observing', () => {
+  it('tracing does not turn observed motion into an approval', () => {
     const { imu, sent } = make();
     imu.setTrace(true);
     imu.await('act-2');
     imu.ingest(sample(0.0));
     imu.ingest(sample(0.4));
     expect(sent.filter((m) => m.kind === 'imu')).toHaveLength(2);
-    expect(sent.filter((m) => m.kind === 'confirm')).toEqual([
-      { kind: 'confirm', actionId: 'act-2', accepted: true },
-    ]);
+    expect(sent.filter((m) => m.kind === 'confirm')).toEqual([]);
+    expect(imu.isPending()).toBe(true);
+    imu.dispose();
   });
 
   it('setTrace(false) stops the stream', () => {
