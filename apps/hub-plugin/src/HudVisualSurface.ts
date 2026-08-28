@@ -3,6 +3,7 @@ import {
   ImageRawDataUpdateResult,
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
+import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
 import { CANVAS, ContainerId, type HudContentKind } from './types';
 
 const TILE_WIDTH = 288;
@@ -89,10 +90,12 @@ export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
 export class HudVisualSurface {
   private painting = false;
   private pending?: PendingPaint;
+  private frameNumber = 0;
 
   constructor(
     private readonly client: BridgeClient,
     private readonly renderer: HudFrameRenderer,
+    private readonly diagnostics?: G2DiagnosticTrace,
   ) {}
 
   paint(frame: HudVisualFrame): Promise<boolean> {
@@ -126,19 +129,39 @@ export class HudVisualSurface {
   }
 
   private async paintNow(frame: HudVisualFrame): Promise<boolean> {
+    const frameNumber = ++this.frameNumber;
+    let current: { order: number; tile: HudImageTile } | undefined;
     try {
       const tiles = await this.renderer.render(frame);
-      for (const tile of tiles) {
+      for (const [order, tile] of tiles.entries()) {
+        current = { order, tile };
         const result = await this.client.require().updateImageRawData(
           new ImageRawDataUpdate({
             containerID: tile.containerId,
             imageData: tile.pixels,
           }),
         );
-        if (result !== ImageRawDataUpdateResult.success) return false;
+        const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';
+        this.diagnostics?.record({
+          type: 'tile_upload',
+          frame: frameNumber,
+          order,
+          containerId: tile.containerId as 4 | 8 | 9 | 10,
+          outcome,
+        });
+        if (outcome === 'failed') return false;
       }
       return true;
     } catch {
+      if (current) {
+        this.diagnostics?.record({
+          type: 'tile_upload',
+          frame: frameNumber,
+          order: current.order,
+          containerId: current.tile.containerId as 4 | 8 | 9 | 10,
+          outcome: 'error',
+        });
+      }
       console.error('[HudVisualSurface] frame paint failed');
       return false;
     }

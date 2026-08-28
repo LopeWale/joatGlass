@@ -9,7 +9,7 @@ type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 /**
  * The control-center navigation from the approved dashboard design:
  * left double-tap opens the CAPABILITY menu — Messages, Notifications,
- * Calendar, Debate, Settings — and each entry opens its data view. The
+ * Calendar, Brainstorm, Settings — and each entry opens its data view. The
  * first build shipped only the old resume-policy list here, so the wearer
  * double-tapped into "a menu modal, but not the one we designed" (their
  * words, on hardware). Settings still exists — one level down.
@@ -18,7 +18,7 @@ type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
  *   home ──double-tap──▶ caps ──pick row──▶ data view (Mac-drawn) or settings
  *   caps/settings/data ──double-tap──▶ home  (double-tap is BACK, always)
  */
-const CAPABILITIES = ['Messages', 'Notifications', 'Calendar', 'Debate', 'Settings'] as const;
+const CAPABILITIES = ['Messages', 'Notifications', 'Calendar', 'Brainstorm', 'Settings'] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'auto', label: 'Resume mic: instantly' },

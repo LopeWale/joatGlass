@@ -83,7 +83,12 @@ class VoiceOrchestrator:
         # fresh status makes stale copy look like a new answer. With no live
         # session owning the surface, clear those regions and let the plugin
         # render its intentional connected-empty (Ready) surface.
-        if self._sessions is None or not self._sessions.active:
+        active_status = (
+            self._sessions.active_status
+            if self._sessions is not None and self._sessions.active
+            else None
+        )
+        if active_status is None:
             for container_id in (
                 ContainerId.MAIN,
                 ContainerId.CONTEXT,
@@ -92,17 +97,27 @@ class VoiceOrchestrator:
                 await self._transport.send(
                     HudText(text="", container_id=container_id)
                 )
-        wake_hint = " — say 'JOAT ...'" if self._wake_words else ""
-        status = (f"JOAT · online{wake_hint}" if self._stt_available
-                  else "JOAT · online (no STT)")
-        await self._transport.send(HudText(text=status, container_id=ContainerId.STATUS_BAR))
-        if not self._stt_available:
+        if active_status is None:
+            wake_hint = " — say 'JOAT ...'" if self._wake_words else ""
+            status = (f"JOAT · online{wake_hint}" if self._stt_available
+                      else "JOAT · online (no STT)")
+            await self._transport.send(
+                HudText(text=status, container_id=ContainerId.STATUS_BAR)
+            )
+        if not self._stt_available and active_status is None:
             await self._transport.send(
                 HudText(text="Install whisperkit-cli on the Mac to enable transcription.")
             )
         # Request ears: an earlier session (or doff) may have left the mic off,
         # and a brain that cannot hear is indistinguishable from none.
         await self._transport.send(AudioControl(open=True))
+        if active_status is not None:
+            # The plugin truthfully marks AudioControl(open=True) as
+            # listening. A focused session owns stronger status copy, so
+            # restore it after opening the microphone.
+            await self._transport.send(
+                HudText(text=active_status, container_id=ContainerId.STATUS_BAR)
+            )
 
     def on_audio(self, pcm: bytes, seq: int) -> None:
         if self._last_seq is not None and seq != self._last_seq + 1:
@@ -203,7 +218,12 @@ class VoiceOrchestrator:
             # "hearing you" is transient. Empty STT, unaddressed room speech,
             # a deterministic command, and a normal model reply must all
             # return the chrome to its truthful idle state.
-            await self._hud.status("JOAT · listening")
+            active_status = (
+                self._sessions.active_status
+                if self._sessions is not None and self._sessions.active
+                else None
+            )
+            await self._hud.status(active_status or "JOAT · listening")
 
     async def watch_loop_lag(self, interval_s: float = 0.5,
                              warn_s: float = 0.75) -> None:
