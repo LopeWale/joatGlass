@@ -352,8 +352,12 @@ async function boot(): Promise<void> {
           if (context.signal.aborted) return;
           console.error('[joat] confirmation render failed:', err);
         }
-        if (visible) imu.activate(msg.actionId, 8000);
-        else imu.cancel(msg.actionId);
+        if (visible) {
+          // Content-free acceptance synchronization for the official desktop
+          // simulator. Vite removes this branch from packed builds.
+          if (import.meta.env.DEV) console.info('[joat] acceptance confirmation-visible');
+          imu.activate(msg.actionId, 8000);
+        } else imu.cancel(msg.actionId);
         break;
       }
       case 'pairing.set':

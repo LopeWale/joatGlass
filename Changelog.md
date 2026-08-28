@@ -2,6 +2,44 @@
 
 ## 2026-08-28
 
+- Closed the installed-engine OpenClaw → Hermes → JOAT Calendar simulator gate.
+  A user-observed Mac app status confirmed Calendar and Reminders full access;
+  the remaining failure was routing, not TCC. Whisper's common “asks Hermes”
+  rendering now reaches the same explicit candidate-only route as “ask Hermes”.
+  A development-only, loopback-only, tokenized PCM fixture kept the official
+  Even simulator as the sole glasses connection; production build inspection
+  proves the fixture route and content are absent. Hermes proposed the synthetic
+  “JOAT Hermes Green Orbit” event, JOAT rendered the exact Calendar/date/time/
+  duration/zone preview, the simulator accepted it, EventKit logged one event
+  add, and the durable action/attempt finished `succeeded` with
+  `eventkit_saved_and_read_back` / `read_back_matched` after payload purge. A
+  native Calendar query found exactly one 10:00–10:30 event, exact-title cleanup
+  removed one, and a second query found zero. Owner-readable framebuffer and
+  receipt evidence is retained under
+  `~/Library/Application Support/JOAT/acceptance/hermes-calendar/20260828-143952-green-orbit/`.
+  This is official-simulator proof, not physical-lens evidence. The earlier
+  two-Calendar-record cleanup discrepancy was separately resolved from macOS
+  logs: JOAT saved one event and `calaccessd` added one Calendar projection for
+  the scheduled Reminder; it was not a duplicate JOAT event write. The older
+  external native-acceptance driver remains incompatible with the exact
+  app-launched-PID bridge boundary and must not be used to weaken that boundary.
+
+- Re-ran the opt-in, content-free Gate 0 location probe against the current
+  `com.example.joat` v0.1.14 plugin without issuing any navigation action.
+  The official simulator retained complete, four-quadrant 576×288 frames for
+  Ready, the fixed confirmation marker, and restored Ready; a separate v2
+  receipt recorded one system tap, two successful page transitions, and 28
+  successful ordered tile uploads. The simulator rejected the requested high
+  accuracy profile and delivered no samples, which remains simulator-only
+  capability evidence rather than a packaged-phone finding. A timing
+  falsification run also reproduced bridge acknowledgement before framebuffer
+  change, so callback and pixel proof remain separate. Packaging now builds in
+  a fresh private staging directory: concurrent DEV PCM fixtures can remain in
+  the shared `dist/` tree without entering `joat.ehpk`. The resulting canonical
+  package is 65,964 bytes with SHA-256
+  `ff43e4494a9cf2c20204255fe42b64cef97a4f20e5c8812c0e748dfe016ab282`.
+  Physical walking/cycling receipts and synchronized lens video remain open.
+
 - Implemented an experimental, explicit-invocation walking/cycling navigation
   lane without treating comparison-plugin distances as release truth. Spoken
   destinations resolve to bounded canonical candidates, require G2

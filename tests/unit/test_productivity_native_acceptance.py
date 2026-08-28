@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import stat
+import subprocess
+import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,11 +19,15 @@ from PIL import Image
 
 from scripts.simulator_productivity_native_acceptance import (
     AcceptanceSafetyError,
+    NativeItemIdentity,
     DefaultsPreference,
     alarm_delivery_after,
     alpha_preview_has_content,
     alpha_preview_command,
+    build_acceptance_titles,
+    classify_alarm_delivery_failure,
     create_engine_stub_repo,
+    evaluate_notification_preflight,
     plan_acceptance_schedule,
     redact_native_reference,
     repo_preference_restore_command,
@@ -42,17 +50,27 @@ def test_schedule_keeps_a_full_two_minute_alarm_observation_window() -> None:
     assert (schedule.reminder_due - now).total_seconds() == 135
 
 
-def test_cleanup_title_must_be_an_exact_randomized_acceptance_identity() -> None:
-    validate_acceptance_title("JOAT ACCEPTANCE a1b2c3d4", "a1b2c3d4")
+def test_event_and_reminder_use_distinct_randomized_acceptance_identities() -> None:
+    titles = build_acceptance_titles("a1b2c3d4")
+
+    assert titles.event == "JOAT ACCEPTANCE a1b2c3d4 EVENT"
+    assert titles.reminder == "JOAT ACCEPTANCE a1b2c3d4 REMINDER"
+    assert titles.event != titles.reminder
+    validate_acceptance_title(titles.event, "a1b2c3d4", kind="event")
+    validate_acceptance_title(titles.reminder, "a1b2c3d4", kind="reminder")
 
     with pytest.raises(AcceptanceSafetyError, match="exact randomized"):
-        validate_acceptance_title("Design review", "a1b2c3d4")
+        validate_acceptance_title("Design review", "a1b2c3d4", kind="event")
     with pytest.raises(AcceptanceSafetyError, match="exact randomized"):
-        validate_acceptance_title("JOAT ACCEPTANCE a1b2c3d4 extra", "a1b2c3d4")
+        validate_acceptance_title(
+            "JOAT ACCEPTANCE a1b2c3d4 REMINDER",
+            "a1b2c3d4",
+            kind="event",
+        )
 
 
 def test_alarm_observation_uses_only_new_lines_and_returns_no_content(tmp_path: Path) -> None:
-    title = "JOAT ACCEPTANCE a1b2c3d4"
+    title = "JOAT ACCEPTANCE a1b2c3d4 REMINDER"
     feed = tmp_path / "notifications.jsonl"
     feed.write_text(
         json.dumps({"at": 10, "app": "Reminders", "title": title, "body": "old"})
@@ -83,7 +101,7 @@ def test_alarm_observation_uses_only_new_lines_and_returns_no_content(tmp_path: 
 
 
 def test_alarm_probe_rejects_matching_reminders_banner_before_due(tmp_path: Path) -> None:
-    title = "JOAT ACCEPTANCE a1b2c3d4"
+    title = "JOAT ACCEPTANCE a1b2c3d4 REMINDER"
     feed = tmp_path / "notifications.jsonl"
     feed.write_text(
         json.dumps({"at": 20, "app": "Reminders", "title": title, "body": "created"})
@@ -101,7 +119,7 @@ def test_alarm_probe_rejects_matching_reminders_banner_before_due(tmp_path: Path
 
 
 def test_alarm_probe_rejects_a_future_timestamp_and_feed_rotation(tmp_path: Path) -> None:
-    title = "JOAT ACCEPTANCE a1b2c3d4"
+    title = "JOAT ACCEPTANCE a1b2c3d4 REMINDER"
     feed = tmp_path / "notifications.jsonl"
     feed.write_text(
         json.dumps({"at": 50, "app": "Reminders", "title": title, "body": "future"})
@@ -129,7 +147,7 @@ def test_alarm_probe_rejects_a_future_timestamp_and_feed_rotation(tmp_path: Path
 def test_alarm_probe_rejects_inode_replacement_even_when_size_does_not_shrink(
     tmp_path: Path,
 ) -> None:
-    title = "JOAT ACCEPTANCE a1b2c3d4"
+    title = "JOAT ACCEPTANCE a1b2c3d4 REMINDER"
     feed = tmp_path / "notifications.jsonl"
     feed.write_text("{}\n", encoding="utf-8")
     original = feed.stat()
@@ -248,23 +266,93 @@ def test_repo_preference_read_distinguishes_missing_key_from_defaults_failure() 
         )
 
 
-def test_engine_stub_is_private_executable_and_cannot_open_the_native_bridge(
+def test_engine_stub_is_private_pid_bound_bridge_proxy(
     tmp_path: Path,
 ) -> None:
-    repo = create_engine_stub_repo(tmp_path)
-    executable = repo / ".venv/bin/python"
+    stub = create_engine_stub_repo(tmp_path, authorized_client_pid=4242)
+    executable = stub.repo / ".venv/bin/python"
 
     assert executable.is_file()
     assert stat.S_IMODE(executable.stat().st_mode) == 0o700
     source = executable.read_text(encoding="utf-8")
-    assert "signal.pause()" in source
-    assert "JOAT_NATIVE_BRIDGE" not in source
+    assert "JOAT_NATIVE_BRIDGE" in source
+    assert "AUTHORIZED_CLIENT_PID = 4242" in source
+    assert "LOCAL_PEERPID = 0x002" in source
+    assert stub.bridge_path == stub.repo / "acceptance-native-bridge.sock"
 
 
-def test_cleanup_launches_native_apps_before_exact_title_deletion(
+@pytest.mark.asyncio
+async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path) -> None:
+    upstream_path = tmp_path / "native.sock"
+
+    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        data = await reader.read(32)
+        writer.write(data)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_unix_server(echo, path=upstream_path)
+    stub = create_engine_stub_repo(tmp_path, authorized_client_pid=os.getpid())
+    env = dict(os.environ)
+    env["JOAT_NATIVE_BRIDGE"] = str(upstream_path)
+    process = subprocess.Popen(  # noqa: S603 - private generated executable
+        [str(stub.repo / ".venv/bin/python"), "-u", "-m", "joat"],
+        cwd=stub.repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not stub.bridge_path.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert stub.bridge_path.exists()
+        assert stat.S_IMODE(stub.bridge_path.stat().st_mode) == 0o600
+
+        reader, writer = await asyncio.open_unix_connection(stub.bridge_path)
+        writer.write(b"authorized")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readexactly(10), timeout=2) == b"authorized"
+        writer.close()
+        await writer.wait_closed()
+
+        probe = (
+            "import socket,sys; s=socket.socket(socket.AF_UNIX); "
+            "s.connect(sys.argv[1]); s.sendall(b'unauthorized'); "
+            "data=s.recv(32); raise SystemExit(0 if data == b'' else 7)"
+        )
+        unauthorized = await asyncio.to_thread(
+            subprocess.run,
+            [str(Path(os.sys.executable)), "-c", probe, str(stub.bridge_path)],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert unauthorized.returncode == 0
+    finally:
+        process.terminate()
+        await asyncio.to_thread(process.wait, 5)
+        server.close()
+        await server.wait_closed()
+
+
+def test_cleanup_deletes_only_the_read_back_event_and_reminder_identities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    titles = build_acceptance_titles("a1b2c3d4")
+    event = NativeItemIdentity(
+        calendar_item_identifier="event-internal",
+        calendar_item_external_identifier="event-external",
+        calendar_identifier="calendar-target",
+    )
+    reminder = NativeItemIdentity(
+        calendar_item_identifier="reminder-internal",
+        calendar_item_external_identifier=None,
+        calendar_identifier="reminder-list",
+    )
+    projection_counts = iter((1, 0))
     monkeypatch.setattr(
         acceptance,
         "_ensure_native_app_running",
@@ -277,31 +365,46 @@ def test_cleanup_launches_native_apps_before_exact_title_deletion(
     )
     monkeypatch.setattr(
         acceptance,
-        "_cleanup_calendar_items",
-        lambda _script, _title, _calendar_id: calls.append("delete-calendar") or (1, 1),
+        "_cleanup_calendar_item",
+        lambda _script, title, calendar_id, uid: (
+            calls.append(f"delete-calendar:{title}:{calendar_id}:{uid}") or 1
+        ),
     )
     monkeypatch.setattr(
         acceptance,
-        "_osascript",
-        lambda _script, _title: calls.append("delete-reminder") or 1,
+        "_cleanup_reminder_item",
+        lambda _script, title, list_id, item_id: (
+            calls.append(f"delete-reminder:{title}:{list_id}:{item_id}") or 1
+        ),
+    )
+    monkeypatch.setattr(
+        acceptance,
+        "_count_calendar_projection",
+        lambda _script, title: (
+            calls.append(f"count-projection:{title}") or next(projection_counts)
+        ),
     )
 
     removed = acceptance.cleanup_test_items(
-        "JOAT ACCEPTANCE a1b2c3d4",
+        titles,
         "a1b2c3d4",
+        event_identity=event,
+        reminder_identity=reminder,
     )
 
     assert calls == [
         "launch:Calendar",
         "launch:Reminders",
-        "delete-calendar",
-        "delete-reminder",
+        f"count-projection:{titles.reminder}",
+        f"delete-calendar:{titles.event}:calendar-target:event-external",
+        f"delete-reminder:{titles.reminder}:reminder-list:reminder-internal",
+        f"count-projection:{titles.reminder}",
         "quit:Calendar",
     ]
-    assert removed.calendar_removed_count == 2
-    assert removed.calendar_target_removed_count == 1
-    assert removed.calendar_other_removed_count == 1
+    assert removed.calendar_removed_count == 1
     assert removed.reminder_removed_count == 1
+    assert removed.scheduled_reminder_projection_count_before == 1
+    assert removed.scheduled_reminder_projection_count_after == 0
     assert removed.errors == ()
 
 
@@ -324,36 +427,60 @@ def test_cleanup_restores_calendar_if_reminders_launch_fails(
     )
 
     with pytest.raises(acceptance.AcceptanceBlocked, match="Reminders unavailable"):
-        acceptance.cleanup_test_items("JOAT ACCEPTANCE a1b2c3d4", "a1b2c3d4")
+        acceptance.cleanup_test_items(
+            build_acceptance_titles("a1b2c3d4"),
+            "a1b2c3d4",
+            event_identity=NativeItemIdentity("event", "uid", "calendar"),
+            reminder_identity=NativeItemIdentity("reminder", None, "list"),
+        )
 
     assert calls == ["launch:Calendar", "launch:Reminders", "quit:Calendar"]
 
 
-def test_cleanup_preserves_calendar_result_when_reminder_delete_fails(
+def test_cleanup_never_falls_back_to_global_title_deletion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(acceptance, "_ensure_native_app_running", lambda _name: False)
     monkeypatch.setattr(
         acceptance,
-        "_cleanup_calendar_items",
-        lambda _script, _title, _calendar_id: (1, 1),
+        "_cleanup_calendar_item",
+        lambda _script, _title, _calendar_id, _uid: 1,
     )
+    monkeypatch.setattr(acceptance, "_count_calendar_projection", lambda *_args: 0)
 
-    def delete_reminder(_script: str, _title: str) -> int:
+    def delete_reminder(_script: str, _title: str, _list_id: str, _item_id: str) -> int:
         raise RuntimeError("reminders unavailable")
 
-    monkeypatch.setattr(acceptance, "_osascript", delete_reminder)
+    monkeypatch.setattr(acceptance, "_cleanup_reminder_item", delete_reminder)
 
     removed = acceptance.cleanup_test_items(
-        "JOAT ACCEPTANCE a1b2c3d4",
+        build_acceptance_titles("a1b2c3d4"),
         "a1b2c3d4",
+        event_identity=NativeItemIdentity("event", "uid", "calendar"),
+        reminder_identity=NativeItemIdentity("reminder", None, "list"),
     )
 
-    assert removed.calendar_removed_count == 2
-    assert removed.calendar_target_removed_count == 1
-    assert removed.calendar_other_removed_count == 1
+    assert removed.calendar_removed_count == 1
     assert removed.reminder_removed_count == 0
     assert removed.errors == ("reminder_delete_RuntimeError",)
+
+
+def test_cleanup_requires_native_identities_before_launching_apps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        acceptance,
+        "_ensure_native_app_running",
+        lambda _name: pytest.fail("unsafe cleanup must fail before launching apps"),
+    )
+
+    with pytest.raises(AcceptanceSafetyError, match="native event identity"):
+        acceptance.cleanup_test_items(
+            build_acceptance_titles("a1b2c3d4"),
+            "a1b2c3d4",
+            event_identity=None,
+            reminder_identity=None,
+        )
 
 
 def test_calendar_only_cleanup_never_launches_or_deletes_reminders(
@@ -367,29 +494,102 @@ def test_calendar_only_cleanup_never_launches_or_deletes_reminders(
     )
     monkeypatch.setattr(
         acceptance,
-        "_cleanup_calendar_items",
-        lambda _script, _title, calendar_id: (
-            calls.append(f"calendar:{calendar_id}") or (1, 0)
+        "_cleanup_calendar_item",
+        lambda _script, _title, calendar_id, uid: (
+            calls.append(f"calendar:{calendar_id}:{uid}") or 1
         ),
     )
     monkeypatch.setattr(
         acceptance,
-        "_osascript",
+        "_cleanup_reminder_item",
         lambda _script, _title: pytest.fail("Reminders cleanup must not run"),
     )
+    monkeypatch.setattr(acceptance, "_count_calendar_projection", lambda *_args: 0)
 
     removed = acceptance.cleanup_test_items(
-        "JOAT ACCEPTANCE a1b2c3d4",
+        build_acceptance_titles("a1b2c3d4"),
         "a1b2c3d4",
-        event_calendar_identifier="calendar-target",
+        event_identity=NativeItemIdentity("event", "uid", "calendar-target"),
+        reminder_identity=None,
         include_reminder=False,
     )
 
-    assert calls == ["launch:Calendar", "calendar:calendar-target"]
-    assert removed.calendar_target_removed_count == 1
-    assert removed.calendar_other_removed_count == 0
+    assert calls == ["launch:Calendar", "calendar:calendar-target:uid"]
+    assert removed.calendar_removed_count == 1
     assert removed.reminder_removed_count == 0
     assert removed.errors == ()
+
+
+def test_focus_preflight_is_read_only_and_requires_a_matching_operator_condition() -> None:
+    focus_off = evaluate_notification_preflight(
+        "focus-off",
+        diagnostic_focus_active=False,
+    )
+    assert focus_off.expect_banner is True
+    assert focus_off.expect_focus_suppression is False
+    assert focus_off.mutated_settings is False
+
+    suppressed = evaluate_notification_preflight(
+        "focus-suppressed",
+        diagnostic_focus_active=True,
+    )
+    assert suppressed.expect_banner is False
+    assert suppressed.expect_focus_suppression is True
+    assert suppressed.mutated_settings is False
+
+    with pytest.raises(acceptance.AcceptanceBlocked, match="does not match"):
+        evaluate_notification_preflight(
+            "focus-off",
+            diagnostic_focus_active=True,
+        )
+    with pytest.raises(acceptance.AcceptanceBlocked, match="must be explicitly confirmed"):
+        evaluate_notification_preflight(None, diagnostic_focus_active=False)
+
+
+def test_reminders_allowed_preflight_records_operator_assertion_without_claiming_detection() -> None:
+    preflight = evaluate_notification_preflight(
+        "reminders-allowed",
+        diagnostic_focus_active=True,
+    )
+
+    assert preflight.expect_banner is True
+    assert preflight.focus_diagnostic_authoritative is False
+    assert preflight.operator_assertion == "reminders-allowed"
+
+
+def test_alarm_failure_classification_distinguishes_native_delivery_boundaries() -> None:
+    due = datetime(2026, 8, 28, 16, 20, tzinfo=timezone.utc)
+    fired = "RDTimeAlarmProducer expiredAlarm {fireDate: 2026-08-28 16:20:00 +0000}"
+    submitted = "Added notification request: [ hasError: 0 hasCompletionHandler: 1 ]"
+
+    not_fired = classify_alarm_delivery_failure("unrelated", due=due)
+    assert not_fired.category == "alarm_not_fired"
+
+    submission_failed = classify_alarm_delivery_failure(fired, due=due)
+    assert submission_failed.category == "notification_submission_failed"
+
+    focus_suppressed = classify_alarm_delivery_failure(
+        "\n".join(
+            (
+                fired,
+                submitted,
+                "interruptionSuppression: delay delivery",
+                "muted by DND suppression: delay",
+            )
+        ),
+        due=due,
+    )
+    assert focus_suppressed.category == "focus_suppressed"
+    assert focus_suppressed.alarm_fired is True
+    assert focus_suppressed.notification_submitted is True
+    assert focus_suppressed.focus_suppressed is True
+
+    ax_missed = classify_alarm_delivery_failure(
+        "\n".join((fired, submitted)),
+        due=due,
+    )
+    assert ax_missed.category == "ax_capture_missed"
+    assert ax_missed.retained_raw_log is False
 
 
 def test_alpha_preview_uses_the_simulator_framebuffers_authoritative_alpha_channel(
