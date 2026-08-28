@@ -21,6 +21,12 @@ export interface LifecycleHandler {
   onExit(reason: 'system' | 'abnormal'): void;
 }
 
+export interface NavigationInputOwner {
+  isActive(): boolean;
+  handleClick(): boolean;
+  handleScroll(direction: 'up' | 'down'): Promise<boolean>;
+}
+
 /**
  * Single onEvenHubEvent subscription fanned out to typed handlers.
  *
@@ -55,6 +61,7 @@ export class EventRouter {
     private readonly menu: CapabilityMenu,
     private readonly lifecycle?: LifecycleHandler,
     private readonly diagnostics?: G2DiagnosticTrace,
+    private readonly navigation?: NavigationInputOwner,
   ) {}
 
   attach(): void {
@@ -152,6 +159,17 @@ export class EventRouter {
       // Long-press first: on a text-capture page the SDK delivers 9/10
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
+      if (this.navigation?.isActive()) {
+        const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
+        if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+          void this.navigation.handleScroll('up');
+          return;
+        }
+        if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+          void this.navigation.handleScroll('down');
+          return;
+        }
+      }
       if (this.menu.handleScroll(event.textEvent.eventType ?? 0)) return;
       // Scrolls and clicks: clicks on a text container arrive as sysEvent,
       // so what reaches this line is a scroll.
@@ -266,6 +284,19 @@ export class EventRouter {
     }
 
     if (
+      type === OsEventTypeList.CLICK_EVENT
+      && this.navigation?.isActive()
+      && (
+        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+        || source === EventSourceType.TOUCH_EVENT_FROM_RING
+        || source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
+      )
+    ) {
+      this.navigation.handleClick();
+      return;
+    }
+
+    if (
       type === OsEventTypeList.CLICK_EVENT &&
       (source === EventSourceType.TOUCH_EVENT_FROM_RING ||
         source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) &&
@@ -294,6 +325,9 @@ export class EventRouter {
         return;
       case 3: // Re-dial the brain
         this.link.connect();
+        return;
+      case 4: // Five sidebar rows are spoken for; settings lives here.
+        void this.menu.openSettings();
         return;
       default:
         // Future firmware items: relay so the Mac can learn about them.

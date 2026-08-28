@@ -39,7 +39,7 @@ def test_exact_text_and_source_survive_restart(tmp_path: Path) -> None:
 
     with DurableStore(path) as store:
         created = create_note(NoteStore(store), text=visible_text)
-        assert store.schema_version == 2
+        assert store.schema_version >= 2
         assert created.text == visible_text
         assert created.source == NoteSource(
             kind="hud.quick-note", identifier="voice-session-7"
@@ -157,7 +157,7 @@ def test_v1_store_is_upgraded_without_rewriting_its_ledger(
 
     monkeypatch.setattr(store_module, "_MIGRATIONS", all_migrations)
     with DurableStore(path) as upgraded:
-        assert upgraded.schema_version == 2
+        assert upgraded.schema_version == max(version for version, _, _ in all_migrations)
         assert upgraded.execute(
             "SELECT name,checksum FROM schema_migrations WHERE version=1"
         ).fetchone() == v1_ledger

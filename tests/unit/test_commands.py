@@ -51,3 +51,33 @@ class TestVoiceCommandRouter:
         assert await commands(text) == "Calendar event cancelled."
         assert replies.seen == [text]
         assert productivity.seen == [text]
+
+    async def test_quick_note_claims_explicit_capture_before_productivity(self) -> None:
+        replies = RecordingReplies()
+        notes = RecordingProductivity("Saved QuickNote: exact")
+        productivity = RecordingProductivity()
+        commands = VoiceCommandRouter(
+            replies,
+            ModelRegistry([]),
+            productivity=productivity,
+            notes=notes,
+        )
+
+        assert await commands("take a note exact") == "Saved QuickNote: exact"
+        assert notes.seen == ["take a note exact"]
+        assert productivity.seen == []
+
+    async def test_hermes_calendar_proposal_is_claimed_before_general_inference(self) -> None:
+        replies = RecordingReplies()
+        productivity = RecordingProductivity()
+        hermes = RecordingProductivity("Calendar event cancelled.")
+        commands = VoiceCommandRouter(
+            replies,
+            ModelRegistry([]),
+            productivity=productivity,
+            hermes=hermes,
+        )
+
+        text = "ask Hermes to draft a calendar event for review tomorrow"
+        assert await commands(text) == "Calendar event cancelled."
+        assert hermes.seen == [text]

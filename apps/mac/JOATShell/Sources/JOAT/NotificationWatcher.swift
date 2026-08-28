@@ -2,6 +2,40 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+/// Pure appearance-edge accounting, extracted so the quiet-period regression
+/// is testable without an Accessibility tree. Counts preserve two identical
+/// banners as two observations while suppressing a lingering banner.
+struct BannerAppearanceTracker {
+    private(set) var hasPrimed = false
+    private var previousCounts: [String: Int] = [:]
+
+    mutating func freshMask(for identifiers: [String]) -> [Bool] {
+        var currentCounts: [String: Int] = [:]
+        for identifier in identifiers {
+            currentCounts[identifier, default: 0] += 1
+        }
+        guard hasPrimed else {
+            hasPrimed = true
+            previousCounts = currentCounts
+            // A banner can arrive before the first scheduled sweep. Treat the
+            // first observed appearances as fresh: a possible duplicate is
+            // safer than silently losing the notification forever.
+            return Array(repeating: true, count: identifiers.count)
+        }
+        var remaining = previousCounts
+        let mask = identifiers.map { identifier in
+            let prior = remaining[identifier, default: 0]
+            if prior > 0 {
+                remaining[identifier] = prior - 1
+                return false
+            }
+            return true
+        }
+        previousCounts = currentCounts
+        return mask
+    }
+}
+
 /// Reads OTHER apps' notification banners via the Accessibility API and
 /// hands them to the Python engine (docs/MAC_APP.md §Notification source).
 ///
@@ -44,13 +78,12 @@ final class NotificationWatcher {
 
     private var timer: Timer?
     private var sweepCount = 0
-    private var seen: [String: Date] = [:]
-    /// Banners present in the previous sweep, so a banner that lingers for
-    /// its several-second display is emitted once, not once per second.
-    private var previous: Set<String> = []
+    private var appearances = BannerAppearanceTracker()
 
     private let outURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JOAT/notifications.jsonl")
+    private let heartbeatURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/JOAT/notifications.heartbeat")
 
     var isTrusted: Bool { AXIsProcessTrusted() }
 
@@ -69,8 +102,13 @@ final class NotificationWatcher {
 
     func start() {
         guard timer == nil else { return }
+        let directory = outURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(
-            at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         appendDebug("watcher start() reached; trusted=\(AXIsProcessTrusted())")
         // Poll rather than rely on AXObserver alone: a delivered banner takes
         // ~1s to enter the tree, and appended notifications reuse the existing
@@ -122,7 +160,6 @@ final class NotificationWatcher {
         }
 
         let now = Date()
-        seen = seen.filter { now.timeIntervalSince($0.value) < 300 }
 
         var banners: [AXUIElement] = []
         var budget = Budget()
@@ -140,29 +177,25 @@ final class NotificationWatcher {
                         + "banners=\(banners.count) nodes=\(budget.nodes)")
         }
 
-        var current: Set<String> = []
-        var fresh: [(id: String, app: String, title: String, body: String)] = []
+        var observed: [(id: String, app: String, title: String, body: String)] = []
         for banner in banners {
             guard let f = fields(of: banner) else { continue }
             let id = "\(f.app)\u{1}\(f.title)\u{1}\(f.body)"
-            current.insert(id)
-            if !previous.contains(id) {
-                fresh.append((id, f.app, f.title, f.body))
-            }
+            observed.append((id, f.app, f.title, f.body))
             if debugEnabled {
-                appendDebug("banner app=\(f.app) title=\(f.title) body=\(f.body.prefix(80))")
+                // Diagnostics are content-free: AXDebug used to persist title
+                // and body prefixes indefinitely in a world-readable log.
+                appendDebug(
+                    "banner app=\(f.app) title_chars=\(f.title.count) body_chars=\(f.body.count)"
+                )
             }
         }
 
-        // The first sweep must not replay what is already on screen as new.
-        let priming = previous.isEmpty && !current.isEmpty
-        previous = current
-        if priming { return }
-
-        for item in fresh where seen[item.id] == nil {
-            seen[item.id] = now
+        let fresh = appearances.freshMask(for: observed.map(\.id))
+        for (item, isFresh) in zip(observed, fresh) where isFresh {
             emit(app: item.app, title: item.title, body: item.body, at: now)
         }
+        writeHeartbeat(at: now)
     }
 
     /// The banner sits ~7 levels down and its window is full-screen sized,
@@ -271,13 +304,34 @@ final class NotificationWatcher {
                to: outURL.deletingLastPathComponent().appendingPathComponent("ax-debug.log"))
     }
 
+    /// Content-free proof that trust and the Notification Center AX query both
+    /// succeeded. Python rejects a stale readable feed instead of reporting a
+    /// dead watcher as healthy.
+    private func writeHeartbeat(at date: Date) {
+        let value = "\(date.timeIntervalSince1970)\n"
+        do {
+            try Data(value.utf8).write(to: heartbeatURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: heartbeatURL.path
+            )
+        } catch {
+            appendDebug("heartbeat write FAILED error=\(type(of: error))")
+        }
+    }
+
     private func append(_ line: String, to url: URL) {
         if let h = try? FileHandle(forWritingTo: url) {
-            try? h.seekToEnd()
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path
+            )
+            _ = try? h.seekToEnd()
             try? h.write(contentsOf: Data(line.utf8))
             try? h.close()
         } else {
             try? Data(line.utf8).write(to: url)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path
+            )
         }
     }
 }

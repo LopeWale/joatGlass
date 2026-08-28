@@ -147,7 +147,11 @@ class NoteStore:
         if not isinstance(query, str):
             raise ValueError("query must be text")
         _require_utf8("query", query)
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
             raise ValueError("limit must be between 1 and 100")
 
         needle = query.casefold()
@@ -165,6 +169,20 @@ class NoteStore:
                 if len(matches) == limit:
                     break
         return tuple(matches)
+
+    def active(self) -> tuple[QuickNote, ...]:
+        """Return every active note in deterministic newest-first order.
+
+        Interactive search stays bounded; explicit owner export must never
+        silently truncate the durable collection.
+        """
+        rows = self._store.execute(
+            "SELECT note_id,idempotency_key,visible_text,source_kind,"
+            "source_identifier,created_at_us,updated_at_us,deleted_at_us "
+            "FROM quick_notes WHERE deleted_at_us IS NULL "
+            "ORDER BY updated_at_us DESC,note_id ASC"
+        ).fetchall()
+        return tuple(self._from_row(row) for row in rows)
 
     def delete(self, note_id: str, *, now_us: int) -> QuickNote:
         """Hide a note immediately while retaining its text for undo."""
@@ -189,9 +207,12 @@ class NoteStore:
             if is_deleted == deleted:
                 return current
             if now_us < current.updated_at_us:
-                raise NoteConflictError("mutation timestamp precedes durable note timestamp")
+                raise NoteConflictError(
+                    "mutation timestamp precedes durable note timestamp"
+                )
             db.execute(
-                "UPDATE quick_notes SET updated_at_us=?,deleted_at_us=? WHERE note_id=?",
+                "UPDATE quick_notes SET updated_at_us=?,deleted_at_us=? "
+                "WHERE note_id=?",
                 (now_us, now_us if deleted else None, note_id),
             )
             return self._get_with(db, note_id, include_deleted=True)

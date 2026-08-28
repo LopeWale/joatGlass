@@ -94,4 +94,17 @@ enum BridgeContract {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(type, from: data)
     }
+
+    /// Canonical write-body encoding shared with Python's
+    /// json.dumps(..., ensure_ascii=False, separators=(",", ":"), sort_keys=True).
+    static func canonicalJSONData<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let encoded = try encoder.encode(value)
+        let object = try JSONSerialization.jsonObject(with: encoded)
+        return try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+    }
 }

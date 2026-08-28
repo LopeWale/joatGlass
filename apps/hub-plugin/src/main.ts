@@ -1,4 +1,4 @@
-import { AudioInputSource } from '@evenrealities/even_hub_sdk';
+import { AudioInputSource, OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
@@ -6,7 +6,7 @@ import { HudCanvasRenderer } from './HudCanvasRenderer';
 import { HudVisualSurface } from './HudVisualSurface';
 import { Chrome } from './Chrome';
 import { TOKEN_KEY, handlePairingOffer, loadToken } from './Pairing';
-import { LocationMonitor } from './LocationMonitor';
+import { LocationSessionManager } from './LocationSessionManager';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
 import { ImuMonitor } from './ImuMonitor';
@@ -15,8 +15,25 @@ import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
 import { ContainerId, type DownlinkMessage } from './types';
-import { runVisualConfirmationFixture } from './VisualFixtures';
+import {
+  BrowserHudPreview,
+  VISUAL_CONFIRMATION_PROMPT,
+  isProductivityVisualState,
+  runVisualConfirmationFixture,
+  visualListFixture,
+  type ProductivityVisualState,
+} from './VisualFixtures';
 import { MacG2DiagnosticTrace } from './G2DiagnosticTrace';
+import {
+  isNavigationVisualState,
+  navigationVisualFixture,
+  type NavigationVisualState,
+} from './NavigationHud';
+import { NavigationController } from './NavigationController';
+import {
+  replaySyntheticAudioFixture,
+  syntheticAudioFixtureUrl,
+} from './SyntheticAudioFixture';
 
 /**
  * Comma-separated candidate brain URLs — every host must be an exact-match
@@ -33,16 +50,26 @@ const MAC_WS_URLS = ((): readonly string[] => {
   return parsed.length > 0 ? parsed : ['wss://mac.local:8787/glasses'];
 })();
 
-type VisualState = 'overview' | 'sidebar' | 'messages' | 'confirmation';
+type VisualState =
+  | 'overview'
+  | 'sidebar'
+  | 'more'
+  | 'confirmation'
+  | ProductivityVisualState
+  | NavigationVisualState;
 
 const VISUAL_STATE = ((): VisualState | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatVisual');
-  return requested === 'overview' || requested === 'sidebar'
-    || requested === 'messages' || requested === 'confirmation'
+  return requested === 'overview' || requested === 'sidebar' || requested === 'more'
+    || requested === 'confirmation' || isProductivityVisualState(requested)
+    || (requested !== null && isNavigationVisualState(requested))
     ? requested
     : undefined;
 })();
+
+const BROWSER_VISUAL_PREVIEW = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get('joatPreview') === 'browser';
 
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
@@ -52,6 +79,21 @@ function setPanel(id: string, text: string): void {
 }
 
 async function boot(): Promise<void> {
+  if (VISUAL_STATE && BROWSER_VISUAL_PREVIEW) {
+    const renderer = new HudCanvasRenderer();
+    const preview = new BrowserHudPreview(renderer);
+    const previewClient = new BridgeClient();
+    const hud = new HudPresenter(previewClient, new HudPageBuilder(), preview);
+    const previewLink = new MacLink({ urls: MAC_WS_URLS, token: loadToken() });
+    const menu = new CapabilityMenu(
+      hud,
+      new Settings(),
+      previewLink,
+    );
+    const navigation = new NavigationController(hud, previewLink);
+    await renderVisualState(hud, menu, undefined, VISUAL_STATE, navigation);
+    return;
+  }
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
   // Bridge FIRST: the pairing token prefers HOST storage (the
@@ -70,6 +112,14 @@ async function boot(): Promise<void> {
   // Disabled by default. Only the local Mac shell can enable this support
   // capture, and the gateway independently redacts every event it accepts.
   const g2Diagnostics = new MacG2DiagnosticTrace(link);
+  // The Even host exposes one unkeyed location stream. Keep one owner that
+  // switches between the existing ambient contract and an explicit Gate-0
+  // high-accuracy probe instead of racing independent start/stop callers.
+  const location = new LocationSessionManager(client, link, g2Diagnostics);
+  let navigationRef: NavigationController | undefined;
+  let hudRef: HudPresenter | undefined;
+  let audioRef: AudioStreamer | undefined;
+  let imuRef: ImuMonitor | undefined;
 
   // A token the Mac no longer honours must not outlive the session, or
   // every relaunch dials with it and is refused again.
@@ -95,6 +145,22 @@ async function boot(): Promise<void> {
     chromeRef?.setLink(state);
     setPanel('p-url', link.activeUrl); // failover rotation, made visible
     if (state === 'connected') announce?.();
+    else {
+      // A disconnected or replacement brain no longer authorizes either
+      // opt-in diagnostic path. A fresh authenticated session will send its
+      // complete true/false state again.
+      g2Diagnostics.setEnabled(false);
+      void audioRef?.stop();
+      void imuRef?.stop();
+      void location.revokeRemoteControl();
+      void navigationRef?.stopAll().then((hadView) => {
+        if (
+          hadView
+          && link.linkState !== 'connected'
+          && !navigationRef?.isActive()
+        ) void hudRef?.showDefault();
+      });
+    }
   });
 
   // Startup page (one-shot; bridge already initialized above). The second
@@ -107,13 +173,18 @@ async function boot(): Promise<void> {
     new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics),
     g2Diagnostics,
   );
+  hudRef = hud;
   const audio = new AudioStreamer(client, link);
   const imu = new ImuMonitor(client, link);
+  audioRef = audio;
+  imuRef = imu;
   const settings = new Settings();
   settings.load();
   setPanel('p-policy', settings.resumePolicy);
   settings.onChange((policy) => setPanel('p-policy', policy));
   const menu = new CapabilityMenu(hud, settings, link);
+  const navigation = new NavigationController(hud, link, location);
+  navigationRef = navigation;
   menu.micIsOpen = () => audio.isOpen;
   // Mic truth leaves the phone on every change — the Mac's pill used to
   // latch "streaming" at hello and never verify.
@@ -125,11 +196,13 @@ async function boot(): Promise<void> {
 
   const lifecycle: LifecycleHandler = {
     onForegroundEnter: () => {
+      location.setForeground(true);
       // The host may have paused delivery while backgrounded; repaint so the
       // wearer isn't looking at a stale frame.
       void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
     },
     onForegroundExit: () => {
+      location.setForeground(false);
       // Nothing to flush: Settings writes through on every change, so there is
       // no dirty state to lose. Deliberately a no-op rather than invented work.
       // If buffered state ever lands here, this is where it gets persisted.
@@ -142,13 +215,22 @@ async function boot(): Promise<void> {
     },
   };
 
-  new EventRouter(client, link, audio, imu, menu, lifecycle, g2Diagnostics).attach();
+  new EventRouter(
+    client,
+    link,
+    audio,
+    imu,
+    menu,
+    lifecycle,
+    g2Diagnostics,
+    navigation,
+  ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
   // production presenter/menu/event methods as the real gesture and Mac paths;
   // it does not ship in the packed plugin or introduce an alternate renderer.
   if (VISUAL_STATE) {
-    await renderVisualState(hud, menu, imu, VISUAL_STATE);
+    await renderVisualState(hud, menu, imu, VISUAL_STATE, navigation);
     setPanel('p-status', `visual: ${VISUAL_STATE}`);
     return;
   }
@@ -157,10 +239,38 @@ async function boot(): Promise<void> {
   devices.onBattery = (level, charging) => chromeRef?.setBattery(level, charging);
   devices.attach();
 
-  link.onMessage(async (msg: DownlinkMessage) => {
+  link.onMessage(async (msg: DownlinkMessage, context) => {
+    const ensureCurrent = (): void => {
+      if (context.signal.aborted) {
+        throw new Error(`stale downlink generation ${context.generation}`);
+      }
+    };
+    const awaitCurrent = async <T>(operation: Promise<T>): Promise<T> => {
+      const result = await operation;
+      ensureCurrent();
+      return result;
+    };
+    ensureCurrent();
     switch (msg.kind) {
       case 'g2.diagnostic.control':
         g2Diagnostics.setEnabled(msg.enabled);
+        break;
+      case 'location.probe.control':
+        await awaitCurrent(location.setProbeEnabled(msg.enabled, context.signal));
+        break;
+      case 'navigation.view':
+        await awaitCurrent(navigation.present(msg, undefined, context.signal));
+        break;
+      case 'navigation.origin.request':
+        await awaitCurrent(navigation.requestOrigin(msg, context.signal));
+        break;
+      case 'navigation.route':
+        await awaitCurrent(navigation.installRoute(msg));
+        break;
+      case 'navigation.stop':
+        if (await awaitCurrent(navigation.stopRoute(msg.sessionId))) {
+          await awaitCurrent(hud.showDefault());
+        }
         break;
       case 'hud.text':
         // Status-bar writes become the STATE WORD, not the whole line: the
@@ -172,30 +282,50 @@ async function boot(): Promise<void> {
         }
         // append streams (debate turns, token-by-token replies) without a
         // full repaint; plain hud.text replaces the container.
-        if (msg.append) await hud.appendText(msg.text, msg.containerId);
-        else await hud.showText(msg.text, msg.containerId, msg.textColor, msg.contentKind);
-        break;
-      case 'hud.list':
-        if (menu.acceptsList(msg.title, msg.items.length)) {
-          await hud.showList(msg.items, { title: msg.title, hint: msg.hint });
+        if (msg.append) await awaitCurrent(hud.appendText(msg.text, msg.containerId));
+        else {
+          await awaitCurrent(
+            hud.showText(msg.text, msg.containerId, msg.textColor, msg.contentKind),
+          );
         }
         break;
+      case 'hud.list':
+        if (await awaitCurrent(menu.presentList(
+          msg.title,
+          msg.items,
+          msg.requestId,
+          msg.selectable ?? false,
+          msg.hint,
+        ))) {
+          break;
+        }
+        await awaitCurrent(menu.presentLifecycle(msg.title, msg.items, msg.hint));
+        break;
       case 'hud.rebuild':
-        await hud.showDefault();
+        if (msg.reason === 'brainstorm') {
+          await awaitCurrent(menu.beginLiveSession('brainstorm'));
+        } else {
+          await awaitCurrent(hud.showDefault());
+        }
         break;
       case 'audio.control':
         if (msg.open) {
-          const ok = await audio.start(
-            msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses,
+          const ok = await awaitCurrent(
+            audio.start(
+              msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses,
+              context.signal,
+            ),
           );
           setPanel('p-mic', ok ? 'streaming' : 'unavailable');
         } else {
-          await audio.stop();
+          await awaitCurrent(audio.stop());
           setPanel('p-mic', 'off');
         }
         break;
       case 'imu.control':
-        msg.open ? await imu.start() : await imu.stop();
+        msg.open
+          ? await awaitCurrent(imu.start(undefined, context.signal))
+          : await awaitCurrent(imu.stop());
         break;
       case 'imu.trace':
         imu.setTrace(msg.enabled);
@@ -204,6 +334,7 @@ async function boot(): Promise<void> {
         const rendered = hud.showConfirmation(msg.prompt, msg.actionId);
         imu.prepare(msg.actionId, (accepted) => {
           void hud.dismissConfirmation(msg.actionId);
+          if (context.signal.aborted) return;
           link.send({
             kind: 'confirm',
             actionId: msg.actionId,
@@ -213,11 +344,12 @@ async function boot(): Promise<void> {
             payloadDigest: msg.payloadDigest,
             previewDigest: msg.previewDigest,
           });
-        });
+        }, context.signal);
         let visible = false;
         try {
-          visible = await rendered;
+          visible = await awaitCurrent(rendered);
         } catch (err) {
+          if (context.signal.aborted) return;
           console.error('[joat] confirmation render failed:', err);
         }
         if (visible) imu.activate(msg.actionId, 8000);
@@ -294,6 +426,17 @@ async function boot(): Promise<void> {
   }
   await imu.start();
 
+  // Deterministic official-simulator voice gate. Vite replaces DEV with false
+  // and removes this branch from packed builds. The resolver independently
+  // requires a loopback page and a tokenized same-origin fixture path.
+  if (import.meta.env.DEV) {
+    const fixtureUrl = syntheticAudioFixtureUrl(window.location.href);
+    if (fixtureUrl !== undefined) {
+      const batches = await replaySyntheticAudioFixture(audio, fixtureUrl);
+      console.info(`[joat] synthetic audio fixture replayed (${batches} batches)`);
+    }
+  }
+
   // Plugin-owned chrome: clock, link, mic, battery, and the gesture hint —
   // painted from state the PHONE has, so the HUD keeps informing the wearer
   // through a Mac outage instead of going blank.
@@ -314,7 +457,6 @@ async function boot(): Promise<void> {
 
   // Wearer position -> Mac: weather-without-asking, and the
   // brain stops answering timezone questions from the Mac's point of view.
-  const location = new LocationMonitor(client, link);
   void location.start();
   setPanel('p-status', audio.isOpen ? 'listening' : 'mic off');
   setPanel('p-mic', audio.isOpen ? 'streaming' : 'off');
@@ -323,6 +465,7 @@ async function boot(): Promise<void> {
     await audio.stop();
     imu.dispose();
     await imu.stop();
+    await location.shutdown();
     link.close();
     client.dispose();
   }
@@ -333,26 +476,44 @@ async function boot(): Promise<void> {
 async function renderVisualState(
   hud: HudPresenter,
   menu: CapabilityMenu,
-  imu: ImuMonitor,
+  imu: ImuMonitor | undefined,
   state: VisualState,
+  navigation?: NavigationController,
 ): Promise<void> {
   hud.setMicState(true);
+
+  if (isNavigationVisualState(state)) {
+    const simulatorStatus = '9:41       JOAT simulator no route       bat 87%';
+    const fixture = navigationVisualFixture(state);
+    if (navigation) {
+      await navigation.present({
+        kind: 'navigation.view',
+        sessionId: 'simulator-no-route',
+        requestId: `fixture-${state}`,
+        generation: 1,
+        navigation: fixture,
+      }, simulatorStatus);
+    } else {
+      await hud.showNavigation(fixture, simulatorStatus);
+    }
+    return;
+  }
+
   await hud.showText('9:41       JOAT ready       bat 87%', ContainerId.StatusBar, 2);
 
-  if (state === 'messages') {
-    await hud.showList(
-      [
-        '[2m ago] Adele · Can you send the latest mockups?',
-        '[18m ago] Marcus · Heading to the lab in 10.',
-        '[1h ago] Team Ops · Standup notes are ready.',
-      ],
-      { title: 'MESSAGES · 3', hint: 'tap select · left x2 overview' },
-    );
+  if (isProductivityVisualState(state)) {
+    const fixture = visualListFixture(state);
+    await hud.showList(fixture.items, {
+      title: fixture.title,
+      hint: fixture.hint,
+      selectable: fixture.selectable,
+    });
     return;
   }
 
   if (state === 'confirmation') {
-    await runVisualConfirmationFixture(hud, imu);
+    if (imu) await runVisualConfirmationFixture(hud, imu);
+    else await hud.showConfirmation(VISUAL_CONFIRMATION_PROMPT, 'browser-visual-confirmation');
     return;
   }
 
@@ -364,6 +525,12 @@ async function renderVisualState(
   await hud.showText('left x2 menu · long-press mic', ContainerId.Hint, 1);
   if (state === 'sidebar') {
     await menu.toggle();
+  } else if (state === 'more') {
+    await menu.toggle();
+    for (let index = 0; index < 4; index += 1) {
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    }
+    menu.handleClick();
   }
 }
 

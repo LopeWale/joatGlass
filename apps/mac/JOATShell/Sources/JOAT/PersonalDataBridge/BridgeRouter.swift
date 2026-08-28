@@ -1,10 +1,16 @@
+import CryptoKit
 import Foundation
 
 actor BridgeRouter {
     private let eventKit: EventKitService
+    private let openClawCredentials: any OpenClawCredentialServicing
 
-    init(eventKit: EventKitService = EventKitService()) {
+    init(
+        eventKit: EventKitService = EventKitService(),
+        openClawCredentials: any OpenClawCredentialServicing = OpenClawCredentialService()
+    ) {
         self.eventKit = eventKit
+        self.openClawCredentials = openClawCredentials
     }
 
     func start() async {
@@ -69,9 +75,46 @@ actor BridgeRouter {
                 let body = try BridgeContract.decode(CalendarQueryRequest.self, from: request.body)
                 result = try await BridgeContract.encode(eventKit.queryEvents(body))
                 commitPhase = "read_only"
+            case "openclaw.identity.get":
+                let body = try BridgeContract.decode(OpenClawProfileRequest.self, from: request.body)
+                result = try await BridgeContract.encode(
+                    openClawCredentials.identity(profileID: body.profileID)
+                )
+                commitPhase = "local_secret_created_or_loaded"
+            case "openclaw.identity.sign":
+                let body = try BridgeContract.decode(OpenClawSignRequest.self, from: request.body)
+                result = try await BridgeContract.encode(OpenClawSignatureDTO(
+                    signature: openClawCredentials.sign(
+                        profileID: body.profileID,
+                        payload: body.payload
+                    )
+                ))
+                commitPhase = "local_secret_operation"
+            case "openclaw.token.load":
+                let body = try BridgeContract.decode(OpenClawTokenRequest.self, from: request.body)
+                result = try await BridgeContract.encode(openClawCredentials.loadToken(
+                    profileID: body.profileID,
+                    deviceID: body.deviceID,
+                    role: body.role
+                ))
+                commitPhase = "local_secret_read"
+            case "openclaw.token.store":
+                let body = try BridgeContract.decode(
+                    OpenClawTokenStoreRequest.self,
+                    from: request.body
+                )
+                try await openClawCredentials.storeToken(
+                    profileID: body.profileID,
+                    deviceID: body.deviceID,
+                    role: body.role,
+                    token: body.token,
+                    scopes: body.scopes
+                )
+                result = try BridgeContract.encode(OpenClawStoredDTO(stored: true))
+                commitPhase = "local_secret_stored"
             case "calendar.create":
-                let binding = try writeBinding(request)
                 let body = try BridgeContract.decode(CalendarCreateRequest.self, from: request.body)
+                let binding = try writeBinding(request)
                 result = try await eventKit.createEvent(
                     body,
                     attemptID: binding.attemptID,
@@ -79,8 +122,8 @@ actor BridgeRouter {
                 )
                 commitPhase = "committed_readback"
             case "reminders.create":
-                let binding = try writeBinding(request)
                 let body = try BridgeContract.decode(ReminderCreateRequest.self, from: request.body)
+                let binding = try writeBinding(request)
                 result = try await eventKit.createReminder(
                     body,
                     attemptID: binding.attemptID,
@@ -88,8 +131,8 @@ actor BridgeRouter {
                 )
                 commitPhase = "committed_readback"
             case "reminders.complete":
-                let binding = try writeBinding(request)
                 let body = try BridgeContract.decode(ReminderCompleteRequest.self, from: request.body)
+                let binding = try writeBinding(request)
                 result = try await eventKit.completeReminder(
                     body,
                     attemptID: binding.attemptID,
@@ -144,7 +187,21 @@ actor BridgeRouter {
                 "writes require an attempt ID and SHA-256 payload digest"
             )
         }
-        return (attemptID, digest.lowercased())
+        let normalizedDigest = digest.lowercased()
+        // Hash the received body rather than a decoded/re-encoded DTO. Python
+        // deliberately includes explicit nulls (for example DST choice),
+        // while synthesized Swift Encodable omits nil optionals.
+        let canonicalBody = try BridgeContract.canonicalJSONData(request.body)
+        let computedDigest = SHA256.hash(data: canonicalBody)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        guard normalizedDigest == computedDigest else {
+            throw NativeBridgeError(
+                "payload_digest_mismatch",
+                "payload digest does not match the canonical write body"
+            )
+        }
+        return (attemptID, normalizedDigest)
     }
 
     private func response(

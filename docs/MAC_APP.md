@@ -34,6 +34,13 @@ fix). The engine must treat a TCC denial as a visible state, never assume
 the grant. Never "fix" a broken grant by adding the bare python binary to
 the FDA list — that grants FDA to every Python script on the machine.
 
+The generated Debug host is deliberately a different TCC principal:
+`com.joat.shell.debug`, displayed as **JOAT Debug**, on ports 18787/51060.
+When Xcode hosts the application for XCTest, the shell does not initialize
+Accessibility, its native bridge, notification watchers, or the Python engine.
+This prevents a disposable test launch from presenting a Documents prompt that
+can be mistaken for the installed Developer-ID app at `/Applications/JOAT.app`.
+
 **Known architectural debt (from the audit, in priority order):**
 1. ~~No Xcode app target.~~ **DONE.** `apps/mac/JOATShell/project.yml` is an
    XcodeGen spec; `scripts/build_app.sh` regenerates the project, archives,
@@ -56,7 +63,12 @@ the FDA list — that grants FDA to every Python script on the machine.
 4. No update channel (Sparkle needs the Xcode target's nested-code layout),
    no dSYM archiving, no localization, shell has no os_log.
 
-The Mac Studio runs everything: BLE transport, audio, reasoning, the debate loop, verifier, channels, and computer use. Python 3.12+ package, structured as a long-running service (launchd), OOP throughout.
+JOAT.app owns the local Python engine as a child process on the wearer-facing
+Mac. BLE transport, audio, Brainstorm coordination, verification, native
+productivity execution, and action authority stay local. The currently wired
+OpenClaw role is hosted separately on the private Mac mini and is reached only
+through its managed Tailscale Serve WSS origin. Scoped OpenClaw
+channels/MCP/cron/skills integration remains planned but is not yet wired.
 
 ## Runtime layout
 
@@ -66,7 +78,7 @@ joat/
 ├── ble/           # DirectBleTransport (bleak/CoreBluetooth), HubGatewayTransport (WS client to men-g2-ble-gateway)
 ├── audio/         # Lc3Decoder (liblc3), VadWakeWord, WhisperKitEngine, ParakeetMlxEngine
 ├── display/       # HudRenderer: 576x288 pages, text containers, cards, diff updates
-├── agents/        # ProposerAgent (subprocess codex), CriticAgent (subprocess claude), JudgeAgent (MLX), DebateLoop
+├── agents/        # Codex/Claude seats, local judge, and paired OpenClawTerminalAgent
 ├── verifier/      # VerifierGate: Fetcher, WaybackClient, QuoteMatcher, NliJudge (MiniCheck), Verdict
 ├── channels/      # IMessageChannel, MailChannel, NotificationTriage
 ├── computeruse/   # CuaDriver (Lume VM), IphoneMirrorDriver (mirroir-mcp pattern)
@@ -77,7 +89,7 @@ joat/
 
 **`Orchestrator` (services/)** — the entry point. Subscribes to `TranscriptReady` events, classifies intent:
 - *Fast path*: question/command → local MLX → `HudRenderer.show()`.
-- *Planning path*: complex/multi-step → `DebateLoop.run(task)` → stream progress to HUD → confirmed plan → optional `CuaDriver` execution behind `Confirmer`.
+- *Planning path*: complex/multi-step → Brainstorm `RoundTable` / internal `DebateSession` → stream progress to HUD → confirmed plan → optional `CuaDriver` execution behind `Confirmer`.
 
 **`DirectBleTransport` (ble/)** — connects both lens peripherals, replays the 7-packet auth + init (time-sync, pipe-role, heartbeat), maintains heartbeat, auto-reconnects. Validate auth bytes against `men-g2-ble-gateway` before implementing; in Phase 0 we use `HubGatewayTransport` (the gateway's WS/MCP API) and defer raw BLE.
 
@@ -85,10 +97,16 @@ joat/
 
 **Audio chain (audio/)** — `Lc3Decoder` (0xF1/NUS frames → 16 kHz PCM) → `VadWakeWord` (always-listening) → `SttEngine`. WhisperKit runs on the Neural Engine (99 langs); Parakeet-TDT v3 on MLX is the low-WER alternative (25 EU langs). Engine selected in `config/`.
 
-**`DebateLoop` (agents/)** — state machine per docs/ARCHITECTURE.md §5. Agents are subprocess wrappers:
+**Brainstorm (`RoundTable` + internal `DebateSession`)** — state machine per
+docs/ARCHITECTURE.md §5. `debate` remains a compatibility voice trigger. Seats
+include:
 - `ProposerAgent`: `codex exec --json --output-schema plan.schema.json` (web_search=live, sandbox read-only).
 - `CriticAgent`: `claude -p --output-format json --allowedTools "WebSearch,WebFetch" --max-turns N`. Constructor takes an `AuthStrategy` (subscription binary | metered API key + `--max-budget-usd`) so the ToS fallback is a config change.
 - `JudgeAgent`: local MLX model; emits agreement score + blocking issues.
+- `OpenClawTerminalAgent`: optional paired private-WSS adapter. Brainstorm and
+  Calendar proposals address the same configured Mac-mini `hermes` agent but
+  use distinct route-isolated session labels, key namespaces, connections,
+  locks, and persistent transcript histories.
 
 **`VerifierGate` (verifier/)** — pipeline objects, each a small class: `Fetcher` (httpx, retries, headless/reader fallback), `WaybackClient` (availability + Save-Page-Now), `QuoteMatcher` (normalized fuzzy match), `NliJudge` (MiniCheck or MLX), composed by `VerifierGate.verify()` → `Verdict`. Denials build `RepairRequest`s listing each failed citation and reason.
 
@@ -98,12 +116,35 @@ joat/
 
 ## Config (`config/`)
 
-- `joat.toml`: mode (desk/mobile/auto), STT engine, MLX model ids, debate caps (max rounds, retries, judge threshold 0.85), budget caps.
+- `joat.toml`: mode (desk/mobile/auto), STT engine, MLX model ids, Brainstorm caps (internally still named `debate`: max rounds, retries, judge threshold 0.85), budget caps.
 - `plan.schema.json` / `critique.schema.json`: the debate JSON schemas.
 - `domains.allowlist`: verifier domain reputation seeds; Hub `app.json` WS domains.
 - Pinned CLI versions (Codex v0.148.0 at time of writing) — re-verify flags on upgrade.
 
 ## Service management
 
-- launchd plist keeps the brain alive; healthcheck endpoint on localhost; structured JSON logs with content hashes (not content) for audit.
-- OpenClaw gateway (`ws://127.0.0.1:18789`) provides channels/cron/skills; the debate loop is exposed as an OpenClaw skill.
+- JOAT.app owns and shuts down the local Python engine child; the healthcheck
+  remains loopback-only, with structured logs that retain hashes rather than
+  content where practical.
+- The optional OpenClaw Brainstorm seat uses paired protocol-v4 WSS over managed
+  Tailscale Serve to the private Mac mini. A second JOAT connection uses the
+  same installed/configured `hermes` agent for Calendar proposals, without
+  installing another Hermes. Each connection adopts only its own exact
+  route-isolated session, requires an empty effective tool inventory at
+  admission and immediately before each send, and rejects the other JOAT
+  namespace plus existing `main`/Telegram sessions. A local exact-shape RPC
+  firewall rejects channel, configuration, agent-management, tool invocation,
+  delivery-routing, and non-Hermes requests before a WebSocket frame is
+  written. That inventory check is not an atomic server-side execution policy;
+  Hermes therefore remains configured with no tools in either JOAT lane.
+  The explicit Calendar-proposal path accepts only deadline-bounded,
+  versioned Hermes text and hands the resulting candidate to JOAT's local
+  preview, confirmation, native execution, read-back, and receipt boundary;
+  it grants Hermes no EventKit handle or OpenClaw tool. Its remote session is
+  separate but persistent; archive/delete remains a live Gateway verification
+  question, not an ephemeral-session claim. General OpenClaw
+  channels/MCP/cron/skills and automation wiring remains planned but unwired.
+- The native bridge accepts only the exact Python PID launched by `JOAT.app`
+  and revokes it on exit. This prevents another same-UID process from replacing
+  the engine socket peer. A compromised engine remains inside the trusted
+  boundary; native one-shot confirmation capability is still a hardening gate.

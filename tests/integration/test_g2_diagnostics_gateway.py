@@ -13,6 +13,11 @@ from joat.core.pairing import PairingStore
 from joat.services.g2_diagnostics import G2DiagnosticStore
 
 
+def test_location_probe_cannot_run_without_a_redacted_receipt_store() -> None:
+    with pytest.raises(ValueError, match="requires g2_diagnostics"):
+        HubGatewayTransport(location_probe=True)
+
+
 @pytest.mark.asyncio
 async def test_gateway_enables_and_persists_only_the_allowlisted_trace(
     tmp_path, unused_tcp_port: int,  # type: ignore[no-untyped-def]
@@ -23,6 +28,7 @@ async def test_gateway_enables_and_persists_only_the_allowlisted_trace(
         port=unused_tcp_port,
         pairing=PairingStore(path=tmp_path / "pairing.json"),
         g2_diagnostics=G2DiagnosticStore(path=path),
+        location_probe=True,
     )
     await gateway.start()
     try:
@@ -30,6 +36,9 @@ async def test_gateway_enables_and_persists_only_the_allowlisted_trace(
             assert json.loads(await socket.recv()) == {"kind": "auth.accepted"}
             assert json.loads(await socket.recv()) == {
                 "kind": "g2.diagnostic.control", "enabled": True,
+            }
+            assert json.loads(await socket.recv()) == {
+                "kind": "location.probe.control", "enabled": True,
             }
             await socket.send(json.dumps({
                 "kind": "g2.diagnostic",
@@ -41,8 +50,32 @@ async def test_gateway_enables_and_persists_only_the_allowlisted_trace(
                     "outcome": "success",
                 },
             }))
+            await socket.send(json.dumps({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "location_probe_state",
+                    "requested": "high",
+                    "outcome": "success",
+                },
+            }))
+            await socket.send(json.dumps({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "location_probe",
+                    "sampleSequence": 1,
+                    "profile": "high",
+                    "lifecycle": "foreground",
+                    "fields": 7,
+                    "cadenceMs": 1004,
+                    "accuracy": "lte10",
+                    "timestampAge": "fresh",
+                    "displacement": "5_20",
+                    "headingDelta": "0_30",
+                },
+            }))
             await asyncio.wait_for(
-                _wait_for(lambda: path.exists()), timeout=1,
+                _wait_for(lambda: path.exists() and len(json.loads(path.read_text())["events"]) == 3),
+                timeout=1,
             )
     finally:
         await gateway.stop()
@@ -52,6 +85,17 @@ async def test_gateway_enables_and_persists_only_the_allowlisted_trace(
         "sequence", "recordedAtMs", "type", "from", "to", "reason", "outcome",
     }
     assert receipt["events"][0]["to"] == "list"
+    assert receipt["events"][1].keys() == {
+        "sequence", "recordedAtMs", "type", "requested", "outcome",
+    }
+    assert receipt["events"][1]["outcome"] == "success"
+    assert receipt["events"][2].keys() == {
+        "sequence", "recordedAtMs", "type", "sampleSequence", "profile", "lifecycle", "fields",
+        "cadenceMs", "accuracy", "timestampAge", "displacement", "headingDelta",
+    }
+    assert receipt["events"][2]["sequence"] == 3
+    assert receipt["events"][2]["sampleSequence"] == 1
+    assert "latitude" not in receipt["events"][2]
 
 
 @pytest.mark.asyncio

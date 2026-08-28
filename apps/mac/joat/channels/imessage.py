@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,7 @@ class IMessageStore:
         # page, the returned ROWID becomes the durable in-process signal that
         # the caller must keep draining even if the filesystem is unchanged.
         self._drain_after: int | None = None
+        self._last_health_probe = 0.0
         # Messages stores only the raw handle; the wearer needs a name.
         self._contacts = ContactResolver()
 
@@ -84,12 +86,16 @@ class IMessageStore:
         depending on FSEvents in the engine process.
         """
         newest = 0.0
+        observed = False
         for suffix in ("", "-wal"):
             try:
                 newest = max(newest, (self._path.parent /
                                       (self._path.name + suffix)).stat().st_mtime)
+                observed = True
             except OSError:
                 continue
+        if not observed:
+            raise FileNotFoundError(f"Messages store is unavailable at {self._path}")
         if newest > self._last_change:
             self._last_change = newest
             return True
@@ -98,6 +104,14 @@ class IMessageStore:
     def read_new(self, watermark: Any) -> tuple[list[Notification], Any]:
         last = int(watermark)
         if self._drain_after != last and not self._changed():
+            # An mtime is an edge signal, not a health signal. Periodically
+            # prove the read permission still exists so the mux can promote
+            # best-effort banners if Full Disk Access is revoked while idle.
+            now = time.monotonic()
+            if now - self._last_health_probe >= 30:
+                with self._connect() as conn:
+                    conn.execute("SELECT 1 FROM message LIMIT 1").fetchone()
+                self._last_health_probe = now
             return [], last
 
         # Preserve this continuation before opening the live store. If a
@@ -136,6 +150,7 @@ class IMessageStore:
                 subtitle="",
                 body=text,
                 delivered_unix=_unix_time(date),
+                native_id=str(rowid),
             ))
         self._drain_after = last if len(rows) > _READ_PAGE_SIZE else None
         return out, last

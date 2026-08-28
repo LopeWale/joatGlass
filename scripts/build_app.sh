@@ -123,10 +123,42 @@ else
 fi
 
 if [ "$WANT_INSTALL" = 1 ]; then
-  say "installing to /Applications"
-  rm -rf /Applications/JOAT.app
-  ditto "$APP" /Applications/JOAT.app
-  say "installed: /Applications/JOAT.app"
+  INSTALL_TARGET="/Applications/JOAT.app"
+  INSTALL_STAGE_DIR="$(mktemp -d /Applications/.JOAT-install.XXXXXX)"
+  INSTALL_STAGE_APP="$INSTALL_STAGE_DIR/JOAT.app"
+  INSTALL_BACKUP_DIR=""
+  cleanup_install_stage() {
+    if [ -d "$INSTALL_STAGE_DIR" ]; then
+      rm -rf "$INSTALL_STAGE_DIR"
+    fi
+  }
+  trap cleanup_install_stage EXIT
+
+  say "staging signed app in /Applications"
+  ditto "$APP" "$INSTALL_STAGE_APP"
+  codesign --verify --strict "$INSTALL_STAGE_APP" \
+    || die "staged app signature verification failed"
+
+  if [ -e "$INSTALL_TARGET" ]; then
+    INSTALL_BACKUP_DIR="$(mktemp -d /Applications/JOAT-backup.XXXXXX)"
+    mv "$INSTALL_TARGET" "$INSTALL_BACKUP_DIR/JOAT.app"
+  fi
+
+  if ! mv "$INSTALL_STAGE_APP" "$INSTALL_TARGET"; then
+    if [ -n "$INSTALL_BACKUP_DIR" ] && [ ! -e "$INSTALL_TARGET" ]; then
+      mv "$INSTALL_BACKUP_DIR/JOAT.app" "$INSTALL_TARGET" \
+        || die "install failed; previous app remains at $INSTALL_BACKUP_DIR/JOAT.app"
+      rmdir "$INSTALL_BACKUP_DIR"
+    fi
+    die "install failed; the previous JOAT.app was restored"
+  fi
+  rmdir "$INSTALL_STAGE_DIR"
+  trap - EXIT
+
+  say "installed atomically: $INSTALL_TARGET"
+  if [ -n "$INSTALL_BACKUP_DIR" ]; then
+    say "previous app retained: $INSTALL_BACKUP_DIR/JOAT.app"
+  fi
 else
   say "built: $APP   (--install to place it in /Applications)"
 fi

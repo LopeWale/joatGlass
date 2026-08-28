@@ -6,14 +6,14 @@ import type { UplinkMessage } from './types';
  * device identifiers, audio, token, or user-input payload fields. The Mac
  * independently validates this same vocabulary before it writes an export.
  */
-export type G2TracePage = 'overview' | 'sidebar' | 'list' | 'confirmation';
+export type G2TracePage = 'overview' | 'sidebar' | 'list' | 'confirmation' | 'navigation';
 
 export type G2TraceEvent =
   | {
     type: 'page_transition';
     from: G2TracePage;
     to: G2TracePage;
-    reason: 'show_sidebar' | 'show_list' | 'show_overview' | 'show_confirmation' | 'dismiss_confirmation';
+    reason: 'show_sidebar' | 'show_list' | 'show_overview' | 'show_confirmation' | 'show_navigation' | 'dismiss_confirmation';
     outcome: 'success' | 'failed';
   }
   | {
@@ -34,6 +34,24 @@ export type G2TraceEvent =
     target: 'text' | 'visual';
     decision: 'attempt' | 'recovered' | 'abandoned' | 'skipped';
     containerId: number;
+  }
+  | {
+    type: 'location_probe';
+    sampleSequence: number;
+    profile: 'high';
+    lifecycle: 'foreground' | 'background';
+    /** Bit 0 timestamp, bit 1 speed, bit 2 heading. Presence only. */
+    fields: number;
+    cadenceMs: number;
+    accuracy: 'unknown' | 'lte5' | 'lte10' | 'lte25' | 'gt25';
+    timestampAge: 'missing' | 'future' | 'fresh' | 'stale';
+    displacement: 'first' | 'lt5' | '5_20' | '20_100' | 'gt100';
+    headingDelta: 'unavailable' | 'insufficient_motion' | '0_30' | '31_90' | '91_180';
+  }
+  | {
+    type: 'location_probe_state';
+    requested: 'high' | 'ambient';
+    outcome: 'success' | 'failed';
   };
 
 /** Narrow observer seam so instrumentation cannot change HUD control flow. */

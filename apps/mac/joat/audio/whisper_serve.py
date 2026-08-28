@@ -35,6 +35,7 @@ from .whisperkit import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
 log = logging.getLogger(__name__)
 
 MIN_UTTERANCE_BYTES = SAMPLE_RATE * SAMPLE_WIDTH // 4  # < 250 ms is a VAD blip
+DEFAULT_READY_TIMEOUT_S = 30.0
 
 
 def is_prompt_echo(text: str, prompt: str | None) -> bool:
@@ -98,7 +99,7 @@ class WhisperServeEngine(SttEngine):
         command: list[str] | None = None,
         prompt: str | None = None,
         max_buffer_s: float = 30.0,
-        ready_timeout_s: float = 180.0,
+        ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S,
     ) -> None:
         self._binary = binary
         self._model = model
@@ -122,23 +123,45 @@ class WhisperServeEngine(SttEngine):
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    async def start(self) -> bool:
+    async def start(self, shutdown: asyncio.Event | None = None) -> bool:
         """Spawn the server (unless external) and wait until it transcribes.
 
-        The first-ever start also downloads the model, so the ready timeout
-        is generous. Returns False (never raises) when serve can't come up —
-        callers degrade the same way the batch engine does.
+        Startup is bounded so STT cannot hold every unrelated capability
+        hostage. Returns False (never raises) when serve can't come up —
+        callers degrade to the batch engine.
         """
         try:
             if not self._external:
                 await self._spawn()
-            await self._wait_ready()
+            if shutdown is None:
+                await self._wait_ready()
+            else:
+                await self._wait_ready_or_shutdown(shutdown)
             log.info("whisper serve ready at %s (model %s)", self._base_url, self._model)
             return True
         except Exception as exc:
             log.error("whisper serve failed to start: %s", exc)
             await self.close()
             return False
+
+    async def _wait_ready_or_shutdown(self, shutdown: asyncio.Event) -> None:
+        """Wait for readiness without trapping a shell-initiated shutdown."""
+        ready = asyncio.create_task(self._wait_ready())
+        stopped = asyncio.create_task(shutdown.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                (ready, stopped),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stopped in done:
+                ready.cancel()
+                await asyncio.gather(ready, return_exceptions=True)
+                await self.close()
+                raise asyncio.CancelledError
+            await ready
+        finally:
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
 
     async def close(self) -> None:
         proc, self._proc = self._proc, None

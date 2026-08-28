@@ -112,6 +112,21 @@ describe('ImuMonitor confirms', () => {
       { kind: 'confirm', actionId: 'rendering', accepted: true },
     ]);
   });
+
+  it('revoking a generation cancels its still-visible confirmation gate', () => {
+    const { imu, sent } = make();
+    const controller = new AbortController();
+    const settled = vi.fn();
+    imu.prepare('old-generation', settled, controller.signal);
+    expect(imu.activate('old-generation', 8000)).toBe(true);
+
+    controller.abort();
+
+    expect(imu.isPending()).toBe(false);
+    expect(settled).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledWith(false);
+    expect(sent).toEqual([]);
+  });
 });
 
 describe('ImuMonitor trace mode', () => {
@@ -159,6 +174,37 @@ describe('ImuMonitor trace mode', () => {
 });
 
 describe('ImuMonitor host degradation', () => {
+  it('a new stop invalidates and compensates an older pending IMU start', async () => {
+    let releaseStart!: (started: boolean) => void;
+    const pendingStart = new Promise<boolean>((resolve) => { releaseStart = resolve; });
+    const controls: boolean[] = [];
+    const client = {
+      assertStarted: () => ({
+        imuControl: async (open: boolean) => {
+          controls.push(open);
+          if (open) return pendingStart;
+          return true;
+        },
+      }),
+      require: () => ({
+        imuControl: async (open: boolean) => {
+          controls.push(open);
+          return true;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const imu = new ImuMonitor(client, { send: () => undefined } as unknown as MacLink);
+    const oldGeneration = new AbortController();
+
+    const starting = imu.start(undefined, oldGeneration.signal);
+    oldGeneration.abort();
+    await imu.stop();
+    releaseStart(true);
+
+    await expect(starting).resolves.toBe(false);
+    expect(controls).toEqual([true, false, false]);
+  });
+
   it('start() returns false instead of throwing when the host has no IMU', async () => {
     const sent: UplinkMessage[] = [];
     const client = {

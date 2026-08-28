@@ -14,6 +14,9 @@ struct EngineStatus: Decodable {
     var stt = "off"
     var llm = "off"
     var debate = "off"
+    var openClaw: OpenClaw = .init()
+    var agentTerminal: AgentTerminal = .init()
+    var brainstorm: Brainstorm = .init()
     var lastTranscript = ""
     var lastReply = ""
     var lastCard = ""
@@ -34,8 +37,67 @@ struct EngineStatus: Decodable {
         }
     }
 
+    struct OpenClaw: Decodable {
+        var state = "not_configured"
+        var endpointHost = ""
+        var scopes: [String] = []
+        var reason = "endpoint_missing"
+
+        enum CodingKeys: String, CodingKey {
+            case state, scopes, reason
+            case endpointHost = "endpoint_host"
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "not_configured"
+            endpointHost = (try? c.decodeIfPresent(String.self, forKey: .endpointHost)) ?? ""
+            scopes = (try? c.decodeIfPresent([String].self, forKey: .scopes)) ?? []
+            reason = (try? c.decodeIfPresent(String.self, forKey: .reason)) ?? "endpoint_missing"
+        }
+    }
+
+    struct AgentTerminal: Decodable {
+        var state = "unavailable"
+        var reason = "gateway_not_ready"
+
+        enum CodingKeys: String, CodingKey { case state, reason }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "unavailable"
+            reason = (try? c.decodeIfPresent(String.self, forKey: .reason)) ?? "gateway_not_ready"
+        }
+    }
+
+    struct Brainstorm: Decodable {
+        var state = "unavailable"
+        var seatCount = 0
+        var phase = "idle"
+
+        enum CodingKeys: String, CodingKey {
+            case state, phase
+            case seatCount = "seat_count"
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "unavailable"
+            seatCount = (try? c.decodeIfPresent(Int.self, forKey: .seatCount)) ?? 0
+            phase = (try? c.decodeIfPresent(String.self, forKey: .phase)) ?? "idle"
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
-        case at, glasses, device, mic, notifications, stt, llm, debate
+        case at, glasses, device, mic, notifications, stt, llm, debate, brainstorm
+        case openClaw = "openclaw"
+        case agentTerminal = "agent_terminal"
         case lastTranscript = "last_transcript"
         case lastReply = "last_reply"
         case lastCard = "last_card"
@@ -57,6 +119,9 @@ struct EngineStatus: Decodable {
         stt = s(.stt, "off")
         llm = s(.llm, "off")
         debate = s(.debate, "off")
+        openClaw = (try? c.decodeIfPresent(OpenClaw.self, forKey: .openClaw)) ?? .init()
+        agentTerminal = (try? c.decodeIfPresent(AgentTerminal.self, forKey: .agentTerminal)) ?? .init()
+        brainstorm = (try? c.decodeIfPresent(Brainstorm.self, forKey: .brainstorm)) ?? .init()
         lastTranscript = s(.lastTranscript, "")
         lastReply = s(.lastReply, "")
         lastCard = s(.lastCard, "")
@@ -64,7 +129,10 @@ struct EngineStatus: Decodable {
     }
 
     /// Stale = the engine stopped writing (crashed, or never started).
-    var isFresh: Bool { Date().timeIntervalSince1970 - at < 15 }
+    var isFresh: Bool {
+        let age = Date().timeIntervalSince1970 - at
+        return age >= 0 && age < 15
+    }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JOAT/status.json")

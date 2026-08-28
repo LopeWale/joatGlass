@@ -147,6 +147,54 @@ class TestChannel:
         assert "The private message body" not in caplog.text
         assert "channel=Messages" in caplog.text
 
+    async def test_slow_triage_times_out_and_raw_notification_still_delivers(self) -> None:
+        class NeverReplies(ReplyEngine):
+            async def reply(self, text: str) -> str | None:
+                del text
+                await asyncio.Event().wait()
+                return None
+
+        delivered: list[str] = []
+        channel = NotificationChannel(
+            None,  # type: ignore[arg-type] -- _handle is the unit under test
+            NeverReplies(),
+            delivered.append,
+            triage_timeout_s=0.01,
+        )
+        await channel._handle(Notification(
+            rec_id=1,
+            app="com.apple.MobileSMS",
+            title="Ada",
+            subtitle="",
+            body="Call me",
+            delivered_unix=0.0,
+        ))
+
+        assert delivered == ["Ada · Messages\nCall me"]
+
+    async def test_failed_triage_does_not_block_raw_delivery(self) -> None:
+        class BrokenTriage(ReplyEngine):
+            async def reply(self, text: str) -> str | None:
+                del text
+                raise RuntimeError("model unavailable")
+
+        delivered: list[str] = []
+        channel = NotificationChannel(
+            None,  # type: ignore[arg-type] -- _handle is the unit under test
+            BrokenTriage(),
+            delivered.append,
+        )
+        await channel._handle(Notification(
+            rec_id=1,
+            app="com.apple.MobileSMS",
+            title="Ada",
+            subtitle="",
+            body="Call me",
+            delivered_unix=0.0,
+        ))
+
+        assert delivered == ["Ada · Messages\nCall me"]
+
 
 class TestManagerCards:
     async def test_idle_shows_now_active_queues_and_drains(self, caplog) -> None:  # type: ignore[no-untyped-def]

@@ -12,118 +12,125 @@ struct MainWindowView: View {
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header
 
-            HStack(spacing: 10) {
-                Pill("Glasses", value: live ? status.glasses : "—",
-                     ok: live && status.glasses == "connected")
-                Pill("Mic", value: live ? status.mic : "—",
-                     ok: live && status.mic == "streaming")
-                Pill("Notifications", value: live ? status.notifications : "—",
-                     ok: live && status.notifications == "live")
-            }
-            HStack(spacing: 10) {
-                Pill("Speech", value: live ? status.stt : "—", ok: live && status.stt == "ready")
-                Pill("Model", value: live ? status.llm : "—", ok: live && status.llm == "ready")
-                Pill("Debate", value: live ? status.debate : "—", ok: live && status.debate == "ready")
-            }
+                HStack(spacing: 10) {
+                    Pill("Glasses", value: live ? status.glasses : "Status unavailable",
+                         ok: live && status.glasses == "connected")
+                    Pill("Mic", value: live ? status.mic : "Status unavailable",
+                         ok: live && status.mic == "streaming")
+                    Pill("Notifications", value: live ? status.notifications : "Status unavailable",
+                         ok: live && status.notifications == "live")
+                }
+                HStack(spacing: 10) {
+                    Pill("Speech", value: live ? status.stt : "Status unavailable",
+                         ok: live && status.stt == "ready")
+                    Pill("Model", value: live ? status.llm : "Status unavailable",
+                         ok: live && status.llm == "ready")
+                    Pill("Brainstorm", value: brainstormValue,
+                         ok: live && ["ready", "running", "settled"].contains(status.brainstorm.state))
+                }
 
-            GroupBox("Last exchange") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Row(icon: "quote.bubble", label: "You said",
-                        text: status.lastTranscript.isEmpty ? "nothing yet — say “JOAT …”" : status.lastTranscript)
-                    Row(icon: "eyeglasses", label: "On the HUD",
-                        text: status.lastReply.isEmpty ? "—" : status.lastReply)
-                    if !status.lastCard.isEmpty {
-                        Row(icon: "bell.badge", label: "Last card", text: status.lastCard)
+                GroupBox("Last exchange") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Row(icon: "quote.bubble", label: "You said",
+                            text: status.lastTranscript.isEmpty ? "nothing yet — say “JOAT …”" : status.lastTranscript)
+                        Row(icon: "eyeglasses", label: "On the HUD",
+                            text: status.lastReply.isEmpty ? "—" : status.lastReply)
+                        if !status.lastCard.isEmpty {
+                            Row(icon: "bell.badge", label: "Last card", text: status.lastCard)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(4)
+                }
+
+                openClawStatus
+
+                if !engine.accessibilityTrusted {
+                    GroupBox {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Notification text needs Accessibility").font(.callout.weight(.medium))
+                                Text("Without it, cards can show which app notified you but not what it said.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Grant…") { engine.requestAccessibility() }
+                        }
+                        .padding(4)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(4)
-            }
 
-            if !engine.accessibilityTrusted {
-                GroupBox {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Notification text needs Accessibility").font(.callout.weight(.medium))
-                            Text("Without it, cards can show which app notified you but not what it said.")
-                                .font(.caption).foregroundStyle(.secondary)
+                GroupBox("Calendar & Reminders") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            LabeledContent("Calendar", value: engine.calendarAccess)
+                            Button("Connect…") { engine.requestCalendarAccess() }
+                                .disabled(engine.calendarAccess == "full access")
                         }
-                        Spacer()
-                        Button("Grant…") { engine.requestAccessibility() }
+                        HStack {
+                            LabeledContent("Reminders", value: engine.remindersAccess)
+                            Button("Connect…") { engine.requestRemindersAccess() }
+                                .disabled(engine.remindersAccess == "full access")
+                        }
+                        Text("Access is requested only from these buttons. You can revoke it in System Settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(4)
                 }
-            }
 
-            GroupBox("Calendar & Reminders") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        LabeledContent("Calendar", value: engine.calendarAccess)
-                        Button("Connect…") { engine.requestCalendarAccess() }
-                            .disabled(engine.calendarAccess == "full access")
-                    }
-                    HStack {
-                        LabeledContent("Reminders", value: engine.remindersAccess)
-                        Button("Connect…") { engine.requestRemindersAccess() }
-                            .disabled(engine.remindersAccess == "full access")
-                    }
-                    Text("Access is requested only from these buttons. You can revoke it in System Settings.")
+                Divider()
+
+                HStack {
+                    Button(showLog ? "Hide Log" : "Show Log") { showLog.toggle() }
+                    Button("Open Full Log") { engine.openLog() }
+                    Toggle("Record G2 trace", isOn: Binding(
+                        get: { engine.g2DiagnosticsEnabled },
+                        set: { engine.setG2DiagnosticsEnabled($0) }
+                    ))
+                    .help("Records only page, gesture, tile, and recovery metadata. Enabling restarts the engine.")
+                    Button("Export Redacted G2 Trace…") { engine.exportG2Diagnostics() }
+                    // The only recovery a locked-out phone cannot perform itself:
+                    // it holds a token this Mac no longer accepts (reinstall,
+                    // cleared storage, a different phone), so it cannot
+                    // authenticate to ask. The wearer just sees "reconnecting"
+                    // forever. Authority here is physical access to the Mac.
+                    Button("Pair / Replace Glasses") { engine.openPairingWindow() }
+                        .help("Open a private 120-second pairing window. Use when "
+                              + "the HUD is stuck on \"reconnecting\" or when replacing glasses.")
+                    Spacer()
+                    Text("\(status.counts.utterances) asked · \(status.counts.cards) cards")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                if let notice = engine.pairingNotice {
+                    Text(notice)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(notice.hasPrefix("Pairing stayed closed") ? .red : .secondary)
                 }
-                .padding(4)
-            }
 
-            Spacer(minLength: 0)
-
-            HStack {
-                Button(showLog ? "Hide Log" : "Show Log") { showLog.toggle() }
-                Button("Open Full Log") { engine.openLog() }
-                Toggle("Record G2 trace", isOn: Binding(
-                    get: { engine.g2DiagnosticsEnabled },
-                    set: { engine.setG2DiagnosticsEnabled($0) }
-                ))
-                .help("Records only page, gesture, tile, and recovery metadata. Enabling restarts the engine.")
-                Button("Export Redacted G2 Trace…") { engine.exportG2Diagnostics() }
-                // The only recovery a locked-out phone cannot perform itself:
-                // it holds a token this Mac no longer accepts (reinstall,
-                // cleared storage, a different phone), so it cannot
-                // authenticate to ask. The wearer just sees "reconnecting"
-                // forever. Authority here is physical access to the Mac.
-                Button("Pair / Replace Glasses") { engine.openPairingWindow() }
-                    .help("Open a private 120-second pairing window. Use when "
-                          + "the HUD is stuck on \"reconnecting\" or when replacing glasses.")
-                Spacer()
-                Text("\(status.counts.utterances) asked · \(status.counts.cards) cards")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            if let notice = engine.pairingNotice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(notice.hasPrefix("Pairing stayed closed") ? .red : .secondary)
-            }
-
-            if let notice = engine.g2DiagnosticNotice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(notice.hasPrefix("G2 trace export failed") || notice.hasPrefix("Trace stayed off") ? .red : .secondary)
-            }
-
-            if showLog {
-                ScrollView {
-                    Text(logTail).font(.system(size: 10, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                if let notice = engine.g2DiagnosticNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(notice.hasPrefix("G2 trace export failed") || notice.hasPrefix("Trace stayed off") ? .red : .secondary)
                 }
-                .frame(height: 150)
+
+                if showLog {
+                    ScrollView {
+                        Text(logTail).font(.system(size: 10, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    }
+                    .frame(height: 150)
+                }
             }
+            .padding(16)
         }
-        .padding(16)
-        .frame(minWidth: 460, minHeight: 420)
+        .frame(minWidth: 560, minHeight: 520)
         .onAppear {
             refresh()
             engine.refreshPersonalDataAccess()
@@ -159,6 +166,100 @@ struct MainWindowView: View {
         }
     }
 
+    private var brainstormValue: String {
+        guard live else { return "Status unavailable · stale" }
+        switch status.brainstorm.state {
+        case "ready": return "Ready · \(status.brainstorm.seatCount) collaborators"
+        case "running":
+            let phase = [
+                "opening": "Opening",
+                "turn": "Collaborating",
+                "closing": "Closing",
+            ][status.brainstorm.phase] ?? "Working"
+            return "\(phase) · \(status.brainstorm.seatCount) collaborators"
+        case "settled": return "Settled · \(status.brainstorm.seatCount) collaborators"
+        case "cancelled": return "Cancelled"
+        case "failed": return "Failed"
+        default: return "Unavailable"
+        }
+    }
+
+    private var openClawStatus: some View {
+        GroupBox("OpenClaw") {
+            VStack(alignment: .leading, spacing: 8) {
+                StatusLine(
+                    label: "Gateway",
+                    value: gatewayValue,
+                    healthy: live && ["connected_read_only", "connected_operator"].contains(status.openClaw.state)
+                )
+                StatusLine(
+                    label: "Agent Terminal",
+                    value: terminalValue,
+                    healthy: live && ["ready", "running"].contains(status.agentTerminal.state)
+                )
+                if live && !status.openClaw.endpointHost.isEmpty {
+                    Text(status.openClaw.endpointHost)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityLabel("OpenClaw Gateway host")
+                }
+                if live, let explanation = openClawExplanation {
+                    Text(explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
+        }
+    }
+
+    private var gatewayValue: String {
+        guard live else { return "Status unavailable · stale" }
+        switch status.openClaw.state {
+        case "checking": return "Checking signed pairing"
+        case "approval_required": return "Approval required"
+        case "connected_read_only": return "Connected · read-only"
+        case "connected_operator": return "Connected · read + write"
+        case "disconnected": return "Disconnected"
+        case "failed": return "Connection failed"
+        default: return "Not configured"
+        }
+    }
+
+    private var terminalValue: String {
+        guard live else { return "Status unavailable · stale" }
+        switch status.agentTerminal.state {
+        case "approval_required": return "Approval required"
+        case "ready": return "Ready · dedicated no-tool session"
+        case "running": return "Running"
+        case "blocked": return "Blocked · safety gate"
+        default: return "Unavailable"
+        }
+    }
+
+    private var openClawExplanation: String? {
+        switch status.agentTerminal.reason {
+        case "write_scope_required":
+            return "Operator write approval is required before Agent Terminal can send."
+        case "dedicated_session_not_proven":
+            return "A dedicated no-tool Agent Terminal session has not been proven."
+        case "tools_enabled":
+            return "Agent Terminal is blocked because the remote agent exposes tools."
+        case "history_recovery_required":
+            return "Agent Terminal is paused until its exact session history is reconciled."
+        case "connection_closed":
+            return "The private Gateway connection closed after bounded reconnect attempts."
+        case "protocol_rejected":
+            return "Agent Terminal rejected an unexpected Gateway response."
+        case "gateway_not_ready":
+            return "Agent Terminal remains unavailable until the Gateway connection is proven."
+        default:
+            return nil
+        }
+    }
+
     private func refresh() {
         if let s = EngineStatus.load() {
             status = s
@@ -184,6 +285,27 @@ private struct Pill: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
+    }
+}
+
+private struct StatusLine: View {
+    let label: String
+    let value: String
+    let healthy: Bool
+
+    var body: some View {
+        LabeledContent {
+            Text(value)
+                .foregroundStyle(healthy ? Color.green : .secondary)
+        } label: {
+            Text(label)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
     }
 }
 

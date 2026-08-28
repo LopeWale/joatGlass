@@ -49,20 +49,24 @@ def _read_varint(data: bytes, i: int) -> tuple[int, int] | None:
     return None
 
 
-def parse_records(data: bytes) -> list[tuple[str, str, float]]:
-    """(text, bundle_id, unix_seconds) for every record shape in the blob."""
-    out: list[tuple[str, str, float]] = []
+def _parse_record_entries(data: bytes) -> list[tuple[str, str, float, int]]:
+    out: list[tuple[str, str, float, int]] = []
     i = 0
     now = time.time()
     while (i := data.find(b"\x0a", i)) != -1:
         candidate = _try_record(data, i, now)
         if candidate is not None:
             record, end = candidate
-            out.append(record)
+            out.append((*record, i))
             i = end
         else:
             i += 1
     return out
+
+
+def parse_records(data: bytes) -> list[tuple[str, str, float]]:
+    """(text, bundle_id, unix_seconds) for every record shape in the blob."""
+    return [(text, bundle, timestamp) for text, bundle, timestamp, _ in _parse_record_entries(data)]
 
 
 def _try_record(data: bytes, i: int, now: float) -> tuple[tuple[str, str, float], int] | None:
@@ -104,32 +108,51 @@ def _try_record(data: bytes, i: int, now: float) -> tuple[tuple[str, str, float]
 
 
 class BiomeNotificationStore:
-    """read_since watermark = unix seconds of the newest record seen."""
+    """Read Biome records with a timestamp plus exact-record cursor."""
 
     def __init__(self, stream_dir: Path = DEFAULT_STREAM_DIR) -> None:
         self._dir = stream_dir
 
-    def baseline(self) -> float:
+    def baseline(self) -> dict[str, object]:
         """Start delivering only notifications newer than 'now'."""
         if not self._dir.is_dir():
             raise FileNotFoundError(f"no Biome notification stream at {self._dir}")
         next(self._dir.iterdir(), None)  # surfaces TCC denial as PermissionError
-        return time.time()
+        return {"timestamp": time.time(), "seen_at_timestamp": []}
 
     def read_new(self, watermark: Any) -> tuple[list[Notification], Any]:
+        if isinstance(watermark, dict):
+            timestamp = float(watermark.get("timestamp", 0.0))
+            seen_at_timestamp = {
+                str(value) for value in watermark.get("seen_at_timestamp", [])
+            }
+        else:
+            # Backward-compatible upgrade from the former scalar cursor.
+            timestamp = float(watermark)
+            seen_at_timestamp = set()
         fresh: list[Notification] = []
-        newest = watermark
+        newest = timestamp
+        seen_at_newest = set(seen_at_timestamp)
         for segment in sorted(self._dir.iterdir()):
             if not segment.is_file():
                 continue
-            if segment.stat().st_mtime < watermark - 60:
+            if segment.stat().st_mtime < timestamp - 60:
                 continue  # untouched since before the watermark
-            for text, bundle, ts in parse_records(segment.read_bytes()):
-                if ts > watermark:
+            for text, bundle, ts, byte_offset in _parse_record_entries(segment.read_bytes()):
+                native_id = f"{segment.name}:{byte_offset}"
+                if ts > timestamp or (ts == timestamp and native_id not in seen_at_timestamp):
                     fresh.append(Notification(
                         rec_id=int(ts * 1000), app=bundle, title=text,
                         subtitle="", body="", delivered_unix=ts,
+                        native_id=native_id,
                     ))
-                    newest = max(newest, ts)
+                    if ts > newest:
+                        newest = ts
+                        seen_at_newest = {native_id}
+                    elif ts == newest:
+                        seen_at_newest.add(native_id)
         fresh.sort(key=lambda n: n.delivered_unix)
-        return fresh, newest
+        return fresh, {
+            "timestamp": newest,
+            "seen_at_timestamp": sorted(seen_at_newest),
+        }

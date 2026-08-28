@@ -26,6 +26,13 @@ from joat.core.protocol import (
     HudText,
     Imu,
     InputEvent,
+    NavigationAction,
+    NavigationOrigin,
+    NavigationOriginFailure,
+    NavigationRerouteRequest,
+    NavigationRouteAck,
+    NavigationState,
+    NavigationViewAck,
 )
 from joat.services.message_reply import MessageReplyController
 
@@ -100,6 +107,95 @@ class TestConnection:
 
 
 class TestUplink:
+    async def test_navigation_action_reaches_dedicated_generation_bound_subscriber(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        got: list[NavigationAction] = []
+        t.on_navigation_action(got.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "navigation.action",
+                "sessionId": "nav-1",
+                "requestId": "mode-2",
+                "generation": 8,
+                "action": "select_mode",
+                "choiceId": "walking",
+            }))
+            await _wait_for(lambda: bool(got))
+        assert got == [NavigationAction(
+            session_id="nav-1",
+            request_id="mode-2",
+            generation=8,
+            action="select_mode",
+            choice_id="walking",
+        )]
+
+    async def test_navigation_route_receipts_state_and_reroute_reach_dedicated_subscribers(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        acks: list[NavigationRouteAck] = []
+        states: list[NavigationState] = []
+        reroutes: list[NavigationRerouteRequest] = []
+        t.on_navigation_route_ack(acks.append)
+        t.on_navigation_state(states.append)
+        t.on_navigation_reroute(reroutes.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "navigation.route.ack", "sessionId": "nav-1",
+                "routeId": "route-1", "revision": 1, "outcome": "installed",
+            }))
+            await ws.send(json.dumps({
+                "kind": "navigation.state", "sessionId": "nav-1",
+                "routeId": "route-1", "revision": 1, "sequence": 1,
+                "state": "guidance",
+            }))
+            await ws.send(json.dumps({
+                "kind": "navigation.reroute.request", "sessionId": "nav-1",
+                "routeId": "route-1", "baseRevision": 1,
+                "requestId": "route-1:1:reroute", "latitude": 41.9,
+                "longitude": -87.65,
+            }))
+            await _wait_for(lambda: bool(acks and states and reroutes))
+        assert acks[0].outcome == "installed"
+        assert states[0].state == "guidance"
+        assert reroutes[0].request_id == "route-1:1:reroute"
+
+    async def test_navigation_origin_reaches_its_dedicated_subscriber(self, transport) -> None:
+        t, url = transport
+        origins: list[NavigationOrigin] = []
+        t.on_navigation_origin(origins.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "navigation.origin", "sessionId": "nav-1",
+                "requestId": "origin-1", "generation": 6,
+                "latitude": 41.9, "longitude": -87.65, "accuracy": 6,
+            }))
+            await _wait_for(lambda: bool(origins))
+        assert origins[0].request_id == "origin-1"
+
+    async def test_navigation_view_and_origin_failure_receipts_reach_subscribers(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        views: list[NavigationViewAck] = []
+        failures: list[NavigationOriginFailure] = []
+        t.on_navigation_view_ack(views.append)
+        t.on_navigation_origin_failure(failures.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "navigation.view.ack", "sessionId": "nav-1",
+                "requestId": "mode-2", "generation": 8, "outcome": "rejected",
+            }))
+            await ws.send(json.dumps({
+                "kind": "navigation.origin.failed", "sessionId": "nav-1",
+                "requestId": "origin-1", "generation": 9, "reason": "unavailable",
+            }))
+            await _wait_for(lambda: bool(views and failures))
+        assert views[0].outcome == "rejected"
+        assert failures[0].reason == "unavailable"
+
     async def test_audio_arrives_as_packed_pcm(self, transport) -> None:
         t, url = transport
         got: list[tuple[bytes, int]] = []

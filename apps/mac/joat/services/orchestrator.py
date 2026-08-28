@@ -48,18 +48,16 @@ class VoiceOrchestrator:
         status: object | None = None,
         commands: Callable[[str], Awaitable[str | None]] | None = None,
         fuzzy_wake: tuple[str, ...] = ("joat",),
-        fuzzy_threshold: float = 0.72,
+        fuzzy_threshold: float = 0.86,
     ) -> None:
         self._transport = transport
         self._commands = commands
         self._hud = HudWriter(transport)
         self._sessions = sessions
         self._status = status
-        # STT mangles a one-word wake utterance differently every time
-        # (observed: Jeves, Javes, Javits, Jokes). A curated alias list can
-        # never be complete, so near-misses are matched by similarity too.
-        # 0.72 was chosen against live mishearings: it accepts javits/javes/
-        # jote and rejects service/driving/job/just/jazz/javascript.
+        # Curated live aliases are supplied by __main__. Fuzzy fallback is
+        # intentionally strict: 0.72 also accepts ordinary ambient words
+        # coat/goat/boat, which can turn room speech into local note writes.
         self._fuzzy_wake = fuzzy_wake
         self._fuzzy_threshold = fuzzy_threshold
         # Longest first so "hey joat" strips before "joat" matches.

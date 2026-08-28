@@ -23,12 +23,35 @@ final class EngineController: ObservableObject {
     /// login items don't inherit the shell environment). NOTE: the hub
     /// plugin's VITE_MAC_WS_URL and the packed app.json whitelist must
     /// still agree with whatever this resolves to.
+    nonisolated static func defaultEnginePort(bundleIdentifier: String?) -> Int {
+        bundleIdentifier == "com.joat.shell.debug" ? 18_787 : 8_787
+    }
+
+    nonisolated static func defaultSttPort(bundleIdentifier: String?) -> Int {
+        bundleIdentifier == "com.joat.shell.debug" ? 51_060 : 50_060
+    }
+
+    /// Hosted XCTest launches the application target to inject its bundle.
+    /// Starting the real notification watchers and Python engine from that
+    /// short-lived host would request Files & Folders access for a disposable
+    /// Debug identity and make its prompt look like the installed JOAT app.
+    nonisolated static func shouldRunAppServices(
+        environment: [String: String]
+    ) -> Bool {
+        environment["XCTestConfigurationFilePath"] == nil
+    }
+
     static let enginePort =
-        (UserDefaults.standard.object(forKey: "EnginePort") as? Int) ?? 8787
+        (UserDefaults.standard.object(forKey: "EnginePort") as? Int)
+        ?? defaultEnginePort(bundleIdentifier: Bundle.main.bundleIdentifier)
+
+    static let sttPort =
+        (UserDefaults.standard.object(forKey: "SttPort") as? Int)
+        ?? defaultSttPort(bundleIdentifier: Bundle.main.bundleIdentifier)
 
     @Published var state: State = .stopped
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
-    @Published var accessibilityTrusted: Bool = AXIsProcessTrusted()
+    @Published var accessibilityTrusted = false
     @Published var pairingNotice: String?
     @Published var calendarAccess = "not determined"
     @Published var remindersAccess = "not determined"
@@ -56,6 +79,10 @@ final class EngineController: ObservableObject {
 
     init() {
         g2DiagnosticsEnabled = UserDefaults.standard.bool(forKey: "G2DiagnosticsEnabled")
+        guard Self.shouldRunAppServices(
+            environment: ProcessInfo.processInfo.environment
+        ) else { return }
+        accessibilityTrusted = AXIsProcessTrusted()
         do {
             try NativeBridgeServer.shared.start()
             refreshPersonalDataAccess()
@@ -170,8 +197,11 @@ final class EngineController: ObservableObject {
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: logURL.path
+        )
         if let h = try? FileHandle(forWritingTo: logURL) {
-            try? h.seekToEnd()
+            _ = try? h.seekToEnd()
             try? h.write(contentsOf: Data((line + "\n").utf8))
             try? h.close()
         }
@@ -206,11 +236,15 @@ final class EngineController: ObservableObject {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
         let log = try? FileHandle(forWritingTo: logURL)
-        try? log?.seekToEnd()
+        _ = try? log?.seekToEnd()
 
         let p = Process()
         p.executableURL = repo.appendingPathComponent(".venv/bin/python")
-        p.arguments = ["-u", "-m", "joat", "--port", String(Self.enginePort)]
+        p.arguments = [
+            "-u", "-m", "joat",
+            "--port", String(Self.enginePort),
+            "--stt-port", String(Self.sttPort),
+        ]
             + (g2DiagnosticsEnabled ? ["--g2-diagnostics"] : [])
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
@@ -228,8 +262,10 @@ final class EngineController: ObservableObject {
         p.terminationHandler = { [weak self] proc in
             Task { @MainActor in self?.engineExited(code: proc.terminationStatus) }
         }
+        NativeBridgeServer.shared.authorizePeerProcessID(nil)
         do {
             try p.run()
+            NativeBridgeServer.shared.authorizePeerProcessID(p.processIdentifier)
             process = p
             state = .running
         } catch {
@@ -259,6 +295,7 @@ final class EngineController: ObservableObject {
     }
 
     private func engineExited(code: Int32) {
+        NativeBridgeServer.shared.authorizePeerProcessID(nil)
         process = nil
         if userStopped {
             state = .stopped
@@ -275,9 +312,12 @@ final class EngineController: ObservableObject {
         }
     }
 
-    /// Exactly one engine may exist. An app relaunch (or a crashed shell)
-    /// can leave an orphan holding the engine port — the new engine would
-    /// then crash-loop on bind. Reap by PORT OWNERSHIP: the kernel reports
+    /// Exactly one engine may own this app identity's resolved port. An app
+    /// relaunch (or a crashed shell) can leave an orphan holding that port —
+    /// the new engine would then crash-loop on bind. Reap by PORT OWNERSHIP:
+    /// production and Debug intentionally use different ports, so a broad
+    /// process-name kill would let a test restart the installed engine. The
+    /// kernel reports
     /// the engine's argv with the resolved interpreter path (not .venv/...),
     /// so command-pattern matching is unreliable; holding the port is not.
     ///
@@ -292,8 +332,7 @@ final class EngineController: ObservableObject {
             "launchctl bootout gui/$(id -u)/com.joat.brain 2>/dev/null; "
             + "rm -f \"$HOME/Library/LaunchAgents/com.joat.brain.plist\"; "
             + "PIDS=$(lsof -ti tcp:\(Self.enginePort) -sTCP:LISTEN); "
-            + "[ -n \"$PIDS\" ] && kill $PIDS && sleep 1; "
-            + "pkill -f -- '[-]u -m joat' && sleep 1; true"]
+            + "[ -n \"$PIDS\" ] && kill $PIDS && sleep 1; true"]
         try? reap.run()
         reap.waitUntilExit()
     }

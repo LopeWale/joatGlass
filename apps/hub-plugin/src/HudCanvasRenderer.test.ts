@@ -4,9 +4,11 @@ import {
   gray8ToGray4,
   hudBrightnessGray,
   hudDisplayTitle,
+  hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
   resolveHudOverview,
+  resolveHudListKind,
   visibleHudListItems,
   visibleHudTailLines,
   wrapHudText,
@@ -52,8 +54,34 @@ describe('selected visual geometry', () => {
     expect(hudDisplayTitle('MESSAGES · SETUP')).toBe('Messages · Setup');
     expect(hudDisplayTitle('JOAT')).toBe('JOAT');
     expect(hudDisplayTitle('NOTIFICATIONS')).toBe('Notifications');
+    expect(hudDisplayTitle('QUICKNOTES')).toBe('QuickNotes');
     expect(hudDisplayTitle('Already Mixed')).toBe('Already Mixed');
   });
+});
+
+describe('semantic HUD chrome', () => {
+  it('maps sidebar glyphs by capability name rather than stale row position', () => {
+    expect(hudSidebarIconName('Messages')).toBe('messages');
+    expect(hudSidebarIconName('Notifications')).toBe('notifications');
+    expect(hudSidebarIconName('Calendar')).toBe('calendar');
+    expect(hudSidebarIconName('Tasks')).toBe('tasks');
+    expect(hudSidebarIconName('More')).toBe('more');
+    expect(hudSidebarIconName('QuickNotes')).toBe('quicknotes');
+    expect(hudSidebarIconName('Brainstorm')).toBe('brainstorm');
+    expect(hudSidebarIconName('Activity')).toBe('activity');
+  });
+
+  it('resolves list treatment from the Mac-owned capability title', () => {
+    expect(resolveHudListKind('MESSAGES')).toBe('messages');
+    expect(resolveHudListKind('NOTIFICATIONS')).toBe('notifications');
+    expect(resolveHudListKind('CALENDAR · 7 DAYS')).toBe('calendar');
+    expect(resolveHudListKind('TASKS')).toBe('tasks');
+    expect(resolveHudListKind('QUICKNOTES')).toBe('quicknotes');
+    expect(resolveHudListKind('ACTIVITY')).toBe('activity');
+    expect(resolveHudListKind('ACTION · VERIFYING')).toBe('activity');
+    expect(resolveHudListKind('LISTENING RESUME')).toBe('generic');
+  });
+
 });
 
 describe('parseHudLabeledValue', () => {

@@ -10,7 +10,7 @@ and (later) surface arbitration in exactly one place.
 from __future__ import annotations
 
 from ..core.interfaces import GlassesTransport
-from ..core.protocol import ContainerId, HudText
+from ..core.protocol import ContainerId, HudRebuild, HudText
 
 
 class HudWriter:
@@ -18,6 +18,10 @@ class HudWriter:
 
     def __init__(self, transport: GlassesTransport) -> None:
         self._transport = transport
+
+    async def begin_brainstorm(self) -> None:
+        """Release any menu focus before the first live Brainstorm frame."""
+        await self._transport.send(HudRebuild(reason="brainstorm"))
 
     async def status(self, text: str) -> None:
         """Status bar line (top 32px)."""

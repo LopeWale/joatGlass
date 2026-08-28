@@ -19,11 +19,12 @@ to bundle ids. Dates are Cocoa epoch (seconds since 2001-01-01).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import plistlib
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,7 @@ class Notification:
     subtitle: str
     body: str
     delivered_unix: float
+    native_id: str | None = None
 
 
 def _parse_record(rec_id: int, app: str, delivered: float | None, blob: bytes) -> Notification | None:
@@ -70,7 +72,7 @@ def _parse_record(rec_id: int, app: str, delivered: float | None, blob: bytes) -
     if not (title or subtitle or body):
         return None
     when = (delivered or 0.0) + COCOA_EPOCH_UNIX if delivered else 0.0
-    return Notification(rec_id, app, title, subtitle, body, when)
+    return Notification(rec_id, app, title, subtitle, body, when, str(rec_id))
 
 
 class NotificationStore:
@@ -78,6 +80,10 @@ class NotificationStore:
 
     def __init__(self, db_path: Path = DEFAULT_DB) -> None:
         self._path = db_path
+
+    @property
+    def available(self) -> bool:
+        return self._path.is_file() and self._path.stat().st_size > 0
 
     def latest_rec_id(self) -> int:
         with self._connect() as conn:
@@ -172,17 +178,21 @@ class NotificationChannel:
         self,
         store: NotificationSource,
         triage: ReplyEngine | None,
-        deliver: Callable[[str], None],
+        deliver: Callable[[str], None | Awaitable[None]],
         poll_interval_s: float = 2.0,
         status: object | None = None,
         policy: DeliveryPolicy | None = None,
+        triage_timeout_s: float = 5.0,
     ) -> None:
+        if triage_timeout_s <= 0:
+            raise ValueError("triage timeout must be positive")
         self._store = store
         self._triage = triage
         self._deliver = deliver
         self._interval = poll_interval_s
         self._status = status
         self._policy = policy or DeliveryPolicy()
+        self._triage_timeout_s = triage_timeout_s
         self._running = False
 
     async def run(self) -> None:
@@ -218,17 +228,34 @@ class NotificationChannel:
     # invents. Only longer content earns a model-written summary.
     VERBATIM_CHARS = 70
 
-    async def _handle(self, n: Notification) -> None:
+    async def _handle(self, n: Notification) -> bool:
         raw = (n.body or n.subtitle or n.title).strip()
         level, summary = Urgency.NOTIFY, raw[:120]
         short = len(raw) <= self.VERBATIM_CHARS
         if self._triage is not None:
             age = (humanize_age(time.time() - n.delivered_unix)
                    if n.delivered_unix > 0 else "unknown")
-            reply = await self._triage.reply(TRIAGE_PROMPT.format(
-                app=n.app, age=age, title=n.title, subtitle=n.subtitle,
-                body=n.body,
-            ))
+            try:
+                async with asyncio.timeout(self._triage_timeout_s):
+                    reply = await self._triage.reply(TRIAGE_PROMPT.format(
+                        app=n.app, age=age, title=n.title, subtitle=n.subtitle,
+                        body=n.body,
+                    ))
+            except TimeoutError:
+                reply = None
+                log.warning(
+                    "notification triage timed out channel=%s chars=%d",
+                    humanize_app(n.app),
+                    len(raw),
+                )
+            except Exception as exc:
+                reply = None
+                log.warning(
+                    "notification triage failed channel=%s error=%s chars=%d",
+                    humanize_app(n.app),
+                    type(exc).__name__,
+                    len(raw),
+                )
             parsed = parse_triage(reply or "")
             if parsed is not None:
                 level = parsed[0]
@@ -260,15 +287,18 @@ class NotificationChannel:
                 channel,
                 len(summary),
             )
-            return
+            return False
         rendered = card.render()
         log.info(
-            "notification disposition=delivered channel=%s latency_s=%.1f chars=%d",
+            "notification disposition=enqueued channel=%s latency_s=%.1f chars=%d",
             channel,
             time.time() - n.delivered_unix,
             len(rendered),
         )
+        delivery = self._deliver(rendered)
+        if inspect.isawaitable(delivery):
+            await delivery
         if self._status is not None:
             self._status.set(last_card=rendered)  # type: ignore[attr-defined]
             self._status.bump("cards")  # type: ignore[attr-defined]
-        self._deliver(rendered)
+        return True

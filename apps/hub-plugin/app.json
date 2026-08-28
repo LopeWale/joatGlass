@@ -2,7 +2,7 @@
   "package_id": "com.example.joat",
   "edition": "202601",
   "name": "JOAT",
-  "version": "0.1.11",
+  "version": "0.1.14",
   "min_sdk_version": "0.0.14",
   "entrypoint": "index.html",
   "permissions": [
@@ -30,7 +30,7 @@
     },
     {
       "name": "location",
-      "desc": "Your position, sent only to your own Mac, so weather and time zones are right where you are."
+      "desc": "Your position is sent to your own Mac for local context and walking/cycling guidance. When you explicitly request navigation, destination searches and route endpoints may be sent by your Mac to its configured routing provider."
     }
   ],
   "supported_languages": [
