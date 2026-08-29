@@ -243,6 +243,31 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
+  it('composites a JOAT overlay over navigation, then removes it without replacing navigation', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const destination = navigationVisualFixture('nav-guidance');
+
+    await hud.showNavigation(destination);
+    await hud.showAssistantOverlay('Turn right in 200 metres.');
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'navigation',
+      navigation: destination,
+      assistantOverlay: { text: 'Turn right in 200 metres.' },
+    });
+
+    await hud.dismissAssistantOverlay();
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'navigation',
+      navigation: destination,
+    });
+    expect(frames[frames.length - 1]).not.toHaveProperty('assistantOverlay');
+  });
+
   it('restores the prior frame when a navigation paint and bounded heal both fail', async () => {
     const frames: HudVisualFrame[] = [];
     const results = [true, false, false, true];
@@ -368,6 +393,43 @@ describe('HudPresenter modal surfaces', () => {
     hud.setMicState(true);
     await hud.showText('9:41   JOAT paused', ContainerId.StatusBar);
     expect(frames[frames.length - 1]).toMatchObject({ micOn: true });
+  });
+
+  it('passes an exact redacted Planning grid to the visual list and drops partial metadata', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const planningGrid = Array.from({ length: 42 }, (_, index) => {
+      const value = new Date(Date.UTC(2026, 7, 31 + index));
+      return {
+        day: value.toISOString().slice(0, 10),
+        eventCount: index === 1 ? 1 : 0,
+        reminderCount: index === 1 ? 1 : 0,
+        inMonth: value.getUTCMonth() === 8,
+      };
+    });
+
+    await hud.showList(['AUG 31–SEP 6 · 2 planned'], {
+      title: 'PLANNING · PLAN · SEPTEMBER 2026',
+      selectable: true,
+      planningGrid,
+    });
+    const complete = frames[frames.length - 1]!;
+    expect(complete.kind).toBe('list');
+    if (complete.kind === 'list') {
+      expect(complete.planningGrid).toEqual(planningGrid);
+    }
+
+    await hud.showList(['AUG 31–SEP 6 · 2 planned'], {
+      title: 'PLANNING · PLAN · SEPTEMBER 2026',
+      selectable: true,
+      planningGrid: planningGrid.slice(0, 41),
+    });
+    const partial = frames[frames.length - 1]!;
+    expect(partial.kind).toBe('list');
+    if (partial.kind === 'list') expect(partial.planningGrid).toBeUndefined();
   });
 
   it('keeps a plain Mac reply and its appended stream in the visual overview frame', async () => {

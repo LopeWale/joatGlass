@@ -15,20 +15,36 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from contextvars import ContextVar
-from dataclasses import replace
-from datetime import datetime
-from typing import Any
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone, tzinfo
+from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..channels.cards import CardLog
 from ..channels.imessage import IMessageStore, MessageThread
-from ..core.protocol import BrainstormHudView, HudList, InputEvent
+from ..core.protocol import BrainstormHudView, HudList, InputEvent, PlanningGridCell
 from ..core.interfaces import GlassesTransport
-from ..native.bridge import NativeBridgeClient, NativeBridgeError, NativeBridgeUnavailable
+from ..native.bridge import (
+    NativeBridgeClient,
+    NativeBridgeError,
+    NativeBridgeProtocolError,
+    NativeBridgeUnavailable,
+)
 from ..persistence.actions import ActionActivity, ActionJournal
 from ..persistence.notes import NoteStore, QuickNote
 from .hud import HudWriter
+from .hermes_productivity import system_local_time_zone
+from .planning import (
+    PlanningAuthorizationError,
+    PlanningEntry,
+    PlanningProjection,
+    PlanningScope,
+    advance_selected_day,
+    load_native_planning,
+)
 from .status import StatusPublisher
 from .message_reply import MessageReplyController
 
@@ -36,6 +52,18 @@ log = logging.getLogger(__name__)
 
 BACK_HINT = "left x2 overview"
 DETAIL_HINT = "tap detail · left x2 overview"
+PLANNING_HINT = "tap choose · swipe move · left x2 overview"
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanningRow:
+    """One deliberate drill-down action in the native Planning projection."""
+
+    label: str
+    action: Literal["scope", "previous", "next", "week", "day", "entry"]
+    scope: PlanningScope | None = None
+    day: date | None = None
+    entry: PlanningEntry | None = None
 
 
 def _age(unix: float) -> str:
@@ -74,8 +102,15 @@ class CapabilityRouter:
         self._actions = actions
         self._message_rows: list[MessageThread] = []
         self._notification_rows: list[tuple[float, str]] = []
-        self._calendar_rows: list[dict[str, Any]] = []
-        self._task_rows: list[dict[str, Any]] = []
+        # Calendar and Reminders have different EventKit stores, but a wearer
+        # navigates time, not stores. Keep one bounded read-only projection and
+        # the action rows that produced its current visible page.
+        self._planning_selected_day = datetime.now().astimezone().date()
+        # The first wearable page is the calendar itself. A wearer chooses a
+        # week, then a day, instead of first having to navigate past a control
+        # panel before seeing their month.
+        self._planning_scope = PlanningScope.MONTH
+        self._planning_rows: list[_PlanningRow] = []
         self._note_rows: list[QuickNote] = []
         self._activity_rows: list[ActionActivity] = []
         self._active_request_id: str | None = None
@@ -89,7 +124,11 @@ class CapabilityRouter:
         """Transport callback — synchronous, so work is scheduled."""
         if event.container_name == "capmenu" and event.selected_name:
             asyncio.get_running_loop().create_task(
-                self.open(event.selected_name, request_id=event.request_id)
+                self.open(
+                    event.selected_name,
+                    request_id=event.request_id,
+                    planning_anchor_unix_ms=event.planning_anchor_unix_ms,
+                )
             )
         elif event.container_name == "capdata" and event.selected_index is not None:
             asyncio.get_running_loop().create_task(self._select_capability_row(
@@ -103,7 +142,13 @@ class CapabilityRouter:
         elif event.container_name == "menu" and event.selected_name == "closed":
             asyncio.get_running_loop().create_task(self.repaint_home())
 
-    async def open(self, name: str, *, request_id: str | None = None) -> None:
+    async def open(
+        self,
+        name: str,
+        *,
+        request_id: str | None = None,
+        planning_anchor_unix_ms: int | None = None,
+    ) -> None:
         """Open one list generation; stale concurrent generations cannot paint."""
         self._active_request_id = request_id
         self._active_capability = self._canonical_capability(name)
@@ -120,10 +165,14 @@ class CapabilityRouter:
                     await self._show_brainstorm()
                 case "Agent Terminal":
                     await self._show_agent_terminal()
-                case "Calendar":
-                    await self._show_calendar()
-                case "Tasks" | "Reminders":
-                    await self._show_tasks()
+                # Old installed packages can still send either label. All
+                # aliases converge on one Planning surface instead of
+                # presenting the two native stores as separate calendars.
+                case "Planning" | "Calendar" | "Tasks" | "Reminders":
+                    self._restore_planning_anchor(planning_anchor_unix_ms)
+                    await self._show_planning()
+                case "Navigation":
+                    await self._show_navigation()
                 case "QuickNotes":
                     await self._show_notes()
                 case "Activity":
@@ -173,7 +222,20 @@ class CapabilityRouter:
                 ["Messages needs Full Disk Access on the Mac."],
             )
             return
-        rows = await asyncio.to_thread(self._messages.recent_threads, 5)
+        try:
+            rows = await asyncio.to_thread(self._messages.recent_threads, 5)
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("Messages capability unavailable: %s", type(exc).__name__)
+            if self._request_is_current():
+                self._message_rows = []
+            await self._show_focus(
+                "MESSAGES · ACCESS",
+                [
+                    "Messages access is blocked on this Mac.",
+                    "Allow Full Disk Access for JOAT, then reopen Messages.",
+                ],
+            )
+            return
         if not self._request_is_current():
             return
         self._message_rows = rows
@@ -235,10 +297,8 @@ class CapabilityRouter:
                     await self._select_message(index, trace_id)
                 case "NOTIFICATIONS":
                     await self._select_notification(index)
-                case "CALENDAR":
-                    await self._select_calendar(index)
-                case "TASKS":
-                    await self._select_task(index)
+                case "PLANNING" | "CALENDAR" | "TASKS":
+                    await self._select_planning(index)
                 case "QUICKNOTES":
                     await self._select_note(index)
                 case "ACTIVITY":
@@ -270,158 +330,300 @@ class CapabilityRouter:
             card.splitlines() or ["Notification content unavailable."],
         )
 
-    async def _show_calendar(self) -> None:
+    async def _show_planning(self) -> None:
+        """Show the one calendar-shaped view of native events and reminders.
+
+        This does not write, infer missing records, or treat Calendar.app's
+        Scheduled Reminders projection as a second event source.  The initial
+        list, each scope change, and every day drill-down fetches the bounded
+        authoritative EventKit range again so a native edit is never hidden by
+        a stale in-memory agenda.
+        """
+
         client = self._personal_data
+        origin = self._planning_origin()
         if client is None:
-            if self._request_is_current():
-                self._calendar_rows = []
+            self._planning_rows = []
+            self._status.set_personal_data(state="not_configured")
             await self._show_focus(
-                "CALENDAR · SETUP",
-                ["Open JOAT on the Mac to connect Calendar."],
+                f"{origin} · PLAN · SETUP",
+                ["Start JOAT from the Mac app to use Calendar and Reminders."],
             )
             return
         try:
-            status = await client.call("authorization.status")
-            if status.authorization.calendar != "full_access":
-                await self._show_focus(
-                    "CALENDAR · SETUP",
-                    ["Open JOAT on the Mac and connect Calendar."],
-                )
-                return
-            containers = await client.call("calendar.listContainers")
-            calendars = containers.result if isinstance(containers.result, list) else []
-            identifiers = [
-                item["calendar_identifier"]
-                for item in calendars
-                if isinstance(item, dict) and isinstance(item.get("calendar_identifier"), str)
-            ]
-            now_ms = int(time.time() * 1000)
-            upcoming = await client.call(
-                "calendar.query",
-                {
-                    "start_unix_ms": now_ms,
-                    "end_unix_ms": now_ms + 7 * 24 * 60 * 60 * 1000,
-                    "calendar_identifiers": identifiers,
-                    "limit": 5,
-                },
+            projection = await load_native_planning(
+                client,
+                selected_day=self._planning_selected_day,
+                scope=self._planning_scope,
+                zone=self._planning_zone(),
             )
-            events = upcoming.result if isinstance(upcoming.result, list) else []
-            calendar_rows = [item for item in events if isinstance(item, dict)]
-            if not self._request_is_current():
-                return
-            self._calendar_rows = calendar_rows
-            rows = [self._calendar_row(item) for item in calendar_rows]
+        except PlanningAuthorizationError:
+            self._planning_rows = []
+            self._status.set_personal_data(state="authorization_required")
             await self._show_focus(
-                "CALENDAR · 7 DAYS" if rows else "CALENDAR · EMPTY",
-                rows or ["No upcoming events."],
-                hint=DETAIL_HINT if rows else BACK_HINT,
-                selectable=bool(rows),
+                f"{origin} · PLAN · SETUP",
+                ["Calendar and Reminders full access is required."],
             )
-        except (NativeBridgeUnavailable, NativeBridgeError):
+            return
+        except NativeBridgeUnavailable:
+            self._planning_rows = []
+            self._status.set_personal_data(state="unavailable")
             await self._show_focus(
-                "CALENDAR · UNAVAILABLE",
-                ["Check Calendar access in JOAT on the Mac."],
+                f"{origin} · PLAN · UNAVAILABLE",
+                ["Calendar and Reminders bridge is unavailable. Restart JOAT on the Mac."],
+            )
+            return
+        except NativeBridgeProtocolError:
+            self._planning_rows = []
+            self._status.set_personal_data(state="protocol_error")
+            await self._show_focus(
+                f"{origin} · PLAN · UNAVAILABLE",
+                ["Calendar and Reminders bridge needs a JOAT update on the Mac."],
+            )
+            return
+        except NativeBridgeError:
+            self._planning_rows = []
+            self._status.set_personal_data(state="unavailable")
+            await self._show_focus(
+                f"{origin} · PLAN · UNAVAILABLE",
+                ["Calendar and Reminders bridge is unavailable. Restart JOAT on the Mac."],
+            )
+            return
+
+        if not self._request_is_current():
+            return
+        # A successful authoritative Planning read is stronger than the
+        # startup probe. It carries no planning content into the status file.
+        self._status.set_personal_data(state="ready")
+        self._planning_rows = self._planning_rows_for(projection)
+        await self._show_focus(
+            f"{origin} · {projection.title}",
+            [row.label for row in self._planning_rows],
+            hint=PLANNING_HINT,
+            selectable=True,
+            planning_grid=self._planning_grid_for(projection),
+        )
+
+    @staticmethod
+    def _planning_grid_for(
+        projection: PlanningProjection,
+    ) -> tuple[PlanningGridCell, ...] | None:
+        """Publish only native per-day totals for the one Month renderer.
+
+        Names, native IDs, containers, and times remain on the next tap's
+        Week/Day agenda. The Month needs just enough truthful information to
+        mark a day as containing Events and/or Reminders rather than looking
+        silently free.
+        """
+
+        if projection.scope is not PlanningScope.MONTH or len(projection.days) != 42:
+            return None
+        return tuple(
+            PlanningGridCell(
+                day=day.day,
+                event_count=day.event_count,
+                reminder_count=day.reminder_count,
+                in_month=day.day.month == projection.selected_day.month,
+            )
+            for day in projection.days
+        )
+
+    def _planning_rows_for(self, projection: PlanningProjection) -> list[_PlanningRow]:
+        """Encode scope, time travel, and drill-down into ordinary G2 rows.
+
+        The existing transparent capture layer reports a selected list row to
+        the Mac.  Keeping the action identity here makes that click a real
+        navigation command, rather than asking the HUD to parse visible text.
+        """
+
+        scope_rows = [
+            _PlanningRow(
+                label=f"{'●' if projection.scope is scope else '○'} VIEW · {scope.value.upper()}",
+                action="scope",
+                scope=scope,
+            )
+            for scope in (PlanningScope.MONTH, PlanningScope.WEEK, PlanningScope.DAY)
+        ]
+        if projection.scope is PlanningScope.MONTH:
+            previous = advance_selected_day(projection.selected_day, projection.scope, -1)
+            following = advance_selected_day(projection.selected_day, projection.scope, 1)
+            rows: list[_PlanningRow] = []
+            for first in range(0, len(projection.days), 7):
+                week = projection.days[first:first + 7]
+                dated = [day for day in week if day.day.month == projection.selected_day.month]
+                item_count = sum(len(day.entries) for day in dated)
+                rows.append(_PlanningRow(
+                    label=(
+                        f"{week[0].day.strftime('%b').upper()} {week[0].day.day}–"
+                        f"{week[-1].day.strftime('%b').upper()} {week[-1].day.day}"
+                        f" · {item_count} planned"
+                    ),
+                    action="week",
+                    day=week[0].day,
+                ))
+            rows.extend([
+                _PlanningRow(
+                    label=f"‹ {previous.strftime('%B').upper()} {previous.year}",
+                    action="previous",
+                ),
+                _PlanningRow(
+                    label=f"{following.strftime('%B').upper()} {following.year} ›",
+                    action="next",
+                ),
+                *scope_rows,
+            ])
+            return rows
+
+        if projection.scope is PlanningScope.WEEK:
+            previous = advance_selected_day(projection.selected_day, projection.scope, -1)
+            following = advance_selected_day(projection.selected_day, projection.scope, 1)
+            rows = []
+            for day in projection.days:
+                events = day.event_count
+                reminders = day.reminder_count
+                pieces = []
+                if events:
+                    pieces.append(f"{events} event{'s' if events != 1 else ''}")
+                if reminders:
+                    pieces.append(f"{reminders} reminder{'s' if reminders != 1 else ''}")
+                summary = " · ".join(pieces) if pieces else "free"
+                rows.append(_PlanningRow(
+                    label=f"{day.day.strftime('%a').upper()} {day.day.strftime('%b').upper()} {day.day.day} · {summary}",
+                    action="day",
+                    day=day.day,
+                ))
+            rows.extend([
+                _PlanningRow(
+                    label=f"‹ {previous.strftime('%b').upper()} {previous.day}",
+                    action="previous",
+                ),
+                _PlanningRow(
+                    label=f"{following.strftime('%b').upper()} {following.day} ›",
+                    action="next",
+                ),
+                *scope_rows,
+            ])
+            return rows
+
+        previous = advance_selected_day(projection.selected_day, projection.scope, -1)
+        following = advance_selected_day(projection.selected_day, projection.scope, 1)
+        rows = []
+        selected = projection.days[0]
+        if not selected.entries:
+            rows.append(_PlanningRow(label="Nothing planned", action="day", day=selected.day))
+        for entry in selected.entries:
+            rows.append(_PlanningRow(
+                label=f"{entry.time_label} · {entry.kind.upper()} · {entry.title}",
+                action="entry",
+                entry=entry,
+            ))
+        rows.extend([
+            _PlanningRow(
+                label=f"‹ {previous.strftime('%a').upper()} {previous.strftime('%b').upper()} {previous.day}",
+                action="previous",
+            ),
+            _PlanningRow(
+                label=f"{following.strftime('%a').upper()} {following.strftime('%b').upper()} {following.day} ›",
+                action="next",
+            ),
+            *scope_rows,
+        ])
+        return rows
+
+    async def _select_planning(self, index: int) -> None:
+        if not 0 <= index < len(self._planning_rows):
+            return
+        row = self._planning_rows[index]
+        if row.action == "scope" and row.scope is not None:
+            self._planning_scope = row.scope
+            await self._show_planning()
+            return
+        if row.action == "previous":
+            self._planning_selected_day = advance_selected_day(
+                self._planning_selected_day, self._planning_scope, -1
+            )
+            await self._show_planning()
+            return
+        if row.action == "next":
+            self._planning_selected_day = advance_selected_day(
+                self._planning_selected_day, self._planning_scope, 1
+            )
+            await self._show_planning()
+            return
+        if row.action == "week" and row.day is not None:
+            self._planning_selected_day = row.day
+            self._planning_scope = PlanningScope.WEEK
+            await self._show_planning()
+            return
+        if row.action == "day" and row.day is not None:
+            self._planning_selected_day = row.day
+            self._planning_scope = PlanningScope.DAY
+            await self._show_planning()
+            return
+        if row.action == "entry" and row.entry is not None:
+            entry = row.entry
+            await self._show_focus(
+                f"{self._planning_origin()} · {entry.kind.upper()}",
+                [
+                    entry.title,
+                    f"{entry.time_label} · {entry.kind.title()}",
+                    "Read-only native item · left x2 Planning",
+                ],
+                hint="left x2 Planning",
             )
 
-    async def _show_tasks(self) -> None:
-        client = self._personal_data
-        if client is None:
-            if self._request_is_current():
-                self._task_rows = []
-            await self._show_focus(
-                "TASKS · SETUP",
-                ["Open JOAT on the Mac to connect Reminders."],
-            )
+    def _planning_origin(self) -> str:
+        """Name the current menu contract while accepting old package aliases."""
+
+        if self._active_capability == "TASKS":
+            return "TASKS"
+        if self._active_capability == "CALENDAR":
+            return "CALENDAR"
+        return "PLANNING"
+
+    def _restore_planning_anchor(self, anchor_unix_ms: int | None) -> None:
+        """Return a safe-write outcome to its actual day in the local agenda.
+
+        The anchor is an absolute instant, so a Calendar proposal created in
+        another IANA zone lands on the right civil day for this Mac's native
+        EventKit/Reminders read model. Invalid direct callers keep the normal
+        Month view rather than manufacturing a date.
+        """
+
+        if (
+            isinstance(anchor_unix_ms, bool)
+            or not isinstance(anchor_unix_ms, int)
+            or not 0 <= anchor_unix_ms <= 32_503_680_000_000
+        ):
             return
         try:
-            status = await client.call("authorization.status")
-            if status.authorization.reminders != "full_access":
-                await self._show_focus(
-                    "TASKS · SETUP",
-                    ["Open JOAT on the Mac and connect Reminders."],
-                )
-                return
-            containers = await client.call("reminders.listContainers")
-            lists = containers.result if isinstance(containers.result, list) else []
-            identifiers = [
-                item["calendar_identifier"]
-                for item in lists
-                if isinstance(item, dict) and isinstance(item.get("calendar_identifier"), str)
-            ]
-            pending = await client.call(
-                "reminders.query",
-                {
-                    "calendar_identifiers": identifiers,
-                    "include_completed": False,
-                    "limit": 5,
-                },
-            )
-            reminders = pending.result if isinstance(pending.result, list) else []
-            task_rows = [item for item in reminders if isinstance(item, dict)]
-            if not self._request_is_current():
-                return
-            self._task_rows = task_rows
-            rows = [
-                self._task_row(item)
-                for item in task_rows
-            ]
-            await self._show_focus(
-                "TASKS" if rows else "TASKS · EMPTY",
-                rows or ["No incomplete reminders."],
-                hint=DETAIL_HINT if rows else BACK_HINT,
-                selectable=bool(rows),
-            )
-        except (NativeBridgeUnavailable, NativeBridgeError):
-            await self._show_focus(
-                "TASKS · UNAVAILABLE",
-                ["Check Reminders access in JOAT on the Mac."],
-            )
+            selected = datetime.fromtimestamp(
+                anchor_unix_ms / 1_000,
+                tz=self._planning_zone(),
+            ).date()
+        except (OverflowError, OSError, ValueError):
+            return
+        self._planning_selected_day = selected
+        self._planning_scope = PlanningScope.DAY
 
     @staticmethod
-    def _calendar_row(item: dict[str, Any]) -> str:
-        title = str(item.get("title") or "Untitled event")
-        start = item.get("start_unix_ms")
-        if not isinstance(start, (int, float)):
-            return title
-        when = datetime.fromtimestamp(start / 1000).astimezone().strftime("%a %H:%M")
-        return f"{title} · {when}"
+    def _planning_zone() -> tzinfo:
+        """Resolve an IANA zone when the local OS exposes one.
 
-    @staticmethod
-    def _task_row(item: dict[str, Any]) -> str:
-        title = str(item.get("title") or "Untitled reminder")
-        due = item.get("due")
-        if not isinstance(due, dict):
-            return title
-        fields = tuple(due.get(key) for key in ("year", "month", "day", "hour", "minute"))
-        if not all(isinstance(value, int) for value in fields):
-            return title
-        year, month, day, hour, minute = fields
-        return f"{title} · Due {year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+        A fixed UTC offset from ``datetime.now().astimezone()`` looks usable
+        today but shifts future dates into the wrong civil day at a DST
+        transition.  The same resolver that validates Calendar proposals
+        returns a real ``ZoneInfo`` on macOS; the fallback is only for hosts
+        without an IANA ``/etc/localtime`` symlink.
+        """
 
-    async def _select_calendar(self, index: int) -> None:
-        if not 0 <= index < len(self._calendar_rows):
-            return
-        item = self._calendar_rows[index]
-        title = str(item.get("title") or "Untitled event")
-        start = item.get("start_unix_ms")
-        end = item.get("end_unix_ms")
-        rows = [title]
-        if isinstance(start, (int, float)):
-            rows.append(datetime.fromtimestamp(start / 1000).astimezone().strftime("Starts %a %b %-d · %H:%M"))
-        if isinstance(end, (int, float)):
-            rows.append(datetime.fromtimestamp(end / 1000).astimezone().strftime("Ends %a %b %-d · %H:%M"))
-        await self._show_focus("CALENDAR · DETAIL", rows)
-
-    async def _select_task(self, index: int) -> None:
-        if not 0 <= index < len(self._task_rows):
-            return
-        item = self._task_rows[index]
-        rows = [str(item.get("title") or "Untitled reminder")]
-        rendered = self._task_row(item)
-        if " · " in rendered:
-            rows.append(rendered.split(" · ", 1)[1])
-        rows.append("Complete by voice: JOAT, complete reminder …")
-        await self._show_focus("TASKS · DETAIL", rows)
+        zone_name = system_local_time_zone()
+        if zone_name is not None:
+            try:
+                return ZoneInfo(zone_name)
+            except ZoneInfoNotFoundError:
+                pass
+        return datetime.now().astimezone().tzinfo or timezone.utc
 
     async def _show_notes(self) -> None:
         if self._notes is None:
@@ -448,6 +650,22 @@ class CapabilityRouter:
         if not 0 <= index < len(self._note_rows):
             return
         await self._show_focus("QUICKNOTES · DETAIL", [self._note_rows[index].text])
+
+    async def _show_navigation(self) -> None:
+        """Give the wearer the next natural action, not a hidden CLI contract.
+
+        Navigation's explicit spoken grammar prevents a background transcript
+        from becoming a destination. The NavigationSession then resolves and
+        shows the canonical place before any routing begins.
+        """
+        await self._show_focus(
+            "NAVIGATION",
+            [
+                'Say “JOAT, navigate to …”',
+                "I’ll confirm the exact place before starting.",
+            ],
+            hint="say destination · left x2 overview",
+        )
 
     async def _show_activity(self) -> None:
         if self._actions is None:
@@ -494,6 +712,7 @@ class CapabilityRouter:
         *,
         hint: str = BACK_HINT,
         selectable: bool = False,
+        planning_grid: tuple[PlanningGridCell, ...] | None = None,
     ) -> None:
         """Render non-dashboard capability states in the shared focus shell."""
         await self._send_list(HudList(
@@ -501,6 +720,7 @@ class CapabilityRouter:
             title=title,
             hint=hint,
             selectable=selectable,
+            planning_grid=planning_grid,
         ))
 
     async def _send_list(self, message: HudList) -> None:
@@ -525,13 +745,15 @@ class CapabilityRouter:
 
     async def _repeat(self) -> None:
         last = self._status.get("last_reply")
-        await self._hud.show(last if last else "Nothing to repeat yet.")
+        await self._hud.assistant(last if last else "Nothing to repeat yet.")
+        await self._hud.settle_assistant()
 
     async def repaint_home(self) -> None:
         """Compatibility path for older plugins that did not buffer Home."""
         last_reply = self._status.get("last_reply")
         if last_reply:
-            await self._hud.show(last_reply)
+            await self._hud.assistant(last_reply)
+            await self._hud.settle_assistant()
         last_heard = self._status.get("last_transcript")
         if last_heard:
             await self._hud.context(f"you  {last_heard}")

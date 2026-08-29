@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { NavigationController } from './NavigationController';
 import { navigationVisualFixture } from './NavigationHud';
@@ -8,6 +8,7 @@ function harness(paintResults: boolean[] = []) {
   const frames: unknown[] = [];
   const sent: UplinkMessage[] = [];
   const allSent: UplinkMessage[] = [];
+  const diagnostics = { record: vi.fn() };
   let locationConsumer: ((location: never, receivedAt: number) => void) | undefined;
   const location = {
     setNavigationConsumer: async (consumer?: typeof locationConsumer) => {
@@ -30,12 +31,14 @@ function harness(paintResults: boolean[] = []) {
       if (message.kind !== 'navigation.view.ack') sent.push(message);
     } },
     location,
+    diagnostics,
   );
   return {
     controller,
     frames,
     sent,
     allSent,
+    diagnostics,
     emit: (locationFix: object, receivedAt = 10_100) => {
       locationConsumer?.(locationFix as never, receivedAt);
     },
@@ -148,6 +151,20 @@ describe('NavigationController', () => {
         generation: 2, outcome: 'bridge_acknowledged',
       },
     ]);
+  });
+
+  it('records the acknowledged HUD semantic state without its visible copy', async () => {
+    const { controller, diagnostics } = harness();
+
+    await controller.present({
+      kind: 'navigation.view', sessionId: 'nav-1', requestId: 'mode-1', generation: 1,
+      navigation: navigationVisualFixture('nav-mode'),
+    });
+
+    expect(diagnostics.record).toHaveBeenCalledWith({
+      type: 'navigation_cue', cue: 'mode', outcome: 'success',
+    });
+    expect(JSON.stringify(diagnostics.record.mock.calls)).not.toContain('Walking');
   });
 
   it('cannot reactivate a stopped session when an old HUD paint finishes late', async () => {
@@ -284,7 +301,7 @@ describe('NavigationController', () => {
   });
 
   it('clears a session that stops before any route was installed', async () => {
-    const { controller } = harness();
+    const { controller, diagnostics } = harness();
     await controller.present({
       kind: 'navigation.view',
       sessionId: 'nav-1',
@@ -298,6 +315,9 @@ describe('NavigationController', () => {
     expect(controller.isActive()).toBe(true);
     expect(await controller.stopRoute('nav-1')).toBe(true);
     expect(controller.isActive()).toBe(false);
+    expect(diagnostics.record).toHaveBeenCalledWith({
+      type: 'navigation_cue', cue: 'stopped', outcome: 'success',
+    });
   });
 
   it('drops local HUD and high-rate location ownership when the Mac link is lost', async () => {

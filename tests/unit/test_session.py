@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
-from joat.core.protocol import BrainstormHudView, ContainerId, DownlinkMessage, HudText
+from joat.core.protocol import BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
 from joat.services.hud import HudWriter
 from joat.services.roundtable import Participant, RoundTable
 from joat.services.session import DebateSession, Session, SessionManager
@@ -115,6 +115,19 @@ class TestDebateSession:
         ).run()
 
         assert phases == ["opening", "turn", "closing"]
+
+    async def test_remote_collaborator_exception_becomes_a_visible_blocked_frame(self) -> None:
+        transport = SinkTransport()
+
+        async def broken(_prompt: str) -> AsyncIterator[str]:
+            raise ConnectionError("remote closed")
+            yield "unreachable"
+
+        await debate(transport, pair(broken, agent(["never"])), None).run()
+
+        frames = brainstorm_frames(transport)
+        assert frames[-1].state == "blocked"
+        assert "collaborator disconnected" in frames[-1].activity
 
     async def test_turns_stream_in_order_visibly(self) -> None:
         transport = SinkTransport()
@@ -247,6 +260,96 @@ class TestDebateSession:
 
 
 class TestSessionManager:
+    async def test_glasses_begin_action_keeps_a_typed_brainstorm_capture_frame_visible(self) -> None:
+        transport = SinkTransport()
+        capture = BrainstormHudView(
+            screen="brainstorm",
+            state="ready",
+            topic="Speak your question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity='Say “JOAT, brainstorm …” to begin.',
+            terminal_state="ready",
+            endpoint_host="admins-mac-mini.tail3a3363.ts.net",
+            no_tools_checked=True,
+        )
+        manager = SessionManager(
+            HudWriter(transport),
+            lambda _topic: None,
+            topic_capture_view=lambda: capture,
+        )
+
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+
+        assert not manager.active
+        assert brainstorm_frames(transport) == [capture]
+        assert not any(isinstance(message, HudText) for message in transport.sent)
+
+    async def test_glasses_cancel_action_interrupts_the_active_session(self) -> None:
+        entered = asyncio.Event()
+        exited = asyncio.Event()
+
+        class BlockedSession(Session):
+            async def run(self) -> None:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    exited.set()
+
+            def cancel(self) -> None:
+                return None
+
+        manager = SessionManager(HudWriter(SinkTransport()), lambda _topic: BlockedSession())
+        assert manager.handle_transcript("brainstorm a launch")
+        await entered.wait()
+
+        manager.handle_brainstorm_action(BrainstormAction("cancel"))
+        await exited.wait()
+        await asyncio.sleep(0)
+
+        assert not manager.active
+
+    async def test_glasses_show_terminal_action_is_owned_by_the_active_session(self) -> None:
+        handled: list[str] = []
+        active = asyncio.Event()
+
+        class ActionSession(Session):
+            async def run(self) -> None:
+                active.set()
+                await asyncio.Event().wait()
+
+            def cancel(self) -> None:
+                return None
+
+            async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
+                handled.append(action.action)
+                return True
+
+        manager = SessionManager(HudWriter(SinkTransport()), lambda _topic: ActionSession())
+        assert manager.handle_transcript("brainstorm a launch")
+        await active.wait()
+
+        manager.handle_brainstorm_action(BrainstormAction("show_terminal"))
+        await asyncio.sleep(0)
+
+        assert handled == ["show_terminal"]
+        await manager.close(timeout_s=0.01)
+
+    async def test_glasses_retry_action_uses_only_the_registered_terminal_recovery(self) -> None:
+        retried = asyncio.Event()
+
+        async def retry() -> None:
+            retried.set()
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: None,
+            terminal_retry=retry,
+        )
+        manager.handle_brainstorm_action(BrainstormAction("retry_terminal"))
+        await retried.wait()
+
     async def test_registered_session_starter_and_active_correction_share_one_owner(self) -> None:
         received: list[str] = []
         states: list[str] = []

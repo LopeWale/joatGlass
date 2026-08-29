@@ -136,6 +136,17 @@ describe('LocationSessionManager', () => {
     expect(h.diagnostics.record.mock.calls.flat()).not.toContainEqual(
       expect.objectContaining({ type: 'location_probe' }),
     );
+    expect(h.diagnostics.record).toHaveBeenCalledWith({
+      type: 'navigation_location',
+      sampleSequence: 1,
+      lifecycle: 'foreground',
+      fields: 7,
+      cadence: 'first',
+      accuracy: 'lte10',
+      timestampAge: 'stale',
+      displacement: 'first',
+      headingDelta: 'unavailable',
+    });
   });
 
   it('does not let a diagnostic probe preempt an active navigation session', async () => {
@@ -196,7 +207,7 @@ describe('LocationSessionManager', () => {
       profile: 'high',
       lifecycle: 'background',
       fields: 7,
-      cadenceMs: 0,
+      cadence: 'first',
       accuracy: 'lte5',
       timestampAge: 'fresh',
       displacement: 'first',
@@ -208,7 +219,7 @@ describe('LocationSessionManager', () => {
       profile: 'high',
       lifecycle: 'background',
       fields: 7,
-      cadenceMs: 1000,
+      cadence: 'lte1s',
       accuracy: 'lte10',
       timestampAge: 'fresh',
       displacement: '5_20',
@@ -239,6 +250,47 @@ describe('LocationSessionManager', () => {
 
     expect(await h.manager.start()).toBe(true);
     expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a host that ignores the one-shot timeout block Gate 0', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    h.bridge.getAppLocation.mockImplementationOnce(() => new Promise<AppLocation | null>(() => {}));
+    await h.manager.setProbeEnabled(true);
+
+    const started = h.manager.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(started).resolves.toBe(true);
+    expect(h.bridge.startAppLocationUpdates).toHaveBeenLastCalledWith({
+      accuracy: AppLocationAccuracy.High,
+      distanceFilter: 1,
+      intervalMs: 1000,
+    });
+    const profileStates = h.diagnostics.record.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.type === 'location_probe_state');
+    expect(profileStates).toEqual([
+      { type: 'location_probe_state', requested: 'high', outcome: 'success' },
+    ]);
+  });
+
+  it('bounds an unresponsive high-accuracy stream start as a failed Gate 0 capability', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    h.bridge.startAppLocationUpdates.mockImplementationOnce(
+      () => new Promise<boolean>(() => {}),
+    );
+    await h.manager.setProbeEnabled(true);
+
+    const started = h.manager.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(started).resolves.toBe(false);
+    expect(h.diagnostics.record).toHaveBeenCalledWith({
+      type: 'location_probe_state', requested: 'high', outcome: 'failed',
+    });
+    expect(h.bridge.stopAppLocationUpdates).toHaveBeenCalled();
   });
 
   it('degrades to unavailable when an older host cannot register the location listener', async () => {

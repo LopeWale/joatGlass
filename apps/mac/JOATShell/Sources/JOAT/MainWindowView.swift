@@ -77,6 +77,16 @@ struct MainWindowView: View {
                             Button("Connect…") { engine.requestRemindersAccess() }
                                 .disabled(engine.remindersAccess == "full access")
                         }
+                        StatusLine(
+                            label: "Engine bridge",
+                            value: personalDataBridgeValue,
+                            healthy: live && status.personalData.state == "ready"
+                        )
+                        if live && status.personalData.state == "unavailable" {
+                            Text("Access is granted; restart JOAT to reconnect its engine to EventKit.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Text("Access is requested only from these buttons. You can revoke it in System Settings.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -235,6 +245,19 @@ struct MainWindowView: View {
         case "ready": return "Ready · dedicated no-tool session"
         case "running": return "Running"
         case "blocked": return "Blocked · safety gate"
+        default: return "Unavailable"
+        }
+    }
+
+    private var personalDataBridgeValue: String {
+        guard live else { return "Status unavailable · stale" }
+        switch status.personalData.state {
+        case "checking": return "Checking"
+        case "ready": return "Ready"
+        case "authorization_required": return "Full access required"
+        case "not_configured": return "Start through JOAT.app"
+        case "unavailable": return "Restart JOAT"
+        case "protocol_error": return "Update JOAT"
         default: return "Unavailable"
         }
     }

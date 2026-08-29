@@ -59,6 +59,7 @@ from .core.interfaces import NavigationProvider, ReplyEngine, SttEngine
 from .core.navigation import NavigationPoint
 from .core.protocol import (
     Device,
+    BrainstormHudView,
     Hello,
     InputEvent,
     NavigationAction,
@@ -82,9 +83,10 @@ from .persistence.actions import ActionJournal
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.store import DurableStore
-from .persistence.tasks import TaskOccurrence, TaskOccurrenceStore
+from .persistence.tasks import TaskOccurrenceStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
+from .services.brainstorm_acceptance import InAppBrainstormAcceptance
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.capabilities import CapabilityRouter
@@ -93,6 +95,7 @@ from .services.hermes_productivity import (
     HermesCalendarProposalController,
     system_local_time_zone,
 )
+from .services.planning import personal_data_bridge_state
 from .services.message_reply import MessageReplyController
 from .services.note_commands import NoteCommandController
 from .services.navigation import (
@@ -101,7 +104,10 @@ from .services.navigation import (
     navigation_query,
 )
 from .services.productivity_actions import ProductivityActionController
-from .services.task_monitor import TaskMonitor
+from .services.task_monitor import (
+    TaskMonitor,
+    evaluate_reminder_occurrence,
+)
 from .services.session import (
     DebateSession, Session, SessionManager, seat_participants,
 )
@@ -147,6 +153,11 @@ async def main() -> None:
                         help="opt in to a content-free real-G2 support trace")
     parser.add_argument("--location-probe", action="store_true",
                         help="request high-accuracy, privacy-bucketed Gate-0 location telemetry")
+    parser.add_argument(
+        "--g2-brainstorm-acceptance",
+        action="store_true",
+        help="run one app-launched, content-free physical G2 Hermes acceptance flow",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -179,12 +190,26 @@ async def main() -> None:
         for recovered_state in recovered.values():
             counts[recovered_state] = counts.get(recovered_state, 0) + 1
         log.warning("durable action recovery states=%s", counts)
+    acceptance_events: list[dict[str, object]] = []
+
+    def observe_acceptance_events(_path: Path, events: list[dict[str, object]]) -> None:
+        # G2DiagnosticStore has already rejected every content-bearing field.
+        acceptance_events[:] = [dict(event) for event in events]
+
+    g2_diagnostics = (
+        G2DiagnosticStore(writer=observe_acceptance_events)
+        if args.g2_brainstorm_acceptance
+        else G2DiagnosticStore()
+        if args.g2_diagnostics or args.location_probe
+        else None
+    )
     transport = HubGatewayTransport(
         host=args.host,
         port=args.port,
         pairing=PairingStore(),
-        g2_diagnostics=G2DiagnosticStore()
-        if args.g2_diagnostics or args.location_probe else None,
+        # Acceptance evidence must never be satisfied by a local simulator.
+        trust_loopback=not args.g2_brainstorm_acceptance,
+        g2_diagnostics=g2_diagnostics,
         location_probe=args.location_probe,
     )
     native_bridge_path = os.environ.get("JOAT_NATIVE_BRIDGE")
@@ -193,6 +218,17 @@ async def main() -> None:
         if native_bridge_path
         else None
     )
+    # TCC access in the Mac window is not proof that this app-launched engine
+    # can use the owner-only bridge. Publish a bounded, content-free state so
+    # the Mac UI and HUD can distinguish those two recovery paths.
+    status.set_personal_data(state="checking")
+
+    async def refresh_personal_data_bridge_state() -> None:
+        status.set_personal_data(
+            state=await personal_data_bridge_state(personal_data),
+        )
+
+    bridge_status_task = asyncio.create_task(refresh_personal_data_bridge_state())
 
     serve_engine: WhisperServeEngine | None = None
     stt: SttEngine
@@ -293,7 +329,13 @@ async def main() -> None:
     log.info("switchable models — %s", models.summary())
 
     openclaw_terminal: OpenClawTerminalAgent | None = None
+    # Keep the locally constructed, no-tool candidate after an approval or
+    # connection failure. A wearer-selected retry may initialize this exact
+    # dedicated session; it never falls back to main/Telegram credentials.
+    openclaw_retry_candidate: OpenClawTerminalAgent | None = None
     openclaw_calendar_terminal: OpenClawTerminalAgent | None = None
+    endpoint_host = ""
+    requested_scopes: tuple[str, ...] = ()
     try:
         openclaw_config = OpenClawRuntimeConfig.load()
     except ValueError:
@@ -369,6 +411,7 @@ async def main() -> None:
                     policy=BRAINSTORM_TERMINAL_POLICY,
                     state_changed=publish_terminal_state,
                 )
+                openclaw_retry_candidate = candidate
                 await candidate.initialize()
             except OpenClawPairingRequired:
                 status.set_openclaw(
@@ -489,17 +532,25 @@ async def main() -> None:
     seats: list[tuple[str, str, object]] = [
         ("codex", "proposer", proposer(models.provider("codex"))),
         ("claude", "critic", critic(models.provider("claude"))),
-        ("openclaw", "agent terminal", openclaw_terminal),
     ]
-    seated = [(name, role, a) for name, role, a in seats if a]
-    absent = [name for name, _r, a in seats if not a]
-    if len(seated) >= 2:
+
+    def current_seated() -> list[tuple[str, str, object]]:
+        terminal = status.agent_terminal_projection()
+        remote = openclaw_terminal if terminal["state"] in {"ready", "running"} else None
+        current = [(name, role, agent) for name, role, agent in seats if agent]
+        if remote is not None:
+            current.append(("openclaw", "agent terminal", remote))
+        return current
+
+    initial_seated = current_seated()
+    absent = ["openclaw"] if openclaw_terminal is None else []
+    if len(initial_seated) >= 2:
         log.info("round table: %s%s",
-                 ", ".join(f"{n} ({r})" for n, r, _ in seated),
+                 ", ".join(f"{n} ({r})" for n, r, _ in initial_seated),
                  f" — absent: {', '.join(absent)}" if absent else "")
     else:
         log.warning("debate unavailable — need 2 collaborators, have %d (absent: %s)",
-                    len(seated), ", ".join(absent))
+                    len(initial_seated), ", ".join(absent))
 
     claim_judge = MiniCheckJudge() if minicheck_available() else None
     if claim_judge:
@@ -530,6 +581,7 @@ async def main() -> None:
 
     def make_debate(topic: str) -> Session | None:
         # A debate needs someone to disagree with; one seat is a monologue.
+        seated = current_seated()
         if len(seated) < 2:
             return None
         return DebateSession(
@@ -574,21 +626,129 @@ async def main() -> None:
     def publish_brainstorm_phase(phase: str) -> None:
         status.set_brainstorm(
             state="running",
-            seat_count=len(seated),
+            seat_count=len(current_seated()),
             phase=phase,
         )
 
     def publish_brainstorm_state(state: str) -> None:
         status.set_brainstorm(
             state=state,
-            seat_count=len(seated),
+            seat_count=len(current_seated()),
             phase="opening" if state == "running" else "closing",
         )
 
-    status.set(debate=f"{len(seated)} seats" if len(seated) >= 2 else "unavailable")
+    def topic_capture_view() -> BrainstormHudView:
+        """Keep the Brainstorm surface visible while the wearer names a topic."""
+        terminal = status.agent_terminal_projection()
+        labels = [
+            "Hermes" if name == "openclaw" else name.capitalize()
+            for name, _role, _agent in current_seated()
+        ]
+        return BrainstormHudView(
+            screen="brainstorm",
+            state="ready",
+            topic="Speak your question",
+            collaborators=labels[:3],
+            activity='Say “JOAT, brainstorm …” to begin.',
+            terminal_state=str(terminal["state"]),
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        )
+
+    async def show_terminal_retry_view(activity: str) -> None:
+        """A retry is visible on the lenses; it is never a silent redial."""
+        terminal = status.agent_terminal_projection()
+        await hud.show_brainstorm(BrainstormHudView(
+            screen="agent_terminal",
+            state=str(terminal["state"]),
+            topic="Hermes Agent Terminal",
+            collaborators=[],
+            activity=activity,
+            terminal_state=str(terminal["state"]),
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        ))
+
+    async def retry_openclaw_terminal() -> None:
+        """Retry only the isolated Hermes terminal after an explicit G2 tap."""
+        nonlocal openclaw_terminal
+        candidate = openclaw_retry_candidate
+        if candidate is None:
+            await show_terminal_retry_view("Open JOAT on the Mac to configure or approve Hermes.")
+            return
+        status.set_openclaw(
+            state="checking",
+            endpoint_host=endpoint_host,
+            scopes=(),
+            reason="checking_pairing",
+        )
+        status.set_agent_terminal(state="running", reason="")
+        await show_terminal_retry_view("Checking the dedicated Hermes session…")
+        try:
+            await candidate.initialize()
+        except OpenClawPairingRequired:
+            status.set_openclaw(
+                state="approval_required",
+                endpoint_host=endpoint_host,
+                scopes=requested_scopes,
+                reason="device_approval_required",
+            )
+            status.set_agent_terminal(state="approval_required", reason="write_scope_required")
+            await show_terminal_retry_view("Approve the JOAT device in OpenClaw, then tap retry.")
+        except OpenClawToolsEnabled:
+            status.set_openclaw(
+                state="disconnected", endpoint_host=endpoint_host, scopes=(), reason="gateway_not_ready",
+            )
+            status.set_agent_terminal(state="blocked", reason="tools_enabled")
+            await show_terminal_retry_view("Hermes tools are enabled; this JOAT session remains blocked.")
+        except OpenClawToolInventoryUnsettled:
+            status.set_openclaw(
+                state="disconnected", endpoint_host=endpoint_host, scopes=(), reason="gateway_not_ready",
+            )
+            status.set_agent_terminal(state="blocked", reason="dedicated_session_not_proven")
+            await show_terminal_retry_view("Hermes session isolation is not proven yet.")
+        except OpenClawGatewayError:
+            status.set_openclaw(
+                state="failed", endpoint_host=endpoint_host, scopes=(), reason="protocol_rejected",
+            )
+            status.set_agent_terminal(state="unavailable", reason="gateway_not_ready")
+            await show_terminal_retry_view("Hermes rejected the dedicated session protocol.")
+        except (
+            NativeBridgeError,
+            NativeBridgeProtocolError,
+            NativeBridgeUnavailable,
+            RuntimeError,
+            OSError,
+            TimeoutError,
+        ) as exc:
+            reason = (
+                "native_credentials_unavailable"
+                if isinstance(exc, (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable))
+                else "gateway_not_ready"
+            )
+            status.set_openclaw(
+                state="failed", endpoint_host=endpoint_host, scopes=(), reason=reason,
+            )
+            status.set_agent_terminal(state="unavailable", reason="gateway_not_ready")
+            await show_terminal_retry_view("Hermes is unavailable; retry when the Mac connection recovers.")
+        else:
+            openclaw_terminal = candidate
+            status.set_openclaw(
+                state="connected_operator",
+                endpoint_host=endpoint_host,
+                scopes=requested_scopes,
+                reason="",
+            )
+            status.set_agent_terminal(state="ready", reason="")
+            await show_terminal_retry_view("Dedicated no-tool session ready. Tap to begin a Brainstorm.")
+
+    initial_count = len(current_seated())
+    status.set(debate=f"{initial_count} seats" if initial_count >= 2 else "unavailable")
     status.set_brainstorm(
-        state="ready" if len(seated) >= 2 else "unavailable",
-        seat_count=len(seated),
+        state="ready" if initial_count >= 2 else "unavailable",
+        seat_count=initial_count,
         phase="idle",
     )
     sessions = SessionManager(
@@ -597,6 +757,8 @@ async def main() -> None:
         card_log=card_log,
         on_state=publish_brainstorm_state,
         starters=[make_navigation],
+        terminal_retry=retry_openclaw_terminal,
+        topic_capture_view=topic_capture_view,
     )
 
     def active_navigation() -> NavigationSession | NavigationUnavailableSession | None:
@@ -641,6 +803,27 @@ async def main() -> None:
             active.accept_reroute(request)
 
     transport.on_navigation_action(on_navigation_action)
+    brainstorm_acceptance: InAppBrainstormAcceptance | None = None
+    if args.g2_brainstorm_acceptance:
+        receipt_stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        acceptance_out = (
+            Path.home()
+            / "Library/Application Support/JOAT/acceptance/brainstorm"
+            / f"{receipt_stamp}-{uuid.uuid4().hex[:8]}-physical-g2.json"
+        )
+        brainstorm_acceptance = InAppBrainstormAcceptance(
+            transport=transport,
+            terminal=openclaw_terminal,
+            out=acceptance_out,
+            diagnostic_events=acceptance_events,
+            # Returning to a normal engine after a completed one-shot keeps
+            # this a test mode, not a persistent alternate assistant.
+            on_complete=shutdown.set,
+        )
+        brainstorm_acceptance.attach()
+        log.info("Brainstorm G2 acceptance armed (content-free receipt only)")
+    else:
+        transport.on_brainstorm_action(sessions.handle_brainstorm_action)
     transport.on_navigation_origin(on_navigation_origin)
     transport.on_navigation_origin_failure(on_navigation_origin_failure)
     transport.on_navigation_view_ack(on_navigation_view_ack)
@@ -754,73 +937,15 @@ async def main() -> None:
     )
     transport.on_input(capabilities.on_input)
 
-    async def deliver_task_alert(card: str) -> None:
+    async def deliver_task_alert(alert: ProductivityHudView) -> None:
         if not transport.connected:
             raise RuntimeError("glasses are not connected")
-        title = card.removeprefix("!! ").split(" · Reminder\n", 1)[0].strip() or "Reminder"
-        await transport.send(ProductivityHudView(
-            domain="reminders",
-            phase="due",
-            title=title[:72],
-            primary="Due now",
-            secondary="This reminder is still incomplete.",
-            hint="left x2 Reminders",
-        ))
-
-    async def evaluate_task_occurrence(occurrence: TaskOccurrence) -> bool | None:
-        """Confirm the native Reminder is still incomplete before alerting.
-
-        Unknown is fail-quiet: EventKit's own alarm remains authoritative, and
-        JOAT retries reconciliation instead of showing a possibly false alert.
-        """
-        if personal_data is None:
-            return None
-        try:
-            listed = await personal_data.call("reminders.listContainers")
-            containers = listed.result if isinstance(listed.result, list) else []
-            identifiers = [
-                item["calendar_identifier"]
-                for item in containers
-                if isinstance(item, dict)
-                and isinstance(item.get("calendar_identifier"), str)
-            ]
-            if occurrence.calendar_identifier not in identifiers:
-                return None
-            queried = await personal_data.call(
-                "reminders.query",
-                {
-                    "calendar_identifiers": [occurrence.calendar_identifier],
-                    "include_completed": True,
-                    "limit": 500,
-                },
-            )
-        except (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable):
-            return None
-        if (
-            listed.store_instance_id != queried.store_instance_id
-            or listed.store_generation != queried.store_generation
-        ):
-            return None
-        reminders = queried.result if isinstance(queried.result, list) else []
-        matches = [
-            item
-            for item in reminders
-            if isinstance(item, dict)
-            and item.get("calendar_item_identifier") == occurrence.external_item_id
-        ]
-        if len(matches) != 1:
-            return None
-        completed = matches[0].get("is_completed")
-        if completed is True:
-            return False
-        if completed is False:
-            return True
-        return None
+        await transport.send(alert)
 
     task_monitor = TaskMonitor(
         task_occurrences,
         deliver_task_alert,
-        evaluate=evaluate_task_occurrence,
+        evaluate=lambda occurrence: evaluate_reminder_occurrence(occurrence, personal_data),
     )
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
 
@@ -880,6 +1005,8 @@ async def main() -> None:
         beat_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()
+        if brainstorm_acceptance is not None:
+            await brainstorm_acceptance.close()
         await sessions.close()
         await transport.stop()
         if notif_task is not None:
@@ -892,6 +1019,9 @@ async def main() -> None:
             await openclaw_calendar_terminal.close()
         if openclaw_terminal is not None:
             await openclaw_terminal.close()
+        if not bridge_status_task.done():
+            bridge_status_task.cancel()
+        await asyncio.gather(bridge_status_task, return_exceptions=True)
         if personal_data is not None:
             await personal_data.close()
         durable_store.close()

@@ -17,6 +17,7 @@ struct EngineStatus: Decodable {
     var openClaw: OpenClaw = .init()
     var agentTerminal: AgentTerminal = .init()
     var brainstorm: Brainstorm = .init()
+    var personalData: PersonalData = .init()
     var lastTranscript = ""
     var lastReply = ""
     var lastCard = ""
@@ -94,10 +95,26 @@ struct EngineStatus: Decodable {
         }
     }
 
+    /// The engine's fixed-state proof of access to the app-owned EventKit
+    /// bridge. This is deliberately separate from the Mac app's TCC snapshot.
+    struct PersonalData: Decodable {
+        var state = "checking"
+
+        enum CodingKeys: String, CodingKey { case state }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "checking"
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case at, glasses, device, mic, notifications, stt, llm, debate, brainstorm
         case openClaw = "openclaw"
         case agentTerminal = "agent_terminal"
+        case personalData = "personal_data"
         case lastTranscript = "last_transcript"
         case lastReply = "last_reply"
         case lastCard = "last_card"
@@ -122,6 +139,7 @@ struct EngineStatus: Decodable {
         openClaw = (try? c.decodeIfPresent(OpenClaw.self, forKey: .openClaw)) ?? .init()
         agentTerminal = (try? c.decodeIfPresent(AgentTerminal.self, forKey: .agentTerminal)) ?? .init()
         brainstorm = (try? c.decodeIfPresent(Brainstorm.self, forKey: .brainstorm)) ?? .init()
+        personalData = (try? c.decodeIfPresent(PersonalData.self, forKey: .personalData)) ?? .init()
         lastTranscript = s(.lastTranscript, "")
         lastReply = s(.lastReply, "")
         lastCard = s(.lastCard, "")

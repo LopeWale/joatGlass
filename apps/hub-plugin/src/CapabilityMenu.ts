@@ -2,24 +2,47 @@ import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
-import type { ProductivityHudModel, ResumePolicy } from './types';
+import type {
+  InputEventPayload,
+  PlanningGridCell,
+  ProductivityHudModel,
+  ResumePolicy,
+} from './types';
 
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
+const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
+
+function isPlanningAnchor(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && value <= PLANNING_ANCHOR_MAX_UNIX_MS;
+}
+
 /**
  * The control-center navigation from the approved dashboard design:
- * left double-tap opens the CAPABILITY menu — Messages, Notifications,
- * Calendar, Tasks, More — and each entry opens its data view. The
+ * left double-tap opens the CAPABILITY menu — Messages, Planning,
+ * Navigation, Brainstorm, and the remaining views and actions by
+ * scroll. Data entries open a Mac-drawn view; direct actions retain their
+ * existing local or gateway contracts. The
  * first build shipped only the old resume-policy list here, so the wearer
  * double-tapped into "a menu modal, but not the one we designed" (their
- * words, on hardware). Settings still exists — one level down.
+ * words, on hardware). Settings is a scroll-reachable first-level action.
  *
  * View machine, and what double-tap means in each state:
- *   home ──double-tap──▶ caps ──pick row──▶ data view (Mac-drawn) or settings
+ *   home ──double-tap──▶ caps ──pick row──▶ data view, settings, or direct action
  *   caps/settings/data ──double-tap──▶ home  (double-tap is BACK, always)
  */
-const CAPABILITIES = ['Messages', 'Notifications', 'Calendar', 'Tasks', 'More'] as const;
-const MORE_CAPABILITIES = ['QuickNotes', 'Brainstorm', 'Agent Terminal', 'Activity'] as const;
+// The visual sidebar shows five rows at a time and scrolls this one continuous
+// list. Nothing is hidden behind a second "More" interaction: a wearer can
+// keep scrolling from Messages through every available glasses capability or
+// direct action. The renderer and G2 list limit both accept these 11 rows.
+const CAPABILITIES = [
+  'Messages', 'Planning', 'Navigation', 'Brainstorm',
+  'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
+  'Repeat', 'Reconnect', 'Settings',
+] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'auto', label: 'Resume mic: instantly' },
@@ -37,13 +60,17 @@ export function isActionLifecycleTitle(title?: string): boolean {
 }
 
 export class CapabilityMenu {
-  private view: 'closed' | 'transition' | 'caps' | 'more' | 'settings' | 'data' | 'productivity' = 'closed';
+  private view: 'closed' | 'transition' | 'caps' | 'settings' | 'data' | 'productivity' = 'closed';
   private selectedIndex = 0;
   private dataItemCount = 0;
   private dataRowsSelectable = false;
   private pendingTitle?: string;
   private pendingRequestId?: string;
-  private productivityReturn?: 'Calendar' | 'Tasks';
+  private productivityReturn?: 'Planning';
+  private productivityAnchorUnixMs?: number;
+  /** A Planning row may open a day or item detail. Back returns to the live
+   * schedule rather than throwing the wearer all the way to the overview. */
+  private planningDrillDown = false;
   private transitionId = 0;
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
@@ -70,6 +97,7 @@ export class CapabilityMenu {
     this.pendingRequestId = undefined;
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
+    this.planningDrillDown = false;
     await this.hud.showDefault();
   }
 
@@ -97,6 +125,7 @@ export class CapabilityMenu {
     requestId?: string,
     selectable = false,
     hint?: string,
+    planningGrid?: PlanningGridCell[],
   ): Promise<boolean> {
     if (this.view !== 'data' || !this.pendingTitle || !title) return false;
     if (!this.pendingRequestId || requestId !== this.pendingRequestId) return false;
@@ -109,7 +138,7 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
-    const shown = await this.hud.showList(items, { title, hint, selectable });
+    const shown = await this.hud.showList(items, { title, hint, selectable, planningGrid });
     if (
       !this.isCurrentTransition(transition)
       || this.pendingRequestId !== expectedRequestId
@@ -154,8 +183,9 @@ export class CapabilityMenu {
     return true;
   }
 
-  /** A real Calendar/Reminders outcome screen. Back reloads its originating
-   * collection so a saved object cannot strand the wearer on stale rows. */
+  /** A real Calendar/Reminders outcome screen. Back reloads the unified
+   * native-backed Planning collection so an outcome cannot strand the wearer
+   * on a stale Calendar- or Tasks-only list. */
   async presentProductivity(productivity: ProductivityHudModel): Promise<boolean> {
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
@@ -167,7 +197,10 @@ export class CapabilityMenu {
       return true;
     }
     this.view = 'productivity';
-    this.productivityReturn = productivity.domain === 'calendar' ? 'Calendar' : 'Tasks';
+    this.productivityReturn = 'Planning';
+    this.productivityAnchorUnixMs = isPlanningAnchor(productivity.planningAnchorUnixMs)
+      ? productivity.planningAnchorUnixMs
+      : undefined;
     this.pendingTitle = this.productivityReturn.toUpperCase();
     this.pendingRequestId = undefined;
     this.selectedIndex = 0;
@@ -186,7 +219,18 @@ export class CapabilityMenu {
       else await this.close();
     } else if (this.view === 'productivity' && this.productivityReturn) {
       const capability = this.productivityReturn;
-      await this.openCapability(capability, capability === 'Calendar' ? 2 : 3);
+      await this.openCapability(
+        capability,
+        CAPABILITIES.indexOf(capability),
+        this.productivityAnchorUnixMs,
+      );
+    } else if (
+      this.view === 'data'
+      && this.pendingTitle === 'PLANNING'
+      && this.planningDrillDown
+    ) {
+      this.planningDrillDown = false;
+      await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
     } else {
       await this.close();
     }
@@ -229,11 +273,7 @@ export class CapabilityMenu {
       if (applied !== 0) void this.hud.moveSelection(applied);
       return true;
     }
-    const rows = this.view === 'settings'
-      ? POLICY_ROWS
-      : this.view === 'more'
-        ? MORE_CAPABILITIES
-        : CAPABILITIES;
+    const rows = this.view === 'settings' ? POLICY_ROWS : CAPABILITIES;
     this.selectedIndex = Math.max(0, Math.min(rows.length - 1, this.selectedIndex + delta));
     void this.hud.setSelection(this.selectedIndex);
     return true;
@@ -246,6 +286,7 @@ export class CapabilityMenu {
     if (this.view === 'transition') return true;
     if (this.view === 'data') {
       if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
+      if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
       const random = globalThis.crypto?.randomUUID?.()
         ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
       const traceId = `hud-${random}`;
@@ -279,10 +320,26 @@ export class CapabilityMenu {
       return true;
     }
 
-    const picked = this.view === 'more' ? MORE_CAPABILITIES[index] : CAPABILITIES[index];
+    const picked = CAPABILITIES[index];
     if (picked) {
-      if (picked === 'More') {
-        void this.openMore();
+      if (picked === 'Repeat') {
+        // Keep the established Mac contract: repeat only the last completed
+        // stored reply. It never re-runs a prompt, resumes audio, or creates
+        // a capability-data page.
+        void this.repeatLastReply();
+        return true;
+      }
+      if (picked === 'Reconnect') {
+        // Force the real authenticated WebSocket redial. MacLink owns the
+        // socket replacement, auth, failover/backoff, and Chrome's truthful
+        // connecting/reconnecting/connected HUD state.
+        void this.reconnectToMac();
+        return true;
+      }
+      if (picked === 'Settings') {
+        // This is the persisted listening-resume settings surface, not an
+        // imitation static page. Its existing left-double return stays Home.
+        void this.openSettings();
         return true;
       }
       // The data lives on the Mac; ask it to draw the view. The Mac answers
@@ -298,19 +355,27 @@ export class CapabilityMenu {
     return `${active ? '*' : ' '} ${row.label}`;
   }
 
-  private async openMore(): Promise<void> {
-    const transition = this.beginTransition();
-    this.selectedIndex = 0;
-    const shown = await this.hud.showSidebar([...MORE_CAPABILITIES], this.selectedIndex);
-    if (!this.isCurrentTransition(transition)) return;
-    if (shown) this.view = 'more';
-    else await this.close();
+  private async repeatLastReply(): Promise<void> {
+    // Match the G2 contextual-menu wire shape exactly so the Mac's existing
+    // CapabilityRouter._repeat() owns the response and assistant overlay.
+    this.link.send({
+      kind: 'input',
+      event: { containerName: 'sysmenu', selectedIndex: 1 },
+    });
+    await this.close();
+  }
+
+  private async reconnectToMac(): Promise<void> {
+    this.link.connect();
+    await this.close();
   }
 
   private async openCapability(
-    picked: Exclude<(typeof CAPABILITIES)[number] | (typeof MORE_CAPABILITIES)[number], 'More'>,
+    picked: Exclude<(typeof CAPABILITIES)[number], 'Repeat' | 'Reconnect' | 'Settings'>,
     index: number,
+    planningAnchorUnixMs?: number,
   ): Promise<void> {
+    if (picked === 'Planning') this.planningDrillDown = false;
     const transition = this.beginTransition();
     const title = picked.toUpperCase();
     const requestId = `hud-request-${this.randomId()}`;
@@ -329,15 +394,19 @@ export class CapabilityMenu {
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
     this.selectedIndex = 0;
+    const event: InputEventPayload = {
+      containerName: 'capmenu',
+      eventType: 0,
+      selectedIndex: index,
+      selectedName: picked,
+      requestId,
+    };
+    if (picked === 'Planning' && isPlanningAnchor(planningAnchorUnixMs)) {
+      event.planningAnchorUnixMs = planningAnchorUnixMs;
+    }
     this.link.send({
       kind: 'input',
-      event: {
-        containerName: 'capmenu',
-        eventType: 0,
-        selectedIndex: index,
-        selectedName: picked,
-        requestId,
-      },
+      event,
     });
   }
 
@@ -363,6 +432,8 @@ export class CapabilityMenu {
     this.pendingTitle = undefined;
     this.pendingRequestId = undefined;
     this.productivityReturn = undefined;
+    this.productivityAnchorUnixMs = undefined;
+    this.planningDrillDown = false;
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
     // Restore a LIVE home, not a souvenir of the menu — a stale status line

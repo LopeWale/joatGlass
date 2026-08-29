@@ -17,6 +17,7 @@ from joat.core.interfaces import (
     Transcript,
 )
 from joat.core.protocol import (
+    AssistantOverlay,
     AudioControl,
     ContainerId,
     DownlinkMessage,
@@ -136,6 +137,27 @@ class TestVoiceLoop:
         assert isinstance(transport.sent[-2], AudioControl)
         assert transport.sent[-2].open is True
 
+    async def test_connect_replays_the_active_brainstorm_frame_after_authentication(self) -> None:
+        class ActiveSessions:
+            active = True
+            active_status = "BRAINSTORM · reconnect"
+
+            def __init__(self) -> None:
+                self.replayed = 0
+
+            async def replay_active_hud(self) -> bool:
+                self.replayed += 1
+                return True
+
+            def handle_transcript(self, _text: str) -> bool:
+                return True
+
+        sessions = ActiveSessions()
+        transport, engine = FakeTransport(), FakeEngine()
+        await VoiceOrchestrator(transport, engine, sessions=sessions).on_connect()  # type: ignore[arg-type]
+
+        assert sessions.replayed == 1
+
     async def test_utterance_becomes_hud_text(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("turn on the lights")
         orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
@@ -225,7 +247,7 @@ class TestReplyFlow:
         await drain()
 
         assert commands_seen == ["Good morning."]
-        assert region(transport, ContainerId.MAIN) == ["Good morning. How can I help?"]
+        assert assistant_text(transport) == ["Good morning. How can I help?"]
         assert replier.asked == []
 
     async def test_greeting_plus_request_reaches_reply_engine_intact(self) -> None:
@@ -255,7 +277,7 @@ class TestReplyFlow:
         expected = "Good morning, what is on my calendar?"
         assert commands_seen == [expected]
         assert replier.asked == [expected]
-        assert region(transport, ContainerId.MAIN) == ["You have one event at noon."]
+        assert assistant_text(transport) == ["You have one event at noon."]
 
     async def test_unaddressed_greeting_stays_silent_in_wake_word_mode(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("Good morning.")
@@ -309,9 +331,29 @@ class TestReplyFlow:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        assert region(transport, ContainerId.MAIN) == ["It is 72 degrees."]
+        assert assistant_text(transport) == ["It is 72 degrees."]
         assert region(transport, ContainerId.CONTEXT) == ["you  what is the weather"]
         assert replier.asked == ["what is the weather"]
+
+    async def test_assistant_reply_is_an_overlay_not_the_messages_main_region(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("JOAT, what is next?")
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=FakeReplier("Design review at 4:30."),
+            wake_words=("joat",),
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        overlays = [message for message in transport.sent if isinstance(message, AssistantOverlay)]
+        assert [(message.text, message.operation, message.dismiss_after_ms) for message in overlays] == [
+            ("Design review at 4:30.", "replace", None),
+            ("", "settle", 6_000),
+        ]
+        assert region(transport, ContainerId.MAIN) == []
+        assert region(transport, ContainerId.CONTEXT) == ["you  what is next?"]
 
     async def test_replier_declining_leaves_transcript_standing(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hm")
@@ -355,7 +397,7 @@ class TestReplyFlow:
         await drain()
 
         assert replier.asked == ["first question"]  # second was dropped, not raced
-        assert region(transport, ContainerId.MAIN) == ["slow answer"]
+        assert assistant_text(transport) == ["slow answer"]
         assert region(transport, ContainerId.CONTEXT) == ["you  first question"]
 
 
@@ -385,12 +427,14 @@ class TestStreamedReply:
             transport.audio_cb(pcm, i)
         await drain()
 
-        hud = [m for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        # MAIN is the reply's alone now: first chunk replaces, rest append.
-        assert [(m.text, m.append) for m in hud] == [
-            ("Once ", False),
-            ("upon ", True),
-            ("a time.", True),
+        hud = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
+        # Assistant output is its own overlay: it streams above the feature,
+        # then settles without rewriting that feature's main region.
+        assert [(m.text, m.operation) for m in hud] == [
+            ("Once ", "replace"),
+            ("upon ", "append"),
+            ("a time.", "append"),
+            ("", "settle"),
         ]
         assert region(transport, ContainerId.CONTEXT) == ["you  tell me a story"]
 
@@ -402,8 +446,11 @@ class TestStreamedReply:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        hud = [m for m in transport.sent if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
-        assert [(m.text, m.append) for m in hud] == [("Hello!", False)]
+        hud = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
+        assert [(m.text, m.operation) for m in hud] == [
+            ("Hello!", "replace"),
+            ("", "settle"),
+        ]
         assert region(transport, ContainerId.CONTEXT) == ["you  hi"]
 
 
@@ -411,6 +458,14 @@ def region(transport, container: ContainerId) -> list[str]:
     """Text written to one dashboard region (docs/HUD_DASHBOARD.md)."""
     return [m.text for m in transport.sent
             if isinstance(m, HudText) and m.container_id is container]
+
+
+def assistant_text(transport) -> list[str]:
+    """Visible reply copy, deliberately outside any feature-page region."""
+    return [
+        m.text for m in transport.sent
+        if isinstance(m, AssistantOverlay) and m.operation in {"replace", "append"}
+    ]
 
 
 WAKE = ("hey joat", "joat")
@@ -433,12 +488,13 @@ class TestAcknowledgement:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        hud = [m for m in transport.sent if isinstance(m, HudText)]
-        status = [m for m in hud if m.container_id is ContainerId.STATUS_BAR]
+        hud = transport.sent
+        status = [m for m in hud if isinstance(m, HudText) and m.container_id is ContainerId.STATUS_BAR]
         assert status, "no acknowledgement — the wearer sees a dead HUD while waiting"
-        # And it lands BEFORE the transcript reaches the main container.
+        # And it lands BEFORE the response reaches the assistant overlay.
         assert hud.index(status[0]) < next(
-            i for i, m in enumerate(hud) if m.container_id is ContainerId.MAIN)
+            i for i, m in enumerate(hud)
+            if isinstance(m, AssistantOverlay) and m.operation == "replace")
 
 
 class TestWakeWordGate:
@@ -452,10 +508,10 @@ class TestWakeWordGate:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        # The wearer's words land in CONTEXT prefixed "you  "; the reply
-        # owns MAIN. Strip the prefix so these stay about the wake gate.
+        # The wearer's words land in CONTEXT prefixed "you  "; the reply is
+        # in a separate overlay. Strip the prefix so these stay about wake.
         said = [s.removeprefix("you  ") for s in region(transport, ContainerId.CONTEXT)]
-        return said + region(transport, ContainerId.MAIN)
+        return said + assistant_text(transport)
 
     async def test_unaddressed_room_speech_is_fully_ignored(self) -> None:
         texts = await self._run("I'm so tired of repeating this to the team.")

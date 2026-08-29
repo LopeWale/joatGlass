@@ -31,6 +31,8 @@ export const CONFIRM_PROMPT_MAX_UNITS = 120;
  */
 export type ResumePolicy = 'auto' | 'mac' | 'confirm';
 export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system';
+/** A transient JOAT response is never a Messages, Brainstorm, or Hermes page. */
+export type AssistantOverlayOperation = 'replace' | 'append' | 'settle' | 'dismiss';
 export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
 export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
 export type NavigationRoutePlan = import('./NavigationProgress').NavigationRoutePlan;
@@ -42,6 +44,8 @@ export type BrainstormHudState =
   | 'ready'
   | 'running'
   | 'settled'
+  | 'cancelled'
+  | 'failed'
   | 'blocked';
 export interface BrainstormHudModel {
   screen: BrainstormHudScreen;
@@ -57,10 +61,31 @@ export interface BrainstormHudModel {
   noToolsChecked: boolean;
 }
 
+/**
+ * Bounded wearer intents while the live Brainstorm surface owns the HUD.
+ * These are deliberately not free-form prompts: spoken language remains the
+ * sole topic source, while gestures only control the local session lifecycle.
+ */
+export type BrainstormAction =
+  | 'begin_topic_capture'
+  | 'show_terminal'
+  | 'show_brainstorm'
+  | 'cancel'
+  | 'retry_terminal';
+
 /** A bounded lifecycle page for native Calendar and Reminders actions.
  * The interactive preview remains a separate `confirm.request` frame; this
  * state is only what the native bridge is doing or established afterward. */
 export type ProductivityHudDomain = 'calendar' | 'reminders';
+
+/** A redacted source-backed count for one fixed Planning month cell. Labels,
+ * native identifiers, and times stay in the Week/Day drill-down payload. */
+export interface PlanningGridCell {
+  day: string;
+  eventCount: number;
+  reminderCount: number;
+  inMonth: boolean;
+}
 export type ProductivityHudPhase =
   | 'verifying'
   | 'saved'
@@ -78,6 +103,8 @@ export interface ProductivityHudModel {
   primary: string;
   secondary: string;
   hint: string;
+  /** Content-free instant that returns an outcome to its native Planning day. */
+  planningAnchorUnixMs?: number;
 }
 export type NavigationAction =
   | 'confirm_destination'
@@ -108,6 +135,10 @@ export type UplinkMessage =
   | { kind: 'pairing'; token: string }
   /** Opt-in and content-free; the Mac validates this allowlisted schema again. */
   | { kind: 'g2.diagnostic'; event: G2DiagnosticEvent }
+  | {
+    kind: 'brainstorm.action';
+    action: BrainstormAction;
+  }
   | {
     kind: 'navigation.action';
     sessionId: string;
@@ -169,8 +200,22 @@ export type DownlinkMessage =
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
+  | {
+    kind: 'assistant.overlay';
+    operation: AssistantOverlayOperation;
+    text?: string;
+    dismissAfterMs?: number;
+  }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
-  | { kind: 'hud.list'; items: string[]; title?: string; hint?: string; requestId?: string; selectable?: boolean }
+  | {
+    kind: 'hud.list';
+    items: string[];
+    title?: string;
+    hint?: string;
+    requestId?: string;
+    selectable?: boolean;
+    planningGrid?: PlanningGridCell[];
+  }
   | { kind: 'brainstorm.view'; brainstorm: BrainstormHudModel }
   | { kind: 'productivity.view'; productivity: ProductivityHudModel }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
@@ -224,6 +269,8 @@ export interface InputEventPayload {
   traceId?: string;
   /** Binds a row selection to the exact list generation that was rendered. */
   requestId?: string;
+  /** Content-free instant supplied only when returning from a productivity outcome. */
+  planningAnchorUnixMs?: number;
 }
 
 export type Unsubscribe = () => void;

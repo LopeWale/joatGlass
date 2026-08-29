@@ -5,6 +5,7 @@ import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import type { CapabilityMenu } from './CapabilityMenu';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
+import type { BrainstormAction, BrainstormHudScreen } from './types';
 
 type G2Gesture = Extract<G2TraceEvent, { type: 'gesture' }>['gesture'];
 type G2GestureDelivery = Extract<G2TraceEvent, { type: 'gesture' }>['delivery'];
@@ -27,6 +28,24 @@ export interface NavigationInputOwner {
   handleScroll(direction: 'up' | 'down'): Promise<boolean>;
   /** Left-temple double press exits the current navigation session. */
   handleCancel(): boolean;
+}
+
+/** The live Brainstorm surface gets first claim on its explicit gestures. */
+export interface BrainstormInputOwner {
+  isActive(): boolean;
+  handleClick(): boolean;
+  /** Left-temple double press cancels an active Brainstorm round. */
+  handleCancel(): boolean;
+  /** Fixed receipt of a successfully handed-off action; never prompt content. */
+  consumeAcceptedAction(): { action: BrainstormAction; surface: BrainstormHudScreen } | undefined;
+}
+
+/** A transient JOAT reply sits above the active feature, without destroying
+ * it. Ordinary input dismisses that reply first; long-press remains the
+ * always-available microphone privacy control. */
+export interface AssistantOverlayInputOwner {
+  hasAssistantOverlay(): boolean;
+  dismissAssistantOverlay(): Promise<boolean>;
 }
 
 /**
@@ -64,6 +83,8 @@ export class EventRouter {
     private readonly lifecycle?: LifecycleHandler,
     private readonly diagnostics?: G2DiagnosticTrace,
     private readonly navigation?: NavigationInputOwner,
+    private readonly brainstorm?: BrainstormInputOwner,
+    private readonly assistantOverlay?: AssistantOverlayInputOwner,
   ) {}
 
   attach(): void {
@@ -161,6 +182,7 @@ export class EventRouter {
       // Long-press first: on a text-capture page the SDK delivers 9/10
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
+      if (this.dismissAssistantOverlayFor(event.textEvent.eventType)) return;
       if (this.navigation?.isActive()) {
         const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -172,15 +194,36 @@ export class EventRouter {
           return;
         }
       }
-      if (this.menu.handleScroll(event.textEvent.eventType ?? 0)) return;
-      // Scrolls and clicks: clicks on a text container arrive as sysEvent,
-      // so what reaches this line is a scroll.
+      // The full-screen Brainstorm page has no scrollback. A downward swipe
+      // is therefore an explicit, source-independent cancellation fallback
+      // that the official simulator can exercise; left-double remains the
+      // physical shortcut. It is consumed before menu/list routing.
+      if (
+        this.brainstorm?.isActive()
+        && (event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT)
+          === OsEventTypeList.SCROLL_BOTTOM_EVENT
+        && this.brainstorm.handleCancel()
+      ) {
+        return;
+      }
+      const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
+      // The image HUD's invisible capture surface normally receives taps as
+      // sysEvent, but some hosts send a textEvent with CLICK omitted by the
+      // protobuf encoder. If our own sidebar owns that surface, select its
+      // highlighted row rather than consuming the input as a zero-distance
+      // scroll. Closed menus still relay the event unchanged.
+      if (
+        eventType === OsEventTypeList.CLICK_EVENT
+        && this.menu.handleClick()
+      ) return;
+      if (this.menu.handleScroll(eventType)) return;
+      // Scrolls and otherwise unowned text clicks relay to the Mac.
       this.link.send({
         kind: 'input',
         event: {
           containerId: event.textEvent.containerID,
           containerName: event.textEvent.containerName,
-          eventType: event.textEvent.eventType ?? 0,
+          eventType,
         },
       });
       return;
@@ -189,6 +232,7 @@ export class EventRouter {
     if (event.listEvent) {
       this.recordGesture(this.classify(event.listEvent.eventType), 'list');
       if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
+      if (this.dismissAssistantOverlayFor(event.listEvent.eventType)) return;
       // Settings menu open → selection is a local concern, not Mac input.
       if (this.menu.handleList(event.listEvent)) return;
       this.link.send({
@@ -224,6 +268,29 @@ export class EventRouter {
 
   private recordGesture(gesture: G2Gesture, delivery: G2GestureDelivery): void {
     this.diagnostics?.record({ type: 'gesture', gesture, delivery });
+  }
+
+  private recordAcceptedBrainstormAction(
+    source: number,
+    gesture: 'tap' | 'double_press',
+  ): void {
+    const accepted = this.brainstorm?.consumeAcceptedAction();
+    const sourceName = source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+      ? 'left'
+      : source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
+        ? 'right'
+        : source === EventSourceType.TOUCH_EVENT_FROM_RING
+          ? 'ring'
+          : undefined;
+    if (!accepted || sourceName === undefined) return;
+    this.diagnostics?.record({
+      type: 'brainstorm_action',
+      action: accepted.action,
+      surface: accepted.surface,
+      source: sourceName,
+      gesture,
+      delivery: 'sys',
+    });
   }
 
   private handleSys(sys: NonNullable<EvenHubEvent['sysEvent']>): void {
@@ -270,6 +337,8 @@ export class EventRouter {
       return;
     }
 
+    if (this.dismissAssistantOverlayFor(type)) return;
+
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
       // Left temple: the transient capability sidebar. Consumed locally,
       // never relayed to the Mac or confused with the OS exit gesture.
@@ -279,6 +348,12 @@ export class EventRouter {
         // target the hidden navigation frame. The same deliberate gesture
         // becomes the visible navigation stop/recovery action.
         if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
+        // A live Brainstorm owns the same stop gesture. This check is after
+        // navigation so one active surface always has deterministic priority.
+        if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) {
+          this.recordAcceptedBrainstormAction(source, 'double_press');
+          return;
+        }
         void this.menu.toggle();
         return;
       }
@@ -300,6 +375,19 @@ export class EventRouter {
       )
     ) {
       this.navigation.handleClick();
+      return;
+    }
+
+    if (
+      type === OsEventTypeList.CLICK_EVENT
+      && this.brainstorm?.isActive()
+      && (
+        source === EventSourceType.TOUCH_EVENT_FROM_RING
+        || source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
+      )
+      && this.brainstorm.handleClick()
+    ) {
+      this.recordAcceptedBrainstormAction(source, 'tap');
       return;
     }
 
@@ -341,5 +429,18 @@ export class EventRouter {
         // Future firmware items: relay so the Mac can learn about them.
         this.link.send({ kind: 'input', event: { containerName: 'sysmenu', selectedIndex: itemID } });
     }
+  }
+
+  private dismissAssistantOverlayFor(eventType: number | undefined): boolean {
+    if (!this.assistantOverlay?.hasAssistantOverlay()) return false;
+    const type = eventType ?? OsEventTypeList.CLICK_EVENT;
+    if (
+      type !== OsEventTypeList.CLICK_EVENT
+      && type !== OsEventTypeList.DOUBLE_CLICK_EVENT
+      && type !== OsEventTypeList.SCROLL_TOP_EVENT
+      && type !== OsEventTypeList.SCROLL_BOTTOM_EVENT
+    ) return false;
+    void this.assistantOverlay.dismissAssistantOverlay();
+    return true;
   }
 }

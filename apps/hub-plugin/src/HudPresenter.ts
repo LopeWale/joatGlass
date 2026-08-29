@@ -1,7 +1,7 @@
 import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
-import type { HudFramePainter, HudVisualFrame } from './HudVisualSurface';
+import type { AssistantOverlayVisual, HudFramePainter, HudVisualFrame } from './HudVisualSurface';
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
 import {
@@ -9,6 +9,7 @@ import {
   ContainerId,
   type BrainstormHudModel,
   type HudContentKind,
+  type PlanningGridCell,
   type ProductivityHudDomain,
   type ProductivityHudModel,
 } from './types';
@@ -27,6 +28,33 @@ const DEFAULT_LIST_TITLE = 'JOAT';
 const DEFAULT_LIST_HINT = 'left x2 overview';
 const MAX_FOCUS_COPY_CHARS = 46;
 
+/** The downlink is a WebSocket boundary, so treat its optional visual
+ * metadata as untrusted even though TypeScript says it is well shaped. A bad
+ * or partial grid must fall back to the ordinary selectable list. */
+function normalizePlanningGrid(
+  planningGrid: readonly PlanningGridCell[] | undefined,
+): PlanningGridCell[] | undefined {
+  if (!planningGrid || planningGrid.length !== 42) return undefined;
+  const normalized = planningGrid.map((cell) => ({
+    day: cell.day,
+    eventCount: cell.eventCount,
+    reminderCount: cell.reminderCount,
+    inMonth: cell.inMonth,
+  }));
+  const isValid = normalized.every((cell) => (
+    typeof cell.day === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(cell.day)
+    && Number.isInteger(cell.eventCount)
+    && cell.eventCount >= 0
+    && cell.eventCount <= 99
+    && Number.isInteger(cell.reminderCount)
+    && cell.reminderCount >= 0
+    && cell.reminderCount <= 99
+    && typeof cell.inMonth === 'boolean'
+  ));
+  return isValid ? normalized : undefined;
+}
+
 const DEFAULT_BRIGHTNESS: Readonly<Record<number, number>> = {
   [ContainerId.StatusBar]: 2,
   [ContainerId.Main]: 4,
@@ -39,12 +67,14 @@ export interface ListSurfaceOptions {
   title?: string;
   hint?: string;
   selectable?: boolean;
+  planningGrid?: readonly PlanningGridCell[];
 }
 
 interface ResolvedListSurfaceOptions {
   title: string;
   hint: string;
   selectable: boolean;
+  planningGrid?: readonly PlanningGridCell[];
 }
 
 interface HudContentState {
@@ -77,6 +107,10 @@ interface ConfirmationReturnState extends HudContentState {
   surface: HudSurface;
 }
 
+interface AssistantOverlayState extends AssistantOverlayVisual {
+  dismissTimer?: ReturnType<typeof setTimeout>;
+}
+
 /**
  * Renders text to the HUD.
  *
@@ -100,6 +134,7 @@ export class HudPresenter {
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private confirmationStartedAt?: number;
   private confirmationTimer?: ReturnType<typeof setInterval>;
+  private assistantOverlay?: AssistantOverlayState;
   private micOn = false;
 
   constructor(
@@ -185,6 +220,47 @@ export class HudPresenter {
       }, PAINT_INTERVAL_MS - elapsed));
     }
     return true;
+  }
+
+  /**
+   * JOAT is a transient top layer, not another content page. It intentionally
+   * leaves the current Messages/Navigation/Brainstorm/Hermes surface intact;
+   * only a consent confirmation remains visually exclusive.
+   */
+  async showAssistantOverlay(text: string, append = false): Promise<boolean> {
+    if (!this.visual || !text) return false;
+    const current = this.assistantOverlay;
+    if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
+    this.assistantOverlay = { text: append ? `${current?.text ?? ''}${text}` : text };
+    if (this.confirmation) return true;
+    return this.paintVisual();
+  }
+
+  settleAssistantOverlay(dismissAfterMs: number): boolean {
+    const overlay = this.assistantOverlay;
+    if (!overlay || !Number.isInteger(dismissAfterMs) || dismissAfterMs < 1_000 || dismissAfterMs > 15_000) {
+      return false;
+    }
+    if (overlay.dismissTimer !== undefined) clearTimeout(overlay.dismissTimer);
+    overlay.dismissTimer = setTimeout(() => {
+      if (this.assistantOverlay === overlay) void this.dismissAssistantOverlay();
+    }, dismissAfterMs);
+    return true;
+  }
+
+  async dismissAssistantOverlay(): Promise<boolean> {
+    const overlay = this.assistantOverlay;
+    if (!overlay) return true;
+    if (overlay.dismissTimer !== undefined) clearTimeout(overlay.dismissTimer);
+    this.assistantOverlay = undefined;
+    if (this.confirmation) return true;
+    return this.paintVisual();
+  }
+
+  /** The transient reply owns ordinary input while it is readable, so a
+   * wearer cannot accidentally activate the obscured feature underneath. */
+  hasAssistantOverlay(): boolean {
+    return this.assistantOverlay !== undefined;
   }
 
   /**
@@ -1015,10 +1091,12 @@ export class HudPresenter {
   }
 
   private resolveListOptions(options: ListSurfaceOptions): ResolvedListSurfaceOptions {
+    const planningGrid = normalizePlanningGrid(options.planningGrid);
     return {
       title: (options.title?.trim() || DEFAULT_LIST_TITLE).slice(0, MAX_FOCUS_COPY_CHARS),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_COPY_CHARS),
       selectable: options.selectable ?? false,
+      ...(planningGrid ? { planningGrid } : {}),
     };
   }
 
@@ -1047,7 +1125,7 @@ export class HudPresenter {
       };
     }
     if (this.surface.kind === 'sidebar') {
-      return {
+      return this.withAssistantOverlay({
         kind: 'sidebar',
         status,
         micOn: this.micOn,
@@ -1060,10 +1138,10 @@ export class HudPresenter {
         context: this.streams.get(ContainerId.Context) ?? '',
         tray: this.streams.get(ContainerId.Tray) ?? '',
         hint: this.streams.get(ContainerId.Hint) ?? '',
-      };
+      });
     }
     if (this.surface.kind === 'list') {
-      return {
+      return this.withAssistantOverlay({
         kind: 'list',
         status,
         micOn: this.micOn,
@@ -1072,33 +1150,34 @@ export class HudPresenter {
         selectedIndex: this.surface.selectedIndex,
         selectable: this.surface.options.selectable,
         hint: this.surface.options.hint,
-      };
+        planningGrid: this.surface.options.planningGrid,
+      });
     }
     if (this.surface.kind === 'navigation') {
-      return {
+      return this.withAssistantOverlay({
         kind: 'navigation',
         status,
         micOn: this.micOn,
         navigation: this.cloneNavigation(this.surface.navigation),
-      };
+      });
     }
     if (this.surface.kind === 'brainstorm') {
-      return {
+      return this.withAssistantOverlay({
         kind: 'brainstorm',
         status,
         micOn: this.micOn,
         brainstorm: this.cloneBrainstorm(this.surface.brainstorm),
-      };
+      });
     }
     if (this.surface.kind === 'productivity') {
-      return {
+      return this.withAssistantOverlay({
         kind: 'productivity',
         status,
         micOn: this.micOn,
         productivity: this.cloneProductivity(this.surface.productivity),
-      };
+      });
     }
-    return {
+    return this.withAssistantOverlay({
       kind: 'overview',
       status,
       micOn: this.micOn,
@@ -1109,7 +1188,13 @@ export class HudPresenter {
       context: this.streams.get(ContainerId.Context) ?? '',
       tray: this.streams.get(ContainerId.Tray) ?? '',
       hint: this.streams.get(ContainerId.Hint) ?? '',
-    };
+    });
+  }
+
+  private withAssistantOverlay<T extends HudVisualFrame>(frame: T): T {
+    const overlay = this.assistantOverlay;
+    if (!overlay) return frame;
+    return { ...frame, assistantOverlay: { text: overlay.text } };
   }
 
   private async paintVisual(): Promise<boolean> {
@@ -1156,7 +1241,12 @@ export class HudPresenter {
     return {
       kind: 'list',
       items: [...surface.items],
-      options: { ...surface.options },
+      options: {
+        ...surface.options,
+        ...(surface.options.planningGrid
+          ? { planningGrid: surface.options.planningGrid.map((cell) => ({ ...cell })) }
+          : {}),
+      },
       selectedIndex: surface.selectedIndex,
     };
   }

@@ -68,7 +68,7 @@ enum G2DiagnosticExport {
         case "page_transition":
             guard hasExactly(event, ["sequence", "recordedAtMs", "type", "from", "to", "reason", "outcome"]),
                   let from = page(event["from"]), let to = page(event["to"]),
-                  let reason = one(of: event["reason"], ["show_sidebar", "show_list", "show_overview", "show_confirmation", "dismiss_confirmation"]),
+                  let reason = one(of: event["reason"], ["show_sidebar", "show_list", "show_overview", "show_confirmation", "show_navigation", "dismiss_confirmation"]),
                   let outcome = one(of: event["outcome"], ["success", "failed"])
             else { return nil }
             output["from"] = from; output["to"] = to
@@ -108,14 +108,14 @@ enum G2DiagnosticExport {
         case "location_probe":
             guard hasExactly(event, [
                 "sequence", "recordedAtMs", "type", "sampleSequence", "profile",
-                "lifecycle", "fields", "cadenceMs", "accuracy", "timestampAge",
+                "lifecycle", "fields", "cadence", "accuracy", "timestampAge",
                 "displacement", "headingDelta",
             ]),
                   let sampleSequence = positiveInt(event["sampleSequence"]),
                   let profile = one(of: event["profile"], ["high"]),
                   let lifecycle = one(of: event["lifecycle"], ["foreground", "background"]),
                   let fields = boundedInt(event["fields"], 0...7),
-                  let cadenceMs = boundedInt(event["cadenceMs"], 0...600_000),
+                  let cadence = one(of: event["cadence"], ["first", "lte1s", "1_5s", "5_30s", "gt30s"]),
                   let accuracy = one(of: event["accuracy"], ["unknown", "lte5", "lte10", "lte25", "gt25"]),
                   let timestampAge = one(of: event["timestampAge"], ["missing", "future", "fresh", "stale"]),
                   let displacement = one(of: event["displacement"], ["first", "lt5", "5_20", "20_100", "gt100"]),
@@ -123,9 +123,33 @@ enum G2DiagnosticExport {
             else { return nil }
             output["sampleSequence"] = sampleSequence; output["profile"] = profile
             output["lifecycle"] = lifecycle; output["fields"] = fields
-            output["cadenceMs"] = cadenceMs; output["accuracy"] = accuracy
+            output["cadence"] = cadence; output["accuracy"] = accuracy
             output["timestampAge"] = timestampAge; output["displacement"] = displacement
             output["headingDelta"] = headingDelta
+        case "navigation_location":
+            guard hasExactly(event, [
+                "sequence", "recordedAtMs", "type", "sampleSequence", "lifecycle",
+                "fields", "cadence", "accuracy", "timestampAge", "displacement", "headingDelta",
+            ]),
+                  let sampleSequence = positiveInt(event["sampleSequence"]),
+                  let lifecycle = one(of: event["lifecycle"], ["foreground", "background"]),
+                  let fields = boundedInt(event["fields"], 0...7),
+                  let cadence = one(of: event["cadence"], ["first", "lte1s", "1_5s", "5_30s", "gt30s"]),
+                  let accuracy = one(of: event["accuracy"], ["unknown", "lte5", "lte10", "lte25", "gt25"]),
+                  let timestampAge = one(of: event["timestampAge"], ["missing", "future", "fresh", "stale"]),
+                  let displacement = one(of: event["displacement"], ["first", "lt5", "5_20", "20_100", "gt100"]),
+                  let headingDelta = one(of: event["headingDelta"], ["unavailable", "insufficient_motion", "0_30", "31_90", "91_180"])
+            else { return nil }
+            output["sampleSequence"] = sampleSequence; output["lifecycle"] = lifecycle
+            output["fields"] = fields; output["cadence"] = cadence; output["accuracy"] = accuracy
+            output["timestampAge"] = timestampAge; output["displacement"] = displacement
+            output["headingDelta"] = headingDelta
+        case "navigation_cue":
+            guard hasExactly(event, ["sequence", "recordedAtMs", "type", "cue", "outcome"]),
+                  let cue = one(of: event["cue"], ["destination", "repair", "mode", "preview", "guidance", "uncertain", "wrong_way", "off_route", "rerouting", "arrived", "error", "stopped"]),
+                  let outcome = one(of: event["outcome"], ["success", "failed"])
+            else { return nil }
+            output["cue"] = cue; output["outcome"] = outcome
         default:
             return nil
         }
@@ -133,7 +157,7 @@ enum G2DiagnosticExport {
     }
 
     private static func page(_ value: Any?) -> String? {
-        one(of: value, ["overview", "sidebar", "list", "confirmation"])
+        one(of: value, ["overview", "sidebar", "list", "confirmation", "navigation"])
     }
 
     private static func one(of value: Any?, _ allowed: [String]) -> String? {

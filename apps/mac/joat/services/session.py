@@ -12,9 +12,10 @@ import asyncio
 import logging
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 from ..core.interfaces import ReplyEngine
+from ..core.protocol import BrainstormAction, BrainstormHudView
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
 from ..channels.cards import CardLog
@@ -49,6 +50,14 @@ class Session(ABC):
         """Consume correction/retry speech while this session owns focus."""
         return False
 
+    async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
+        """Claim a bounded glasses action while this session owns focus."""
+        return False
+
+    async def replay_hud(self) -> bool:
+        """Restore a wearer-visible session frame after link re-authentication."""
+        return False
+
     @property
     def status(self) -> str:
         """Status chrome to restore after transient voice/link feedback."""
@@ -63,6 +72,8 @@ class Session(ABC):
 SessionFactory = Callable[[str], Session | None]
 """topic → Session, or None when the trigger can't be honored (missing agents)."""
 SessionStarter = Callable[[str], Session | None]
+TopicCaptureView = Callable[[], BrainstormHudView]
+"""Build the exact idle Brainstorm frame shown while the wearer speaks a topic."""
 
 
 class SessionManager:
@@ -75,6 +86,8 @@ class SessionManager:
         card_log: CardLog | None = None,
         on_state: Callable[[str], None] | None = None,
         starters: Sequence[SessionStarter] = (),
+        terminal_retry: Callable[[], Awaitable[None]] | None = None,
+        topic_capture_view: TopicCaptureView | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
@@ -84,6 +97,8 @@ class SessionManager:
         self._card_log = card_log
         self._on_state = on_state
         self._starters = list(starters)
+        self._terminal_retry = terminal_retry
+        self._topic_capture_view = topic_capture_view
 
     @property
     def active(self) -> bool:
@@ -168,13 +183,7 @@ class SessionManager:
         if self._active is not None:
             if lowered in ("stop", "cancel", "stop the debate"):
                 log.info("wearer cancelled the active session")
-                self._active.cancel()
-                task = self._task
-                if task is not None and not task.done():
-                    # A cooperative flag cannot wake an agent stream blocked
-                    # in network I/O. Propagate cancellation into the active
-                    # iterator now; each remote adapter owns its bounded abort.
-                    task.cancel()
+                self._cancel_active()
                 return True
             if self._active.consume_transcript(text):
                 return True
@@ -209,6 +218,59 @@ class SessionManager:
         if trigger is not None:
             return self._start(trigger.group(1).strip())
         return False
+
+    def handle_brainstorm_action(self, action: BrainstormAction) -> None:
+        """Route an explicit G2 control to the session currently on screen."""
+        if action.action == "retry_terminal":
+            retry = self._terminal_retry
+            if retry is not None:
+                async def run_retry() -> None:
+                    await retry()
+                asyncio.get_running_loop().create_task(run_retry())
+            return
+        active = self._active
+        if action.action == "begin_topic_capture" and active is None:
+            view = self._topic_capture_view
+
+            async def show_capture() -> None:
+                if view is not None:
+                    await self._hud.show_brainstorm(view())
+                else:
+                    # Older embeddings can still request a topic before they
+                    # supply the visual factory. Preserve the old status-only
+                    # signal rather than rejecting their action outright.
+                    await self._hud.status("BRAINSTORM · speak your question")
+
+            asyncio.get_running_loop().create_task(show_capture())
+            return
+        if active is None:
+            return
+        if action.action == "cancel":
+            self._cancel_active()
+            return
+
+        async def route() -> None:
+            try:
+                await active.handle_brainstorm_action(action)
+            except Exception:
+                log.exception("brainstorm action failed action=%s", action.action)
+
+        asyncio.get_running_loop().create_task(route())
+
+    async def replay_active_hud(self) -> bool:
+        active = self._active
+        return await active.replay_hud() if active is not None else False
+
+    def _cancel_active(self) -> None:
+        active = self._active
+        if active is None:
+            return
+        active.cancel()
+        task = self._task
+        if task is not None and not task.done():
+            # A cooperative flag cannot wake an agent stream blocked in remote
+            # I/O. The session's cancellation handler paints a final frame.
+            task.cancel()
 
     def _start(self, topic: str) -> bool:
         session = self._factory(topic)
@@ -306,6 +368,7 @@ class DebateSession(Session):
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
         self._cancelled = False
+        self._failed = False
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -316,7 +379,9 @@ class DebateSession(Session):
 
     @property
     def completion_state(self) -> str:
-        return "cancelled" if self._cancelled else "settled"
+        if self._cancelled:
+            return "cancelled"
+        return "failed" if self._failed else "settled"
 
     def direct(self, text: str) -> str | None:
         """Give the floor to a named seat. Returns the name, or None."""
@@ -326,7 +391,37 @@ class DebateSession(Session):
         self._table.direct(seat.name)
         return seat.name
 
+    async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
+        if action.action == "show_terminal":
+            callback = getattr(self._sink, "show_terminal", None)
+            if callback is None:
+                return False
+            await callback()
+            return True
+        if action.action == "show_brainstorm":
+            return await self.replay_hud()
+        return False
+
+    async def replay_hud(self) -> bool:
+        callback = getattr(self._sink, "replay", None)
+        if callback is None:
+            return False
+        await callback()
+        return True
+
     async def run(self) -> None:
+        try:
+            await self._run()
+        except asyncio.CancelledError:
+            self._cancelled = True
+            await self._finish("cancelled")
+            raise
+        except Exception:
+            self._failed = True
+            log.exception("Brainstorm collaborator failed")
+            await self._finish("blocked · collaborator disconnected; open Hermes to retry")
+
+    async def _run(self) -> None:
         """The DebateLoop state machine (ARCHITECTURE §5), fully visible.
 
         A ROUND is one turn for every seat. After each round the judge scores

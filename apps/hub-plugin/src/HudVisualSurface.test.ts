@@ -4,13 +4,14 @@ import type { BridgeClient } from './BridgeClient';
 import {
   HudVisualSurface,
   splitGray4Tiles,
+  visibleSurfaceReceipt,
   type HudFrameRenderer,
   type HudVisualFrame,
 } from './HudVisualSurface';
 import { ContainerId } from './types';
 
 describe('splitGray4Tiles', () => {
-  it('maps the canvas into four ordered packed-Gray4 SDK images', () => {
+  it('maps the canvas into four ordered unpacked-Gray4 SDK images', () => {
     const pixels = new Uint8Array(576 * 288);
     pixels[0] = 1;
     pixels[287] = 2;
@@ -25,17 +26,35 @@ describe('splitGray4Tiles', () => {
       ContainerId.VisualBottomLeft,
       ContainerId.VisualBottomRight,
     ]);
-    expect(tiles.every((tile) => tile.pixels.length === 288 * 144 / 2)).toBe(true);
-    expect(tiles[0]?.pixels[0]).toBe(0x10);
-    expect(tiles[0]?.pixels[143]).toBe(0x02);
-    expect(tiles[1]?.pixels[0]).toBe(0x30);
-    expect(tiles[2]?.pixels[0]).toBe(0x40);
-    expect(tiles[3]?.pixels[0]).toBe(0x50);
+    expect(tiles.every((tile) => tile.pixels.length === 41_472)).toBe(true);
+    expect(tiles[0]?.pixels[0]).toBe(1);
+    expect(tiles[0]?.pixels[287]).toBe(2);
+    expect(tiles[1]?.pixels[0]).toBe(3);
+    expect(tiles[2]?.pixels[0]).toBe(4);
+    expect(tiles[3]?.pixels[0]).toBe(5);
   });
 });
 
 describe('HudVisualSurface', () => {
-  it('normalizes raster bytes to the host List<int> representation', async () => {
+  it('marks only a completed Reminders due frame with a content-free receipt key', () => {
+    const due: HudVisualFrame = {
+      kind: 'productivity', status: '', micOn: false,
+      productivity: {
+        domain: 'reminders', phase: 'due', title: 'private title',
+        primary: 'Due now', secondary: 'private subtitle', hint: 'left x2 Planning',
+      },
+    };
+    const saved: HudVisualFrame = {
+      ...due,
+      productivity: { ...due.productivity, phase: 'saved' },
+    };
+
+    expect(visibleSurfaceReceipt(due)).toBe('reminder_due');
+    expect(visibleSurfaceReceipt(saved)).toBeUndefined();
+    expect(JSON.stringify(visibleSurfaceReceipt(due))).not.toContain('private');
+  });
+
+  it('sends one unpacked Gray4 byte per pixel through the host List<int> boundary', async () => {
     const payloads: unknown[] = [];
     const client = {
       require: () => ({
@@ -45,14 +64,11 @@ describe('HudVisualSurface', () => {
         },
       }),
     } as unknown as BridgeClient;
-    const renderer: HudFrameRenderer = {
-      render: async () => [
-        { containerId: ContainerId.Image, pixels: new Uint8Array([0, 3, 10, 15]) },
-        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([1]) },
-        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([2]) },
-        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
-      ],
-    };
+    const pixels = new Uint8Array(576 * 288);
+    pixels.fill(10);
+    pixels[0] = 0;
+    pixels[576 * 288 - 1] = 15;
+    const renderer: HudFrameRenderer = { render: async () => splitGray4Tiles(pixels) };
     const frame: HudVisualFrame = {
       kind: 'overview', status: '', micOn: false, mainBrightness: 4,
       main: '', context: '', tray: '', hint: '',
@@ -60,7 +76,11 @@ describe('HudVisualSurface', () => {
 
     await new HudVisualSurface(client, renderer).paint(frame);
 
-    expect(payloads).toEqual([[0, 3, 10, 15], [1], [2], [4]]);
+    expect(payloads).toHaveLength(4);
+    expect(payloads.every((payload) => Array.isArray(payload) && payload.length === 41_472)).toBe(true);
+    expect((payloads[0] as number[])[0]).toBe(0);
+    expect((payloads[3] as number[])[41_471]).toBe(15);
+    expect(payloads.flatMap((payload) => payload as number[]).every((value) => value <= 15)).toBe(true);
   });
 
   it('awaits all four image updates serially', async () => {
@@ -219,5 +239,43 @@ describe('HudVisualSurface', () => {
       { type: 'tile_upload', frame: 1, order: 2, containerId: 9, outcome: 'success' },
       { type: 'tile_upload', frame: 1, order: 3, containerId: 10, outcome: 'success' },
     ]);
+  });
+
+  it('records a completed Brainstorm raster only as a fixed-state SHA-256 receipt', async () => {
+    const events: unknown[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => ImageRawDataUpdateResult.success,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([9, 8, 7]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([6]) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([5]) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
+      ],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'brainstorm', status: '', micOn: false,
+      brainstorm: {
+        screen: 'agent_terminal', state: 'running', topic: 'not retained', collaborators: [],
+        activity: 'not retained', terminalState: 'ready', noToolsChecked: true,
+      },
+    };
+
+    await new HudVisualSurface(client, renderer, {
+      record: (event) => events.push(event),
+    }).paint(frame);
+
+    await vi.waitFor(() => expect(events.some(
+      (event) => (event as { type?: string }).type === 'visual_frame',
+    )).toBe(true));
+    const receipt = events.find((event) => (event as { type?: string }).type === 'visual_frame');
+    expect(receipt).toEqual({
+      type: 'visual_frame', kind: 'brainstorm', surface: 'agent_terminal', state: 'running',
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(JSON.stringify(receipt)).not.toMatch(/retained|topic|activity|pixels/i);
   });
 });

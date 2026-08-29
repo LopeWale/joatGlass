@@ -31,6 +31,7 @@ from scripts.simulator_productivity_native_acceptance import (
     classify_alarm_delivery_failure,
     create_engine_stub_repo,
     evaluate_notification_preflight,
+    has_due_surface_receipt,
     plan_acceptance_schedule,
     redact_native_reference,
     repo_preference_restore_command,
@@ -70,6 +71,18 @@ def test_event_and_reminder_use_distinct_randomized_acceptance_identities() -> N
             "a1b2c3d4",
             kind="event",
         )
+
+
+def test_due_surface_receipt_is_fixed_and_carries_no_reminder_content() -> None:
+    assert has_due_surface_receipt(
+        b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
+    )
+    assert not has_due_surface_receipt(
+        b"[HudVisualSurface] receipt saved bridge-ack\n"
+    )
+    assert not has_due_surface_receipt(
+        b"reminder_due private title bridge-ack\n"
+    )
 
 
 def test_alarm_observation_uses_only_new_lines_and_returns_no_content(tmp_path: Path) -> None:

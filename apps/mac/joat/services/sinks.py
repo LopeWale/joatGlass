@@ -46,6 +46,7 @@ class HudSink:
         self._speakers: list[str] = []
         self._speaker = ""
         self._activity = ""
+        self._state = "ready"
 
     def _terminal_status(self) -> dict[str, str | bool]:
         if self._terminal_projection is not None:
@@ -70,6 +71,7 @@ class HudSink:
         return f"{name} {suffix}"[:64] if suffix else name[:64]
 
     async def _paint(self, state: str) -> None:
+        self._state = state
         terminal = self._terminal_status()
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="brainstorm",
@@ -103,7 +105,32 @@ class HudSink:
     async def close(self, verdict: str) -> None:
         self._speaker = ""
         self._activity = verdict[:180]
-        await self._paint("settled")
+        if verdict == "cancelled":
+            await self._paint("cancelled")
+        elif verdict.startswith("blocked"):
+            await self._paint("blocked")
+        else:
+            await self._paint("settled")
+
+    async def show_terminal(self) -> None:
+        """Show Hermes connection truth without stopping the live roundtable."""
+        terminal = self._terminal_status()
+        await self._hud.show_brainstorm(BrainstormHudView(
+            screen="agent_terminal",
+            state="running",
+            topic="Hermes Agent Terminal",
+            collaborators=[],
+            activity="Brainstorm remains active. Tap to return to the room.",
+            terminal_state=str(terminal["state"]),
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        ))
+
+    async def replay(self) -> None:
+        """Repaint the exact last semantic frame after an authenticated reconnect."""
+        if self._topic:
+            await self._paint(self._state)
 
 
 class TerminalSink:
@@ -169,6 +196,18 @@ class Broadcast:
                 # A dead HUD must not silence the terminal, and vice versa.
                 # The debate is the product; a surface is not.
                 pass
+
+    async def show_terminal(self) -> None:
+        for sink in self._sinks:
+            callback = getattr(sink, "show_terminal", None)
+            if callback is not None:
+                await callback()
+
+    async def replay(self) -> None:
+        for sink in self._sinks:
+            callback = getattr(sink, "replay", None)
+            if callback is not None:
+                await callback()
 
 
 @dataclass

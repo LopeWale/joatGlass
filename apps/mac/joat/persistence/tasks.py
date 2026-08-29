@@ -119,6 +119,19 @@ class TaskOccurrenceStore:
         ).fetchall()
         return tuple(self._from_row(row) for row in rows)
 
+    def find_by_external_item_id(self, external_item_id: str) -> TaskOccurrence | None:
+        """Read the exact durable due instant for one JOAT-created reminder."""
+
+        if not isinstance(external_item_id, str) or not external_item_id.strip():
+            raise ValueError("external_item_id must be a non-empty string")
+        row = self._store.execute(
+            self._select_columns() +
+            " FROM task_occurrences t LEFT JOIN task_alert_receipts r "
+            "ON r.occurrence_id=t.occurrence_id WHERE t.external_item_id=?",
+            (external_item_id,),
+        ).fetchone()
+        return self._from_row(row) if row is not None else None
+
     def mark_alert_enqueued(self, occurrence_id: str, *, now_us: int) -> TaskOccurrence:
         with self._store.transaction() as db:
             current = self._get_with(db, occurrence_id)
@@ -158,19 +171,42 @@ class TaskOccurrenceStore:
             )
             return self._get_with(db, occurrence_id)
 
+    def retire_due_tracking(self, occurrence_id: str, *, now_us: int) -> TaskOccurrence:
+        """Stop JOAT's old local alarm after EventKit reschedules the item.
+
+        This changes only the local occurrence ledger; it never modifies the
+        native Reminder.  ``cancelled`` means the stored due occurrence is no
+        longer current, not that the wearer cancelled the Reminder itself.
+        """
+
+        with self._store.transaction() as db:
+            current = self._get_with(db, occurrence_id)
+            if current.state in ("completed", "dismissed", "cancelled"):
+                return current
+            db.execute(
+                "UPDATE task_occurrences SET state='cancelled',updated_at_us=?,"
+                "alerted_at_us=NULL WHERE occurrence_id=?",
+                (now_us, occurrence_id),
+            )
+            return self._get_with(db, occurrence_id)
+
     def mark_completed_external_if_present(
         self,
         external_item_id: str,
         *,
         now_us: int,
     ) -> TaskOccurrence | None:
-        row = self._store.execute(
-            "SELECT occurrence_id FROM task_occurrences WHERE external_item_id=?",
-            (external_item_id,),
-        ).fetchone()
-        if row is None:
+        if not isinstance(external_item_id, str) or not external_item_id.strip():
             return None
-        return self.mark_completed(str(row[0]), now_us=now_us)
+        occurrence = self.find_by_external_item_id(external_item_id)
+        if occurrence is None:
+            return None
+        # A native reschedule retires only JOAT's old local alarm.  If the
+        # wearer later completes that same native Reminder, bookkeeping must
+        # not turn the verified native completion into a false uncertainty.
+        if occurrence.state == "cancelled":
+            return occurrence
+        return self.mark_completed(occurrence.occurrence_id, now_us=now_us)
 
     @classmethod
     def _get_with(cls, db: sqlite3.Connection, occurrence_id: str) -> TaskOccurrence:

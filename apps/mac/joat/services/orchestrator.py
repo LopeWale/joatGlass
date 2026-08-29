@@ -110,6 +110,12 @@ class VoiceOrchestrator:
         # and a brain that cannot hear is indistinguishable from none.
         await self._transport.send(AudioControl(open=True))
         if active_status is not None:
+            # The replacement Hub process starts with no retained visual
+            # surface. Restore the current Brainstorm snapshot only after the
+            # new authenticated link is able to receive it.
+            replay = getattr(self._sessions, "replay_active_hud", None)
+            if replay is not None:
+                await replay()
             # The plugin truthfully marks AudioControl(open=True) as
             # listening. A focused session owns stronger status copy, so
             # restore it after opening the microphone.
@@ -177,7 +183,8 @@ class VoiceOrchestrator:
                 log.info("unaddressed speech ignored chars=%d", len(transcript.text))
                 return
             if not addressed:
-                await self._hud.show("Yes?")
+                await self._hud.assistant("Yes?")
+                await self._hud.settle_assistant(4_000)
                 return
             query = addressed
             # Trigger phrases ("debate <topic>") now see only ADDRESSED text.
@@ -192,7 +199,8 @@ class VoiceOrchestrator:
                 answer = await self._commands(query)
                 if answer is not None:
                     await self._hud.context(f"you  {query}")
-                    await self._hud.show(answer)
+                    await self._hud.assistant(answer)
+                    await self._hud.settle_assistant()
                     return
             # The wearer's words go to their OWN region, so the reply no
             # longer erases the proof they were heard (HUD_DASHBOARD.md).
@@ -202,12 +210,13 @@ class VoiceOrchestrator:
             parts: list[str] = []
             async for chunk in self._replier.stream(query):
                 if parts:
-                    await self._hud.append(chunk)
+                    await self._hud.assistant(chunk, append=True)
                 else:
-                    await self._hud.show(chunk)
+                    await self._hud.assistant(chunk)
                 parts.append(chunk)
             if parts:
                 reply_text = "".join(parts)
+                await self._hud.settle_assistant()
                 log.info("reply emitted chars=%d", len(reply_text))
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]

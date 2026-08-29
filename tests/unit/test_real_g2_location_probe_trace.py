@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from unittest.mock import AsyncMock
 
 import pytest
 import websockets
 
-from scripts.real_g2_location_probe_trace import capture, summarize_receipt
+from scripts.real_g2_location_probe_trace import (
+    capture,
+    configure_probe_logging,
+    await_stationary_marker,
+    marker_timeout_seconds,
+    summarize_navigation_field_run,
+    summarize_receipt,
+    write_navigation_field_run_summary,
+)
 
 
 def _confirm_reply(request: dict[str, object]) -> str:
@@ -23,6 +33,46 @@ def _confirm_reply(request: dict[str, object]) -> str:
             "previewDigest": request["previewDigest"],
         }
     )
+
+
+def test_probe_logging_suppresses_gateway_and_transport_metadata() -> None:
+    """A physical run must not emit host/device metadata through child loggers."""
+
+    logger_names = ("joat.ble.hub_gateway", "websockets")
+    prior_levels = {name: logging.getLogger(name).level for name in logger_names}
+    try:
+        configure_probe_logging()
+        assert all(logging.getLogger(name).level == logging.WARNING for name in logger_names)
+    finally:
+        for name, level in prior_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def test_marker_timeout_never_overstates_the_packed_g2_confirmation_window() -> None:
+    assert marker_timeout_seconds(4.0) == 4.0
+    assert marker_timeout_seconds(30.0) == 8.0
+
+
+@pytest.mark.asyncio
+async def test_stationary_marker_renews_only_the_noop_capture_prompt() -> None:
+    gateway = type("Gateway", (), {})()
+    gateway.request_confirm = AsyncMock(side_effect=[False, False, True])
+
+    marked, attempts = await await_stationary_marker(
+        gateway,
+        mode="walking",
+        marker_timeout_s=8.0,
+        marker_attempts=5,
+    )
+
+    assert (marked, attempts) == (True, 3)
+    assert [call.args[0] for call in gateway.request_confirm.await_args_list] == [
+        "gate0-walking-marker-1",
+        "gate0-walking-marker-2",
+        "gate0-walking-marker-3",
+    ]
+    assert all(call.args[1] == "Gate 0 walking capture. Tap while stopped to mark lens visible."
+               for call in gateway.request_confirm.await_args_list)
 
 
 async def _connect_when_ready(url: str):  # type: ignore[no-untyped-def]
@@ -121,6 +171,111 @@ def test_success_without_samples_is_inconclusive() -> None:
 
     assert summary["result"] == "inconclusive"
     assert summary["sampleCount"] == 0
+
+
+def test_navigation_field_run_summary_keeps_only_quality_buckets_and_video_markers() -> None:
+    summary = summarize_navigation_field_run(
+        "walking",
+        {
+            "schema": "joat.g2-diagnostic.v2",
+            "events": [
+                {
+                    "sequence": 1, "recordedAtMs": 100,
+                    "type": "navigation_cue", "cue": "destination", "outcome": "success",
+                },
+                {
+                    "sequence": 2, "recordedAtMs": 200,
+                    "type": "navigation_location", "sampleSequence": 1,
+                    "lifecycle": "foreground", "fields": 5, "cadence": "first",
+                    "accuracy": "lte10", "timestampAge": "fresh",
+                    "displacement": "first", "headingDelta": "unavailable",
+                },
+                {
+                    "sequence": 3, "recordedAtMs": 300,
+                    "type": "navigation_cue", "cue": "guidance", "outcome": "success",
+                },
+                {
+                    "sequence": 4, "recordedAtMs": 400,
+                    "type": "navigation_cue", "cue": "stopped", "outcome": "success",
+                },
+            ],
+        },
+    )
+
+    assert summary["schema"] == "joat.g2-navigation-field-run.v1"
+    assert summary["receiptResult"] == "pass"
+    assert summary["locationQuality"] == {
+        "accuracy": {"lte10": 1},
+        "timestampAge": {"fresh": 1},
+        "cadence": {"first": 1},
+        "displacement": {"first": 1},
+        "headingDelta": {"unavailable": 1},
+        "lifecycle": {"foreground": 1},
+        "fieldPresence": {"timestamp_heading": 1},
+    }
+    assert summary["hudCues"] == [
+        {"cue": "destination", "outcome": "success", "recordedAtMs": 100},
+        {"cue": "guidance", "outcome": "success", "recordedAtMs": 300},
+        {"cue": "stopped", "outcome": "success", "recordedAtMs": 400},
+    ]
+    assert summary["lensVideoMarkers"] == [
+        {"name": "start", "recordedAtMs": 100},
+        {"name": "end", "recordedAtMs": 400},
+    ]
+    serialized = json.dumps(summary).lower()
+    assert "latitude" not in serialized
+    assert "longitude" not in serialized
+    assert "cajun" not in serialized
+    assert "address" not in serialized
+    assert "route" not in serialized
+
+
+def test_navigation_field_run_receipt_stays_inconclusive_without_both_video_markers() -> None:
+    summary = summarize_navigation_field_run(
+        "cycling",
+        {
+            "schema": "joat.g2-diagnostic.v2",
+            "events": [
+                {
+                    "sequence": 1, "recordedAtMs": 100,
+                    "type": "navigation_cue", "cue": "destination", "outcome": "success",
+                },
+                {
+                    "sequence": 2, "recordedAtMs": 200,
+                    "type": "navigation_location", "sampleSequence": 1,
+                    "lifecycle": "foreground", "fields": 0, "cadence": "first",
+                    "accuracy": "lte10", "timestampAge": "fresh",
+                    "displacement": "first", "headingDelta": "unavailable",
+                },
+            ],
+        },
+    )
+
+    assert summary["receiptResult"] == "inconclusive"
+    assert summary["lensVideoMarkers"] == [{"name": "start", "recordedAtMs": 100}]
+
+
+def test_navigation_field_run_summary_writes_separate_owner_only_output(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    receipt = tmp_path / "normal-joat-receipt.json"
+    receipt.write_text(json.dumps({
+        "schema": "joat.g2-diagnostic.v2",
+        "events": [{
+            "sequence": 1, "recordedAtMs": 100,
+            "type": "navigation_cue", "cue": "destination", "outcome": "success",
+        }],
+    }))
+    summary_path = tmp_path / "walking-field-run.json"
+
+    summary = write_navigation_field_run_summary(
+        mode="walking", receipt_path=receipt, out=summary_path,
+    )
+
+    assert json.loads(summary_path.read_text()) == summary
+    assert summary_path.stat().st_mode & 0o077 == 0
+    with pytest.raises(FileExistsError):
+        write_navigation_field_run_summary(
+            mode="walking", receipt_path=receipt, out=summary_path,
+        )
 
 
 def test_failed_high_profile_is_a_failure_even_if_no_sample_arrives() -> None:
