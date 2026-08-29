@@ -129,20 +129,17 @@ def project_planning(
     entries_by_day: dict[date, list[PlanningEntry]] = {day: [] for day in range_days}
 
     for item in events:
-        entry = _event_entry(item, zone)
-        if entry is None:
-            continue
-        entry_day = entry.sort_at.date()
-        if lower <= entry_day <= upper:
-            entries_by_day[entry_day].append(entry)
+        for entry_day, event_entry in _event_entries(item, zone):
+            if lower <= entry_day <= upper:
+                entries_by_day[entry_day].append(event_entry)
 
     for item in reminders:
-        entry = _reminder_entry(item, zone)
-        if entry is None:
+        reminder_entry = _reminder_entry(item, zone)
+        if reminder_entry is None:
             continue
-        entry_day = entry.sort_at.date()
+        entry_day = reminder_entry.sort_at.date()
         if lower <= entry_day <= upper:
-            entries_by_day[entry_day].append(entry)
+            entries_by_day[entry_day].append(reminder_entry)
 
     days = tuple(
         PlanningDay(
@@ -260,20 +257,53 @@ def _title_for_scope(
     return f"PLAN · {start.strftime('%b').upper()} {start.day}–{end.strftime('%b').upper()} {end.day}"
 
 
-def _event_entry(item: dict[str, Any], zone: tzinfo) -> PlanningEntry | None:
+def _event_entries(item: dict[str, Any], zone: tzinfo) -> tuple[tuple[date, PlanningEntry], ...]:
+    """Project a timed or all-day event into every local day it overlaps."""
+
     start = item.get("start_unix_ms")
     native_identifier = item.get("calendar_item_identifier")
     if not isinstance(start, (int, float)) or not isinstance(native_identifier, str) or not native_identifier:
-        return None
-    local = datetime.fromtimestamp(start / 1_000, zone)
-    is_all_day = item.get("is_all_day") is True
-    return PlanningEntry(
-        kind="event",
-        native_identifier=native_identifier,
-        title=_title(item),
-        time_label="ALL DAY" if is_all_day else local.strftime("%H:%M"),
-        sort_at=datetime.combine(local.date(), time.min, zone) if is_all_day else local,
+        return ()
+    starts_at = datetime.fromtimestamp(start / 1_000, zone)
+    end = item.get("end_unix_ms")
+    ends_at = (
+        datetime.fromtimestamp(end / 1_000, zone)
+        if isinstance(end, (int, float))
+        else starts_at
     )
+    if ends_at < starts_at:
+        ends_at = starts_at
+    is_all_day = item.get("is_all_day") is True
+    first_day = starts_at.date()
+    # EventKit end dates are exclusive.  An event ending exactly at midnight
+    # therefore belongs to the preceding day, not a phantom zero-length next
+    # day occurrence.
+    final_day = (ends_at - timedelta(microseconds=1)).date() if ends_at > starts_at else first_day
+    entries: list[tuple[date, PlanningEntry]] = []
+    current_day = first_day
+    while current_day <= final_day:
+        begins_here = current_day == first_day
+        time_label = (
+            "ALL DAY"
+            if is_all_day
+            else starts_at.strftime("%H:%M")
+            if begins_here
+            else "CONTINUES"
+        )
+        sort_at = (
+            datetime.combine(current_day, time.min, tzinfo=zone)
+            if is_all_day or not begins_here
+            else starts_at
+        )
+        entries.append((current_day, PlanningEntry(
+            kind="event",
+            native_identifier=native_identifier,
+            title=_title(item),
+            time_label=time_label,
+            sort_at=sort_at,
+        )))
+        current_day += timedelta(days=1)
+    return tuple(entries)
 
 
 def _reminder_entry(item: dict[str, Any], zone: tzinfo) -> PlanningEntry | None:
