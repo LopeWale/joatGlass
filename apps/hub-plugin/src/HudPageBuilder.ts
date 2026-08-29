@@ -170,22 +170,7 @@ export class HudPageBuilder {
     });
   }
 
-  /**
-   * Conservative one-shot startup page.
-   *
-   * Contextual menus and the four-image visual surface are enhancements, not
-   * boot requirements. Keeping both off the one-shot create call gives older
-   * packaged hosts a page they can always adopt before recoverable rebuilds
-   * negotiate the richer surface.
-   */
-  startup(): CreateStartUpPageContainer {
-    return new CreateStartUpPageContainer({
-      containerTotalNum: 1,
-      textObject: [this.minimalStartupText()],
-    });
-  }
-
-  /** Same minimal visible page for a reloaded host session. */
+  /** The known-visible fallback page after a host rejects the visual startup. */
   compatibilityLayout(): RebuildPageContainer {
     return new RebuildPageContainer({
       containerTotalNum: 1,

@@ -6,14 +6,14 @@ export type HudPageSurface = 'visual' | 'text' | 'minimal';
 export type HudFallbackSurface = Exclude<HudPageSurface, 'visual'>;
 
 export interface HudPageBootResult {
-  surface: HudFallbackSurface;
+  surface: HudPageSurface;
   contextualMenu: boolean;
 }
 
 type HudPageBootClient = Pick<BridgeClient, 'start' | 'require'>;
 type HudPageBootLayouts = Pick<
   HudPageBuilder,
-  | 'startup'
+  | 'visualStartup'
   | 'compatibilityLayout'
   | 'dashboardCompatibilityLayout'
   | 'defaultLayout'
@@ -40,20 +40,22 @@ function observe(observer: ((outcome: boolean) => void) | undefined, outcome: bo
 }
 
 /**
- * Spend the host's one-shot startup call on the smallest visible text page,
- * then promote to the full text dashboard through recoverable rebuilds.
+ * Use the visual G2 surface as the one-shot startup page. If the native host
+ * rejects it, BridgeClient rebuilds the known-visible text page and this
+ * routine continues through the compatibility path.
  *
- * The desktop simulator accepts JOAT's four-image page at startup, but a
- * packaged iPhone host has returned `invalid` for both create and rebuild.
- * A startup rejection is terminal; an optional-menu rejection is not. The
- * four-image HUD remains the product target and is negotiated after this
- * known-visible baseline so rejection can fall back without a black lens.
+ * This is intentionally not a simulator-only path: the package and simulator
+ * exercise the exact same native-page contract. A startup rejection is not a
+ * black lens; it lands on the durable text page before optional enhancements.
  */
 export async function initializeHudPage(
   client: HudPageBootClient,
   layouts: HudPageBootLayouts,
 ): Promise<HudPageBootResult> {
-  await client.start(layouts.startup(), layouts.compatibilityLayout());
+  const startup = await client.start(layouts.visualStartup(), layouts.compatibilityLayout());
+  if (startup === 'created') {
+    return { surface: 'visual', contextualMenu: false };
+  }
 
   if (!await rebuild(client, layouts.dashboardCompatibilityLayout())) {
     const restored = await rebuild(client, layouts.compatibilityLayout());

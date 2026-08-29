@@ -97,7 +97,14 @@ interface PendingPaint {
   resolve: Array<(painted: boolean) => void>;
 }
 
-/** Split one row-major Gray4 frame into the SDK's four maximum-size images. */
+/**
+ * Split one row-major *unpacked* Gray4 frame into the SDK's four maximum-size
+ * images, then pack two 4-bit pixels into each byte for the native transport.
+ *
+ * The host determines raw format from byte length: 288 × 144 bytes means
+ * Gray8, while 288 × 144 ÷ 2 means packed Gray4. Sending one 0...15 value per
+ * byte is neither representation and is acknowledged without a valid raster.
+ */
 export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
   if (pixels.length !== CANVAS.width * CANVAS.height) {
     throw new Error(`expected ${CANVAS.width * CANVAS.height} Gray4 pixels, got ${pixels.length}`);
@@ -110,12 +117,16 @@ export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
   ] as const;
 
   return definitions.map(({ containerId, x, y }) => {
-    const tile = new Uint8Array(TILE_WIDTH * TILE_HEIGHT);
+    const unpacked = new Uint8Array(TILE_WIDTH * TILE_HEIGHT);
     for (let row = 0; row < TILE_HEIGHT; row += 1) {
       const source = (y + row) * CANVAS.width + x;
-      tile.set(pixels.subarray(source, source + TILE_WIDTH), row * TILE_WIDTH);
+      unpacked.set(pixels.subarray(source, source + TILE_WIDTH), row * TILE_WIDTH);
     }
-    return { containerId, pixels: tile };
+    const packed = new Uint8Array(unpacked.length / 2);
+    for (let source = 0, target = 0; source < unpacked.length; source += 2, target += 1) {
+      packed[target] = ((unpacked[source] ?? 0) << 4) | (unpacked[source + 1] ?? 0);
+    }
+    return { containerId, pixels: packed };
   });
 }
 
@@ -173,7 +184,10 @@ export class HudVisualSurface implements HudFramePainter {
         const result = await this.client.require().updateImageRawData(
           new ImageRawDataUpdate({
             containerID: tile.containerId,
-            imageData: tile.pixels,
+            // The phone bridge is a Dart List<int> boundary.  Keep the
+            // payload as a normal JS array instead of relying on a typed-array
+            // structured-clone conversion that the host does not guarantee.
+            imageData: Array.from(tile.pixels),
           }),
         );
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';

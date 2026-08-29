@@ -28,7 +28,7 @@ describe('BridgeClient.start reload resilience', () => {
     });
     const c = new BridgeClient();
     await c.init();
-    await c.start({} as never, {} as never);
+    await expect(c.start({} as never, {} as never)).resolves.toBe('created');
     expect(rebuild).not.toHaveBeenCalled();
     expect(() => c.assertStarted()).not.toThrow();
   });
@@ -40,7 +40,7 @@ describe('BridgeClient.start reload resilience', () => {
     });
     const c = new BridgeClient();
     await c.init();
-    await c.start({} as never, {} as never);
+    await expect(c.start({} as never, {} as never)).resolves.toBe('recovered');
     expect(() => c.assertStarted()).not.toThrow();
   });
 

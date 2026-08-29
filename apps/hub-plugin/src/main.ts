@@ -213,12 +213,12 @@ async function boot(): Promise<void> {
     }
   });
 
-  // Spend the one-shot create on the conservative text dashboard. Richer
-  // visual/menu surfaces are negotiated through recoverable rebuilds so an
-  // older packaged host can degrade without turning the whole app black.
+  // Create the product's four-tile G2 page first. If the native host rejects
+  // it, initializeHudPage has already rebuilt the durable text fallback.
   const hudBoot = await initializeHudPage(client, layouts);
   const activeLayouts = layouts.withContextualMenu(hudBoot.contextualMenu);
-  if (!hudBoot.contextualMenu) {
+  const fallbackSurface = hudBoot.surface === 'visual' ? 'text' : hudBoot.surface;
+  if (hudBoot.surface !== 'visual' && !hudBoot.contextualMenu) {
     console.warn(
       '[joat] HUD compatibility mode: text, contextual menu off',
     );
@@ -228,21 +228,23 @@ async function boot(): Promise<void> {
   // first complete frame must both acknowledge before selection; otherwise
   // restore the durable text compatibility page instead of black-screening.
   const firstLight = await selectHudFirstLight({
-    activateSurface: () => activateVisualHudPage(
-      client,
-      activeLayouts,
-      hudBoot.surface,
-      (accepted) => firstLightReceipt.push({
-        type: 'hud_surface',
-        stage: 'visual_rebuild',
-        surface: 'visual',
-        outcome: accepted ? 'success' : 'failed',
-      }),
-    ),
+    activateSurface: () => hudBoot.surface === 'visual'
+      ? Promise.resolve('visual' as const)
+      : activateVisualHudPage(
+        client,
+        activeLayouts,
+        fallbackSurface,
+        (accepted) => firstLightReceipt.push({
+          type: 'hud_surface',
+          stage: 'visual_rebuild',
+          surface: 'visual',
+          outcome: accepted ? 'success' : 'failed',
+        }),
+      ),
     restoreFallback: () => restoreCompatibleHudPage(
       client,
       activeLayouts,
-      hudBoot.surface,
+      fallbackSurface,
     ),
     restoreMinimal: () => restoreMinimalHudPage(client, activeLayouts),
     createVisual: () => new HudPresenter(

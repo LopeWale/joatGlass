@@ -39,7 +39,6 @@ function containers(page: Page) {
 
 const builder = new HudPageBuilder();
 const LAYOUTS: ReadonlyArray<[string, Page]> = [
-  ['startup', builder.startup() as Page],
   ['compatibility', builder.compatibilityLayout() as Page],
   ['dashboard-compatibility', builder.dashboardCompatibilityLayout() as Page],
   ['default', builder.defaultLayout() as Page],
@@ -58,14 +57,17 @@ describe('HudPageBuilder invariants', () => {
     expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
   });
 
-  it('makes the one-shot startup a single visible container with no optional features', () => {
-    const startup = builder.startup() as Page;
-    expect(startup.containerTotalNum).toBe(1);
+  it('makes the one-shot startup the real four-tile G2 surface', () => {
+    const startup = builder.visualStartup() as Page;
+    expect(startup.containerTotalNum).toBe(5);
     expect(startup.menuObject).toBeUndefined();
-    expect(startup.imageObject).toBeUndefined();
-    expect(startup.listObject).toBeUndefined();
+    expect(startup.imageObject).toHaveLength(4);
     expect(startup.textObject).toHaveLength(1);
-    expect(startup.textObject?.[0]?.content?.trim()).not.toBe('');
+    expect(startup.textObject?.[0]).toMatchObject({
+      isEventCapture: 1,
+      content: '',
+      textColor: 0,
+    });
   });
 
   it('makes menu-free compatibility durable across every later rebuild shape', () => {

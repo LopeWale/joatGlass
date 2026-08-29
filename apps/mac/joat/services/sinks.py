@@ -57,6 +57,18 @@ class HudSink:
             "no_tools_checked": False,
         }
 
+    @staticmethod
+    def _display_speaker(label: str) -> str:
+        """Keep a compact participant name while retaining live turn context."""
+        name, separator, remainder = label.partition(" (")
+        if not separator:
+            return label[:64]
+        closing = remainder.find(")")
+        if closing < 0:
+            return name[:64]
+        suffix = remainder[closing + 1:].strip()
+        return f"{name} {suffix}"[:64] if suffix else name[:64]
+
     async def _paint(self, state: str) -> None:
         terminal = self._terminal_status()
         await self._hud.show_brainstorm(BrainstormHudView(
@@ -64,7 +76,7 @@ class HudSink:
             state=state,
             topic=self._topic,
             collaborators=[speaker.split(" (")[0][:48] for speaker in self._speakers[:3]],
-            active_speaker=self._speaker.split(" (")[0][:64],
+            active_speaker=self._display_speaker(self._speaker),
             activity=self._activity[:180],
             terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),

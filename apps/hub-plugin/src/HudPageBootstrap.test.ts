@@ -7,16 +7,18 @@ import {
 
 type RebuildOutcome = boolean | Error;
 
-function harness(rebuildResults: RebuildOutcome[]) {
+function harness(
+  rebuildResults: RebuildOutcome[],
+  startup: 'created' | 'recovered' = 'recovered',
+) {
   const pages = {
-    startup: { name: 'minimal-visible-startup' },
     minimal: { name: 'minimal-visible-rebuild' },
     dashboard: { name: 'text-dashboard-without-menu' },
     default: { name: 'text-dashboard-with-menu' },
     visual: { name: 'visual-page' },
   };
   const layouts = {
-    startup: vi.fn(() => pages.startup),
+    visualStartup: vi.fn(() => pages.visual),
     compatibilityLayout: vi.fn(() => pages.minimal),
     dashboardCompatibilityLayout: vi.fn(() => pages.dashboard),
     defaultLayout: vi.fn(() => pages.default),
@@ -28,14 +30,26 @@ function harness(rebuildResults: RebuildOutcome[]) {
     return outcome;
   });
   const client = {
-    start: vi.fn(async () => {}),
+    start: vi.fn(async () => startup),
     require: vi.fn(() => ({ rebuildPageContainer })),
   };
   return { client, layouts, pages, rebuildPageContainer };
 }
 
 describe('initializeHudPage', () => {
-  it('spends the one-shot create on a visible minimal page before promoting to the text dashboard', async () => {
+  it('creates the four-tile visual page during the one-shot startup', async () => {
+    const { client, layouts, pages, rebuildPageContainer } = harness([], 'created');
+
+    await expect(initializeHudPage(client as never, layouts as never)).resolves.toEqual({
+      surface: 'visual',
+      contextualMenu: false,
+    });
+
+    expect(client.start).toHaveBeenCalledWith(pages.visual, pages.minimal);
+    expect(rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
+  it('continues from text recovery when the one-shot visual page is rejected', async () => {
     const { client, layouts, pages, rebuildPageContainer } = harness([true, true]);
 
     await expect(initializeHudPage(client as never, layouts as never)).resolves.toEqual({
@@ -43,7 +57,7 @@ describe('initializeHudPage', () => {
       contextualMenu: true,
     });
 
-    expect(client.start).toHaveBeenCalledWith(pages.startup, pages.minimal);
+    expect(client.start).toHaveBeenCalledWith(pages.visual, pages.minimal);
     expect(rebuildPageContainer).toHaveBeenNthCalledWith(1, pages.dashboard);
     expect(rebuildPageContainer).toHaveBeenNthCalledWith(2, pages.default);
   });
@@ -92,12 +106,12 @@ describe('initializeHudPage', () => {
       .rejects.toThrow('minimal page restoration also failed');
   });
 
-  it('does not rebuild when the minimal one-shot startup itself fails', async () => {
+  it('does not rebuild when the visual one-shot startup and its text fallback both fail', async () => {
     const { client, layouts, rebuildPageContainer } = harness([true]);
-    client.start.mockRejectedValueOnce(new Error('minimal startup failed'));
+    client.start.mockRejectedValueOnce(new Error('visual startup failed'));
 
     await expect(initializeHudPage(client as never, layouts as never))
-      .rejects.toThrow('minimal startup failed');
+      .rejects.toThrow('visual startup failed');
     expect(rebuildPageContainer).not.toHaveBeenCalled();
   });
 });
