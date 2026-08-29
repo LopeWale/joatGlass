@@ -10,7 +10,7 @@ import {
 import { ContainerId } from './types';
 
 describe('splitGray4Tiles', () => {
-  it('maps the 576x288 canvas into four ordered 288x144 SDK images', () => {
+  it('maps the canvas into four ordered packed-Gray4 SDK images', () => {
     const pixels = new Uint8Array(576 * 288);
     pixels[0] = 1;
     pixels[287] = 2;
@@ -25,16 +25,44 @@ describe('splitGray4Tiles', () => {
       ContainerId.VisualBottomLeft,
       ContainerId.VisualBottomRight,
     ]);
-    expect(tiles.every((tile) => tile.pixels.length === 288 * 144)).toBe(true);
-    expect(tiles[0]?.pixels[0]).toBe(1);
-    expect(tiles[0]?.pixels[287]).toBe(2);
-    expect(tiles[1]?.pixels[0]).toBe(3);
-    expect(tiles[2]?.pixels[0]).toBe(4);
-    expect(tiles[3]?.pixels[0]).toBe(5);
+    expect(tiles.every((tile) => tile.pixels.length === 288 * 144 / 2)).toBe(true);
+    expect(tiles[0]?.pixels[0]).toBe(0x10);
+    expect(tiles[0]?.pixels[143]).toBe(0x02);
+    expect(tiles[1]?.pixels[0]).toBe(0x30);
+    expect(tiles[2]?.pixels[0]).toBe(0x40);
+    expect(tiles[3]?.pixels[0]).toBe(0x50);
   });
 });
 
 describe('HudVisualSurface', () => {
+  it('normalizes raster bytes to the host List<int> representation', async () => {
+    const payloads: unknown[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async (update: { imageData?: unknown }) => {
+          payloads.push(update.imageData);
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([0, 3, 10, 15]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([1]) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([2]) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
+      ],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+
+    await new HudVisualSurface(client, renderer).paint(frame);
+
+    expect(payloads).toEqual([[0, 3, 10, 15], [1], [2], [4]]);
+  });
+
   it('awaits all four image updates serially', async () => {
     let active = 0;
     let maxActive = 0;

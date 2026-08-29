@@ -263,6 +263,28 @@ describe('CapabilityMenu', () => {
     });
   });
 
+  it('restores the native Reminders collection through its Tasks capability after a due screen', async () => {
+    const { menu, lists, sent, operations } = rig();
+    expect(await menu.presentProductivity({
+      domain: 'reminders',
+      phase: 'due',
+      title: 'Buy filters',
+      primary: 'Due now',
+      secondary: 'This reminder is still incomplete.',
+      hint: 'left x2 Reminders',
+    })).toBe(true);
+    expect(operations).toEqual(['productivity']);
+    expect(menu.handleClick()).toBe(true); // an alarm page cannot write or complete an item
+
+    await menu.toggle();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(lists[0]).toEqual(['Loading recent tasks…']);
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capmenu', selectedIndex: 3, selectedName: 'Tasks' },
+    });
+  });
+
   it('the armed reply instructions cannot be reinterpreted as message rows', async () => {
     const { menu, sent } = rig();
     await menu.toggle();

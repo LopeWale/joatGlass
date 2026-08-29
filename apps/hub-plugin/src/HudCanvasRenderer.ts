@@ -132,6 +132,12 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
   return labels[phase];
 }
 
+export function productivityPhaseProgress(phase: ProductivityHudModel['phase']): number {
+  if (phase === 'saved' || phase === 'completed' || phase === 'due') return 1;
+  if (phase === 'verifying') return 0.45;
+  return 0.18;
+}
+
 interface StatusParts {
   time: string;
   state: string;
@@ -149,9 +155,9 @@ export function hudBrightnessGray(level: number): number {
   return [34, QUIET, CHROME, SUPPORT, BRIGHT][Math.max(0, Math.min(4, Math.round(level)))]!;
 }
 
-/** The canvas uses normal 8-bit color for antialiasing, but the G2 protocol
- * consumes one unpacked 0...15 grayscale value per pixel. Quantizing here is
- * essential: passing 0...255 clips most authored hierarchy to full green. */
+/** The canvas uses normal 8-bit color for antialiasing; its G2 transport is
+ * packed Gray4. Quantize before tile packing so authored hierarchy survives
+ * inside the 16 native grayscale levels. */
 export function gray8ToGray4(value: number): number {
   return Math.max(0, Math.min(15, Math.round(value * 15 / 255)));
 }
@@ -863,9 +869,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
     context.fillRect(36, 230, 504, 3);
-    const progress = model.phase === 'saved' || model.phase === 'due' ? 1
-      : model.phase === 'verifying' ? 0.45
-        : 0.18;
+    const progress = productivityPhaseProgress(model.phase);
     context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
     context.fillRect(36, 230, Math.round(504 * progress), 3);
 

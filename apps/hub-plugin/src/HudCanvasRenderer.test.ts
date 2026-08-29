@@ -8,6 +8,7 @@ import {
   parseHudLabeledValue,
   parseHudListItem,
   productivityPhaseLabel,
+  productivityPhaseProgress,
   resolveHudOverview,
   resolveHudListKind,
   visibleHudListItems,
@@ -93,6 +94,11 @@ describe('productivity HUD state labels', () => {
     expect(productivityPhaseLabel('failed')).toBe('NOT SAVED');
     expect(productivityPhaseLabel('check')).toBe('CHECK REQUIRED');
     expect(productivityPhaseLabel('due')).toBe('DUE NOW');
+    expect(productivityPhaseProgress('saved')).toBe(1);
+    expect(productivityPhaseProgress('completed')).toBe(1);
+    expect(productivityPhaseProgress('due')).toBe(1);
+    expect(productivityPhaseProgress('verifying')).toBe(0.45);
+    expect(productivityPhaseProgress('check')).toBe(0.18);
   });
 });
 

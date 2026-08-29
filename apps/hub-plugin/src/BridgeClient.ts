@@ -5,6 +5,9 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { Unsubscribe } from './types';
 
+/** How the host accepted the one-shot startup request. */
+export type StartupPageResolution = 'created' | 'recovered';
+
 /**
  * Owns the SDK bridge lifecycle and enforces the required call order:
  *   1. waitForEvenAppBridge()
@@ -60,17 +63,17 @@ export class BridgeClient {
   async start(
     container: Parameters<EvenAppBridge['createStartUpPageContainer']>[0],
     rebuild?: Parameters<EvenAppBridge['rebuildPageContainer']>[0],
-  ): Promise<void> {
+  ): Promise<StartupPageResolution> {
     if (this.started) throw new Error('createStartUpPageContainer already called (one-shot)');
     const result = await this.require().createStartUpPageContainer(container);
     if (result === StartUpPageCreateResult.success) {
       this.started = true;
-      return;
+      return 'created';
     }
     if (result === StartUpPageCreateResult.invalid && rebuild !== undefined) {
       if (await this.require().rebuildPageContainer(rebuild)) {
         this.started = true;
-        return;
+        return 'recovered';
       }
     }
     throw new Error(`startup page failed: ${StartUpPageCreateResult[result] ?? result}`);

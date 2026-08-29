@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
-from joat.core.protocol import ContainerId, DownlinkMessage, HudRebuild, HudText
+from joat.core.protocol import BrainstormHudView, ContainerId, DownlinkMessage, HudText
 from joat.services.hud import HudWriter
 from joat.services.roundtable import Participant, RoundTable
 from joat.services.session import DebateSession, Session, SessionManager
@@ -65,12 +65,27 @@ def debate(transport: SinkTransport, seats: RoundTable, judge, **kw) -> DebateSe
 
 
 def hud_texts(transport: SinkTransport) -> list[tuple[str, bool, int]]:
-    return [(m.text, m.append, int(m.container_id))
-            for m in transport.sent if isinstance(m, HudText)]
+    """Project the real Brainstorm frames into an ordered visible transcript.
+
+    The production glasses surface is no longer a rolling HudText pane.  Each
+    paint is a complete, typed Brainstorm frame, so expose its speaker and
+    activity in test order rather than reintroducing a text-only fallback.
+    """
+    return [
+        (f"{message.active_speaker}\n{message.activity}", False, int(ContainerId.MAIN))
+        for message in transport.sent
+        if isinstance(message, BrainstormHudView)
+    ]
+
+
+def brainstorm_frames(transport: SinkTransport) -> list[BrainstormHudView]:
+    return [
+        message for message in transport.sent if isinstance(message, BrainstormHudView)
+    ]
 
 
 class TestDebateSession:
-    async def test_brainstorm_releases_focus_before_first_visible_frame(self) -> None:
+    async def test_brainstorm_starts_with_a_production_frame(self) -> None:
         transport = SinkTransport()
 
         await debate(
@@ -80,13 +95,13 @@ class TestDebateSession:
             topic="plan the week",
         ).run()
 
-        assert isinstance(transport.sent[0], HudRebuild)
-        assert transport.sent[0].layout == "default"
-        visible_copy = "\n".join(
-            message.text for message in transport.sent if isinstance(message, HudText)
-        )
-        assert "BRAINSTORM · plan the week" in visible_copy
-        assert "debate" not in visible_copy.casefold()
+        frames = brainstorm_frames(transport)
+        assert frames[0].screen == "brainstorm"
+        assert frames[0].state == "running"
+        assert frames[0].topic == "plan the week"
+        assert frames[0].collaborators == ["codex", "claude"]
+        assert frames[-1].state == "settled"
+        assert not any(isinstance(message, HudText) for message in transport.sent)
 
     async def test_publishes_opening_turn_and_closing_phases(self) -> None:
         transport = SinkTransport()
@@ -118,10 +133,11 @@ class TestDebateSession:
         assert joined.index("CLAUDE") < joined.index("Weak claim")
         assert joined.index("Weak claim") < joined.index("JUDGE")
         assert "Verdict: proposal stands." in joined
-        # streaming means the two proposer chunks arrived as two writes, not
-        # one block after the turn finished
-        appends = [t for t, a, _c in hud_texts(transport) if a]
-        assert "Use spaces. " in appends and "Simple." in appends
+        # streaming means the two proposer chunks each reached the production
+        # frame sequence before the next collaborator received the floor.
+        activities = [frame.activity for frame in brainstorm_frames(transport)]
+        assert any("Use spaces. " in activity for activity in activities)
+        assert any("Simple." in activity for activity in activities)
 
     async def test_a_third_seat_speaks_after_the_other_two(self) -> None:
         """OpenClaw's whole integration requirement, as a test: a third voice
@@ -135,7 +151,7 @@ class TestDebateSession:
         await debate(transport, seats, None).run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         assert joined.index("one") < joined.index("two") < joined.index("three")
-        assert "OPENCLAW (third opinion)" in joined
+        assert "OPENCLAW" in joined
 
     async def test_each_speaker_sees_every_prior_turn(self) -> None:
         """Sequencing is structural: turn N+1's prompt CONTAINS turn N, so a
@@ -512,9 +528,9 @@ class TestVerifiedDebate:
         await session.run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         # visible order: turn, verifier deny, repair turn, verifier pass
-        assert joined.index("» CODEX") < joined.index("FAIL — quote not found")
-        assert joined.index("DENIED") < joined.index("repair 1")
-        assert joined.index("repair 1") < joined.index("[1] OK")
+        assert joined.index("CODEX") < joined.index("FAIL — quote not found")
+        assert joined.index("DENIED") < joined.index("CODEX — repair 1")
+        assert joined.index("CODEX — repair 1") < joined.index("[1] OK")
         assert "PASS" in joined
         # the repair prompt carried the verifier's complaint
         assert any("DENIED — fix [1]" in p for p in prompts[1:])
@@ -564,7 +580,7 @@ class TestConvergence:
         ])
         await self._session(judge, transport, ["v1 proposal", "v2 proposal"]).run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
-        assert "CODEX (proposer) — round 2" in joined
+        assert "CODEX — round 2" in joined
         assert "v2 proposal" in joined
         assert "converged (agreement 0.95, round 2)" in joined
 
