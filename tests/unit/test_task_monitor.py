@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import joat.persistence.store as store_module
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.store import DurableStore
 from joat.persistence.tasks import TaskOccurrenceConflict, TaskOccurrenceStore
-from joat.services.task_monitor import TaskMonitor
+from joat.services.task_monitor import (
+    TaskMonitor,
+    evaluate_reminder_occurrence,
+    reminder_due_hud_view,
+)
 
 
 def action(journal: ActionJournal, *, now_us: int = 10) -> str:
@@ -36,6 +41,67 @@ def register(store: DurableStore, *, due_unix_ms: int = 1_000):
         now_us=10,
     )
     return occurrences, occurrence
+
+
+class ReminderEvaluationBridge:
+    def __init__(
+        self,
+        *,
+        reminder: dict[str, object] | None,
+        list_generation: int = 7,
+        query_generation: int = 7,
+    ) -> None:
+        self.reminder = reminder
+        self.list_generation = list_generation
+        self.query_generation = query_generation
+
+    async def call(self, method: str, body=None):  # type: ignore[no-untyped-def]
+        del body
+        if method == "reminders.listContainers":
+            return SimpleNamespace(
+                store_instance_id="store-A",
+                store_generation=self.list_generation,
+                result=[{"calendar_identifier": "list-1"}],
+            )
+        if method == "reminders.query":
+            return SimpleNamespace(
+                store_instance_id="store-A",
+                store_generation=self.query_generation,
+                result=[] if self.reminder is None else [self.reminder],
+            )
+        raise AssertionError(f"unexpected native call: {method}")
+
+
+def test_reminder_due_hud_view_is_the_single_read_only_projection() -> None:
+    view = reminder_due_hud_view("!! Take medicine · Reminder\nDue now")
+
+    assert (view.domain, view.phase, view.title) == ("reminders", "due", "Take medicine")
+    assert (view.primary, view.secondary, view.hint) == (
+        "Due now",
+        "This reminder is still incomplete.",
+        "left x2 Reminders",
+    )
+
+
+async def test_native_reminder_evaluation_is_exact_and_fail_quiet(tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        _, occurrence = register(store)
+        complete = ReminderEvaluationBridge(
+            reminder={"calendar_item_identifier": "eventkit-1", "is_completed": True},
+        )
+        incomplete = ReminderEvaluationBridge(
+            reminder={"calendar_item_identifier": "eventkit-1", "is_completed": False},
+        )
+        missing = ReminderEvaluationBridge(reminder=None)
+        stale = ReminderEvaluationBridge(
+            reminder={"calendar_item_identifier": "eventkit-1", "is_completed": False},
+            query_generation=8,
+        )
+
+        assert await evaluate_reminder_occurrence(occurrence, complete) is False  # type: ignore[arg-type]
+        assert await evaluate_reminder_occurrence(occurrence, incomplete) is True  # type: ignore[arg-type]
+        assert await evaluate_reminder_occurrence(occurrence, missing) is None  # type: ignore[arg-type]
+        assert await evaluate_reminder_occurrence(occurrence, stale) is None  # type: ignore[arg-type]
 
 
 async def test_restart_catches_up_due_once_without_duplicate(tmp_path: Path) -> None:

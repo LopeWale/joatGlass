@@ -53,6 +53,11 @@ from joat.persistence.store import DurableStore
 from joat.persistence.tasks import TaskOccurrenceStore
 from joat.services.g2_diagnostics import G2DiagnosticStore
 from joat.services.productivity_actions import ProductivityActionController
+from joat.services.task_monitor import (
+    TaskMonitor,
+    evaluate_reminder_occurrence,
+    reminder_due_hud_view,
+)
 
 log = logging.getLogger("joat.simulator_productivity_native_acceptance")
 
@@ -1664,6 +1669,26 @@ async def _drive_confirmed_command(
     }
 
 
+async def _run_due_monitor_at_native_due(
+    monitor: TaskMonitor,
+    due: datetime,
+) -> int:
+    """Wait for real wall-clock due time before exercising the monitor.
+
+    Passing a synthetic future timestamp to ``run_due_once`` would produce a
+    nice-looking card before the Reminder is actually due.  This acceptance
+    path intentionally waits for the native alarm boundary instead.
+    """
+
+    delay_s = due.timestamp() - time.time()
+    if delay_s > 0:
+        await asyncio.sleep(delay_s)
+    return await monitor.run_due_once(
+        now_unix_ms=int(time.time() * 1_000),
+        now_us=time.time_ns() // 1_000,
+    )
+
+
 async def run(args: argparse.Namespace) -> tuple[int, Path]:
     try:
         zone = ZoneInfo(args.zone)
@@ -1704,6 +1729,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
         "simulator": {},
         "confirmations": [],
         "native_readback": {},
+        "due_monitor": {"required": include_reminder, "delivered": False},
         "alarm_delivery": {"observed": False},
         "durable_actions": [],
         "cleanup": {
@@ -1742,6 +1768,8 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
     event_identity: NativeItemIdentity | None = None
     reminder_identity: NativeItemIdentity | None = None
     notification_preflight: NotificationPreflightEvidence | None = None
+    alarm_task: asyncio.Task[AlarmDeliveryEvidence] | None = None
+    due_monitor_task: asyncio.Task[int] | None = None
     exit_code = 1
     try:
         if include_reminder:
@@ -1837,11 +1865,12 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 # Mac app, never the retired generic action-list fallback.
                 await gateway.send(view)
 
+            occurrences = TaskOccurrenceStore(store)
             controller = ProductivityActionController(
                 bridge,
                 gateway.request_confirmation,
                 journal,
-                TaskOccurrenceStore(store),
+                occurrences,
                 publish_status=publish_status,
             )
             await gateway.start()
@@ -1984,15 +2013,51 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             )
 
             if include_reminder:
-                try:
-                    alarm = await _wait_for_alarm(
-                        args.notification_feed,
-                        offset=notification_offset,
-                        feed_identity=notification_feed_identity,
-                        title=titles.reminder,
-                        due=schedule.reminder_due,
-                        timeout_s=args.alarm_timeout_seconds,
+                async def deliver_due_alert(card: str) -> None:
+                    # Use the same pure projection as the running Mac app;
+                    # a textual card or generic action receipt would not
+                    # establish that the wearer sees the real due surface.
+                    await gateway.send(reminder_due_hud_view(card))
+
+                due_monitor = TaskMonitor(
+                    occurrences,
+                    deliver_due_alert,
+                    evaluate=lambda occurrence: evaluate_reminder_occurrence(
+                        occurrence,
+                        bridge,
+                    ),
+                )
+                alarm_task = asyncio.create_task(_wait_for_alarm(
+                    args.notification_feed,
+                    offset=notification_offset,
+                    feed_identity=notification_feed_identity,
+                    title=titles.reminder,
+                    due=schedule.reminder_due,
+                    timeout_s=args.alarm_timeout_seconds,
+                ))
+                due_monitor_task = asyncio.create_task(_run_due_monitor_at_native_due(
+                    due_monitor,
+                    schedule.reminder_due,
+                ))
+                due_delivery_count = await due_monitor_task
+                if due_delivery_count != 1:
+                    raise AcceptanceFailed(
+                        "reminder_due_monitor_not_delivered",
+                        "the production monitor did not deliver one due reminder card",
                     )
+                due_screenshot_digest, due_preview_digest = await _capture_screenshot(
+                    automation_base,
+                    evidence_dir / "reminder-due.png",
+                )
+                receipt["due_monitor"] = {
+                    "required": True,
+                    "delivered": True,
+                    "delivery_count": due_delivery_count,
+                    "screenshot_digest": due_screenshot_digest,
+                    "screenshot_preview_digest": due_preview_digest,
+                }
+                try:
+                    alarm = await alarm_task
                 except AcceptanceBlocked as exc:
                     if exc.code != "reminder_alarm_not_observed":
                         raise
@@ -2055,6 +2120,13 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
         exit_code = 1
     finally:
         cleanup_error: str | None = None
+        for task in (alarm_task, due_monitor_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (alarm_task, due_monitor_task) if task is not None),
+            return_exceptions=True,
+        )
         if wrote_native:
             if schedule is None:
                 cleanup_error = "native_cleanup_schedule_missing"
