@@ -23,7 +23,7 @@ from typing import Any
 
 from ..channels.cards import CardLog
 from ..channels.imessage import IMessageStore, MessageThread
-from ..core.protocol import HudList, InputEvent
+from ..core.protocol import BrainstormHudView, HudList, InputEvent
 from ..core.interfaces import GlassesTransport
 from ..native.bridge import NativeBridgeClient, NativeBridgeError, NativeBridgeUnavailable
 from ..persistence.actions import ActionActivity, ActionJournal
@@ -117,13 +117,9 @@ class CapabilityRouter:
                 # Both spellings: a wearer's installed plugin build may still send
                 # "Debate", and a rename must not make the menu row inert.
                 case "Brainstorm" | "Debate":
-                    await self._show_focus(
-                        "BRAINSTORM",
-                        [
-                            'Say: "JOAT, brainstorm <question>"',
-                            "Ready collaborators answer · you route turns",
-                        ],
-                    )
+                    await self._show_brainstorm()
+                case "Agent Terminal":
+                    await self._show_agent_terminal()
                 case "Calendar":
                     await self._show_calendar()
                 case "Tasks" | "Reminders":
@@ -136,6 +132,37 @@ class CapabilityRouter:
                     log.info("unknown capability requested: %s", name)
         finally:
             self._request_context.reset(token)
+
+    async def _show_brainstorm(self) -> None:
+        """Open the actual visual round-table surface from the glasses menu."""
+        terminal = self._status.agent_terminal_projection()
+        await self._hud.show_brainstorm(BrainstormHudView(
+            screen="brainstorm",
+            state="ready",
+            topic="Ready for a question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity='Say “JOAT, brainstorm …” to begin.',
+            terminal_state=str(terminal["state"]),
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        ))
+
+    async def _show_agent_terminal(self) -> None:
+        """Expose Hermes readiness without leaking an endpoint credential or chat."""
+        terminal = self._status.agent_terminal_projection()
+        state = str(terminal["state"])
+        await self._hud.show_brainstorm(BrainstormHudView(
+            screen="agent_terminal",
+            state=state,
+            topic="Hermes Agent Terminal",
+            collaborators=[],
+            activity="Hermes participates as a Brainstorm collaborator.",
+            terminal_state=state,
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        ))
 
     async def _show_messages(self) -> None:
         if self._messages is None or not self._messages.available:

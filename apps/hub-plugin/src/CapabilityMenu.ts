@@ -2,7 +2,7 @@ import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
-import type { ResumePolicy } from './types';
+import type { ProductivityHudModel, ResumePolicy } from './types';
 
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
@@ -19,7 +19,7 @@ type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
  *   caps/settings/data ──double-tap──▶ home  (double-tap is BACK, always)
  */
 const CAPABILITIES = ['Messages', 'Notifications', 'Calendar', 'Tasks', 'More'] as const;
-const MORE_CAPABILITIES = ['QuickNotes', 'Brainstorm', 'Activity'] as const;
+const MORE_CAPABILITIES = ['QuickNotes', 'Brainstorm', 'Agent Terminal', 'Activity'] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'auto', label: 'Resume mic: instantly' },
@@ -37,12 +37,13 @@ export function isActionLifecycleTitle(title?: string): boolean {
 }
 
 export class CapabilityMenu {
-  private view: 'closed' | 'transition' | 'caps' | 'more' | 'settings' | 'data' = 'closed';
+  private view: 'closed' | 'transition' | 'caps' | 'more' | 'settings' | 'data' | 'productivity' = 'closed';
   private selectedIndex = 0;
   private dataItemCount = 0;
   private dataRowsSelectable = false;
   private pendingTitle?: string;
   private pendingRequestId?: string;
+  private productivityReturn?: 'Calendar' | 'Tasks';
   private transitionId = 0;
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
@@ -153,6 +154,26 @@ export class CapabilityMenu {
     return true;
   }
 
+  /** A real Calendar/Reminders outcome screen. Back reloads its originating
+   * collection so a saved object cannot strand the wearer on stale rows. */
+  async presentProductivity(productivity: ProductivityHudModel): Promise<boolean> {
+    const transition = this.beginTransition();
+    this.dataRowsSelectable = false;
+    this.dataItemCount = 0;
+    const shown = await this.hud.showProductivity(productivity);
+    if (!this.isCurrentTransition(transition)) return true;
+    if (!shown) {
+      await this.close();
+      return true;
+    }
+    this.view = 'productivity';
+    this.productivityReturn = productivity.domain === 'calendar' ? 'Calendar' : 'Tasks';
+    this.pendingTitle = this.productivityReturn.toUpperCase();
+    this.pendingRequestId = undefined;
+    this.selectedIndex = 0;
+    return true;
+  }
+
   /** Left double-tap. Closed: open the capability menu. Anywhere else: BACK
    *  home — one gesture, one meaning, matching the hint line. */
   async toggle(): Promise<void> {
@@ -163,6 +184,9 @@ export class CapabilityMenu {
       if (!this.isCurrentTransition(transition)) return;
       if (shown) this.view = 'caps';
       else await this.close();
+    } else if (this.view === 'productivity' && this.productivityReturn) {
+      const capability = this.productivityReturn;
+      await this.openCapability(capability, capability === 'Calendar' ? 2 : 3);
     } else {
       await this.close();
     }
@@ -171,6 +195,7 @@ export class CapabilityMenu {
   /** Returns true when the event was consumed (a menu view is open). */
   handleList(list: ListEvent): boolean {
     if (this.view === 'closed' || this.view === 'data') return false;
+    if (this.view === 'productivity') return true;
     if (this.view === 'transition') return true;
 
     // `?? 0` on both reads: the protobuf transport omits zero-valued fields,
@@ -188,6 +213,7 @@ export class CapabilityMenu {
    * owns selection movement instead of the firmware List widget. */
   handleScroll(eventType: number): boolean {
     if (this.view === 'closed') return false;
+    if (this.view === 'productivity') return true;
     if (this.view === 'transition') return true;
     const delta = eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
       ? 1
@@ -216,6 +242,7 @@ export class CapabilityMenu {
   /** Right temple/ring click selects the highlighted custom-rendered row. */
   handleClick(): boolean {
     if (this.view === 'closed') return false;
+    if (this.view === 'productivity') return true;
     if (this.view === 'transition') return true;
     if (this.view === 'data') {
       if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
@@ -335,6 +362,7 @@ export class CapabilityMenu {
     this.selectedIndex = 0;
     this.pendingTitle = undefined;
     this.pendingRequestId = undefined;
+    this.productivityReturn = undefined;
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
     // Restore a LIVE home, not a souvenir of the menu — a stale status line

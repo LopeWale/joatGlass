@@ -9,7 +9,17 @@ from __future__ import annotations
 
 import io
 
-from joat.services.sinks import Broadcast, TerminalSink
+from joat.core.protocol import BrainstormHudView
+from joat.services.hud import HudWriter
+from joat.services.sinks import Broadcast, HudSink, TerminalSink
+
+
+class HudTransport:
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    async def send(self, message: object) -> None:
+        self.sent.append(message)
 
 
 class Recorder:
@@ -55,6 +65,31 @@ class TestTerminalSink:
         buf = io.StringIO()
         await TerminalSink(out=buf, use_color=False).turn("CODEX (proposer)")
         assert "\033[" not in buf.getvalue()
+
+
+class TestHudSink:
+    async def test_paints_the_structured_brainstorm_view_not_streamed_overview_text(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(
+            HudWriter(transport),  # type: ignore[arg-type]
+            lambda: {
+                "state": "ready",
+                "reason": "",
+                "endpoint_host": "home-mac.example-tailnet.ts.net",
+                "no_tools_checked": True,
+            },
+        )
+        await sink.open("tabs or spaces", ["codex (proposer)", "openclaw (agent terminal)"])
+        await sink.turn("openclaw (agent terminal)")
+        await sink.chunk("Use tabs with a formatter.")
+        frame = transport.sent[-1]
+        assert isinstance(frame, BrainstormHudView)
+        assert frame.screen == "brainstorm"
+        assert frame.state == "running"
+        assert frame.active_speaker == "openclaw"
+        assert frame.terminal_state == "ready"
+        assert frame.no_tools_checked is True
+        assert "formatter" in frame.activity
 
 
 class TestBroadcast:

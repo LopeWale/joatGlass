@@ -44,3 +44,5 @@ docs/design/**/joat-glasses-dashboard.html
 
 .codex/coordination/*
 !.codex/coordination/project.yaml
+.playwright-mcp
+output/

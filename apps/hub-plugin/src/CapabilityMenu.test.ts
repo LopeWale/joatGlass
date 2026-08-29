@@ -64,6 +64,10 @@ function rig(
       moves.push(delta);
       return true;
     }),
+    showProductivity: vi.fn(async () => {
+      operations.push('productivity');
+      return true;
+    }),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
@@ -138,14 +142,14 @@ describe('CapabilityMenu', () => {
     expect(listOptions[0]?.title).toBe('NOTIFICATIONS');
   });
 
-  it('uses More as a scalable second level for QuickNotes, Brainstorm, and Activity', async () => {
+  it('uses More as a scalable second level for QuickNotes, Brainstorm, Agent Terminal, and Activity', async () => {
     const { menu, sidebars, lists, listOptions, sent } = rig();
     await menu.toggle();
     for (let index = 0; index < 4; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     }
     menu.handleClick();
-    await vi.waitFor(() => expect(sidebars[1]).toEqual(['QuickNotes', 'Brainstorm', 'Activity']));
+    await vi.waitFor(() => expect(sidebars[1]).toEqual(['QuickNotes', 'Brainstorm', 'Agent Terminal', 'Activity']));
     menu.handleClick();
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent quicknotes…']);
@@ -235,6 +239,28 @@ describe('CapabilityMenu', () => {
     expect(await menu.presentLifecycle('ACTION · VERIFYING', rows(1))).toBe(true);
     expect(menu.handleClick()).toBe(true);
     expect(sent).toHaveLength(1);
+  });
+
+  it('restores the originating Calendar collection after a lifecycle screen', async () => {
+    const { menu, lists, sent, operations } = rig();
+    expect(await menu.presentProductivity({
+      domain: 'calendar',
+      phase: 'saved',
+      title: 'Design review',
+      primary: 'Saved and verified',
+      secondary: 'Calendar read-back matched',
+      hint: 'left x2 Calendar',
+    })).toBe(true);
+    expect(operations).toEqual(['productivity']);
+    expect(menu.handleClick()).toBe(true); // lifecycle pages never write
+
+    await menu.toggle();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(lists[0]).toEqual(['Loading recent calendar…']);
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capmenu', selectedIndex: 2, selectedName: 'Calendar' },
+    });
   });
 
   it('the armed reply instructions cannot be reinterpreted as message rows', async () => {

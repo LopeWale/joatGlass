@@ -1,6 +1,6 @@
 import type { HudPresenter } from './HudPresenter';
 import type { ImuMonitor } from './ImuMonitor';
-import { CANVAS, ContainerId } from './types';
+import { CANVAS, ContainerId, type BrainstormHudModel } from './types';
 import type {
   HudFramePainter,
   HudFrameRenderer,
@@ -30,6 +30,59 @@ export const PRODUCTIVITY_VISUAL_STATES = [
 ] as const;
 
 export type ProductivityVisualState = (typeof PRODUCTIVITY_VISUAL_STATES)[number];
+
+export const BRAINSTORM_VISUAL_STATES = [
+  'brainstorm-ready',
+  'brainstorm-live',
+  'agent-terminal-ready',
+  'agent-terminal-blocked',
+] as const;
+
+export type BrainstormVisualState = (typeof BRAINSTORM_VISUAL_STATES)[number];
+
+export function isBrainstormVisualState(value: string | null): value is BrainstormVisualState {
+  return BRAINSTORM_VISUAL_STATES.some((state) => state === value);
+}
+
+export function brainstormVisualFixture(state: BrainstormVisualState): BrainstormHudModel {
+  const terminalReady = {
+    screen: 'agent_terminal' as const,
+    state: 'ready' as const,
+    topic: 'Hermes Agent Terminal',
+    collaborators: [],
+    activity: 'Hermes is available as a Brainstorm collaborator.',
+    endpointHost: 'home-mac.example-tailnet.ts.net',
+    terminalState: 'ready' as const,
+    terminalReason: 'Dedicated JOAT session',
+    noToolsChecked: true,
+  };
+  switch (state) {
+    case 'brainstorm-ready':
+      return {
+        screen: 'brainstorm', state: 'ready', topic: 'How should JOAT plan today?',
+        collaborators: ['Codex · proposer', 'Claude · critic', 'Hermes · terminal'],
+        activity: 'Say “JOAT, brainstorm …” to begin.',
+        terminalState: 'ready', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
+      };
+    case 'brainstorm-live':
+      return {
+        screen: 'brainstorm', state: 'running', topic: 'How should JOAT plan today?',
+        collaborators: ['Codex · proposer', 'Claude · critic', 'Hermes · terminal'],
+        activeSpeaker: 'Hermes · terminal',
+        activity: 'Comparing the proposal against constraints and next actions.',
+        endpointHost: terminalReady.endpointHost,
+        terminalState: 'running', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
+      };
+    case 'agent-terminal-blocked':
+      return {
+        ...terminalReady,
+        state: 'blocked', terminalState: 'blocked', noToolsChecked: false,
+        terminalReason: 'Dedicated session is not ready.',
+      };
+    case 'agent-terminal-ready':
+      return terminalReady;
+  }
+}
 
 export function isProductivityVisualState(
   value: string | null,

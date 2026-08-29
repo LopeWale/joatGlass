@@ -375,6 +375,100 @@ class HudList:
         return message
 
 
+_BRAINSTORM_HUD_STATES = frozenset({
+    "unavailable", "approval_required", "ready", "running", "settled", "blocked",
+})
+_PRODUCTIVITY_HUD_DOMAINS = frozenset({"calendar", "reminders"})
+_PRODUCTIVITY_HUD_PHASES = frozenset({
+    "verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved", "due",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class BrainstormHudView:
+    """Bounded, non-secret state for the four-tile Brainstorm HUD."""
+
+    screen: Literal["brainstorm", "agent_terminal"]
+    state: str
+    topic: str
+    collaborators: list[str]
+    activity: str
+    terminal_state: str
+    active_speaker: str = ""
+    endpoint_host: str = ""
+    terminal_reason: str = ""
+    no_tools_checked: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.screen not in {"brainstorm", "agent_terminal"}:
+            raise ProtocolError("Brainstorm HUD screen is invalid")
+        if self.state not in _BRAINSTORM_HUD_STATES:
+            raise ProtocolError("Brainstorm HUD state is invalid")
+        if self.terminal_state not in _BRAINSTORM_HUD_STATES:
+            raise ProtocolError("Brainstorm terminal state is invalid")
+        if len(self.collaborators) > 3:
+            raise ProtocolError("Brainstorm HUD has too many collaborators")
+        return {
+            "kind": "brainstorm.view",
+            "brainstorm": {
+                "screen": self.screen,
+                "state": self.state,
+                "topic": _brainstorm_text(self.topic, "topic", 96),
+                "collaborators": [
+                    _brainstorm_text(item, "collaborator", 48)
+                    for item in self.collaborators
+                ],
+                "activeSpeaker": _brainstorm_text(
+                    self.active_speaker, "active speaker", 64, allow_empty=True,
+                ),
+                "activity": _brainstorm_text(
+                    self.activity, "activity", 180, allow_empty=True,
+                ),
+                "endpointHost": _brainstorm_text(
+                    self.endpoint_host, "endpoint host", 253, allow_empty=True,
+                ),
+                "terminalState": self.terminal_state,
+                "terminalReason": _brainstorm_text(
+                    self.terminal_reason, "terminal reason", 64, allow_empty=True,
+                ),
+                "noToolsChecked": self.no_tools_checked,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProductivityHudView:
+    """Bounded lifecycle state for one Calendar or Reminders HUD page.
+
+    The preceding ``ConfirmRequest`` is the only interactive authority for a
+    native write. This post-preview view is a safe projection of outcome.
+    """
+
+    domain: Literal["calendar", "reminders"]
+    phase: Literal["verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved", "due"]
+    title: str
+    primary: str
+    secondary: str
+    hint: str
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.domain not in _PRODUCTIVITY_HUD_DOMAINS:
+            raise ProtocolError("Productivity HUD domain is invalid")
+        if self.phase not in _PRODUCTIVITY_HUD_PHASES:
+            raise ProtocolError("Productivity HUD phase is invalid")
+        return {
+            "kind": "productivity.view",
+            "productivity": {
+                "domain": self.domain,
+                "phase": self.phase,
+                "title": _productivity_text(self.title, "title", 72),
+                "primary": _productivity_text(self.primary, "primary", 72),
+                "secondary": _productivity_text(self.secondary, "secondary", 112),
+                "hint": _productivity_text(self.hint, "hint", 46),
+            },
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class AudioControl:
     open: bool
@@ -627,6 +721,8 @@ DownlinkMessage = (
     | HudText
     | HudRebuild
     | HudList
+    | BrainstormHudView
+    | ProductivityHudView
     | AudioControl
     | ImuControl
     | ImuTrace
@@ -661,6 +757,20 @@ def _navigation_identifier(value: Any, name: str, maximum: int = 128) -> str:
         raise ProtocolError(
             f"navigation {name} must be a non-empty string of at most {maximum} characters"
         )
+    return value
+
+
+def _brainstorm_text(
+    value: Any, name: str, maximum: int, *, allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str) or len(value) > maximum or (not allow_empty and not value):
+        raise ProtocolError(f"Brainstorm HUD {name} is invalid")
+    return value
+
+
+def _productivity_text(value: Any, name: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise ProtocolError(f"Productivity HUD {name} is invalid")
     return value
 
 
@@ -870,6 +980,18 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "order": _trace_int(event["order"], "order", minimum=0, maximum=3),
             "containerId": _trace_tile_container(event["containerId"]),
             "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed", "error")),
+        }
+    if event_type == "hud_surface":
+        _trace_shape(event, {"type", "stage", "surface", "outcome"})
+        return {
+            "type": "hud_surface",
+            "stage": _trace_enum(
+                event["stage"], "stage", ("visual_rebuild", "first_frame", "selected"),
+            ),
+            "surface": _trace_enum(
+                event["surface"], "surface", ("visual", "text", "minimal"),
+            ),
+            "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed")),
         }
     if event_type == "self_heal":
         _trace_shape(event, {"type", "surface", "target", "decision", "containerId"})

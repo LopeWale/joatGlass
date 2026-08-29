@@ -267,6 +267,22 @@ describe('NavigationController', () => {
     expect(sent).toEqual([]);
   });
 
+  it('sends a single bound cancel action for the explicit left-temple navigation exit', async () => {
+    const { controller, sent } = harness();
+    await controller.present({
+      kind: 'navigation.view',
+      sessionId: 'nav-1', requestId: 'guidance-1', generation: 9,
+      navigation: navigationVisualFixture('nav-guidance'),
+    });
+
+    expect(controller.handleCancel()).toBe(true);
+    expect(sent).toEqual([{
+      kind: 'navigation.action',
+      sessionId: 'nav-1', requestId: 'guidance-1', generation: 9,
+      action: 'cancel',
+    }]);
+  });
+
   it('clears a session that stops before any route was installed', async () => {
     const { controller } = harness();
     await controller.present({

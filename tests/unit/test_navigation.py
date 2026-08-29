@@ -251,7 +251,7 @@ class TestNavigationSession:
             session_id=origin.session_id, request_id=origin.request_id,
             generation=origin.generation, reason="unavailable",
         ))
-        error = await wait_for(transport, NavigationView, count=3)
+        error = await wait_for(transport, NavigationView, count=4)
         assert isinstance(error, NavigationView)
         assert error.navigation.primary == "Location unavailable"
         assert "foreground" in error.navigation.secondary
@@ -261,6 +261,33 @@ class TestNavigationSession:
         assert retried_origin.request_id != origin.request_id
         session.cancel()
         await task
+
+    async def test_left_temple_cancel_is_honored_while_location_is_pending(self) -> None:
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Cajun Corner", FakeProvider([candidate]), transport,
+            session_id="nav-cancel-locating",
+        )
+        task = asyncio.create_task(session.run())
+
+        destination = await wait_for(transport, NavigationView)
+        assert isinstance(destination, NavigationView)
+        session.accept_action(action(destination, "confirm_destination"))
+        mode = await wait_for(transport, NavigationView, count=2)
+        assert isinstance(mode, NavigationView)
+        session.accept_action(action(mode, "select_mode", "walking"))
+        locating = await wait_for(transport, NavigationView, count=3)
+        assert isinstance(locating, NavigationView)
+        assert locating.navigation.interaction == "none"
+
+        session.accept_action(action(locating, "cancel"))
+        await task
+        assert isinstance(transport.sent[-1], NavigationStop)
 
     async def test_provider_route_must_match_the_selected_mode_and_have_steps(self) -> None:
         candidate = NavigationCandidate(
@@ -286,7 +313,7 @@ class TestNavigationSession:
             generation=origin.generation, latitude=41.9, longitude=-87.65,
         ))
 
-        error = await wait_for(transport, NavigationView, count=3)
+        error = await wait_for(transport, NavigationView, count=5)
         assert isinstance(error, NavigationView)
         assert error.navigation.primary == "Route unavailable"
         session.cancel()
@@ -320,7 +347,7 @@ class TestNavigationSession:
             generation=origin.generation, latitude=41.9, longitude=-87.65,
         ))
 
-        error = await wait_for(transport, NavigationView, count=3)
+        error = await wait_for(transport, NavigationView, count=5)
         assert isinstance(error, NavigationView)
         assert error.navigation.primary == "Route unavailable"
         session.cancel()
@@ -379,13 +406,24 @@ class TestNavigationSession:
             generation=origin_request.generation,
             latitude=41.9, longitude=-87.65, accuracy=6,
         ))
-        preview = await wait_for(transport, NavigationView, count=3)
+        locating = await wait_for(transport, NavigationView, count=3)
+        assert isinstance(locating, NavigationView)
+        assert locating.navigation.view == "uncertain"
+        assert locating.navigation.primary == "Getting your location"
+        assert locating.navigation.interaction == "none"
+
+        preview = await wait_for(transport, NavigationView, count=5)
         assert isinstance(preview, NavigationView)
         assert preview.navigation.view == "preview"
         assert preview.navigation.mode == "walking"
 
         session.accept_action(action(preview, "start"))
         session.accept_action(action(preview, "start"))
+        starting = await wait_for(transport, NavigationView, count=6)
+        assert isinstance(starting, NavigationView)
+        assert starting.navigation.view == "rerouting"
+        assert starting.navigation.primary == "Starting navigation"
+        assert starting.navigation.interaction == "none"
         route = await wait_for(transport, NavigationRoute)
         assert isinstance(route, NavigationRoute)
         assert route.destination_label == "Cajun Corner"
@@ -415,7 +453,7 @@ class TestNavigationSession:
             session_id="nav-test", route_id="route-1", base_revision=1,
             request_id="reroute-1", latitude=41.905, longitude=-87.645,
         ))
-        rerouting = await wait_for(transport, NavigationView, count=4)
+        rerouting = await wait_for(transport, NavigationView, count=7)
         assert isinstance(rerouting, NavigationView)
         assert rerouting.navigation.view == "rerouting"
         await asyncio.sleep(0)
@@ -557,7 +595,7 @@ class TestNavigationSession:
             generation=origin.generation, latitude=41.9, longitude=-87.65,
             accuracy=5,
         ))
-        preview = await wait_for(transport, NavigationView, count=3)
+        preview = await wait_for(transport, NavigationView, count=5)
         assert isinstance(preview, NavigationView)
         session.accept_action(action(preview, "start"))
         installed = await wait_for(transport, NavigationRoute)
@@ -571,7 +609,7 @@ class TestNavigationSession:
             base_revision=installed.revision, request_id="reroute-stale",
             latitude=41.905, longitude=-87.645,
         ))
-        rerouting = await wait_for(transport, NavigationView, count=4)
+        rerouting = await wait_for(transport, NavigationView, count=7)
         assert isinstance(rerouting, NavigationView)
         session.accept_view_ack(NavigationViewAck(
             session_id=rerouting.session_id,

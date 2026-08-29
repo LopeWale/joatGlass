@@ -8,9 +8,9 @@ hashes and state, never native identifiers, notification text, or action
 payloads.
 
 The signed Mac app remains the TCC owner throughout the run.  The harness
-temporarily points its supervised Python engine at a private inert stub so no
-second bridge client or gateway can race the acceptance driver, then restores
-the exact prior repo preference and relaunches normal operation.
+temporarily points its supervised Python engine at a private PID-bound relay;
+only this exact harness process can use the app-authorized native bridge.  It
+then restores the exact prior repo preference and relaunches normal operation.
 EventKit permission prompts remain UI only: if Calendar or Reminders is not at
 full access, this exits before any native write and tells the operator to use
 the app's Connect buttons.
@@ -28,6 +28,7 @@ import re
 import signal
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -45,7 +46,7 @@ from PIL import Image
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.core.pairing import PairingStore
-from joat.core.protocol import AudioControl, HudList
+from joat.core.protocol import AudioControl, ProductivityHudView
 from joat.native.bridge import NativeBridgeClient
 from joat.persistence.actions import ActionJournal
 from joat.persistence.store import DurableStore
@@ -126,6 +127,7 @@ class EngineStubSpec:
 class NotificationPreflightEvidence:
     operator_assertion: str
     diagnostic_focus_active: bool | None
+    diagnostic_consistent: bool | None
     focus_diagnostic_authoritative: bool
     expect_banner: bool
     expect_focus_suppression: bool
@@ -790,20 +792,21 @@ def evaluate_notification_preflight(
             "notification_precondition_unconfirmed",
             "the Reminders presentation condition must be explicitly confirmed",
         )
-    if operator_assertion == "focus-off" and diagnostic_focus_active is not False:
+    if operator_assertion == "focus-off" and diagnostic_focus_active is True:
         raise AcceptanceBlocked(
             "focus_preflight_mismatch",
             "the read-only Focus diagnostic does not match the asserted focus-off condition",
         )
-    if operator_assertion == "focus-suppressed" and diagnostic_focus_active is not True:
-        raise AcceptanceBlocked(
-            "focus_preflight_mismatch",
-            "the read-only Focus diagnostic does not match the asserted focus-suppressed condition",
-        )
     expect_suppression = operator_assertion == "focus-suppressed"
+    diagnostic_consistent = (
+        None
+        if diagnostic_focus_active is None or operator_assertion == "reminders-allowed"
+        else diagnostic_focus_active is expect_suppression
+    )
     return NotificationPreflightEvidence(
         operator_assertion=operator_assertion,
         diagnostic_focus_active=diagnostic_focus_active,
+        diagnostic_consistent=diagnostic_consistent,
         focus_diagnostic_authoritative=False,
         expect_banner=not expect_suppression,
         expect_focus_suppression=expect_suppression,
@@ -1182,26 +1185,25 @@ def _osascript(script: str, *arguments: str) -> int:
     return int(value) if value else 0
 
 
-def _cleanup_calendar_item(
-    script: str,
-    title: str,
-    calendar_identifier: str,
-    external_identifier: str,
-) -> int:
-    return _osascript(script, title, calendar_identifier, external_identifier)
-
-
-def _cleanup_reminder_item(
-    script: str,
-    title: str,
-    list_identifier: str,
-    item_identifier: str,
-) -> int:
-    return _osascript(script, title, list_identifier, item_identifier)
-
-
 def _count_calendar_projection(script: str, reminder_title: str) -> int:
     return _osascript(script, reminder_title)
+
+
+def _wait_for_calendar_projection_absence(
+    script: str,
+    reminder_title: str,
+    *,
+    timeout_s: float = 10.0,
+    poll_interval_s: float = 0.25,
+) -> int:
+    """Allow Calendar's read-only Reminders projection to converge after deletion."""
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = _count_calendar_projection(script, reminder_title)
+        if remaining == 0 or time.monotonic() >= deadline:
+            return remaining
+        time.sleep(poll_interval_s)
 
 
 def _native_app_is_running(name: str) -> bool:
@@ -1250,22 +1252,44 @@ def _quit_native_app(name: str) -> None:
     )
 
 
-def cleanup_test_items(
+async def _delete_native_acceptance_item(
+    bridge: NativeBridgeClient,
+    method: str,
+    body: dict[str, object],
+) -> bool:
+    canonical_body = json.dumps(
+        body,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    response = await bridge.call(
+        method,
+        body,
+        attempt_id=f"acceptance-cleanup-{uuid.uuid4()}",
+        payload_digest=_digest(canonical_body),
+    )
+    return isinstance(response.result, dict) and response.result.get("removed") is True
+
+
+async def cleanup_test_items(
+    bridge: NativeBridgeClient,
     titles: AcceptanceTitles,
     run_id: str,
     *,
+    schedule: AcceptanceSchedule,
     event_identity: NativeItemIdentity | None,
     reminder_identity: NativeItemIdentity | None,
     include_reminder: bool = True,
 ) -> CleanupOutcome:
-    """Delete only identities read back from EventKit; never delete title-wide."""
+    """Delete only exact synthetic identities through the TCC-owning EventKit bridge."""
 
     validate_acceptance_title(titles.event, run_id, kind="event")
     validate_acceptance_title(titles.reminder, run_id, kind="reminder")
     if (
         event_identity is None
         or not event_identity.calendar_identifier
-        or not event_identity.calendar_item_external_identifier
+        or not event_identity.calendar_item_identifier
     ):
         raise AcceptanceSafetyError("cleanup requires the native event identity")
     if include_reminder and (
@@ -1275,46 +1299,6 @@ def cleanup_test_items(
     ):
         raise AcceptanceSafetyError("cleanup requires the native reminder identity")
     started_apps: list[str] = []
-    calendar_script = """
-on run argv
-  set wantedTitle to item 1 of argv
-  set wantedCalendarIdentifier to item 2 of argv
-  set wantedUID to item 3 of argv
-  set removed to 0
-  tell application "Calendar"
-    repeat with targetCalendar in calendars
-      if calendarIdentifier of targetCalendar is wantedCalendarIdentifier then
-        set matches to (every event of targetCalendar whose summary is wantedTitle and uid is wantedUID)
-        repeat with targetEvent in matches
-          delete targetEvent
-          set removed to removed + 1
-        end repeat
-      end if
-    end repeat
-  end tell
-  return removed
-end run
-"""
-    reminders_script = """
-on run argv
-  set wantedTitle to item 1 of argv
-  set wantedListIdentifier to item 2 of argv
-  set wantedItemIdentifier to item 3 of argv
-  set removed to 0
-  tell application "Reminders"
-    repeat with targetList in lists
-      if id of targetList is wantedListIdentifier then
-        set matches to (every reminder of targetList whose name is wantedTitle and id is wantedItemIdentifier)
-        repeat with targetReminder in matches
-          delete targetReminder
-          set removed to removed + 1
-        end repeat
-      end if
-    end repeat
-  end tell
-  return removed
-end run
-"""
     projection_script = """
 on run argv
   set wantedTitle to item 1 of argv
@@ -1328,27 +1312,39 @@ on run argv
 end run
 """
     try:
-        app_names = ("Calendar", "Reminders") if include_reminder else ("Calendar",)
-        for name in app_names:
-            if _ensure_native_app_running(name):
-                started_apps.append(name)
+        if include_reminder and _ensure_native_app_running("Calendar"):
+            started_apps.append("Calendar")
         errors: list[str] = []
         projection_before = 0
         projection_after = 0
         if include_reminder:
             try:
-                projection_before = _count_calendar_projection(
+                projection_before = await asyncio.to_thread(
+                    _count_calendar_projection,
                     projection_script,
                     titles.reminder,
                 )
             except Exception as exc:
                 errors.append(f"calendar_projection_before_{type(exc).__name__}")
         try:
-            calendar_removed_count = _cleanup_calendar_item(
-                calendar_script,
-                titles.event,
-                event_identity.calendar_identifier,
-                cast(str, event_identity.calendar_item_external_identifier),
+            calendar_removed_count = int(
+                await _delete_native_acceptance_item(
+                    bridge,
+                    "acceptance.calendar.delete",
+                    {
+                        "calendar_identifier": event_identity.calendar_identifier,
+                        "calendar_item_identifier": (
+                            event_identity.calendar_item_identifier
+                        ),
+                        "expected_title": titles.event,
+                        "expected_start_unix_ms": int(
+                            schedule.event_start.timestamp() * 1_000
+                        ),
+                        "expected_end_unix_ms": int(
+                            schedule.event_end.timestamp() * 1_000
+                        ),
+                    },
+                )
             )
         except Exception as exc:
             calendar_removed_count = 0
@@ -1356,16 +1352,27 @@ end run
         reminder_removed_count = 0
         if include_reminder and reminder_identity is not None:
             try:
-                reminder_removed_count = _cleanup_reminder_item(
-                    reminders_script,
-                    titles.reminder,
-                    reminder_identity.calendar_identifier,
-                    reminder_identity.calendar_item_identifier,
+                reminder_removed_count = int(
+                    await _delete_native_acceptance_item(
+                        bridge,
+                        "acceptance.reminder.delete",
+                        {
+                            "calendar_identifier": reminder_identity.calendar_identifier,
+                            "calendar_item_identifier": (
+                                reminder_identity.calendar_item_identifier
+                            ),
+                            "expected_title": titles.reminder,
+                            "expected_due_unix_ms": int(
+                                schedule.reminder_due.timestamp() * 1_000
+                            ),
+                        },
+                    )
                 )
             except Exception as exc:
                 errors.append(f"reminder_delete_{type(exc).__name__}")
             try:
-                projection_after = _count_calendar_projection(
+                projection_after = await asyncio.to_thread(
+                    _wait_for_calendar_projection_absence,
                     projection_script,
                     titles.reminder,
                 )
@@ -1427,8 +1434,6 @@ async def _query_exact_items(
 
 def _native_item_identity(
     item: dict[str, Any],
-    *,
-    require_external_identifier: bool,
 ) -> NativeItemIdentity:
     item_identifier = item.get("calendar_item_identifier")
     external_identifier = item.get("calendar_item_external_identifier")
@@ -1438,10 +1443,6 @@ def _native_item_identity(
         or not item_identifier
         or not isinstance(calendar_identifier, str)
         or not calendar_identifier
-        or (
-            require_external_identifier
-            and (not isinstance(external_identifier, str) or not external_identifier)
-        )
         or (external_identifier is not None and not isinstance(external_identifier, str))
     ):
         raise AcceptanceFailed(
@@ -1808,6 +1809,18 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     notification_stat.st_ino,
                 )
 
+            existing_events, existing_reminders = await _query_exact_items(
+                bridge,
+                titles=titles,
+                schedule=schedule,
+                include_reminder=include_reminder,
+            )
+            if existing_events or existing_reminders:
+                raise AcceptanceBlocked(
+                    "synthetic_identity_collision",
+                    "fresh acceptance identities unexpectedly matched existing native items",
+                )
+
             store = DurableStore(temp_dir / "actions.sqlite3")
             journal = ActionJournal(store)
             gateway = HubGatewayTransport(
@@ -1819,14 +1832,10 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             connected = asyncio.Event()
             gateway.on_hello(lambda _hello: connected.set())
 
-            async def publish_status(status_title: str, message: str) -> None:
-                await gateway.send(
-                    HudList(
-                        items=[message],
-                        title=status_title,
-                        hint="acceptance · synthetic data",
-                    )
-                )
+            async def publish_status(view: ProductivityHudView) -> None:
+                # Exercise the identical typed G2 lifecycle frame used by the
+                # Mac app, never the retired generic action-list fallback.
+                await gateway.send(view)
 
             controller = ProductivityActionController(
                 bridge,
@@ -1897,7 +1906,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             await asyncio.sleep(2)
 
             event_command = (
-                f"schedule {title} on {schedule.event_start:%Y-%m-%d} "
+                f"schedule {titles.event} on {schedule.event_start:%Y-%m-%d} "
                 f"at {schedule.event_start:%H:%M} for 1 minute in {args.zone}"
             )
             # Arm exact-title cleanup before the controller can cross the
@@ -1922,7 +1931,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
 
             if include_reminder:
                 reminder_command = (
-                    f"remind me to {title} on {schedule.reminder_due:%Y-%m-%d} "
+                    f"remind me to {titles.reminder} on {schedule.reminder_due:%Y-%m-%d} "
                     f"at {schedule.reminder_due:%H:%M} in {args.zone}"
                 )
                 reminder_confirmation = await _drive_confirmed_command(
@@ -1950,17 +1959,10 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
 
             events, reminders = await _query_exact_items(
                 bridge,
-                title=title,
+                titles=titles,
                 schedule=schedule,
                 include_reminder=include_reminder,
             )
-            candidate_calendar_identifier = events[0].get("calendar_identifier") if events else None
-            if not isinstance(candidate_calendar_identifier, str) or not candidate_calendar_identifier:
-                raise AcceptanceFailed(
-                    "calendar_identifier_missing",
-                    "native event read-back omitted its target calendar identity",
-                )
-            event_calendar_identifier = candidate_calendar_identifier
             receipt["native_readback"] = _verify_native_readback(
                 events,
                 reminders,
@@ -1968,6 +1970,13 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 args.zone,
                 include_reminder=include_reminder,
             )
+            event_identity = _native_item_identity(
+                events[0],
+            )
+            if include_reminder:
+                reminder_identity = _native_item_identity(
+                    reminders[0],
+                )
             native_readback_verified = True
             receipt["durable_actions"] = _assert_durable_acceptance(
                 store,
@@ -1975,15 +1984,50 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             )
 
             if include_reminder:
-                alarm = await _wait_for_alarm(
-                    args.notification_feed,
-                    offset=notification_offset,
-                    feed_identity=notification_feed_identity,
-                    title=title,
-                    due=schedule.reminder_due,
-                    timeout_s=args.alarm_timeout_seconds,
-                )
-                receipt["alarm_delivery"] = {"observed": True, **asdict(alarm)}
+                try:
+                    alarm = await _wait_for_alarm(
+                        args.notification_feed,
+                        offset=notification_offset,
+                        feed_identity=notification_feed_identity,
+                        title=titles.reminder,
+                        due=schedule.reminder_due,
+                        timeout_s=args.alarm_timeout_seconds,
+                    )
+                except AcceptanceBlocked as exc:
+                    if exc.code != "reminder_alarm_not_observed":
+                        raise
+                    classification = await asyncio.to_thread(
+                        collect_alarm_delivery_failure,
+                        due=schedule.reminder_due,
+                        observed_until=datetime.now(zone),
+                    )
+                    receipt["alarm_delivery"] = {
+                        "observed": False,
+                        "classification": asdict(classification),
+                        "expected_focus_suppression": bool(
+                            notification_preflight
+                            and notification_preflight.expect_focus_suppression
+                        ),
+                    }
+                    if not (
+                        notification_preflight
+                        and notification_preflight.expect_focus_suppression
+                        and classification.category == "focus_suppressed"
+                    ):
+                        raise AcceptanceBlocked(
+                            f"reminder_alarm_{classification.category}",
+                            "the native reminder banner was not observed; retained classification identifies the failed boundary",
+                        ) from exc
+                else:
+                    if (
+                        notification_preflight
+                        and notification_preflight.expect_focus_suppression
+                    ):
+                        raise AcceptanceFailed(
+                            "focus_suppression_not_observed",
+                            "a Reminders banner appeared despite the asserted suppression condition",
+                        )
+                    receipt["alarm_delivery"] = {"observed": True, **asdict(alarm)}
             else:
                 receipt["alarm_delivery"] = {
                     "observed": False,
@@ -2016,44 +2060,75 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 cleanup_error = "native_cleanup_schedule_missing"
             else:
                 try:
-                    cleanup = await asyncio.to_thread(
-                        cleanup_test_items,
-                        title,
-                        run_id,
-                        event_calendar_identifier=event_calendar_identifier,
-                        include_reminder=include_reminder,
-                    )
-                    receipt["cleanup"].update(
-                        calendar_removed_count=cleanup.calendar_removed_count,
-                        calendar_target_removed_count=(
-                            cleanup.calendar_target_removed_count
-                        ),
-                        calendar_other_removed_count=cleanup.calendar_other_removed_count,
-                        reminder_removed_count=cleanup.reminder_removed_count,
-                    )
-                    if cleanup.errors:
-                        cleanup_error = "_and_".join(cleanup.errors)
-                    elif native_readback_verified and (
-                        cleanup.calendar_target_removed_count != 1
-                        or cleanup.calendar_other_removed_count
-                        not in ({0, 1} if include_reminder else {0})
-                        or cleanup.reminder_removed_count != (1 if include_reminder else 0)
-                    ):
-                        cleanup_error = "cleanup_cardinality_mismatch"
-                except Exception as exc:
-                    cleanup_error = f"cleanup_{type(exc).__name__}"
-                try:
-                    async with NativeBridgeClient(args.bridge) as cleanup_bridge:
+                    async with NativeBridgeClient(stub.bridge_path) as cleanup_bridge:
+                        cleanup_events, cleanup_reminders = await _query_exact_items(
+                            cleanup_bridge,
+                            titles=titles,
+                            schedule=schedule,
+                            include_reminder=include_reminder,
+                        )
+                        if len(cleanup_events) > 1 or len(cleanup_reminders) > 1:
+                            raise AcceptanceSafetyError(
+                                "scoped cleanup found more than one native identity"
+                            )
+                        if event_identity is None and cleanup_events:
+                            event_identity = _native_item_identity(
+                                cleanup_events[0],
+                            )
+                        if reminder_identity is None and cleanup_reminders:
+                            reminder_identity = _native_item_identity(
+                                cleanup_reminders[0],
+                            )
+                        if event_identity is not None:
+                            cleanup = await cleanup_test_items(
+                                cleanup_bridge,
+                                titles,
+                                run_id,
+                                schedule=schedule,
+                                event_identity=event_identity,
+                                reminder_identity=reminder_identity,
+                                include_reminder=(
+                                    include_reminder and reminder_identity is not None
+                                ),
+                            )
+                            receipt["cleanup"].update(
+                                calendar_removed_count=cleanup.calendar_removed_count,
+                                reminder_removed_count=cleanup.reminder_removed_count,
+                                scheduled_reminder_projection_count_before=(
+                                    cleanup.scheduled_reminder_projection_count_before
+                                ),
+                                scheduled_reminder_projection_count_after=(
+                                    cleanup.scheduled_reminder_projection_count_after
+                                ),
+                                event_native_ref_digest=_digest(
+                                    event_identity.calendar_item_identifier
+                                ),
+                                reminder_native_ref_digest=(
+                                    _digest(reminder_identity.calendar_item_identifier)
+                                    if reminder_identity is not None
+                                    else None
+                                ),
+                            )
+                            if cleanup.errors:
+                                cleanup_error = "_and_".join(cleanup.errors)
+                            elif native_readback_verified and (
+                                cleanup.calendar_removed_count != 1
+                                or cleanup.reminder_removed_count
+                                != (1 if include_reminder else 0)
+                                or cleanup.scheduled_reminder_projection_count_before > 1
+                                or cleanup.scheduled_reminder_projection_count_after != 0
+                            ):
+                                cleanup_error = "cleanup_cardinality_mismatch"
                         receipt["cleanup"]["native_absence_verified"] = (
                             await _wait_for_cleanup_absence(
                                 cleanup_bridge,
-                                title=title,
+                                titles=titles,
                                 schedule=schedule,
                                 include_reminder=include_reminder,
                             )
                         )
                 except Exception as exc:
-                    absence_error = f"cleanup_absence_{type(exc).__name__}"
+                    absence_error = f"cleanup_{type(exc).__name__}"
                     cleanup_error = (
                         f"{cleanup_error}_and_{absence_error}"
                         if cleanup_error is not None
@@ -2129,6 +2204,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--automation-port", type=int, default=9902)
     parser.add_argument("--minimum-lead-seconds", type=int, default=120)
     parser.add_argument("--alarm-timeout-seconds", type=float, default=120)
+    parser.add_argument(
+        "--notification-mode",
+        choices=("focus-off", "reminders-allowed", "focus-suppressed"),
+        help=(
+            "operator-confirmed, read-only Reminders presentation condition; "
+            "required unless --calendar-only"
+        ),
+    )
     parser.add_argument(
         "--calendar-only",
         action="store_true",

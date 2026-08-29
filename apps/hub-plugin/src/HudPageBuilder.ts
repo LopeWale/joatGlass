@@ -26,6 +26,13 @@ export interface SidebarBackdrop {
  *  - containerTotalNum matches the number of declared containers
  */
 export class HudPageBuilder {
+  constructor(private readonly contextualMenu = true) {}
+
+  /** Freeze the host capability negotiated at boot into every later layout. */
+  withContextualMenu(enabled: boolean): HudPageBuilder {
+    return new HudPageBuilder(enabled);
+  }
+
   private statusBar(): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.StatusBar,
@@ -124,9 +131,9 @@ export class HudPageBuilder {
 
   /**
    * The glasses-OS contextual menu (long-press): stable ids the wearer can
-   * reach from ANY screen without costing the display. Attached to EVERY
-   * layout deliberately — a rebuild without menuObject CLEARS the menu, so
-   * closing settings would silently delete it (SDK d.ts on rebuild).
+   * reach from any negotiated menu-capable screen without costing the
+   * display. The builder's boot-time capability flag is applied to every
+   * later layout so a host that rejected menuObject is never sent it again.
    */
   static readonly MENU_REPEAT = 1;
   static readonly MENU_MUTE = 2;
@@ -144,12 +151,53 @@ export class HudPageBuilder {
     });
   }
 
-  /** Status bar + main text. The default for voice → HUD replies. */
+  private menuConfig(): { menuObject?: MenuContainerProperty } {
+    return this.contextualMenu ? { menuObject: this.systemMenu() } : {};
+  }
+
+  private minimalStartupText(): TextContainerProperty {
+    return new TextContainerProperty({
+      containerID: ContainerId.Main,
+      containerName: 'startup',
+      xPosition: 0,
+      yPosition: 0,
+      width: CANVAS.width,
+      height: CANVAS.height,
+      paddingLength: 8,
+      borderWidth: 0,
+      isEventCapture: 1,
+      content: 'JOAT\nStarting...',
+    });
+  }
+
+  /**
+   * Conservative one-shot startup page.
+   *
+   * Contextual menus and the four-image visual surface are enhancements, not
+   * boot requirements. Keeping both off the one-shot create call gives older
+   * packaged hosts a page they can always adopt before recoverable rebuilds
+   * negotiate the richer surface.
+   */
   startup(): CreateStartUpPageContainer {
     return new CreateStartUpPageContainer({
+      containerTotalNum: 1,
+      textObject: [this.minimalStartupText()],
+    });
+  }
+
+  /** Same minimal visible page for a reloaded host session. */
+  compatibilityLayout(): RebuildPageContainer {
+    return new RebuildPageContainer({
+      containerTotalNum: 1,
+      textObject: [this.minimalStartupText()],
+    });
+  }
+
+  /** Full text HUD without the optional OS contextual menu. */
+  dashboardCompatibilityLayout(): RebuildPageContainer {
+    return new RebuildPageContainer({
       containerTotalNum: 5,
       textObject: this.dashboard(),
-      menuObject: this.systemMenu(),
     });
   }
 
@@ -158,7 +206,7 @@ export class HudPageBuilder {
     return new RebuildPageContainer({
       containerTotalNum: 5,
       textObject: this.dashboard(),
-      menuObject: this.systemMenu(),
+      ...this.menuConfig(),
     });
   }
 
@@ -215,7 +263,6 @@ export class HudPageBuilder {
     return new CreateStartUpPageContainer({
       containerTotalNum: 5,
       ...this.visualObjects(),
-      menuObject: this.systemMenu(),
     });
   }
 
@@ -223,8 +270,18 @@ export class HudPageBuilder {
     return new RebuildPageContainer({
       containerTotalNum: 5,
       ...this.visualObjects(),
-      menuObject: this.systemMenu(),
     });
+  }
+
+  /**
+   * Kept as a named alias for older focused fixtures. The modern visual
+   * surface intentionally never includes the OS menu: omitting it clears a
+   * stale text-page menu and avoids coupling image-page support to that
+   * optional host capability. Its transparent text layer remains the sole
+   * gesture owner.
+   */
+  visualCompatibilityLayout(): RebuildPageContainer {
+    return this.visualLayout();
   }
 
   /**
@@ -239,7 +296,7 @@ export class HudPageBuilder {
     const capped = items.slice(0, 5).map((s) => s.slice(0, 24));
     return new RebuildPageContainer({
       containerTotalNum: 6,
-      menuObject: this.systemMenu(),
+      ...this.menuConfig(),
       textObject: [
         this.statusBar(),
         this.main(128, 0, 2, backdrop.main ?? '', {
@@ -295,7 +352,7 @@ export class HudPageBuilder {
     const hint = (chrome.hint?.trim() || 'left x2 overview').slice(0, 46);
     return new RebuildPageContainer({
       containerTotalNum: 4,
-      menuObject: this.systemMenu(),
+      ...this.menuConfig(),
       // Capture moves OFF main and ONTO the list — see main()'s note.
       textObject: [
         this.statusBar(),
@@ -331,7 +388,7 @@ export class HudPageBuilder {
     const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
     return new RebuildPageContainer({
       containerTotalNum: 5,
-      menuObject: this.systemMenu(),
+      ...this.menuConfig(),
       textObject: [
         this.statusBar(),
         this.main(144, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`),

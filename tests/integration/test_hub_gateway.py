@@ -17,7 +17,7 @@ import websockets
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.channels.imessage import MessageThread
-from joat.core.interfaces import MessageSender
+from joat.core.interfaces import AudioFrame, MessageSender
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
     Device,
@@ -204,6 +204,34 @@ class TestUplink:
             await ws.send(json.dumps({"kind": "audio", "source": "glasses", "seq": 0, "pcm": [1, -1]}))
             await _wait_for(lambda: bool(got))
         assert got[0] == (b"\x01\x00\xff\xff", 0)
+
+    async def test_audio_frame_preserves_provenance_before_legacy_callback(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        order: list[str] = []
+        frames: list[AudioFrame] = []
+        t.on_audio_frame(lambda frame: (order.append("frame"), frames.append(frame)))
+        t.on_audio(lambda _pcm, _seq: order.append("legacy"))
+
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "audio",
+                "source": "glasses",
+                "speaker": "wearer",
+                "seq": 4,
+                "pcm": [2, -2],
+            }))
+            await _wait_for(lambda: len(order) == 2)
+
+        assert order == ["frame", "legacy"]
+        assert len(frames) == 1
+        assert frames[0].pcm == b"\x02\x00\xfe\xff"
+        assert frames[0].seq == 4
+        assert frames[0].source == "glasses"
+        assert frames[0].speaker == "wearer"
+        assert frames[0].connection_generation
+        assert frames[0].received_at_us > 0
 
     async def test_audio_gap_is_detected(self, transport, caplog) -> None:
         t, url = transport

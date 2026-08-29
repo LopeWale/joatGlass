@@ -28,6 +28,17 @@ export type G2TraceEvent =
     containerId: 4 | 8 | 9 | 10;
     outcome: 'success' | 'failed' | 'error';
   }
+  /**
+   * A content-free first-light receipt. It identifies only whether the real
+   * host accepted the modern page and its first image frame; it never carries
+   * HUD text, image pixels, or wearer/device data.
+   */
+  | {
+    type: 'hud_surface';
+    stage: 'visual_rebuild' | 'first_frame' | 'selected';
+    surface: 'visual' | 'text' | 'minimal';
+    outcome: 'success' | 'failed';
+  }
   | {
     type: 'self_heal';
     surface: G2TracePage;

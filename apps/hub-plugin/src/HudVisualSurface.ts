@@ -5,7 +5,14 @@ import {
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
-import { CANVAS, ContainerId, type HudContentKind } from './types';
+import {
+  CANVAS,
+  ContainerId,
+  type BrainstormHudModel,
+  type HudContentKind,
+  type ProductivityHudDomain,
+  type ProductivityHudModel,
+} from './types';
 
 const TILE_WIDTH = 288;
 const TILE_HEIGHT = 144;
@@ -56,12 +63,25 @@ export type HudVisualFrame =
     micOn: boolean;
     prompt: string;
     secondsRemaining: number;
+    reviewDomain?: ProductivityHudDomain;
   }
   | {
     kind: 'navigation';
     status: string;
     micOn: boolean;
     navigation: NavigationHudModel;
+  }
+  | {
+    kind: 'brainstorm';
+    status: string;
+    micOn: boolean;
+    brainstorm: BrainstormHudModel;
+  }
+  | {
+    kind: 'productivity';
+    status: string;
+    micOn: boolean;
+    productivity: ProductivityHudModel;
   };
 
 export interface HudFrameRenderer {

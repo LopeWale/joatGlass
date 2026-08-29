@@ -29,8 +29,22 @@ from joat.services.g2_diagnostics import G2DiagnosticStore, TRACE_SCHEMA
 
 log = logging.getLogger("joat.real_g2_location_probe_trace")
 
-RUN_SCHEMA = "joat.g2-location-probe-run.v1"
+RUN_SCHEMA = "joat.g2-location-probe-run.v2"
 MODES = frozenset({"walking", "cycling"})
+
+
+def _last_hud_surface_value(
+    events: list[dict[str, object]], *, stage: str, field: str
+) -> str:
+    """Return a bounded first-light value, or explicit absence for old builds."""
+
+    for event in reversed(events):
+        if event.get("type") != "hud_surface" or event.get("stage") != stage:
+            continue
+        value = event.get(field)
+        if isinstance(value, str):
+            return value
+    return "missing"
 
 
 def summarize_receipt(mode: str, receipt: dict[str, object]) -> dict[str, object]:
@@ -83,6 +97,20 @@ def summarize_receipt(mode: str, receipt: dict[str, object]) -> dict[str, object
         ),
         "tileUploadCount": sum(
             event.get("type") == "tile_upload" for event in typed_events
+        ),
+        # These are bridge outcomes, deliberately not lens-pixel claims. The
+        # synchronized G2 video remains the independent visible-HUD receipt.
+        "hudSurfaceEventCount": sum(
+            event.get("type") == "hud_surface" for event in typed_events
+        ),
+        "visualRebuildOutcome": _last_hud_surface_value(
+            typed_events, stage="visual_rebuild", field="outcome"
+        ),
+        "firstFrameOutcome": _last_hud_surface_value(
+            typed_events, stage="first_frame", field="outcome"
+        ),
+        "selectedHudSurface": _last_hud_surface_value(
+            typed_events, stage="selected", field="surface"
         ),
     }
 

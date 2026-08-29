@@ -316,6 +316,18 @@ export class NavigationController {
     return true;
   }
 
+  /**
+   * The left-temple double press is the one explicit on-glasses escape hatch
+   * while navigation owns the HUD. Keep the current frame bound until the
+   * Mac responds with navigation.stop, so another gesture cannot act on a
+   * restored surface ahead of that terminal message.
+   */
+  handleCancel(): boolean {
+    if (!this.current) return false;
+    this.send('cancel');
+    return true;
+  }
+
   async handleScroll(direction: 'up' | 'down'): Promise<boolean> {
     const current = this.current;
     if (!current) return false;
@@ -452,7 +464,7 @@ export class NavigationController {
         view: 'guidance',
         primary: maneuverTitle(state.maneuver),
         secondary: state.instruction,
-        hint: `Then continue · ${formatNavigationDistance(state.maneuverDistanceM)}`,
+        hint: `Then continue · ${formatNavigationDistance(state.maneuverDistanceM)} · double-left stops`,
         maneuver: state.maneuver,
         maneuverDistanceM: state.maneuverDistanceM,
         remainingDistanceM: state.remainingDistanceM,
@@ -468,7 +480,7 @@ export class NavigationController {
         view: 'uncertain',
         primary: 'Finding your position',
         secondary: state.reason === 'accuracy' ? 'GPS accuracy is low' : 'Route match is uncertain',
-        hint: 'Pause safely · route held',
+        hint: 'Pause safely · double-left stops',
       };
     }
     if (state.kind === 'wrong_way') {
@@ -477,7 +489,7 @@ export class NavigationController {
         view: 'wrong_way',
         primary: 'Wrong direction',
         secondary: 'Turn around when safe',
-        hint: 'Route resumes automatically',
+        hint: 'Route resumes · double-left stops',
         maneuver: 'u_turn',
         remainingDistanceM: state.remainingDistanceM,
       };
@@ -488,7 +500,7 @@ export class NavigationController {
         view: 'off_route',
         primary: 'Off route',
         secondary: 'Stop when safe',
-        hint: 'Checking a new route…',
+        hint: 'Rerouting · double-left stops',
       };
     }
     return {

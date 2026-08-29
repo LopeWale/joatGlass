@@ -176,6 +176,21 @@ class StatusPublisher:
         }
         self.flush()
 
+    def agent_terminal_projection(self) -> dict[str, str | bool]:
+        """The only terminal data permitted to leave the Mac status model."""
+        terminal = dict(self._state["agent_terminal"])
+        openclaw = dict(self._state["openclaw"])
+        state = str(terminal["state"])
+        return {
+            "state": state,
+            "reason": str(terminal["reason"]),
+            "endpoint_host": str(openclaw["endpoint_host"]),
+            # This means the local session preflight was clean, not that the
+            # remote gateway remains tool-free for the full later run.
+            "no_tools_checked": state in {"ready", "running"}
+            and str(terminal["reason"]) == "",
+        }
+
     def bump(self, counter: str) -> None:
         counts = dict(self._state["counts"])
         counts[counter] = counts.get(counter, 0) + 1

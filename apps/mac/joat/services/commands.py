@@ -27,12 +27,14 @@ class VoiceCommandRouter:
         models: ModelRegistry,
         productivity: CommandController | None = None,
         notes: CommandController | None = None,
+        voice_notes: CommandController | None = None,
         hermes: CommandController | None = None,
     ) -> None:
         self._message_replies = message_replies
         self._models = models
         self._productivity = productivity
         self._notes = notes
+        self._voice_notes = voice_notes
         self._hermes = hermes
 
     async def __call__(self, text: str) -> str | None:
@@ -42,6 +44,10 @@ class VoiceCommandRouter:
         reply_result = await self._message_replies.handle_command(text)
         if reply_result is not None:
             return reply_result
+        if self._voice_notes is not None:
+            voice_note_result = await self._voice_notes.handle_command(text)
+            if voice_note_result is not None:
+                return voice_note_result
         if self._notes is not None:
             note_result = await self._notes.handle_command(text)
             if note_result is not None:

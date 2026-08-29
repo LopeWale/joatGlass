@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from joat.channels.cards import CardLog
 from joat.channels.imessage import MessageThread
-from joat.core.protocol import ContainerId, HudList, HudText, InputEvent
+from joat.core.protocol import BrainstormHudView, ContainerId, HudList, HudText, InputEvent
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
@@ -125,6 +125,22 @@ def make_router(
 
 
 class TestCapabilityViews:
+    async def test_brainstorm_and_agent_terminal_open_real_hud_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, status = make_router(tmp_path)
+        status.set_openclaw(
+            state="connected_read_only",
+            endpoint_host="home-mac.example-tailnet.ts.net",
+            scopes=["operator.read"],
+            reason="",
+        )
+        status.set_agent_terminal(state="ready", reason="")
+        await router.open("Brainstorm")
+        await router.open("Agent Terminal")
+        frames = [item for item in transport.sent if isinstance(item, BrainstormHudView)]
+        assert [frame.screen for frame in frames] == ["brainstorm", "agent_terminal"]
+        assert frames[-1].endpoint_host == "home-mac.example-tailnet.ts.net"
+        assert frames[-1].no_tools_checked is True
+
     async def test_messages_view_lists_recent_conversations(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         now = time.time()
         router, transport, _ = make_router(

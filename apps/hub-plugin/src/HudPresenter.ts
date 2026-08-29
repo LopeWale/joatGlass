@@ -4,7 +4,14 @@ import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
 import type { HudFramePainter, HudVisualFrame } from './HudVisualSurface';
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
-import { CONFIRM_PROMPT_MAX_UNITS, ContainerId, type HudContentKind } from './types';
+import {
+  CONFIRM_PROMPT_MAX_UNITS,
+  ContainerId,
+  type BrainstormHudModel,
+  type HudContentKind,
+  type ProductivityHudDomain,
+  type ProductivityHudModel,
+} from './types';
 
 const MAX_UPGRADE_CHARS = 2000;
 
@@ -60,7 +67,9 @@ type HudSurface =
     options: ResolvedListSurfaceOptions;
     selectedIndex: number;
   }
-  | { kind: 'navigation'; navigation: NavigationHudModel };
+  | { kind: 'navigation'; navigation: NavigationHudModel }
+  | { kind: 'brainstorm'; brainstorm: BrainstormHudModel }
+  | { kind: 'productivity'; productivity: ProductivityHudModel };
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -270,8 +279,92 @@ export class HudPresenter {
     return this.renderNavigation(surface, statusOverride, prior);
   }
 
+  /** Dedicated four-tile production page for a live Brainstorm or Hermes. */
+  async showBrainstorm(brainstorm: BrainstormHudModel, statusOverride?: string): Promise<boolean> {
+    if (!this.visual || this.confirmation) return false;
+    const prior = this.capturePresenterSnapshot();
+    const surface: HudSurface = {
+      kind: 'brainstorm',
+      brainstorm: this.cloneBrainstorm(brainstorm),
+    };
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams),
+        brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds),
+      };
+    }
+    const liveStatus = statusOverride === undefined
+      ? this.captureLiveStatus()
+      : { text: statusOverride, brightness: 2 };
+    this.resetAll();
+    this.surface = surface;
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) {
+        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+      }
+    }
+    const painted = await this.paintVisual();
+    if (!painted) {
+      this.restorePresenterSnapshot(prior);
+      await this.visual.paint(this.visualFrame());
+    }
+    return painted;
+  }
+
+  /** Native Calendar/Reminders lifecycle page. The preceding confirmation is
+   * the only write authority; this surface only renders bridge evidence. */
+  async showProductivity(
+    productivity: ProductivityHudModel,
+    statusOverride?: string,
+  ): Promise<boolean> {
+    if (!this.visual) return false;
+    const surface: HudSurface = {
+      kind: 'productivity',
+      productivity: this.cloneProductivity(productivity),
+    };
+    if (this.confirmation) {
+      // Native read-back can start before the async confirmation dismissal
+      // finishes its last tile. Defer the page rather than claiming a screen
+      // paint which the wearer never saw; dismiss restores it atomically.
+      this.confirmation.surface = surface;
+      return true;
+    }
+    const prior = this.capturePresenterSnapshot();
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams),
+        brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds),
+      };
+    }
+    const liveStatus = statusOverride === undefined
+      ? this.captureLiveStatus()
+      : { text: statusOverride, brightness: 2 };
+    this.resetAll();
+    this.surface = surface;
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) {
+        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+      }
+    }
+    const painted = await this.paintVisual();
+    if (!painted) {
+      this.restorePresenterSnapshot(prior);
+      await this.visual.paint(this.visualFrame());
+    }
+    return painted;
+  }
+
   async setSelection(index: number): Promise<boolean> {
-    if (this.surface.kind === 'default' || this.surface.kind === 'navigation') return false;
+    if (
+      this.surface.kind === 'default'
+      || this.surface.kind === 'navigation'
+      || this.surface.kind === 'brainstorm'
+      || this.surface.kind === 'productivity'
+    ) return false;
     const maximum = Math.max(0, this.surface.items.length - 1);
     const selectedIndex = Math.max(0, Math.min(maximum, index));
     if (this.surface.kind === 'sidebar') {
@@ -283,7 +376,12 @@ export class HudPresenter {
   }
 
   moveSelection(delta: number): Promise<boolean> {
-    if (this.surface.kind === 'default' || this.surface.kind === 'navigation') {
+    if (
+      this.surface.kind === 'default'
+      || this.surface.kind === 'navigation'
+      || this.surface.kind === 'brainstorm'
+      || this.surface.kind === 'productivity'
+    ) {
       return Promise.resolve(false);
     }
     return this.setSelection(this.surface.selectedIndex + delta);
@@ -646,6 +744,30 @@ export class HudPresenter {
       return result;
     }
 
+    if (prior.surface.kind === 'brainstorm') {
+      this.focusReturn = {
+        streams: new Map(prior.streams),
+        brightness: new Map(prior.brightness),
+        kinds: new Map(prior.kinds),
+      };
+      const restored = await this.showBrainstorm(prior.surface.brainstorm);
+      const result = await this.repaintReplacementConfirmation(restored);
+      this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
+      return result;
+    }
+
+    if (prior.surface.kind === 'productivity') {
+      this.focusReturn = {
+        streams: new Map(prior.streams),
+        brightness: new Map(prior.brightness),
+        kinds: new Map(prior.kinds),
+      };
+      const restored = await this.showProductivity(prior.surface.productivity);
+      const result = await this.repaintReplacementConfirmation(restored);
+      this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
+      return result;
+    }
+
     const liveStatus = this.captureLiveStatus();
     if (this.visual) {
       this.resetAll();
@@ -789,7 +911,11 @@ export class HudPresenter {
 
   private tracePage(): G2TracePage {
     if (this.confirmation) return 'confirmation';
-    return this.surface.kind === 'default' ? 'overview' : this.surface.kind;
+    if (this.surface.kind === 'default') return 'overview';
+    // The trace vocabulary predates this visual page; it remains content-free.
+    return this.surface.kind === 'brainstorm' || this.surface.kind === 'productivity'
+      ? 'list'
+      : this.surface.kind;
   }
 
   private recordPageTransition(
@@ -917,6 +1043,7 @@ export class HudPresenter {
         micOn: this.micOn,
         prompt: this.confirmation.prompt,
         secondsRemaining: Math.max(0, 8 - elapsed),
+        reviewDomain: this.productivityReviewDomain(this.confirmation.prompt),
       };
     }
     if (this.surface.kind === 'sidebar') {
@@ -953,6 +1080,22 @@ export class HudPresenter {
         status,
         micOn: this.micOn,
         navigation: this.cloneNavigation(this.surface.navigation),
+      };
+    }
+    if (this.surface.kind === 'brainstorm') {
+      return {
+        kind: 'brainstorm',
+        status,
+        micOn: this.micOn,
+        brainstorm: this.cloneBrainstorm(this.surface.brainstorm),
+      };
+    }
+    if (this.surface.kind === 'productivity') {
+      return {
+        kind: 'productivity',
+        status,
+        micOn: this.micOn,
+        productivity: this.cloneProductivity(this.surface.productivity),
       };
     }
     return {
@@ -999,6 +1142,12 @@ export class HudPresenter {
     if (surface.kind === 'navigation') {
       return { kind: 'navigation', navigation: this.cloneNavigation(surface.navigation) };
     }
+    if (surface.kind === 'brainstorm') {
+      return { kind: 'brainstorm', brainstorm: this.cloneBrainstorm(surface.brainstorm) };
+    }
+    if (surface.kind === 'productivity') {
+      return { kind: 'productivity', productivity: this.cloneProductivity(surface.productivity) };
+    }
     if (surface.kind === 'sidebar') {
       return {
         kind: 'sidebar', items: [...surface.items], selectedIndex: surface.selectedIndex,
@@ -1042,6 +1191,23 @@ export class HudPresenter {
 
   private cloneNavigation(navigation: NavigationHudModel): NavigationHudModel {
     return { ...navigation, options: [...navigation.options] };
+  }
+
+  private cloneBrainstorm(brainstorm: BrainstormHudModel): BrainstormHudModel {
+    return { ...brainstorm, collaborators: [...brainstorm.collaborators] };
+  }
+
+  private cloneProductivity(productivity: ProductivityHudModel): ProductivityHudModel {
+    return { ...productivity };
+  }
+
+  private productivityReviewDomain(prompt: string): ProductivityHudDomain | undefined {
+    const normalized = prompt.trim().toLowerCase();
+    if (normalized.startsWith('create event ')) return 'calendar';
+    if (normalized.startsWith('create reminder ') || normalized.startsWith('complete reminder ')) {
+      return 'reminders';
+    }
+    return undefined;
   }
 
   private resetAll(): void {

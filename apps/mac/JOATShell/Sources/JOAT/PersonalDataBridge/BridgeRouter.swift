@@ -139,6 +139,30 @@ actor BridgeRouter {
                     payloadDigest: binding.payloadDigest
                 )
                 commitPhase = "committed_readback"
+            case "acceptance.calendar.delete":
+                let body = try BridgeContract.decode(
+                    AcceptanceCalendarDeleteRequest.self,
+                    from: request.body
+                )
+                let binding = try writeBinding(request)
+                result = try await eventKit.deleteAcceptanceEvent(
+                    body,
+                    attemptID: binding.attemptID,
+                    payloadDigest: binding.payloadDigest
+                )
+                commitPhase = "committed_readback"
+            case "acceptance.reminder.delete":
+                let body = try BridgeContract.decode(
+                    AcceptanceReminderDeleteRequest.self,
+                    from: request.body
+                )
+                let binding = try writeBinding(request)
+                result = try await eventKit.deleteAcceptanceReminder(
+                    body,
+                    attemptID: binding.attemptID,
+                    payloadDigest: binding.payloadDigest
+                )
+                commitPhase = "committed_readback"
             default:
                 throw NativeBridgeError("unknown_method", "bridge method is not supported")
             }
