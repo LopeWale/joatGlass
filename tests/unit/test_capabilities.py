@@ -24,7 +24,7 @@ from joat.core.protocol import (
     HudText,
     InputEvent,
 )
-from joat.native.bridge import NativeBridgeProtocolError
+from joat.native.bridge import NativeBridgeProtocolError, NativeBridgeUnavailable
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
@@ -110,10 +110,32 @@ class FakePersonalData:
         return response
 
 
+class StaleFailurePlanningData:
+    """Delay an old authorization failure behind a newer successful page."""
+
+    def __init__(self) -> None:
+        self.first_authorization_started = asyncio.Event()
+        self.release_first_authorization = asyncio.Event()
+        self.authorization_calls = 0
+
+    async def call(self, method: str, body=None):  # type: ignore[no-untyped-def]
+        del body
+        if method == "authorization.status":
+            self.authorization_calls += 1
+            if self.authorization_calls == 1:
+                self.first_authorization_started.set()
+                await self.release_first_authorization.wait()
+                raise NativeBridgeUnavailable("old private socket failure")
+            return bridge_response()
+        return bridge_response(result=[])
+
+
 def bridge_response(*, calendar="full_access", reminders="full_access", result=None):  # type: ignore[no-untyped-def]
     return SimpleNamespace(
         authorization=SimpleNamespace(calendar=calendar, reminders=reminders),
         result=result,
+        store_instance_id="eventkit-store",
+        store_generation=1,
     )
 
 
@@ -383,6 +405,24 @@ class TestCapabilityViews:
         ]
         snapshot = json.loads((tmp_path / "status.json").read_text())
         assert snapshot["personal_data"] == {"state": "unavailable"}
+
+    async def test_stale_planning_failure_cannot_overwrite_new_ready_bridge_state(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        personal = StaleFailurePlanningData()
+        router, transport, _ = make_router(tmp_path, personal_data=personal)
+
+        old = asyncio.create_task(router.open("Planning", request_id="planning-old"))
+        await personal.first_authorization_started.wait()
+        await router.open("Planning", request_id="planning-new")
+        personal.release_first_authorization.set()
+        await old
+
+        snapshot = json.loads((tmp_path / "status.json").read_text())
+        assert snapshot["personal_data"] == {"state": "ready"}
+        rendered = [message for message in transport.sent if isinstance(message, HudList)]
+        assert len(rendered) == 1
+        assert rendered[0].request_id == "planning-new"
 
     async def test_planning_opens_one_native_backed_month_week_day_hierarchy(
         self, tmp_path

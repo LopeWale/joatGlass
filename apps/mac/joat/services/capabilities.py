@@ -343,6 +343,8 @@ class CapabilityRouter:
         client = self._personal_data
         origin = self._planning_origin()
         if client is None:
+            if not self._request_is_current():
+                return
             self._planning_rows = []
             self._status.set_personal_data(state="not_configured")
             await self._show_focus(
@@ -358,6 +360,8 @@ class CapabilityRouter:
                 zone=self._planning_zone(),
             )
         except PlanningAuthorizationError:
+            if not self._request_is_current():
+                return
             self._planning_rows = []
             self._status.set_personal_data(state="authorization_required")
             await self._show_focus(
@@ -366,6 +370,8 @@ class CapabilityRouter:
             )
             return
         except NativeBridgeUnavailable:
+            if not self._request_is_current():
+                return
             self._planning_rows = []
             self._status.set_personal_data(state="unavailable")
             await self._show_focus(
@@ -374,6 +380,8 @@ class CapabilityRouter:
             )
             return
         except NativeBridgeProtocolError:
+            if not self._request_is_current():
+                return
             self._planning_rows = []
             self._status.set_personal_data(state="protocol_error")
             await self._show_focus(
@@ -382,6 +390,8 @@ class CapabilityRouter:
             )
             return
         except NativeBridgeError:
+            if not self._request_is_current():
+                return
             self._planning_rows = []
             self._status.set_personal_data(state="unavailable")
             await self._show_focus(

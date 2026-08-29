@@ -44,6 +44,10 @@ class PlanningAuthorizationError(RuntimeError):
     """Calendar or Reminders access is missing for the unified plan."""
 
 
+class _PlanningSnapshotChanged(RuntimeError):
+    """An EventKit write invalidated a multi-read Planning projection."""
+
+
 def _has_full_access(value: object) -> bool:
     """Accept the canonical Swift enum and the established Python fixture form.
 
@@ -220,7 +224,33 @@ async def load_native_planning(
     event and must never be counted twice.
     """
 
+    # EventKit returns a store identity/generation with every bridge response.
+    # A Planning page combines five reads, so retry rather than merge data
+    # across a native write which landed halfway through those reads.
+    for _ in range(2):
+        try:
+            return await _load_native_planning_once(
+                client,
+                selected_day=selected_day,
+                scope=scope,
+                zone=zone,
+            )
+        except _PlanningSnapshotChanged:
+            continue
+    raise NativeBridgeProtocolError(
+        "EventKit changed while loading Planning; retry the agenda"
+    )
+
+
+async def _load_native_planning_once(
+    client: NativePlanningClient,
+    *,
+    selected_day: date,
+    scope: PlanningScope,
+    zone: tzinfo,
+) -> PlanningProjection:
     status = await client.call("authorization.status")
+    snapshot = _planning_snapshot_identity(status)
     authorization = getattr(status, "authorization", None)
     calendar_access = getattr(authorization, "calendar", None)
     reminders_access = getattr(authorization, "reminders", None)
@@ -234,7 +264,7 @@ async def load_native_planning(
             f"{' and '.join(missing)} full access is required to show Planning"
         )
 
-    calendar_containers, reminder_containers = await _gather_containers(client)
+    calendar_containers, reminder_containers = await _gather_containers(client, snapshot)
     range_days = _days_for_scope(selected_day, scope)
     start_at = datetime.combine(range_days[0], time.min, tzinfo=zone)
     end_at = datetime.combine(range_days[-1] + timedelta(days=1), time.min, tzinfo=zone)
@@ -244,6 +274,7 @@ async def load_native_planning(
         "calendar_identifiers": _container_identifiers(calendar_containers),
         "limit": 500,
     })
+    _require_planning_snapshot(event_response, snapshot)
     reminder_response = await client.call("reminders.query", {
         "calendar_identifiers": _container_identifiers(reminder_containers),
         "include_completed": False,
@@ -251,6 +282,7 @@ async def load_native_planning(
         "due_start_unix_ms": int(start_at.timestamp() * 1_000),
         "due_end_unix_ms": int(end_at.timestamp() * 1_000),
     })
+    _require_planning_snapshot(reminder_response, snapshot)
     events = _dictionary_items(getattr(event_response, "result", None))
     reminders = _dictionary_items(getattr(reminder_response, "result", None))
     return project_planning(
@@ -262,9 +294,33 @@ async def load_native_planning(
     )
 
 
-async def _gather_containers(client: NativePlanningClient) -> tuple[object, object]:
+def _planning_snapshot_identity(response: object) -> tuple[str, int]:
+    instance = getattr(response, "store_instance_id", None)
+    generation = getattr(response, "store_generation", None)
+    if (
+        not isinstance(instance, str)
+        or not instance
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        raise NativeBridgeProtocolError("native EventKit snapshot identity is missing")
+    return instance, generation
+
+
+def _require_planning_snapshot(response: object, expected: tuple[str, int]) -> None:
+    if _planning_snapshot_identity(response) != expected:
+        raise _PlanningSnapshotChanged
+
+
+async def _gather_containers(
+    client: NativePlanningClient,
+    snapshot: tuple[str, int],
+) -> tuple[object, object]:
     calendar_response = await client.call("calendar.listContainers")
     reminder_response = await client.call("reminders.listContainers")
+    _require_planning_snapshot(calendar_response, snapshot)
+    _require_planning_snapshot(reminder_response, snapshot)
     return getattr(calendar_response, "result", None), getattr(reminder_response, "result", None)
 
 

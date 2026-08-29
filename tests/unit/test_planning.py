@@ -29,6 +29,11 @@ class FakeNativeData:
     async def call(self, method: str, params: dict[str, object] | None = None) -> object:
         self.calls.append((method, params))
         response = self.responses[method]
+        if isinstance(response, tuple):
+            if not response:
+                raise AssertionError(f"exhausted sequential response for {method}")
+            response, *remaining = response
+            self.responses[method] = tuple(remaining)
         if isinstance(response, Exception):
             raise response
         return response
@@ -39,10 +44,14 @@ def bridge_response(
     calendar: str = "full_access",
     reminders: str = "full_access",
     result: object = None,
+    store_instance_id: str = "eventkit-store",
+    store_generation: int = 1,
 ) -> object:
     return SimpleNamespace(
         authorization=SimpleNamespace(calendar=calendar, reminders=reminders),
         result=result,
+        store_instance_id=store_instance_id,
+        store_generation=store_generation,
     )
 
 
@@ -307,6 +316,35 @@ async def test_native_loader_accepts_the_real_swift_full_access_enum_spelling() 
     )
 
     assert projection.days[0].entries == ()
+
+
+@pytest.mark.asyncio
+async def test_native_loader_retries_instead_of_merging_eventkit_generations() -> None:
+    native = FakeNativeData({
+        "authorization.status": (
+            bridge_response(store_generation=1),
+            bridge_response(store_generation=2),
+        ),
+        # The first attempt observes a write after authorization. The retry
+        # then obtains its entire agenda from generation 2.
+        "calendar.listContainers": (
+            bridge_response(result=[], store_generation=2),
+            bridge_response(result=[], store_generation=2),
+        ),
+        "reminders.listContainers": bridge_response(result=[], store_generation=2),
+        "calendar.query": bridge_response(result=[], store_generation=2),
+        "reminders.query": bridge_response(result=[], store_generation=2),
+    })
+
+    projection = await load_native_planning(
+        native,
+        selected_day=date(2026, 9, 1),
+        scope=PlanningScope.DAY,
+        zone=CHICAGO,
+    )
+
+    assert projection.days[0].entries == ()
+    assert [method for method, _ in native.calls].count("authorization.status") == 2
 
 
 @pytest.mark.asyncio
