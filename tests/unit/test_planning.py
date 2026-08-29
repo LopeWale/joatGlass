@@ -1,17 +1,44 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from joat.services.planning import (
+    PlanningAuthorizationError,
     PlanningScope,
     advance_selected_day,
+    load_native_planning,
     month_grid,
     project_planning,
 )
 
 
 CHICAGO = ZoneInfo("America/Chicago")
+
+
+class FakeNativeData:
+    def __init__(self, responses: dict[str, object]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
+
+    async def call(self, method: str, params: dict[str, object] | None = None) -> object:
+        self.calls.append((method, params))
+        return self.responses[method]
+
+
+def bridge_response(
+    *,
+    calendar: str = "full_access",
+    reminders: str = "full_access",
+    result: object = None,
+) -> object:
+    return SimpleNamespace(
+        authorization=SimpleNamespace(calendar=calendar, reminders=reminders),
+        result=result,
+    )
 
 
 def event(title: str, when: datetime) -> dict[str, object]:
@@ -134,3 +161,60 @@ def test_scope_navigation_keeps_the_wearer_on_human_calendar_boundaries() -> Non
     assert advance_selected_day(selected, PlanningScope.WEEK, 1) == date(2026, 2, 7)
     assert advance_selected_day(selected, PlanningScope.MONTH, 1) == date(2026, 2, 28)
     assert advance_selected_day(date(2026, 3, 31), PlanningScope.MONTH, -1) == date(2026, 2, 28)
+
+
+@pytest.mark.asyncio
+async def test_native_loader_queries_one_calendar_window_and_incomplete_reminders() -> None:
+    native = FakeNativeData({
+        "authorization.status": bridge_response(),
+        "calendar.listContainers": bridge_response(result=[{"calendar_identifier": "work"}]),
+        "reminders.listContainers": bridge_response(result=[{"calendar_identifier": "personal"}]),
+        "calendar.query": bridge_response(result=[
+            event("Design review", datetime(2026, 9, 1, 9, 30, tzinfo=CHICAGO)),
+        ]),
+        "reminders.query": bridge_response(result=[
+            reminder("Buy filters", year=2026, month=9, day=1, hour=18, minute=0),
+        ]),
+    })
+
+    projection = await load_native_planning(
+        native,
+        selected_day=date(2026, 9, 1),
+        scope=PlanningScope.DAY,
+        zone=CHICAGO,
+    )
+
+    assert [entry.title for entry in projection.days[0].entries] == ["Design review", "Buy filters"]
+    assert native.calls == [
+        ("authorization.status", None),
+        ("calendar.listContainers", None),
+        ("reminders.listContainers", None),
+        ("calendar.query", {
+            "start_unix_ms": int(datetime(2026, 9, 1, tzinfo=CHICAGO).timestamp() * 1_000),
+            "end_unix_ms": int(datetime(2026, 9, 2, tzinfo=CHICAGO).timestamp() * 1_000),
+            "calendar_identifiers": ["work"],
+            "limit": 500,
+        }),
+        ("reminders.query", {
+            "calendar_identifiers": ["personal"],
+            "include_completed": False,
+            "limit": 500,
+        }),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_loader_requires_full_access_to_both_authoritative_stores() -> None:
+    native = FakeNativeData({
+        "authorization.status": bridge_response(reminders="denied"),
+    })
+
+    with pytest.raises(PlanningAuthorizationError, match="Reminders"):
+        await load_native_planning(
+            native,
+            selected_day=date(2026, 9, 1),
+            scope=PlanningScope.DAY,
+            zone=CHICAGO,
+        )
+
+    assert native.calls == [("authorization.status", None)]

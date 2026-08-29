@@ -12,7 +12,7 @@ from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 
 class PlanningScope(StrEnum):
@@ -24,6 +24,17 @@ class PlanningScope(StrEnum):
 
 
 PlanningEntryKind = Literal["event", "reminder"]
+
+
+class NativePlanningClient(Protocol):
+    """The narrow read-only subset of the native EventKit bridge we need."""
+
+    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        """Issue one established native bridge request."""
+
+
+class PlanningAuthorizationError(RuntimeError):
+    """Calendar or Reminders access is missing for the unified plan."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +158,80 @@ def project_planning(
         title=_title_for_scope(selected_day, scope, range_days),
         days=days,
     )
+
+
+async def load_native_planning(
+    client: NativePlanningClient,
+    *,
+    selected_day: date,
+    scope: PlanningScope,
+    zone: tzinfo,
+) -> PlanningProjection:
+    """Load one bounded planning range from both native authoritative stores.
+
+    A merged wearable view needs both permissions.  We fail explicitly rather
+    than show a partial day that silently implies there are no reminders or no
+    calendar events.  Reminders remain a separate native query because their
+    Calendar.app "Scheduled Reminders" projection is not a second EventKit
+    event and must never be counted twice.
+    """
+
+    status = await client.call("authorization.status")
+    authorization = getattr(status, "authorization", None)
+    calendar_access = getattr(authorization, "calendar", None)
+    reminders_access = getattr(authorization, "reminders", None)
+    missing = []
+    if calendar_access != "full_access":
+        missing.append("Calendar")
+    if reminders_access != "full_access":
+        missing.append("Reminders")
+    if missing:
+        raise PlanningAuthorizationError(
+            f"{' and '.join(missing)} full access is required to show Planning"
+        )
+
+    calendar_containers, reminder_containers = await _gather_containers(client)
+    range_days = _days_for_scope(selected_day, scope)
+    start_at = datetime.combine(range_days[0], time.min, tzinfo=zone)
+    end_at = datetime.combine(range_days[-1] + timedelta(days=1), time.min, tzinfo=zone)
+    event_response = await client.call("calendar.query", {
+        "start_unix_ms": int(start_at.timestamp() * 1_000),
+        "end_unix_ms": int(end_at.timestamp() * 1_000),
+        "calendar_identifiers": _container_identifiers(calendar_containers),
+        "limit": 500,
+    })
+    reminder_response = await client.call("reminders.query", {
+        "calendar_identifiers": _container_identifiers(reminder_containers),
+        "include_completed": False,
+        "limit": 500,
+    })
+    events = _dictionary_items(getattr(event_response, "result", None))
+    reminders = _dictionary_items(getattr(reminder_response, "result", None))
+    return project_planning(
+        selected_day=selected_day,
+        scope=scope,
+        zone=zone,
+        events=events,
+        reminders=reminders,
+    )
+
+
+async def _gather_containers(client: NativePlanningClient) -> tuple[object, object]:
+    calendar_response = await client.call("calendar.listContainers")
+    reminder_response = await client.call("reminders.listContainers")
+    return getattr(calendar_response, "result", None), getattr(reminder_response, "result", None)
+
+
+def _dictionary_items(raw: object) -> list[dict[str, Any]]:
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def _container_identifiers(raw: object) -> list[str]:
+    return [
+        identifier
+        for item in _dictionary_items(raw)
+        if isinstance(identifier := item.get("calendar_identifier"), str) and identifier
+    ]
 
 
 def _days_for_scope(selected_day: date, scope: PlanningScope) -> tuple[date, ...]:
