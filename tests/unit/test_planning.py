@@ -199,6 +199,8 @@ async def test_native_loader_queries_one_calendar_window_and_incomplete_reminder
             "calendar_identifiers": ["personal"],
             "include_completed": False,
             "limit": 500,
+            "due_start_unix_ms": int(datetime(2026, 9, 1, tzinfo=CHICAGO).timestamp() * 1_000),
+            "due_end_unix_ms": int(datetime(2026, 9, 2, tzinfo=CHICAGO).timestamp() * 1_000),
         }),
     ]
 

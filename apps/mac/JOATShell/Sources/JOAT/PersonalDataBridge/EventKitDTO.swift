@@ -168,6 +168,30 @@ struct ReminderQueryRequest: Codable, Sendable {
     let calendarIdentifiers: [String]
     let includeCompleted: Bool
     let limit: Int
+    /// Optional half-open date window for a wearable day/week/month agenda.
+    /// Omitting both preserves the legacy unbounded incomplete-reminders read.
+    let dueStartUnixMS: Int64?
+    let dueEndUnixMS: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case calendarIdentifiers, includeCompleted, limit
+        case dueStartUnixMS = "dueStartUnixMs"
+        case dueEndUnixMS = "dueEndUnixMs"
+    }
+
+    init(
+        calendarIdentifiers: [String],
+        includeCompleted: Bool,
+        limit: Int,
+        dueStartUnixMS: Int64? = nil,
+        dueEndUnixMS: Int64? = nil
+    ) {
+        self.calendarIdentifiers = calendarIdentifiers
+        self.includeCompleted = includeCompleted
+        self.limit = limit
+        self.dueStartUnixMS = dueStartUnixMS
+        self.dueEndUnixMS = dueEndUnixMS
+    }
 }
 
 struct ReminderCompleteRequest: Codable, Sendable {
