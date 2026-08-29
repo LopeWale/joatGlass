@@ -35,7 +35,11 @@ def reminder_due_hud_view(card: str) -> ProductivityHudView:
         title=title[:72],
         primary="Due now",
         secondary="This reminder is still incomplete.",
-        hint="left x2 Reminders",
+        # Every terminal productivity surface returns through the same
+        # native-backed Calendar + Reminders schedule.  Calling this a
+        # separate Reminders page would send the wearer toward a destination
+        # that the HUD router intentionally no longer exposes.
+        hint="left x2 Planning",
     )
 
 
