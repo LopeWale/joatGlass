@@ -158,6 +158,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._pending_confirms: dict[str, _PendingConfirm] = {}
         self._session_id: str | None = None
         self._session_pairing_identity_digest: bytes | None = None
+        # Unlike ordinary JOAT, a field-acceptance receipt must not allow a
+        # loopback simulator to stand in for an actual paired wearer session.
+        self._current_peer_is_loopback = False
         self._last_seq: int | None = None
         self.device: Device | None = None
         self.hello: Hello | None = None
@@ -207,6 +210,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             self._conn = None
             self._session_id = None
             self._session_pairing_identity_digest = None
+            self._current_peer_is_loopback = False
+            self.hello = None
         server = self._server
         if server is not None:
             server.close()  # type: ignore[attr-defined]
@@ -218,6 +223,51 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     @property
     def connected(self) -> bool:
         return self._conn is not None
+
+    @property
+    def physical_g2_connected(self) -> bool:
+        """Whether the current authenticated peer is a non-loopback G2.
+
+        This is intentionally an acceptance-evidence predicate, rather than
+        a generic capability flag: an official local simulator remains useful
+        for development but must never satisfy a physical-run receipt.
+        """
+
+        return bool(
+            self._conn is not None
+            and not self._current_peer_is_loopback
+            and self.hello is not None
+            and self.hello.model == "g2"
+        )
+
+    @property
+    def g2_diagnostics(self) -> G2DiagnosticStore | None:
+        """Current redacted diagnostics owner, if the wearer enabled one."""
+
+        return self._g2_diagnostics
+
+    async def set_g2_diagnostics(self, store: G2DiagnosticStore | None) -> None:
+        """Toggle the trusted-Mac diagnostic stream without restarting JOAT.
+
+        The plugin may receive this control after it has already connected;
+        that is deliberate.  A live acceptance run must not reset STT or the
+        reply model merely to begin retaining its content-free receipt.
+        """
+
+        previous = self._g2_diagnostics
+        self._g2_diagnostics = store
+        connection = self._conn
+        if connection is not None:
+            try:
+                await connection.send(
+                    json.dumps(G2DiagnosticControl(enabled=store is not None).to_wire())
+                )
+            except websockets.ConnectionClosed:
+                # Link loss is handled by the regular connection lifecycle.
+                # Keep the configured owner for a paired reconnect.
+                pass
+        if previous is not None and previous is not store:
+            await previous.flush()
 
     # ── subscriptions ────────────────────────────────────────────────────────
 
@@ -443,17 +493,21 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
     # ── pairing ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _peer_is_loopback(conn: ServerConnection) -> bool:
+        addr = conn.remote_address
+        try:
+            return bool(ip_address(addr[0]).is_loopback)
+        except (ValueError, IndexError, TypeError):
+            return False
+
     def _peer_is_exempt(self, conn: ServerConnection) -> bool:
         """Loopback peers skip pairing: the simulator and test harnesses run
         on this Mac, and a local process could read the token file anyway —
         the boundary being enforced is the network, not the machine."""
         if not self._trust_loopback:
             return False
-        addr = conn.remote_address
-        try:
-            return bool(ip_address(addr[0]).is_loopback)
-        except (ValueError, IndexError, TypeError):
-            return False
+        return self._peer_is_loopback(conn)
 
     def forget_pairing(self) -> bool:
         """Open an explicit, time-bounded local pairing window.
@@ -632,7 +686,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._conn = conn
         self._session_id = session_id
         self._session_pairing_identity_digest = pairing_identity_digest
+        self._current_peer_is_loopback = self._peer_is_loopback(conn)
         self._last_seq = None
+        self.hello = None
         host = str(conn.remote_address[0]) if conn.remote_address else "?"
         self._refusals.pop(host, None)
         self._lockout_warned = False
@@ -654,6 +710,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 self._conn = None
                 self._session_id = None
                 self._session_pairing_identity_digest = None
+                self._current_peer_is_loopback = False
+                self.hello = None
                 for cb in self._disconnect_cbs:
                     cb()
             log.info("plugin disconnected")

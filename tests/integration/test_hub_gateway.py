@@ -35,6 +35,7 @@ from joat.core.protocol import (
     NavigationViewAck,
 )
 from joat.services.message_reply import MessageReplyController
+from joat.services.g2_diagnostics import G2DiagnosticStore
 
 HOST = "127.0.0.1"
 
@@ -101,6 +102,38 @@ class TestConnection:
         async with websockets.connect(url):
             await _wait_for(lambda: t.connected)
         await _wait_for(lambda: not t.connected)
+
+    async def test_loopback_g2_cannot_be_reported_as_physical_acceptance_evidence(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            await ws.send(json.dumps({
+                "kind": "hello", "sn": "SIMULATOR", "model": "g2", "launchSource": "simulator",
+            }))
+            await _wait_for(lambda: t.hello is not None)
+            assert t.hello is not None and t.hello.model == "g2"
+            assert not t.physical_g2_connected
+
+    async def test_g2_diagnostics_switches_live_without_replacing_the_gateway(self, transport) -> None:
+        t, url = transport
+        store = G2DiagnosticStore(writer=lambda _path, _events: None)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            await _wait_for(lambda: t.connected)
+
+            await t.set_g2_diagnostics(store)
+            assert json.loads(await ws.recv()) == {
+                "kind": "g2.diagnostic.control", "enabled": True,
+            }
+            assert t.g2_diagnostics is store
+
+            await t.set_g2_diagnostics(None)
+            assert json.loads(await ws.recv()) == {
+                "kind": "g2.diagnostic.control", "enabled": False,
+            }
+            assert t.g2_diagnostics is None
 
     async def test_newest_connection_wins(self, transport) -> None:
         """Reconnect-after-sleep is common; two live plugins are not."""

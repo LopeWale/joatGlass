@@ -59,6 +59,7 @@ from .core.interfaces import NavigationProvider, ReplyEngine, SttEngine
 from .core.navigation import NavigationPoint
 from .core.protocol import (
     Device,
+    BrainstormAction,
     BrainstormHudView,
     Hello,
     InputEvent,
@@ -86,7 +87,11 @@ from .persistence.store import DurableStore
 from .persistence.tasks import TaskOccurrenceStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
-from .services.brainstorm_acceptance import InAppBrainstormAcceptance
+from .services.brainstorm_acceptance import (
+    InAppBrainstormAcceptance,
+    consume_arm_request,
+    default_arm_path,
+)
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.capabilities import CapabilityRouter
@@ -153,11 +158,6 @@ async def main() -> None:
                         help="opt in to a content-free real-G2 support trace")
     parser.add_argument("--location-probe", action="store_true",
                         help="request high-accuracy, privacy-bucketed Gate-0 location telemetry")
-    parser.add_argument(
-        "--g2-brainstorm-acceptance",
-        action="store_true",
-        help="run one app-launched, content-free physical G2 Hermes acceptance flow",
-    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -190,16 +190,8 @@ async def main() -> None:
         for recovered_state in recovered.values():
             counts[recovered_state] = counts.get(recovered_state, 0) + 1
         log.warning("durable action recovery states=%s", counts)
-    acceptance_events: list[dict[str, object]] = []
-
-    def observe_acceptance_events(_path: Path, events: list[dict[str, object]]) -> None:
-        # G2DiagnosticStore has already rejected every content-bearing field.
-        acceptance_events[:] = [dict(event) for event in events]
-
     g2_diagnostics = (
-        G2DiagnosticStore(writer=observe_acceptance_events)
-        if args.g2_brainstorm_acceptance
-        else G2DiagnosticStore()
+        G2DiagnosticStore()
         if args.g2_diagnostics or args.location_probe
         else None
     )
@@ -207,8 +199,7 @@ async def main() -> None:
         host=args.host,
         port=args.port,
         pairing=PairingStore(),
-        # Acceptance evidence must never be satisfied by a local simulator.
-        trust_loopback=not args.g2_brainstorm_acceptance,
+        trust_loopback=True,
         g2_diagnostics=g2_diagnostics,
         location_probe=args.location_probe,
     )
@@ -804,26 +795,18 @@ async def main() -> None:
 
     transport.on_navigation_action(on_navigation_action)
     brainstorm_acceptance: InAppBrainstormAcceptance | None = None
-    if args.g2_brainstorm_acceptance:
-        receipt_stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        acceptance_out = (
-            Path.home()
-            / "Library/Application Support/JOAT/acceptance/brainstorm"
-            / f"{receipt_stamp}-{uuid.uuid4().hex[:8]}-physical-g2.json"
-        )
-        brainstorm_acceptance = InAppBrainstormAcceptance(
-            transport=transport,
-            terminal=openclaw_terminal,
-            out=acceptance_out,
-            diagnostic_events=acceptance_events,
-            # Returning to a normal engine after a completed one-shot keeps
-            # this a test mode, not a persistent alternate assistant.
-            on_complete=shutdown.set,
-        )
-        brainstorm_acceptance.attach()
-        log.info("Brainstorm G2 acceptance armed (content-free receipt only)")
-    else:
-        transport.on_brainstorm_action(sessions.handle_brainstorm_action)
+
+    def on_brainstorm_action(action: BrainstormAction) -> None:
+        # The normal session manager remains the only action consumer until a
+        # local user explicitly arms the one-shot physical acceptance flow.
+        # This prevents duplicate handling during a live proof run.
+        active = brainstorm_acceptance
+        if active is not None:
+            active.handle_action(action)
+        else:
+            sessions.handle_brainstorm_action(action)
+
+    transport.on_brainstorm_action(on_brainstorm_action)
     transport.on_navigation_origin(on_navigation_origin)
     transport.on_navigation_origin_failure(on_navigation_origin_failure)
     transport.on_navigation_view_ack(on_navigation_view_ack)
@@ -991,6 +974,63 @@ async def main() -> None:
     await transport.start()
     log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
 
+    async def monitor_brainstorm_acceptance_arm() -> None:
+        """Consume one fixed local arm request without restarting the engine.
+
+        The request is written solely by the signed JOAT shell after an
+        explicit menu choice.  It contains no payload or free-form controls;
+        this task merely switches the already-connected plugin into its
+        content-free diagnostic mode for the one acceptance workflow.
+        """
+
+        nonlocal brainstorm_acceptance
+        arm_path = default_arm_path()
+        while not shutdown.is_set():
+            if not consume_arm_request(arm_path):
+                await asyncio.sleep(0.25)
+                continue
+            if brainstorm_acceptance is not None:
+                log.warning("ignored duplicate Brainstorm G2 acceptance arm request")
+                continue
+
+            events: list[dict[str, object]] = []
+            receipt_stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            acceptance_out = (
+                arm_path.parent
+                / f"{receipt_stamp}-{uuid.uuid4().hex[:8]}-physical-g2.json"
+            )
+            controller = InAppBrainstormAcceptance(
+                transport=transport,
+                terminal=openclaw_terminal,
+                out=acceptance_out,
+                diagnostic_events=events,
+            )
+            acceptance_diagnostics = G2DiagnosticStore(
+                writer=controller.observe_diagnostics,
+            )
+            previous_diagnostics = transport.g2_diagnostics
+            await transport.set_g2_diagnostics(acceptance_diagnostics)
+            brainstorm_acceptance = controller
+            controller.attach(subscribe_actions=False)
+            log.info("Brainstorm G2 acceptance armed in the live engine")
+            try:
+                await controller.wait()
+            except asyncio.CancelledError:
+                await controller.close()
+                raise
+            except Exception as exc:
+                # The receipt already captures only the bounded outcome.  Do
+                # not log remote response material if a provider fails.
+                log.warning("Brainstorm G2 acceptance stopped after %s", type(exc).__name__)
+            finally:
+                if brainstorm_acceptance is controller:
+                    brainstorm_acceptance = None
+                await transport.set_g2_diagnostics(previous_diagnostics)
+
+    acceptance_arm_task = asyncio.get_running_loop().create_task(
+        monitor_brainstorm_acceptance_arm()
+    )
+
     # Diagnostic: a starved loop delays every reply, and looks exactly
     # like a slow model in the logs unless it is measured directly.
     lag_task = asyncio.get_running_loop().create_task(orchestrator.watch_loop_lag())
@@ -1005,6 +1045,8 @@ async def main() -> None:
         beat_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()
+        acceptance_arm_task.cancel()
+        await asyncio.gather(acceptance_arm_task, return_exceptions=True)
         if brainstorm_acceptance is not None:
             await brainstorm_acceptance.close()
         await sessions.close()
