@@ -17,6 +17,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import urlsplit
 
 from .openclaw_gateway import (
     AGENT_TERMINAL_AGENT_ID,
@@ -39,6 +40,9 @@ DEFAULT_OPENCLAW_CONFIG_PATH = (
     Path.home() / "Library/Application Support/JOAT/openclaw.json"
 )
 CONNECTION_CLOSE_TIMEOUT_S = 1.0
+# Hermes exposes its broad browser control dashboard on this port.  JOAT must
+# connect only to OpenClaw's authenticated Gateway, never that dashboard.
+HERMES_CONTROL_DASHBOARD_PORT = 9443
 
 
 class OpenClawHistoryRecoveryRequired(OpenClawGatewayError):
@@ -82,7 +86,12 @@ class OpenClawRuntimeConfig:
             or agent_id != AGENT_TERMINAL_AGENT_ID
         ):
             raise ValueError("OpenClaw runtime config is invalid")
-        return cls(profile=GatewayProfile(gateway_url), agent_id=agent_id)
+        profile = GatewayProfile(gateway_url)
+        if urlsplit(profile.url).port == HERMES_CONTROL_DASHBOARD_PORT:
+            raise ValueError(
+                "OpenClaw runtime config must point to the Gateway, not the Hermes dashboard"
+            )
+        return cls(profile=profile, agent_id=agent_id)
 
 
 class OpenClawConnectionFactory(Protocol):

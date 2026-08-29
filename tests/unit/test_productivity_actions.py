@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from joat.core.confirmation import ConfirmationResult
+from joat.core.protocol import ProductivityHudView
 from joat.native.bridge import NativeBridgeUnavailable
 from joat.persistence.actions import ActionJournal
 from joat.persistence.store import DurableStore
@@ -149,14 +150,14 @@ def rig(
     bridge: FakeBridge,
     *,
     accept: bool = True,
-    updates: list[tuple[str, str]] | None = None,
+    updates: list[ProductivityHudView] | None = None,
 ):
     store = DurableStore(tmp_path / "joat.sqlite3")
     journal = ActionJournal(store)
     confirms = ConfirmationHarness(accept=accept)
-    async def publish(title: str, message: str) -> None:
+    async def publish(view: ProductivityHudView) -> None:
         assert updates is not None
-        updates.append((title, message))
+        updates.append(view)
 
     controller = ProductivityActionController(
         bridge,
@@ -166,6 +167,15 @@ def rig(
         publish_status=publish if updates is not None else None,
     )  # type: ignore[arg-type]
     return controller, confirms, journal, store
+
+
+def workflow_projection(
+    updates: list[ProductivityHudView],
+) -> list[tuple[str, str, str, str, str, str]]:
+    return [
+        (view.domain, view.phase, view.title, view.primary, view.secondary, view.hint)
+        for view in updates
+    ]
 
 
 class TestCalendarCreation:
@@ -224,7 +234,7 @@ class TestCalendarCreation:
         store.close()
 
     async def test_action_lifecycle_reports_verification_and_receipt(self, tmp_path: Path) -> None:
-        updates: list[tuple[str, str]] = []
+        updates: list[ProductivityHudView] = []
         bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
         controller, _, _, store = rig(tmp_path, bridge, updates=updates)
 
@@ -234,16 +244,16 @@ class TestCalendarCreation:
         )
 
         assert result == "Created Calendar event: Design review."
-        assert updates == [
-            ("ACTION · VERIFYING", "Calendar create · Checking native read-back…"),
-            ("ACTION · DONE", "Calendar create · Saved and verified"),
+        assert workflow_projection(updates) == [
+            ("calendar", "verifying", "Design review", "Saving calendar event", "Checking native read-back", "Please wait"),
+            ("calendar", "saved", "Design review", "Saved and verified", "Calendar read-back matched", "left x2 Calendar"),
         ]
         store.close()
 
     async def test_receipt_persistence_failure_after_native_commit_becomes_uncertain(
         self, tmp_path: Path, monkeypatch
     ) -> None:  # type: ignore[no-untyped-def]
-        updates: list[tuple[str, str]] = []
+        updates: list[ProductivityHudView] = []
         bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
         controller, _, journal, store = rig(tmp_path, bridge, updates=updates)
 
@@ -260,16 +270,16 @@ class TestCalendarCreation:
 
         assert "may have created" in str(result)
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
-        assert updates[-1] == (
-            "ACTION · CHECK",
-            "Calendar create · Check native app before retrying",
+        assert workflow_projection(updates)[-1] == (
+            "calendar", "check", "Design review", "Check Calendar",
+            "It may have changed. Do not retry.", "Open Calendar on Mac",
         )
         store.close()
 
     async def test_committed_receipt_that_raises_still_purges_payload(
         self, tmp_path: Path, monkeypatch
     ) -> None:  # type: ignore[no-untyped-def]
-        updates: list[tuple[str, str]] = []
+        updates: list[ProductivityHudView] = []
         bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
         controller, _, journal, store = rig(tmp_path, bridge, updates=updates)
         record_success = journal.record_success
@@ -288,9 +298,9 @@ class TestCalendarCreation:
         assert result == "Created Calendar event: Design review."
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "succeeded"
         assert store.execute("SELECT count(*) FROM action_payloads").fetchone()[0] == 0
-        assert updates[-1] == (
-            "ACTION · DONE",
-            "Calendar create · Saved and verified",
+        assert workflow_projection(updates)[-1] == (
+            "calendar", "saved", "Design review", "Saved and verified",
+            "Calendar read-back matched", "left x2 Calendar",
         )
         store.close()
 
@@ -337,7 +347,7 @@ class TestCalendarCreation:
     async def test_noncommitted_response_cannot_be_reported_as_calendar_success(
         self, tmp_path: Path
     ) -> None:
-        updates: list[tuple[str, str]] = []
+        updates: list[ProductivityHudView] = []
         bridge = FakeBridge(
             containers=[calendar_container("Work", "cal-work", default=True)],
             write_commit_phase="read_only",
@@ -351,16 +361,16 @@ class TestCalendarCreation:
 
         assert "may have created" in str(result)
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
-        assert updates[-1] == (
-            "ACTION · CHECK",
-            "Calendar create · Check native app before retrying",
+        assert workflow_projection(updates)[-1] == (
+            "calendar", "check", "Design review", "Check Calendar",
+            "It may have changed. Do not retry.", "Open Calendar on Mac",
         )
         store.close()
 
     async def test_precommit_native_failure_is_visible_but_never_claims_uncertainty(
         self, tmp_path: Path
     ) -> None:
-        updates: list[tuple[str, str]] = []
+        updates: list[ProductivityHudView] = []
         bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
         bridge.write_error = NativeBridgeUnavailable(
             "not dispatched",
@@ -375,9 +385,9 @@ class TestCalendarCreation:
 
         assert result == "Calendar did not create the event. Check JOAT on the Mac."
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "failed"
-        assert updates[-1] == (
-            "ACTION · FAILED",
-            "Calendar create · Native write failed",
+        assert workflow_projection(updates)[-1] == (
+            "calendar", "failed", "Design review", "Not saved",
+            "No calendar item was changed.", "left x2 Calendar",
         )
         store.close()
 
@@ -409,7 +419,8 @@ class TestCalendarCreation:
 
     async def test_decline_never_calls_eventkit_write(self, tmp_path: Path) -> None:
         bridge = FakeBridge(containers=[calendar_container("Work", "cal-work", default=True)])
-        controller, _, _, store = rig(tmp_path, bridge, accept=False)
+        updates: list[ProductivityHudView] = []
+        controller, _, _, store = rig(tmp_path, bridge, accept=False, updates=updates)
 
         result = await controller.handle_command(
             "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
@@ -419,6 +430,10 @@ class TestCalendarCreation:
         assert result == "Calendar event cancelled."
         assert all(method != "calendar.create" for method, *_ in bridge.calls)
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "rejected"
+        assert workflow_projection(updates) == [
+            ("calendar", "cancelled", "Design review", "Cancelled",
+             "No calendar item was changed.", "left x2 Calendar"),
+        ]
         store.close()
 
     async def test_confirmation_task_cancellation_purges_uncommitted_payload(
@@ -536,7 +551,8 @@ class TestReminderCreation:
                 "is_completed": False,
             },
         )
-        controller, confirms, _, store = rig(tmp_path, bridge)
+        updates: list[ProductivityHudView] = []
+        controller, confirms, _, store = rig(tmp_path, bridge, updates=updates)
 
         result = await controller.handle_command(
             "remind me to Buy filters on 2026-09-01 at 18:00 in America/Chicago"
@@ -559,6 +575,10 @@ class TestReminderCreation:
         assert store.execute(
             "SELECT count(*) FROM action_receipts WHERE external_item_id IS NOT NULL"
         ).fetchone()[0] == 1
+        assert workflow_projection(updates) == [
+            ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
+            ("reminders", "saved", "Buy filters", "Saved and verified", "Reminders read-back matched", "left x2 Reminders"),
+        ]
         store.close()
 
     async def test_missing_native_alarm_is_uncertain_after_possible_commit(
@@ -634,7 +654,8 @@ class TestReminderCreation:
                 "has_recurrence_rules": False,
             }],
         )
-        controller, confirms, _, store = rig(tmp_path, bridge)
+        updates: list[ProductivityHudView] = []
+        controller, confirms, _, store = rig(tmp_path, bridge, updates=updates)
 
         result = await controller.handle_command("complete reminder Buy filters")
 
@@ -643,12 +664,16 @@ class TestReminderCreation:
         assert bridge.calls[-1][0] == "reminders.complete"
         assert bridge.calls[-1][1]["calendar_item_identifier"] == "reminder-1"
         assert bridge.calls[-1][1]["calendar_identifier"] == "list-personal"
+        assert workflow_projection(updates) == [
+            ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
+            ("reminders", "completed", "Buy filters", "Completed and verified", "Reminders read-back matched", "left x2 Reminders"),
+        ]
         store.close()
 
     async def test_completion_readback_from_another_list_is_uncertain(
         self, tmp_path: Path
     ) -> None:
-        updates: list[tuple[str, str]] = []
+        updates: list[ProductivityHudView] = []
         bridge = FakeBridge(
             containers=[reminder_container("Personal", "list-personal", default=True)],
             reminder_query=[{
@@ -670,9 +695,9 @@ class TestReminderCreation:
 
         assert "may have been completed" in str(result)
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
-        assert updates[-1] == (
-            "ACTION · CHECK",
-            "Reminders complete · Check native app before retrying",
+        assert workflow_projection(updates)[-1] == (
+            "reminders", "check", "Buy filters", "Check Reminders",
+            "It may have changed. Do not retry.", "Open Reminders on Mac",
         )
         store.close()
 

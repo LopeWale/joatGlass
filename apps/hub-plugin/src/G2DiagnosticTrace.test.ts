@@ -73,4 +73,27 @@ describe('MacG2DiagnosticTrace', () => {
       },
     }]);
   });
+
+  it('forwards a first-light outcome without HUD content or pixels', () => {
+    const sent: UplinkMessage[] = [];
+    const trace = new MacG2DiagnosticTrace({ sendDiagnostic: (message) => sent.push(message) });
+    trace.setEnabled(true);
+
+    trace.record({
+      type: 'hud_surface',
+      stage: 'visual_rebuild',
+      surface: 'visual',
+      outcome: 'failed',
+    });
+
+    expect(sent).toEqual([{
+      kind: 'g2.diagnostic',
+      event: {
+        type: 'hud_surface',
+        stage: 'visual_rebuild',
+        surface: 'visual',
+        outcome: 'failed',
+      },
+    }]);
+  });
 });

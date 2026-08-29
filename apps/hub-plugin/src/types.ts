@@ -34,6 +34,51 @@ export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system
 export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
 export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
 export type NavigationRoutePlan = import('./NavigationProgress').NavigationRoutePlan;
+/** Safe projection of the live Brainstorm / Hermes terminal state. */
+export type BrainstormHudScreen = 'brainstorm' | 'agent_terminal';
+export type BrainstormHudState =
+  | 'unavailable'
+  | 'approval_required'
+  | 'ready'
+  | 'running'
+  | 'settled'
+  | 'blocked';
+export interface BrainstormHudModel {
+  screen: BrainstormHudScreen;
+  state: BrainstormHudState;
+  topic: string;
+  collaborators: string[];
+  activeSpeaker?: string;
+  activity: string;
+  endpointHost?: string;
+  terminalState: BrainstormHudState;
+  terminalReason?: string;
+  /** Local preflight only; this is never an atomic remote guarantee. */
+  noToolsChecked: boolean;
+}
+
+/** A bounded lifecycle page for native Calendar and Reminders actions.
+ * The interactive preview remains a separate `confirm.request` frame; this
+ * state is only what the native bridge is doing or established afterward. */
+export type ProductivityHudDomain = 'calendar' | 'reminders';
+export type ProductivityHudPhase =
+  | 'verifying'
+  | 'saved'
+  | 'completed'
+  | 'failed'
+  | 'check'
+  | 'cancelled'
+  | 'not_saved'
+  | 'due';
+
+export interface ProductivityHudModel {
+  domain: ProductivityHudDomain;
+  phase: ProductivityHudPhase;
+  title: string;
+  primary: string;
+  secondary: string;
+  hint: string;
+}
 export type NavigationAction =
   | 'confirm_destination'
   | 'retry_destination'
@@ -126,6 +171,8 @@ export type DownlinkMessage =
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
   | { kind: 'hud.list'; items: string[]; title?: string; hint?: string; requestId?: string; selectable?: boolean }
+  | { kind: 'brainstorm.view'; brainstorm: BrainstormHudModel }
+  | { kind: 'productivity.view'; productivity: ProductivityHudModel }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */

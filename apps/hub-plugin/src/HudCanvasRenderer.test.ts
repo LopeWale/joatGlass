@@ -7,6 +7,7 @@ import {
   hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
+  productivityPhaseLabel,
   resolveHudOverview,
   resolveHudListKind,
   visibleHudListItems,
@@ -82,6 +83,17 @@ describe('semantic HUD chrome', () => {
     expect(resolveHudListKind('LISTENING RESUME')).toBe('generic');
   });
 
+});
+
+describe('productivity HUD state labels', () => {
+  it('keeps native verification, uncertainty, and due alarms visually distinct', () => {
+    expect(productivityPhaseLabel('verifying')).toBe('VERIFYING');
+    expect(productivityPhaseLabel('saved')).toBe('SAVED');
+    expect(productivityPhaseLabel('completed')).toBe('COMPLETED');
+    expect(productivityPhaseLabel('failed')).toBe('NOT SAVED');
+    expect(productivityPhaseLabel('check')).toBe('CHECK REQUIRED');
+    expect(productivityPhaseLabel('due')).toBe('DUE NOW');
+  });
 });
 
 describe('parseHudLabeledValue', () => {

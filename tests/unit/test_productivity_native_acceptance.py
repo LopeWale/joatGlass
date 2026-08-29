@@ -7,10 +7,13 @@ import json
 import os
 import stat
 import subprocess
+import sys
+import tempfile
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -283,7 +286,9 @@ def test_engine_stub_is_private_pid_bound_bridge_proxy(
 
 @pytest.mark.asyncio
 async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path) -> None:
-    upstream_path = tmp_path / "native.sock"
+    socket_context = tempfile.TemporaryDirectory(prefix="joat-proxy-test-", dir="/tmp")
+    socket_root = Path(socket_context.name)
+    upstream_path = socket_root / "native.sock"
 
     async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         data = await reader.read(32)
@@ -293,7 +298,11 @@ async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path
         await writer.wait_closed()
 
     server = await asyncio.start_unix_server(echo, path=upstream_path)
-    stub = create_engine_stub_repo(tmp_path, authorized_client_pid=os.getpid())
+    stub = create_engine_stub_repo(
+        tmp_path,
+        authorized_client_pid=os.getpid(),
+        proxy_root=socket_root,
+    )
     env = dict(os.environ)
     env["JOAT_NATIVE_BRIDGE"] = str(upstream_path)
     process = subprocess.Popen(  # noqa: S603 - private generated executable
@@ -324,7 +333,7 @@ async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path
         )
         unauthorized = await asyncio.to_thread(
             subprocess.run,
-            [str(Path(os.sys.executable)), "-c", probe, str(stub.bridge_path)],
+            [str(Path(sys.executable)), "-c", probe, str(stub.bridge_path)],
             capture_output=True,
             timeout=5,
             check=False,
@@ -335,12 +344,41 @@ async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path
         await asyncio.to_thread(process.wait, 5)
         server.close()
         await server.wait_closed()
+        socket_context.cleanup()
 
 
-def test_cleanup_deletes_only_the_read_back_event_and_reminder_identities(
+class _CleanupBridge:
+    def __init__(self, *, fail_method: str | None = None) -> None:
+        self.fail_method = fail_method
+        self.calls: list[tuple[str, dict[str, object], str, str]] = []
+
+    async def call(
+        self,
+        method: str,
+        body: dict[str, object],
+        *,
+        attempt_id: str,
+        payload_digest: str,
+    ) -> SimpleNamespace:
+        self.calls.append((method, body, attempt_id, payload_digest))
+        if method == self.fail_method:
+            raise RuntimeError("native cleanup failed")
+        return SimpleNamespace(result={"removed": True})
+
+
+def _cleanup_schedule() -> acceptance.AcceptanceSchedule:
+    return plan_acceptance_schedule(
+        datetime(2026, 8, 28, 10, 52, 45, tzinfo=ZoneInfo("America/Chicago")),
+        minimum_lead_seconds=120,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_only_the_read_back_event_and_reminder_identities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    bridge = _CleanupBridge()
     titles = build_acceptance_titles("a1b2c3d4")
     event = NativeItemIdentity(
         calendar_item_identifier="event-internal",
@@ -349,7 +387,7 @@ def test_cleanup_deletes_only_the_read_back_event_and_reminder_identities(
     )
     reminder = NativeItemIdentity(
         calendar_item_identifier="reminder-internal",
-        calendar_item_external_identifier=None,
+        calendar_item_external_identifier="reminder-external",
         calendar_identifier="reminder-list",
     )
     projection_counts = iter((1, 0))
@@ -365,42 +403,46 @@ def test_cleanup_deletes_only_the_read_back_event_and_reminder_identities(
     )
     monkeypatch.setattr(
         acceptance,
-        "_cleanup_calendar_item",
-        lambda _script, title, calendar_id, uid: (
-            calls.append(f"delete-calendar:{title}:{calendar_id}:{uid}") or 1
-        ),
-    )
-    monkeypatch.setattr(
-        acceptance,
-        "_cleanup_reminder_item",
-        lambda _script, title, list_id, item_id: (
-            calls.append(f"delete-reminder:{title}:{list_id}:{item_id}") or 1
-        ),
-    )
-    monkeypatch.setattr(
-        acceptance,
         "_count_calendar_projection",
         lambda _script, title: (
             calls.append(f"count-projection:{title}") or next(projection_counts)
         ),
     )
 
-    removed = acceptance.cleanup_test_items(
+    removed = await acceptance.cleanup_test_items(
+        bridge,  # type: ignore[arg-type]
         titles,
         "a1b2c3d4",
+        schedule=_cleanup_schedule(),
         event_identity=event,
         reminder_identity=reminder,
     )
 
     assert calls == [
         "launch:Calendar",
-        "launch:Reminders",
         f"count-projection:{titles.reminder}",
-        f"delete-calendar:{titles.event}:calendar-target:event-external",
-        f"delete-reminder:{titles.reminder}:reminder-list:reminder-internal",
         f"count-projection:{titles.reminder}",
         "quit:Calendar",
     ]
+    assert [call[0] for call in bridge.calls] == [
+        "acceptance.calendar.delete",
+        "acceptance.reminder.delete",
+    ]
+    assert bridge.calls[0][1] == {
+        "calendar_identifier": "calendar-target",
+        "calendar_item_identifier": "event-internal",
+        "expected_title": titles.event,
+        "expected_start_unix_ms": 1_787_932_500_000,
+        "expected_end_unix_ms": 1_787_932_560_000,
+    }
+    assert bridge.calls[1][1] == {
+        "calendar_identifier": "reminder-list",
+        "calendar_item_identifier": "reminder-internal",
+        "expected_title": titles.reminder,
+        "expected_due_unix_ms": 1_787_932_500_000,
+    }
+    assert all(call[2].startswith("acceptance-cleanup-") for call in bridge.calls)
+    assert all(len(call[3]) == 64 for call in bridge.calls)
     assert removed.calendar_removed_count == 1
     assert removed.reminder_removed_count == 1
     assert removed.scheduled_reminder_projection_count_before == 1
@@ -408,64 +450,64 @@ def test_cleanup_deletes_only_the_read_back_event_and_reminder_identities(
     assert removed.errors == ()
 
 
-def test_cleanup_restores_calendar_if_reminders_launch_fails(
+@pytest.mark.asyncio
+async def test_cleanup_continues_to_projection_verification_if_reminder_delete_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
-
-    def ensure(name: str) -> bool:
-        calls.append(f"launch:{name}")
-        if name == "Reminders":
-            raise acceptance.AcceptanceBlocked("unavailable", "Reminders unavailable")
-        return True
-
-    monkeypatch.setattr(acceptance, "_ensure_native_app_running", ensure)
-    monkeypatch.setattr(
-        acceptance,
-        "_quit_native_app",
-        lambda name: calls.append(f"quit:{name}"),
-    )
-
-    with pytest.raises(acceptance.AcceptanceBlocked, match="Reminders unavailable"):
-        acceptance.cleanup_test_items(
-            build_acceptance_titles("a1b2c3d4"),
-            "a1b2c3d4",
-            event_identity=NativeItemIdentity("event", "uid", "calendar"),
-            reminder_identity=NativeItemIdentity("reminder", None, "list"),
-        )
-
-    assert calls == ["launch:Calendar", "launch:Reminders", "quit:Calendar"]
-
-
-def test_cleanup_never_falls_back_to_global_title_deletion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    bridge = _CleanupBridge(fail_method="acceptance.reminder.delete")
     monkeypatch.setattr(acceptance, "_ensure_native_app_running", lambda _name: False)
-    monkeypatch.setattr(
-        acceptance,
-        "_cleanup_calendar_item",
-        lambda _script, _title, _calendar_id, _uid: 1,
-    )
     monkeypatch.setattr(acceptance, "_count_calendar_projection", lambda *_args: 0)
 
-    def delete_reminder(_script: str, _title: str, _list_id: str, _item_id: str) -> int:
-        raise RuntimeError("reminders unavailable")
-
-    monkeypatch.setattr(acceptance, "_cleanup_reminder_item", delete_reminder)
-
-    removed = acceptance.cleanup_test_items(
+    removed = await acceptance.cleanup_test_items(
+        bridge,  # type: ignore[arg-type]
         build_acceptance_titles("a1b2c3d4"),
         "a1b2c3d4",
+        schedule=_cleanup_schedule(),
         event_identity=NativeItemIdentity("event", "uid", "calendar"),
-        reminder_identity=NativeItemIdentity("reminder", None, "list"),
+        reminder_identity=NativeItemIdentity("reminder", "external", "list"),
     )
 
     assert removed.calendar_removed_count == 1
     assert removed.reminder_removed_count == 0
     assert removed.errors == ("reminder_delete_RuntimeError",)
+    assert not hasattr(acceptance, "_cleanup_calendar_item")
+    assert not hasattr(acceptance, "_cleanup_reminder_item")
 
 
-def test_cleanup_requires_native_identities_before_launching_apps(
+@pytest.mark.asyncio
+async def test_cleanup_waits_for_scheduled_reminder_projection_to_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = _CleanupBridge()
+    counts = iter((1, 1, 0))
+    sleeps: list[float] = []
+    monkeypatch.setattr(acceptance, "_ensure_native_app_running", lambda _name: False)
+    monkeypatch.setattr(
+        acceptance,
+        "_count_calendar_projection",
+        lambda *_args: next(counts),
+    )
+    monkeypatch.setattr(
+        "scripts.simulator_productivity_native_acceptance.time.sleep",
+        sleeps.append,
+    )
+
+    removed = await acceptance.cleanup_test_items(
+        bridge,  # type: ignore[arg-type]
+        build_acceptance_titles("a1b2c3d4"),
+        "a1b2c3d4",
+        schedule=_cleanup_schedule(),
+        event_identity=NativeItemIdentity("event", "uid", "calendar"),
+        reminder_identity=NativeItemIdentity("reminder", "external", "list"),
+    )
+
+    assert removed.scheduled_reminder_projection_count_before == 1
+    assert removed.scheduled_reminder_projection_count_after == 0
+    assert sleeps == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_requires_native_identities_before_launching_apps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -475,46 +517,41 @@ def test_cleanup_requires_native_identities_before_launching_apps(
     )
 
     with pytest.raises(AcceptanceSafetyError, match="native event identity"):
-        acceptance.cleanup_test_items(
+        await acceptance.cleanup_test_items(
+            _CleanupBridge(),  # type: ignore[arg-type]
             build_acceptance_titles("a1b2c3d4"),
             "a1b2c3d4",
+            schedule=_cleanup_schedule(),
             event_identity=None,
             reminder_identity=None,
         )
 
 
-def test_calendar_only_cleanup_never_launches_or_deletes_reminders(
+@pytest.mark.asyncio
+async def test_calendar_only_cleanup_never_launches_or_deletes_reminders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    bridge = _CleanupBridge()
     monkeypatch.setattr(
         acceptance,
         "_ensure_native_app_running",
         lambda name: calls.append(f"launch:{name}") or False,
     )
-    monkeypatch.setattr(
-        acceptance,
-        "_cleanup_calendar_item",
-        lambda _script, _title, calendar_id, uid: (
-            calls.append(f"calendar:{calendar_id}:{uid}") or 1
-        ),
-    )
-    monkeypatch.setattr(
-        acceptance,
-        "_cleanup_reminder_item",
-        lambda _script, _title: pytest.fail("Reminders cleanup must not run"),
-    )
     monkeypatch.setattr(acceptance, "_count_calendar_projection", lambda *_args: 0)
 
-    removed = acceptance.cleanup_test_items(
+    removed = await acceptance.cleanup_test_items(
+        bridge,  # type: ignore[arg-type]
         build_acceptance_titles("a1b2c3d4"),
         "a1b2c3d4",
+        schedule=_cleanup_schedule(),
         event_identity=NativeItemIdentity("event", "uid", "calendar-target"),
         reminder_identity=None,
         include_reminder=False,
     )
 
-    assert calls == ["launch:Calendar", "calendar:calendar-target:uid"]
+    assert calls == []
+    assert [call[0] for call in bridge.calls] == ["acceptance.calendar.delete"]
     assert removed.calendar_removed_count == 1
     assert removed.reminder_removed_count == 0
     assert removed.errors == ()
@@ -527,6 +564,7 @@ def test_focus_preflight_is_read_only_and_requires_a_matching_operator_condition
     )
     assert focus_off.expect_banner is True
     assert focus_off.expect_focus_suppression is False
+    assert focus_off.diagnostic_consistent is True
     assert focus_off.mutated_settings is False
 
     suppressed = evaluate_notification_preflight(
@@ -535,6 +573,7 @@ def test_focus_preflight_is_read_only_and_requires_a_matching_operator_condition
     )
     assert suppressed.expect_banner is False
     assert suppressed.expect_focus_suppression is True
+    assert suppressed.diagnostic_consistent is True
     assert suppressed.mutated_settings is False
 
     with pytest.raises(acceptance.AcceptanceBlocked, match="does not match"):
@@ -544,6 +583,17 @@ def test_focus_preflight_is_read_only_and_requires_a_matching_operator_condition
         )
     with pytest.raises(acceptance.AcceptanceBlocked, match="must be explicitly confirmed"):
         evaluate_notification_preflight(None, diagnostic_focus_active=False)
+
+
+def test_non_authoritative_legacy_focus_diagnostic_cannot_disprove_operator_suppression() -> None:
+    suppressed = evaluate_notification_preflight(
+        "focus-suppressed",
+        diagnostic_focus_active=False,
+    )
+
+    assert suppressed.expect_focus_suppression is True
+    assert suppressed.diagnostic_consistent is False
+    assert suppressed.focus_diagnostic_authoritative is False
 
 
 def test_reminders_allowed_preflight_records_operator_assertion_without_claiming_detection() -> None:

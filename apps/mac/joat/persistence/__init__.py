@@ -8,6 +8,14 @@ from .notes import (
     QuickNote,
 )
 from .store import DurableStore, StorageOwnedError, StorageSchemaError
+from .voice_notes import (
+    VoiceNote,
+    VoiceNoteConflictError,
+    VoiceNoteFrame,
+    VoiceNoteNotFoundError,
+    VoiceNoteSegment,
+    VoiceNoteStore,
+)
 
 __all__ = [
     "DurableStore",
@@ -18,4 +26,10 @@ __all__ = [
     "QuickNote",
     "StorageOwnedError",
     "StorageSchemaError",
+    "VoiceNote",
+    "VoiceNoteConflictError",
+    "VoiceNoteFrame",
+    "VoiceNoteNotFoundError",
+    "VoiceNoteSegment",
+    "VoiceNoteStore",
 ]

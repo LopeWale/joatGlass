@@ -9,7 +9,12 @@ import quickNoteSvg from '@phosphor-icons/core/regular/note-pencil.svg?raw';
 import activitySvg from '@phosphor-icons/core/regular/pulse.svg?raw';
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
-import { CANVAS, type HudContentKind } from './types';
+import {
+  CANVAS,
+  type BrainstormHudModel,
+  type HudContentKind,
+  type ProductivityHudModel,
+} from './types';
 import {
   splitGray4Tiles,
   type HudFrameRenderer,
@@ -95,6 +100,7 @@ export function hudSidebarIconName(item: string): HudIconName {
     more: 'more',
     quicknotes: 'quicknotes',
     brainstorm: 'brainstorm',
+    'agent terminal': 'brainstorm',
     debate: 'brainstorm',
     activity: 'activity',
   };
@@ -110,6 +116,20 @@ export function resolveHudListKind(title: string): HudListKind {
   if (normalized.startsWith('QUICKNOTES')) return 'quicknotes';
   if (normalized.startsWith('ACTIVITY') || normalized.startsWith('ACTION ·')) return 'activity';
   return 'generic';
+}
+
+export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): string {
+  const labels: Readonly<Record<ProductivityHudModel['phase'], string>> = {
+    verifying: 'VERIFYING',
+    saved: 'SAVED',
+    completed: 'COMPLETED',
+    failed: 'NOT SAVED',
+    check: 'CHECK REQUIRED',
+    cancelled: 'CANCELLED',
+    not_saved: 'NOT SAVED',
+    due: 'DUE NOW',
+  };
+  return labels[phase];
 }
 
 interface StatusParts {
@@ -432,10 +452,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawList(context, frame, icons);
         break;
       case 'confirmation':
-        this.drawConfirmation(context, frame);
+        this.drawConfirmation(context, frame, icons);
         break;
       case 'navigation':
         this.drawNavigation(context, frame.navigation);
+        break;
+      case 'brainstorm':
+        this.drawBrainstorm(context, frame.brainstorm, icons);
+        break;
+      case 'productivity':
+        this.drawProductivity(context, frame.productivity, icons);
         break;
     }
     // Chrome is the final compositing layer. Besides making ownership
@@ -724,12 +750,19 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawConfirmation(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'confirmation' }>,
+    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
     context.textAlign = 'center';
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
     context.font = `13px ${HUD_FONT}`;
-    context.fillText('Confirm action', 288, 79);
+    if (frame.reviewDomain) {
+      const isCalendar = frame.reviewDomain === 'calendar';
+      this.drawIcon(context, icons[isCalendar ? 'calendar' : 'tasks'], 220, 51, 18, SUPPORT);
+      context.fillText(isCalendar ? 'Calendar review' : 'Reminder review', 302, 60);
+    } else {
+      context.fillText('Confirm action', 288, 79);
+    }
     context.strokeStyle = gray(CHROME);
     context.beginPath();
     context.moveTo(274, 96.5);
@@ -784,6 +817,135 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
     context.fillText(`${frame.secondsRemaining}s remaining`, 288, 267);
+  }
+
+  private drawProductivity(
+    context: CanvasRenderingContext2D,
+    model: ProductivityHudModel,
+    icons: Record<HudIconName, HTMLImageElement>,
+  ): void {
+    const isCalendar = model.domain === 'calendar';
+    const label = isCalendar ? 'Calendar' : 'Reminders';
+    const phase = productivityPhaseLabel(model.phase);
+    const icon = icons[isCalendar ? 'calendar' : 'tasks'];
+
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    this.drawIcon(context, icon, 36, 49, 20, BRIGHT);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `15px ${HUD_FONT}`;
+    context.fillText(label, 66, 60);
+    context.textAlign = 'right';
+    context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(phase, 540, 60);
+    context.strokeStyle = gray(HAIRLINE);
+    context.beginPath();
+    context.moveTo(36, 76.5);
+    context.lineTo(540, 76.5);
+    context.stroke();
+
+    context.textAlign = 'left';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `20px ${HUD_FONT}`;
+    this.drawWrappedText(context, model.title, 36, 105, 504, 18, 2);
+
+    context.strokeStyle = gray(model.phase === 'due' ? SUPPORT : CHROME);
+    context.lineWidth = 1;
+    roundedRect(context, 36, 143, 504, 70, 7);
+    context.stroke();
+    context.fillStyle = gray(BRIGHT);
+    context.font = `14px ${HUD_FONT}`;
+    this.fitText(context, model.primary, 54, 166, 468);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    this.drawWrappedText(context, model.secondary, 54, 188, 468, 14, 2);
+
+    context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
+    context.fillRect(36, 230, 504, 3);
+    const progress = model.phase === 'saved' || model.phase === 'due' ? 1
+      : model.phase === 'verifying' ? 0.45
+        : 0.18;
+    context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
+    context.fillRect(36, 230, Math.round(504 * progress), 3);
+
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    this.fitText(context, model.hint, 288, 267, 500);
+  }
+
+  private drawBrainstorm(
+    context: CanvasRenderingContext2D,
+    model: BrainstormHudModel,
+    icons: Record<HudIconName, HTMLImageElement>,
+  ): void {
+    const state = model.state.replace(/_/g, ' ').toUpperCase();
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    this.drawIcon(context, icons.brainstorm, 36, 49, 20, BRIGHT);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `15px ${HUD_FONT}`;
+    context.fillText(model.screen === 'agent_terminal' ? 'Agent Terminal' : 'Brainstorm', 66, 60);
+    context.textAlign = 'right';
+    context.fillStyle = gray(SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(state, 540, 60);
+    context.strokeStyle = gray(HAIRLINE);
+    context.beginPath();
+    context.moveTo(36, 76.5);
+    context.lineTo(540, 76.5);
+    context.stroke();
+
+    if (model.screen === 'agent_terminal') {
+      context.textAlign = 'left';
+      context.fillStyle = gray(BRIGHT);
+      context.font = `21px ${HUD_FONT}`;
+      this.fitText(context, `HERMES · ${state}`, 36, 108, 500);
+      context.fillStyle = gray(SUPPORT);
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(context, model.endpointHost || 'Dedicated JOAT session', 36, 135, 500);
+      context.strokeStyle = gray(CHROME);
+      roundedRect(context, 36, 154, 504, 53, 6);
+      context.stroke();
+      context.fillStyle = gray(SUPPORT);
+      context.font = `11px ${HUD_FONT}`;
+      context.fillText(
+        model.noToolsChecked ? 'NO TOOLS CHECKED BEFORE SEND' : 'TOOL STATE NOT CLEARED',
+        54,
+        176,
+      );
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, model.terminalReason || 'Hermes participates as a Brainstorm seat.', 54, 195, 462);
+    } else {
+      context.textAlign = 'left';
+      context.fillStyle = gray(BRIGHT);
+      context.font = `18px ${HUD_FONT}`;
+      this.fitText(context, model.topic || 'Choose a question to explore', 36, 106, 504);
+      context.fillStyle = gray(CHROME);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText('TABLE', 36, 129);
+      model.collaborators.slice(0, 3).forEach((collaborator, index) => {
+        const x = 36 + index * 168;
+        context.strokeStyle = gray(index === 0 ? SUPPORT : CHROME);
+        roundedRect(context, x, 139, 156, 27, 5);
+        context.stroke();
+        context.fillStyle = gray(SUPPORT);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(context, collaborator, x + 12, 156, 132);
+      });
+      context.fillStyle = gray(SUPPORT);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, model.activeSpeaker ? `NOW · ${model.activeSpeaker}` : 'NOW · waiting for a collaborator', 36, 187, 504);
+      context.fillStyle = gray(CHROME);
+      context.font = `11px ${HUD_FONT}`;
+      this.drawWrappedText(context, model.activity || 'Say “JOAT, brainstorm …” to begin.', 36, 207, 504, 16, 2);
+    }
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText('left x2: menu · long-press: mic', 288, 267);
   }
 
   private drawNavigation(

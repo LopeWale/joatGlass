@@ -2,8 +2,16 @@ import { AudioInputSource, OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
+import { MinimalHudPresenter } from './MinimalHudPresenter';
 import { HudCanvasRenderer } from './HudCanvasRenderer';
 import { HudVisualSurface } from './HudVisualSurface';
+import {
+  activateVisualHudPage,
+  initializeHudPage,
+  restoreCompatibleHudPage,
+  restoreMinimalHudPage,
+  selectHudFirstLight,
+} from './HudPageBootstrap';
 import { Chrome } from './Chrome';
 import { TOKEN_KEY, handlePairingOffer, loadToken } from './Pairing';
 import { LocationSessionManager } from './LocationSessionManager';
@@ -14,16 +22,19 @@ import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
-import { ContainerId, type DownlinkMessage } from './types';
+import { ContainerId, type DownlinkMessage, type ProductivityHudModel } from './types';
 import {
   BrowserHudPreview,
   VISUAL_CONFIRMATION_PROMPT,
+  brainstormVisualFixture,
+  isBrainstormVisualState,
   isProductivityVisualState,
   runVisualConfirmationFixture,
   visualListFixture,
   type ProductivityVisualState,
+  type BrainstormVisualState,
 } from './VisualFixtures';
-import { MacG2DiagnosticTrace } from './G2DiagnosticTrace';
+import { MacG2DiagnosticTrace, type G2TraceEvent } from './G2DiagnosticTrace';
 import {
   isNavigationVisualState,
   navigationVisualFixture,
@@ -56,13 +67,46 @@ type VisualState =
   | 'more'
   | 'confirmation'
   | ProductivityVisualState
+  | ProductivityLifecycleVisualState
+  | BrainstormVisualState
   | NavigationVisualState;
+
+/** Development-only lenses gate for the native Calendar/Reminders screens.
+ * Each state uses the same presenter and canvas renderer as a downlink from
+ * the Mac bridge; it exists so the official simulator can prove pixels before
+ * a package is put on the glasses. */
+const PRODUCTIVITY_LIFECYCLE_VISUAL_STATES = [
+  'calendar-review',
+  'calendar-verifying',
+  'calendar-saved',
+  'calendar-failed',
+  'calendar-check',
+  'calendar-cancelled',
+  'reminders-review',
+  'reminders-verifying',
+  'reminders-saved',
+  'reminders-failed',
+  'reminders-check',
+  'reminders-completed',
+  'reminders-due',
+] as const;
+
+type ProductivityLifecycleVisualState =
+  (typeof PRODUCTIVITY_LIFECYCLE_VISUAL_STATES)[number];
+
+function isProductivityLifecycleVisualState(
+  value: string | null,
+): value is ProductivityLifecycleVisualState {
+  return PRODUCTIVITY_LIFECYCLE_VISUAL_STATES.some((state) => state === value);
+}
 
 const VISUAL_STATE = ((): VisualState | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatVisual');
   return requested === 'overview' || requested === 'sidebar' || requested === 'more'
     || requested === 'confirmation' || isProductivityVisualState(requested)
+    || isProductivityLifecycleVisualState(requested)
+    || isBrainstormVisualState(requested)
     || (requested !== null && isNavigationVisualState(requested))
     ? requested
     : undefined;
@@ -112,6 +156,11 @@ async function boot(): Promise<void> {
   // Disabled by default. Only the local Mac shell can enable this support
   // capture, and the gateway independently redacts every event it accepts.
   const g2Diagnostics = new MacG2DiagnosticTrace(link);
+  // This tiny in-memory receipt is collected before the Mac can opt in, but
+  // never leaves the plugin until the explicit support-capture control frame
+  // arrives. It has no screen, location, device, or wearer data.
+  const firstLightReceipt: G2TraceEvent[] = [];
+  let firstLightReceiptDelivered = false;
   // The Even host exposes one unkeyed location stream. Keep one owner that
   // switches between the existing ambient contract and an explicit Gate-0
   // high-accuracy probe instead of racing independent start/stop callers.
@@ -150,6 +199,7 @@ async function boot(): Promise<void> {
       // opt-in diagnostic path. A fresh authenticated session will send its
       // complete true/false state again.
       g2Diagnostics.setEnabled(false);
+      firstLightReceiptDelivered = false;
       void audioRef?.stop();
       void imuRef?.stop();
       void location.revokeRemoteControl();
@@ -163,17 +213,66 @@ async function boot(): Promise<void> {
     }
   });
 
-  // Startup page (one-shot; bridge already initialized above). The second
-  // argument lets a reloaded WebView adopt the host's existing page.
-  await client.start(layouts.visualStartup(), layouts.visualLayout());
+  // Spend the one-shot create on the conservative text dashboard. Richer
+  // visual/menu surfaces are negotiated through recoverable rebuilds so an
+  // older packaged host can degrade without turning the whole app black.
+  const hudBoot = await initializeHudPage(client, layouts);
+  const activeLayouts = layouts.withContextualMenu(hudBoot.contextualMenu);
+  if (!hudBoot.contextualMenu) {
+    console.warn(
+      '[joat] HUD compatibility mode: text, contextual menu off',
+    );
+  }
 
-  const hud = new HudPresenter(
-    client,
-    layouts,
-    new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics),
-    g2Diagnostics,
-  );
+  // The modern four-tile HUD is the product surface. Its container rebuild and
+  // first complete frame must both acknowledge before selection; otherwise
+  // restore the durable text compatibility page instead of black-screening.
+  const firstLight = await selectHudFirstLight({
+    activateSurface: () => activateVisualHudPage(
+      client,
+      activeLayouts,
+      hudBoot.surface,
+      (accepted) => firstLightReceipt.push({
+        type: 'hud_surface',
+        stage: 'visual_rebuild',
+        surface: 'visual',
+        outcome: accepted ? 'success' : 'failed',
+      }),
+    ),
+    restoreFallback: () => restoreCompatibleHudPage(
+      client,
+      activeLayouts,
+      hudBoot.surface,
+    ),
+    restoreMinimal: () => restoreMinimalHudPage(client, activeLayouts),
+    createVisual: () => new HudPresenter(
+      client,
+      activeLayouts,
+      new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics),
+      g2Diagnostics,
+    ),
+    createText: () => new HudPresenter(client, activeLayouts, undefined, g2Diagnostics),
+    createMinimal: () => new MinimalHudPresenter(client, activeLayouts),
+    onVisualFirstFrame: (painted) => firstLightReceipt.push({
+      type: 'hud_surface',
+      stage: 'first_frame',
+      surface: 'visual',
+      outcome: painted ? 'success' : 'failed',
+    }),
+  });
+  firstLightReceipt.push({
+    type: 'hud_surface',
+    stage: 'selected',
+    surface: firstLight.surface,
+    outcome: 'success',
+  });
+  const hud = firstLight.hud;
   hudRef = hud;
+  if (firstLight.surface === 'text') {
+    console.warn('[joat] visual HUD unavailable; using text compatibility surface');
+  } else if (firstLight.surface === 'minimal') {
+    console.warn('[joat] rich HUD layouts unavailable; using live minimal recovery surface');
+  }
   const audio = new AudioStreamer(client, link);
   const imu = new ImuMonitor(client, link);
   audioRef = audio;
@@ -254,12 +353,23 @@ async function boot(): Promise<void> {
     switch (msg.kind) {
       case 'g2.diagnostic.control':
         g2Diagnostics.setEnabled(msg.enabled);
+        if (msg.enabled && !firstLightReceiptDelivered) {
+          firstLightReceipt.forEach((event) => g2Diagnostics.record(event));
+          firstLightReceiptDelivered = true;
+        }
         break;
       case 'location.probe.control':
         await awaitCurrent(location.setProbeEnabled(msg.enabled, context.signal));
         break;
       case 'navigation.view':
         await awaitCurrent(navigation.present(msg, undefined, context.signal));
+        break;
+      case 'brainstorm.view':
+        await awaitCurrent(menu.beginLiveSession('brainstorm'));
+        await awaitCurrent(hud.showBrainstorm(msg.brainstorm));
+        break;
+      case 'productivity.view':
+        await awaitCurrent(menu.presentProductivity(msg.productivity));
         break;
       case 'navigation.origin.request':
         await awaitCurrent(navigation.requestOrigin(msg, context.signal));
@@ -379,9 +489,6 @@ async function boot(): Promise<void> {
 
   link.connect();
 
-  // First light BEFORE any further host round trip: a dark lens reads as a
-  // failure, and getDeviceInfo is a call into the phone that can stall.
-  await hud.setStatus('JOAT · connecting');
   setPanel('p-status', 'connecting');
 
   // Tolerate a stalled/absent device info — both fields already default, and
@@ -503,7 +610,34 @@ async function renderVisualState(
     return;
   }
 
+  if (isBrainstormVisualState(state)) {
+    await hud.showBrainstorm(
+      brainstormVisualFixture(state),
+      '9:41       JOAT brainstorm       bat 87%',
+    );
+    return;
+  }
+
   await hud.showText('9:41       JOAT ready       bat 87%', ContainerId.StatusBar, 2);
+
+  if (isProductivityLifecycleVisualState(state)) {
+    if (state === 'calendar-review') {
+      await hud.showConfirmation(
+        'Create event “Design review”? Work · Sep 1, 2026 at 09:30 · 45m · America/Chicago',
+        'fixture-calendar-review',
+      );
+      return;
+    }
+    if (state === 'reminders-review') {
+      await hud.showConfirmation(
+        'Create reminder + JOAT alert “Buy filters”? Personal · Sep 1, 2026 at 18:00 · America/Chicago',
+        'fixture-reminders-review',
+      );
+      return;
+    }
+    await hud.showProductivity(productivityLifecycleFixture(state));
+    return;
+  }
 
   if (isProductivityVisualState(state)) {
     const fixture = visualListFixture(state);
@@ -535,6 +669,59 @@ async function renderVisualState(
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     }
     menu.handleClick();
+  }
+}
+
+function productivityLifecycleFixture(
+  state: Exclude<ProductivityLifecycleVisualState, 'calendar-review' | 'reminders-review'>,
+): ProductivityHudModel {
+  const calendar = state.startsWith('calendar-');
+  const domain = calendar ? 'calendar' : 'reminders';
+  const title = calendar ? 'Design review' : 'Buy filters';
+  const nativeApp = calendar ? 'Calendar' : 'Reminders';
+  const returnHint = `left x2 ${nativeApp}`;
+  switch (state) {
+    case 'calendar-verifying':
+    case 'reminders-verifying':
+      return {
+        domain, phase: 'verifying', title,
+        primary: `Saving ${calendar ? 'calendar event' : 'reminder'}`,
+        secondary: 'Checking native read-back', hint: 'Please wait',
+      };
+    case 'calendar-saved':
+    case 'reminders-saved':
+      return {
+        domain, phase: 'saved', title,
+        primary: 'Saved and verified', secondary: `${nativeApp} read-back matched`, hint: returnHint,
+      };
+    case 'calendar-failed':
+    case 'reminders-failed':
+      return {
+        domain, phase: 'failed', title,
+        primary: 'Not saved', secondary: `No ${nativeApp.toLowerCase()} item was changed.`, hint: returnHint,
+      };
+    case 'calendar-check':
+    case 'reminders-check':
+      return {
+        domain, phase: 'check', title,
+        primary: `Check ${nativeApp}`, secondary: 'It may have changed. Do not retry.',
+        hint: `Open ${nativeApp} on Mac`,
+      };
+    case 'calendar-cancelled':
+      return {
+        domain, phase: 'cancelled', title,
+        primary: 'Cancelled', secondary: 'No calendar item was changed.', hint: returnHint,
+      };
+    case 'reminders-completed':
+      return {
+        domain, phase: 'completed', title,
+        primary: 'Completed and verified', secondary: 'Reminders read-back matched', hint: returnHint,
+      };
+    case 'reminders-due':
+      return {
+        domain, phase: 'due', title,
+        primary: 'Due now', secondary: 'This reminder is still incomplete.', hint: returnHint,
+      };
   }
 }
 

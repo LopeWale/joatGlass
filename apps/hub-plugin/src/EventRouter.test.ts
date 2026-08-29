@@ -39,6 +39,7 @@ function make(
     isActive: vi.fn(() => navigationActive),
     handleClick: vi.fn(() => navigationActive),
     handleScroll: vi.fn(async () => navigationActive),
+    handleCancel: vi.fn(() => navigationActive),
   };
   const shutDownPageContainer = vi.fn(async (_mode: number) => true);
   const lifecycle: LifecycleHandler = {
@@ -233,6 +234,20 @@ describe('EventRouter — double press', () => {
     });
     expect(menu.toggle).toHaveBeenCalledTimes(1);
     expect(shutDownPageContainer).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('left temple stops active navigation instead of opening a hidden-overlay sidebar', () => {
+    const { fire, menu, navigation, sent } = make(false, undefined, true);
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+
+    expect(navigation.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 

@@ -296,6 +296,33 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames.some((frame) => frame.kind === 'navigation')).toBe(false);
   });
 
+  it('defers a native reminder lifecycle page behind confirmation and restores it exactly', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const reminder = {
+      domain: 'reminders' as const,
+      phase: 'saved' as const,
+      title: 'Buy filters',
+      primary: 'Saved and verified',
+      secondary: 'Reminders read-back matched',
+      hint: 'left x2 Reminders',
+    };
+
+    await hud.showConfirmation('Create reminder “Buy filters”? Personal', 'reminder-create');
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'confirmation', reviewDomain: 'reminders',
+    });
+    expect(await hud.showProductivity(reminder)).toBe(true);
+    await hud.dismissConfirmation('reminder-create');
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'productivity', productivity: reminder,
+    });
+  });
+
   it('keeps Mac-owned Overview regions blank during status-only boot', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {

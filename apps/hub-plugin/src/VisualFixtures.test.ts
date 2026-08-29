@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   VISUAL_CONFIRMATION_PROMPT,
+  brainstormVisualFixture,
+  isBrainstormVisualState,
   runVisualConfirmationFixture,
   isProductivityVisualState,
   stitchHudPreviewRgba,
@@ -45,6 +47,20 @@ describe('visual fixtures', () => {
     expect(visualListFixture('activity-detail').title).toBe('ACTIVITY · DETAIL');
     expect(isProductivityVisualState('notification-detail')).toBe(true);
     expect(isProductivityVisualState('overview')).toBe(false);
+  });
+
+  it('covers real Brainstorm and Hermes terminal visual states', () => {
+    expect(brainstormVisualFixture('brainstorm-live')).toMatchObject({
+      screen: 'brainstorm', state: 'running', activeSpeaker: 'Hermes · terminal',
+    });
+    expect(brainstormVisualFixture('agent-terminal-ready')).toMatchObject({
+      screen: 'agent_terminal', state: 'ready', noToolsChecked: true,
+    });
+    expect(brainstormVisualFixture('agent-terminal-blocked')).toMatchObject({
+      screen: 'agent_terminal', state: 'blocked', noToolsChecked: false,
+    });
+    expect(isBrainstormVisualState('brainstorm-ready')).toBe(true);
+    expect(isBrainstormVisualState('overview')).toBe(false);
   });
 
   it('makes the confirmation fixture unmistakably test-only', () => {

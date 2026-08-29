@@ -67,6 +67,8 @@ def test_runtime_config_requires_exact_owner_only_non_secret_schema(tmp_path) ->
         '{"gateway_url":"wss://example.ts.net","agent_id":"hermes",'
         '"token":"secret"}',
         '{"gateway_url":"https://example.ts.net","agent_id":"hermes"}',
+        '{"gateway_url":"wss://admins-mac-mini.tail3a3363.ts.net:9443",'
+        '"agent_id":"hermes"}',
         '{"gateway_url":"wss://example.ts.net","agent_id":"bad agent"}',
         '{"gateway_url":"wss://example.ts.net","agent_id":"main"}',
     ],

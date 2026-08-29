@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Protocol, TextIO
 
 from .hud import HudWriter
+from ..core.protocol import BrainstormHudView
 from .roundtable import is_failure
 
 
@@ -31,26 +33,65 @@ class TranscriptSink(Protocol):
 
 
 class HudSink:
-    """The glasses: two lines at a glance, streamed token by token."""
+    """The glasses: a live production Brainstorm page, never a text dump."""
 
-    def __init__(self, hud: HudWriter) -> None:
+    def __init__(
+        self,
+        hud: HudWriter,
+        terminal_projection: Callable[[], dict[str, str | bool]] | None = None,
+    ) -> None:
         self._hud = hud
+        self._terminal_projection = terminal_projection
+        self._topic = ""
+        self._speakers: list[str] = []
+        self._speaker = ""
+        self._activity = ""
+
+    def _terminal_status(self) -> dict[str, str | bool]:
+        if self._terminal_projection is not None:
+            return self._terminal_projection()
+        return {
+            "state": "unavailable",
+            "reason": "gateway_not_ready",
+            "endpoint_host": "",
+            "no_tools_checked": False,
+        }
+
+    async def _paint(self, state: str) -> None:
+        terminal = self._terminal_status()
+        await self._hud.show_brainstorm(BrainstormHudView(
+            screen="brainstorm",
+            state=state,
+            topic=self._topic,
+            collaborators=[speaker.split(" (")[0][:48] for speaker in self._speakers[:3]],
+            active_speaker=self._speaker.split(" (")[0][:64],
+            activity=self._activity[:180],
+            terminal_state=str(terminal["state"]),
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        ))
 
     async def open(self, topic: str, speakers: list[str]) -> None:
-        await self._hud.begin_brainstorm()
-        await self._hud.status(f"BRAINSTORM · {topic[:30]}")
-        await self._hud.show(f"{' · '.join(speakers)}\ndiscussing…")
+        self._topic = topic[:96]
+        self._speakers = list(speakers)
+        self._speaker = ""
+        self._activity = "Preparing collaborators…"
+        await self._paint("running")
 
     async def turn(self, label: str) -> None:
-        # A fresh paint per turn: the HUD shows WHO is speaking now, not a
-        # scrolling wall the wearer has to re-read while walking.
-        await self._hud.show(f"» {label}\n")
+        self._speaker = label
+        self._activity = "Thinking…"
+        await self._paint("running")
 
     async def chunk(self, text: str) -> None:
-        await self._hud.append(text)
+        self._activity = (self._activity + text)[-180:]
+        await self._paint("running")
 
     async def close(self, verdict: str) -> None:
-        await self._hud.status(f"BRAINSTORM · {verdict}")
+        self._speaker = ""
+        self._activity = verdict[:180]
+        await self._paint("settled")
 
 
 class TerminalSink:

@@ -25,6 +25,8 @@ export interface NavigationInputOwner {
   isActive(): boolean;
   handleClick(): boolean;
   handleScroll(direction: 'up' | 'down'): Promise<boolean>;
+  /** Left-temple double press exits the current navigation session. */
+  handleCancel(): boolean;
 }
 
 /**
@@ -272,6 +274,11 @@ export class EventRouter {
       // Left temple: the transient capability sidebar. Consumed locally,
       // never relayed to the Mac or confused with the OS exit gesture.
       if (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L) {
+        // Navigation owns the wearer surface as a single interaction. Do not
+        // paint a sidebar over an active route while tap/swipe continue to
+        // target the hidden navigation frame. The same deliberate gesture
+        // becomes the visible navigation stop/recovery action.
+        if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
         void this.menu.toggle();
         return;
       }

@@ -142,7 +142,7 @@ class NavigationSession(Session):
                 elif isinstance(event, NavigationViewAck):
                     self._handle_view_ack(event)
                 elif isinstance(event, NavigationOrigin):
-                    self._handle_origin(event)
+                    await self._handle_origin(event)
                 elif isinstance(event, NavigationOriginFailure):
                     await self._handle_origin_failure(event)
                 elif isinstance(event, _RouteReady):
@@ -315,6 +315,13 @@ class NavigationSession(Session):
         ):
             return
         phase = view.navigation.view
+        # A left-temple double press is a universal, explicitly labelled
+        # on-glasses stop. It must win during provider/origin waits as well as
+        # while guidance is active; those frames intentionally consume normal
+        # taps and swipes.
+        if action.action == "cancel":
+            self.cancel()
+            return
         if phase == "destination" and action.action == "confirm_destination":
             await self._show_mode()
         elif phase == "destination" and action.action == "retry_destination":
@@ -355,9 +362,6 @@ class NavigationSession(Session):
                 await self._send_route()
             else:
                 await self._show_retry_prompt()
-        elif phase == "error" and action.action == "cancel":
-            self.cancel()
-
     async def _show_retry_prompt(self) -> None:
         self._awaiting_destination_speech = True
         await self._send_view(NavigationHudView(
@@ -374,17 +378,24 @@ class NavigationSession(Session):
     async def _request_origin(self) -> None:
         if self._destination is None or self._mode is None:
             return
+        await self._send_view(NavigationHudView(
+            view="uncertain",
+            primary="Getting your location",
+            secondary="Keep phone foreground and unlocked",
+            hint="Locating before route search · double-left stops",
+            interaction="none",
+            mode=self._mode,
+        ), "locating")
         self._generation += 1
         self._origin_request = NavigationOriginRequest(
             session_id=self._session_id,
             request_id=self._request_id("origin", self._generation),
             generation=self._generation,
         )
-        self._current_view = None
         self._error_recovery = None
         await self._transport.send(self._origin_request)
 
-    def _handle_origin(self, origin: NavigationOrigin) -> None:
+    async def _handle_origin(self, origin: NavigationOrigin) -> None:
         request = self._origin_request
         if (
             request is None
@@ -397,9 +408,17 @@ class NavigationSession(Session):
             return
         self._origin_request = None
         self._origin = NavigationPoint(origin.latitude, origin.longitude)
+        await self._send_view(NavigationHudView(
+            view="uncertain",
+            primary=f"Finding a {self._mode} route",
+            secondary="Checking the route to your destination",
+            hint="Route search in progress · double-left stops",
+            interaction="none",
+            mode=self._mode,
+        ), "routing")
         self._start_route(
             self._origin,
-            request.generation,
+            self._generation,
             self._route_revision + 1,
             install_immediately=False,
         )
@@ -564,6 +583,24 @@ class NavigationSession(Session):
             or self._arrived
         ):
             return
+        # Replace the interactive preview before transmitting the route. This
+        # both tells the wearer what is happening and makes a second tap inert
+        # while the high-accuracy session is installed on the phone.
+        if view.navigation.view == "preview":
+            await self._send_view(NavigationHudView(
+                view="rerouting",
+                primary="Starting navigation",
+                secondary="Preparing directions on your glasses",
+                hint="Directions begin when ready · double-left stops",
+                interaction="none",
+                mode=self._mode,
+                remaining_distance_m=route.plan.steps[-1].distance_along_route_m,
+                eta_minutes=route.eta_minutes,
+                progress=0,
+            ), "starting")
+            view = self._current_view
+            if view is None:
+                return
         self._route_installed = False
         self._install_attempt = (route.route_id, self._route_revision)
         await self._transport.send(NavigationRoute(
@@ -644,7 +681,7 @@ class NavigationSession(Session):
             view="rerouting",
             primary="Rerouting",
             secondary="Finding a safer path",
-            hint="Old directions paused",
+            hint="Old directions paused · double-left stops",
             interaction="none",
             mode=self._mode,
         ), "rerouting")

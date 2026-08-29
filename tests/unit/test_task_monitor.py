@@ -137,7 +137,7 @@ def test_completion_retains_prior_alert_receipt(tmp_path: Path) -> None:
         assert completed.completed_at_us == 30
 
 
-def test_migration_five_upgrades_prior_v3_without_checksum_drift(
+def test_current_migrations_upgrade_prior_v4_without_checksum_drift(
     tmp_path: Path,
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -159,7 +159,7 @@ def test_migration_five_upgrades_prior_v3_without_checksum_drift(
     with DurableStore(path) as upgraded:
         occurrences = TaskOccurrenceStore(upgraded)
         completed = occurrences.mark_completed("occurrence-1", now_us=30)
-        assert upgraded.schema_version == 5
+        assert upgraded.schema_version == all_migrations[-1][0]
         assert completed.alerted_at_us == 20
 
 

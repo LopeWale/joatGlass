@@ -67,6 +67,23 @@ class TestVoiceCommandRouter:
         assert notes.seen == ["take a note exact"]
         assert productivity.seen == []
 
+    async def test_voice_note_control_is_claimed_before_quick_note(self) -> None:
+        replies = RecordingReplies()
+        voice_notes = RecordingProductivity("Recording Voice Note: review")
+        notes = RecordingProductivity("wrong controller")
+        commands = VoiceCommandRouter(
+            replies,
+            ModelRegistry([]),
+            notes=notes,
+            voice_notes=voice_notes,
+        )
+
+        assert await commands("start a voice note review") == (
+            "Recording Voice Note: review"
+        )
+        assert voice_notes.seen == ["start a voice note review"]
+        assert notes.seen == []
+
     async def test_hermes_calendar_proposal_is_claimed_before_general_inference(self) -> None:
         replies = RecordingReplies()
         productivity = RecordingProductivity()

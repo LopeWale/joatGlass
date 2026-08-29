@@ -182,6 +182,36 @@ struct ReminderCompleteRequest: Codable, Sendable {
     }
 }
 
+struct AcceptanceCalendarDeleteRequest: Codable, Sendable {
+    let calendarIdentifier: String
+    let calendarItemIdentifier: String
+    let expectedTitle: String
+    let expectedStartUnixMS: Int64
+    let expectedEndUnixMS: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case calendarIdentifier, calendarItemIdentifier, expectedTitle
+        case expectedStartUnixMS = "expectedStartUnixMs"
+        case expectedEndUnixMS = "expectedEndUnixMs"
+    }
+}
+
+struct AcceptanceReminderDeleteRequest: Codable, Sendable {
+    let calendarIdentifier: String
+    let calendarItemIdentifier: String
+    let expectedTitle: String
+    let expectedDueUnixMS: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case calendarIdentifier, calendarItemIdentifier, expectedTitle
+        case expectedDueUnixMS = "expectedDueUnixMs"
+    }
+}
+
+struct AcceptanceDeleteResult: Codable, Equatable, Sendable {
+    let removed: Bool
+}
+
 struct LocalTimeResolveRequest: Codable, Sendable {
     let civilTime: CivilTime
 }

@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
-from .protocol import Device, DownlinkMessage, InputEvent
+from .protocol import AudioSource, Device, DownlinkMessage, InputEvent
 from .navigation import (
     NavigationCandidate,
     NavigationMode,
@@ -22,6 +22,26 @@ from .navigation import (
 
 AudioCallback = Callable[[bytes, int], None]
 """(pcm_bytes, seq). A jump in seq means frames were dropped upstream."""
+
+
+@dataclass(frozen=True, slots=True)
+class AudioFrame:
+    """One received audio frame with the wire provenance capture needs.
+
+    ``connection_generation`` prevents a reconnect's restarted sequence from
+    being mistaken for a replay. ``received_at_us`` is host wall-clock receipt
+    time; ordering remains the durable capture ordinal, not this clock.
+    """
+
+    pcm: bytes
+    connection_generation: str
+    seq: int
+    source: AudioSource
+    speaker: str | None
+    received_at_us: int
+
+
+AudioFrameCallback = Callable[[AudioFrame], None]
 
 InputCallback = Callable[[InputEvent], None]
 DeviceCallback = Callable[[Device], None]
@@ -64,6 +84,13 @@ class GlassesTransport(ABC):
 
     @abstractmethod
     def on_device(self, callback: DeviceCallback) -> None: ...
+
+
+class AudioFrameSource(ABC):
+    """Metadata-preserving audio subscription for durable capture lanes."""
+
+    @abstractmethod
+    def on_audio_frame(self, callback: AudioFrameCallback) -> None: ...
 
 
 class NavigationProvider(ABC):

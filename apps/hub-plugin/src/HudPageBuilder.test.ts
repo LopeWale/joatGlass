@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
 import { HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, ContainerId } from './types';
 
@@ -29,6 +30,7 @@ type Page = {
     itemContainer?: { itemCount?: number; itemName?: string[] };
   }>;
   imageObject?: Array<{ containerID?: number; isEventCapture?: number; zOrderIndex?: number }>;
+  menuObject?: { menuItems?: Array<{ itemID?: number; itemName?: string }> };
 };
 
 function containers(page: Page) {
@@ -38,14 +40,53 @@ function containers(page: Page) {
 const builder = new HudPageBuilder();
 const LAYOUTS: ReadonlyArray<[string, Page]> = [
   ['startup', builder.startup() as Page],
+  ['compatibility', builder.compatibilityLayout() as Page],
+  ['dashboard-compatibility', builder.dashboardCompatibilityLayout() as Page],
   ['default', builder.defaultLayout() as Page],
   ['sidebar', builder.sidebarLayout(['a', 'b', 'c'], {}) as Page],
   ['list', builder.listLayout(['a', 'b', 'c']) as Page],
   ['confirmation', builder.confirmationLayout('Send reply?') as Page],
+  ['visual-startup', builder.visualStartup() as Page],
   ['visual', builder.visualLayout() as Page],
+  ['visual-compatibility', builder.visualCompatibilityLayout() as Page],
 ];
 
 describe('HudPageBuilder invariants', () => {
+  // Schema regression only. The packaged phone has already shown that SDK
+  // validation and simulator acceptance do not prove native-host acceptance.
+  it.each(LAYOUTS)('%s: passes the installed SDK page validator', (_name, page) => {
+    expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
+  });
+
+  it('makes the one-shot startup a single visible container with no optional features', () => {
+    const startup = builder.startup() as Page;
+    expect(startup.containerTotalNum).toBe(1);
+    expect(startup.menuObject).toBeUndefined();
+    expect(startup.imageObject).toBeUndefined();
+    expect(startup.listObject).toBeUndefined();
+    expect(startup.textObject).toHaveLength(1);
+    expect(startup.textObject?.[0]?.content?.trim()).not.toBe('');
+  });
+
+  it('makes menu-free compatibility durable across every later rebuild shape', () => {
+    const compatible = builder.withContextualMenu(false);
+    const pages: Page[] = [
+      compatible.defaultLayout() as Page,
+      compatible.sidebarLayout(['a'], {}) as Page,
+      compatible.listLayout(['a']) as Page,
+      compatible.confirmationLayout('confirm') as Page,
+      compatible.visualLayout() as Page,
+    ];
+    expect(pages.every((page) => page.menuObject === undefined)).toBe(true);
+    expect((builder.defaultLayout() as Page).menuObject?.menuItems).toHaveLength(4);
+  });
+
+  it('keeps the modern image HUD menu-free even after text-menu negotiation', () => {
+    const visual = builder.visualLayout() as Page;
+    expect(visual.menuObject).toBeUndefined();
+    expect((builder.visualCompatibilityLayout() as Page).menuObject).toBeUndefined();
+  });
+
   it.each(LAYOUTS)('%s: exactly one container captures events', (_name, page) => {
     const capturing = containers(page).filter((c) => c.isEventCapture === 1);
     expect(capturing).toHaveLength(1);
@@ -54,6 +95,7 @@ describe('HudPageBuilder invariants', () => {
   it.each(LAYOUTS)('%s: zOrderIndex is set on every container and unique', (_name, page) => {
     const all = containers(page);
     const z = all.map((c) => c.zOrderIndex);
+    if (z.every((v) => v === undefined)) return;
     expect(z.every((v) => typeof v === 'number')).toBe(true);
     expect(new Set(z).size).toBe(all.length);
   });

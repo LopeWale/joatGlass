@@ -19,10 +19,14 @@ import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from ..core.confirmation import ConfirmationResult
-from ..core.protocol import CONFIRM_PROMPT_MAX_UTF16_UNITS, utf16_units
+from ..core.protocol import (
+    CONFIRM_PROMPT_MAX_UTF16_UNITS,
+    ProductivityHudView,
+    utf16_units,
+)
 from ..native.bridge import (
     NativeBridgeClient,
     NativeBridgeError,
@@ -39,7 +43,10 @@ from ..persistence.actions import (
 from ..persistence.tasks import TaskOccurrenceStore
 
 Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
-ActionStatusPublisher = Callable[[str, str], Awaitable[None]]
+WorkflowPhase = Literal[
+    "verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved",
+]
+ActionStatusPublisher = Callable[[ProductivityHudView], Awaitable[None]]
 
 _ZONE = r"[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)*"
 _EVENT = re.compile(
@@ -240,6 +247,7 @@ class ProductivityActionController:
             method="calendar.create",
             body=body,
             target=container,
+            display_title=title,
             prompt=prompt,
             success=f"Created Calendar event: {title}.",
             cancelled="Calendar event cancelled.",
@@ -287,6 +295,7 @@ class ProductivityActionController:
             method="reminders.create",
             body=body,
             target=container,
+            display_title=title,
             prompt=prompt,
             success=f"Created Reminder: {title}.",
             cancelled="Reminder cancelled.",
@@ -372,12 +381,14 @@ class ProductivityActionController:
             method="reminders.complete",
             body=body,
             target=container,
+            display_title=title,
             prompt=f"Complete reminder “{title}”? {container.title}",
             success=f"Completed Reminder: {title}.",
             cancelled="Reminder completion cancelled.",
             uncertain="The reminder may have been completed. Check Reminders before retrying.",
             failed="Reminders did not complete the reminder. Check JOAT on the Mac.",
             monitor_due_unix_ms=None,
+            success_phase="completed",
         )
 
     async def _prepare(
@@ -475,12 +486,14 @@ class ProductivityActionController:
         method: str,
         body: dict[str, object],
         target: _ResolvedContainer,
+        display_title: str,
         prompt: str,
         success: str,
         cancelled: str,
         uncertain: str,
         failed: str,
         monitor_due_unix_ms: int | None,
+        success_phase: Literal["saved", "completed"] = "saved",
         origin: ActionOrigin | None = None,
     ) -> str:
         assert self._bridge is not None
@@ -534,6 +547,11 @@ class ProductivityActionController:
                 now_us=time.time_ns() // 1_000,
             )
             self._journal.purge_payload(record.action_id)
+            await self._publish_workflow_status(
+                kind,
+                "not_saved",
+                display_title,
+            )
             return cancelled
         if not isinstance(decision, ConfirmationResult):
             self._journal.cancel_unconfirmed(
@@ -542,6 +560,11 @@ class ProductivityActionController:
                 now_us=time.time_ns() // 1_000,
             )
             self._journal.purge_payload(record.action_id)
+            await self._publish_workflow_status(
+                kind,
+                "not_saved",
+                display_title,
+            )
             return cancelled
         self._journal.record_confirmation(
             record.action_id,
@@ -562,6 +585,11 @@ class ProductivityActionController:
         )
         if self._journal.get(record.action_id).state != "approved":
             self._journal.purge_payload(record.action_id)
+            await self._publish_workflow_status(
+                kind,
+                "cancelled",
+                display_title,
+            )
             return cancelled
 
         attempt = self._journal.begin_attempt(
@@ -571,10 +599,10 @@ class ProductivityActionController:
             request_id=f"native:{record.action_id}",
             now_us=time.time_ns() // 1_000,
         )
-        action_label = self._action_label(kind)
-        await self._publish_action_status(
-            "ACTION · VERIFYING",
-            f"{action_label} · Checking native read-back…",
+        await self._publish_workflow_status(
+            kind,
+            "verifying",
+            display_title,
         )
         try:
             response = await self._bridge.call(
@@ -634,7 +662,7 @@ class ProductivityActionController:
         except NativeBridgeError as exc:
             possible = exc.commit_phase.startswith("committed")
             self._record_write_failure(record.action_id, attempt.attempt_id, exc.code, possible)
-            await self._publish_write_failure(action_label, possible)
+            await self._publish_write_failure(kind, display_title, possible)
             return uncertain if possible else failed
         except NativeBridgeUnavailable as exc:
             self._record_write_failure(
@@ -643,7 +671,7 @@ class ProductivityActionController:
                 "native_bridge_unavailable",
                 exc.possible_external_commit,
             )
-            await self._publish_write_failure(action_label, exc.possible_external_commit)
+            await self._publish_write_failure(kind, display_title, exc.possible_external_commit)
             return uncertain if exc.possible_external_commit else failed
         except NativeBridgeProtocolError:
             # A malformed receipt arrived only after the framed write was sent.
@@ -653,7 +681,7 @@ class ProductivityActionController:
                 "native_bridge_invalid_receipt",
                 True,
             )
-            await self._publish_write_failure(action_label, True)
+            await self._publish_write_failure(kind, display_title, True)
             return uncertain
         except Exception:
             # EventKit may already have committed even if local occurrence
@@ -664,7 +692,7 @@ class ProductivityActionController:
                 "post_commit_local_failure",
                 True,
             )
-            await self._publish_write_failure(action_label, True)
+            await self._publish_write_failure(kind, display_title, True)
             return uncertain
 
         try:
@@ -713,53 +741,94 @@ class ProductivityActionController:
                 try:
                     if self._journal.get(record.action_id).state == "succeeded":
                         self._purge_payload_best_effort(record.action_id)
-                        await self._publish_action_status(
-                            "ACTION · DONE",
-                            f"{action_label} · Saved and verified",
+                        await self._publish_workflow_status(
+                            kind,
+                            success_phase,
+                            display_title,
                         )
                         return success
                 except Exception:
                     pass
                 log.exception("could not persist terminal state for action %s", record.action_id)
-            await self._publish_write_failure(action_label, True)
+            await self._publish_write_failure(kind, display_title, True)
             return uncertain
 
         self._purge_payload_best_effort(record.action_id)
-        await self._publish_action_status(
-            "ACTION · DONE",
-            f"{action_label} · Saved and verified",
+        await self._publish_workflow_status(
+            kind,
+            success_phase,
+            display_title,
         )
         return success
 
     async def _publish_write_failure(
         self,
-        action_label: str,
+        kind: str,
+        display_title: str,
         possible_external_commit: bool,
     ) -> None:
         if possible_external_commit:
-            await self._publish_action_status(
-                "ACTION · CHECK",
-                f"{action_label} · Check native app before retrying",
+            await self._publish_workflow_status(
+                kind,
+                "check",
+                display_title,
             )
         else:
-            await self._publish_action_status(
-                "ACTION · FAILED",
-                f"{action_label} · Native write failed",
+            await self._publish_workflow_status(
+                kind,
+                "failed",
+                display_title,
             )
 
-    async def _publish_action_status(self, title: str, message: str) -> None:
+    async def _publish_workflow_status(
+        self,
+        kind: str,
+        phase: WorkflowPhase,
+        display_title: str,
+    ) -> None:
         if self._publish_status is None:
             return
+        primary, secondary, hint = self._workflow_copy(kind, phase)
         try:
-            await self._publish_status(title, message)
+            await self._publish_status(ProductivityHudView(
+                domain=self._workflow_domain(kind),
+                phase=phase,
+                title=display_title[:72],
+                primary=primary,
+                secondary=secondary,
+                hint=hint,
+            ))
         except Exception:
             # HUD feedback is evidence presentation, never write authority.
             # A disconnected display must not corrupt the durable outcome.
             return
 
     @staticmethod
-    def _action_label(kind: str) -> str:
-        return kind.replace(".", " ").capitalize()
+    def _workflow_domain(kind: str) -> Literal["calendar", "reminders"]:
+        return "calendar" if kind == "calendar.create" else "reminders"
+
+    @classmethod
+    def _workflow_copy(
+        cls,
+        kind: str,
+        phase: WorkflowPhase,
+    ) -> tuple[str, str, str]:
+        native_app = "Calendar" if cls._workflow_domain(kind) == "calendar" else "Reminders"
+        return_hint = f"left x2 {native_app}"
+        if phase == "verifying":
+            subject = "calendar event" if kind == "calendar.create" else "reminder"
+            return (f"Saving {subject}", "Checking native read-back", "Please wait")
+        if phase == "saved":
+            return ("Saved and verified", f"{native_app} read-back matched", return_hint)
+        if phase == "completed":
+            return ("Completed and verified", "Reminders read-back matched", return_hint)
+        if phase == "check":
+            return (f"Check {native_app}", "It may have changed. Do not retry.", f"Open {native_app} on Mac")
+        if phase == "cancelled":
+            return ("Cancelled", f"No {native_app.lower()} item was changed.", return_hint)
+        if phase == "not_saved":
+            return ("Not saved", f"No {native_app.lower()} item was changed.", return_hint)
+        return ("Not saved", f"No {native_app.lower()} item was changed.", return_hint)
 
     def _record_write_failure(
         self,

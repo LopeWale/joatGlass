@@ -31,6 +31,9 @@ from websockets.http11 import Request, Response
 
 from ..core.interfaces import (
     AudioCallback,
+    AudioFrame,
+    AudioFrameCallback,
+    AudioFrameSource,
     DeviceCallback,
     GlassesTransport,
     InputCallback,
@@ -99,7 +102,7 @@ class _PendingConfirm:
     expires_at_s: float
 
 
-class HubGatewayTransport(GlassesTransport):
+class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     """Accepts one plugin connection at a time.
 
     One, not many: the G2 has a single wearer and a single HUD, so a second
@@ -134,6 +137,7 @@ class HubGatewayTransport(GlassesTransport):
         self._conn: ServerConnection | None = None
 
         self._audio_cbs: list[AudioCallback] = []
+        self._audio_frame_cbs: list[AudioFrameCallback] = []
         self._input_cbs: list[InputCallback] = []
         self._device_cbs: list[DeviceCallback] = []
         self._imu_cbs: list[ImuCallback] = []
@@ -216,6 +220,10 @@ class HubGatewayTransport(GlassesTransport):
 
     def on_audio(self, callback: AudioCallback) -> None:
         self._audio_cbs.append(callback)
+
+    def on_audio_frame(self, callback: AudioFrameCallback) -> None:
+        """Subscribe to provenance-preserving frames before legacy consumers."""
+        self._audio_frame_cbs.append(callback)
 
     def on_input(self, callback: InputCallback) -> None:
         self._input_cbs.append(callback)
@@ -641,7 +649,7 @@ class HubGatewayTransport(GlassesTransport):
                 for hello_cb in self._hello_cbs:
                     hello_cb(message)
             case Audio():
-                self._handle_audio(message)
+                self._handle_audio(message, session_id)
             case Imu():
                 for imu_cb in self._imu_cbs:
                     imu_cb(message)
@@ -743,7 +751,7 @@ class HubGatewayTransport(GlassesTransport):
                 for navigation_origin_failure_cb in self._navigation_origin_failure_cbs:
                     navigation_origin_failure_cb(message)
 
-    def _handle_audio(self, message: Audio) -> None:
+    def _handle_audio(self, message: Audio, session_id: str) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:
             # Gap = MacLink shed frames while the socket was down. Surfaced so
             # the STT layer can reset instead of splicing across the hole.
@@ -751,6 +759,18 @@ class HubGatewayTransport(GlassesTransport):
         self._last_seq = message.seq
 
         pcm = pack_pcm(message.pcm)
+        frame = AudioFrame(
+            pcm=pcm,
+            connection_generation=session_id,
+            seq=message.seq,
+            source=message.source,
+            speaker=message.speaker,
+            received_at_us=time.time_ns() // 1_000,
+        )
+        # Capture subscribers run first. A durable note can therefore journal
+        # the received frame before the conversational lane starts VAD/STT.
+        for frame_cb in self._audio_frame_cbs:
+            frame_cb(frame)
         for cb in self._audio_cbs:
             cb(pcm, message.seq)
 

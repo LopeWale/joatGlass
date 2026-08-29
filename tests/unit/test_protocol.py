@@ -16,6 +16,7 @@ from joat.core.protocol import (
     AuthAccepted,
     Audio,
     AudioControl,
+    BrainstormHudView,
     Confirm,
     ConfirmRequest,
     ContainerId,
@@ -44,6 +45,7 @@ from joat.core.protocol import (
     NavigationView,
     PairingAck,
     PairingSet,
+    ProductivityHudView,
     Input,
     Policy,
     ProtocolError,
@@ -279,6 +281,22 @@ class TestParseUplink:
             "outcome": "success",
         })
 
+    def test_g2_diagnostic_accepts_only_bounded_first_light_outcome(self) -> None:
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "hud_surface",
+                "stage": "first_frame",
+                "surface": "visual",
+                "outcome": "failed",
+            },
+        }) == G2Diagnostic(event={
+            "type": "hud_surface",
+            "stage": "first_frame",
+            "surface": "visual",
+            "outcome": "failed",
+        })
+
     def test_g2_diagnostic_rejects_content_and_unknown_fields(self) -> None:
         with pytest.raises(ProtocolError, match="unsupported fields"):
             parse_uplink({
@@ -286,6 +304,18 @@ class TestParseUplink:
                 "event": {
                     "type": "gesture", "gesture": "tap", "delivery": "sys",
                     "text": "private message",
+                },
+            })
+
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "hud_surface",
+                    "stage": "selected",
+                    "surface": "text",
+                    "outcome": "success",
+                    "content": "JOAT is ready",
                 },
             })
 
@@ -417,6 +447,73 @@ class TestDownlinkWire:
         assert wire["hint"] == "H" * 46
         assert wire["requestId"] == "hud-request-7"
         assert wire["selectable"] is True
+
+    def test_brainstorm_view_is_bounded_and_has_no_terminal_payload(self) -> None:
+        wire = BrainstormHudView(
+            screen="agent_terminal",
+            state="ready",
+            topic="Hermes Agent Terminal",
+            collaborators=[],
+            activity="Hermes joins Brainstorm.",
+            terminal_state="ready",
+            endpoint_host="admins-mac-mini.tail3a3363.ts.net",
+            terminal_reason="",
+            no_tools_checked=True,
+        ).to_wire()
+        assert wire["kind"] == "brainstorm.view"
+        assert wire["brainstorm"] == {
+            "screen": "agent_terminal",
+            "state": "ready",
+            "topic": "Hermes Agent Terminal",
+            "collaborators": [],
+            "activeSpeaker": "",
+            "activity": "Hermes joins Brainstorm.",
+            "endpointHost": "admins-mac-mini.tail3a3363.ts.net",
+            "terminalState": "ready",
+            "terminalReason": "",
+            "noToolsChecked": True,
+        }
+
+    def test_productivity_view_is_typed_and_bounded(self) -> None:
+        wire = ProductivityHudView(
+            domain="reminders",
+            phase="completed",
+            title="Buy filters",
+            primary="Saved and verified",
+            secondary="Reminders read-back matched",
+            hint="left x2 overview",
+        ).to_wire()
+        assert wire == {
+            "kind": "productivity.view",
+            "productivity": {
+                "domain": "reminders",
+                "phase": "completed",
+                "title": "Buy filters",
+                "primary": "Saved and verified",
+                "secondary": "Reminders read-back matched",
+                "hint": "left x2 overview",
+            },
+        }
+
+    def test_productivity_view_rejects_invalid_phase_and_oversized_copy(self) -> None:
+        with pytest.raises(ProtocolError, match="phase"):
+            ProductivityHudView(  # type: ignore[arg-type]
+                domain="calendar",
+                phase="invented",
+                title="Review",
+                primary="Saved",
+                secondary="Read-back matched",
+                hint="left x2 overview",
+            ).to_wire()
+        with pytest.raises(ProtocolError, match="title"):
+            ProductivityHudView(
+                domain="calendar",
+                phase="saved",
+                title="x" * 73,
+                primary="Saved",
+                secondary="Calendar read-back matched",
+                hint="left x2 overview",
+            ).to_wire()
 
     def test_audio_control_omits_source_when_unset(self) -> None:
         assert AudioControl(open=True).to_wire() == {"kind": "audio.control", "open": True}

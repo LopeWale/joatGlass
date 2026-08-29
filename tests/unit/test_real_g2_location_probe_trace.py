@@ -54,7 +54,7 @@ def test_success_requires_high_profile_and_a_following_sample() -> None:
     )
 
     assert summary == {
-        "schema": "joat.g2-location-probe-run.v1",
+        "schema": "joat.g2-location-probe-run.v2",
         "mode": "walking",
         "result": "pass",
         "eventCount": 5,
@@ -63,7 +63,45 @@ def test_success_requires_high_profile_and_a_following_sample() -> None:
         "pageTransitionCount": 1,
         "gestureCount": 1,
         "tileUploadCount": 1,
+        "hudSurfaceEventCount": 0,
+        "visualRebuildOutcome": "missing",
+        "firstFrameOutcome": "missing",
+        "selectedHudSurface": "missing",
     }
+
+
+def test_summary_records_bridge_outcomes_without_claiming_lens_visibility() -> None:
+    summary = summarize_receipt(
+        "walking",
+        {
+            "schema": "joat.g2-diagnostic.v2",
+            "events": [
+                {
+                    "type": "hud_surface",
+                    "stage": "visual_rebuild",
+                    "surface": "visual",
+                    "outcome": "success",
+                },
+                {
+                    "type": "hud_surface",
+                    "stage": "first_frame",
+                    "surface": "visual",
+                    "outcome": "failed",
+                },
+                {
+                    "type": "hud_surface",
+                    "stage": "selected",
+                    "surface": "text",
+                    "outcome": "success",
+                },
+            ],
+        },
+    )
+
+    assert summary["hudSurfaceEventCount"] == 3
+    assert summary["visualRebuildOutcome"] == "success"
+    assert summary["firstFrameOutcome"] == "failed"
+    assert summary["selectedHudSurface"] == "text"
 
 
 def test_success_without_samples_is_inconclusive() -> None:

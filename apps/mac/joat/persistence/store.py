@@ -390,12 +390,108 @@ _MIGRATION_5 = (
     """,
 )
 
+_MIGRATION_6 = (
+    """
+    CREATE TABLE voice_notes (
+        capture_id TEXT PRIMARY KEY CHECK (
+            typeof(capture_id) = 'text' AND length(capture_id) > 0
+        ),
+        idempotency_key TEXT NOT NULL UNIQUE CHECK (
+            typeof(idempotency_key) = 'text' AND length(idempotency_key) > 0
+        ),
+        title TEXT CHECK (
+            title IS NULL OR (typeof(title) = 'text' AND length(title) > 0)
+        ),
+        source_kind TEXT NOT NULL CHECK (
+            typeof(source_kind) = 'text' AND length(source_kind) > 0
+        ),
+        state TEXT NOT NULL CHECK (state IN (
+            'preparing','recording','paused','finalizing','saved',
+            'saved_degraded','interrupted','discarded','failed'
+        )),
+        created_at_us INTEGER NOT NULL CHECK (created_at_us >= 0),
+        updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),
+        started_at_us INTEGER CHECK (
+            started_at_us IS NULL OR started_at_us >= created_at_us
+        ),
+        ended_at_us INTEGER CHECK (
+            ended_at_us IS NULL OR ended_at_us >= created_at_us
+        ),
+        received_frames INTEGER NOT NULL DEFAULT 0 CHECK (received_frames >= 0),
+        journaled_frames INTEGER NOT NULL DEFAULT 0 CHECK (
+            journaled_frames >= 0 AND journaled_frames <= received_frames
+        ),
+        transcribed_segments INTEGER NOT NULL DEFAULT 0 CHECK (
+            transcribed_segments >= 0
+        ),
+        gap_count INTEGER NOT NULL DEFAULT 0 CHECK (gap_count >= 0),
+        raw_bytes INTEGER NOT NULL DEFAULT 0 CHECK (raw_bytes >= 0),
+        raw_retained INTEGER NOT NULL DEFAULT 1 CHECK (raw_retained IN (0,1)),
+        completion_code TEXT,
+        CHECK ((state IN ('saved','saved_degraded','interrupted','discarded','failed'))
+               = (ended_at_us IS NOT NULL)),
+        CHECK ((state = 'discarded') = (title IS NULL)),
+        CHECK (state != 'saved' OR raw_retained = 0)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE voice_note_frames (
+        capture_id TEXT NOT NULL REFERENCES voice_notes(capture_id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        connection_generation TEXT NOT NULL CHECK (
+            typeof(connection_generation) = 'text'
+            AND length(connection_generation) > 0
+        ),
+        seq INTEGER NOT NULL CHECK (seq >= 0),
+        source TEXT NOT NULL CHECK (
+            typeof(source) = 'text' AND length(source) > 0
+        ),
+        speaker TEXT CHECK (
+            speaker IS NULL OR (typeof(speaker) = 'text' AND length(speaker) > 0)
+        ),
+        received_at_us INTEGER NOT NULL CHECK (received_at_us >= 0),
+        pcm_digest BLOB NOT NULL CHECK (
+            typeof(pcm_digest) = 'blob' AND length(pcm_digest) = 32
+        ),
+        pcm BLOB NOT NULL CHECK (typeof(pcm) = 'blob' AND length(pcm) > 0),
+        PRIMARY KEY (capture_id, ordinal),
+        UNIQUE (capture_id, connection_generation, seq)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE voice_note_segments (
+        capture_id TEXT NOT NULL REFERENCES voice_notes(capture_id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        kind TEXT NOT NULL CHECK (kind IN ('transcript','gap','system')),
+        text TEXT NOT NULL CHECK (
+            typeof(text) = 'text' AND length(text) > 0
+        ),
+        first_frame_ordinal INTEGER CHECK (
+            first_frame_ordinal IS NULL OR first_frame_ordinal >= 0
+        ),
+        last_frame_ordinal INTEGER CHECK (
+            last_frame_ordinal IS NULL OR last_frame_ordinal >= first_frame_ordinal
+        ),
+        created_at_us INTEGER NOT NULL CHECK (created_at_us >= 0),
+        PRIMARY KEY (capture_id, ordinal),
+        CHECK ((kind = 'transcript') = (first_frame_ordinal IS NOT NULL)),
+        CHECK ((kind = 'transcript') = (last_frame_ordinal IS NOT NULL))
+    ) STRICT
+    """,
+    """
+    CREATE INDEX voice_notes_active_state
+    ON voice_notes(state, updated_at_us, capture_id)
+    WHERE state IN ('preparing','recording','paused','finalizing')
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
     (3, "eventkit_task_occurrences", _MIGRATION_3),
     (4, "durable_notification_observations", _MIGRATION_4),
     (5, "retain_task_alert_history", _MIGRATION_5),
+    (6, "durable_local_voice_notes", _MIGRATION_6),
 )
 
 

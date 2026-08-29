@@ -60,7 +60,6 @@ from .core.navigation import NavigationPoint
 from .core.protocol import (
     Device,
     Hello,
-    HudList,
     InputEvent,
     NavigationAction,
     NavigationOrigin,
@@ -69,6 +68,7 @@ from .core.protocol import (
     NavigationRouteAck,
     NavigationState,
     NavigationViewAck,
+    ProductivityHudView,
 )
 from .navigation.mapbox import MapboxNavigationProvider
 from .navigation.policies import candidate_navigation_policies
@@ -535,7 +535,7 @@ async def main() -> None:
         return DebateSession(
             topic,
             seat_participants(seated),
-            Broadcast([HudSink(hud), TerminalSink(), debate_state]),
+            Broadcast([HudSink(hud, status.agent_terminal_projection), TerminalSink(), debate_state]),
             replier,
             gate=gate,
             on_phase=publish_brainstorm_phase,
@@ -654,13 +654,9 @@ async def main() -> None:
     )
     task_occurrences = TaskOccurrenceStore(durable_store)
 
-    async def publish_action_status(title: str, message: str) -> None:
-        """Show lifecycle evidence without making HUD delivery write authority."""
-        await transport.send(HudList(
-            items=[message],
-            title=title,
-            hint="left x2 overview",
-        ))
+    async def publish_action_status(view: ProductivityHudView) -> None:
+        """Render the typed read-only EventKit lifecycle surface on G2."""
+        await transport.send(view)
 
     productivity_actions = ProductivityActionController(
         personal_data,
@@ -761,7 +757,15 @@ async def main() -> None:
     async def deliver_task_alert(card: str) -> None:
         if not transport.connected:
             raise RuntimeError("glasses are not connected")
-        await sessions.notify_and_wait(card)
+        title = card.removeprefix("!! ").split(" · Reminder\n", 1)[0].strip() or "Reminder"
+        await transport.send(ProductivityHudView(
+            domain="reminders",
+            phase="due",
+            title=title[:72],
+            primary="Due now",
+            secondary="This reminder is still incomplete.",
+            hint="left x2 Reminders",
+        ))
 
     async def evaluate_task_occurrence(occurrence: TaskOccurrence) -> bool | None:
         """Confirm the native Reminder is still incomplete before alerting.

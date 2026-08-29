@@ -359,12 +359,135 @@ actor EventKitService {
         return result
     }
 
+    func deleteAcceptanceEvent(
+        _ request: AcceptanceCalendarDeleteRequest,
+        attemptID: String,
+        payloadDigest: String
+    ) throws -> JSONValue {
+        if let previous = completedAttempts[attemptID] {
+            guard previous.payloadDigest == payloadDigest else {
+                throw NativeBridgeError("attempt_conflict", "attempt ID was used for another payload")
+            }
+            return previous.result
+        }
+        try requireAcceptanceTitle(request.expectedTitle, suffix: "EVENT")
+        _ = try requireFullAccess("calendar")
+        guard let event = store.calendarItem(
+            withIdentifier: request.calendarItemIdentifier
+        ) as? EKEvent else {
+            throw NativeBridgeError("acceptance_item_not_found", "synthetic event no longer exists")
+        }
+        guard event.calendar.calendarIdentifier == request.calendarIdentifier,
+              event.title == request.expectedTitle,
+              unixMS(event.startDate) == request.expectedStartUnixMS,
+              unixMS(event.endDate) == request.expectedEndUnixMS,
+              (event.recurrenceRules ?? []).isEmpty
+        else {
+            throw NativeBridgeError(
+                "acceptance_item_changed",
+                "synthetic event no longer matches its read-back identity"
+            )
+        }
+        guard event.calendar.allowsContentModifications else {
+            throw NativeBridgeError("container_read_only", "synthetic event calendar is read-only")
+        }
+        do {
+            try store.remove(event, span: .thisEvent, commit: true)
+        } catch {
+            throw NativeBridgeError(
+                "acceptance_cleanup_failed",
+                "EventKit did not confirm synthetic event removal",
+                commitPhase: "committed_unverified"
+            )
+        }
+        storeGeneration &+= 1
+        guard store.calendarItem(withIdentifier: request.calendarItemIdentifier) == nil else {
+            throw NativeBridgeError(
+                "acceptance_cleanup_readback_failed",
+                "synthetic event remained readable after removal",
+                commitPhase: "committed_unverified"
+            )
+        }
+        let result = try BridgeContract.encode(AcceptanceDeleteResult(removed: true))
+        completedAttempts[attemptID] = (payloadDigest, result)
+        return result
+    }
+
+    func deleteAcceptanceReminder(
+        _ request: AcceptanceReminderDeleteRequest,
+        attemptID: String,
+        payloadDigest: String
+    ) throws -> JSONValue {
+        if let previous = completedAttempts[attemptID] {
+            guard previous.payloadDigest == payloadDigest else {
+                throw NativeBridgeError("attempt_conflict", "attempt ID was used for another payload")
+            }
+            return previous.result
+        }
+        try requireAcceptanceTitle(request.expectedTitle, suffix: "REMINDER")
+        _ = try requireFullAccess("reminders")
+        guard let reminder = store.calendarItem(
+            withIdentifier: request.calendarItemIdentifier
+        ) as? EKReminder else {
+            throw NativeBridgeError("acceptance_item_not_found", "synthetic reminder no longer exists")
+        }
+        guard reminder.calendar.calendarIdentifier == request.calendarIdentifier,
+              reminder.title == request.expectedTitle,
+              reminderDueUnixMS(reminder) == request.expectedDueUnixMS,
+              (reminder.recurrenceRules ?? []).isEmpty
+        else {
+            throw NativeBridgeError(
+                "acceptance_item_changed",
+                "synthetic reminder no longer matches its read-back identity"
+            )
+        }
+        guard reminder.calendar.allowsContentModifications else {
+            throw NativeBridgeError("container_read_only", "synthetic reminder list is read-only")
+        }
+        do {
+            try store.remove(reminder, commit: true)
+        } catch {
+            throw NativeBridgeError(
+                "acceptance_cleanup_failed",
+                "EventKit did not confirm synthetic reminder removal",
+                commitPhase: "committed_unverified"
+            )
+        }
+        storeGeneration &+= 1
+        guard store.calendarItem(withIdentifier: request.calendarItemIdentifier) == nil else {
+            throw NativeBridgeError(
+                "acceptance_cleanup_readback_failed",
+                "synthetic reminder remained readable after removal",
+                commitPhase: "committed_unverified"
+            )
+        }
+        let result = try BridgeContract.encode(AcceptanceDeleteResult(removed: true))
+        completedAttempts[attemptID] = (payloadDigest, result)
+        return result
+    }
+
     private func requireCurrentStore(_ instanceID: String, _ generation: UInt64) throws {
         guard instanceID == storeInstanceID else {
             throw NativeBridgeError("stale_store_instance", "native bridge restarted; preview is stale")
         }
         guard generation == storeGeneration else {
             throw NativeBridgeError("stale_store_generation", "EventKit changed; preview is stale")
+        }
+    }
+
+    private func requireAcceptanceTitle(_ title: String, suffix: String) throws {
+        let components = title.split(separator: " ", omittingEmptySubsequences: false)
+        guard components.count == 4,
+              components[0] == "JOAT",
+              components[1] == "ACCEPTANCE",
+              components[2].count == 8,
+              components[2].allSatisfy({ "0123456789abcdef".contains($0) }),
+              components[3] == Substring(suffix)
+        else {
+            throw NativeBridgeError(
+                "acceptance_title_required",
+                "native cleanup is restricted to randomized acceptance items"
+            )
         }
     }
 
@@ -475,6 +598,14 @@ actor EventKitService {
             return calendar.date(from: components)
         } ?? Date.distantFuture
         return (due, reminder.calendarItemIdentifier)
+    }
+
+    private func reminderDueUnixMS(_ reminder: EKReminder) -> Int64? {
+        reminder.dueDateComponents.flatMap { components in
+            var calendar = components.calendar ?? Calendar(identifier: .gregorian)
+            if let zone = components.timeZone { calendar.timeZone = zone }
+            return calendar.date(from: components).map(unixMS)
+        }
     }
 
     private func civilTime(_ components: DateComponents) -> CivilTime? {

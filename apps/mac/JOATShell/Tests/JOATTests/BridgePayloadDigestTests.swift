@@ -98,6 +98,62 @@ final class BridgePayloadDigestTests: XCTestCase {
         XCTAssertEqual(encoded["calendar_item_identifier"], .string("reminder-1"))
     }
 
+    func testAcceptanceCleanupPayloadBindsExactNativeState() throws {
+        let event = AcceptanceCalendarDeleteRequest(
+            calendarIdentifier: "calendar-1",
+            calendarItemIdentifier: "event-1",
+            expectedTitle: "JOAT ACCEPTANCE a1b2c3d4 EVENT",
+            expectedStartUnixMS: 1_788_274_200_000,
+            expectedEndUnixMS: 1_788_274_260_000
+        )
+        let reminder = AcceptanceReminderDeleteRequest(
+            calendarIdentifier: "list-1",
+            calendarItemIdentifier: "reminder-1",
+            expectedTitle: "JOAT ACCEPTANCE a1b2c3d4 REMINDER",
+            expectedDueUnixMS: 1_788_274_200_000
+        )
+
+        let encodedEvent = try XCTUnwrap(try BridgeContract.encode(event).objectValue)
+        let encodedReminder = try XCTUnwrap(try BridgeContract.encode(reminder).objectValue)
+
+        XCTAssertEqual(encodedEvent["calendar_identifier"], .string("calendar-1"))
+        XCTAssertEqual(encodedEvent["calendar_item_identifier"], .string("event-1"))
+        XCTAssertEqual(encodedEvent["expected_title"], .string("JOAT ACCEPTANCE a1b2c3d4 EVENT"))
+        XCTAssertEqual(encodedEvent["expected_start_unix_ms"], .number(1_788_274_200_000))
+        XCTAssertEqual(encodedEvent["expected_end_unix_ms"], .number(1_788_274_260_000))
+        XCTAssertEqual(encodedReminder["calendar_identifier"], .string("list-1"))
+        XCTAssertEqual(encodedReminder["calendar_item_identifier"], .string("reminder-1"))
+        XCTAssertEqual(encodedReminder["expected_title"], .string("JOAT ACCEPTANCE a1b2c3d4 REMINDER"))
+        XCTAssertEqual(encodedReminder["expected_due_unix_ms"], .number(1_788_274_200_000))
+    }
+
+    func testAcceptanceCleanupRejectsNonSyntheticTitleBeforeEventKitAccess() async throws {
+        let router = BridgeRouter()
+        let request = AcceptanceCalendarDeleteRequest(
+            calendarIdentifier: "calendar-1",
+            calendarItemIdentifier: "event-1",
+            expectedTitle: "JOAT ACCEPTANCE ١٢٣٤٥٦٧٨ EVENT",
+            expectedStartUnixMS: 1_788_274_200_000,
+            expectedEndUnixMS: 1_788_274_260_000
+        )
+        let body = try XCTUnwrap(try BridgeContract.encode(request).objectValue)
+        let deadline = Int64(Date().timeIntervalSince1970 * 1_000) + 5_000
+        let digest = hexDigest(try BridgeContract.canonicalJSONData(body))
+
+        let response = await router.handle(BridgeRequest(
+            version: BridgeContract.version,
+            requestID: "unsafe-cleanup",
+            method: "acceptance.calendar.delete",
+            deadlineUnixMS: deadline,
+            attemptID: "attempt-unsafe-cleanup",
+            payloadDigest: digest,
+            body: body
+        ))
+
+        XCTAssertEqual(response.error?.code, "acceptance_title_required")
+        XCTAssertEqual(response.commitPhase, "none")
+    }
+
     private func exampleBody() -> CalendarCreateRequest {
         CalendarCreateRequest(
             storeInstanceID: "store-A",
