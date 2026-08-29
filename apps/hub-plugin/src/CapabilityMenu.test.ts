@@ -147,6 +147,81 @@ describe('CapabilityMenu', () => {
     expect(listOptions[0]?.title).toBe('PLANNING');
   });
 
+  it('replaces a missing Planning response with retry guidance, then accepts its late matching response', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, listOptions, sent } = rig();
+      await menu.toggle();
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      menu.handleClick();
+      await vi.advanceTimersByTimeAsync(0);
+      const requestId = latestRequestId(sent);
+      expect(requestId).toMatch(/^hud-request-/);
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(lists[1]).toEqual([
+        'No response from the Mac yet.',
+        'Return to Overview, then open Planning to retry.',
+      ]);
+      expect(listOptions[1]).toMatchObject({
+        title: 'PLANNING · RETRY', hint: 'left x2 overview',
+      });
+
+      expect(await menu.presentList(
+        'PLANNING · PLAN · AUGUST 2026', rows(2), requestId, true,
+      )).toBe(true);
+      expect(lists[2]).toEqual(rows(2));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not discard a matching Planning response while the retry frame is still painting', async () => {
+    vi.useFakeTimers();
+    try {
+      let finishRetryPaint: ((shown: boolean) => void) | undefined;
+      const retryPaint = new Promise<boolean>((resolve) => { finishRetryPaint = resolve; });
+      const { menu, sent } = rig(true, [true, retryPaint, true]);
+      await menu.toggle();
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      menu.handleClick();
+      await vi.advanceTimersByTimeAsync(0);
+      const requestId = latestRequestId(sent);
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      const response = menu.presentList(
+        'PLANNING · PLAN · AUGUST 2026', rows(2), requestId, true,
+      );
+      finishRetryPaint?.(true);
+
+      expect(await response).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the retry timer once the current Planning frame arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, sent } = rig();
+      await menu.toggle();
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      menu.handleClick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await menu.presentList(
+        'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
+      )).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(lists).toEqual([
+        ['Loading recent planning…'],
+        rows(2),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps Navigation visible in the first-level wearable sidebar and opens its destination handoff', async () => {
     const { menu, sidebars, selections, lists, listOptions, sent } = rig();
     await menu.toggle();
