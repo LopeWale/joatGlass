@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import stat
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -12,12 +13,19 @@ from typing import Any
 import pytest
 
 from joat.core.protocol import BrainstormAction, BrainstormHudView, Hello
-from joat.services.brainstorm_acceptance import InAppBrainstormAcceptance
+from joat.services.brainstorm_acceptance import (
+    ARM_SCHEMA,
+    InAppBrainstormAcceptance,
+    consume_arm_request,
+)
 
 
 class FakeTransport:
     def __init__(self, events: list[dict[str, object]]) -> None:
         self.events = events
+        self.connected = True
+        self.physical_g2_connected = True
+        self.hello: Hello | None = None
         self.sent: list[BrainstormHudView] = []
         self.hello_callbacks: list[Callable[[Hello], None]] = []
         self.action_callbacks: list[Callable[[BrainstormAction], None]] = []
@@ -40,8 +48,9 @@ class FakeTransport:
             "sha256": f"{len(self.events) + 10:064x}",
         })
 
-    def hello(self) -> None:
+    def emit_hello(self) -> None:
         message = Hello(sn="g2-not-retained", model="g2", launch_source="physical")
+        self.hello = message
         for callback in self.hello_callbacks:
             callback(message)
 
@@ -98,7 +107,7 @@ async def test_in_app_controller_drives_real_g2_contract_and_discards_hermes_tex
     )
     controller.attach()
 
-    transport.hello()
+    transport.emit_hello()
     await _wait_for(lambda: len(transport.sent) == 1)
     assert transport.sent[-1].state == "ready"
     transport.action("begin_topic_capture", "brainstorm", "right")
@@ -109,7 +118,7 @@ async def test_in_app_controller_drives_real_g2_contract_and_discards_hermes_tex
     assert transport.sent[-1].screen == "agent_terminal"
     transport.action("show_brainstorm", "agent_terminal", "ring")
     await _wait_for(lambda: len(transport.sent) == 5)
-    transport.hello()
+    transport.emit_hello()
     await _wait_for(lambda: len(transport.sent) == 6)
     transport.action("cancel", "brainstorm", "left", "double_press")
     await asyncio.wait_for(completed.wait(), timeout=1)
@@ -139,3 +148,58 @@ async def test_in_app_controller_refuses_to_start_from_non_g2_hello(tmp_path: Pa
     assert transport.sent == []
     await controller.close()
     assert json.loads(controller.output_path.read_text())["result"] == "inconclusive"
+
+
+@pytest.mark.asyncio
+async def test_in_app_controller_accepts_actions_from_the_live_router_without_a_second_subscription(
+    tmp_path: Path,
+) -> None:
+    events: list[dict[str, object]] = []
+    transport = FakeTransport(events)
+    controller = InAppBrainstormAcceptance(
+        transport=transport, terminal=FakeHermes(), out=tmp_path / "receipt.json",
+        diagnostic_events=events, action_timeout_s=1, connect_timeout_s=1,
+    )
+    controller.attach(subscribe_actions=False)
+    assert transport.action_callbacks == []
+    transport.emit_hello()
+    await _wait_for(lambda: len(transport.sent) == 1)
+
+    transport.events.append({
+        "sequence": 2, "recordedAtMs": 2, "type": "brainstorm_action",
+        "action": "begin_topic_capture", "surface": "brainstorm", "gesture": "tap",
+        "delivery": "sys", "source": "right",
+    })
+    controller.handle_action(BrainstormAction(action="begin_topic_capture"))
+    await _wait_for(lambda: len(transport.sent) == 2)
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_in_app_controller_rejects_loopback_g2_even_when_its_model_is_g2(tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+    transport = FakeTransport(events)
+    transport.physical_g2_connected = False
+    controller = InAppBrainstormAcceptance(
+        transport=transport, terminal=FakeHermes(), out=tmp_path / "receipt.json",
+        diagnostic_events=events, action_timeout_s=0.01, connect_timeout_s=0.01,
+    )
+    controller.attach()
+    transport.emit_hello()
+    await asyncio.sleep(0)
+    assert transport.sent == []
+    await controller.close()
+    assert json.loads(controller.output_path.read_text())["result"] == "inconclusive"
+
+
+def test_arm_request_is_fixed_owner_only_and_single_use(tmp_path: Path) -> None:
+    arm = tmp_path / "arm.json"
+    arm.write_text(ARM_SCHEMA + "\n")
+    os.chmod(arm, 0o600)
+    assert consume_arm_request(arm) is True
+    assert not arm.exists()
+
+    arm.write_text("topic must never be accepted\n")
+    os.chmod(arm, 0o600)
+    assert consume_arm_request(arm) is False
+    assert not arm.exists()

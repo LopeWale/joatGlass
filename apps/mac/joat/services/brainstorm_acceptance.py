@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from ..services.g2_diagnostics import TRACE_SCHEMA
 
 
 RUN_SCHEMA = "joat.g2-brainstorm-acceptance.v2"
+ARM_SCHEMA = "joat.g2-brainstorm-acceptance-arm.v1"
 MAX_RETAINED_EVENTS = 12
 _HEX_SHA256_LENGTH = 64
 _PHYSICAL_SOURCES = frozenset({"left", "right", "ring"})
@@ -49,6 +51,40 @@ _FIXED_HERMES_PROMPT = (
     "JOAT physical acceptance run. Emit a long sequence of neutral status "
     "markers only. Do not use tools or call any external service."
 )
+
+
+def default_arm_path() -> Path:
+    return Path.home() / "Library/Application Support/JOAT/acceptance/brainstorm/arm.json"
+
+
+def consume_arm_request(path: Path) -> bool:
+    """Consume one owner-only, fixed-vocabulary app opt-in request.
+
+    This is intentionally not a general local control API: the request has no
+    topic, endpoint, action, or free-form value.  Its only effect is arming
+    the fixed acceptance flow from the already app-launched engine.
+    """
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    try:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or path.read_bytes() != (ARM_SCHEMA + "\n").encode("utf-8")
+        ):
+            return False
+        return True
+    finally:
+        # A malformed request cannot become a standing trigger.  This is a
+        # same-user owner-local preference, not a retry queue.
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class HermesStream(Protocol):
@@ -310,11 +346,31 @@ class InAppBrainstormAcceptance:
 
         self._events[:] = [dict(event) for event in events]
 
-    def attach(self) -> None:
+    def attach(self, *, subscribe_actions: bool = True) -> None:
+        """Attach once to the live engine without taking over normal routing.
+
+        Dynamic arming registers the production action router first and calls
+        :meth:`handle_action` only while this controller is active.  Static
+        tests can still subscribe directly.
+        """
+
         if self._out.exists():
             raise FileExistsError("refusing to overwrite an acceptance receipt")
         self._transport.on_hello(self._on_hello)
-        self._transport.on_brainstorm_action(self._on_action)
+        if subscribe_actions:
+            self._transport.on_brainstorm_action(self._on_action)
+        self._task = asyncio.get_running_loop().create_task(self._run())
+        existing = self._transport.hello
+        if self._transport.connected and existing is not None:
+            self._on_hello(existing)
+
+    async def wait(self) -> None:
+        """Wait until this one-shot flow writes its final bounded receipt."""
+
+        task = self._task
+        if task is None:
+            raise RuntimeError("acceptance controller was not attached")
+        await asyncio.shield(task)
 
     async def close(self) -> None:
         """Finish a stopped app run without leaving an ambiguous active task."""
@@ -332,15 +388,18 @@ class InAppBrainstormAcceptance:
                 ),
             )
 
+    def handle_action(self, action: BrainstormAction) -> None:
+        """Receive a production-routed Brainstorm action while armed."""
+
+        self._on_action(action)
+
     def _on_hello(self, hello: Hello) -> None:
-        if hello.model != "g2":
+        if hello.model != "g2" or not self._transport.physical_g2_connected:
             return
         self._hello_count += 1
         self._physical_hello.set()
         if self._hello_count > 1:
             self._replacement_hello.set()
-        if self._task is None:
-            self._task = asyncio.get_running_loop().create_task(self._run())
 
     def _on_action(self, action: BrainstormAction) -> None:
         self._actions.put_nowait(action.action)
