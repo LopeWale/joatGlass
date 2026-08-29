@@ -12,6 +12,12 @@ import type {
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
 const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
+/**
+ * The native bridge itself has a bounded call deadline. Give it a small
+ * allowance, then replace the local loading frame with an honest retry state
+ * instead of leaving a wearer on a spinner indefinitely.
+ */
+const CAPABILITY_RESPONSE_TIMEOUT_MS = 12_000;
 
 function isPlanningAnchor(value: unknown): value is number {
   return typeof value === 'number'
@@ -66,6 +72,7 @@ export class CapabilityMenu {
   private dataRowsSelectable = false;
   private pendingTitle?: string;
   private pendingRequestId?: string;
+  private responseTimeout?: ReturnType<typeof setTimeout>;
   private productivityReturn?: 'Planning';
   private productivityAnchorUnixMs?: number;
   /** A Planning row may open a day or item detail. Back returns to the live
@@ -90,6 +97,7 @@ export class CapabilityMenu {
    * streamed frame cannot remain trapped behind the Brainstorm instructions. */
   async beginLiveSession(session: 'brainstorm'): Promise<void> {
     void session;
+    this.clearResponseTimeout();
     this.transitionId += 1;
     this.view = 'closed';
     this.selectedIndex = 0;
@@ -134,6 +142,7 @@ export class CapabilityMenu {
       || normalized.startsWith(`${this.pendingTitle} ·`);
     if (!matches) return false;
 
+    this.clearResponseTimeout();
     const expectedRequestId = this.pendingRequestId;
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
@@ -187,6 +196,7 @@ export class CapabilityMenu {
    * native-backed Planning collection so an outcome cannot strand the wearer
    * on a stale Calendar- or Tasks-only list. */
   async presentProductivity(productivity: ProductivityHudModel): Promise<boolean> {
+    this.clearResponseTimeout();
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
@@ -376,6 +386,7 @@ export class CapabilityMenu {
     planningAnchorUnixMs?: number,
   ): Promise<void> {
     if (picked === 'Planning') this.planningDrillDown = false;
+    this.clearResponseTimeout();
     const transition = this.beginTransition();
     const title = picked.toUpperCase();
     const requestId = `hud-request-${this.randomId()}`;
@@ -408,6 +419,49 @@ export class CapabilityMenu {
       kind: 'input',
       event,
     });
+    if (picked === 'Planning') this.armResponseTimeout(title, requestId);
+  }
+
+  private armResponseTimeout(title: string, requestId: string): void {
+    this.responseTimeout = setTimeout(() => {
+      void this.showResponseTimeout(title, requestId);
+    }, CAPABILITY_RESPONSE_TIMEOUT_MS);
+  }
+
+  private clearResponseTimeout(): void {
+    if (this.responseTimeout !== undefined) clearTimeout(this.responseTimeout);
+    this.responseTimeout = undefined;
+  }
+
+  /** A later matching native response still replaces this retry state. */
+  private async showResponseTimeout(title: string, requestId: string): Promise<void> {
+    this.responseTimeout = undefined;
+    if (
+      this.view !== 'data'
+      || this.pendingTitle !== title
+      || this.pendingRequestId !== requestId
+    ) return;
+
+    this.dataRowsSelectable = false;
+    this.dataItemCount = 0;
+    const shown = await this.hud.showList([
+      'No response from the Mac yet.',
+      'Return to Overview, then open Planning to retry.',
+    ], {
+      title: `${title} · RETRY`,
+      hint: 'left x2 overview',
+      selectable: false,
+    });
+    if (
+      this.view !== 'data'
+      || this.pendingTitle !== title
+      || this.pendingRequestId !== requestId
+    ) return;
+    if (!shown) {
+      await this.close();
+      return;
+    }
+    this.selectedIndex = 0;
   }
 
   private randomId(): string {
@@ -426,6 +480,7 @@ export class CapabilityMenu {
   }
 
   private async close(): Promise<void> {
+    this.clearResponseTimeout();
     this.transitionId += 1;
     this.view = 'closed';
     this.selectedIndex = 0;
