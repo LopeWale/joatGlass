@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 from typing import Any, Literal, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from ..native.bridge import (
+    NativeBridgeError,
+    NativeBridgeProtocolError,
+    NativeBridgeUnavailable,
+)
 
 
 class PlanningScope(StrEnum):
@@ -35,6 +42,46 @@ class NativePlanningClient(Protocol):
 
 class PlanningAuthorizationError(RuntimeError):
     """Calendar or Reminders access is missing for the unified plan."""
+
+
+def _has_full_access(value: object) -> bool:
+    """Accept the canonical Swift enum and the established Python fixture form.
+
+    ``NativeAuthorization`` is a raw Swift ``Codable`` enum, so the native
+    bridge emits ``fullAccess``.  The existing Python fixtures predate that
+    raw spelling and use ``full_access``.  Keeping this normalization at the
+    EventKit boundary prevents a granted TCC state from being misreported as
+    a setup problem while still rejecting every other value.
+    """
+    return isinstance(value, str) and value in {"fullAccess", "full_access"}
+
+
+async def personal_data_bridge_state(client: NativePlanningClient | None) -> str:
+    """Return a fixed, content-free EventKit readiness state for the shell.
+
+    The signed app owns TCC while the engine owns the private socket client.
+    Querying the bridge's authorization snapshot validates both boundaries
+    without reading an event, reminder, title, native identifier, or error
+    message. Callers expose the result as a status code only.
+    """
+
+    if client is None:
+        return "not_configured"
+    try:
+        response = await client.call("authorization.status")
+    except NativeBridgeUnavailable:
+        return "unavailable"
+    except NativeBridgeProtocolError:
+        return "protocol_error"
+    except NativeBridgeError:
+        return "unavailable"
+    authorization = getattr(response, "authorization", None)
+    if (
+        _has_full_access(getattr(authorization, "calendar", None))
+        and _has_full_access(getattr(authorization, "reminders", None))
+    ):
+        return "ready"
+    return "authorization_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,9 +225,9 @@ async def load_native_planning(
     calendar_access = getattr(authorization, "calendar", None)
     reminders_access = getattr(authorization, "reminders", None)
     missing = []
-    if calendar_access != "full_access":
+    if not _has_full_access(calendar_access):
         missing.append("Calendar")
-    if reminders_access != "full_access":
+    if not _has_full_access(reminders_access):
         missing.append("Reminders")
     if missing:
         raise PlanningAuthorizationError(
@@ -260,6 +307,12 @@ def _title_for_scope(
 def _event_entries(item: dict[str, Any], zone: tzinfo) -> tuple[tuple[date, PlanningEntry], ...]:
     """Project a timed or all-day event into every local day it overlaps."""
 
+    # ``calendar.query`` is a typed EKEvent bridge call.  Keep this defensive
+    # guard anyway: Calendar.app can project Scheduled Reminders alongside
+    # events, and a future bridge must not turn that projection into a second
+    # schedule entry when it labels the source explicitly.
+    if item.get("entity") == "reminder":
+        return ()
     start = item.get("start_unix_ms")
     native_identifier = item.get("calendar_item_identifier")
     if not isinstance(start, (int, float)) or not isinstance(native_identifier, str) or not native_identifier:
@@ -326,8 +379,26 @@ def _reminder_entry(item: dict[str, Any], zone: tzinfo) -> PlanningEntry | None:
     else:
         is_timed = False
         resolved_hour, resolved_minute = 0, 0
+    due_zone = zone
+    zone_name = due.get("time_zone_id")
+    if isinstance(zone_name, str):
+        try:
+            due_zone = ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError:
+            # The native bridge normally guarantees this. Do not substitute
+            # the Mac zone if a malformed DTO says a reminder lives elsewhere.
+            return None
+    elif zone_name is not None:
+        return None
     try:
-        sort_at = datetime(year, month, day, resolved_hour, resolved_minute, tzinfo=zone)
+        sort_at = datetime(
+            year,
+            month,
+            day,
+            resolved_hour,
+            resolved_minute,
+            tzinfo=due_zone,
+        ).astimezone(zone)
     except ValueError:
         return None
     return PlanningEntry(

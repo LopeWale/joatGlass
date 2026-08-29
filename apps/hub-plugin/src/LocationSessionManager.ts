@@ -5,7 +5,7 @@ import {
   type EvenAppBridge,
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
+import type { G2DiagnosticTrace, G2TraceCadence } from './G2DiagnosticTrace';
 import type { MacLink } from './MacLink';
 
 type LocationProfile = 'ambient' | 'probe' | 'navigation';
@@ -23,6 +23,16 @@ const HIGH_ACCURACY_OPTIONS: Readonly<AppLocationOptions> = {
   distanceFilter: 1,
   intervalMs: 1000,
 };
+
+// Some host builds acknowledge `getAppLocation({ timeoutMs })` but never
+// settle its promise. Gate 0 must classify that as an unavailable one-shot
+// fix and still attempt the separately requested continuous profile.
+const ONE_SHOT_LOCATION_TIMEOUT_MS = 5_000;
+
+// The continuous start call has the same host-boundary risk. A host that
+// neither resolves nor rejects must become an explicit failed capability in
+// the owner-only receipt, rather than holding the location state machine.
+const STREAM_START_TIMEOUT_MS = 5_000;
 
 const FIELD_TIMESTAMP = 1;
 const FIELD_SPEED = 2;
@@ -55,8 +65,8 @@ export class LocationSessionManager {
   private navigationConsumer?: NavigationLocationConsumer;
 
   private lastSent?: { lat: number; lon: number; at: number };
-  private lastProbe?: { lat: number; lon: number; receivedAt: number };
-  private probeSequence = 0;
+  private lastQuality?: { lat: number; lon: number; receivedAt: number };
+  private qualitySequence = 0;
 
   constructor(
     private readonly client: Pick<BridgeClient, 'require'>,
@@ -78,7 +88,7 @@ export class LocationSessionManager {
     const desiredProfile = enabled ? 'probe' : 'ambient';
     if (this.desiredProfile !== desiredProfile) {
       this.desiredProfile = desiredProfile;
-      this.resetProbeWindow();
+      this.resetQualityWindow();
     }
     const operation = this.enqueue(async () => {
       if (!this.shouldRun || this.unsubscribe === undefined) return true;
@@ -96,7 +106,11 @@ export class LocationSessionManager {
     if (consumer && this.probeSession) return Promise.resolve(false);
     const profileEpoch = ++this.profileEpoch;
     this.navigationConsumer = consumer;
-    this.desiredProfile = consumer ? 'navigation' : 'ambient';
+    const desiredProfile = consumer ? 'navigation' : 'ambient';
+    if (this.desiredProfile !== desiredProfile) {
+      this.desiredProfile = desiredProfile;
+      this.resetQualityWindow();
+    }
     return this.enqueue(async () => {
       if (!this.shouldRun || this.unsubscribe === undefined) return true;
       return this.applyDesiredProfile(profileEpoch);
@@ -110,7 +124,7 @@ export class LocationSessionManager {
     this.navigationConsumer = undefined;
     this.desiredProfile = 'ambient';
     this.appliedProfile = undefined;
-    this.resetProbeWindow();
+    this.resetQualityWindow();
     // Do not queue the first stop behind a hung native start. If that start
     // later reports success, its epoch check below issues a second stop.
     const immediateStop = this.forceStopStream();
@@ -146,7 +160,7 @@ export class LocationSessionManager {
       this.appliedProfile = undefined;
       this.unsubscribe?.();
       this.unsubscribe = undefined;
-      this.resetProbeWindow();
+      this.resetQualityWindow();
       this.probeSession = false;
       this.navigationConsumer = undefined;
       return stopped;
@@ -174,12 +188,7 @@ export class LocationSessionManager {
     }
 
     try {
-      const first = await bridge.getAppLocation({
-        accuracy: this.desiredProfile === 'ambient'
-          ? AppLocationAccuracy.Medium
-          : AppLocationAccuracy.High,
-        timeoutMs: 5000,
-      });
+      const first = await this.readInitialLocation(bridge);
       if (first) this.onLocation(first);
     } catch {
       // A failed one-shot does not prove continuous updates are unavailable.
@@ -211,7 +220,8 @@ export class LocationSessionManager {
       // Even a rejected/throwing bridge call can leave the native side in an
       // unknown state. Retain that uncertainty so shutdown retries stop.
       this.streamMayBeActive = true;
-      const started = await bridge.startAppLocationUpdates(
+      const started = await this.startLocationUpdates(
+        bridge,
         target === 'ambient' ? AMBIENT_OPTIONS : HIGH_ACCURACY_OPTIONS,
       );
       if (
@@ -266,6 +276,55 @@ export class LocationSessionManager {
     return this.client.require();
   }
 
+  private async readInitialLocation(bridge: LocationBridge): Promise<AppLocation | null> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        bridge.getAppLocation({
+          accuracy: this.desiredProfile === 'ambient'
+            ? AppLocationAccuracy.Medium
+            : AppLocationAccuracy.High,
+          timeoutMs: ONE_SHOT_LOCATION_TIMEOUT_MS,
+        }),
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => resolve(null), ONE_SHOT_LOCATION_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  private async startLocationUpdates(
+    bridge: LocationBridge,
+    options: Readonly<AppLocationOptions>,
+  ): Promise<boolean> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const start = Promise.resolve().then(() => bridge.startAppLocationUpdates(options));
+    try {
+      const result = await Promise.race([
+        start,
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => resolve(null), STREAM_START_TIMEOUT_MS);
+        }),
+      ]);
+      if (result !== null) return result;
+
+      // The native call may still take effect after its promise became stale.
+      // Stop now, and compensate once more if the late promise eventually
+      // resolves. Neither cleanup task may keep the diagnostic control path
+      // waiting.
+      void this.forceStopStream();
+      void start.then(
+        () => this.forceStopStream(),
+        () => undefined,
+      );
+      return false;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
   private recordProfileState(profile: LocationProfile, success: boolean): void {
     if (profile === 'navigation') return;
     if (!this.probeSession) return;
@@ -285,9 +344,10 @@ export class LocationSessionManager {
     const receivedAt = Date.now();
     this.forwardAmbient(latitude, longitude, location.accuracy, receivedAt);
     if (this.appliedProfile === 'probe') {
-      this.recordProbe(location, receivedAt);
+      this.recordLocationQuality(location, receivedAt, 'location_probe');
     }
     if (this.appliedProfile === 'navigation') {
+      this.recordLocationQuality(location, receivedAt, 'navigation_location');
       this.navigationConsumer?.(location, receivedAt);
     }
   }
@@ -314,40 +374,48 @@ export class LocationSessionManager {
     });
   }
 
-  private recordProbe(location: AppLocation, receivedAt: number): void {
-    const previous = this.lastProbe;
-    const cadenceMs = previous
-      ? boundedInt(receivedAt - previous.receivedAt, 0, 600_000)
-      : 0;
+  private recordLocationQuality(
+    location: AppLocation,
+    receivedAt: number,
+    kind: 'location_probe' | 'navigation_location',
+  ): void {
+    const previous = this.lastQuality;
+    const cadence = cadenceBucket(previous ? receivedAt - previous.receivedAt : undefined);
     const movement = previous
       ? displacementAndBearing(previous.lat, previous.lon, location.latitude, location.longitude)
       : undefined;
 
-    this.probeSequence = this.probeSequence >= 2_147_483_647
+    this.qualitySequence = this.qualitySequence >= 2_147_483_647
       ? 1
-      : this.probeSequence + 1;
-    this.diagnostics.record({
-      type: 'location_probe',
-      sampleSequence: this.probeSequence,
-      profile: 'high',
-      lifecycle: this.foreground ? 'foreground' : 'background',
+      : this.qualitySequence + 1;
+    const lifecycle: 'foreground' | 'background' = this.foreground
+      ? 'foreground'
+      : 'background';
+    const quality = {
+      sampleSequence: this.qualitySequence,
+      lifecycle,
       fields: fieldMask(location),
-      cadenceMs,
+      cadence,
       accuracy: accuracyBucket(location.accuracy),
       timestampAge: timestampAgeBucket(location.timestamp, receivedAt),
       displacement: displacementBucket(movement?.distance),
       headingDelta: headingDeltaBucket(location.heading, movement),
-    });
-    this.lastProbe = {
+    };
+    if (kind === 'location_probe') {
+      this.diagnostics.record({ type: kind, profile: 'high', ...quality });
+    } else {
+      this.diagnostics.record({ type: kind, ...quality });
+    }
+    this.lastQuality = {
       lat: location.latitude,
       lon: location.longitude,
       receivedAt,
     };
   }
 
-  private resetProbeWindow(): void {
-    this.lastProbe = undefined;
-    this.probeSequence = 0;
+  private resetQualityWindow(): void {
+    this.lastQuality = undefined;
+    this.qualitySequence = 0;
   }
 }
 
@@ -423,7 +491,10 @@ function degreesToRadians(degrees: number): number {
   return degrees * Math.PI / 180;
 }
 
-function boundedInt(value: number, minimum: number, maximum: number): number {
-  if (!Number.isFinite(value)) return minimum;
-  return Math.min(maximum, Math.max(minimum, Math.round(value)));
+function cadenceBucket(intervalMs: number | undefined): G2TraceCadence {
+  if (intervalMs === undefined || !Number.isFinite(intervalMs)) return 'first';
+  if (intervalMs <= 1_000) return 'lte1s';
+  if (intervalMs <= 5_000) return '1_5s';
+  if (intervalMs <= 30_000) return '5_30s';
+  return 'gt30s';
 }

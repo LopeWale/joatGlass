@@ -10,7 +10,7 @@ and (later) surface arbitration in exactly one place.
 from __future__ import annotations
 
 from ..core.interfaces import GlassesTransport
-from ..core.protocol import BrainstormHudView, ContainerId, HudRebuild, HudText
+from ..core.protocol import AssistantOverlay, BrainstormHudView, ContainerId, HudRebuild, HudText
 
 
 class HudWriter:
@@ -31,12 +31,26 @@ class HudWriter:
         """Status bar line (top 32px)."""
         await self._transport.send(HudText(text=text, container_id=ContainerId.STATUS_BAR))
 
+    async def assistant(self, text: str, *, append: bool = False) -> None:
+        """Show JOAT above the active feature without replacing its surface."""
+        await self._transport.send(AssistantOverlay(
+            text=text,
+            operation="append" if append else "replace",
+        ))
+
+    async def settle_assistant(self, dismiss_after_ms: int = 6_000) -> None:
+        """Leave the completed answer readable briefly, then reveal the same view."""
+        await self._transport.send(AssistantOverlay(
+            operation="settle",
+            dismiss_after_ms=dismiss_after_ms,
+        ))
+
     async def show(
         self,
         text: str,
         container: ContainerId = ContainerId.MAIN,
         *,
-        content_kind: str | None = "assistant",
+        content_kind: str | None = "system",
         trace_id: str | None = None,
     ) -> None:
         """Replace the container's content."""

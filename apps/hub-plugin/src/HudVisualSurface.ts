@@ -3,13 +3,14 @@ import {
   ImageRawDataUpdateResult,
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
+import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
 import {
   CANVAS,
   ContainerId,
   type BrainstormHudModel,
   type HudContentKind,
+  type PlanningGridCell,
   type ProductivityHudDomain,
   type ProductivityHudModel,
 } from './types';
@@ -22,7 +23,11 @@ export interface HudImageTile {
   pixels: Uint8Array;
 }
 
-export type HudVisualFrame =
+export interface AssistantOverlayVisual {
+  text: string;
+}
+
+type HudVisualBaseFrame =
   | {
     kind: 'overview';
     status: string;
@@ -56,6 +61,7 @@ export type HudVisualFrame =
     selectedIndex: number;
     selectable: boolean;
     hint: string;
+    planningGrid?: readonly PlanningGridCell[];
   }
   | {
     kind: 'confirmation';
@@ -84,6 +90,12 @@ export type HudVisualFrame =
     productivity: ProductivityHudModel;
   };
 
+/** The assistant layer is composited into the same four G2 images, not a
+ * fifth native image container. That preserves the current feature page. */
+export type HudVisualFrame = HudVisualBaseFrame & {
+  assistantOverlay?: AssistantOverlayVisual;
+};
+
 export interface HudFrameRenderer {
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
 }
@@ -92,18 +104,52 @@ export interface HudFramePainter {
   paint(frame: HudVisualFrame): Promise<boolean>;
 }
 
+/** A dev-only simulator receipt must name a fixed state, never its content. */
+export function visibleSurfaceReceipt(frame: HudVisualFrame): 'reminder_due' | undefined {
+  if (
+    frame.kind === 'productivity'
+    && frame.productivity.domain === 'reminders'
+    && frame.productivity.phase === 'due'
+  ) {
+    return 'reminder_due';
+  }
+  return undefined;
+}
+
+async function completedBrainstormFrameReceipt(
+  frame: HudVisualFrame,
+  tiles: readonly HudImageTile[],
+): Promise<Extract<G2TraceEvent, { type: 'visual_frame' }> | undefined> {
+  if (frame.kind !== 'brainstorm' || tiles.length !== 4 || !globalThis.crypto?.subtle) {
+    return undefined;
+  }
+  const rasterLength = tiles.reduce((total, tile) => total + tile.pixels.length, 0);
+  const raster = new Uint8Array(rasterLength);
+  let offset = 0;
+  for (const tile of tiles) {
+    raster.set(tile.pixels, offset);
+    offset += tile.pixels.length;
+  }
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raster));
+  const sha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return {
+    type: 'visual_frame',
+    kind: 'brainstorm',
+    surface: frame.brainstorm.screen,
+    state: frame.brainstorm.state,
+    sha256,
+  };
+}
+
 interface PendingPaint {
   frame: HudVisualFrame;
   resolve: Array<(painted: boolean) => void>;
 }
 
 /**
- * Split one row-major *unpacked* Gray4 frame into the SDK's four maximum-size
- * images, then pack two 4-bit pixels into each byte for the native transport.
- *
- * The host determines raw format from byte length: 288 × 144 bytes means
- * Gray8, while 288 × 144 ÷ 2 means packed Gray4. Sending one 0...15 value per
- * byte is neither representation and is acknowledged without a valid raster.
+ * Split one row-major unpacked Gray4 frame into the SDK's four maximum-size
+ * images. The SDK boundary takes one grayscale byte per pixel, with each byte
+ * already quantized to the Gray4 range 0...15.
  */
 export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
   if (pixels.length !== CANVAS.width * CANVAS.height) {
@@ -122,11 +168,7 @@ export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
       const source = (y + row) * CANVAS.width + x;
       unpacked.set(pixels.subarray(source, source + TILE_WIDTH), row * TILE_WIDTH);
     }
-    const packed = new Uint8Array(unpacked.length / 2);
-    for (let source = 0, target = 0; source < unpacked.length; source += 2, target += 1) {
-      packed[target] = ((unpacked[source] ?? 0) << 4) | (unpacked[source + 1] ?? 0);
-    }
-    return { containerId, pixels: packed };
+    return { containerId, pixels: unpacked };
   });
 }
 
@@ -200,8 +242,19 @@ export class HudVisualSurface implements HudFramePainter {
         });
         if (outcome === 'failed') return false;
       }
+      // This opt-in receipt binds the accepted G2 action to the completed
+      // four-tile output without retaining a frame, text, topic, or device
+      // identifier. Hashing is detached: it must not delay a visual ack or a
+      // generation-bound navigation action after those four uploads succeed.
+      void completedBrainstormFrameReceipt(frame, tiles)
+        .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })
+        .catch(() => undefined);
       if (import.meta.env.DEV) {
         console.info(`[HudVisualSurface] frame ${frameNumber} bridge-ack`);
+        const receipt = visibleSurfaceReceipt(frame);
+        if (receipt) {
+          console.info(`[HudVisualSurface] receipt ${receipt} bridge-ack`);
+        }
       }
       return true;
     } catch {

@@ -8,13 +8,23 @@ this router is the half that draws each view.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from joat.channels.cards import CardLog
 from joat.channels.imessage import MessageThread
-from joat.core.protocol import BrainstormHudView, ContainerId, HudList, HudText, InputEvent
+from joat.core.protocol import (
+    AssistantOverlay,
+    BrainstormHudView,
+    ContainerId,
+    HudList,
+    HudText,
+    InputEvent,
+)
+from joat.native.bridge import NativeBridgeProtocolError
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
@@ -79,6 +89,14 @@ class BlockingMessages:
         return [MessageThread("New", "new", "current", time.time())]
 
 
+class PermissionDeniedMessages:
+    available = True
+
+    def recent_threads(self, limit: int = 5) -> list[MessageThread]:
+        del limit
+        raise PermissionError("Messages database read denied")
+
+
 class FakePersonalData:
     def __init__(self, responses):  # type: ignore[no-untyped-def]
         self._responses = responses
@@ -86,7 +104,10 @@ class FakePersonalData:
 
     async def call(self, method: str, body=None):  # type: ignore[no-untyped-def]
         self.calls.append((method, body))
-        return self._responses[method]
+        response = self._responses[method]
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def bridge_response(*, calendar="full_access", reminders="full_access", result=None):  # type: ignore[no-untyped-def]
@@ -151,6 +172,23 @@ class TestCapabilityViews:
             "[now] Dele · On my way", "[now] Adaeze · Call me"]
         assert lists[0].title == "MESSAGES"
         assert lists[0].hint == "tap select · left x2 overview"
+
+    async def test_navigation_capability_explains_the_spoken_destination_handoff(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+
+        await router.open("Navigation", request_id="navigation-entry")
+
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert len(lists) == 1
+        assert lists[0].title == "NAVIGATION"
+        assert lists[0].items == [
+            'Say “JOAT, navigate to …”',
+            "I’ll confirm the exact place before starting.",
+        ]
+        assert lists[0].hint == "say destination · left x2 overview"
+        assert lists[0].request_id == "navigation-entry"
 
     async def test_newest_same_capability_generation_owns_render_and_selection(
         self, tmp_path
@@ -256,6 +294,27 @@ class TestCapabilityViews:
                     and m.container_id is ContainerId.STATUS_BAR]
         assert statuses == []
 
+    async def test_messages_permission_failure_replaces_loading_with_access_guidance(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path, rows=[])
+        router._messages = PermissionDeniedMessages()  # type: ignore[assignment]
+
+        raised = False
+        try:
+            await router.open("Messages", request_id="messages-denied")
+        except PermissionError:
+            raised = True
+
+        assert raised is False
+        rendered = [message for message in transport.sent if isinstance(message, HudList)][-1]
+        assert rendered.title == "MESSAGES · ACCESS"
+        assert rendered.items == [
+            "Messages access is blocked on this Mac.",
+            "Allow Full Disk Access for JOAT, then reopen Messages.",
+        ]
+        assert rendered.request_id == "messages-denied"
+
     async def test_notifications_view_lists_recent_cards(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, cards=["!! Adaeze · Messages\nCall me now"])
         await router.open("Notifications")
@@ -280,83 +339,175 @@ class TestCapabilityViews:
         assert detail.title == "NOTIFICATIONS · DETAIL"
         assert detail.items == ["!! Adaeze · Messages", "Call me now"]
 
-    async def test_calendar_directs_setup_to_the_explicit_mac_control(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_planning_directs_setup_to_the_explicit_mac_control(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path)
-        await router.open("Calendar")
+        await router.open("Planning")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert any("connect Calendar" in item for item in lists[0].items)
-        assert lists[0].title == "CALENDAR · SETUP"
+        assert any("Calendar and Reminders" in item for item in lists[0].items)
+        assert lists[0].title == "PLANNING · PLAN · SETUP"
 
-    async def test_calendar_queries_authorized_native_store_by_identifier(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        now_ms = int(time.time() * 1000)
+    async def test_planning_handles_a_malformed_native_bridge_response(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(
+            tmp_path,
+            personal_data=FakePersonalData({
+                "authorization.status": NativeBridgeProtocolError("malformed response"),
+            }),
+        )
+
+        await router.open("Planning")
+
+        rendered = [message for message in transport.sent if isinstance(message, HudList)][-1]
+        assert rendered.title == "PLANNING · PLAN · UNAVAILABLE"
+        assert rendered.items == [
+            "Calendar and Reminders bridge needs a JOAT update on the Mac.",
+        ]
+
+    async def test_planning_distinguishes_a_granted_access_from_bridge_loss(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        from joat.native.bridge import NativeBridgeUnavailable
+
+        router, transport, status = make_router(
+            tmp_path,
+            personal_data=FakePersonalData({
+                "authorization.status": NativeBridgeUnavailable("closed socket"),
+            }),
+        )
+
+        await router.open("Planning")
+
+        rendered = [message for message in transport.sent if isinstance(message, HudList)][-1]
+        assert rendered.title == "PLANNING · PLAN · UNAVAILABLE"
+        assert rendered.items == [
+            "Calendar and Reminders bridge is unavailable. Restart JOAT on the Mac.",
+        ]
+        snapshot = json.loads((tmp_path / "status.json").read_text())
+        assert snapshot["personal_data"] == {"state": "unavailable"}
+
+    async def test_planning_opens_one_native_backed_month_week_day_hierarchy(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        starts_at = datetime(2026, 9, 1, 9, 30).astimezone()
         personal = FakePersonalData({
             "authorization.status": bridge_response(),
             "calendar.listContainers": bridge_response(result=[
                 {"calendar_identifier": "cal-work", "title": "Work"},
             ]),
             "calendar.query": bridge_response(result=[
-                {"title": "Design review", "start_unix_ms": now_ms},
+                {
+                    "title": "Design review",
+                    "calendar_item_identifier": "event-1",
+                    "start_unix_ms": int(starts_at.timestamp() * 1_000),
+                    "end_unix_ms": int(starts_at.timestamp() * 1_000) + 3_600_000,
+                },
             ]),
-        })
-        router, transport, _ = make_router(tmp_path, personal_data=personal)
-
-        await router.open("Calendar")
-
-        query = personal.calls[-1]
-        assert query[0] == "calendar.query"
-        assert query[1]["calendar_identifiers"] == ["cal-work"]
-        assert query[1]["limit"] == 5
-        rendered = [m for m in transport.sent if isinstance(m, HudList)][0]
-        assert rendered.title == "CALENDAR · 7 DAYS"
-        assert "Design review" in rendered.items[0]
-
-        router.on_input(InputEvent(
-            container_name="capdata",
-            selected_name="CALENDAR",
-            selected_index=0,
-        ))
-        await asyncio.sleep(0)
-        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.title == "CALENDAR · DETAIL"
-        assert any("Design review" in row for row in detail.items)
-
-    async def test_tasks_queries_incomplete_reminders(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        personal = FakePersonalData({
-            "authorization.status": bridge_response(),
             "reminders.listContainers": bridge_response(result=[
                 {"calendar_identifier": "list-home", "title": "Home"},
             ]),
             "reminders.query": bridge_response(result=[
-                {"title": "Buy filters"},
+                {
+                    "title": "Buy filters",
+                    "calendar_item_identifier": "reminder-1",
+                    "due": {"year": 2026, "month": 9, "day": 1, "hour": 18, "minute": 0},
+                    "is_completed": False,
+                },
             ]),
         })
         router, transport, _ = make_router(tmp_path, personal_data=personal)
+        router._planning_selected_day = date(2026, 9, 1)
 
-        await router.open("Tasks")
+        await router.open("Planning")
 
-        query = personal.calls[-1]
-        assert query == (
-            "reminders.query",
-            {
-                "calendar_identifiers": ["list-home"],
-                "include_completed": False,
-                "limit": 5,
-            },
-        )
+        calendar_query = next(call for call in personal.calls if call[0] == "calendar.query")
+        reminders_query = next(call for call in personal.calls if call[0] == "reminders.query")
+        assert calendar_query[1]["calendar_identifiers"] == ["cal-work"]
+        assert calendar_query[1]["limit"] == 500
+        assert reminders_query[1]["calendar_identifiers"] == ["list-home"]
+        assert reminders_query[1]["include_completed"] is False
+        assert reminders_query[1]["due_start_unix_ms"] < reminders_query[1]["due_end_unix_ms"]
         rendered = [m for m in transport.sent if isinstance(m, HudList)][0]
-        assert rendered.title == "TASKS"
-        assert rendered.items == ["Buy filters"]
-        assert rendered.hint == "tap detail · left x2 overview"
+        assert rendered.title == "PLANNING · PLAN · SEPTEMBER 2026"
+        assert rendered.items[0] == "AUG 31–SEP 6 · 2 planned"
+        assert rendered.planning_grid is not None
+        assert len(rendered.planning_grid) == 42
+        september_first = next(cell for cell in rendered.planning_grid if cell.day == date(2026, 9, 1))
+        assert september_first.event_count == 1
+        assert september_first.reminder_count == 1
+        assert september_first.in_month is True
 
+        # G2 click 1: choose a month week; G2 click 2: choose Sep 1.
+        router.on_input(InputEvent(container_name="capdata", selected_name="PLANNING", selected_index=0))
+        await asyncio.sleep(0)
+        week = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert week.title == "PLANNING · PLAN · AUG 31–SEP 6"
+        assert week.items[1] == "TUE SEP 1 · 1 event · 1 reminder"
+        assert week.planning_grid is None
+
+        router.on_input(InputEvent(container_name="capdata", selected_name="PLANNING", selected_index=1))
+        await asyncio.sleep(0)
+        day = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert day.title == "PLANNING · PLAN · TUE SEP 1"
+        assert day.items[:2] == [
+            "09:30 · EVENT · Design review",
+            "18:00 · REMINDER · Buy filters",
+        ]
+
+        # A native item stays inside Planning; it is not a synthetic Calendar
+        # detail page that can drift from the source-backed schedule.
         router.on_input(InputEvent(
-            container_name="capdata",
-            selected_name="TASKS",
-            selected_index=0,
+            container_name="capdata", selected_name="PLANNING", selected_index=0
         ))
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.title == "TASKS · DETAIL"
-        assert detail.items[0] == "Buy filters"
+        assert detail.title == "PLANNING · EVENT"
+        assert detail.items == [
+            "Design review",
+            "09:30 · Event",
+            "Read-only native item · left x2 Planning",
+        ]
+        assert detail.hint == "left x2 Planning"
+
+        # Old installed Calendar/Tasks menu rows are compatibility aliases for
+        # that same nested Plan, not separate source-specific lists.
+        await router.open("Calendar")
+        calendar = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert calendar.title == "CALENDAR · PLAN · TUE SEP 1"
+        assert "09:30 · EVENT · Design review" in calendar.items
+
+        await router.open("Tasks")
+        tasks = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert tasks.title == "TASKS · PLAN · TUE SEP 1"
+        assert "09:30 · EVENT · Design review" in tasks.items
+        assert "18:00 · REMINDER · Buy filters" in tasks.items
+
+    async def test_planning_return_anchor_opens_the_native_day_not_today(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        starts_at = datetime(2026, 9, 1, 9, 30).astimezone()
+        personal = FakePersonalData({
+            "authorization.status": bridge_response(),
+            "calendar.listContainers": bridge_response(result=[
+                {"calendar_identifier": "cal-work", "title": "Work"},
+            ]),
+            "calendar.query": bridge_response(result=[{
+                "title": "Design review",
+                "calendar_item_identifier": "event-1",
+                "start_unix_ms": int(starts_at.timestamp() * 1_000),
+                "end_unix_ms": int(starts_at.timestamp() * 1_000) + 3_600_000,
+            }]),
+            "reminders.listContainers": bridge_response(result=[]),
+            "reminders.query": bridge_response(result=[]),
+        })
+        router, transport, _ = make_router(tmp_path, personal_data=personal)
+
+        await router.open(
+            "Planning",
+            planning_anchor_unix_ms=int(starts_at.timestamp() * 1_000),
+        )
+
+        rendered = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert rendered.title == "PLANNING · PLAN · TUE SEP 1"
+        assert rendered.items[0] == "09:30 · EVENT · Design review"
 
     async def test_quicknotes_and_activity_are_durable_reachable_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
@@ -423,16 +574,21 @@ class TestGestureReflexes:
         status.set(last_reply="It is 72 degrees.", last_transcript="what is the weather")
         router.on_input(InputEvent(container_name="menu", selected_name="closed"))
         await asyncio.sleep(0.05)
-        main = [m for m in transport.sent
-                if isinstance(m, HudText) and m.container_id is ContainerId.MAIN]
+        overlay = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
         ctx = [m for m in transport.sent
                if isinstance(m, HudText) and m.container_id is ContainerId.CONTEXT]
-        assert [m.text for m in main] == ["It is 72 degrees."]
+        assert [(m.text, m.operation, m.dismiss_after_ms) for m in overlay] == [
+            ("It is 72 degrees.", "replace", None),
+            ("", "settle", 6_000),
+        ]
         assert [m.text for m in ctx] == ["you  what is the weather"]
 
     async def test_repeat_with_no_history_says_so(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path)
         router.on_input(InputEvent(container_name="sysmenu", selected_index=1))
         await asyncio.sleep(0.05)
-        texts = [m for m in transport.sent if isinstance(m, HudText)]
-        assert any("Nothing to repeat" in m.text for m in texts)
+        overlay = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
+        assert [(m.text, m.operation, m.dismiss_after_ms) for m in overlay] == [
+            ("Nothing to repeat yet.", "replace", None),
+            ("", "settle", 6_000),
+        ]

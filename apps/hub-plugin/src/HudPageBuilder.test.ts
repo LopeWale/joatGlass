@@ -195,6 +195,19 @@ describe('HudPageBuilder invariants', () => {
     expect(containers(page).filter((c) => c.isEventCapture === 1)).toHaveLength(1);
   });
 
+  it('sidebar preserves every flat capability for native list scrolling', () => {
+    const items = [
+      'Messages', 'Calendar', 'Tasks', 'Navigation', 'Brainstorm',
+      'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
+    ];
+    const page = builder.sidebarLayout(items) as Page;
+
+    expect(page.listObject?.[0]?.itemContainer).toMatchObject({
+      itemCount: items.length,
+      itemName: items,
+    });
+  });
+
   it('confirmation is a dedicated full-screen decision surface with no list or button chrome', () => {
     const page = builder.confirmationLayout('Send reply to Adele?') as Page;
     const byId = (id: number) => page.textObject?.find((c) => c.containerID === id);

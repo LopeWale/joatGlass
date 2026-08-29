@@ -1,16 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
   HUD_VISUAL_GEOMETRY,
+  brainstormActionHint,
   gray8ToGray4,
   hudBrightnessGray,
   hudDisplayTitle,
   hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
+  canRenderPlanningMonthGrid,
+  planningGridMarker,
+  planningGridMatchesMonth,
+  parsePlanningMonthTitle,
+  planningMonthDays,
   productivityPhaseLabel,
   productivityPhaseProgress,
   resolveHudOverview,
   resolveHudListKind,
+  visibleHudSidebarItems,
   visibleHudListItems,
   visibleHudTailLines,
   wrapHudText,
@@ -65,8 +72,10 @@ describe('semantic HUD chrome', () => {
   it('maps sidebar glyphs by capability name rather than stale row position', () => {
     expect(hudSidebarIconName('Messages')).toBe('messages');
     expect(hudSidebarIconName('Notifications')).toBe('notifications');
+    expect(hudSidebarIconName('Planning')).toBe('calendar');
     expect(hudSidebarIconName('Calendar')).toBe('calendar');
     expect(hudSidebarIconName('Tasks')).toBe('tasks');
+    expect(hudSidebarIconName('Navigation')).toBe('navigation');
     expect(hudSidebarIconName('More')).toBe('more');
     expect(hudSidebarIconName('QuickNotes')).toBe('quicknotes');
     expect(hudSidebarIconName('Brainstorm')).toBe('brainstorm');
@@ -76,6 +85,7 @@ describe('semantic HUD chrome', () => {
   it('resolves list treatment from the Mac-owned capability title', () => {
     expect(resolveHudListKind('MESSAGES')).toBe('messages');
     expect(resolveHudListKind('NOTIFICATIONS')).toBe('notifications');
+    expect(resolveHudListKind('PLANNING · PLAN · SEP 1–7')).toBe('calendar');
     expect(resolveHudListKind('CALENDAR · 7 DAYS')).toBe('calendar');
     expect(resolveHudListKind('TASKS')).toBe('tasks');
     expect(resolveHudListKind('QUICKNOTES')).toBe('quicknotes');
@@ -84,6 +94,54 @@ describe('semantic HUD chrome', () => {
     expect(resolveHudListKind('LISTENING RESUME')).toBe('generic');
   });
 
+});
+
+describe('Planning month geometry', () => {
+  it('recognizes the native Planning month title and creates a stable Monday-first grid', () => {
+    const month = parsePlanningMonthTitle('PLANNING · PLAN · SEPTEMBER 2026');
+
+    expect(month).toEqual({ year: 2026, month: 8, label: 'SEPTEMBER' });
+    expect(planningMonthDays(month!).slice(0, 7)).toEqual([
+      { day: 31, inMonth: false },
+      { day: 1, inMonth: true },
+      { day: 2, inMonth: true },
+      { day: 3, inMonth: true },
+      { day: 4, inMonth: true },
+      { day: 5, inMonth: true },
+      { day: 6, inMonth: true },
+    ]);
+    expect(planningMonthDays(month!)).toHaveLength(42);
+    const days = planningMonthDays(month!);
+    expect(days[days.length - 1]).toEqual({ day: 11, inMonth: false });
+
+    const planningGrid = Array.from({ length: 42 }, (_, index) => {
+      const value = new Date(Date.UTC(2026, 7, 31 + index));
+      return {
+        day: value.toISOString().slice(0, 10),
+        eventCount: index === 1 ? 1 : 0,
+        reminderCount: index === 1 ? 1 : 0,
+        inMonth: value.getUTCMonth() === 8,
+      };
+    });
+    expect(planningGridMatchesMonth(month!, planningGrid)).toBe(true);
+    expect(planningGridMarker(planningGrid[1]!)).toBe('E1 R1');
+    expect(planningGridMarker(planningGrid[0]!)).toBe('');
+    expect(canRenderPlanningMonthGrid(month, planningGrid, true, 0, 11)).toBe(true);
+    expect(canRenderPlanningMonthGrid(month, planningGrid, true, 5, 11)).toBe(true);
+    expect(canRenderPlanningMonthGrid(month, planningGrid, true, 6, 11)).toBe(false);
+    expect(planningGridMatchesMonth(month!, [
+      ...planningGrid.slice(0, 1),
+      { ...planningGrid[1]!, day: '2026-09-02' },
+      ...planningGrid.slice(2),
+    ])).toBe(false);
+  });
+
+  it('does not mistake a week, day, or arbitrary list for a calendar month', () => {
+    expect(parsePlanningMonthTitle('PLANNING · PLAN · SEP 1–7')).toBeUndefined();
+    expect(parsePlanningMonthTitle('PLANNING · PLAN · TUE SEP 1')).toBeUndefined();
+    expect(parsePlanningMonthTitle('SEPTEMBER 2026')).toBeUndefined();
+    expect(parsePlanningMonthTitle('PLANNING · PLAN · JANUARY 0099')).toBeUndefined();
+  });
 });
 
 describe('productivity HUD state labels', () => {
@@ -99,6 +157,16 @@ describe('productivity HUD state labels', () => {
     expect(productivityPhaseProgress('due')).toBe(1);
     expect(productivityPhaseProgress('verifying')).toBe(0.45);
     expect(productivityPhaseProgress('check')).toBe(0.18);
+  });
+});
+
+describe('Brainstorm wearable actions', () => {
+  it('discloses both physical cancellation gestures while a session is running', () => {
+    expect(brainstormActionHint({
+      screen: 'brainstorm',
+      state: 'running',
+      terminalState: 'ready',
+    })).toBe('tap: Hermes · swipe down or left x2: cancel');
   });
 });
 
@@ -237,6 +305,29 @@ describe('visibleHudListItems', () => {
       { item: 'three', index: 2 },
       { item: 'four', index: 3 },
       { item: 'five', index: 4 },
+    ]);
+  });
+});
+
+describe('visibleHudSidebarItems', () => {
+  it('keeps the selected capability visible beyond the first five wearable rows', () => {
+    const items = [
+      'Messages', 'Planning', 'Navigation', 'Brainstorm', 'Notifications',
+      'QuickNotes', 'Agent Terminal', 'Activity',
+    ];
+    expect(visibleHudSidebarItems(items, 0)).toEqual([
+      { item: 'Messages', index: 0 },
+      { item: 'Planning', index: 1 },
+      { item: 'Navigation', index: 2 },
+      { item: 'Brainstorm', index: 3 },
+      { item: 'Notifications', index: 4 },
+    ]);
+    expect(visibleHudSidebarItems(items, 7)).toEqual([
+      { item: 'Brainstorm', index: 3 },
+      { item: 'Notifications', index: 4 },
+      { item: 'QuickNotes', index: 5 },
+      { item: 'Agent Terminal', index: 6 },
+      { item: 'Activity', index: 7 },
     ]);
   });
 });

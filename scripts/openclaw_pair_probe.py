@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create or verify JOAT's read-only OpenClaw device pairing.
+"""Create or verify JOAT's production Agent Terminal device pairing.
 
 This command never accepts a Telegram token or shared Gateway secret.  It is
 for the managed Tailscale Serve route, where tailnet identity authenticates the
@@ -23,9 +23,15 @@ from joat.agents.openclaw_native import NativeOpenClawCredentials
 from joat.native.bridge import NativeBridgeClient
 
 
+# This pairing credential is the one that the production Agent Terminal uses.
+# Asking for a weaker, read-only grant here would persist a token that the
+# terminal deliberately refuses before it can inspect its dedicated session.
+_AGENT_TERMINAL_SCOPES = ("operator.read", "operator.write")
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Request or verify a read-only JOAT OpenClaw device pairing"
+        description="Request or verify JOAT's Agent Terminal OpenClaw device pairing"
     )
     parser.add_argument("--url", required=True, help="private wss:// Tailscale Serve origin")
     parser.add_argument(
@@ -59,7 +65,7 @@ async def _probe(*, url: str, bridge_path: Path) -> dict[str, object]:
             profile=profile,
             identity=credentials,
             token_store=credentials,
-            scopes=("operator.read",),
+            scopes=_AGENT_TERMINAL_SCOPES,
         )
         try:
             connection = await client.connect()
@@ -70,18 +76,19 @@ async def _probe(*, url: str, bridge_path: Path) -> dict[str, object]:
                 "device_id": credentials.device_id,
                 "request_id": exc.request_id,
                 "reason": exc.reason,
-                "requested_scopes": ["operator.read"],
+                "requested_scopes": list(_AGENT_TERMINAL_SCOPES),
             }
         try:
             server = connection.hello.get("server")
             auth = connection.hello.get("auth")
             return {
-                "status": "connected_read_only",
+                "status": "connected_operator",
                 "gateway": profile.url,
                 "device_id": credentials.device_id,
                 "server": server,
                 "auth": auth,
                 "advertised_methods": sorted(connection.advertised_methods),
+                "requested_scopes": list(_AGENT_TERMINAL_SCOPES),
             }
         finally:
             await connection.close()

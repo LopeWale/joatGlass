@@ -26,7 +26,9 @@ DEFAULT_PATH = Path(
     "~/Library/Application Support/JOAT/status.json"
 ).expanduser()
 
-_RESERVED_SAFE_PROJECTIONS = frozenset({"openclaw", "agent_terminal", "brainstorm"})
+_RESERVED_SAFE_PROJECTIONS = frozenset({
+    "openclaw", "agent_terminal", "brainstorm", "personal_data",
+})
 _OPENCLAW_STATES = frozenset({
     "not_configured",
     "checking",
@@ -47,6 +49,14 @@ _BRAINSTORM_STATES = frozenset({
     "unavailable", "ready", "running", "settled", "cancelled", "failed",
 })
 _BRAINSTORM_PHASES = frozenset({"idle", "opening", "turn", "closing"})
+_PERSONAL_DATA_STATES = frozenset({
+    "checking",
+    "not_configured",
+    "authorization_required",
+    "ready",
+    "unavailable",
+    "protocol_error",
+})
 _SAFE_REASONS = frozenset({
     "",
     "endpoint_missing",
@@ -95,6 +105,10 @@ class StatusPublisher:
                 "seat_count": 0,
                 "phase": "idle",
             },
+            # EventKit TCC and the app-owned engine bridge are independent
+            # facts. This fixed-state projection deliberately carries no
+            # socket path, error string, calendar/list identity, or content.
+            "personal_data": {"state": "checking"},
             "last_transcript": "",
             "last_reply": "",
             "last_card": "",
@@ -174,6 +188,20 @@ class StatusPublisher:
             "seat_count": seat_count,
             "phase": phase,
         }
+        self.flush()
+
+    def set_personal_data(self, *, state: str) -> None:
+        """Publish only the EventKit bridge state needed by the Mac shell.
+
+        ``full access`` is reported by the signed Mac app itself. This state
+        is the separate answer to whether the app-launched engine can reach
+        that owner-only bridge right now, so the wearer is never told to
+        reconnect a permission that is already granted.
+        """
+
+        if state not in _PERSONAL_DATA_STATES:
+            raise ValueError("invalid personal-data bridge state")
+        self._state["personal_data"] = {"state": state}
         self.flush()
 
     def agent_terminal_projection(self) -> dict[str, str | bool]:

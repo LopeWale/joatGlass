@@ -7,6 +7,25 @@ import type { UplinkMessage } from './types';
  * independently validates this same vocabulary before it writes an export.
  */
 export type G2TracePage = 'overview' | 'sidebar' | 'list' | 'confirmation' | 'navigation';
+export type G2TraceCadence = 'first' | 'lte1s' | '1_5s' | '5_30s' | 'gt30s';
+export type NavigationCue =
+  | 'destination' | 'repair' | 'mode' | 'preview' | 'guidance'
+  | 'uncertain' | 'wrong_way' | 'off_route' | 'rerouting' | 'arrived' | 'error'
+  | 'stopped';
+
+/** Common, already-bucketed phone location quality. No route position or
+ * measured movement value leaves the glasses. */
+type LocationQualityEvent = {
+  sampleSequence: number;
+  lifecycle: 'foreground' | 'background';
+  /** Bit 0 timestamp, bit 1 speed, bit 2 heading. Presence only. */
+  fields: number;
+  cadence: G2TraceCadence;
+  accuracy: 'unknown' | 'lte5' | 'lte10' | 'lte25' | 'gt25';
+  timestampAge: 'missing' | 'future' | 'fresh' | 'stale';
+  displacement: 'first' | 'lt5' | '5_20' | '20_100' | 'gt100';
+  headingDelta: 'unavailable' | 'insufficient_motion' | '0_30' | '31_90' | '91_180';
+};
 
 export type G2TraceEvent =
   | {
@@ -46,23 +65,43 @@ export type G2TraceEvent =
     decision: 'attempt' | 'recovered' | 'abandoned' | 'skipped';
     containerId: number;
   }
-  | {
+  | (LocationQualityEvent & {
     type: 'location_probe';
-    sampleSequence: number;
     profile: 'high';
-    lifecycle: 'foreground' | 'background';
-    /** Bit 0 timestamp, bit 1 speed, bit 2 heading. Presence only. */
-    fields: number;
-    cadenceMs: number;
-    accuracy: 'unknown' | 'lte5' | 'lte10' | 'lte25' | 'gt25';
-    timestampAge: 'missing' | 'future' | 'fresh' | 'stale';
-    displacement: 'first' | 'lt5' | '5_20' | '20_100' | 'gt100';
-    headingDelta: 'unavailable' | 'insufficient_motion' | '0_30' | '31_90' | '91_180';
-  }
+  })
+  /** Location quality of the actual navigation profile, rather than the
+   * standalone Gate-0 probe. It exists only while Mac diagnostics are on. */
+  | (LocationQualityEvent & { type: 'navigation_location' })
   | {
     type: 'location_probe_state';
     requested: 'high' | 'ambient';
     outcome: 'success' | 'failed';
+  }
+  /** HUD acknowledgement with no rendered copy, place, route, or pixels. The
+   * Mac receipt supplies the timestamp used to synchronize lens video. */
+  | {
+    type: 'navigation_cue';
+    cue: NavigationCue;
+    outcome: 'success' | 'failed';
+  }
+  /** A physical-source receipt only after the Brainstorm controller accepted
+   * its fixed, prompt-free action. */
+  | {
+    type: 'brainstorm_action';
+    action: 'begin_topic_capture' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
+    surface: 'brainstorm' | 'agent_terminal';
+    source: 'left' | 'right' | 'ring';
+    gesture: 'tap' | 'double_press';
+    delivery: 'sys';
+  }
+  /** SHA-256 of the completed packed four-tile raster, never its pixels or
+   * text. This binds an accepted physical action to a rendered visual state. */
+  | {
+    type: 'visual_frame';
+    kind: 'brainstorm';
+    surface: 'brainstorm' | 'agent_terminal';
+    state: 'unavailable' | 'approval_required' | 'ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
+    sha256: string;
   };
 
 /** Narrow observer seam so instrumentation cannot change HUD control flow. */

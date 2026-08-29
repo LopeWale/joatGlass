@@ -21,6 +21,9 @@ final class EngineStatusOpenClawTests: XCTestCase {
             "state": "ready",
             "seat_count": 2,
             "phase": "idle"
+          },
+          "personal_data": {
+            "state": "ready"
           }
         }
         """#.utf8)
@@ -34,6 +37,7 @@ final class EngineStatusOpenClawTests: XCTestCase {
         XCTAssertEqual(status.agentTerminal.state, "approval_required")
         XCTAssertEqual(status.brainstorm.state, "ready")
         XCTAssertEqual(status.brainstorm.seatCount, 2)
+        XCTAssertEqual(status.personalData.state, "ready")
     }
 
     func testMissingOrMalformedProjectionStaysUnavailable() throws {
@@ -52,6 +56,7 @@ final class EngineStatusOpenClawTests: XCTestCase {
         XCTAssertEqual(status.agentTerminal.state, "unavailable")
         XCTAssertEqual(status.brainstorm.state, "unavailable")
         XCTAssertEqual(status.brainstorm.seatCount, 0)
+        XCTAssertEqual(status.personalData.state, "checking")
     }
 
     func testFutureDatedSnapshotIsNotFresh() {

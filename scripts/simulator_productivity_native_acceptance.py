@@ -56,12 +56,11 @@ from joat.services.productivity_actions import ProductivityActionController
 from joat.services.task_monitor import (
     TaskMonitor,
     evaluate_reminder_occurrence,
-    reminder_due_hud_view,
 )
 
 log = logging.getLogger("joat.simulator_productivity_native_acceptance")
 
-RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v2"
+RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v3"
 TITLE_PREFIX = "JOAT ACCEPTANCE"
 EVENT_TITLE_SUFFIX = "EVENT"
 REMINDER_TITLE_SUFFIX = "REMINDER"
@@ -79,6 +78,7 @@ DEFAULT_EVIDENCE_ROOT = (
 DEFAULT_APP = Path("/Applications/JOAT.app")
 DEFAULT_APP_BUNDLE_ID = "com.joat.shell"
 DEFAULT_RECOVERY_GUARD = DEFAULT_EVIDENCE_ROOT / ".mac-app-recovery.json"
+DUE_SURFACE_RECEIPT = "[HudVisualSurface] receipt reminder_due bridge-ack"
 
 
 class AcceptanceSafetyError(RuntimeError):
@@ -1156,6 +1156,25 @@ async def _wait_for_confirmation_and_click(
     )
 
 
+async def _clear_simulator_console(automation_base: str) -> None:
+    try:
+        await asyncio.to_thread(
+            _http_bytes,
+            f"{automation_base}/api/console",
+            method="DELETE",
+        )
+    except (OSError, urllib.error.URLError) as exc:
+        raise AcceptanceBlocked(
+            "simulator_console_reset_failed",
+            "the official simulator console could not be cleared before the due reminder",
+        ) from exc
+
+
+def has_due_surface_receipt(console_output: bytes) -> bool:
+    """Match only the fixed, content-free post-paint receipt."""
+    return DUE_SURFACE_RECEIPT in console_output.decode("utf-8", errors="replace")
+
+
 async def _capture_screenshot(automation_base: str, path: Path) -> tuple[str, str]:
     await asyncio.sleep(0.4)
     png = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/screenshot/glasses")
@@ -1163,6 +1182,39 @@ async def _capture_screenshot(automation_base: str, path: Path) -> tuple[str, st
     path.chmod(0o600)
     _, preview_digest = await asyncio.to_thread(_write_alpha_preview, path)
     return _digest(png), preview_digest
+
+
+async def _wait_for_due_surface_proof(
+    automation_base: str,
+    screenshot_path: Path,
+    *,
+    timeout_s: float = 10.0,
+) -> tuple[str, str]:
+    """Prove the completed due frame reached the official simulator surface.
+
+    The fixed receipt is emitted only after all four G2 image uploads succeed.
+    It deliberately carries neither reminder text nor an EventKit identifier;
+    the private screenshot is retained separately for visual review.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            console = await asyncio.to_thread(
+                _http_bytes,
+                f"{automation_base}/api/console",
+            )
+        except (OSError, urllib.error.URLError) as exc:
+            raise AcceptanceBlocked(
+                "simulator_console_unavailable",
+                "the official simulator console was unavailable while awaiting the due frame",
+            ) from exc
+        if has_due_surface_receipt(console):
+            return await _capture_screenshot(automation_base, screenshot_path)
+        await asyncio.sleep(0.1)
+    raise AcceptanceBlocked(
+        "reminder_due_surface_not_visible",
+        "the due reminder was enqueued but the official simulator did not prove a completed wearer-visible frame",
+    )
 
 
 def _start_process(name: str, command: list[str], *, cwd: Path, env: dict[str, str]) -> ManagedProcess:
@@ -1729,8 +1781,26 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
         "simulator": {},
         "confirmations": [],
         "native_readback": {},
-        "due_monitor": {"required": include_reminder, "delivered": False},
-        "alarm_delivery": {"observed": False},
+        "delivery_stages": {
+            "native_scheduling": {
+                "required": include_reminder,
+                "verified": False,
+                "authority": "EventKit",
+            },
+            "os_banner_delivery": {
+                "required": include_reminder,
+                "observed": False,
+            },
+            "hud_enqueue": {
+                "required": include_reminder,
+                "completed": False,
+            },
+            "wearer_visible": {
+                "required": include_reminder,
+                "observed": False,
+                "surface": "official_even_simulator",
+            },
+        },
         "durable_actions": [],
         "cleanup": {
             "calendar_removed_count": 0,
@@ -1999,6 +2069,23 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 args.zone,
                 include_reminder=include_reminder,
             )
+            if include_reminder:
+                # EventKit is the authority for scheduling.  This assertion is
+                # intentionally independent from macOS banner delivery and from
+                # the JOAT task monitor below.
+                receipt["delivery_stages"]["native_scheduling"] = {
+                    "required": True,
+                    "verified": True,
+                    "authority": "EventKit",
+                    "absolute_alarm_matched": True,
+                    "nonrecurring": True,
+                }
+            else:
+                receipt["delivery_stages"]["native_scheduling"] = {
+                    "required": False,
+                    "not_applicable": True,
+                    "authority": "EventKit",
+                }
             event_identity = _native_item_identity(
                 events[0],
             )
@@ -2013,11 +2100,11 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             )
 
             if include_reminder:
-                async def deliver_due_alert(card: str) -> None:
+                async def deliver_due_alert(alert: ProductivityHudView) -> None:
                     # Use the same pure projection as the running Mac app;
                     # a textual card or generic action receipt would not
                     # establish that the wearer sees the real due surface.
-                    await gateway.send(reminder_due_hud_view(card))
+                    await gateway.send(alert)
 
                 due_monitor = TaskMonitor(
                     occurrences,
@@ -2027,6 +2114,9 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         bridge,
                     ),
                 )
+                # Ignore pre-due renderer output.  A due proof is meaningful
+                # only when it follows this acceptance run's native boundary.
+                await _clear_simulator_console(automation_base)
                 alarm_task = asyncio.create_task(_wait_for_alarm(
                     args.notification_feed,
                     offset=notification_offset,
@@ -2045,14 +2135,21 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         "reminder_due_monitor_not_delivered",
                         "the production monitor did not deliver one due reminder card",
                     )
-                due_screenshot_digest, due_preview_digest = await _capture_screenshot(
+                receipt["delivery_stages"]["hud_enqueue"] = {
+                    "required": True,
+                    "completed": True,
+                    "delivery_count": due_delivery_count,
+                    "proof": "task_monitor_gateway_send_completed",
+                }
+                due_screenshot_digest, due_preview_digest = await _wait_for_due_surface_proof(
                     automation_base,
                     evidence_dir / "reminder-due.png",
                 )
-                receipt["due_monitor"] = {
+                receipt["delivery_stages"]["wearer_visible"] = {
                     "required": True,
-                    "delivered": True,
-                    "delivery_count": due_delivery_count,
+                    "observed": True,
+                    "surface": "official_even_simulator",
+                    "receipt": "reminder_due",
                     "screenshot_digest": due_screenshot_digest,
                     "screenshot_preview_digest": due_preview_digest,
                 }
@@ -2066,7 +2163,8 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         due=schedule.reminder_due,
                         observed_until=datetime.now(zone),
                     )
-                    receipt["alarm_delivery"] = {
+                    receipt["delivery_stages"]["os_banner_delivery"] = {
+                        "required": True,
                         "observed": False,
                         "classification": asdict(classification),
                         "expected_focus_suppression": bool(
@@ -2092,12 +2190,17 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                             "focus_suppression_not_observed",
                             "a Reminders banner appeared despite the asserted suppression condition",
                         )
-                    receipt["alarm_delivery"] = {"observed": True, **asdict(alarm)}
+                    receipt["delivery_stages"]["os_banner_delivery"] = {
+                        "required": True,
+                        "observed": True,
+                        **asdict(alarm),
+                    }
             else:
-                receipt["alarm_delivery"] = {
-                    "observed": False,
-                    "not_applicable": True,
-                }
+                for stage in ("os_banner_delivery", "hud_enqueue", "wearer_visible"):
+                    receipt["delivery_stages"][stage] = {
+                        "required": False,
+                        "not_applicable": True,
+                    }
             receipt["result"] = "pending_cleanup"
             write_private_receipt(receipt_path, receipt)
             exit_code = 0

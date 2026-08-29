@@ -77,6 +77,15 @@ async def transport(unused_tcp_port: int):
 
 
 class TestConnection:
+    async def test_unpaired_gateway_completes_the_auth_phase_before_hello(self, transport) -> None:
+        """An isolated simulator uses no pairing store but still runs MacLink's
+        application-auth handshake. Without auth.accepted it reconnects before
+        it can announce itself or receive a glasses HUD downlink."""
+        _transport, url = transport
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+
     async def test_hello_is_recorded(self, transport) -> None:
         t, url = transport
         async with websockets.connect(url) as ws:
@@ -261,6 +270,18 @@ class TestUplink:
             )
             await _wait_for(lambda: bool(got))
         assert got[0].is_right_temple_click
+
+    async def test_brainstorm_action_reaches_its_dedicated_subscribers(self, transport) -> None:
+        t, url = transport
+        got = []
+        t.on_brainstorm_action(got.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "kind": "brainstorm.action",
+                "action": "show_terminal",
+            }))
+            await _wait_for(lambda: bool(got))
+        assert got[0].action == "show_terminal"
 
     async def test_traced_message_selection_is_observable_without_content(
         self, transport, caplog

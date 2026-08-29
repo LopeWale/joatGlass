@@ -23,6 +23,8 @@ type NavigationUplinkMessage = Extract<UplinkMessage, {
     | 'navigation.origin.failed';
 }>;
 
+type BrainstormUplinkMessage = Extract<UplinkMessage, { kind: 'brainstorm.action' }>;
+
 interface DownlinkDispatcher {
   readonly socket: WebSocket;
   readonly generation: number;
@@ -283,6 +285,21 @@ export class MacLink {
    * coordinates, and even content-free receipts are generation-bound.
    */
   sendNavigation(msg: NavigationUplinkMessage): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN || !this.authenticated) return false;
+    try {
+      this.rawSend(msg);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Brainstorm gestures are session-control intents, not durable commands.
+   * Dropping one during a reconnect is safer than replaying a stale cancel or
+   * retry against the replacement Mac session.
+   */
+  sendBrainstorm(msg: BrainstormUplinkMessage): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN || !this.authenticated) return false;
     try {
       this.rawSend(msg);

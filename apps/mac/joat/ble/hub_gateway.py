@@ -48,6 +48,7 @@ from ..core.protocol import (
     Audio,
     Auth,
     AuthAccepted,
+    BrainstormAction,
     Confirm,
     ConfirmRequest,
     Device,
@@ -83,6 +84,7 @@ ImuCallback = Callable[[Imu], None]
 ConfirmCallback = Callable[[Confirm], None]
 HelloCallback = Callable[[Hello], None]
 NavigationActionCallback = Callable[[NavigationAction], None]
+BrainstormActionCallback = Callable[[BrainstormAction], None]
 NavigationRouteAckCallback = Callable[[NavigationRouteAck], None]
 NavigationViewAckCallback = Callable[[NavigationViewAck], None]
 NavigationStateCallback = Callable[[NavigationState], None]
@@ -144,6 +146,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._confirm_cbs: list[ConfirmCallback] = []
         self._hello_cbs: list[HelloCallback] = []
         self._navigation_action_cbs: list[NavigationActionCallback] = []
+        self._brainstorm_action_cbs: list[BrainstormActionCallback] = []
         self._navigation_route_ack_cbs: list[NavigationRouteAckCallback] = []
         self._navigation_view_ack_cbs: list[NavigationViewAckCallback] = []
         self._navigation_state_cbs: list[NavigationStateCallback] = []
@@ -254,6 +257,10 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     def on_navigation_action(self, callback: NavigationActionCallback) -> None:
         """Semantic HUD actions, already schema- and generation-bound."""
         self._navigation_action_cbs.append(callback)
+
+    def on_brainstorm_action(self, callback: BrainstormActionCallback) -> None:
+        """Receive a bounded action from the currently painted G2 surface."""
+        self._brainstorm_action_cbs.append(callback)
 
     def on_navigation_route_ack(self, callback: NavigationRouteAckCallback) -> None:
         self._navigation_route_ack_cbs.append(callback)
@@ -529,13 +536,32 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         material = token.encode("utf-8") if token is not None else b"local-loopback"
         return hashlib.sha256(b"joat-pairing-identity-v1\0" + material).digest()
 
-    async def _authenticate(self, conn: ServerConnection) -> bytes | None:
+    async def _authenticate(
+        self, conn: ServerConnection,
+    ) -> tuple[bytes | None, str | bytes | None]:
         """Authenticate before the peer can replace the active HUD session."""
         if self._pairing is None:
-            return self._pairing_identity(None)
+            # Local/test deployments intentionally have no pairing store, but
+            # a real MacLink still sends its mandatory auth frame and waits
+            # for an acknowledgement. Preserve compatibility with older raw
+            # test clients that begin immediately with hello by buffering that
+            # first non-auth frame for the normal dispatcher.
+            try:
+                raw = await asyncio.wait_for(conn.recv(), timeout=0.05)
+            except asyncio.TimeoutError:
+                return self._pairing_identity(None), None
+            try:
+                payload = json.loads(raw)
+                first = parse_uplink(payload)
+            except (json.JSONDecodeError, ProtocolError, TypeError):
+                return self._pairing_identity(None), raw
+            if isinstance(first, Auth):
+                await conn.send(json.dumps(AuthAccepted().to_wire()))
+                return self._pairing_identity(None), None
+            return self._pairing_identity(None), raw
         if self._peer_is_exempt(conn):
             await conn.send(json.dumps(AuthAccepted().to_wire()))
-            return self._pairing_identity(None)
+            return self._pairing_identity(None), None
 
         async with self._auth_lock:
             try:
@@ -551,13 +577,13 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     ):
                         self._record_refusal(conn)
                         await conn.close(code=4401, reason="authentication failed")
-                        return None
+                        return None, None
                     await conn.send(json.dumps(AuthAccepted().to_wire()))
-                    return self._pairing_identity(expected)
+                    return self._pairing_identity(expected), None
 
                 if not self._pairing.window_open:
                     await conn.close(code=4403, reason="pairing window closed")
-                    return None
+                    return None, None
 
                 if first.token is not None:
                     # Recovery adoption is safe only because a local user
@@ -565,7 +591,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     self._pairing.confirm(first.token)
                     log.info("pairing: adopted a persisted peer token — window closed")
                     await conn.send(json.dumps(AuthAccepted().to_wire()))
-                    return self._pairing_identity(first.token)
+                    return self._pairing_identity(first.token), None
 
                 candidate = PairingStore.mint()
                 await conn.send(json.dumps(PairingSet(token=candidate).to_wire()))
@@ -579,22 +605,22 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     )
                 ):
                     await conn.close(code=4401, reason="pairing acknowledgement failed")
-                    return None
+                    return None, None
                 self._pairing.confirm(candidate)
                 log.info("pairing: confirmed — remote peers now require auth")
                 await conn.send(json.dumps(AuthAccepted().to_wire()))
-                return self._pairing_identity(candidate)
+                return self._pairing_identity(candidate), None
             except (asyncio.TimeoutError, ProtocolError, websockets.ConnectionClosed):
                 try:
                     await conn.close(code=4401, reason="authentication required")
                 except websockets.ConnectionClosed:
                     pass
-                return None
+            return None, None
 
     # ── receiving ────────────────────────────────────────────────────────────
 
     async def _session(self, conn: ServerConnection) -> None:
-        pairing_identity_digest = await self._authenticate(conn)
+        pairing_identity_digest, initial_raw = await self._authenticate(conn)
         if pairing_identity_digest is None:
             return
         session_id = secrets.token_urlsafe(18)
@@ -612,6 +638,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._lockout_warned = False
         log.info("plugin connected")
         try:
+            if initial_raw is not None:
+                self._dispatch(initial_raw, session_id)
             if self._g2_diagnostics is not None:
                 await conn.send(json.dumps(G2DiagnosticControl(enabled=True).to_wire()))
             if self._location_probe:
@@ -729,6 +757,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                         # Support capture is optional. A custom or degraded
                         # recorder must not drop a real G2 control session.
                         log.warning("dropping G2 diagnostic after %s", type(exc).__name__)
+            case BrainstormAction():
+                for brainstorm_cb in self._brainstorm_action_cbs:
+                    brainstorm_cb(message)
             case NavigationAction():
                 for navigation_cb in self._navigation_action_cbs:
                     navigation_cb(message)

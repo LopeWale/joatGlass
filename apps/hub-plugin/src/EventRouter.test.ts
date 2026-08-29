@@ -12,6 +12,8 @@ function make(
   menuConsumesLists = false,
   diagnostics?: { record: (event: unknown) => void },
   navigationActive = false,
+  brainstormActive = false,
+  assistantOverlayVisible = false,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -41,6 +43,19 @@ function make(
     handleScroll: vi.fn(async () => navigationActive),
     handleCancel: vi.fn(() => navigationActive),
   };
+  const brainstorm = {
+    isActive: vi.fn(() => brainstormActive),
+    handleClick: vi.fn(() => brainstormActive),
+    handleCancel: vi.fn(() => brainstormActive),
+    consumeAcceptedAction: vi.fn(() => brainstormActive ? {
+      action: 'show_terminal' as const,
+      surface: 'brainstorm' as const,
+    } : undefined),
+  };
+  const assistantOverlay = {
+    hasAssistantOverlay: vi.fn(() => assistantOverlayVisible),
+    dismissAssistantOverlay: vi.fn(async () => true),
+  };
   const shutDownPageContainer = vi.fn(async (_mode: number) => true);
   const lifecycle: LifecycleHandler = {
     onForegroundEnter: vi.fn(),
@@ -66,6 +81,8 @@ function make(
     lifecycle,
     diagnostics,
     navigation,
+    brainstorm,
+    assistantOverlay,
   ).attach();
   return {
     fire: (e: unknown) => dispatch(e as EvenHubEvent),
@@ -74,6 +91,8 @@ function make(
     imu,
     menu,
     navigation,
+    brainstorm,
+    assistantOverlay,
     lifecycle,
     shutDownPageContainer,
   };
@@ -251,6 +270,20 @@ describe('EventRouter — double press', () => {
     expect(sent).toEqual([]);
   });
 
+  it('left temple cancels a live Brainstorm instead of opening a hidden sidebar', () => {
+    const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+
+    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('right temple opens the system exit dialog, not an immediate exit', () => {
     const { fire, menu, shutDownPageContainer, lifecycle } = make();
     fire({
@@ -303,11 +336,65 @@ describe('EventRouter — lifecycle', () => {
 });
 
 describe('EventRouter — text and list', () => {
+  it('dismisses a visible assistant reply before a hidden feature receives a tap', () => {
+    const { fire, sent, menu, navigation, assistantOverlay } = make(
+      false, undefined, true, false, true,
+    );
+
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+
+    expect(assistantOverlay.dismissAssistantOverlay).toHaveBeenCalledTimes(1);
+    expect(navigation.handleClick).not.toHaveBeenCalled();
+    expect(menu.handleClick).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('dismisses a visible assistant reply before a hidden Brainstorm swipe action', () => {
+    const { fire, sent, brainstorm, assistantOverlay } = make(
+      false, undefined, false, true, true,
+    );
+
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+
+    expect(assistantOverlay.dismissAssistantOverlay).toHaveBeenCalledTimes(1);
+    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('maps a single G2 tap to the active navigation action owner before menu or relay', () => {
     const { fire, sent, menu, navigation } = make(false, undefined, true);
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
     expect(navigation.handleClick).toHaveBeenCalledTimes(1);
     expect(menu.handleClick).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('maps a right-temple tap to the live Brainstorm owner before menu or relay', () => {
+    const { fire, sent, menu, brainstorm } = make(false, undefined, false, true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    expect(brainstorm.handleClick).toHaveBeenCalledTimes(1);
+    expect(menu.handleClick).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('records a redacted Brainstorm action only after the controller accepts it', () => {
+    const events: unknown[] = [];
+    const { fire } = make(false, { record: (event) => events.push(event) }, false, true);
+
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+
+    expect(events).toContainEqual({
+      type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
+      source: 'right', gesture: 'tap', delivery: 'sys',
+    });
+    expect(JSON.stringify(events)).not.toMatch(/topic|prompt|payload|token|https?:/i);
+  });
+
+  it('maps a downward G2 swipe to the live Brainstorm cancellation owner', () => {
+    const { fire, sent, menu, brainstorm } = make(false, undefined, false, true);
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.handleScroll).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
@@ -331,6 +418,18 @@ describe('EventRouter — text and list', () => {
     const { fire, sent, menu } = make(true);
     fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
     expect(menu.handleScroll).toHaveBeenCalledWith(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(sent).toEqual([]);
+  });
+
+  it('selects the highlighted custom-menu row when a host delivers tap as textEvent', () => {
+    const { fire, sent, menu } = make(true);
+
+    // Protobuf omits CLICK_EVENT (0), so this is the host's source-less tap
+    // shape on the image HUD's transparent text capture layer.
+    fire({ textEvent: { containerID: 2, containerName: 'visual-input' } });
+
+    expect(menu.handleClick).toHaveBeenCalledTimes(1);
+    expect(menu.handleScroll).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 

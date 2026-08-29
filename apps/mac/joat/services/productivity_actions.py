@@ -40,7 +40,8 @@ from ..persistence.actions import (
     ConfirmationEvidence,
     ExternalReference,
 )
-from ..persistence.tasks import TaskOccurrenceStore
+from ..persistence.tasks import TaskOccurrenceConflict, TaskOccurrenceStore
+from .task_monitor import native_reminder_matches_persisted_due
 
 Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
 WorkflowPhase = Literal[
@@ -254,6 +255,7 @@ class ProductivityActionController:
             uncertain="Calendar may have created the event. Check Calendar before retrying.",
             failed="Calendar did not create the event. Check JOAT on the Mac.",
             monitor_due_unix_ms=None,
+            planning_anchor_unix_ms=start_ms,
             origin=origin,
         )
 
@@ -302,6 +304,7 @@ class ProductivityActionController:
             uncertain="The reminder may have been created. Check Reminders before retrying.",
             failed="Reminders did not create the reminder. Check JOAT on the Mac.",
             monitor_due_unix_ms=chosen_ms,
+            planning_anchor_unix_ms=chosen_ms,
         )
 
     async def _complete_reminder(self, raw_title: str) -> str:
@@ -388,6 +391,7 @@ class ProductivityActionController:
             uncertain="The reminder may have been completed. Check Reminders before retrying.",
             failed="Reminders did not complete the reminder. Check JOAT on the Mac.",
             monitor_due_unix_ms=None,
+            planning_anchor_unix_ms=self._known_reminder_due_anchor(item_id, reminder),
             success_phase="completed",
         )
 
@@ -479,6 +483,35 @@ class ProductivityActionController:
             store_generation=response.store_generation,
         )
 
+    def _known_reminder_due_anchor(
+        self,
+        external_item_id: str,
+        native_reminder: dict[str, object],
+    ) -> int | None:
+        """Return the actual due instant only when JOAT durably recorded it.
+
+        EventKit reminder queries expose civil components, which cannot encode
+        a fall-back clock-hour choice. A native reminder created outside JOAT,
+        or a JOAT-created one rescheduled in EventKit, therefore returns to
+        generic Planning; its completion is still safe, but we never
+        manufacture a potentially wrong day.
+        """
+
+        if self._task_occurrences is None:
+            return None
+        try:
+            occurrence = self._task_occurrences.find_by_external_item_id(external_item_id)
+        except (ValueError, TaskOccurrenceConflict):
+            return None
+        if occurrence is None:
+            return None
+        if not native_reminder_matches_persisted_due(occurrence, native_reminder):
+            return None
+        anchor = occurrence.due_unix_ms
+        if isinstance(anchor, bool) or not 0 <= anchor <= 32_503_680_000_000:
+            return None
+        return anchor
+
     async def _confirm_and_write(
         self,
         *,
@@ -493,6 +526,7 @@ class ProductivityActionController:
         uncertain: str,
         failed: str,
         monitor_due_unix_ms: int | None,
+        planning_anchor_unix_ms: int | None,
         success_phase: Literal["saved", "completed"] = "saved",
         origin: ActionOrigin | None = None,
     ) -> str:
@@ -551,6 +585,7 @@ class ProductivityActionController:
                 kind,
                 "not_saved",
                 display_title,
+                planning_anchor_unix_ms,
             )
             return cancelled
         if not isinstance(decision, ConfirmationResult):
@@ -564,6 +599,7 @@ class ProductivityActionController:
                 kind,
                 "not_saved",
                 display_title,
+                planning_anchor_unix_ms,
             )
             return cancelled
         self._journal.record_confirmation(
@@ -589,9 +625,18 @@ class ProductivityActionController:
                 kind,
                 "cancelled",
                 display_title,
+                planning_anchor_unix_ms,
             )
             return cancelled
 
+        # A Reminder can be rescheduled while its confirmation is visible.
+        # Do not keep showing its queried pre-confirmation day after the
+        # point where native state may have changed. A successful completion
+        # below re-establishes an anchor only from its own native read-back.
+        post_confirmation_anchor = (
+            None if method == "reminders.complete" else planning_anchor_unix_ms
+        )
+        terminal_planning_anchor = post_confirmation_anchor
         attempt = self._journal.begin_attempt(
             record.action_id,
             adapter="eventkit.native-bridge",
@@ -603,6 +648,7 @@ class ProductivityActionController:
             kind,
             "verifying",
             display_title,
+            post_confirmation_anchor,
         )
         try:
             response = await self._bridge.call(
@@ -659,10 +705,16 @@ class ProductivityActionController:
                     external_item_id,
                     now_us=time.time_ns() // 1_000,
                 )
+                terminal_planning_anchor = self._known_reminder_due_anchor(
+                    external_item_id,
+                    result,
+                )
         except NativeBridgeError as exc:
             possible = exc.commit_phase.startswith("committed")
             self._record_write_failure(record.action_id, attempt.attempt_id, exc.code, possible)
-            await self._publish_write_failure(kind, display_title, possible)
+            await self._publish_write_failure(
+                kind, display_title, possible, post_confirmation_anchor,
+            )
             return uncertain if possible else failed
         except NativeBridgeUnavailable as exc:
             self._record_write_failure(
@@ -671,7 +723,9 @@ class ProductivityActionController:
                 "native_bridge_unavailable",
                 exc.possible_external_commit,
             )
-            await self._publish_write_failure(kind, display_title, exc.possible_external_commit)
+            await self._publish_write_failure(
+                kind, display_title, exc.possible_external_commit, post_confirmation_anchor,
+            )
             return uncertain if exc.possible_external_commit else failed
         except NativeBridgeProtocolError:
             # A malformed receipt arrived only after the framed write was sent.
@@ -681,7 +735,9 @@ class ProductivityActionController:
                 "native_bridge_invalid_receipt",
                 True,
             )
-            await self._publish_write_failure(kind, display_title, True)
+            await self._publish_write_failure(
+                kind, display_title, True, post_confirmation_anchor,
+            )
             return uncertain
         except Exception:
             # EventKit may already have committed even if local occurrence
@@ -692,7 +748,9 @@ class ProductivityActionController:
                 "post_commit_local_failure",
                 True,
             )
-            await self._publish_write_failure(kind, display_title, True)
+            await self._publish_write_failure(
+                kind, display_title, True, post_confirmation_anchor,
+            )
             return uncertain
 
         try:
@@ -745,12 +803,15 @@ class ProductivityActionController:
                             kind,
                             success_phase,
                             display_title,
+                            terminal_planning_anchor,
                         )
                         return success
                 except Exception:
                     pass
                 log.exception("could not persist terminal state for action %s", record.action_id)
-            await self._publish_write_failure(kind, display_title, True)
+            await self._publish_write_failure(
+                kind, display_title, True, terminal_planning_anchor,
+            )
             return uncertain
 
         self._purge_payload_best_effort(record.action_id)
@@ -758,6 +819,7 @@ class ProductivityActionController:
             kind,
             success_phase,
             display_title,
+            terminal_planning_anchor,
         )
         return success
 
@@ -766,18 +828,21 @@ class ProductivityActionController:
         kind: str,
         display_title: str,
         possible_external_commit: bool,
+        planning_anchor_unix_ms: int | None,
     ) -> None:
         if possible_external_commit:
             await self._publish_workflow_status(
                 kind,
                 "check",
                 display_title,
+                planning_anchor_unix_ms,
             )
         else:
             await self._publish_workflow_status(
                 kind,
                 "failed",
                 display_title,
+                planning_anchor_unix_ms,
             )
 
     async def _publish_workflow_status(
@@ -785,6 +850,7 @@ class ProductivityActionController:
         kind: str,
         phase: WorkflowPhase,
         display_title: str,
+        planning_anchor_unix_ms: int | None,
     ) -> None:
         if self._publish_status is None:
             return
@@ -797,6 +863,7 @@ class ProductivityActionController:
                 primary=primary,
                 secondary=secondary,
                 hint=hint,
+                planning_anchor_unix_ms=planning_anchor_unix_ms,
             ))
         except Exception:
             # HUD feedback is evidence presentation, never write authority.

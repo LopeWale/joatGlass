@@ -278,7 +278,10 @@ export class HudPageBuilder {
     const sidebarWidth = 160;
     const contentX = 164;
     const contentWidth = CANVAS.width - contentX;
-    const capped = items.slice(0, 5).map((s) => s.slice(0, 24));
+    // G2's list container owns scrolling. Preserve the complete, flat
+    // capability rail here: truncating after the five visible rows made the
+    // lower capabilities impossible to reach on text-fallback hardware.
+    const capped = items.slice(0, 20).map((s) => s.slice(0, 24));
     return new RebuildPageContainer({
       containerTotalNum: 6,
       ...this.menuConfig(),

@@ -12,6 +12,7 @@ When you change types.ts, change this file in the same commit.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from enum import IntEnum
 import math
 from typing import Any, Literal
@@ -83,6 +84,13 @@ NAVIGATION_ACTIONS: tuple[str, ...] = (
     "retry",
     "cancel",
 )
+BRAINSTORM_ACTIONS: tuple[str, ...] = (
+    "begin_topic_capture",
+    "show_terminal",
+    "show_brainstorm",
+    "cancel",
+    "retry_terminal",
+)
 
 
 # ── Uplink: plugin → Mac ─────────────────────────────────────────────────────
@@ -141,6 +149,7 @@ class InputEvent:
     selected_name: str | None = None
     trace_id: str | None = None
     request_id: str | None = None
+    planning_anchor_unix_ms: int | None = None
 
     @property
     def is_right_temple_click(self) -> bool:
@@ -230,6 +239,13 @@ class NavigationAction:
 
 
 @dataclass(frozen=True, slots=True)
+class BrainstormAction:
+    """A bounded wearer gesture while the Brainstorm HUD owns input."""
+
+    action: str
+
+
+@dataclass(frozen=True, slots=True)
 class NavigationRouteAck:
     session_id: str
     route_id: str
@@ -284,7 +300,7 @@ class NavigationOriginFailure:
 
 UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
-    | Location | G2Diagnostic | NavigationAction | NavigationRouteAck
+    | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
     | NavigationOrigin | NavigationOriginFailure
 )
@@ -339,6 +355,41 @@ class HudText:
 
 
 @dataclass(frozen=True, slots=True)
+class AssistantOverlay:
+    """JOAT's transient spoken response, independent from feature pages.
+
+    This is deliberately not ``HudText(MAIN)``. Messages, Calendar,
+    Navigation, Brainstorm, and Hermes each keep their own durable surface;
+    the plugin composites this one transient layer above whichever one is
+    currently visible, then removes it without rebuilding that surface.
+    """
+
+    text: str = ""
+    operation: Literal["replace", "append", "settle", "dismiss"] = "replace"
+    dismiss_after_ms: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.operation not in {"replace", "append", "settle", "dismiss"}:
+            raise ProtocolError("assistant overlay operation is invalid")
+        if self.operation in {"replace", "append"}:
+            if not self.text or len(self.text) > 512:
+                raise ProtocolError("assistant overlay text is invalid")
+        elif self.text:
+            raise ProtocolError("assistant overlay control carries no text")
+        if self.dismiss_after_ms is not None and not 1_000 <= self.dismiss_after_ms <= 15_000:
+            raise ProtocolError("assistant overlay dismiss timeout is invalid")
+        message: dict[str, Any] = {
+            "kind": "assistant.overlay",
+            "operation": self.operation,
+        }
+        if self.operation in {"replace", "append"}:
+            message["text"] = self.text
+        if self.dismiss_after_ms is not None:
+            message["dismissAfterMs"] = self.dismiss_after_ms
+        return message
+
+
+@dataclass(frozen=True, slots=True)
 class HudRebuild:
     layout: Literal["default", "list", "image"] = "default"
     reason: Literal["brainstorm"] | None = None
@@ -351,12 +402,36 @@ class HudRebuild:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningGridCell:
+    """One redacted native workload total for a Planning month day.
+
+    This is deliberately not a title, calendar identifier, or reminder
+    identifier. The glasses need only date placement and bounded event/task
+    totals to avoid presenting a scheduled day as free.
+    """
+
+    day: date
+    event_count: int
+    reminder_count: int
+    in_month: bool
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "day": self.day.isoformat(),
+            "eventCount": min(99, max(0, self.event_count)),
+            "reminderCount": min(99, max(0, self.reminder_count)),
+            "inMonth": self.in_month,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class HudList:
     items: list[str]
     title: str | None = None
     hint: str | None = None
     request_id: str | None = None
     selectable: bool = False
+    planning_grid: tuple[PlanningGridCell, ...] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -372,16 +447,23 @@ class HudList:
             message["hint"] = self.hint[:46]
         if self.request_id is not None:
             message["requestId"] = self.request_id[:128]
+        if self.planning_grid is not None:
+            # A Planning month has a fixed Monday-first six-week grid. Keep
+            # the payload redacted and bounded even if a caller misbehaves;
+            # the plugin requires exactly 42 cells before opting into the
+            # grid renderer and otherwise falls back to the ordinary list.
+            message["planningGrid"] = [cell.to_wire() for cell in self.planning_grid[:42]]
         return message
 
 
 _BRAINSTORM_HUD_STATES = frozenset({
-    "unavailable", "approval_required", "ready", "running", "settled", "blocked",
+    "unavailable", "approval_required", "ready", "running", "settled", "cancelled", "failed", "blocked",
 })
 _PRODUCTIVITY_HUD_DOMAINS = frozenset({"calendar", "reminders"})
 _PRODUCTIVITY_HUD_PHASES = frozenset({
     "verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved", "due",
 })
+_PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,22 +532,34 @@ class ProductivityHudView:
     primary: str
     secondary: str
     hint: str
+    # An absolute instant is compact and avoids sending a title, native ID, or
+    # an ambiguous local date back through the wearable transport. The Mac
+    # converts it to its current planning zone when the wearer returns.
+    planning_anchor_unix_ms: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.domain not in _PRODUCTIVITY_HUD_DOMAINS:
             raise ProtocolError("Productivity HUD domain is invalid")
         if self.phase not in _PRODUCTIVITY_HUD_PHASES:
             raise ProtocolError("Productivity HUD phase is invalid")
+        productivity: dict[str, Any] = {
+            "domain": self.domain,
+            "phase": self.phase,
+            "title": _productivity_text(self.title, "title", 72),
+            "primary": _productivity_text(self.primary, "primary", 72),
+            "secondary": _productivity_text(self.secondary, "secondary", 112),
+            "hint": _productivity_text(self.hint, "hint", 46),
+        }
+        if self.planning_anchor_unix_ms is not None:
+            anchor = _planning_anchor(
+                self.planning_anchor_unix_ms,
+                field_name="productivity planning anchor",
+            )
+            assert anchor is not None
+            productivity["planningAnchorUnixMs"] = anchor
         return {
             "kind": "productivity.view",
-            "productivity": {
-                "domain": self.domain,
-                "phase": self.phase,
-                "title": _productivity_text(self.title, "title", 72),
-                "primary": _productivity_text(self.primary, "primary", 72),
-                "secondary": _productivity_text(self.secondary, "secondary", 112),
-                "hint": _productivity_text(self.hint, "hint", 46),
-            },
+            "productivity": productivity,
         }
 
 
@@ -719,6 +813,7 @@ class PairingSet:
 DownlinkMessage = (
     AuthAccepted
     | HudText
+    | AssistantOverlay
     | HudRebuild
     | HudList
     | BrainstormHudView
@@ -771,6 +866,21 @@ def _brainstorm_text(
 def _productivity_text(value: Any, name: str, maximum: int) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise ProtocolError(f"Productivity HUD {name} is invalid")
+    return value
+
+
+def _planning_anchor(value: Any, *, field_name: str) -> int | None:
+    """Validate the bounded, content-free instant used to reopen Planning."""
+
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > _PLANNING_ANCHOR_MAX_UNIX_MS
+    ):
+        raise ProtocolError(f"{field_name} must be a valid Unix millisecond instant")
     return value
 
 
@@ -938,6 +1048,19 @@ def _trace_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     return value
 
 
+def _trace_cadence_bucket(value: Any) -> str:
+    milliseconds = _trace_int(value, "cadenceMs", minimum=0, maximum=600_000)
+    if milliseconds == 0:
+        return "first"
+    if milliseconds <= 1_000:
+        return "lte1s"
+    if milliseconds <= 5_000:
+        return "1_5s"
+    if milliseconds <= 30_000:
+        return "5_30s"
+    return "gt30s"
+
+
 def _trace_shape(payload: dict[str, Any], expected: set[str]) -> None:
     if set(payload) != expected:
         raise ProtocolError("g2 diagnostic has unsupported fields")
@@ -1013,24 +1136,34 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
                 event["outcome"], "outcome", ("success", "failed"),
             ),
         }
-    if event_type == "location_probe":
-        _trace_shape(event, {
-            "type", "sampleSequence", "profile", "lifecycle", "fields", "cadenceMs",
+    if event_type in ("location_probe", "navigation_location"):
+        required = {
+            "type", "sampleSequence", "lifecycle", "fields", "cadence",
             "accuracy", "timestampAge", "displacement", "headingDelta",
-        })
-        return {
-            "type": "location_probe",
+        }
+        if event_type == "location_probe":
+            required.add("profile")
+        # v0.1.22 used a numeric cadence. Accept it only at the boundary, and
+        # retain the coarser bucket so owner-only receipts never accumulate a
+        # movement timeline with raw millisecond values.
+        legacy_required = (required - {"cadence"}) | {"cadenceMs"}
+        if set(event) == legacy_required:
+            cadence = _trace_cadence_bucket(event["cadenceMs"])
+        else:
+            _trace_shape(event, required)
+            cadence = _trace_enum(
+                event["cadence"], "cadence", ("first", "lte1s", "1_5s", "5_30s", "gt30s"),
+            )
+        parsed: dict[str, str | int] = {
+            "type": event_type,
             "sampleSequence": _trace_int(
                 event["sampleSequence"], "sampleSequence", minimum=1, maximum=2_147_483_647,
             ),
-            "profile": _trace_enum(event["profile"], "profile", ("high",)),
             "lifecycle": _trace_enum(
                 event["lifecycle"], "lifecycle", ("foreground", "background"),
             ),
             "fields": _trace_int(event["fields"], "fields", minimum=0, maximum=7),
-            "cadenceMs": _trace_int(
-                event["cadenceMs"], "cadenceMs", minimum=0, maximum=600_000,
-            ),
+            "cadence": cadence,
             "accuracy": _trace_enum(
                 event["accuracy"], "accuracy", ("unknown", "lte5", "lte10", "lte25", "gt25"),
             ),
@@ -1044,6 +1177,51 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
                 event["headingDelta"], "headingDelta",
                 ("unavailable", "insufficient_motion", "0_30", "31_90", "91_180"),
             ),
+        }
+        if event_type == "location_probe":
+            parsed["profile"] = _trace_enum(event["profile"], "profile", ("high",))
+        return parsed
+    if event_type == "navigation_cue":
+        _trace_shape(event, {"type", "cue", "outcome"})
+        return {
+            "type": "navigation_cue",
+            "cue": _trace_enum(
+                event["cue"], "cue",
+                ("destination", "repair", "mode", "preview", "guidance", "uncertain", "wrong_way", "off_route", "rerouting", "arrived", "error", "stopped"),
+            ),
+            "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed")),
+        }
+    if event_type == "brainstorm_action":
+        _trace_shape(event, {"type", "action", "surface", "source", "gesture", "delivery"})
+        return {
+            "type": "brainstorm_action",
+            "action": _trace_enum(
+                event["action"], "action",
+                ("begin_topic_capture", "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
+            ),
+            "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
+            "source": _trace_enum(event["source"], "source", ("left", "right", "ring")),
+            "gesture": _trace_enum(event["gesture"], "gesture", ("tap", "double_press")),
+            "delivery": _trace_enum(event["delivery"], "delivery", ("sys",)),
+        }
+    if event_type == "visual_frame":
+        _trace_shape(event, {"type", "kind", "surface", "state", "sha256"})
+        digest = event["sha256"]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ProtocolError("g2 diagnostic sha256 is invalid")
+        return {
+            "type": "visual_frame",
+            "kind": _trace_enum(event["kind"], "kind", ("brainstorm",)),
+            "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
+            "state": _trace_enum(
+                event["state"], "state",
+                ("unavailable", "approval_required", "ready", "running", "settled", "cancelled", "failed", "blocked"),
+            ),
+            "sha256": digest,
         }
     raise ProtocolError("g2 diagnostic type is invalid")
 
@@ -1096,6 +1274,8 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             )
         case "input":
             raw = payload.get("event") or {}
+            if not isinstance(raw, dict):
+                raise ProtocolError("input event must be an object")
             request_id = raw.get("requestId")
             if request_id is not None and (
                 not isinstance(request_id, str)
@@ -1105,6 +1285,23 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 raise ProtocolError(
                     "input requestId must be a non-empty string of at most 128 characters"
                 )
+            try:
+                planning_anchor = _planning_anchor(
+                    raw.get("planningAnchorUnixMs"),
+                    field_name="input planningAnchorUnixMs",
+                )
+            except ProtocolError:
+                # A Planning return anchor is optional navigation context, not
+                # authority. A stale/corrupt plugin must still be able to
+                # reopen the generic native plan instead of leaving the
+                # wearer stranded on an outcome screen.
+                if (
+                    raw.get("containerName") == "capmenu"
+                    and raw.get("selectedName") in {"Planning", "Calendar", "Tasks", "Reminders"}
+                ):
+                    planning_anchor = None
+                else:
+                    raise
             return Input(
                 event=InputEvent(
                     container_id=raw.get("containerId"),
@@ -1115,6 +1312,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     selected_name=raw.get("selectedName"),
                     trace_id=raw.get("traceId"),
                     request_id=request_id,
+                    planning_anchor_unix_ms=planning_anchor,
                 )
             )
         case "pairing":
@@ -1149,6 +1347,13 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 action=action,
                 choice_id=choice_id,
             )
+        case "brainstorm.action":
+            if set(payload) != {"kind", "action"}:
+                raise ProtocolError("brainstorm action has unsupported fields")
+            action = _require(payload, "action", kind)
+            if not isinstance(action, str) or action not in BRAINSTORM_ACTIONS:
+                raise ProtocolError("brainstorm action is invalid")
+            return BrainstormAction(action=action)
         case "navigation.route.ack":
             if set(payload) != {"kind", "sessionId", "routeId", "revision", "outcome"}:
                 raise ProtocolError("navigation route ack has unsupported fields")

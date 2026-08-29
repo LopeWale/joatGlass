@@ -7,6 +7,7 @@ import {
   type NavigationProgressState,
 } from './NavigationProgress';
 import type { LocationSessionManager } from './LocationSessionManager';
+import type { G2DiagnosticTrace, NavigationCue } from './G2DiagnosticTrace';
 import type {
   DownlinkMessage,
   NavigationAction,
@@ -62,6 +63,7 @@ export class NavigationController {
     private readonly hud: NavigationHudSink | Pick<HudPresenter, 'showNavigation'>,
     private readonly link: NavigationLink,
     private readonly location?: NavigationLocationSession,
+    private readonly diagnostics?: G2DiagnosticTrace,
   ) {}
 
   isActive(): boolean {
@@ -104,6 +106,7 @@ export class NavigationController {
       || operation !== this.presentationOperation
     ) return false;
     this.sendViewAck(message, painted ? 'bridge_acknowledged' : 'rejected');
+    this.recordCue(candidate.navigation.view, painted);
     if (!painted) return false;
     this.current = candidate;
     return true;
@@ -262,6 +265,7 @@ export class NavigationController {
       await this.location?.setNavigationConsumer(undefined).catch(() => false);
     }
     if (ownsView) this.current = undefined;
+    if (ownsView || ownsPendingView) this.recordCue('stopped', true);
     // The caller uses this result to decide whether to restore Overview. An
     // old route may be stopped after a newer session already owns the HUD;
     // never let that stale stop hide the newer navigation view.
@@ -410,7 +414,9 @@ export class NavigationController {
     if (route.pausedForReroute) return;
     const navigation = this.progressModel(route, state);
     const painted = await this.hud.showNavigation(navigation);
-    if (!painted || this.route !== route) return;
+    if (this.route !== route) return;
+    this.recordCue(navigation.view, painted);
+    if (!painted) return;
     route.lastSignature = signature;
     this.current = {
       kind: 'navigation.view',
@@ -515,6 +521,17 @@ export class NavigationController {
       etaMinutes: 0,
       progress: 1,
     };
+  }
+
+  /** Observational only: the Mac assigns receipt time after the bridge accepts
+   * this fixed semantic state. It deliberately receives no HUD copy or route
+   * data, and never decides whether a frame or route can proceed. */
+  private recordCue(cue: NavigationCue, painted: boolean): void {
+    this.diagnostics?.record({
+      type: 'navigation_cue',
+      cue,
+      outcome: painted ? 'success' : 'failed',
+    });
   }
 
   private cloneMessage(message: NavigationViewMessage): NavigationViewMessage {

@@ -46,4 +46,36 @@ describe('MinimalHudPresenter recovery surface', () => {
     await expect(hud.setStatus('JOAT · listening')).resolves.toBe(true);
     expect(owner).toHaveBeenCalledWith('JOAT · listening');
   });
+
+  it('shows an assistant answer transiently, then restores the same recovery content', async () => {
+    vi.useFakeTimers();
+    try {
+      const paints: TextContainerUpgrade[] = [];
+      const client = {
+        require: () => ({
+          textContainerUpgrade: vi.fn(async (paint: TextContainerUpgrade) => {
+            paints.push(paint);
+            return true;
+          }),
+          rebuildPageContainer: vi.fn(async () => false),
+        }),
+      } as unknown as BridgeClient;
+      const hud = new MinimalHudPresenter(client, new HudPageBuilder(false));
+      await hud.showText('Calendar is still open.', ContainerId.Main);
+      await hud.showAssistantOverlay('Good morning.');
+
+      expect(hud.hasAssistantOverlay()).toBe(true);
+      expect(paints[paints.length - 1]?.content).toContain('Good morning.');
+      expect(paints[paints.length - 1]?.content).toContain('Calendar is still open.');
+
+      expect(hud.settleAssistantOverlay(1_000)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(hud.hasAssistantOverlay()).toBe(false);
+      expect(paints[paints.length - 1]?.content).not.toContain('Good morning.');
+      expect(paints[paints.length - 1]?.content).toContain('Calendar is still open.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

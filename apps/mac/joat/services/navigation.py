@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import re
+import time
 from typing import Literal, cast
 
 from ..core.interfaces import GlassesTransport, NavigationProvider
@@ -30,9 +31,19 @@ from .session import Session
 log = logging.getLogger(__name__)
 
 
+# A synchronously rejected phone location request must not erase the locating
+# surface before a wearer can perceive it. This affects only immediate failures;
+# the request still starts as soon as its HUD state is sent.
+_MIN_LOCATING_VISIBLE_SECONDS = 0.8
+
+
 def navigation_query(text: str) -> str | None:
     """Return an explicit destination request; ordinary speech is untouched."""
     request = text.strip().rstrip(".!?")
+    # The normal assistant address is optional, not part of the destination.
+    # Keep the command explicit after stripping it: ordinary conversation must
+    # never become a route request merely because it mentioned a place.
+    request = re.sub(r"^joat(?:\s*[,:-])?\s+", "", request, count=1, flags=re.IGNORECASE)
     match = re.match(
         r"^(?:navigate|directions|take me)(?:\s+to)\s+(.+)$",
         request,
@@ -101,6 +112,7 @@ class NavigationSession(Session):
         self._route_token = 0
         self._current_view: NavigationView | None = None
         self._origin_request: NavigationOriginRequest | None = None
+        self._locating_visible_since: float | None = None
         self._candidates: dict[str, NavigationCandidate] = {}
         self._destination: NavigationCandidate | None = None
         self._mode: Literal["walking", "cycling"] | None = None
@@ -163,6 +175,7 @@ class NavigationSession(Session):
         self._cancelled = True
         self._awaiting_destination_speech = False
         self._error_recovery = None
+        self._locating_visible_since = None
         self._cancel_work()
         self._events.put_nowait(_Cancelled())
 
@@ -214,6 +227,7 @@ class NavigationSession(Session):
         self._origin = None
         self._provider_route = None
         self._origin_request = None
+        self._locating_visible_since = None
         self._current_view = None
         self._install_attempt = None
         self._pending_reroute_request_id = None
@@ -386,6 +400,7 @@ class NavigationSession(Session):
             interaction="none",
             mode=self._mode,
         ), "locating")
+        self._locating_visible_since = time.monotonic()
         self._generation += 1
         self._origin_request = NavigationOriginRequest(
             session_id=self._session_id,
@@ -407,6 +422,7 @@ class NavigationSession(Session):
         ):
             return
         self._origin_request = None
+        self._locating_visible_since = None
         self._origin = NavigationPoint(origin.latitude, origin.longitude)
         await self._send_view(NavigationHudView(
             view="uncertain",
@@ -432,6 +448,14 @@ class NavigationSession(Session):
             or failure.generation != request.generation
             or failure.reason != "unavailable"
         ):
+            return
+        locating_visible_since = self._locating_visible_since
+        self._locating_visible_since = None
+        if locating_visible_since is not None:
+            remaining = _MIN_LOCATING_VISIBLE_SECONDS - (time.monotonic() - locating_visible_since)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        if self._cancelled:
             return
         self._origin_request = None
         self._error_recovery = "origin"

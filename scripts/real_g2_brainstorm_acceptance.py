@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run a content-free physical-G2 Brainstorm / Agent Terminal acceptance loop.
+"""Legacy lower-level contract harness for Brainstorm / Agent Terminal.
 
-The public command exercises JOAT's production paired no-tool Hermes session
-through a fixed acceptance turn only after a physical G2 gesture starts it.
-It uses the production authenticated Hub gateway and the already-paired
-phone/G2. No spoken topic, Brainstorm transcript, Agent Terminal output,
-endpoint, device identifier, session key, or OpenClaw payload is stored.
+The in-process :mod:`joat.services.brainstorm_acceptance` controller is the
+only supported physical-Hermes acceptance path.  The signed macOS app admits
+only its exact Python child PID to the native OpenClaw bridge; an external
+script must not and cannot borrow that identity.  This module remains as a
+loopback/lower-level contract harness for focused tests only.
 
 The recorded receipt contains only these bounded facts:
 
@@ -787,6 +787,10 @@ def main() -> None:
         parser.error("--confirm-hermes is required; this run sends one fixed no-tool Hermes turn")
     if not args.confirm_g2_reconnect:
         parser.error("--confirm-g2-reconnect is required; this run verifies HUD recovery after a new G2 connection")
+    parser.error(
+        "standalone Hermes acceptance is unsupported: use JOAT's “Run G2 Brainstorm Acceptance” "
+        "control so the app-launched engine retains its native bridge identity"
+    )
     configure_logging()
     summary = asyncio.run(
         capture(

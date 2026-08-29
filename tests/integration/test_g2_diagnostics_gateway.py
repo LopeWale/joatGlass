@@ -91,10 +91,11 @@ async def test_gateway_enables_and_persists_only_the_allowlisted_trace(
     assert receipt["events"][1]["outcome"] == "success"
     assert receipt["events"][2].keys() == {
         "sequence", "recordedAtMs", "type", "sampleSequence", "profile", "lifecycle", "fields",
-        "cadenceMs", "accuracy", "timestampAge", "displacement", "headingDelta",
+        "cadence", "accuracy", "timestampAge", "displacement", "headingDelta",
     }
     assert receipt["events"][2]["sequence"] == 3
     assert receipt["events"][2]["sampleSequence"] == 1
+    assert receipt["events"][2]["cadence"] == "1_5s"
     assert "latitude" not in receipt["events"][2]
 
 

@@ -77,6 +77,11 @@ struct MenuContent: View {
             if engine.state == .running {
                 Button("Stop Listening") { engine.stop() }
                 Button("Restart Engine") { engine.restart() }
+                if !engine.isG2BrainstormAcceptanceRunning {
+                    Button("Run G2 Brainstorm Acceptance") {
+                        engine.runG2BrainstormAcceptance()
+                    }
+                }
             } else {
                 Button("Start Engine") { engine.start() }
             }

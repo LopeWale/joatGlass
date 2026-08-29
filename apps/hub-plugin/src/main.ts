@@ -41,6 +41,7 @@ import {
   type NavigationVisualState,
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
+import { BrainstormController } from './BrainstormController';
 import {
   replaySyntheticAudioFixture,
   syntheticAudioFixtureUrl,
@@ -189,6 +190,7 @@ async function boot(): Promise<void> {
   // Declared early: the link/mic callbacks below are registered before the
   // page exists, and must not paint into a page that is not there yet.
   let chromeRef: Chrome | undefined;
+  let brainstormRef: BrainstormController | undefined;
   link.onState((state) => {
     setPanel('p-link', state);
     chromeRef?.setLink(state);
@@ -203,6 +205,8 @@ async function boot(): Promise<void> {
       void audioRef?.stop();
       void imuRef?.stop();
       void location.revokeRemoteControl();
+      // A control gesture must never cross a MacLink generation boundary.
+      brainstormRef?.clear();
       void navigationRef?.stopAll().then((hadView) => {
         if (
           hadView
@@ -284,7 +288,9 @@ async function boot(): Promise<void> {
   setPanel('p-policy', settings.resumePolicy);
   settings.onChange((policy) => setPanel('p-policy', policy));
   const menu = new CapabilityMenu(hud, settings, link);
-  const navigation = new NavigationController(hud, link, location);
+  const navigation = new NavigationController(hud, link, location, g2Diagnostics);
+  const brainstorm = new BrainstormController(link);
+  brainstormRef = brainstorm;
   navigationRef = navigation;
   menu.micIsOpen = () => audio.isOpen;
   // Mic truth leaves the phone on every change — the Mac's pill used to
@@ -325,6 +331,8 @@ async function boot(): Promise<void> {
     lifecycle,
     g2Diagnostics,
     navigation,
+    brainstorm,
+    hud,
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -364,13 +372,17 @@ async function boot(): Promise<void> {
         await awaitCurrent(location.setProbeEnabled(msg.enabled, context.signal));
         break;
       case 'navigation.view':
+        brainstorm.clear();
         await awaitCurrent(navigation.present(msg, undefined, context.signal));
         break;
       case 'brainstorm.view':
         await awaitCurrent(menu.beginLiveSession('brainstorm'));
-        await awaitCurrent(hud.showBrainstorm(msg.brainstorm));
+        if (await awaitCurrent(hud.showBrainstorm(msg.brainstorm))) {
+          brainstorm.present(msg.brainstorm);
+        }
         break;
       case 'productivity.view':
+        brainstorm.clear();
         await awaitCurrent(menu.presentProductivity(msg.productivity));
         break;
       case 'navigation.origin.request':
@@ -380,6 +392,7 @@ async function boot(): Promise<void> {
         await awaitCurrent(navigation.installRoute(msg));
         break;
       case 'navigation.stop':
+        brainstorm.clear();
         if (await awaitCurrent(navigation.stopRoute(msg.sessionId))) {
           await awaitCurrent(hud.showDefault());
         }
@@ -401,6 +414,17 @@ async function boot(): Promise<void> {
           );
         }
         break;
+      case 'assistant.overlay':
+        if (msg.operation === 'replace' && msg.text) {
+          await awaitCurrent(hud.showAssistantOverlay(msg.text));
+        } else if (msg.operation === 'append' && msg.text) {
+          await awaitCurrent(hud.showAssistantOverlay(msg.text, true));
+        } else if (msg.operation === 'settle' && msg.dismissAfterMs !== undefined) {
+          hud.settleAssistantOverlay(msg.dismissAfterMs);
+        } else if (msg.operation === 'dismiss') {
+          await awaitCurrent(hud.dismissAssistantOverlay());
+        }
+        break;
       case 'hud.list':
         if (await awaitCurrent(menu.presentList(
           msg.title,
@@ -408,6 +432,7 @@ async function boot(): Promise<void> {
           msg.requestId,
           msg.selectable ?? false,
           msg.hint,
+          msg.planningGrid,
         ))) {
           break;
         }
@@ -417,6 +442,7 @@ async function boot(): Promise<void> {
         if (msg.reason === 'brainstorm') {
           await awaitCurrent(menu.beginLiveSession('brainstorm'));
         } else {
+          brainstorm.clear();
           await awaitCurrent(hud.showDefault());
         }
         break;
@@ -501,7 +527,13 @@ async function boot(): Promise<void> {
   ]).catch(() => null);
   // Host account name grounds "the wearer's name" with zero configuration
   //. Best-effort: older hosts reject the call.
-  const user = await client.require().getUserInfo().catch(() => null);
+  // Some simulator/older-host bridges advertise getUserInfo yet never settle
+  // the promise. Identity is decorative; it must never strand the required
+  // hello handshake that lets the Mac paint every glasses surface.
+  const user = await Promise.race([
+    client.require().getUserInfo(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+  ]).catch(() => null);
   announce = () => {
     link.send({
       kind: 'hello',

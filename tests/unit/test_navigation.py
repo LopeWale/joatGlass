@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+import joat.services.navigation as navigation_service
 from joat.core.interfaces import GlassesTransport, NavigationProvider
 from joat.core.navigation import (
     NavigationCandidate,
@@ -198,6 +199,10 @@ class TestNavigationSession:
             "2301 N Lincoln Ave"
         )
         assert navigation_query("take me to the lake") == "the lake"
+        assert navigation_query("JOAT, navigate to the library") == "the library"
+        assert navigation_query("joat directions to 2301 N Lincoln Ave") == (
+            "2301 N Lincoln Ave"
+        )
         assert navigation_query("Cajun Corner") is None
 
     async def test_missing_provider_is_visible_and_closes_on_bound_tap(self) -> None:
@@ -226,7 +231,16 @@ class TestNavigationSession:
         await task
         assert isinstance(transport.sent[-1], NavigationStop)
 
-    async def test_origin_failure_returns_a_visible_recoverable_error(self) -> None:
+    async def test_origin_failure_keeps_the_locating_state_visible_before_recovery(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            navigation_service,
+            "_MIN_LOCATING_VISIBLE_SECONDS",
+            0.05,
+            raising=False,
+        )
         candidate = NavigationCandidate(
             choice_id="place-1", label="Cajun Corner",
             address="2301 N Lincoln Ave, Chicago",
@@ -251,6 +265,15 @@ class TestNavigationSession:
             session_id=origin.session_id, request_id=origin.request_id,
             generation=origin.generation, reason="unavailable",
         ))
+        await asyncio.sleep(0)
+        locating_views = [
+            message for message in transport.sent
+            if isinstance(message, NavigationView)
+        ]
+        assert len(locating_views) == 3
+        assert locating_views[-1].navigation.primary == "Getting your location"
+
+        await asyncio.sleep(0.06)
         error = await wait_for(transport, NavigationView, count=4)
         assert isinstance(error, NavigationView)
         assert error.navigation.primary == "Location unavailable"

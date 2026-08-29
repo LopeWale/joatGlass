@@ -7,6 +7,9 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from enum import Enum
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core.protocol import ProductivityHudView
 from ..native.bridge import (
@@ -19,8 +22,62 @@ from ..persistence.tasks import TaskOccurrence, TaskOccurrenceStore
 
 log = logging.getLogger(__name__)
 
+_PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000
 
-def reminder_due_hud_view(card: str) -> ProductivityHudView:
+
+class ReminderNativeState(str, Enum):
+    """Result of reconciling one local occurrence with its native Reminder."""
+
+    INCOMPLETE = "incomplete"
+    COMPLETED = "completed"
+    RESCHEDULED = "rescheduled"
+
+
+def native_reminder_matches_persisted_due(
+    occurrence: TaskOccurrence,
+    reminder: dict[str, object],
+) -> bool:
+    """Whether EventKit still reports the civil time JOAT originally stored.
+
+    The durable receipt retains the exact instant selected at creation.  A
+    Reminder query intentionally returns civil components, because EventKit
+    does not carry a DST-fold choice in that DTO.  Reusing the original instant
+    is therefore sound only while every native civil component and the IANA
+    zone match the durable creation receipt.  A user reschedule (including a
+    change to an undated/all-day reminder) makes EventKit authoritative and
+    retires the old local alarm rather than guessing a new instant.
+    """
+
+    due = reminder.get("due")
+    if not isinstance(due, dict):
+        return False
+    try:
+        zone = ZoneInfo(occurrence.time_zone_id)
+        expected = datetime.fromtimestamp(occurrence.due_unix_ms / 1_000, tz=zone)
+    except (OSError, OverflowError, ValueError, ZoneInfoNotFoundError):
+        return False
+    expected_fields = {
+        "year": expected.year,
+        "month": expected.month,
+        "day": expected.day,
+        "hour": expected.hour,
+        "minute": expected.minute,
+        "second": expected.second,
+        "time_zone_id": occurrence.time_zone_id,
+    }
+    return all(
+        isinstance(due.get(field), type(value))
+        and not isinstance(due.get(field), bool)
+        and due.get(field) == value
+        for field, value in expected_fields.items()
+    )
+
+
+def reminder_due_hud_view(
+    card: str,
+    *,
+    planning_anchor_unix_ms: int | None = None,
+) -> ProductivityHudView:
     """Turn a durable due card into the one read-only G2 reminder surface.
 
     The task monitor owns *when* an alert is eligible.  This helper owns the
@@ -29,6 +86,13 @@ def reminder_due_hud_view(card: str) -> ProductivityHudView:
     """
 
     title = card.removeprefix("!! ").split(" · Reminder\n", 1)[0].strip() or "Reminder"
+    anchor = (
+        planning_anchor_unix_ms
+        if isinstance(planning_anchor_unix_ms, int)
+        and not isinstance(planning_anchor_unix_ms, bool)
+        and 0 <= planning_anchor_unix_ms <= _PLANNING_ANCHOR_MAX_UNIX_MS
+        else None
+    )
     return ProductivityHudView(
         domain="reminders",
         phase="due",
@@ -40,13 +104,14 @@ def reminder_due_hud_view(card: str) -> ProductivityHudView:
         # separate Reminders page would send the wearer toward a destination
         # that the HUD router intentionally no longer exposes.
         hint="left x2 Planning",
+        planning_anchor_unix_ms=anchor,
     )
 
 
 async def evaluate_reminder_occurrence(
     occurrence: TaskOccurrence,
     bridge: NativeBridgeClient | None,
-) -> bool | None:
+) -> ReminderNativeState | None:
     """Return whether the exact native Reminder is still incomplete.
 
     ``None`` is deliberately fail-quiet: an unavailable EventKit bridge,
@@ -92,11 +157,16 @@ async def evaluate_reminder_occurrence(
     ]
     if len(matches) != 1:
         return None
-    completed = matches[0].get("is_completed")
+    reminder = matches[0]
+    completed = reminder.get("is_completed")
     if completed is True:
-        return False
+        return ReminderNativeState.COMPLETED
     if completed is False:
-        return True
+        return (
+            ReminderNativeState.INCOMPLETE
+            if native_reminder_matches_persisted_due(occurrence, reminder)
+            else ReminderNativeState.RESCHEDULED
+        )
     return None
 
 
@@ -111,10 +181,12 @@ class TaskMonitor:
     def __init__(
         self,
         occurrences: TaskOccurrenceStore,
-        deliver: Callable[[str], None | Awaitable[None]],
+        deliver: Callable[[ProductivityHudView], None | Awaitable[None]],
         *,
         poll_interval_s: float = 15.0,
-        evaluate: Callable[[TaskOccurrence], Awaitable[bool | None]] | None = None,
+        evaluate: Callable[
+            [TaskOccurrence], Awaitable[ReminderNativeState | None]
+        ] | None = None,
     ) -> None:
         if poll_interval_s <= 0:
             raise ValueError("poll interval must be positive")
@@ -145,24 +217,37 @@ class TaskMonitor:
         for occurrence in self._occurrences.due(now_unix_ms=due_ms):
             if self._evaluate is not None:
                 try:
-                    still_incomplete = await self._evaluate(occurrence)
+                    native_state = await self._evaluate(occurrence)
                 except Exception:
                     log.exception(
                         "task occurrence evaluation failed occurrence=%s",
                         occurrence.occurrence_id,
                     )
                     continue
-                if still_incomplete is False:
+                if native_state is ReminderNativeState.COMPLETED:
                     self._occurrences.mark_completed(
                         occurrence.occurrence_id,
                         now_us=receipt_us,
                     )
                     continue
-                if still_incomplete is None:
+                if native_state is ReminderNativeState.RESCHEDULED:
+                    self._occurrences.retire_due_tracking(
+                        occurrence.occurrence_id,
+                        now_us=receipt_us,
+                    )
+                    continue
+                if native_state is not ReminderNativeState.INCOMPLETE:
                     continue
             card = f"!! {occurrence.title} · Reminder\nDue now"
             try:
-                delivery = self._deliver(card)
+                # Never expose a raw card delivery seam: due state is a
+                # typed, read-only productivity HUD and always returns to the
+                # source-backed Planning day for this occurrence.
+                payload = reminder_due_hud_view(
+                    card,
+                    planning_anchor_unix_ms=occurrence.due_unix_ms,
+                )
+                delivery = self._deliver(payload)
                 if inspect.isawaitable(delivery):
                     await delivery
             except Exception:

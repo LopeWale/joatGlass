@@ -8,14 +8,18 @@ this whole module exists to prevent.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 
 from joat.ble.hub_gateway import pack_pcm
 from joat.core.protocol import (
     Auth,
+    AssistantOverlay,
     AuthAccepted,
     Audio,
     AudioControl,
+    BrainstormAction,
     BrainstormHudView,
     Confirm,
     ConfirmRequest,
@@ -43,6 +47,7 @@ from joat.core.protocol import (
     NavigationRouteStep,
     NavigationViewAck,
     NavigationView,
+    PlanningGridCell,
     PairingAck,
     PairingSet,
     ProductivityHudView,
@@ -203,6 +208,19 @@ class TestParseUplink:
         assert isinstance(msg, Input)
         assert msg.event.container_id is None
 
+    def test_brainstorm_action_is_bounded_and_typed(self) -> None:
+        message = parse_uplink({"kind": "brainstorm.action", "action": "cancel"})
+        assert message == BrainstormAction(action="cancel")
+
+    @pytest.mark.parametrize("payload", [
+        {"kind": "brainstorm.action", "action": "invent"},
+        {"kind": "brainstorm.action", "action": "cancel", "topic": "leak"},
+        {"kind": "brainstorm.action"},
+    ])
+    def test_brainstorm_action_rejects_freeform_or_unknown_fields(self, payload: object) -> None:
+        with pytest.raises(ProtocolError, match="brainstorm action"):
+            parse_uplink(payload)  # type: ignore[arg-type]
+
     def test_left_temple_click_is_not_a_confirm(self) -> None:
         msg = parse_uplink(
             {
@@ -297,6 +315,46 @@ class TestParseUplink:
             "outcome": "failed",
         })
 
+    def test_g2_diagnostic_accepts_only_redacted_brainstorm_action_and_frame_receipts(self) -> None:
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
+                "source": "right", "gesture": "tap", "delivery": "sys",
+            },
+        }) == G2Diagnostic(event={
+            "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
+            "source": "right", "gesture": "tap", "delivery": "sys",
+        })
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "visual_frame", "kind": "brainstorm", "surface": "agent_terminal",
+                "state": "running", "sha256": "a" * 64,
+            },
+        }) == G2Diagnostic(event={
+            "type": "visual_frame", "kind": "brainstorm", "surface": "agent_terminal",
+            "state": "running", "sha256": "a" * 64,
+        })
+
+    @pytest.mark.parametrize("event", [
+        {
+            "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
+            "source": "right", "gesture": "tap", "delivery": "sys", "topic": "private",
+        },
+        {
+            "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
+            "state": "running", "sha256": "A" * 64,
+        },
+        {
+            "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
+            "state": "running", "sha256": "a" * 63,
+        },
+    ])
+    def test_g2_brainstorm_diagnostic_rejects_content_and_noncanonical_digest(self, event) -> None:  # type: ignore[no-untyped-def]
+        with pytest.raises(ProtocolError):
+            parse_uplink({"kind": "g2.diagnostic", "event": event})
+
     def test_g2_diagnostic_rejects_content_and_unknown_fields(self) -> None:
         with pytest.raises(ProtocolError, match="unsupported fields"):
             parse_uplink({
@@ -337,7 +395,7 @@ class TestParseUplink:
                 "profile": "high",
                 "lifecycle": "foreground",
                 "fields": 7,
-                "cadenceMs": 998,
+                "cadence": "lte1s",
                 "accuracy": "lte10",
                 "timestampAge": "fresh",
                 "displacement": "5_20",
@@ -350,7 +408,7 @@ class TestParseUplink:
             "profile": "high",
             "lifecycle": "foreground",
             "fields": 7,
-            "cadenceMs": 998,
+            "cadence": "lte1s",
             "accuracy": "lte10",
             "timestampAge": "fresh",
             "displacement": "5_20",
@@ -381,12 +439,46 @@ class TestParseUplink:
                     "profile": "high",
                     "lifecycle": "foreground",
                     "fields": 0,
-                    "cadenceMs": 0,
+                    "cadence": "first",
                     "accuracy": "unknown",
                     "timestampAge": "missing",
                     "displacement": "first",
                     "headingDelta": "unavailable",
                     "latitude": 41.88,
+                },
+            })
+
+    def test_navigation_field_run_diagnostics_accept_only_fixed_semantic_values(self) -> None:
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "navigation_cue", "cue": "guidance", "outcome": "success",
+            },
+        }) == G2Diagnostic(event={
+            "type": "navigation_cue", "cue": "guidance", "outcome": "success",
+        })
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "navigation_location", "sampleSequence": 3,
+                "lifecycle": "foreground", "fields": 5, "cadence": "1_5s",
+                "accuracy": "lte25", "timestampAge": "fresh",
+                "displacement": "20_100", "headingDelta": "31_90",
+            },
+        }) == G2Diagnostic(event={
+            "type": "navigation_location", "sampleSequence": 3,
+            "lifecycle": "foreground", "fields": 5, "cadence": "1_5s",
+            "accuracy": "lte25", "timestampAge": "fresh",
+            "displacement": "20_100", "headingDelta": "31_90",
+        })
+
+    def test_navigation_field_run_diagnostics_reject_raw_coordinates_and_text(self) -> None:
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "navigation_cue", "cue": "guidance", "outcome": "success",
+                    "destination": "private place",
                 },
             })
 
@@ -430,6 +522,18 @@ class TestDownlinkWire:
         assert wire["contentKind"] == "notification"
         assert wire["traceId"] == "msg-7"
 
+    def test_assistant_overlay_is_a_distinct_non_destructive_surface(self) -> None:
+        assert AssistantOverlay(
+            text="On it.",
+            operation="replace",
+            dismiss_after_ms=6_000,
+        ).to_wire() == {
+            "kind": "assistant.overlay",
+            "text": "On it.",
+            "operation": "replace",
+            "dismissAfterMs": 6_000,
+        }
+
     def test_hud_list_enforces_sdk_caps(self) -> None:
         wire = HudList(items=[f"item {i}" * 20 for i in range(30)]).to_wire()
         assert len(wire["items"]) == 20
@@ -447,6 +551,35 @@ class TestDownlinkWire:
         assert wire["hint"] == "H" * 46
         assert wire["requestId"] == "hud-request-7"
         assert wire["selectable"] is True
+
+    def test_hud_list_planning_grid_is_redacted_and_bounded_to_six_weeks(self) -> None:
+        cells = tuple(
+            PlanningGridCell(
+                day=date(2026, 8, 31) + timedelta(days=index),
+                event_count=index,
+                reminder_count=-1,
+                in_month=index > 0,
+            )
+            for index in range(45)
+        )
+
+        wire = HudList(items=["week"], planning_grid=cells).to_wire()
+
+        assert wire["planningGrid"] == [
+            {"day": "2026-08-31", "eventCount": 0, "reminderCount": 0, "inMonth": False},
+            {"day": "2026-09-01", "eventCount": 1, "reminderCount": 0, "inMonth": True},
+            *[
+                {
+                    "day": (date(2026, 8, 31) + timedelta(days=index)).isoformat(),
+                    "eventCount": min(99, index),
+                    "reminderCount": 0,
+                    "inMonth": True,
+                }
+                for index in range(2, 42)
+            ],
+        ]
+        assert len(wire["planningGrid"]) == 42
+        assert all("title" not in cell and "identifier" not in cell for cell in wire["planningGrid"])
 
     def test_brainstorm_view_is_bounded_and_has_no_terminal_payload(self) -> None:
         wire = BrainstormHudView(
@@ -482,6 +615,7 @@ class TestDownlinkWire:
             primary="Saved and verified",
             secondary="Reminders read-back matched",
             hint="left x2 overview",
+            planning_anchor_unix_ms=1_788_274_200_000,
         ).to_wire()
         assert wire == {
             "kind": "productivity.view",
@@ -492,8 +626,54 @@ class TestDownlinkWire:
                 "primary": "Saved and verified",
                 "secondary": "Reminders read-back matched",
                 "hint": "left x2 overview",
+                "planningAnchorUnixMs": 1_788_274_200_000,
             },
         }
+
+    def test_productivity_view_and_planning_input_reject_invalid_anchors(self) -> None:
+        with pytest.raises(ProtocolError, match="planning anchor"):
+            ProductivityHudView(
+                domain="calendar",
+                phase="saved",
+                title="Review",
+                primary="Saved",
+                secondary="Calendar read-back matched",
+                hint="left x2 Planning",
+                planning_anchor_unix_ms=True,  # type: ignore[arg-type]
+            ).to_wire()
+
+        parsed = parse_uplink({
+            "kind": "input",
+            "event": {
+                "containerName": "capmenu",
+                "selectedName": "Planning",
+                "planningAnchorUnixMs": 1_788_274_200_000,
+            },
+        })
+        assert isinstance(parsed, Input)
+        assert parsed.event.planning_anchor_unix_ms == 1_788_274_200_000
+
+        # A stale outcome screen must not make the Back gesture inert. The
+        # malformed optional context is discarded and generic Planning opens.
+        fallback = parse_uplink({
+            "kind": "input",
+            "event": {
+                "containerName": "capmenu",
+                "selectedName": "Planning",
+                "planningAnchorUnixMs": -1,
+            },
+        })
+        assert isinstance(fallback, Input)
+        assert fallback.event.planning_anchor_unix_ms is None
+
+        with pytest.raises(ProtocolError, match="planningAnchorUnixMs"):
+            parse_uplink({
+                "kind": "input",
+                "event": {
+                    "containerName": "capdata",
+                    "planningAnchorUnixMs": -1,
+                },
+            })
 
     def test_productivity_view_rejects_invalid_phase_and_oversized_copy(self) -> None:
         with pytest.raises(ProtocolError, match="phase"):

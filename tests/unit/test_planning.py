@@ -6,12 +6,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from joat.native.bridge import NativeBridgeProtocolError, NativeBridgeUnavailable
 from joat.services.planning import (
     PlanningAuthorizationError,
     PlanningScope,
     advance_selected_day,
     load_native_planning,
     month_grid,
+    personal_data_bridge_state,
     project_planning,
 )
 
@@ -26,7 +28,10 @@ class FakeNativeData:
 
     async def call(self, method: str, params: dict[str, object] | None = None) -> object:
         self.calls.append((method, params))
-        return self.responses[method]
+        response = self.responses[method]
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def bridge_response(
@@ -58,12 +63,15 @@ def reminder(
     day: int,
     hour: int | None = None,
     minute: int | None = None,
+    time_zone_id: str | None = None,
 ) -> dict[str, object]:
     due: dict[str, object] = {"year": year, "month": month, "day": day}
     if hour is not None:
         due["hour"] = hour
     if minute is not None:
         due["minute"] = minute
+    if time_zone_id is not None:
+        due["time_zone_id"] = time_zone_id
     return {
         "title": title,
         "calendar_item_identifier": f"reminder-{title}",
@@ -136,6 +144,45 @@ def test_week_projection_keeps_tasks_on_their_calendar_day_and_omits_undated() -
         (date(2026, 9, 5), []),
         (date(2026, 9, 6), []),
     ]
+
+
+def test_reminder_uses_its_native_civil_zone_then_projects_into_the_wearer_zone() -> None:
+    projection = project_planning(
+        selected_day=date(2026, 9, 1),
+        scope=PlanningScope.DAY,
+        zone=CHICAGO,
+        events=[],
+        reminders=[
+            reminder(
+                "Call Berlin",
+                year=2026,
+                month=9,
+                day=2,
+                hour=0,
+                minute=30,
+                time_zone_id="Europe/Berlin",
+            ),
+        ],
+    )
+
+    assert [(entry.title, entry.time_label) for entry in projection.days[0].entries] == [
+        ("Call Berlin", "17:30"),
+    ]
+
+
+def test_planning_drops_a_mislabeled_reminder_from_the_event_feed() -> None:
+    projection = project_planning(
+        selected_day=date(2026, 9, 1),
+        scope=PlanningScope.DAY,
+        zone=CHICAGO,
+        events=[{
+            **event("Scheduled reminder projection", datetime(2026, 9, 1, 9, 30, tzinfo=CHICAGO)),
+            "entity": "reminder",
+        }],
+        reminders=[],
+    )
+
+    assert projection.days[0].entries == ()
 
 
 def test_month_projection_marks_days_with_both_native_sources() -> None:
@@ -237,3 +284,51 @@ async def test_native_loader_requires_full_access_to_both_authoritative_stores()
         )
 
     assert native.calls == [("authorization.status", None)]
+
+
+@pytest.mark.asyncio
+async def test_native_loader_accepts_the_real_swift_full_access_enum_spelling() -> None:
+    native = FakeNativeData({
+        "authorization.status": bridge_response(
+            calendar="fullAccess",
+            reminders="fullAccess",
+        ),
+        "calendar.listContainers": bridge_response(result=[]),
+        "reminders.listContainers": bridge_response(result=[]),
+        "calendar.query": bridge_response(result=[]),
+        "reminders.query": bridge_response(result=[]),
+    })
+
+    projection = await load_native_planning(
+        native,
+        selected_day=date(2026, 9, 1),
+        scope=PlanningScope.DAY,
+        zone=CHICAGO,
+    )
+
+    assert projection.days[0].entries == ()
+
+
+@pytest.mark.asyncio
+async def test_personal_data_bridge_state_never_retains_eventkit_error_detail() -> None:
+    ready = FakeNativeData({
+        "authorization.status": bridge_response(
+            calendar="fullAccess",
+            reminders="fullAccess",
+        ),
+    })
+    access_missing = FakeNativeData({
+        "authorization.status": bridge_response(reminders="denied"),
+    })
+    unavailable = FakeNativeData({
+        "authorization.status": NativeBridgeUnavailable("private socket detail"),
+    })
+    protocol_error = FakeNativeData({
+        "authorization.status": NativeBridgeProtocolError("private response detail"),
+    })
+
+    assert await personal_data_bridge_state(None) == "not_configured"
+    assert await personal_data_bridge_state(ready) == "ready"
+    assert await personal_data_bridge_state(access_missing) == "authorization_required"
+    assert await personal_data_bridge_state(unavailable) == "unavailable"
+    assert await personal_data_bridge_state(protocol_error) == "protocol_error"

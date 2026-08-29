@@ -4,6 +4,7 @@ import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
+import type { ProductivityHudModel } from './types';
 
 /**
  * The wearer's report from hardware: double-tap opened "a menu modal, but
@@ -99,10 +100,14 @@ describe('CapabilityMenu', () => {
     expect(isActionLifecycleTitle('ACTIVITY')).toBe(false);
   });
 
-  it('double-tap from home opens the five capabilities in the transient sidebar', async () => {
+  it('double-tap from home exposes one unified Planning entry in the wearable sidebar', async () => {
     const { menu, sidebars, lists, operations } = rig();
     await menu.toggle();
-    expect(sidebars[0]).toEqual(['Messages', 'Notifications', 'Calendar', 'Tasks', 'More']);
+    expect(sidebars[0]).toEqual([
+      'Messages', 'Planning', 'Navigation', 'Brainstorm',
+      'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
+      'Repeat', 'Reconnect', 'Settings',
+    ]);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
   });
@@ -138,26 +143,53 @@ describe('CapabilityMenu', () => {
     expect(selections).toEqual([1]);
     expect(menu.handleClick()).toBe(true);
     await vi.waitFor(() => expect(lists).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent notifications…']);
-    expect(listOptions[0]?.title).toBe('NOTIFICATIONS');
+    expect(lists[0]).toEqual(['Loading recent planning…']);
+    expect(listOptions[0]?.title).toBe('PLANNING');
   });
 
-  it('uses More as a scalable second level for QuickNotes, Brainstorm, Agent Terminal, and Activity', async () => {
-    const { menu, sidebars, lists, listOptions, sent } = rig();
+  it('keeps Navigation visible in the first-level wearable sidebar and opens its destination handoff', async () => {
+    const { menu, sidebars, selections, lists, listOptions, sent } = rig();
     await menu.toggle();
-    for (let index = 0; index < 4; index += 1) {
+
+    expect(sidebars[0]).toEqual([
+      'Messages', 'Planning', 'Navigation', 'Brainstorm',
+      'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
+      'Repeat', 'Reconnect', 'Settings',
+    ]);
+    for (let index = 0; index < 2; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     }
-    menu.handleClick();
-    await vi.waitFor(() => expect(sidebars[1]).toEqual(['QuickNotes', 'Brainstorm', 'Agent Terminal', 'Activity']));
-    menu.handleClick();
+    expect(selections).toEqual([1, 2]);
+    expect(menu.handleClick()).toBe(true);
+
     await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent quicknotes…']);
-    expect(listOptions[0]?.title).toBe('QUICKNOTES');
+    expect(lists[0]).toEqual(['Loading recent navigation…']);
+    expect(listOptions[0]).toEqual({ title: 'NAVIGATION', hint: 'left x2 overview' });
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        containerName: 'capmenu', eventType: 0, selectedIndex: 0, selectedName: 'QuickNotes',
+        containerName: 'capmenu',
+        selectedIndex: 2,
+        selectedName: 'Navigation',
+      },
+    });
+  });
+
+  it('scrolls one continuous wearable list to Agent Terminal without a More submenu', async () => {
+    const { menu, selections, lists, listOptions, sent } = rig();
+    await menu.toggle();
+    for (let index = 0; index < 6; index += 1) {
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    }
+    expect(selections).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(menu.handleClick()).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(lists[0]).toEqual(['Loading recent agent terminal…']);
+    expect(listOptions[0]?.title).toBe('AGENT TERMINAL');
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capmenu', eventType: 0, selectedIndex: 6, selectedName: 'Agent Terminal',
       },
     });
   });
@@ -206,10 +238,10 @@ describe('CapabilityMenu', () => {
     const { menu, sent } = rig();
     await menu.toggle();
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    menu.handleClick(); // Notifications capability
+    menu.handleClick(); // Planning capability
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
-      'NOTIFICATIONS', rows(2), latestRequestId(sent), true,
+      'PLANNING', rows(2), latestRequestId(sent), true,
     )).toBe(true);
 
     expect(menu.handleClick()).toBe(true);
@@ -218,8 +250,30 @@ describe('CapabilityMenu', () => {
       event: {
         containerName: 'capdata',
         selectedIndex: 0,
-        selectedName: 'NOTIFICATIONS',
+        selectedName: 'PLANNING',
       },
+    });
+  });
+
+  it('returns a Planning drill-down to the live planner instead of Home', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    await menu.presentList('PLANNING', rows(2), latestRequestId(sent), true);
+
+    menu.handleClick();
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capdata', selectedName: 'PLANNING', selectedIndex: 0 },
+    });
+
+    await menu.toggle();
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+    expect(sent[2]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capmenu', selectedName: 'Planning', selectedIndex: 1 },
     });
   });
 
@@ -230,7 +284,7 @@ describe('CapabilityMenu', () => {
     menu.handleClick();
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
-      'NOTIFICATIONS · SETUP', rows(2), latestRequestId(sent), false,
+      'PLANNING · PLAN · SETUP', rows(2), latestRequestId(sent), false,
     )).toBe(true);
     expect(menu.handleClick()).toBe(true);
     expect(sent).toHaveLength(1);
@@ -241,48 +295,65 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(1);
   });
 
-  it('restores the originating Calendar collection after a lifecycle screen', async () => {
+  it.each([
+    { domain: 'calendar', phase: 'verifying', title: 'Design review', secondary: 'Checking native read-back' },
+    { domain: 'calendar', phase: 'saved', title: 'Design review', secondary: 'Calendar read-back matched' },
+    { domain: 'calendar', phase: 'failed', title: 'Design review', secondary: 'No calendar item was changed.' },
+    { domain: 'calendar', phase: 'check', title: 'Design review', secondary: 'It may have changed. Do not retry.' },
+    { domain: 'calendar', phase: 'cancelled', title: 'Design review', secondary: 'No calendar item was changed.' },
+    { domain: 'calendar', phase: 'not_saved', title: 'Design review', secondary: 'No calendar item was changed.' },
+    { domain: 'reminders', phase: 'completed', title: 'Buy filters', secondary: 'Reminders read-back matched' },
+    { domain: 'reminders', phase: 'due', title: 'Buy filters', secondary: 'This reminder is still incomplete.' },
+  ] satisfies ReadonlyArray<{
+    domain: ProductivityHudModel['domain'];
+    phase: ProductivityHudModel['phase'];
+    title: string;
+    secondary: string;
+  }>)('returns $domain $phase lifecycle state to unified Planning', async (outcome) => {
     const { menu, lists, sent, operations } = rig();
     expect(await menu.presentProductivity({
-      domain: 'calendar',
-      phase: 'saved',
-      title: 'Design review',
-      primary: 'Saved and verified',
-      secondary: 'Calendar read-back matched',
-      hint: 'left x2 Calendar',
+      domain: outcome.domain,
+      phase: outcome.phase,
+      title: outcome.title,
+      primary: 'Status',
+      secondary: outcome.secondary,
+      hint: 'left x2 Planning',
+      planningAnchorUnixMs: 1_788_274_200_000,
     })).toBe(true);
     expect(operations).toEqual(['productivity']);
     expect(menu.handleClick()).toBe(true); // lifecycle pages never write
 
     await menu.toggle();
     await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent calendar…']);
+    expect(lists[0]).toEqual(['Loading recent planning…']);
     expect(sent[0]).toMatchObject({
       kind: 'input',
-      event: { containerName: 'capmenu', selectedIndex: 2, selectedName: 'Calendar' },
+      event: {
+        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Planning',
+        planningAnchorUnixMs: 1_788_274_200_000,
+      },
     });
   });
 
-  it('restores the native Reminders collection through its Tasks capability after a due screen', async () => {
-    const { menu, lists, sent, operations } = rig();
-    expect(await menu.presentProductivity({
+  it('falls back to generic Planning when a stale outcome has an invalid anchor', async () => {
+    const { menu, sent } = rig();
+    await menu.presentProductivity({
       domain: 'reminders',
       phase: 'due',
       title: 'Buy filters',
       primary: 'Due now',
       secondary: 'This reminder is still incomplete.',
-      hint: 'left x2 Reminders',
-    })).toBe(true);
-    expect(operations).toEqual(['productivity']);
-    expect(menu.handleClick()).toBe(true); // an alarm page cannot write or complete an item
+      hint: 'left x2 Planning',
+      planningAnchorUnixMs: Number.NaN,
+    });
 
     await menu.toggle();
     await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent tasks…']);
-    expect(sent[0]).toMatchObject({
-      kind: 'input',
-      event: { containerName: 'capmenu', selectedIndex: 3, selectedName: 'Tasks' },
+    const event = sent[0]?.event as Record<string, unknown>;
+    expect(event).toMatchObject({
+      containerName: 'capmenu', selectedName: 'Planning',
     });
+    expect(event).not.toHaveProperty('planningAnchorUnixMs');
   });
 
   it('the armed reply instructions cannot be reinterpreted as message rows', async () => {
@@ -305,7 +376,7 @@ describe('CapabilityMenu', () => {
   it('double-tap is BACK from data — buffered home restores without an obsolete repaint', async () => {
     const { menu, sent, defaultsCount } = rig();
     await menu.toggle();
-    menu.handleList(clickRow0()); // into Messages
+    menu.handleList(clickRow0());
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.toggle();          // back
     expect(menu.isOpen()).toBe(false);
@@ -316,13 +387,10 @@ describe('CapabilityMenu', () => {
   it('a live Brainstorm atomically releases its instruction page and menu input', async () => {
     const { menu, sent, defaultsCount } = rig();
     await menu.toggle();
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     }
-    menu.handleClick();
-    await vi.waitFor(() => expect(menu.isOpen()).toBe(true));
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    menu.handleClick();
+    expect(menu.handleClick()).toBe(true); // scrollable first-level Brainstorm
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'BRAINSTORM',
@@ -363,10 +431,10 @@ describe('CapabilityMenu', () => {
 
     expect(newRequest).not.toBe(oldRequest);
     expect(await menu.presentList('MESSAGES', rows(1), oldRequest, true)).toBe(false);
-    expect(await menu.presentList('NOTIFICATIONS', rows(1), oldRequest, true)).toBe(false);
-    expect(await menu.presentList('NOTIFICATIONS', rows(1), newRequest, true)).toBe(true);
+    expect(await menu.presentList('PLANNING', rows(1), oldRequest, true)).toBe(false);
+    expect(await menu.presentList('PLANNING', rows(1), newRequest, true)).toBe(true);
     expect(await menu.presentList(
-      'NOTIFICATIONS · SETUP', rows(1), newRequest, false,
+      'PLANNING · PLAN · SETUP', rows(1), newRequest, false,
     )).toBe(true);
   });
 
@@ -381,8 +449,8 @@ describe('CapabilityMenu', () => {
     expect(defaultsCount()).toBe(1);
   });
 
-  it('closes instead of entering an invisible More menu after a paint failure', async () => {
-    const { menu, defaultsCount } = rig([true, false]);
+  it('closes instead of entering an invisible scrolled capability after a paint failure', async () => {
+    const { menu, defaultsCount } = rig(true, false);
     await menu.toggle();
     for (let index = 0; index < 4; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);

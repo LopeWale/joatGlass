@@ -15,6 +15,7 @@ final class EngineController: ObservableObject {
     static let shared = EngineController()
 
     enum State: Equatable { case stopped, running, crashed(Int32), failed(String) }
+    private enum LaunchMode { case normal, brainstormAcceptance }
 
     /// Single source of truth for the engine's WS port — passed to the
     /// engine via --port and used by the stale-engine reaper. Overridable
@@ -60,6 +61,7 @@ final class EngineController: ObservableObject {
 
     private var process: Process?
     private var userStopped = false
+    private var launchMode: LaunchMode = .normal
     private var recentCrashes: [Date] = []
     private var pendingStopCompletion: (() -> Void)?
 
@@ -70,7 +72,10 @@ final class EngineController: ObservableObject {
 
     var statusLine: String {
         switch state {
-        case .running: "JOAT · engine running"
+        case .running:
+            launchMode == .brainstormAcceptance
+                ? "JOAT · G2 Brainstorm acceptance running"
+                : "JOAT · engine running"
         case .stopped: "JOAT · stopped"
         case .crashed(let code): "JOAT · engine crashed (\(code))"
         case .failed(let why): "JOAT · \(why)"
@@ -246,6 +251,7 @@ final class EngineController: ObservableObject {
             "--stt-port", String(Self.sttPort),
         ]
             + (g2DiagnosticsEnabled ? ["--g2-diagnostics"] : [])
+            + (launchMode == .brainstormAcceptance ? ["--g2-brainstorm-acceptance"] : [])
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
         // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
@@ -290,8 +296,26 @@ final class EngineController: ObservableObject {
     }
 
     func restart() {
+        launchMode = .normal
         stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
+    }
+
+    /// An explicit Mac-side opt-in.  The child remains the exact PID admitted
+    /// by NativeBridgeServer, so the temporary G2 test never turns an
+    /// arbitrary shell process into an OpenClaw credential holder.
+    func runG2BrainstormAcceptance() {
+        guard launchMode != .brainstormAcceptance else { return }
+        launchMode = .brainstormAcceptance
+        if process == nil {
+            start()
+            return
+        }
+        stop { [weak self] in self?.start() }
+    }
+
+    var isG2BrainstormAcceptanceRunning: Bool {
+        state == .running && launchMode == .brainstormAcceptance
     }
 
     private func engineExited(code: Int32) {
@@ -301,6 +325,14 @@ final class EngineController: ObservableObject {
             state = .stopped
             pendingStopCompletion?()
             pendingStopCompletion = nil
+            return
+        }
+        if launchMode == .brainstormAcceptance, code == 0 {
+            // The Python acceptance controller only exits cleanly after it
+            // has emitted its owner-only receipt.  Return to normal JOAT
+            // rather than treating one completed field run as a crash.
+            launchMode = .normal
+            start()
             return
         }
         state = .crashed(code)

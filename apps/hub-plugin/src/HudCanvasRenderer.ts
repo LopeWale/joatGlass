@@ -7,12 +7,14 @@ import taskSvg from '@phosphor-icons/core/regular/check-square-offset.svg?raw';
 import moreSvg from '@phosphor-icons/core/regular/dots-three-circle.svg?raw';
 import quickNoteSvg from '@phosphor-icons/core/regular/note-pencil.svg?raw';
 import activitySvg from '@phosphor-icons/core/regular/pulse.svg?raw';
+import navigationSvg from '@phosphor-icons/core/regular/navigation-arrow.svg?raw';
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
 import {
   CANVAS,
   type BrainstormHudModel,
   type HudContentKind,
+  type PlanningGridCell,
   type ProductivityHudModel,
 } from './types';
 import {
@@ -63,6 +65,7 @@ export type HudIconName =
   | 'quicknotes'
   | 'brainstorm'
   | 'activity'
+  | 'navigation'
   | 'settings'
   | 'microphone'
   | 'battery';
@@ -76,6 +79,7 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   quicknotes: quickNoteSvg,
   brainstorm: scalesSvg,
   activity: activitySvg,
+  navigation: navigationSvg,
   settings: gearSvg,
   microphone: microphoneSvg,
   battery: batteryHighSvg,
@@ -90,13 +94,143 @@ export type HudListKind =
   | 'activity'
   | 'generic';
 
+/** A month is intentionally a real six-row grid on the lens, rather than a
+ * web-calendar imitation. The Mac still owns the selected week/action row;
+ * this parser only recognizes its established, source-backed title. */
+export interface PlanningMonth {
+  year: number;
+  month: number;
+  label: string;
+}
+
+const PLANNING_MONTHS = [
+  'JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+  'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER',
+] as const;
+
+/**
+ * Parse only the native Planning month title. Compatibility aliases remain
+ * renderable because an older installed package may still send CALENDAR or
+ * TASKS while the Mac service converges them on the same plan.
+ */
+export function parsePlanningMonthTitle(title: string): PlanningMonth | undefined {
+  const match = title.trim().toUpperCase().match(
+    /^(?:PLANNING|CALENDAR|TASKS) · PLAN · ([A-Z]+) (\d{4})$/,
+  );
+  if (!match) return undefined;
+  const label = match[1] ?? '';
+  const year = Number(match[2]);
+  const month = PLANNING_MONTHS.indexOf(label as (typeof PLANNING_MONTHS)[number]);
+  // Date.UTC maps 0…99 to 1900…1999. EventKit can still render those dates
+  // in a normal list, but a month grid must never silently map them to a
+  // different century.
+  if (month < 0 || !Number.isInteger(year) || year < 100 || year > 9999) return undefined;
+  return { year, month, label };
+}
+
+/**
+ * Keep the wearable footer aligned with every action the physical G2 router
+ * accepts. This is presentation only: input ownership stays in EventRouter.
+ */
+export function brainstormActionHint(
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState'>,
+): string {
+  if (model.screen === 'brainstorm') {
+    if (model.state === 'running') {
+      return 'tap: Hermes · swipe down or left x2: cancel';
+    }
+    return model.state === 'ready'
+      ? 'tap: speak question · left x2: menu'
+      : 'left x2: menu · long-press: mic';
+  }
+  if (model.state === 'running') return 'tap: return to Brainstorm · left x2: menu';
+  return model.terminalState === 'ready'
+    ? 'tap: begin Brainstorm · left x2: menu'
+    : 'tap: retry Hermes · left x2: menu';
+}
+
+export interface PlanningMonthDay {
+  day: number;
+  inMonth: boolean;
+}
+
+/** A fixed Monday-first 6 × 7 grid keeps the optical layout stable month to
+ * month. UTC operations avoid a wearer time-zone or daylight-saving shift
+ * changing the grid geometry in the renderer. */
+export function planningMonthDays(month: PlanningMonth): readonly PlanningMonthDay[] {
+  const first = planningMonthDateAt(month, 0);
+  const mondayOffset = (first.getUTCDay() + 6) % 7;
+  return Array.from({ length: 42 }, (_, offset) => {
+    const value = planningMonthDateAt(month, offset - mondayOffset);
+    return { day: value.getUTCDate(), inMonth: value.getUTCMonth() === month.month };
+  });
+}
+
+function planningMonthDateAt(month: PlanningMonth, dayOffset: number): Date {
+  return new Date(Date.UTC(month.year, month.month, 1 + dayOffset));
+}
+
+function isoUtcDay(value: Date): string {
+  return [
+    String(value.getUTCFullYear()).padStart(4, '0'),
+    String(value.getUTCMonth() + 1).padStart(2, '0'),
+    String(value.getUTCDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+/** Accept the graphical treatment only when all bounded, redacted cells name
+ * exactly the Month already shown in the title. A malformed/stale payload
+ * safely uses the normal list rather than drawing misleading counts. */
+export function planningGridMatchesMonth(
+  month: PlanningMonth,
+  planningGrid: readonly PlanningGridCell[] | undefined,
+): planningGrid is readonly PlanningGridCell[] {
+  if (!planningGrid || planningGrid.length !== 42) return false;
+  const first = planningMonthDateAt(month, 0);
+  const mondayOffset = (first.getUTCDay() + 6) % 7;
+  return planningGrid.every((cell, offset) => {
+    const expected = planningMonthDateAt(month, offset - mondayOffset);
+    return cell.day === isoUtcDay(expected)
+      && cell.inMonth === (expected.getUTCMonth() === month.month);
+  });
+}
+
+/** Compact count labels preserve the Calendar/Reminders distinction without
+ * exposing titles or identifiers on the month overview. */
+export function planningGridMarker(cell: PlanningGridCell): string {
+  const marker = [];
+  if (cell.eventCount > 0) marker.push(`E${cell.eventCount}`);
+  if (cell.reminderCount > 0) marker.push(`R${cell.reminderCount}`);
+  return marker.join(' ');
+}
+
+/** The graphical calendar owns only the six week action rows. Month controls
+ * remain an ordinary list once selected, so they are never hidden behind the
+ * grid or given an invented local interaction. */
+export function canRenderPlanningMonthGrid(
+  month: PlanningMonth | undefined,
+  planningGrid: readonly PlanningGridCell[] | undefined,
+  selectable: boolean,
+  selectedIndex: number,
+  itemCount: number,
+): boolean {
+  return month !== undefined
+    && planningGridMatchesMonth(month, planningGrid)
+    && selectable
+    && selectedIndex >= 0
+    && selectedIndex < 6
+    && itemCount >= 6;
+}
+
 export function hudSidebarIconName(item: string): HudIconName {
   const normalized = item.trim().toLowerCase();
   const icons: Readonly<Record<string, HudIconName>> = {
     messages: 'messages',
     notifications: 'notifications',
+    planning: 'calendar',
     calendar: 'calendar',
     tasks: 'tasks',
+    navigation: 'navigation',
     more: 'more',
     quicknotes: 'quicknotes',
     brainstorm: 'brainstorm',
@@ -111,6 +245,7 @@ export function resolveHudListKind(title: string): HudListKind {
   const normalized = title.trim().toUpperCase();
   if (normalized.startsWith('MESSAGES')) return 'messages';
   if (normalized.startsWith('NOTIFICATIONS')) return 'notifications';
+  if (normalized.startsWith('PLANNING')) return 'calendar';
   if (normalized.startsWith('CALENDAR')) return 'calendar';
   if (normalized.startsWith('TASKS')) return 'tasks';
   if (normalized.startsWith('QUICKNOTES')) return 'quicknotes';
@@ -425,6 +560,23 @@ export function visibleHudListItems(
   }));
 }
 
+/** The wearable sidebar has room for five rows, but the capability model is
+ * one continuous scrollable list. Keep the selected row visible instead of
+ * burying capabilities behind a second menu. */
+export function visibleHudSidebarItems(
+  items: readonly string[],
+  selectedIndex: number,
+  capacity = 5,
+): HudVisibleListItem[] {
+  const count = Math.max(1, capacity);
+  const maximumStart = Math.max(0, items.length - count);
+  const start = Math.min(Math.max(0, selectedIndex - count + 1), maximumStart);
+  return items.slice(start, start + count).map((item, offset) => ({
+    item,
+    index: start + offset,
+  }));
+}
+
 export class HudCanvasRenderer implements HudFrameRenderer {
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
 
@@ -474,6 +626,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // explicit, this prevents state-specific paths from ever obscuring the
     // clock/privacy/battery spine on host canvas implementations.
     this.drawShell(context, frame.status, frame.micOn, icons);
+    // The assistant is not a page. It is painted last into the same four G2
+    // image tiles, so it can speak over any feature without allocating an
+    // impossible fifth image container or replacing the feature underneath.
+    if (frame.assistantOverlay) {
+      this.drawAssistantOverlay(context, frame.assistantOverlay.text, icons);
+    }
 
     const rgba = context.getImageData(0, 0, CANVAS.width, CANVAS.height).data;
     const pixels = new Uint8Array(CANVAS.width * CANVAS.height);
@@ -528,6 +686,51 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.lineTo(296, HUD_VISUAL_GEOMETRY.statusDividerY);
     context.lineTo(559, HUD_VISUAL_GEOMETRY.statusDividerY);
     context.stroke();
+  }
+
+  private drawAssistantOverlay(
+    context: CanvasRenderingContext2D,
+    text: string,
+    icons: Record<HudIconName, HTMLImageElement>,
+  ): void {
+    context.save();
+    // The assistant preserves the feature *state*, but temporarily owns the
+    // complete content field beneath the status spine. A smaller card leaves
+    // recognisable rows around its edges, which still reads as two entangled
+    // screens on a monochrome HUD.
+    context.fillStyle = gray(0);
+    context.fillRect(2, 37, CANVAS.width - 4, CANVAS.height - 39);
+    roundedRect(context, 58, 51, 460, 183, 12);
+    context.fill();
+    context.strokeStyle = gray(SUPPORT);
+    context.lineWidth = 1;
+    context.stroke();
+
+    this.drawIcon(context, icons.microphone, 82, 70, 15, BRIGHT);
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `11px ${HUD_FONT}`;
+    context.fillText('JOAT', 105, 78);
+    context.fillStyle = gray(CHROME);
+    context.font = `9px ${HUD_FONT}`;
+    context.fillText('ASSISTANT', 150, 78);
+    context.strokeStyle = gray(HAIRLINE);
+    context.beginPath();
+    context.moveTo(82, 94);
+    context.lineTo(494, 94);
+    context.stroke();
+
+    context.fillStyle = gray(BRIGHT);
+    context.font = `17px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    this.drawFittedWrappedText(context, text, 288, 130, 386, 4);
+
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText('TAP TO CONTINUE', 288, 214);
+    context.restore();
   }
 
   private drawOverview(
@@ -669,8 +872,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.lineTo(HUD_VISUAL_GEOMETRY.sidebarWidth + 0.5, 250);
     context.stroke();
 
-    frame.items.slice(0, 5).forEach((item, index) => {
-      const y = 70 + index * 39;
+    const visibleItems = visibleHudSidebarItems(frame.items, frame.selectedIndex);
+    visibleItems.forEach(({ item, index }, row) => {
+      const y = 70 + row * 39;
       if (index === frame.selectedIndex) {
         context.fillStyle = '#000000';
         context.fillRect(12, y - 17, HUD_VISUAL_GEOMETRY.sidebarWidth - 14, 34);
@@ -686,6 +890,27 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.font = `13px ${HUD_FONT}`;
       context.fillText(item, 54, y);
     });
+
+    // Tiny chevrons make the continuous capability list discoverable without
+    // adding another interactive control or consuming a wearable row.
+    const firstVisible = visibleItems[0]?.index ?? 0;
+    const lastVisible = visibleItems[visibleItems.length - 1]?.index ?? -1;
+    context.strokeStyle = gray(SUPPORT);
+    context.lineWidth = 1;
+    if (firstVisible > 0) {
+      context.beginPath();
+      context.moveTo(145, 49);
+      context.lineTo(149, 45);
+      context.lineTo(153, 49);
+      context.stroke();
+    }
+    if (lastVisible < frame.items.length - 1) {
+      context.beginPath();
+      context.moveTo(145, 254);
+      context.lineTo(149, 258);
+      context.lineTo(153, 254);
+      context.stroke();
+    }
   }
 
   private drawList(
@@ -693,6 +918,28 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
+    const planningMonth = parsePlanningMonthTitle(frame.title);
+    const planningGrid = planningMonth && planningGridMatchesMonth(
+      planningMonth,
+      frame.planningGrid,
+    )
+      ? frame.planningGrid
+      : undefined;
+    // Rows 0…5 are the source-backed weekly drill-down actions. Once the
+    // wearer scrolls to prior/next/view controls, use the normal list so the
+    // selected control remains explicit and reachable instead of hiding it
+    // beneath a decorative month grid.
+    if (planningMonth && planningGrid && canRenderPlanningMonthGrid(
+      planningMonth,
+      planningGrid,
+      frame.selectable,
+      frame.selectedIndex,
+      frame.items.length,
+    )) {
+      this.drawPlanningMonth(context, frame, planningMonth, planningGrid);
+      return;
+    }
+
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(BRIGHT);
@@ -751,6 +998,102 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
     context.fillText(frame.hint, 288, 267);
+  }
+
+  /**
+   * Calendar is the one Planning surface that benefits from a dense spatial
+   * map. Each horizontal band is also one existing selectable week row, so
+   * TAP still follows the real Mac-owned action contract (month → week), not
+   * a local visual approximation with a second selection model.
+   */
+  private drawPlanningMonth(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+    month: PlanningMonth,
+    planningGrid: readonly PlanningGridCell[],
+  ): void {
+    const gridLeft = 37;
+    const gridRight = 539;
+    const cellWidth = (gridRight - gridLeft) / 7;
+    const gridTop = 96;
+    const rowHeight = 22;
+    const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+    const selectedWeek = frame.selectedIndex;
+
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `19px ${HUD_FONT}`;
+    context.fillText('Planning', 36, 60);
+    context.textAlign = 'right';
+    context.fillStyle = gray(SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(`${month.label.slice(0, 3)} ${month.year} · E EVENT · R REMINDER`, 540, 60);
+
+    context.textAlign = 'center';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    weekdays.forEach((weekday, column) => {
+      context.fillText(weekday, gridLeft + cellWidth * (column + 0.5), 80);
+    });
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(gridLeft, 87.5);
+    context.lineTo(gridRight, 87.5);
+    context.stroke();
+
+    const days = planningMonthDays(month);
+    for (let row = 0; row < 6; row += 1) {
+      const top = gridTop + row * rowHeight;
+      if (row === selectedWeek) {
+        context.strokeStyle = gray(BRIGHT);
+        context.lineWidth = 1.2;
+        roundedRect(context, gridLeft - 9, top - 9, gridRight - gridLeft + 18, rowHeight, 4);
+        context.stroke();
+      } else {
+        context.strokeStyle = gray(HAIRLINE);
+        context.lineWidth = 0.7;
+        context.beginPath();
+        context.moveTo(gridLeft, top + 10.5);
+        context.lineTo(gridRight, top + 10.5);
+        context.stroke();
+      }
+      for (let column = 0; column < 7; column += 1) {
+        const day = days[row * 7 + column];
+        if (!day) continue;
+        const cell = planningGrid[row * 7 + column];
+        const level = day.inMonth
+          ? row === selectedWeek ? BRIGHT : SUPPORT
+          : QUIET;
+        context.fillStyle = gray(level);
+        context.font = `${day.inMonth ? 13 : 11}px ${HUD_FONT}`;
+        const x = gridLeft + cellWidth * (column + 0.5);
+        context.fillText(String(day.day), x, top - 1);
+        const marker = cell ? planningGridMarker(cell) : '';
+        if (marker) {
+          context.fillStyle = gray(row === selectedWeek ? BRIGHT : SUPPORT);
+          context.font = `7px ${HUD_FONT}`;
+          context.fillText(marker, x, top + 9);
+        }
+      }
+    }
+
+    const selectedSummary = frame.items[selectedWeek]?.replace(/^.*? · /, '') ?? '';
+    context.fillStyle = gray(SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(
+      selectedSummary ? `TAP WEEK · ${selectedSummary.toUpperCase()}` : 'TAP WEEK · AGENDA',
+      288,
+      243,
+    );
+    const nextMonth = frame.items[7]?.replace(/^[‹›\s]+/, '').toUpperCase() ?? 'MONTH CONTROLS';
+    context.fillStyle = gray(CHROME);
+    context.font = `8px ${HUD_FONT}`;
+    this.fitText(context, `WEEK ${selectedWeek + 1}/6 · NEXT ${nextMonth}`, 288, 257, 500);
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    this.fitText(context, frame.hint, 288, 267, 500);
   }
 
   private drawConfirmation(
@@ -946,10 +1289,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.font = `11px ${HUD_FONT}`;
       this.drawWrappedText(context, model.activity || 'Say “JOAT, brainstorm …” to begin.', 36, 207, 504, 16, 2);
     }
+    const actionHint = brainstormActionHint(model);
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
-    context.fillText('left x2: menu · long-press: mic', 288, 267);
+    this.fitText(context, actionHint, 288, 267, 500);
   }
 
   private drawNavigation(

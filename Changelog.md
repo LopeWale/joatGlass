@@ -2,6 +2,41 @@
 
 ## 2026-08-29
 
+- Repaired the physical G2 image transport: the visual renderer now sends one
+  Gray4 value (`0..15`) per pixel at the SDK boundary, rather than packing two
+  pixels into a byte. The previous packed payload could be acknowledged by the
+  phone bridge while producing no lens-visible HUD. Release this as v0.1.22;
+  it requires a fresh private-build install and physical lens check.
+
+- Rebuilt the current integrated Hub source as private `com.example.joat`
+  `v0.1.21`, 69,397 bytes, SHA-256
+  `b213de98185f3f347883ee8c961706638728443cf304d1695c20962a8463b661`.
+  This supersedes the earlier `v0.1.20` candidate because the shared source
+  changed after it was packaged. Full verification before the rebuild: 348 Hub
+  tests, Hub typecheck/production build, and 743 Python tests. It still awaits
+  existing-project upload, phone installation, and physical-G2 evidence.
+
+- Built the next canonical private JOAT package from the integrated Hub source:
+  `com.example.joat` `v0.1.20`, 69,398 bytes, SHA-256
+  `70b8dcd2d8347bac44e2d672a1ae81fc724c0e390bd0fbbf526d8754a2a73ffe`.
+  The fresh-stage pack excludes development fixtures; focused opt-in Gate 0
+  diagnostics/protocol tests pass and the full Hub suite passes 348 tests.
+  This is a build artifact only: it has not yet been installed or accepted on
+  a physical G2, and no simulator or bridge acknowledgement is presented as
+  lens-visible proof.
+
+- Drove the production navigation recovery path through the official Even
+  simulator: canonical-place confirmation → mode selection → high-accuracy
+  location request → unavailable-location recovery → retry → cancel to
+  Overview. Every simulated gesture produced the expected semantic action in
+  the real Hub event router and Mac `NavigationSession`. During this run, an
+  immediate location rejection was found to replace “Getting your location”
+  before it could be perceived; the Mac session now retains that state for up
+  to 0.8 seconds only when the request fails immediately. This does not delay
+  a successful GPS request or route lookup. The simulator cannot emulate the
+  physical left-temple menu gesture or verified phone GPS, so sidebar entry,
+  walking/cycling, guidance, and lens visibility remain real-G2 gates.
+
 - Repaired the packaged-G2 visual HUD contract after a private `v0.1.18`
   install showed the legacy text header/footer while the simulator showed the
   four-tile renderer. The image-first startup and rebuild pages now keep their

@@ -91,6 +91,48 @@ class TestHudSink:
         assert frame.no_tools_checked is True
         assert "formatter" in frame.activity
 
+    async def test_terminal_overlay_and_replay_keep_the_real_brainstorm_state(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(
+            HudWriter(transport),  # type: ignore[arg-type]
+            lambda: {
+                "state": "ready",
+                "reason": "",
+                "endpoint_host": "home-mac.example-tailnet.ts.net",
+                "no_tools_checked": True,
+            },
+        )
+        await sink.open("reconnect safely", ["codex", "claude", "hermes"])
+        await sink.turn("hermes (agent terminal)")
+        await sink.show_terminal()
+
+        terminal = transport.sent[-1]
+        assert isinstance(terminal, BrainstormHudView)
+        assert terminal.screen == "agent_terminal"
+        assert terminal.state == "running"
+        assert terminal.activity.startswith("Brainstorm remains active")
+
+        await sink.replay()
+        restored = transport.sent[-1]
+        assert isinstance(restored, BrainstormHudView)
+        assert restored.screen == "brainstorm"
+        assert restored.state == "running"
+        assert restored.active_speaker == "hermes"
+
+    async def test_cancellation_and_blocked_failure_have_distinct_hud_states(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("t", ["codex", "claude"])
+        await sink.close("cancelled")
+        cancelled = transport.sent[-1]
+        assert isinstance(cancelled, BrainstormHudView)
+        assert cancelled.state == "cancelled"
+
+        await sink.close("blocked · collaborator disconnected")
+        blocked = transport.sent[-1]
+        assert isinstance(blocked, BrainstormHudView)
+        assert blocked.state == "blocked"
+
 
 class TestBroadcast:
     async def test_every_sink_sees_every_event(self) -> None:
