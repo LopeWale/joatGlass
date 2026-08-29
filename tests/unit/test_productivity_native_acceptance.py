@@ -32,6 +32,7 @@ from scripts.simulator_productivity_native_acceptance import (
     create_engine_stub_repo,
     evaluate_notification_preflight,
     has_due_surface_receipt,
+    mark_interrupted,
     plan_acceptance_schedule,
     redact_native_reference,
     repo_preference_restore_command,
@@ -83,6 +84,18 @@ def test_due_surface_receipt_is_fixed_and_carries_no_reminder_content() -> None:
     assert not has_due_surface_receipt(
         b"reminder_due private title bridge-ack\n"
     )
+
+
+def test_interruption_receipt_never_promotes_a_partial_run_to_delivery() -> None:
+    receipt: dict[str, object] = {"result": "running", "blockers": []}
+
+    mark_interrupted(receipt)  # type: ignore[arg-type]
+
+    assert receipt["result"] == "interrupted"
+    assert receipt["blockers"] == [{
+        "code": "acceptance_interrupted",
+        "message": "acceptance interrupted before delivery conclusion",
+    }]
 
 
 def test_alarm_observation_uses_only_new_lines_and_returns_no_content(tmp_path: Path) -> None:

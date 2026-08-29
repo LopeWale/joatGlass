@@ -79,6 +79,7 @@ DEFAULT_APP = Path("/Applications/JOAT.app")
 DEFAULT_APP_BUNDLE_ID = "com.joat.shell"
 DEFAULT_RECOVERY_GUARD = DEFAULT_EVIDENCE_ROOT / ".mac-app-recovery.json"
 DUE_SURFACE_RECEIPT = "[HudVisualSurface] receipt reminder_due bridge-ack"
+INTERRUPTED_ACCEPTANCE_CODE = "acceptance_interrupted"
 
 
 class AcceptanceSafetyError(RuntimeError):
@@ -99,6 +100,20 @@ class AcceptanceFailed(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def mark_interrupted(receipt: dict[str, Any]) -> None:
+    """Leave a content-free, non-success result before deterministic cleanup.
+
+    A normal SIGINT/SIGTERM is an operator/runtime handoff, not evidence that
+    a native reminder failed.  The caller's ``finally`` still performs its
+    exact-identity cleanup and restores the app-owned bridge.
+    """
+    receipt["result"] = "interrupted"
+    receipt["blockers"].append({
+        "code": INTERRUPTED_ACCEPTANCE_CODE,
+        "message": "acceptance interrupted before delivery conclusion",
+    })
 
 
 @dataclass(frozen=True, slots=True)
@@ -2214,6 +2229,9 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             {"code": getattr(exc, "code", "safety_failure"), "message": str(exc)}
         )
         exit_code = 1
+    except asyncio.CancelledError:
+        mark_interrupted(receipt)
+        exit_code = 2
     except Exception as exc:
         receipt["result"] = "failed"
         receipt["blockers"].append(
@@ -2395,10 +2413,45 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def run_with_shutdown_signals(args: argparse.Namespace) -> tuple[int, Path]:
+    """Turn normal terminal termination into cleanup, not a stranded write.
+
+    SIGKILL remains inherently unrecoverable, so the owner-only app recovery
+    guard still handles bridge restoration.  The normal SIGINT/SIGTERM path is
+    different: cancel ``run`` cooperatively and let its finalizer remove the
+    exact synthetic EventKit identities before it hands the app back.
+    """
+    loop = asyncio.get_running_loop()
+    interrupted = asyncio.Event()
+    signals = (signal.SIGINT, signal.SIGTERM)
+    try:
+        for interrupt in signals:
+            loop.add_signal_handler(interrupt, interrupted.set)
+    except NotImplementedError:
+        return await run(args)
+
+    run_task = asyncio.create_task(run(args))
+    interrupt_task = asyncio.create_task(interrupted.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {run_task, interrupt_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if run_task in done:
+            return await run_task
+        run_task.cancel()
+        return await run_task
+    finally:
+        interrupt_task.cancel()
+        await asyncio.gather(interrupt_task, return_exceptions=True)
+        for interrupt in signals:
+            loop.remove_signal_handler(interrupt)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     args = _parser().parse_args()
-    exit_code, receipt_path = asyncio.run(run(args))
+    exit_code, receipt_path = asyncio.run(run_with_shutdown_signals(args))
     print(f"acceptance_result={exit_code} receipt={receipt_path}")
     raise SystemExit(exit_code)
 
