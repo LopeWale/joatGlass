@@ -14,13 +14,14 @@ The recorded receipt contains only these bounded facts:
 * the exact fixed HUD state names;
 * the accepted Brainstorm control action; and
 * the gesture delivery and physical input source which produced that action;
-* whether the no-tool Hermes run was cancelled while active.
+* whether the no-tool Hermes run was cancelled while active; and
+* whether a second physical-G2 hello restored the running Brainstorm HUD.
 
-The trace is opt-in: this runner requires ``--confirm-physical`` and
-``--confirm-hermes`` and refuses to overwrite evidence. Stop the ordinary JOAT
-engine before running it so the paired G2 can connect to this gateway. A
-physical lens recording is a separate proof artifact; ``--lens-video`` stores
-its SHA-256 only, never a copy of the video.
+The trace is opt-in: this runner requires ``--confirm-physical``,
+``--confirm-hermes``, and ``--confirm-g2-reconnect`` and refuses to overwrite
+evidence. Stop the ordinary JOAT engine before running it so the paired G2 can
+connect to this gateway. A physical lens recording is a separate proof
+artifact; ``--lens-video`` stores its SHA-256 only, never a copy of the video.
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ _HUD_STATES = frozenset({
 })
 _HUD_SURFACES = frozenset({"brainstorm", "agent_terminal"})
 _HERMES_RUN_STATES = frozenset({"not_exercised", "cancelled", "completed", "failed"})
+_G2_RECONNECT_STATES = frozenset({"not_exercised", "restored"})
 # This deliberately uninteresting fixed text is sent only after the wearer
 # starts the opt-in physical acceptance.  It is never written to the receipt,
 # console, trace, or HUD.  The longer response gives the wearer time to invoke
@@ -200,7 +202,9 @@ def summarize_receipt(
     *,
     lens_video_sha256: str | None = None,
     hermes_run: str = "not_exercised",
+    g2_reconnect: str = "not_exercised",
     require_cancel: bool = False,
+    require_reconnect: bool = False,
 ) -> dict[str, object]:
     """Verify the physical Brainstorm → Terminal → Brainstorm contract.
 
@@ -215,6 +219,8 @@ def summarize_receipt(
         _sha256(lens_video_sha256, "lensVideoSha256")
     if hermes_run not in _HERMES_RUN_STATES:
         raise ValueError("hermes run state is invalid")
+    if g2_reconnect not in _G2_RECONNECT_STATES:
+        raise ValueError("G2 reconnect state is invalid")
     retained = _retained_events(_require_events(receipt))
     initial = next(
         (
@@ -228,7 +234,7 @@ def summarize_receipt(
         None,
     )
     if initial is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run)
+        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
 
     terminal_action = _find_after(
         retained,
@@ -241,7 +247,7 @@ def summarize_receipt(
         and event.get("source") in _TERMINAL_TOGGLE_SOURCES,
     )
     if terminal_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run)
+        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
     terminal_frame = _find_after(
         retained,
         terminal_action[0],
@@ -251,9 +257,9 @@ def summarize_receipt(
         and event.get("state") == "running"
     )
     if terminal_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run)
+        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
     if terminal_frame[1]["sha256"] == initial[1]["sha256"]:
-        return _summary("fail", retained, lens_video_sha256, hermes_run)
+        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
 
     return_action = _find_after(
         retained,
@@ -266,7 +272,7 @@ def summarize_receipt(
         and event.get("source") in _TERMINAL_TOGGLE_SOURCES,
     )
     if return_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run)
+        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
     returned_frame = _find_after(
         retained,
         return_action[0],
@@ -276,12 +282,14 @@ def summarize_receipt(
         and event.get("state") == "running"
     )
     if returned_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run)
+        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
     if returned_frame[1]["sha256"] == terminal_frame[1]["sha256"]:
-        return _summary("fail", retained, lens_video_sha256, hermes_run)
+        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
 
+    if require_reconnect and g2_reconnect != "restored":
+        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
     if not require_cancel:
-        return _summary("pass", retained, lens_video_sha256, hermes_run)
+        return _summary("pass", retained, lens_video_sha256, hermes_run, g2_reconnect)
     cancel_action = _find_after(
         retained,
         returned_frame[0],
@@ -293,7 +301,7 @@ def summarize_receipt(
         and event.get("source") == "left",
     )
     if cancel_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run)
+        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
     cancelled_frame = _find_after(
         retained,
         cancel_action[0],
@@ -303,10 +311,10 @@ def summarize_receipt(
         and event.get("state") == "cancelled",
     )
     if cancelled_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run)
+        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
     if hermes_run != "cancelled":
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run)
-    return _summary("pass", retained, lens_video_sha256, hermes_run)
+        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+    return _summary("pass", retained, lens_video_sha256, hermes_run, g2_reconnect)
 
 
 def _summary(
@@ -314,6 +322,7 @@ def _summary(
     retained: list[dict[str, str]],
     lens_video_sha256: str | None,
     hermes_run: str,
+    g2_reconnect: str,
 ) -> dict[str, object]:
     return {
         "schema": RUN_SCHEMA,
@@ -330,6 +339,7 @@ def _summary(
         },
         "lensVideoSha256": lens_video_sha256,
         "hermesRun": hermes_run,
+        "g2Reconnect": g2_reconnect,
     }
 
 
@@ -490,6 +500,7 @@ async def capture(
     _gateway_factory: Callable[[G2DiagnosticStore], HubGatewayTransport] | None = None,
     _hermes_context: HermesContext | None = None,
     _require_cancel: bool = False,
+    _require_reconnect: bool = False,
 ) -> dict[str, object]:
     """Run the physical G2 loop, optionally with a real no-tool Hermes run.
 
@@ -527,6 +538,7 @@ async def capture(
 
         hermes_context = _hermes_context() if _hermes_context is not None else _without_hermes()
         hermes_run = "not_exercised"
+        g2_reconnect = "not_exercised"
         hermes_task: asyncio.Task[None] | None = None
         await gateway.start()
         try:
@@ -615,6 +627,39 @@ async def capture(
                     "returned Brainstorm visual frame was not acknowledged",
                 )
 
+                if _require_reconnect:
+                    # The initial phone-side page is intentionally replaced.
+                    # A second G2 hello must restore the current Brainstorm
+                    # state and acknowledge a fresh visual frame; a stale
+                    # cached image cannot satisfy this count.
+                    frames_before_reconnect = _frame_count(observed_events, "brainstorm")
+                    hellos_before_reconnect = len(hello)
+                    await gateway.send(_view(
+                        "brainstorm",
+                        activity="Reconnect G2 to restore this Hermes run",
+                    ))
+                    await _wait_for(
+                        lambda: _frame_count(observed_events, "brainstorm") > frames_before_reconnect,
+                        action_timeout_s,
+                        "reconnect instruction frame was not acknowledged",
+                    )
+                    await _wait_for(
+                        lambda: len(hello) > hellos_before_reconnect and gateway.connected,
+                        connect_timeout_s,
+                        "waiting for the replacement physical G2 connection",
+                    )
+                    frames_before_restore = _frame_count(observed_events, "brainstorm")
+                    await gateway.send(_view(
+                        "brainstorm",
+                        activity="Hermes run restored after G2 reconnect",
+                    ))
+                    await _wait_for(
+                        lambda: _frame_count(observed_events, "brainstorm") > frames_before_restore,
+                        action_timeout_s,
+                        "restored Brainstorm visual frame was not acknowledged",
+                    )
+                    g2_reconnect = "restored"
+
                 if _require_cancel:
                     cancellation = await asyncio.wait_for(actions.get(), action_timeout_s)
                     if cancellation != "cancel":
@@ -666,7 +711,9 @@ async def capture(
             receipt,
             lens_video_sha256=_file_sha256(lens_video) if lens_video else None,
             hermes_run=hermes_run,
+            g2_reconnect=g2_reconnect,
             require_cancel=_require_cancel,
+            require_reconnect=_require_reconnect,
         )
 
     _write_owner_only_json(out, summary)
@@ -710,6 +757,11 @@ def main() -> None:
         help="required acknowledgement that this runs one fixed no-tool Hermes acceptance turn",
     )
     parser.add_argument(
+        "--confirm-g2-reconnect",
+        action="store_true",
+        help="required acknowledgement that this run asks you to reconnect the installed G2 once",
+    )
+    parser.add_argument(
         "--bridge",
         type=Path,
         default=Path(
@@ -725,6 +777,8 @@ def main() -> None:
         parser.error("--confirm-physical is required; stop the ordinary JOAT engine first")
     if not args.confirm_hermes:
         parser.error("--confirm-hermes is required; this run sends one fixed no-tool Hermes turn")
+    if not args.confirm_g2_reconnect:
+        parser.error("--confirm-g2-reconnect is required; this run verifies HUD recovery after a new G2 connection")
     configure_logging()
     summary = asyncio.run(
         capture(
@@ -735,6 +789,7 @@ def main() -> None:
             lens_video=args.lens_video,
             _hermes_context=lambda: _live_hermes(args.bridge),
             _require_cancel=True,
+            _require_reconnect=True,
         )
     )
     print(json.dumps(summary, sort_keys=True))
