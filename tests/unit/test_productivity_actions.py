@@ -246,7 +246,7 @@ class TestCalendarCreation:
         assert result == "Created Calendar event: Design review."
         assert workflow_projection(updates) == [
             ("calendar", "verifying", "Design review", "Saving calendar event", "Checking native read-back", "Please wait"),
-            ("calendar", "saved", "Design review", "Saved and verified", "Calendar read-back matched", "left x2 Calendar"),
+            ("calendar", "saved", "Design review", "Saved and verified", "Calendar read-back matched", "left x2 Planning"),
         ]
         store.close()
 
@@ -272,7 +272,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         assert workflow_projection(updates)[-1] == (
             "calendar", "check", "Design review", "Check Calendar",
-            "It may have changed. Do not retry.", "Open Calendar on Mac",
+            "It may have changed. Do not retry.", "left x2 Planning",
         )
         store.close()
 
@@ -300,7 +300,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT count(*) FROM action_payloads").fetchone()[0] == 0
         assert workflow_projection(updates)[-1] == (
             "calendar", "saved", "Design review", "Saved and verified",
-            "Calendar read-back matched", "left x2 Calendar",
+            "Calendar read-back matched", "left x2 Planning",
         )
         store.close()
 
@@ -363,7 +363,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         assert workflow_projection(updates)[-1] == (
             "calendar", "check", "Design review", "Check Calendar",
-            "It may have changed. Do not retry.", "Open Calendar on Mac",
+            "It may have changed. Do not retry.", "left x2 Planning",
         )
         store.close()
 
@@ -387,7 +387,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "failed"
         assert workflow_projection(updates)[-1] == (
             "calendar", "failed", "Design review", "Not saved",
-            "No calendar item was changed.", "left x2 Calendar",
+            "No calendar item was changed.", "left x2 Planning",
         )
         store.close()
 
@@ -432,7 +432,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "rejected"
         assert workflow_projection(updates) == [
             ("calendar", "cancelled", "Design review", "Cancelled",
-             "No calendar item was changed.", "left x2 Calendar"),
+             "No calendar item was changed.", "left x2 Planning"),
         ]
         store.close()
 
@@ -577,7 +577,7 @@ class TestReminderCreation:
         ).fetchone()[0] == 1
         assert workflow_projection(updates) == [
             ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
-            ("reminders", "saved", "Buy filters", "Saved and verified", "Reminders read-back matched", "left x2 Reminders"),
+            ("reminders", "saved", "Buy filters", "Saved and verified", "Reminders read-back matched", "left x2 Planning"),
         ]
         store.close()
 
@@ -666,7 +666,7 @@ class TestReminderCreation:
         assert bridge.calls[-1][1]["calendar_identifier"] == "list-personal"
         assert workflow_projection(updates) == [
             ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
-            ("reminders", "completed", "Buy filters", "Completed and verified", "Reminders read-back matched", "left x2 Reminders"),
+            ("reminders", "completed", "Buy filters", "Completed and verified", "Reminders read-back matched", "left x2 Planning"),
         ]
         store.close()
 
@@ -697,7 +697,7 @@ class TestReminderCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         assert workflow_projection(updates)[-1] == (
             "reminders", "check", "Buy filters", "Check Reminders",
-            "It may have changed. Do not retry.", "Open Reminders on Mac",
+            "It may have changed. Do not retry.", "left x2 Planning",
         )
         store.close()
 

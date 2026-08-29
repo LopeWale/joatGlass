@@ -814,7 +814,9 @@ class ProductivityActionController:
         phase: WorkflowPhase,
     ) -> tuple[str, str, str]:
         native_app = "Calendar" if cls._workflow_domain(kind) == "calendar" else "Reminders"
-        return_hint = f"left x2 {native_app}"
+        # Both productivity domains return to one live planner, rather than
+        # splitting the wearer into stale Calendar and Reminders lists.
+        return_hint = "left x2 Planning"
         if phase == "verifying":
             subject = "calendar event" if kind == "calendar.create" else "reminder"
             return (f"Saving {subject}", "Checking native read-back", "Please wait")
@@ -823,7 +825,7 @@ class ProductivityActionController:
         if phase == "completed":
             return ("Completed and verified", "Reminders read-back matched", return_hint)
         if phase == "check":
-            return (f"Check {native_app}", "It may have changed. Do not retry.", f"Open {native_app} on Mac")
+            return (f"Check {native_app}", "It may have changed. Do not retry.", "left x2 Planning")
         if phase == "cancelled":
             return ("Cancelled", f"No {native_app.lower()} item was changed.", return_hint)
         if phase == "not_saved":
