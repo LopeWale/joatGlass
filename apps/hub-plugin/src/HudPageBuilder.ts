@@ -197,8 +197,8 @@ export class HudPageBuilder {
 
   /**
    * Pixel-designed HUD: four maximum-size image tiles form one 576x288 frame.
-   * Images cannot capture events, so one empty brightness-0 text container
-   * spans the canvas above them and preserves sys/text gesture delivery.
+   * Images cannot capture events, so one hardware-valid space-only text
+   * container spans the canvas behind them and preserves input delivery.
    */
   private visualObjects(): {
     textObject: TextContainerProperty[];
@@ -207,7 +207,7 @@ export class HudPageBuilder {
     return {
       textObject: [new TextContainerProperty({
         containerID: ContainerId.Main,
-        containerName: 'visual-gesture-layer',
+        containerName: 'visual-input',
         xPosition: 0,
         yPosition: 0,
         width: CANVAS.width,
@@ -215,30 +215,30 @@ export class HudPageBuilder {
         paddingLength: 0,
         borderWidth: 0,
         isEventCapture: 1,
-        zOrderIndex: 5,
+        zOrderIndex: 1,
         textColor: 0,
-        content: '',
+        content: ' ',
       })],
       imageObject: [
         new ImageContainerProperty({
           containerID: ContainerId.Image,
-          containerName: 'visual-top-left',
-          xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 1,
+          containerName: 'visual-tl',
+          xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 2,
         }),
         new ImageContainerProperty({
           containerID: ContainerId.VisualTopRight,
-          containerName: 'visual-top-right',
-          xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 2,
+          containerName: 'visual-tr',
+          xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 3,
         }),
         new ImageContainerProperty({
           containerID: ContainerId.VisualBottomLeft,
-          containerName: 'visual-bottom-left',
-          xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 3,
+          containerName: 'visual-bl',
+          xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 4,
         }),
         new ImageContainerProperty({
           containerID: ContainerId.VisualBottomRight,
-          containerName: 'visual-bottom-right',
-          xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 4,
+          containerName: 'visual-br',
+          xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 5,
         }),
       ],
     };

@@ -7,6 +7,7 @@ type Page = {
   containerTotalNum?: number;
   textObject?: Array<{
     containerID?: number;
+    containerName?: string;
     isEventCapture?: number;
     zOrderIndex?: number;
     xPosition?: number;
@@ -19,6 +20,7 @@ type Page = {
   }>;
   listObject?: Array<{
     containerID?: number;
+    containerName?: string;
     isEventCapture?: number;
     zOrderIndex?: number;
     xPosition?: number;
@@ -29,7 +31,12 @@ type Page = {
     borderColor?: number;
     itemContainer?: { itemCount?: number; itemName?: string[] };
   }>;
-  imageObject?: Array<{ containerID?: number; isEventCapture?: number; zOrderIndex?: number }>;
+  imageObject?: Array<{
+    containerID?: number;
+    containerName?: string;
+    isEventCapture?: number;
+    zOrderIndex?: number;
+  }>;
   menuObject?: { menuItems?: Array<{ itemID?: number; itemName?: string }> };
 };
 
@@ -57,7 +64,7 @@ describe('HudPageBuilder invariants', () => {
     expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
   });
 
-  it('makes the one-shot startup the real four-tile G2 surface', () => {
+  it('makes the one-shot startup an image-first hardware surface', () => {
     const startup = builder.visualStartup() as Page;
     expect(startup.containerTotalNum).toBe(5);
     expect(startup.menuObject).toBeUndefined();
@@ -65,9 +72,20 @@ describe('HudPageBuilder invariants', () => {
     expect(startup.textObject).toHaveLength(1);
     expect(startup.textObject?.[0]).toMatchObject({
       isEventCapture: 1,
-      content: '',
+      content: ' ',
       textColor: 0,
+      zOrderIndex: 1,
     });
+    expect(startup.imageObject?.every(
+      (image) => (image.zOrderIndex ?? 0) > (startup.textObject?.[0]?.zOrderIndex ?? 0),
+    )).toBe(true);
+  });
+
+  it('keeps every visual container name within the packaged-host limit', () => {
+    const visual = builder.visualLayout() as Page;
+    const names = containers(visual).map((container) => container.containerName);
+    expect(names.every((name) => typeof name === 'string' && name.length <= 16)).toBe(true);
+    expect(new Set(names).size).toBe(names.length);
   });
 
   it('makes menu-free compatibility durable across every later rebuild shape', () => {
@@ -194,7 +212,7 @@ describe('HudPageBuilder invariants', () => {
       .not.toMatch(/\b(?:left|right|ring|nod)\b/i);
   });
 
-  it('visual layout tiles the full canvas behind one transparent gesture layer', () => {
+  it('visual layout tiles the full canvas in front of one hardware-safe gesture layer', () => {
     const page = builder.visualLayout() as unknown as {
       containerTotalNum: number;
       textObject: Array<{
@@ -211,14 +229,14 @@ describe('HudPageBuilder invariants', () => {
     expect(page.textObject).toEqual([
       expect.objectContaining({
         xPosition: 0, yPosition: 0, width: 576, height: 288,
-        content: '', textColor: 0, isEventCapture: 1, zOrderIndex: 5,
+        content: ' ', textColor: 0, isEventCapture: 1, zOrderIndex: 1,
       }),
     ]);
     expect(page.imageObject).toEqual([
-      expect.objectContaining({ xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 1 }),
-      expect.objectContaining({ xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 2 }),
-      expect.objectContaining({ xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 3 }),
-      expect.objectContaining({ xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 4 }),
+      expect.objectContaining({ xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 2 }),
+      expect.objectContaining({ xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 3 }),
+      expect.objectContaining({ xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 4 }),
+      expect.objectContaining({ xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 5 }),
     ]);
   });
 
