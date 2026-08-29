@@ -8,9 +8,92 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from ..core.protocol import ProductivityHudView
+from ..native.bridge import (
+    NativeBridgeClient,
+    NativeBridgeError,
+    NativeBridgeProtocolError,
+    NativeBridgeUnavailable,
+)
 from ..persistence.tasks import TaskOccurrence, TaskOccurrenceStore
 
 log = logging.getLogger(__name__)
+
+
+def reminder_due_hud_view(card: str) -> ProductivityHudView:
+    """Turn a durable due card into the one read-only G2 reminder surface.
+
+    The task monitor owns *when* an alert is eligible.  This helper owns the
+    small, typed projection shared by the running Mac app and acceptance
+    harnesses, so evidence cannot quietly validate a different alarm screen.
+    """
+
+    title = card.removeprefix("!! ").split(" · Reminder\n", 1)[0].strip() or "Reminder"
+    return ProductivityHudView(
+        domain="reminders",
+        phase="due",
+        title=title[:72],
+        primary="Due now",
+        secondary="This reminder is still incomplete.",
+        hint="left x2 Reminders",
+    )
+
+
+async def evaluate_reminder_occurrence(
+    occurrence: TaskOccurrence,
+    bridge: NativeBridgeClient | None,
+) -> bool | None:
+    """Return whether the exact native Reminder is still incomplete.
+
+    ``None`` is deliberately fail-quiet: an unavailable EventKit bridge,
+    changed store generation, moved list, or ambiguous match must never turn
+    into a stale due card.  EventKit's own alarm remains the authoritative
+    fallback while the next monitor tick retries reconciliation.
+    """
+
+    if bridge is None:
+        return None
+    try:
+        listed = await bridge.call("reminders.listContainers")
+        containers = listed.result if isinstance(listed.result, list) else []
+        identifiers = [
+            item["calendar_identifier"]
+            for item in containers
+            if isinstance(item, dict)
+            and isinstance(item.get("calendar_identifier"), str)
+        ]
+        if occurrence.calendar_identifier not in identifiers:
+            return None
+        queried = await bridge.call(
+            "reminders.query",
+            {
+                "calendar_identifiers": [occurrence.calendar_identifier],
+                "include_completed": True,
+                "limit": 500,
+            },
+        )
+    except (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable):
+        return None
+    if (
+        listed.store_instance_id != queried.store_instance_id
+        or listed.store_generation != queried.store_generation
+    ):
+        return None
+    reminders = queried.result if isinstance(queried.result, list) else []
+    matches = [
+        item
+        for item in reminders
+        if isinstance(item, dict)
+        and item.get("calendar_item_identifier") == occurrence.external_item_id
+    ]
+    if len(matches) != 1:
+        return None
+    completed = matches[0].get("is_completed")
+    if completed is True:
+        return False
+    if completed is False:
+        return True
+    return None
 
 
 class TaskMonitor:
