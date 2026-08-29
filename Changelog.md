@@ -14,8 +14,12 @@
   pass; the five visual boot/render suites pass 137 tests, the production
   bundle builds, the full Hub-plugin suite passes 336 tests, and the official
   simulator framebuffer shows the modern rounded header/footer.
-  Packaging, private upload, installation, and physical-lens confirmation of
-  the next version remain with the existing release owner.
+  The release owner rebuilt this repair as private `com.akinwale.joat`
+  `v0.1.19` (68,794 bytes, SHA-256
+  `7c6a5868daa6cc7316b6de60fb0ae96fa5705c3a858e7061778e7b0cf6596b49`)
+  and the existing JOAT Even Hub project visibly lists that build. Phone
+  installation and physical-lens confirmation remain open; portal submission
+  and simulator frames are not substitutes for either.
 
 ## 2026-08-28
 
