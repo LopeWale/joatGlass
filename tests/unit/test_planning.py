@@ -154,6 +154,23 @@ def test_month_projection_marks_days_with_both_native_sources() -> None:
     assert selected.is_selected is True
 
 
+def test_event_crossing_midnight_is_visible_on_every_overlapping_calendar_day() -> None:
+    overnight = event("Red-eye review", datetime(2026, 9, 1, 23, 30, tzinfo=CHICAGO))
+    overnight["end_unix_ms"] = int(datetime(2026, 9, 2, 1, 0, tzinfo=CHICAGO).timestamp() * 1_000)
+
+    projection = project_planning(
+        selected_day=date(2026, 9, 2),
+        scope=PlanningScope.DAY,
+        zone=CHICAGO,
+        events=[overnight],
+        reminders=[],
+    )
+
+    assert [(entry.title, entry.time_label) for entry in projection.days[0].entries] == [
+        ("Red-eye review", "CONTINUES"),
+    ]
+
+
 def test_scope_navigation_keeps_the_wearer_on_human_calendar_boundaries() -> None:
     selected = date(2026, 1, 31)
 
