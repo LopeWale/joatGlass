@@ -25,10 +25,14 @@ Keep these independent:
    `--location-probe` during navigation: it is a separate high-accuracy
    session and intentionally cannot preempt a route.
 4. Confirm a navigation provider is configured. The current experimental
-   provider is Mapbox, so it requires both `MAPBOX_ACCESS_TOKEN` and
-   `JOAT_EXPERIMENTAL_NAVIGATION=1`. If either is absent, stop and record the
-   visible provider-unavailable error; that is a failed provider gate, not a
-   field run.
+   provider is Mapbox. When JOAT starts from Finder, it deliberately reads only
+   `MAPBOX_ACCESS_TOKEN` (or the legacy `MAPBOX_API_KEY`) from the selected
+   repository's local `.env`, maps it to the engine contract, and treats that
+   configured token as the local opt-in to experimental navigation. It forwards
+   no other `.env` values. An inherited
+   `JOAT_EXPERIMENTAL_NAVIGATION=false` still disables it explicitly. If no
+   token is present, stop and record the visible provider-unavailable error;
+   that is a failed provider gate, not a field run.
 5. Start one continuous video before speaking. Film the G2 optics closely
    enough to read each HUD transition. Mute the video before sharing if it
    includes the spoken address. Do not send an address screenshot or screen
