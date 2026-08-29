@@ -342,6 +342,14 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
+  it('left click selects an open menu row instead of leaving Calendar or Tasks inert', () => {
+    const { fire, sent, menu, imu } = make(true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+    expect(menu.handleClick).toHaveBeenCalledTimes(1);
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('list events: consumed by an open menu, relayed otherwise', () => {
     const open = make(true);
     open.fire({ listEvent: { containerID: 3 } });
