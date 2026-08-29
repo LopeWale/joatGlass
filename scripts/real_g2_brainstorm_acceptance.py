@@ -536,18 +536,20 @@ async def capture(
         gateway.on_hello(lambda message: hello.append(message.model))
         gateway.on_brainstorm_action(lambda message: actions.put_nowait(message.action))
 
-        hermes_context = _hermes_context() if _hermes_context is not None else _without_hermes()
         hermes_run = "not_exercised"
         g2_reconnect = "not_exercised"
         hermes_task: asyncio.Task[None] | None = None
         await gateway.start()
         try:
+            await _wait_for(
+                lambda: gateway.connected and bool(hello) and hello[-1] == "g2",
+                connect_timeout_s,
+                "waiting for the paired physical G2 connection",
+            )
+            # Do not even initialize the remote Agent Terminal until a
+            # physical G2 is attached to this opt-in acceptance gateway.
+            hermes_context = _hermes_context() if _hermes_context is not None else _without_hermes()
             async with hermes_context as hermes:
-                await _wait_for(
-                    lambda: gateway.connected and bool(hello) and hello[-1] == "g2",
-                    connect_timeout_s,
-                    "waiting for the paired physical G2 connection",
-                )
                 if hermes is None:
                     # Keep the existing local HUD-only contract runnable for
                     # isolated test coverage, but make its evidence boundary
