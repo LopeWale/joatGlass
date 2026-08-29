@@ -2,6 +2,15 @@
 
 ## 2026-08-29
 
+- Fixed the installed Finder-launched JOAT app's experimental-navigation
+  configuration handoff. It now forwards only the selected repository's
+  Mapbox token (`MAPBOX_ACCESS_TOKEN` or legacy `MAPBOX_API_KEY`) to its Python
+  child and treats that local configuration as explicit navigation opt-in;
+  unrelated `.env` values never enter the engine environment. Regression tests
+  cover legacy-key mapping, inherited-setting precedence, and absent-config
+  behavior. This source change requires a new Mac-app build/restart before
+  the running engine can use it; it does not constitute routing or G2 proof.
+
 - Repaired the physical G2 image transport: the visual renderer now sends one
   Gray4 value (`0..15`) per pixel at the SDK boundary, rather than packing two
   pixels into a byte. The previous packed payload could be acknowledged by the

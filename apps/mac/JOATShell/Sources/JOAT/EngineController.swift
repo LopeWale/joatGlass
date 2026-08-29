@@ -15,7 +15,28 @@ final class EngineController: ObservableObject {
     static let shared = EngineController()
 
     enum State: Equatable { case stopped, running, crashed(Int32), failed(String) }
-    private enum LaunchMode { case normal, brainstormAcceptance }
+    nonisolated static let g2BrainstormAcceptanceArmSchema =
+        "joat.g2-brainstorm-acceptance-arm.v1\n"
+
+    /// The only local input that can arm the in-engine proof workflow.  It is
+    /// a fixed vocabulary, owner-only one-shot—not a local command channel.
+    nonisolated static func writeG2BrainstormAcceptanceArm(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws -> URL {
+        let directory = homeDirectory
+            .appendingPathComponent("Library/Application Support/JOAT/acceptance/brainstorm")
+        let destination = directory.appendingPathComponent("arm.json")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try Data(g2BrainstormAcceptanceArmSchema.utf8).write(to: destination, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: destination.path
+        )
+        return destination
+    }
 
     /// Single source of truth for the engine's WS port — passed to the
     /// engine via --port and used by the stale-engine reaper. Overridable
@@ -30,6 +51,80 @@ final class EngineController: ObservableObject {
 
     nonisolated static func defaultSttPort(bundleIdentifier: String?) -> Int {
         bundleIdentifier == "com.joat.shell.debug" ? 51_060 : 50_060
+    }
+
+    /// Extract the two navigation settings the Python engine accepts from the
+    /// repository-local developer configuration.  A Finder-launched app does
+    /// not inherit Terminal or launchctl variables, so the child receives an
+    /// intentionally tiny allowlist rather than the whole `.env` file.
+    ///
+    /// A configured Mapbox token is an explicit opt-in to the local
+    /// experimental navigation lane. An inherited value, including an
+    /// explicit `false` flag, always wins over the repository configuration.
+    nonisolated static func navigationLaunchEnvironment(
+        inherited: [String: String],
+        repo: URL
+    ) -> [String: String] {
+        var environment = inherited
+        let configured = navigationConfiguration(at: repo.appendingPathComponent(".env"))
+
+        let inheritedToken = nonEmpty(environment["MAPBOX_ACCESS_TOKEN"])
+            ?? nonEmpty(environment["MAPBOX_API_KEY"])
+        let configuredToken = nonEmpty(configured["MAPBOX_ACCESS_TOKEN"])
+            ?? nonEmpty(configured["MAPBOX_API_KEY"])
+        let configuredTokenWasUsed = inheritedToken == nil && configuredToken != nil
+        if let token = inheritedToken ?? configuredToken {
+            environment["MAPBOX_ACCESS_TOKEN"] = token
+        }
+
+        if nonEmpty(environment["JOAT_EXPERIMENTAL_NAVIGATION"]) == nil {
+            if let enabled = nonEmpty(configured["JOAT_EXPERIMENTAL_NAVIGATION"]) {
+                environment["JOAT_EXPERIMENTAL_NAVIGATION"] = enabled
+            } else if configuredTokenWasUsed {
+                environment["JOAT_EXPERIMENTAL_NAVIGATION"] = "1"
+            }
+        }
+
+        // The engine contract has one token name.  Do not pass the legacy
+        // name through or accidentally expose unrelated `.env` values.
+        environment.removeValue(forKey: "MAPBOX_API_KEY")
+        return environment
+    }
+
+    private nonisolated static func navigationConfiguration(at url: URL) -> [String: String] {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            return [:]
+        }
+        var configuration: [String: String] = [:]
+        for rawLine in contents.split(whereSeparator: \.isNewline) {
+            var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            if line.hasPrefix("export ") {
+                line.removeFirst("export ".count)
+            }
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<separator]).trimmingCharacters(in: .whitespaces)
+            guard ["MAPBOX_ACCESS_TOKEN", "MAPBOX_API_KEY", "JOAT_EXPERIMENTAL_NAVIGATION"].contains(key) else {
+                continue
+            }
+            var value = String(line[line.index(after: separator)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.count >= 2,
+               let first = value.first,
+               (first == "\"" || first == "'"),
+               value.last == first {
+                value.removeFirst()
+                value.removeLast()
+            }
+            configuration[key] = value
+        }
+        return configuration
+    }
+
+    private nonisolated static func nonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     /// Hosted XCTest launches the application target to inject its bundle.
@@ -61,7 +156,6 @@ final class EngineController: ObservableObject {
 
     private var process: Process?
     private var userStopped = false
-    private var launchMode: LaunchMode = .normal
     private var recentCrashes: [Date] = []
     private var pendingStopCompletion: (() -> Void)?
 
@@ -72,10 +166,7 @@ final class EngineController: ObservableObject {
 
     var statusLine: String {
         switch state {
-        case .running:
-            launchMode == .brainstormAcceptance
-                ? "JOAT · G2 Brainstorm acceptance running"
-                : "JOAT · engine running"
+        case .running: "JOAT · engine running"
         case .stopped: "JOAT · stopped"
         case .crashed(let code): "JOAT · engine crashed (\(code))"
         case .failed(let why): "JOAT · \(why)"
@@ -251,7 +342,6 @@ final class EngineController: ObservableObject {
             "--stt-port", String(Self.sttPort),
         ]
             + (g2DiagnosticsEnabled ? ["--g2-diagnostics"] : [])
-            + (launchMode == .brainstormAcceptance ? ["--g2-brainstorm-acceptance"] : [])
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
         // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
@@ -262,6 +352,7 @@ final class EngineController: ObservableObject {
         if NativeBridgeServer.shared.isRunning {
             env["JOAT_NATIVE_BRIDGE"] = NativeBridgeServer.shared.socketURL.path
         }
+        env = Self.navigationLaunchEnvironment(inherited: env, repo: repo)
         p.environment = env
         p.standardOutput = log
         p.standardError = log
@@ -296,26 +387,23 @@ final class EngineController: ObservableObject {
     }
 
     func restart() {
-        launchMode = .normal
         stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
     }
 
-    /// An explicit Mac-side opt-in.  The child remains the exact PID admitted
-    /// by NativeBridgeServer, so the temporary G2 test never turns an
-    /// arbitrary shell process into an OpenClaw credential holder.
+    /// An explicit Mac-side opt-in that leaves the live engine, STT model, and
+    /// NativeBridge-authorized PID in place.  The engine consumes this fixed,
+    /// owner-only request once; no arbitrary shell gains OpenClaw identity.
     func runG2BrainstormAcceptance() {
-        guard launchMode != .brainstormAcceptance else { return }
-        launchMode = .brainstormAcceptance
-        if process == nil {
-            start()
-            return
+        do {
+            _ = try Self.writeG2BrainstormAcceptanceArm()
+            appendLog("[shell] live G2 Brainstorm acceptance requested; engine not restarted")
+            if process == nil {
+                start()
+            }
+        } catch {
+            appendLog("[shell] failed to request G2 Brainstorm acceptance: \(type(of: error))")
         }
-        stop { [weak self] in self?.start() }
-    }
-
-    var isG2BrainstormAcceptanceRunning: Bool {
-        state == .running && launchMode == .brainstormAcceptance
     }
 
     private func engineExited(code: Int32) {
@@ -325,14 +413,6 @@ final class EngineController: ObservableObject {
             state = .stopped
             pendingStopCompletion?()
             pendingStopCompletion = nil
-            return
-        }
-        if launchMode == .brainstormAcceptance, code == 0 {
-            // The Python acceptance controller only exits cleanly after it
-            // has emitted its owner-only receipt.  Return to normal JOAT
-            // rather than treating one completed field run as a crash.
-            launchMode = .normal
-            start()
             return
         }
         state = .crashed(code)
