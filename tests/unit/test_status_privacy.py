@@ -31,3 +31,18 @@ def test_personal_data_status_is_fixed_and_rejects_diagnostic_text(tmp_path: Pat
     assert snapshot["personal_data"] == {"state": "unavailable"}
     with pytest.raises(ValueError, match="personal-data bridge state"):
         status.set_personal_data(state="socket /private/path: leaked reminder")
+
+
+def test_disconnected_glasses_projection_clears_the_stale_device_identity(tmp_path: Path) -> None:
+    """A prior G2 serial must not make a disconnected link look live."""
+
+    path = tmp_path / "status.json"
+    status = StatusPublisher(path=path)
+    status.set(glasses="connected", device="g2 / S2001234567890", mic="streaming")
+
+    status.set(glasses="disconnected", device="", mic="off")
+
+    snapshot = json.loads(path.read_text())
+    assert snapshot["glasses"] == "disconnected"
+    assert snapshot["device"] == ""
+    assert snapshot["mic"] == "off"
