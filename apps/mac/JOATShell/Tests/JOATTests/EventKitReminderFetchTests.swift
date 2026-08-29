@@ -2,6 +2,38 @@ import XCTest
 @testable import JOAT
 
 final class EventKitReminderFetchTests: XCTestCase {
+    func testReminderDueWindowIsHalfOpenAndExcludesUndatedItems() throws {
+        let request = ReminderQueryRequest(
+            calendarIdentifiers: ["personal"],
+            includeCompleted: false,
+            limit: 500,
+            dueStartUnixMS: 1_788_220_000_000,
+            dueEndUnixMS: 1_788_306_400_000
+        )
+        let window = try EventKitService.reminderDueWindow(request)
+
+        XCTAssertTrue(EventKitService.reminderIsInDueWindow(1_788_220_000_000, window: window))
+        XCTAssertTrue(EventKitService.reminderIsInDueWindow(1_788_306_399_999, window: window))
+        XCTAssertFalse(EventKitService.reminderIsInDueWindow(1_788_306_400_000, window: window))
+        XCTAssertFalse(EventKitService.reminderIsInDueWindow(nil, window: window))
+    }
+
+    func testReminderDueWindowRejectsPartialOrReversedRange() {
+        XCTAssertThrowsError(try EventKitService.reminderDueWindow(ReminderQueryRequest(
+            calendarIdentifiers: ["personal"],
+            includeCompleted: false,
+            limit: 5,
+            dueStartUnixMS: 10
+        )))
+        XCTAssertThrowsError(try EventKitService.reminderDueWindow(ReminderQueryRequest(
+            calendarIdentifiers: ["personal"],
+            includeCompleted: false,
+            limit: 5,
+            dueStartUnixMS: 20,
+            dueEndUnixMS: 20
+        )))
+    }
+
     func testTaskCancellationCancelsEventKitRequestAndResumesContinuation() async {
         let started = expectation(description: "EventKit fetch started")
         let cancelled = expectation(description: "EventKit fetch cancelled")

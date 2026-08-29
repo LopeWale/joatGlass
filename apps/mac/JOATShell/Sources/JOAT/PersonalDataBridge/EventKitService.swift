@@ -267,6 +267,7 @@ actor EventKitService {
         guard (1...500).contains(request.limit) else {
             throw NativeBridgeError("invalid_limit", "reminder query limit must be 1 through 500")
         }
+        let dueWindow = try Self.reminderDueWindow(request)
         let calendars = try exactCalendars(
             identifiers: request.calendarIdentifiers,
             entity: .reminder,
@@ -301,6 +302,10 @@ actor EventKitService {
         let reminders = transferredReminders.value
         return reminders
             .filter { request.includeCompleted || !$0.isCompleted }
+            .filter { reminder in
+                guard let dueWindow else { return true }
+                return Self.reminderIsInDueWindow(reminderDueUnixMS(reminder), window: dueWindow)
+            }
             .sorted { reminderSortKey($0) < reminderSortKey($1) }
             .prefix(request.limit)
             .map(normalize(reminder:))
@@ -606,6 +611,31 @@ actor EventKitService {
             if let zone = components.timeZone { calendar.timeZone = zone }
             return calendar.date(from: components).map(unixMS)
         }
+    }
+
+    static func reminderDueWindow(
+        _ request: ReminderQueryRequest
+    ) throws -> (start: Int64, end: Int64)? {
+        switch (request.dueStartUnixMS, request.dueEndUnixMS) {
+        case (nil, nil):
+            return nil
+        case let (.some(start), .some(end)) where end > start:
+            return (start, end)
+        default:
+            throw NativeBridgeError(
+                "invalid_time_range",
+                "reminder query requires a complete increasing due window"
+            )
+        }
+    }
+
+    static func reminderIsInDueWindow(
+        _ dueUnixMS: Int64?,
+        window: (start: Int64, end: Int64)?
+    ) -> Bool {
+        guard let window else { return true }
+        guard let dueUnixMS else { return false }
+        return dueUnixMS >= window.start && dueUnixMS < window.end
     }
 
     private func civilTime(_ components: DateComponents) -> CivilTime? {

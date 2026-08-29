@@ -98,6 +98,31 @@ final class BridgePayloadDigestTests: XCTestCase {
         XCTAssertEqual(encoded["calendar_item_identifier"], .string("reminder-1"))
     }
 
+    func testReminderQueryCarriesAnOptionalDueWindowWithoutBreakingLegacyReads() throws {
+        let ranged = ReminderQueryRequest(
+            calendarIdentifiers: ["list-personal"],
+            includeCompleted: false,
+            limit: 500,
+            dueStartUnixMS: 1_788_220_000_000,
+            dueEndUnixMS: 1_788_306_400_000
+        )
+        let encoded = try XCTUnwrap(try BridgeContract.encode(ranged).objectValue)
+
+        XCTAssertEqual(encoded["due_start_unix_ms"], JSONValue.number(1_788_220_000_000))
+        XCTAssertEqual(encoded["due_end_unix_ms"], JSONValue.number(1_788_306_400_000))
+
+        let decoded = try BridgeContract.decode(ReminderQueryRequest.self, from: encoded)
+        XCTAssertEqual(decoded.dueStartUnixMS, 1_788_220_000_000)
+        XCTAssertEqual(decoded.dueEndUnixMS, 1_788_306_400_000)
+
+        let legacy = try JSONDecoder().decode(
+            ReminderQueryRequest.self,
+            from: Data(#"{"calendarIdentifiers":["list-personal"],"includeCompleted":false,"limit":5}"#.utf8)
+        )
+        XCTAssertNil(legacy.dueStartUnixMS)
+        XCTAssertNil(legacy.dueEndUnixMS)
+    }
+
     func testAcceptanceCleanupPayloadBindsExactNativeState() throws {
         let event = AcceptanceCalendarDeleteRequest(
             calendarIdentifier: "calendar-1",

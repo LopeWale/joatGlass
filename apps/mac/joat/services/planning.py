@@ -204,6 +204,8 @@ async def load_native_planning(
         "calendar_identifiers": _container_identifiers(reminder_containers),
         "include_completed": False,
         "limit": 500,
+        "due_start_unix_ms": int(start_at.timestamp() * 1_000),
+        "due_end_unix_ms": int(end_at.timestamp() * 1_000),
     })
     events = _dictionary_items(getattr(event_response, "result", None))
     reminders = _dictionary_items(getattr(reminder_response, "result", None))
