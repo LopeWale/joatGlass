@@ -86,6 +86,7 @@ def test_pass_requires_real_input_and_distinct_visible_frame_transitions() -> No
         "wearerVisibleHud": {"bridge": "verified", "lens": "not_recorded"},
         "lensVideoSha256": None,
         "hermesRun": "not_exercised",
+        "g2Reconnect": "not_exercised",
     }
 
 
@@ -123,12 +124,22 @@ def test_live_hermes_receipt_requires_left_double_cancel_and_cancelled_remote_ru
     assert summarize_receipt(
         receipt,
         hermes_run="cancelled",
+        g2_reconnect="restored",
         require_cancel=True,
+        require_reconnect=True,
     )["result"] == "pass"
     assert summarize_receipt(
         receipt,
         hermes_run="completed",
+        g2_reconnect="restored",
         require_cancel=True,
+        require_reconnect=True,
+    )["result"] == "inconclusive"
+    assert summarize_receipt(
+        receipt,
+        hermes_run="cancelled",
+        require_cancel=True,
+        require_reconnect=True,
     )["result"] == "inconclusive"
 
 
@@ -305,8 +316,10 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         _gateway_factory=gateway_factory,
         _hermes_context=lambda: hermes_context(),
         _require_cancel=True,
+        _require_reconnect=True,
     ))
     socket = await _connect_when_ready(f"ws://127.0.0.1:{unused_tcp_port}")
+    replacement: Any | None = None
     try:
         assert json.loads(await socket.recv()) == {"kind": "auth.accepted"}
         assert json.loads(await socket.recv()) == {
@@ -350,26 +363,49 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("d")),
         }))
-        await socket.send(json.dumps({"kind": "brainstorm.action", "action": "cancel"}))
+
+        reconnect_prompt = json.loads(await socket.recv())
+        assert reconnect_prompt["brainstorm"]["state"] == "running"
         await socket.send(json.dumps({
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("e")),
+        }))
+        await socket.close()
+        replacement = await _connect_when_ready(f"ws://127.0.0.1:{unused_tcp_port}")
+        assert json.loads(await replacement.recv()) == {"kind": "auth.accepted"}
+        assert json.loads(await replacement.recv()) == {
+            "kind": "g2.diagnostic.control", "enabled": True,
+        }
+        await replacement.send(json.dumps({
+            "kind": "hello", "sn": "not-retained", "model": "g2", "launchSource": "reconnect",
+        }))
+        restored = json.loads(await replacement.recv())
+        assert restored["brainstorm"]["state"] == "running"
+        await replacement.send(json.dumps({
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("f")),
+        }))
+        await replacement.send(json.dumps({"kind": "brainstorm.action", "action": "cancel"}))
+        await replacement.send(json.dumps({
             "kind": "g2.diagnostic",
             "event": _action("cancel", "brainstorm", "left", "double_press"),
         }))
 
-        cancelled = json.loads(await socket.recv())
+        cancelled = json.loads(await replacement.recv())
         assert cancelled["brainstorm"]["state"] == "cancelled"
-        await socket.send(json.dumps({
-            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("e"), "cancelled"),
+        await replacement.send(json.dumps({
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("a"), "cancelled"),
         }))
         summary = await task
     finally:
         await socket.close()
+        if replacement is not None:
+            await replacement.close()
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
     assert summary["result"] == "pass"
     assert summary["hermesRun"] == "cancelled"
+    assert summary["g2Reconnect"] == "restored"
     assert hermes.prompt is not None
     assert hermes.closed is True
     output = out.read_text()
