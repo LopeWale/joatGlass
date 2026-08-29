@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-08-29
+
+- Repaired the packaged-G2 visual HUD contract after a private `v0.1.18`
+  install showed the legacy text header/footer while the simulator showed the
+  four-tile renderer. The image-first startup and rebuild pages now keep their
+  required space-only event-capture text container behind every image tile,
+  matching the current Even hardware guidance instead of relying on the
+  simulator's tolerance for an empty foreground text layer. Visual container
+  names are also now unique and at most 16 characters; the shipped page used
+  names as long as 20 characters even though the packaged host limit is 16.
+  Focused regressions failed on both hardware-contract violations and now
+  pass; the five visual boot/render suites pass 137 tests, the production
+  bundle builds, the full Hub-plugin suite passes 336 tests, and the official
+  simulator framebuffer shows the modern rounded header/footer.
+  Packaging, private upload, installation, and physical-lens confirmation of
+  the next version remain with the existing release owner.
+
 ## 2026-08-28
 
 - Closed the installed-engine OpenClaw → Hermes → JOAT Calendar simulator gate.
