@@ -880,8 +880,10 @@ async def main() -> None:
     transport.on_hello(greet)
 
     def farewell() -> None:
-        # The pills must not lie about a link that is gone.
-        status.set(glasses="disconnected", mic="off")
+        # The pills must not lie about a link that is gone.  The serial is
+        # part of the live-link projection too: retaining it made a stale
+        # disconnected row look like the G2 was still attached.
+        status.set(glasses="disconnected", device="", mic="off")
         # A replaced WebContent process has lost its phone-side tracker. Until
         # route rehydration has evidence, keeping the Mac session "installed"
         # would be a stale-direction safety bug.
