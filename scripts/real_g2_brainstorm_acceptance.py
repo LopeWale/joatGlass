@@ -419,14 +419,14 @@ async def _without_hermes() -> AsyncIterator[HermesStream | None]:
     yield None
 
 
-async def _consume_hermes(agent: HermesStream) -> None:
+async def _consume_hermes(agent: HermesStream, first_chunk: asyncio.Event) -> None:
     """Exercise a real stream while deliberately retaining none of its text."""
 
     async for _ignored_chunk in agent.stream(_HERMES_ACCEPTANCE_PROMPT):
         # Do not aggregate, display, log, hash, or otherwise retain remote
         # content.  Cancellation propagates into OpenClawTerminalAgent, which
         # performs its bounded `sessions.abort` confirmation before closing.
-        pass
+        first_chunk.set()
 
 
 def _view(
@@ -539,6 +539,7 @@ async def capture(
         hermes_run = "not_exercised"
         g2_reconnect = "not_exercised"
         hermes_task: asyncio.Task[None] | None = None
+        hermes_first_chunk = asyncio.Event()
         await gateway.start()
         try:
             await _wait_for(
@@ -581,7 +582,12 @@ async def capture(
                         action_timeout_s,
                         "begin action did not retain its physical G2 receipt",
                     )
-                    hermes_task = asyncio.create_task(_consume_hermes(hermes))
+                    hermes_task = asyncio.create_task(_consume_hermes(hermes, hermes_first_chunk))
+                    await _wait_for(
+                        hermes_first_chunk.is_set,
+                        action_timeout_s,
+                        "Hermes did not produce a bounded acceptance stream",
+                    )
                     await gateway.send(_view(
                         "brainstorm",
                         activity="Hermes acceptance run active",

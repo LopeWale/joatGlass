@@ -284,8 +284,8 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
 
         async def stream(self, prompt: str) -> AsyncIterator[str]:
             self.prompt = prompt
-            await self._never.wait()
             yield "private remote text that must never be retained"
+            await self._never.wait()
 
         async def close(self) -> None:
             self.closed = True
