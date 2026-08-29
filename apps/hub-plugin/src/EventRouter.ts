@@ -305,7 +305,8 @@ export class EventRouter {
 
     if (
       type === OsEventTypeList.CLICK_EVENT &&
-      (source === EventSourceType.TOUCH_EVENT_FROM_RING ||
+      (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L ||
+        source === EventSourceType.TOUCH_EVENT_FROM_RING ||
         source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) &&
       this.menu.handleClick()
     ) {
