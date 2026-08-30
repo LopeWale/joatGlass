@@ -292,6 +292,116 @@ async def _wait_console_marker(
     raise ProductivityHudFlowError(f"timed out waiting for simulator console marker {marker!r}")
 
 
+_VISUAL_FRAME_ACK = b"[HudVisualSurface] frame "
+_SIMULATOR_BRIDGE_MESSAGE = b"[Simulator] Flutter Bridge intercepted: evenAppMessage"
+
+
+@dataclass(frozen=True, slots=True)
+class VisualFrameCheckpoint:
+    """Content-free counters observed before one renderer-causing action."""
+
+    completed_frames: int
+    simulator_messages: int
+
+
+def visual_frame_ack_count(console: bytes) -> int:
+    """Return completed four-tile frame receipts, never arbitrary console lines.
+
+    The official simulator applies its four image updates independently.  A
+    screenshot can therefore observe a visually torn intermediate state even
+    when its pixels have stopped changing briefly.  The production visual
+    surface emits this development-only receipt only after every tile upload
+    for a frame has succeeded; acceptance waits for a new receipt before it
+    retains a framebuffer for the action that caused it.
+    """
+
+    return sum(
+        line.startswith(_VISUAL_FRAME_ACK) and line.endswith(b" bridge-ack")
+        for line in console.splitlines()
+    )
+
+
+def simulator_bridge_message_count(console: bytes) -> int:
+    """Count the simulator's one-message-per-native-bridge-call trace."""
+
+    return console.count(_SIMULATOR_BRIDGE_MESSAGE)
+
+
+async def _visual_frame_checkpoint(automation_base: str) -> VisualFrameCheckpoint:
+    """Capture the current completed-frame counter for one causal action."""
+
+    try:
+        console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
+    except (OSError, urllib.error.URLError) as exc:
+        raise ProductivityHudFlowError("could not read simulator visual-frame receipts") from exc
+    return VisualFrameCheckpoint(
+        completed_frames=visual_frame_ack_count(console),
+        simulator_messages=simulator_bridge_message_count(console),
+    )
+
+
+async def _wait_for_visual_frame(
+    automation_base: str,
+    *,
+    after: VisualFrameCheckpoint,
+    label: str,
+    timeout_s: float = 15.0,
+) -> VisualFrameCheckpoint:
+    """Wait for the full production canvas frame caused after ``after``.
+
+    This remains content-free: it validates only the renderer's completed
+    four-tile boundary.  The caller separately validates the Mac-side model
+    and retains the visible framebuffer, so a console acknowledgement alone
+    never becomes UI proof.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    last = after
+    while time.monotonic() < deadline:
+        try:
+            console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
+        except (OSError, urllib.error.URLError):
+            await asyncio.sleep(0.1)
+            continue
+        current = VisualFrameCheckpoint(
+            completed_frames=visual_frame_ack_count(console),
+            simulator_messages=simulator_bridge_message_count(console),
+        )
+        last = current
+        if current.completed_frames > after.completed_frames:
+            return current
+        # Official simulator console logs do not expose the app-level console
+        # in every live-menu route. Four new Flutter bridge messages are the
+        # SDK's four image-container uploads for one complete visual frame.
+        # The caller still requires a distinct, settled framebuffer afterward.
+        if current.simulator_messages >= after.simulator_messages + 4:
+            return current
+        await asyncio.sleep(0.1)
+    raise ProductivityHudFlowError(
+        f"{label}: no completed four-tile HUD frame "
+        f"(frames {after.completed_frames}->{last.completed_frames}, "
+        f"bridge messages {after.simulator_messages}->{last.simulator_messages})"
+    )
+
+
+async def _send_after_full_visual_frame(
+    gateway: RecordingGateway,
+    message: DownlinkMessage,
+    *,
+    automation_base: str,
+    label: str,
+) -> None:
+    """Deliver a production downlink and wait for its complete canvas frame."""
+
+    checkpoint = await _visual_frame_checkpoint(automation_base)
+    await gateway.send(message)
+    await _wait_for_visual_frame(
+        automation_base,
+        after=checkpoint,
+        label=label,
+    )
+
+
 def _start_process(
     name: str,
     command: list[str],
@@ -449,10 +559,16 @@ async def _confirm(
     receipt_name: str,
     prior_digest: str | None,
 ) -> tuple[str, dict[str, str]]:
+    frame_checkpoint = await _visual_frame_checkpoint(automation_base)
     request = asyncio.create_task(gateway.request_confirmation(action_id, prompt, timeout_s=8))
     await _wait_for(
         lambda: action_id if action_id in gateway.confirmation_requests else None,
         label=f"{action_id} confirmation downlink",
+    )
+    await _wait_for_visual_frame(
+        automation_base,
+        after=frame_checkpoint,
+        label=f"{action_id} confirmation",
     )
     digest, raw, alpha = await _capture(automation_base, output, receipt_name, prior_digest)
     await _input(automation_base, "click")
@@ -518,10 +634,16 @@ async def _planning_click(
     """Drive one actual menu selection and wait for the authoritative list."""
 
     before = len(gateway.sent)
+    frame_checkpoint = await _visual_frame_checkpoint(automation_base)
     await _input(automation_base, "click")
     rendered = await _wait_for(
         lambda: _planning_list_after(gateway, after=before),
         label=f"{name} Mac Planning response",
+    )
+    await _wait_for_visual_frame(
+        automation_base,
+        after=frame_checkpoint,
+        label=name,
     )
     digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
     validate_planning_screen(phase, rendered)
@@ -544,10 +666,16 @@ async def _wait_for_productivity_return(
     answer with the native-shaped day projection before a framebuffer is kept.
     """
 
+    frame_checkpoint = await _visual_frame_checkpoint(automation_base)
     rendered = await _wait_for(
         lambda: _planning_list_after(gateway, after=after),
         label=f"{name} automatic Planning response",
         timeout_s=8.0,
+    )
+    await _wait_for_visual_frame(
+        automation_base,
+        after=frame_checkpoint,
+        label=name,
     )
     digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
     validate_planning_screen("day", rendered)
@@ -723,7 +851,15 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, primary, secondary, hint, input_action, accepted in calendar_states:
             before = len(gateway.sent)
-            await gateway.send(_view("calendar", phase, title="Design review", primary=primary, secondary=secondary, hint=hint))
+            await _send_after_full_visual_frame(
+                gateway,
+                _view(
+                    "calendar", phase, title="Design review", primary=primary,
+                    secondary=secondary, hint=hint,
+                ),
+                automation_base=automation_base,
+                label=name,
+            )
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
@@ -761,26 +897,45 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, primary, secondary, hint, input_action, accepted in reminder_states:
             before = len(gateway.sent)
-            await gateway.send(_view("reminders", phase, title="Buy filters", primary=primary, secondary=secondary, hint=hint))
+            await _send_after_full_visual_frame(
+                gateway,
+                _view(
+                    "reminders", phase, title="Buy filters", primary=primary,
+                    secondary=secondary, hint=hint,
+                ),
+                automation_base=automation_base,
+                label=name,
+            )
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
 
         before = len(gateway.sent)
-        await gateway.send(_view(
-            "reminders",
-            "saved",
-            title="Buy filters",
-            primary="Saved and verified",
-            secondary="Native alarm set · JOAT monitoring armed.",
-            hint="Monitoring next · left x2 Planning",
-            monitoring_armed=True,
-        ))
+        await _send_after_full_visual_frame(
+            gateway,
+            _view(
+                "reminders",
+                "saved",
+                title="Buy filters",
+                primary="Saved and verified",
+                secondary="Native alarm set · JOAT monitoring armed.",
+                hint="Monitoring next · left x2 Planning",
+                monitoring_armed=True,
+            ),
+            automation_base=automation_base,
+            label="reminders-saved",
+        )
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-saved", digest,
         )
         receipts.append(ScreenReceipt("reminders-saved", None, None, "saved", digest))
         artifacts["reminders-saved"] = {"raw": raw, "alpha": alpha}
+        monitoring_checkpoint = await _visual_frame_checkpoint(automation_base)
+        await _wait_for_visual_frame(
+            automation_base,
+            after=monitoring_checkpoint,
+            label="reminders-monitoring",
+        )
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-monitoring", digest,
         )
@@ -797,6 +952,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(ScreenReceipt("reminders-monitoring-return-planning", None, None, "day", digest))
         artifacts["reminders-monitoring-return-planning"] = artifact
 
+        due_checkpoint = await _visual_frame_checkpoint(automation_base)
         due_delivery = asyncio.create_task(gateway.request_reminder_due_ack(_view(
             "reminders",
             "due",
@@ -808,6 +964,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             # reminder content participates in the receipt protocol.
             reminder_due_id="67ec97c5-a0fd-48ec-89cb-1b756ddaf87a",
         )))
+        await _wait_for_visual_frame(
+            automation_base,
+            after=due_checkpoint,
+            label="reminders-due",
+        )
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
         )
@@ -840,7 +1001,15 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, primary, secondary, hint, input_action, accepted in completion_states:
             before = len(gateway.sent)
-            await gateway.send(_view("reminders", phase, title="Buy filters", primary=primary, secondary=secondary, hint=hint))
+            await _send_after_full_visual_frame(
+                gateway,
+                _view(
+                    "reminders", phase, title="Buy filters", primary=primary,
+                    secondary=secondary, hint=hint,
+                ),
+                automation_base=automation_base,
+                label=name,
+            )
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
@@ -870,6 +1039,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
                 "hubClientAcceptance": "generation-bound reminder_due acknowledgement from the current production Hub client; not a macOS banner or physical-G2 visual proof",
+                "frameCompleteness": "each retained framebuffer follows either a completed production visual-frame receipt or four new simulator native-bridge image transfers, then a distinct settled screenshot; simulator-only evidence",
                 "terminalOutcomeReturn": "every terminal Calendar and Reminders outcome waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",
                 "physicalG2": "not run",

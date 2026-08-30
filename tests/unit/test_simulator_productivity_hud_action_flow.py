@@ -84,3 +84,21 @@ def test_planning_day_receipt_requires_both_native_kinds() -> None:
             items=["10:30 · EVENT · Design review"],
             planning_grid=None,
         ))
+
+
+def test_frame_counter_accepts_only_completed_visual_surface_receipts() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    assert driver.visual_frame_ack_count(
+        b"[HudVisualSurface] frame 4 bridge-ack\n"
+        b"[HudVisualSurface] frame paint failed\n"
+        b"[HudVisualSurface] frame 5 bridge-ack\n"
+    ) == 2
+    assert driver.visual_frame_ack_count(
+        b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
+    ) == 0
+    assert driver.simulator_bridge_message_count(
+        b"[Simulator] Flutter Bridge intercepted: evenAppMessage\n" * 4
+        + b"[HudVisualSurface] frame 4 bridge-ack\n"
+    ) == 4
