@@ -41,7 +41,7 @@ from joat.services.brainstorm_acceptance import (
     MAX_RETAINED_EVENTS,
     RUN_SCHEMA,
     file_sha256,
-    make_g2_gesture_acceptance_session,
+    try_start_g2_gesture_acceptance,
 )
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
@@ -564,25 +564,28 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     def on_action(action: BrainstormAction) -> None:
         actions.append(action)
         if action.action == "begin_acceptance":
-            candidate = make_g2_gesture_acceptance_session(
+            rejection = try_start_g2_gesture_acceptance(
                 transport=gateway,
                 terminal=lambda: terminal,
                 trigger=action,
+                start_session=sessions.try_start_session,
+                # The harness is its own explicit simulator-only test mode;
+                # production actions reach this same function unarmed.
+                acceptance_armed=True,
                 output_directory=receipt_directory,
                 action_timeout_s=15.0,
                 connect_timeout_s=30.0,
                 simulator_override=True,
             )
-            if candidate is None:
+            if rejection is not None:
                 hello = gateway.hello
                 raise BrainstormActionFlowError(
-                    "fixed acceptance factory rejected simulator classification "
+                    "explicit acceptance route rejected simulator classification "
+                    f"state={rejection.state} activity={rejection.activity!r} "
                     f"model={hello.model if hello else 'missing'} "
                     f"launch={hello.launch_source if hello else 'missing'} "
                     f"physical={gateway.physical_g2_connected}"
                 )
-            if not sessions.try_start_session(candidate):
-                raise BrainstormActionFlowError("fixed acceptance session did not start")
             return
         sessions.handle_brainstorm_action(action)
 
