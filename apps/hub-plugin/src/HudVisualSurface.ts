@@ -172,6 +172,14 @@ interface PendingPaint {
   resolve: Array<(painted: boolean) => void>;
 }
 
+function pixelsEqual(left: Uint8Array | undefined, right: Uint8Array): boolean {
+  if (left === undefined || left.length !== right.length) return false;
+  for (let index = 0; index < right.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
 /**
  * Split one row-major raw Gray8 frame into the SDK's four maximum-size
  * images. A byte-per-pixel buffer must remain Gray8; it is neither packed
@@ -232,6 +240,7 @@ export async function encodeGray8TilePng(tile: HudImageTile): Promise<Uint8Array
 export class HudVisualSurface implements HudFramePainter {
   private painting = false;
   private readonly queue: PendingPaint[] = [];
+  private readonly deliveredTiles = new Map<number, Uint8Array>();
   private frameNumber = 0;
 
   constructor(
@@ -279,8 +288,16 @@ export class HudVisualSurface implements HudFramePainter {
     let current: { order: number; tile: HudImageTile } | undefined;
     try {
       const tiles = await this.renderer.render(frame);
+      // Navigation acknowledges an exact route generation only after four
+      // bridge writes. Confirmation is an exclusive decision surface and may
+      // never inherit a quadrant from the page beneath it.
+      const requiresCompleteTransfer = frame.kind === 'confirmation' || frame.kind === 'navigation';
       for (const [order, tile] of tiles.entries()) {
         current = { order, tile };
+        if (
+          !requiresCompleteTransfer
+          && pixelsEqual(this.deliveredTiles.get(tile.containerId), tile.pixels)
+        ) continue;
         const containerName = VisualContainerName[tile.containerId];
         if (!containerName) throw new Error(`unknown visual container ${tile.containerId}`);
         const imageData = await this.imageEncoder(tile);
@@ -302,7 +319,11 @@ export class HudVisualSurface implements HudFramePainter {
           containerId: tile.containerId as 4 | 8 | 9 | 10,
           outcome,
         });
-        if (outcome === 'failed') return false;
+        if (outcome === 'failed') {
+          this.deliveredTiles.clear();
+          return false;
+        }
+        this.deliveredTiles.set(tile.containerId, tile.pixels.slice());
       }
       // This opt-in receipt binds the accepted G2 action to the completed
       // four-tile output without retaining a frame, text, topic, or device
@@ -313,6 +334,7 @@ export class HudVisualSurface implements HudFramePainter {
         .catch(() => undefined);
       return true;
     } catch {
+      this.deliveredTiles.clear();
       if (current) {
         this.diagnostics?.record({
           type: 'tile_upload',
