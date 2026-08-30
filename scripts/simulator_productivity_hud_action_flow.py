@@ -68,16 +68,30 @@ _EXPECTED_FLOW = (
     ("calendar-saved", None, None, "saved"),
     ("calendar-return-planning", None, None, "day"),
     ("calendar-failed", None, None, "failed"),
+    ("calendar-failed-return-planning", None, None, "day"),
     ("calendar-uncertain", None, None, "check"),
+    ("calendar-uncertain-return-planning", None, None, "day"),
+    ("calendar-cancelled", None, None, "cancelled"),
+    ("calendar-cancelled-return-planning", None, None, "day"),
+    ("calendar-not-saved", None, None, "not_saved"),
+    ("calendar-not-saved-return-planning", None, None, "day"),
     ("reminders-review", None, None, "review"),
     ("reminders-verifying", "click", True, "verifying"),
     ("reminders-saved", None, None, "saved"),
+    ("reminders-saved-return-planning", None, None, "day"),
     ("reminders-due", None, None, "due"),
     ("reminders-complete-review", None, None, "review"),
     ("reminders-completing", "click", True, "verifying"),
     ("reminders-completed", None, None, "completed"),
+    ("reminders-completed-return-planning", None, None, "day"),
     ("reminders-failed", None, None, "failed"),
+    ("reminders-failed-return-planning", None, None, "day"),
     ("reminders-uncertain", None, None, "check"),
+    ("reminders-uncertain-return-planning", None, None, "day"),
+    ("reminders-cancelled", None, None, "cancelled"),
+    ("reminders-cancelled-return-planning", None, None, "day"),
+    ("reminders-not-saved", None, None, "not_saved"),
+    ("reminders-not-saved-return-planning", None, None, "day"),
 )
 
 
@@ -689,6 +703,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ("calendar-saved", "saved", "Saved and verified", "Calendar read-back matched", "Planning in 5s · left x2 now", None, None),
             ("calendar-failed", "failed", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
             ("calendar-uncertain", "check", "Check Calendar", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-cancelled", "cancelled", "Cancelled", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-not-saved", "not_saved", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in calendar_states:
             before = len(gateway.sent)
@@ -696,17 +712,22 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
-            if phase == "saved":
+            if phase in {"saved", "failed", "check", "cancelled", "not_saved"}:
+                return_name = (
+                    "calendar-return-planning"
+                    if name == "calendar-saved"
+                    else f"{name}-return-planning"
+                )
                 digest, artifact = await _wait_for_productivity_return(
                     gateway,
                     after=before,
                     automation_base=automation_base,
                     output=args.out,
-                    name=f"{len(receipts) + 2:02d}-calendar-return-planning",
+                    name=f"{len(receipts) + 2:02d}-{return_name}",
                     prior_digest=digest,
                 )
-                receipts.append(ScreenReceipt("calendar-return-planning", None, None, "day", digest))
-                artifacts["calendar-return-planning"] = artifact
+                receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
+                artifacts[return_name] = artifact
 
         digest, artifact = await _confirm(
             gateway,
@@ -726,10 +747,22 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ("reminders-due", "due", "Due now", "This reminder is still incomplete.", "say complete reminder title · left x2 Planning", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in reminder_states:
+            before = len(gateway.sent)
             await gateway.send(_view("reminders", phase, title="Buy filters", primary=primary, secondary=secondary, hint=hint))
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
+            if phase == "saved":
+                digest, artifact = await _wait_for_productivity_return(
+                    gateway,
+                    after=before,
+                    automation_base=automation_base,
+                    output=args.out,
+                    name=f"{len(receipts) + 2:02d}-reminders-saved-return-planning",
+                    prior_digest=digest,
+                )
+                receipts.append(ScreenReceipt("reminders-saved-return-planning", None, None, "day", digest))
+                artifacts["reminders-saved-return-planning"] = artifact
 
         digest, artifact = await _confirm(
             gateway,
@@ -748,12 +781,27 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ("reminders-completed", "completed", "Completed and verified", "Reminders read-back matched", "Planning in 5s · left x2 now", None, None),
             ("reminders-failed", "failed", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
             ("reminders-uncertain", "check", "Check Reminders", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-cancelled", "cancelled", "Cancelled", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-not-saved", "not_saved", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in completion_states:
+            before = len(gateway.sent)
             await gateway.send(_view("reminders", phase, title="Buy filters", primary=primary, secondary=secondary, hint=hint))
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
+            if phase in {"completed", "failed", "check", "cancelled", "not_saved"}:
+                return_name = f"{name}-return-planning"
+                digest, artifact = await _wait_for_productivity_return(
+                    gateway,
+                    after=before,
+                    automation_base=automation_base,
+                    output=args.out,
+                    name=f"{len(receipts) + 2:02d}-{return_name}",
+                    prior_digest=digest,
+                )
+                receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
+                artifacts[return_name] = artifact
 
         validate_flow(receipts)
         return {
@@ -767,7 +815,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
-                "terminalOutcomeReturn": "calendar saved waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
+                "terminalOutcomeReturn": "every terminal Calendar and Reminders outcome waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",
                 "physicalG2": "not run",
             },
