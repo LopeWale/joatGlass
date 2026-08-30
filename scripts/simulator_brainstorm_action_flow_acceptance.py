@@ -130,6 +130,15 @@ _BANNED_EVIDENCE_KEYS = frozenset({
     "audio", "content", "endpoint", "message", "payload", "prompt", "topic",
     "transcript", "url",
 })
+_DEFAULT_WS_HOST = "emmanuels-macbook-pro.local"
+
+
+def default_ws_url(port: int) -> str:
+    """Derive the disposable simulator origin from its isolated gateway port."""
+
+    if not 1 <= port <= 65_535:
+        raise ValueError("simulator WebSocket port is invalid")
+    return f"ws://{_DEFAULT_WS_HOST}:{port}/glasses"
 
 
 def _is_sha256(value: object) -> bool:
@@ -851,8 +860,8 @@ def main() -> None:
     parser.add_argument("--ws-listen-host", default="0.0.0.0")
     parser.add_argument(
         "--ws-url",
-        default="ws://emmanuels-macbook-pro.local:8793/glasses",
-        help="Isolated local WebSocket gateway for the disposable simulator manifest.",
+        default=None,
+        help="Isolated local WebSocket gateway for the disposable simulator manifest. Defaults to --ws-port.",
     )
     parser.add_argument(
         "--simulator",
@@ -862,6 +871,8 @@ def main() -> None:
     args = parser.parse_args()
     args.repo = args.repo.resolve()
     args.out = args.out.resolve()
+    if args.ws_url is None:
+        args.ws_url = default_ws_url(args.ws_port)
     try:
         summary = asyncio.run(_run(args))
     except BrainstormActionFlowError as exc:

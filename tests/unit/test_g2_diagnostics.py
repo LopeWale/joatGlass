@@ -48,3 +48,27 @@ async def test_store_coalesces_one_loop_turn_into_one_background_write(tmp_path)
 
     assert len(writes) == 1
     assert [event["gesture"] for event in writes[0]] == ["tap", "scroll_down"]
+
+
+async def test_store_observes_the_sanitized_snapshot_before_background_persistence(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    writes: list[list[dict[str, object]]] = []
+    observed: list[list[dict[str, object]]] = []
+
+    def writer(_path, events) -> None:  # type: ignore[no-untyped-def]
+        writes.append(events)
+
+    def observer(events) -> None:  # type: ignore[no-untyped-def]
+        observed.append(events)
+
+    store = G2DiagnosticStore(
+        path=tmp_path / "g2-diagnostics.json",
+        writer=writer,
+        observer=observer,
+    )
+    store.record({"type": "gesture", "gesture": "tap", "delivery": "sys"})
+
+    assert len(observed) == 1
+    assert observed[0][0]["gesture"] == "tap"
+    assert writes == []
+    await store.flush()
+    assert len(writes) == 1

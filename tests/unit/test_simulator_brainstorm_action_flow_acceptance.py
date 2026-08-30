@@ -6,9 +6,16 @@ from joat.services.brainstorm_acceptance import RUN_SCHEMA
 from scripts.simulator_brainstorm_action_flow_acceptance import (
     BrainstormActionFlowError,
     ScreenReceipt,
+    default_ws_url,
     validate_visual_artifacts,
     validate_flow,
 )
+
+
+def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:
+    assert default_ws_url(8797) == "ws://emmanuels-macbook-pro.local:8797/glasses"
+    with pytest.raises(ValueError, match="port"):
+        default_ws_url(0)
 
 
 def _frames() -> list[ScreenReceipt]:

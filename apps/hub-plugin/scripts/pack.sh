@@ -33,4 +33,8 @@ if find "$pack_stage" -type f -path '*/__joat-*/*' | grep -q .; then
   exit 1
 fi
 
-evenhub pack app.json "$pack_stage" -o joat.ehpk --sdk-ver 0.0.14
+# Keep the packaged floor reproducible when the registry is temporarily
+# unreachable. SDK 0.0.14 requires Even App 2.2.9; app.json is the reviewed
+# source of truth and the CLI must preserve it rather than use its stale
+# bundled fallback.
+evenhub pack app.json "$pack_stage" -o joat.ehpk --sdk-ver 0.0.14 --enforce-manual-version

@@ -253,6 +253,10 @@ class BrainstormAction:
     surface: Literal["brainstorm"] | None = None
     source: Literal["right", "ring"] | None = None
     gesture: Literal["double_press"] | None = None
+    # Set only by HubGatewayTransport after the authenticated WebSocket has
+    # been selected as the current wearer connection.  It is deliberately not
+    # a wire field: a plugin must never be able to nominate a generation.
+    connection_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

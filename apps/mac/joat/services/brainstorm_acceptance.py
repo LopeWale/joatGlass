@@ -402,9 +402,10 @@ class InAppBrainstormAcceptance:
         self._events.append(dict(self._trigger_event))
         self._is_isolated = is_isolated or (lambda: True)
         self._connection_generation = connection_generation
+        self._action_generation = connection_generation
         self._evidence_mode = evidence_mode
         self._on_complete = on_complete
-        self._actions: asyncio.Queue[str] = asyncio.Queue()
+        self._actions: asyncio.Queue[BrainstormAction] = asyncio.Queue()
         self._accepted_hello = asyncio.Event()
         self._replacement_hello = asyncio.Event()
         self._reconnect_generation_floor: int | None = None
@@ -419,6 +420,16 @@ class InAppBrainstormAcceptance:
 
     def observe_diagnostics(self, _path: Path, events: list[dict[str, Any]]) -> None:
         """G2DiagnosticStore callback; receives only protocol-sanitized events."""
+
+        self.observe_diagnostic_events(events)
+
+    def observe_diagnostic_events(self, events: list[dict[str, Any]]) -> None:
+        """Admit a direct, already-sanitized diagnostic snapshot.
+
+        This updates acceptance causality before the best-effort owner-only
+        receipt write.  It deliberately receives the same bounded vocabulary
+        as the persistence writer—never HUD text, transcript, or payload.
+        """
 
         retained = [dict(self._trigger_event)]
         for sequence, event in enumerate(events, start=2):
@@ -493,14 +504,27 @@ class InAppBrainstormAcceptance:
         generation = self._transport.connection_generation
         if generation == self._connection_generation:
             self._accepted_hello.set()
-        elif (
+            return
+        if generation > self._action_generation:
+            # A real replacement before the explicit reconnect prompt is not
+            # acceptance evidence, but it *is* now the current G2 surface.
+            # Subsequent controls must bind to it rather than to the closed
+            # predecessor.  The separate floor below still prevents it from
+            # satisfying the later reconnect gate.
+            self._action_generation = generation
+        if (
             self._reconnect_generation_floor is not None
             and generation > self._reconnect_generation_floor
         ):
             self._replacement_hello.set()
 
     def _on_action(self, action: BrainstormAction) -> None:
-        self._actions.put_nowait(action.action)
+        # A replay from the replaced authenticated socket is a valid-looking
+        # control with the wrong wearer generation.  It cannot advance this
+        # run or be retained as evidence for its successor.
+        if action.connection_generation != self._action_generation:
+            return
+        self._actions.put_nowait(action)
 
     async def _wait_for(self, predicate: Callable[[], bool], timeout_s: float, message: str) -> None:
         deadline = time.monotonic() + timeout_s
@@ -530,9 +554,12 @@ class InAppBrainstormAcceptance:
         self._require_isolated()
 
     async def _expect(self, action: str) -> None:
+        before = len(self._events)
         observed = await asyncio.wait_for(self._actions.get(), self._action_timeout_s)
-        if observed != action:
+        if observed.action != action:
             raise RuntimeError(f"expected {action} action")
+        if observed.connection_generation != self._action_generation:
+            raise RuntimeError("Brainstorm action generation is stale")
         # The official simulator exposes swipe-down only as a text-delivery
         # event and supplies no physical source. Exercise the visible cancel
         # transition, but do not invent left/right/ring provenance: the final
@@ -540,10 +567,22 @@ class InAppBrainstormAcceptance:
         # still requires the real left-temple diagnostic event for a pass.
         if self._evidence_mode == "simulator" and action == "cancel":
             return
+
+        expected_surface = "agent_terminal" if action == "show_brainstorm" else "brainstorm"
+        expected_gesture = "double_press" if action == "cancel" else "tap"
+        expected_sources = {"left"} if action == "cancel" else _TERMINAL_TOGGLE_SOURCES
         await self._wait_for(
-            lambda: any(event.get("type") == "brainstorm_action" and event.get("action") == action for event in self._events),
+            lambda: any(
+                event.get("type") == "brainstorm_action"
+                and event.get("action") == action
+                and event.get("surface") == expected_surface
+                and event.get("gesture") == expected_gesture
+                and event.get("delivery") == "sys"
+                and event.get("source") in expected_sources
+                for event in self._events[before:]
+            ),
             self._action_timeout_s,
-            f"{action} action did not retain a G2 receipt",
+            f"{action} action did not retain the matching G2 gesture receipt",
         )
 
     async def _next_running_frame_sha256(self, after: int) -> str:
@@ -719,7 +758,10 @@ class G2GestureBrainstormAcceptanceSession(Session):
             connection_generation=connection_generation,
             evidence_mode=evidence_mode,
         )
-        self._diagnostics = G2DiagnosticStore(writer=self._controller.observe_diagnostics)
+        self._diagnostics = G2DiagnosticStore(
+            writer=self._controller.observe_diagnostics,
+            observer=self._controller.observe_diagnostic_events,
+        )
 
     async def run(self) -> None:
         previous = self._transport.g2_diagnostics
@@ -782,6 +824,15 @@ def make_g2_gesture_acceptance_session(
             and (hello.launch_source == "simulator" or simulator_override):
         mode = "simulator"
     else:
+        return None
+    if (
+        trigger.action != "begin_acceptance"
+        or trigger.surface != "brainstorm"
+        or trigger.source not in ("right", "ring")
+        or trigger.gesture != "double_press"
+    ):
+        raise ValueError("Brainstorm acceptance requires the fixed G2 gesture")
+    if trigger.connection_generation != transport.connection_generation:
         return None
     return G2GestureBrainstormAcceptanceSession(
         transport=transport,
