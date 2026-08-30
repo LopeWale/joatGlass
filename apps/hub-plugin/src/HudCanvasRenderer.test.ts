@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
-  gray8ToGray4,
   hudBrightnessGray,
   hudDisplayTitle,
   hudSidebarIconName,
@@ -30,13 +29,6 @@ describe('hudBrightnessGray', () => {
     expect(hudBrightnessGray(4)).toBe(238);
   });
 
-  it('quantizes the authored canvas into the G2 raw 4-bit range', () => {
-    expect(gray8ToGray4(0)).toBe(0);
-    expect(gray8ToGray4(51)).toBe(3);
-    expect(gray8ToGray4(170)).toBe(10);
-    expect(gray8ToGray4(238)).toBe(14);
-    expect(gray8ToGray4(255)).toBe(15);
-  });
 });
 
 describe('selected visual geometry', () => {

@@ -8,7 +8,7 @@ import {
   MenuContainerProperty,
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
-import { CANVAS, ContainerId } from './types';
+import { CANVAS, ContainerId, VisualContainerName } from './types';
 
 export interface SidebarBackdrop {
   main?: string;
@@ -222,22 +222,22 @@ export class HudPageBuilder {
       imageObject: [
         new ImageContainerProperty({
           containerID: ContainerId.Image,
-          containerName: 'visual-tl',
+          containerName: VisualContainerName[ContainerId.Image],
           xPosition: 0, yPosition: 0, width: 288, height: 144, zOrderIndex: 2,
         }),
         new ImageContainerProperty({
           containerID: ContainerId.VisualTopRight,
-          containerName: 'visual-tr',
+          containerName: VisualContainerName[ContainerId.VisualTopRight],
           xPosition: 288, yPosition: 0, width: 288, height: 144, zOrderIndex: 3,
         }),
         new ImageContainerProperty({
           containerID: ContainerId.VisualBottomLeft,
-          containerName: 'visual-bl',
+          containerName: VisualContainerName[ContainerId.VisualBottomLeft],
           xPosition: 0, yPosition: 144, width: 288, height: 144, zOrderIndex: 4,
         }),
         new ImageContainerProperty({
           containerID: ContainerId.VisualBottomRight,
-          containerName: 'visual-br',
+          containerName: VisualContainerName[ContainerId.VisualBottomRight],
           xPosition: 288, yPosition: 144, width: 288, height: 144, zOrderIndex: 5,
         }),
       ],

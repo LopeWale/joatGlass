@@ -4,7 +4,7 @@ import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
 import { HudCanvasRenderer } from './HudCanvasRenderer';
-import { HudVisualSurface } from './HudVisualSurface';
+import { encodeGray8TilePng, HudVisualSurface } from './HudVisualSurface';
 import {
   activateVisualHudPage,
   initializeHudPage,
@@ -120,6 +120,12 @@ const VISUAL_STATE = ((): VisualState | undefined => {
 const BROWSER_VISUAL_PREVIEW = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('joatPreview') === 'browser';
 
+/** Development-only acceptance hook. Unlike `joatVisual`, this keeps the
+ * normal authenticated Mac link alive and merely opens the same sidebar a
+ * left-temple double press would open. It lets the official simulator prove
+ * a live capability request even though it hardcodes right-temple input. */
+const LIVE_MENU_ACCEPTANCE = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get('joatTestOpenMenu') === '1';
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
 function setPanel(id: string, text: string): void {
@@ -258,7 +264,7 @@ async function boot(): Promise<void> {
     createVisual: () => new HudPresenter(
       client,
       activeLayouts,
-      new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics),
+      new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics, encodeGray8TilePng),
       g2Diagnostics,
     ),
     createText: () => new HudPresenter(client, activeLayouts, undefined, g2Diagnostics),
@@ -527,6 +533,11 @@ async function boot(): Promise<void> {
   });
 
   link.connect();
+
+  if (LIVE_MENU_ACCEPTANCE) {
+    await menu.toggle();
+    console.info('[joat] live menu acceptance opened');
+  }
 
   setPanel('p-status', 'connecting');
 

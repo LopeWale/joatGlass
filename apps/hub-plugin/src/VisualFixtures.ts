@@ -116,7 +116,7 @@ export function stitchHudPreviewRgba(
       for (let x = 0; x < 288; x += 1) {
         const target = ((origin[1] + y) * CANVAS.width + origin[0] + x) * 4;
         rgba[target] = 0;
-        rgba[target + 1] = Math.max(0, Math.min(15, tile.pixels[y * 288 + x] ?? 0)) * 17;
+        rgba[target + 1] = tile.pixels[y * 288 + x] ?? 0;
         rgba[target + 2] = 0;
         rgba[target + 3] = 255;
       }
@@ -125,7 +125,7 @@ export function stitchHudPreviewRgba(
   return rgba;
 }
 
-/** Browser-only inspection sink. It takes the exact four Gray4 tiles emitted
+/** Browser-only inspection sink. It takes the exact four Gray8 tiles emitted
  * by the production renderer and stitches them without inventing another UI. */
 export class BrowserHudPreview implements HudFramePainter {
   private readonly canvas: HTMLCanvasElement;
