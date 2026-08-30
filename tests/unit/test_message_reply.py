@@ -62,6 +62,16 @@ class BlockingConfirm:
         return True
 
 
+class FakeContacts:
+    def __init__(self, matches: list[tuple[str, str]]) -> None:
+        self._matches = matches
+        self.queries: list[str] = []
+
+    def search(self, query: str) -> list[tuple[str, str]]:
+        self.queries.append(query)
+        return self._matches
+
+
 THREAD = MessageThread(
     sender="Dele",
     handle="+14055550123",
@@ -77,6 +87,80 @@ class TestMessageReplyController:
 
         assert await replies.handle_command("reply saying On my way") == (
             "Select a Messages conversation first."
+        )
+        assert confirm.calls == []
+        assert sender.sent == []
+
+    async def test_new_message_resolves_one_contact_then_uses_exact_confirmation(
+        self,
+    ) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        contacts = FakeContacts([("Adele Vance", "+14055550177")])
+        replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
+        replies.begin_compose(trace_id="hud-new-message")
+
+        result = await replies.handle_command("message Adele saying Running late")
+
+        assert result == "Submitted to Messages for Adele Vance; delivery unverified."
+        assert contacts.queries == ["Adele"]
+        assert sender.sent == [("+14055550177", "Running late")]
+        assert confirm.calls[0][1] == "Send to Adele Vance? “Running late”"
+
+    @pytest.mark.parametrize(
+        ("matches", "expected"),
+        [
+            ([], "No Mac contact matched Adele. Try a fuller name."),
+            (
+                [("Adele Vance", "+14055550177"), ("Adele Okafor", "+14055550188")],
+                "More than one Mac contact address matched Adele. "
+                "Say the full name and message again.",
+            ),
+        ],
+    )
+    async def test_new_message_never_sends_to_a_missing_or_ambiguous_contact(
+        self,
+        matches: list[tuple[str, str]],
+        expected: str,
+    ) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            contact_search=FakeContacts(matches).search,
+        )
+        replies.begin_compose(trace_id="hud-compose-safe")
+
+        assert await replies.handle_command("message Adele saying Hello") == expected
+        assert confirm.calls == []
+        assert sender.sent == []
+
+    async def test_new_message_requires_the_glasses_compose_surface(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            contact_search=FakeContacts([("Adele", "+14055550177")]).search,
+        )
+
+        assert await replies.handle_command("message Adele saying Hello") == (
+            "Open Messages and choose New message first."
+        )
+        assert confirm.calls == []
+        assert sender.sent == []
+
+    async def test_home_cleanup_disarms_new_message_compose(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            contact_search=FakeContacts([("Adele", "+14055550177")]).search,
+        )
+        replies.begin_compose(trace_id="hud-compose-home")
+
+        replies.clear_selection("home")
+
+        assert await replies.handle_command("message Adele saying Hello") == (
+            "Open Messages and choose New message first."
         )
         assert confirm.calls == []
         assert sender.sent == []

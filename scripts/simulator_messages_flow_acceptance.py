@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise the real Messages menu/router/reply path in the official simulator.
+"""Exercise the real Messages menu/router/reply or compose path in the simulator.
 
 The simulator test hook opens the ordinary sidebar; the wearer then taps
-Messages, selects a conversation, and accepts the confirmation.
+Messages, selects a conversation or New message, and accepts the confirmation.
 The Hub plugin, gateway, CapabilityRouter, IMessageStore and
 MessageReplyController are production implementations. The database and final
 sender are isolated fixtures, so this is simulator proof and cannot send a
@@ -43,7 +43,7 @@ class ScreenReceipt:
     framebuffer_sha256: str
 
 
-_EXPECTED_FLOW = (
+_EXPECTED_REPLY_FLOW = (
     ("messages-sidebar", "test-hook-open"),
     ("messages-conversations", "click"),
     ("messages-conversation", "list-select"),
@@ -51,14 +51,25 @@ _EXPECTED_FLOW = (
     ("messages-result", "click"),
 )
 
+_EXPECTED_COMPOSE_FLOW = (
+    ("messages-sidebar", "test-hook-open"),
+    ("messages-conversations", "click"),
+    ("messages-compose", "list-select"),
+    ("messages-confirmation", None),
+    ("messages-result", "click"),
+)
 
-def validate_flow(receipts: list[ScreenReceipt]) -> None:
-    if len(receipts) != len(_EXPECTED_FLOW):
+
+def _validate_receipts(
+    receipts: list[ScreenReceipt],
+    expected: tuple[tuple[str, str | None], ...],
+) -> None:
+    if len(receipts) != len(expected):
         raise MessagesFlowError(
-            f"expected {len(_EXPECTED_FLOW)} receipts, got {len(receipts)}"
+            f"expected {len(expected)} receipts, got {len(receipts)}"
         )
     seen: set[str] = set()
-    for receipt, (name, action) in zip(receipts, _EXPECTED_FLOW):
+    for receipt, (name, action) in zip(receipts, expected):
         if receipt.name != name or receipt.simulator_input != action:
             raise MessagesFlowError(
                 f"{name}: expected input {action!r}, got "
@@ -70,6 +81,14 @@ def validate_flow(receipts: list[ScreenReceipt]) -> None:
         if digest in seen:
             raise MessagesFlowError(f"{name}: frame is not visually distinct")
         seen.add(digest)
+
+
+def validate_flow(receipts: list[ScreenReceipt]) -> None:
+    _validate_receipts(receipts, _EXPECTED_REPLY_FLOW)
+
+
+def validate_compose_flow(receipts: list[ScreenReceipt]) -> None:
+    _validate_receipts(receipts, _EXPECTED_COMPOSE_FLOW)
 
 
 def build_fixture_store(path: Path) -> IMessageStore:
@@ -133,10 +152,15 @@ class ObservedReplies:
     def __init__(self, delegate: MessageReplyController) -> None:
         self._delegate = delegate
         self.selected = asyncio.Event()
+        self.composing = asyncio.Event()
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
         self._delegate.select(thread, trace_id)
         self.selected.set()
+
+    def begin_compose(self, trace_id: str) -> None:
+        self._delegate.begin_compose(trace_id)
+        self.composing.set()
 
     def clear_selection(self, reason: str = "explicit") -> None:
         self._delegate.clear_selection(reason)
@@ -145,7 +169,7 @@ class ObservedReplies:
         return await self._delegate.handle_command(text)
 
 
-async def run(port: int) -> None:
+async def run(port: int, flow: str = "reply") -> None:
     connected = asyncio.Event()
     with tempfile.TemporaryDirectory(prefix="joat-messages-simulator-") as root:
         evidence_root = Path(root)
@@ -155,7 +179,11 @@ async def run(port: int) -> None:
         hud = HudWriter(gateway)
         sender = RecordingSender()
         replies = ObservedReplies(MessageReplyController(
-            sender, gateway.request_confirmation,
+            sender,
+            gateway.request_confirmation,
+            contact_search=lambda query: [
+                ("Simulator Contact", "fixture-recipient")
+            ] if query.casefold() == "simulator contact" else [],
         ))
         router = CapabilityRouter(
             hud=hud,
@@ -171,18 +199,20 @@ async def run(port: int) -> None:
         try:
             log.info("stage=waiting-for-official-simulator port=%d", port)
             await asyncio.wait_for(connected.wait(), timeout=60)
-            log.info(
-                "stage=connected action=click-Messages-then-select-Dele"
-            )
-            await asyncio.wait_for(replies.selected.wait(), timeout=90)
+            selected = replies.composing if flow == "compose" else replies.selected
+            log.info("stage=connected flow=%s action=select-Messages-row", flow)
+            await asyncio.wait_for(selected.wait(), timeout=90)
             # Retain the dedicated conversation frame before the confirmation
             # replaces it. This delay changes no routing or reply semantics.
             await asyncio.sleep(2)
-            log.info("stage=conversation-selected action=voice-draft-injected")
+            log.info("stage=%s-selected action=voice-draft-injected", flow)
+            command = (
+                "message Simulator Contact saying Simulator trace only. No message will be sent."
+                if flow == "compose"
+                else "reply saying Simulator trace only. No message will be sent."
+            )
             result = await asyncio.wait_for(
-                replies.handle_command(
-                    "reply saying Simulator trace only. No message will be sent."
-                ),
+                replies.handle_command(command),
                 timeout=90,
             )
             if result is None:
@@ -200,9 +230,10 @@ async def run(port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18791)
+    parser.add_argument("--flow", choices=("reply", "compose"), default="reply")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-    asyncio.run(run(args.port))
+    asyncio.run(run(args.port, args.flow))
 
 
 if __name__ == "__main__":

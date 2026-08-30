@@ -50,13 +50,13 @@ def pretty_number(handle: str) -> str:
 
 
 class ContactResolver:
-    """handle -> display name, cached for the process lifetime."""
+    """Normalized handle -> (display name, original handle), cached per process."""
 
     def __init__(self) -> None:
-        self._map: dict[str, str] | None = None
+        self._map: dict[str, tuple[str, str]] | None = None
 
-    def _load(self) -> dict[str, str]:
-        out: dict[str, str] = {}
+    def _load(self) -> dict[str, tuple[str, str]]:
+        out: dict[str, tuple[str, str]] = {}
         for pattern in _SOURCES:
             for path in glob.glob(os.path.expanduser(pattern)):
                 try:
@@ -85,18 +85,48 @@ class ContactResolver:
                                 continue
                             key = normalize_handle(str(value))
                             if key:
-                                out.setdefault(key, name)
+                                out.setdefault(key, (name, str(value)))
         log.info("contacts loaded: %d handles", len(out))
         return out
 
-    def name_for(self, handle: str) -> str:
-        """A person's name when known, otherwise a readable number."""
-        if not handle:
-            return ""
+    def _loaded(self) -> dict[str, tuple[str, str]]:
         if self._map is None:
             try:
                 self._map = self._load()
             except Exception:
                 log.warning("contacts unavailable — showing raw handles")
                 self._map = {}
-        return self._map.get(normalize_handle(handle)) or pretty_number(handle)
+        return self._map
+
+    def name_for(self, handle: str) -> str:
+        """A person's name when known, otherwise a readable number."""
+        if not handle:
+            return ""
+        resolved = self._loaded().get(normalize_handle(handle))
+        return resolved[0] if resolved is not None else pretty_number(handle)
+
+    def search(self, query: str) -> list[tuple[str, str]]:
+        """Mac-local candidates for a spoken recipient; never guess one.
+
+        An exact full-name match wins. Otherwise every query word must prefix
+        one word in the contact's display name. Multiple matches are returned
+        to the caller so consequential send code can fail closed.
+        """
+        words = tuple(part for part in query.casefold().split() if part)
+        if not words:
+            return []
+        candidates = sorted(
+            set(self._loaded().values()),
+            key=lambda item: (item[0].casefold(), normalize_handle(item[1])),
+        )
+        exact = [item for item in candidates if item[0].casefold() == " ".join(words)]
+        if exact:
+            return exact
+        return [
+            item for item in candidates
+            if all(
+                any(name_word.startswith(query_word)
+                    for name_word in item[0].casefold().split())
+                for query_word in words
+            )
+        ]

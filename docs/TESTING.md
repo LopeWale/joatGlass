@@ -205,6 +205,17 @@ production-composed Hub test but remains a physical-G2 acceptance gate, as do
 left-temple ingress, optical legibility, live voice transcription, and any real
 Messages.app submission.
 
+Run the same production controller in new-message mode with
+`--flow compose`. After opening Messages, select the first **New message** row;
+the causal frame order is Sidebar → Conversations → Compose → Confirm → Result.
+The injected voice command resolves one fixture-only **Simulator Contact**
+through the controller's Mac-local contact-search seam. It still terminates at
+`RecordingSender`, so this proves G2 selection, compose rendering, exact
+confirmation, and result routing without reading the user's Contacts database
+or sending a real message. `tests/unit/test_contacts.py` separately exercises
+the real read-only Contacts SQLite adapter with a disposable schema and proves
+that missing or ambiguous names never reach confirmation.
+
 On the Mac, JOAT.app now shows **Messages → Conversation history** with
 **Open Full Disk Access…** and **Check Again**. The probe only attempts to open
 the database from JOAT's signed process; it does not query a table or read a

@@ -1,6 +1,7 @@
 export type MessagesScreen =
   | 'conversations'
   | 'conversation'
+  | 'compose'
   | 'access'
   | 'setup'
   | 'empty'
@@ -31,6 +32,9 @@ export function resolveMessagesViewState(
   }
   if (normalized === 'MESSAGES · CONVERSATION' || normalized === 'MESSAGES · REPLY') {
     return { screen: 'conversation', rowAction: 'none', selectable: false };
+  }
+  if (normalized === 'MESSAGES · COMPOSE') {
+    return { screen: 'compose', rowAction: 'none', selectable: false };
   }
   if (normalized === 'MESSAGES · ACCESS') {
     return { screen: 'access', rowAction: 'retry', selectable: true };
