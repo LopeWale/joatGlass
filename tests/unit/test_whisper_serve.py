@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 import sys
 import textwrap
@@ -19,6 +20,7 @@ from joat.audio.whisper_serve import (
     WhisperServeEngine,
     is_prompt_echo,
 )
+from joat.core.interfaces import Transcript
 
 
 def free_port() -> int:
@@ -253,6 +255,16 @@ class TestPromptEcho:
 
     def test_the_observed_hallucination_is_dropped(self) -> None:
         assert is_prompt_echo("The wearer addresses the assistant as JOAT.", self.PROMPT)
+
+    def test_dropped_echo_log_never_contains_transcript(self, caplog: pytest.LogCaptureFixture) -> None:
+        transcript = "The wearer addresses the assistant as JOAT."
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1", prompt=self.PROMPT)
+
+        caplog.set_level(logging.INFO, logger="joat.audio.whisper_serve")
+
+        assert engine._filter_echo(Transcript(text=transcript, is_final=True)) is None
+        assert transcript not in caplog.text
+        assert f"chars={len(transcript)}" in caplog.text
 
     def test_a_genuine_short_wake_survives(self) -> None:
         # 'JOAT' appears in the prompt, but eating it would make the

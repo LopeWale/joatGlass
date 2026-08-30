@@ -220,7 +220,9 @@ class WhisperServeEngine(SttEngine):
 
     def _filter_echo(self, transcript: Transcript | None) -> Transcript | None:
         if transcript is not None and is_prompt_echo(transcript.text, self._prompt):
-            log.info("dropped prompt-echo hallucination: %s", transcript.text)
+            # This transcription is discarded specifically because it is not
+            # wearer speech.  Do not turn it into durable diagnostic content.
+            log.info("dropped prompt-echo hallucination chars=%d", len(transcript.text))
             return None
         return transcript
 
