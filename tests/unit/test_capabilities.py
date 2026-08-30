@@ -31,6 +31,7 @@ from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
+from joat.services.planning import PlanningScope
 from joat.services.status import StatusPublisher
 
 
@@ -987,6 +988,20 @@ class TestCapabilityViews:
         assert tasks.title == "TASKS · PLAN · TUE SEP 1"
         assert "09:30 · EVENT · Design review" in tasks.items
         assert "18:00 · REMINDER · Buy filters" in tasks.items
+
+        # A pre-Planning package could have opened the same projection under
+        # ``Reminders``.  Its subsequent capdata selection must not become an
+        # inert page merely because the router canonicalizes that name to
+        # TASKS for its single native-backed hierarchy.
+        router._planning_scope = PlanningScope.MONTH
+        await router.open("Reminders")
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="REMINDERS", selected_index=0
+        ))
+        await asyncio.sleep(0)
+        legacy_week = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert legacy_week.title == "TASKS · PLAN · AUG 31–SEP 6"
+        assert legacy_week.items[1] == "TUE SEP 1 · 1 event · 1 reminder"
 
     async def test_planning_return_anchor_opens_the_native_day_not_today(
         self, tmp_path
