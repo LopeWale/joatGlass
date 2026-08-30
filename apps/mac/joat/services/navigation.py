@@ -37,6 +37,34 @@ log = logging.getLogger(__name__)
 _MIN_LOCATING_VISIBLE_SECONDS = 0.8
 
 
+# Voice is deliberately a small, exact grammar while navigation owns the
+# session.  It prevents a conversational fragment from unexpectedly changing
+# a route, while letting the wearer complete every visible navigation choice
+# hands-free.
+_VOICE_CONFIRM = frozenset({"confirm", "yes", "correct", "continue", "that one"})
+_VOICE_RETRY = frozenset({"retry", "try again", "retry navigation"})
+_VOICE_REPAIR = frozenset({
+    "retry", "try again", "change destination", "change the destination",
+    "different destination", "not this one", "no",
+})
+_VOICE_FIRST = frozenset({"first", "the first", "option one", "option 1"})
+_VOICE_SECOND = frozenset({"second", "the second", "option two", "option 2"})
+_VOICE_WALK = frozenset({"walk", "walking", "walking mode"})
+_VOICE_CYCLE = frozenset({"cycle", "cycling", "bike", "bicycle", "cycling mode"})
+_VOICE_START = frozenset({"start", "start navigation", "go", "begin", "begin navigation"})
+_VOICE_CHANGE_MODE = frozenset({"change mode", "change the mode"})
+_VOICE_FINISH = frozenset({"finish", "done", "end navigation"})
+_VOICE_CANCEL = frozenset({
+    "stop", "cancel", "stop navigation", "cancel navigation", "end directions",
+    "stop directions",
+})
+
+
+def _normalise_navigation_voice(text: str) -> str:
+    """Canonicalise only presentation noise; do not reinterpret speech."""
+    return re.sub(r"\s+", " ", text.casefold().strip().rstrip(".!?"))
+
+
 def navigation_query(text: str) -> str | None:
     """Return an explicit destination request; ordinary speech is untouched."""
     request = text.strip().rstrip(".!?")
@@ -180,12 +208,103 @@ class NavigationSession(Session):
         self._events.put_nowait(_Cancelled())
 
     def consume_transcript(self, text: str) -> bool:
+        """Consume an explicit, state-bound navigation voice command.
+
+        Navigation must remain usable when a wearer cannot safely perform a
+        temple gesture.  Speech is therefore an equal input path, but never a
+        shortcut around the canonical-place confirmation: each utterance maps
+        only to the action valid for the currently visible navigation view.
+        """
         query = text.strip()
-        if not self._awaiting_destination_speech or not query:
+        if not query:
             return False
-        self._awaiting_destination_speech = False
-        self._events.put_nowait(_Query(query))
+
+        # An explicit new destination supersedes the current in-flight search
+        # or route.  Ordinary place mentions deliberately do not do this.
+        replacement = navigation_query(query)
+        if replacement is not None:
+            self._awaiting_destination_speech = False
+            self._events.put_nowait(_Query(replacement))
+            return True
+
+        spoken = _normalise_navigation_voice(query)
+        if spoken in _VOICE_CANCEL:
+            self.cancel()
+            return True
+
+        if self._awaiting_destination_speech:
+            self._awaiting_destination_speech = False
+            self._events.put_nowait(_Query(query))
+            return True
+
+        view = self._current_view
+        if view is None:
+            return False
+        decision = self._voice_action(view, spoken)
+        if decision is None:
+            return False
+        action, choice_id = decision
+        self._events.put_nowait(NavigationAction(
+            session_id=view.session_id,
+            request_id=view.request_id,
+            generation=view.generation,
+            action=action,
+            choice_id=choice_id,
+        ))
         return True
+
+    def _voice_action(
+        self,
+        view: NavigationView,
+        spoken: str,
+    ) -> tuple[str, str | None] | None:
+        """Return only an action the current visible state permits."""
+        phase = view.navigation.view
+        if phase == "destination":
+            if spoken in _VOICE_CONFIRM:
+                return ("confirm_destination", None)
+            if spoken in _VOICE_REPAIR:
+                return ("retry_destination", None)
+            return None
+
+        if phase == "repair":
+            choices = view.navigation.choice_ids or []
+            if spoken in _VOICE_REPAIR:
+                return ("select_destination", "retry")
+            if spoken in _VOICE_FIRST and len(choices) >= 1:
+                return ("select_destination", choices[0])
+            if spoken in _VOICE_SECOND and len(choices) >= 2:
+                return ("select_destination", choices[1])
+            for choice_id in choices:
+                candidate = self._candidates.get(choice_id)
+                if candidate is not None and spoken in {
+                    _normalise_navigation_voice(candidate.label),
+                    _normalise_navigation_voice(candidate.address),
+                }:
+                    return ("select_destination", choice_id)
+            return None
+
+        if phase == "mode":
+            if spoken in _VOICE_WALK:
+                return ("select_mode", "walking")
+            if spoken in _VOICE_CYCLE:
+                return ("select_mode", "cycling")
+            return None
+
+        if phase == "preview":
+            if spoken in _VOICE_START:
+                return ("start", None)
+            if spoken in _VOICE_CHANGE_MODE:
+                return ("change_mode", None)
+            if spoken in _VOICE_REPAIR:
+                return ("change_destination", None)
+            return None
+
+        if phase == "error" and spoken in _VOICE_RETRY:
+            return ("retry", None)
+        if self._arrived and spoken in _VOICE_FINISH:
+            return ("finish", None)
+        return None
 
     async def _replace_destination(self, query: str) -> None:
         # A future repair entry point may be opened while a route is active.
@@ -264,7 +383,7 @@ class NavigationSession(Session):
                 view="error",
                 primary="Destination not found",
                 secondary="Try the address again",
-                hint="tap retry · swipe cancel",
+                hint="say retry · swipe cancel",
                 interaction="stationary",
             ), "search-error")
             return
@@ -288,7 +407,7 @@ class NavigationSession(Session):
             secondary=(
                 f"Check {repair_hint}" if repair_hint else "Choose the canonical place"
             ),
-            hint="swipe choose · tap confirm",
+            hint="say first/second · swipe choose",
             interaction="stationary",
             options=options,
             choice_ids=choice_ids,
@@ -300,7 +419,7 @@ class NavigationSession(Session):
             view="destination",
             primary=candidate.label,
             secondary=candidate.address,
-            hint="tap confirm · swipe retry",
+            hint="say confirm · swipe retry",
             interaction="stationary",
         ), "destination")
 
@@ -312,7 +431,7 @@ class NavigationSession(Session):
             view="mode",
             primary="Choose travel mode",
             secondary=destination.label,
-            hint="swipe choose · tap continue",
+            hint="say walk/cycle · swipe choose",
             interaction="stationary",
             options=["Walk", "Cycle"],
             choice_ids=["walking", "cycling"],
@@ -382,7 +501,7 @@ class NavigationSession(Session):
             view="repair",
             primary="Say the destination again",
             secondary="Keep confirmed parts; correct only what was wrong",
-            hint="long-press mic · say address",
+            hint="say the destination again",
             interaction="stationary",
             options=["Waiting for destination"],
             choice_ids=["retry"],
@@ -396,7 +515,7 @@ class NavigationSession(Session):
             view="uncertain",
             primary="Getting your location",
             secondary="Keep phone foreground and unlocked",
-            hint="Locating before route search · double-left stops",
+            hint="Finding phone location · say stop",
             interaction="none",
             mode=self._mode,
         ), "locating")
@@ -428,7 +547,7 @@ class NavigationSession(Session):
             view="uncertain",
             primary=f"Finding a {self._mode} route",
             secondary="Checking the route to your destination",
-            hint="Route search in progress · double-left stops",
+            hint="Route search in progress · say stop",
             interaction="none",
             mode=self._mode,
         ), "routing")
@@ -463,7 +582,7 @@ class NavigationSession(Session):
             view="error",
             primary="Phone location unavailable",
             secondary="Allow Location for Even Hub, then retry",
-            hint="tap retry · swipe cancel",
+            hint="say retry · swipe cancel",
             interaction="stationary",
         ), "origin-error")
 
@@ -544,7 +663,7 @@ class NavigationSession(Session):
                 view="error",
                 primary="Route unavailable",
                 secondary="Try again or change destination",
-                hint="tap retry · swipe cancel",
+                hint="say retry · swipe cancel",
                 interaction="stationary",
             ), "route-error")
             return
@@ -562,7 +681,7 @@ class NavigationSession(Session):
             view="preview",
             primary=self._destination.label if self._destination else "Destination",
             secondary=f"{mode.title()} · {ready.route.eta_minutes:.0f} min",
-            hint="tap start · up mode · down place",
+            hint="say start · up mode · down place",
             interaction="stationary",
             mode=mode,
             maneuver="depart",
@@ -615,7 +734,7 @@ class NavigationSession(Session):
                 view="rerouting",
                 primary="Starting navigation",
                 secondary="Preparing directions on your glasses",
-                hint="Directions begin when ready · double-left stops",
+                hint="Directions begin when ready · say stop",
                 interaction="none",
                 mode=self._mode,
                 remaining_distance_m=route.plan.steps[-1].distance_along_route_m,
@@ -661,7 +780,7 @@ class NavigationSession(Session):
             view="error",
             primary="Navigation could not start",
             secondary="The route was not installed on the phone",
-            hint="tap retry · swipe cancel",
+            hint="say retry · swipe cancel",
             interaction="stationary",
         ), "install-error")
 
@@ -705,7 +824,7 @@ class NavigationSession(Session):
             view="rerouting",
             primary="Rerouting",
             secondary="Finding a safer path",
-            hint="Old directions paused · double-left stops",
+            hint="Old directions paused · say stop",
             interaction="none",
             mode=self._mode,
         ), "rerouting")
@@ -791,7 +910,7 @@ class NavigationUnavailableSession(Session):
                     view="error",
                     primary="Navigation unavailable",
                     secondary=self._reason,
-                    hint="tap or swipe: close",
+                    hint="say cancel · tap or swipe close",
                     interaction="stationary",
                 ),
             ))
@@ -803,6 +922,8 @@ class NavigationUnavailableSession(Session):
         self._settled.set()
 
     def consume_transcript(self, text: str) -> bool:
+        if _normalise_navigation_voice(text) in _VOICE_CANCEL:
+            self.cancel()
         return True
 
     def accept_action(self, action: NavigationAction) -> None:
