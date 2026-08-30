@@ -60,7 +60,7 @@ from joat.services.task_monitor import (
 
 log = logging.getLogger("joat.simulator_productivity_native_acceptance")
 
-RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v3"
+RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v4"
 TITLE_PREFIX = "JOAT ACCEPTANCE"
 EVENT_TITLE_SUFFIX = "EVENT"
 REMINDER_TITLE_SUFFIX = "REMINDER"
@@ -1593,6 +1593,40 @@ def _verify_native_readback(
     return result
 
 
+def _verify_completed_reminder_readback(
+    reminders: list[dict[str, Any]],
+    identity: NativeItemIdentity,
+) -> dict[str, Any]:
+    """Prove that the exact synthetic Reminder became completed in EventKit.
+
+    This is intentionally a second native query after the production
+    ``reminders.complete`` response. It checks the native identity captured
+    at creation, rather than rediscovering an item by title or treating the
+    controller's success string as proof.
+    """
+
+    if len(reminders) != 1:
+        raise AcceptanceFailed(
+            "reminder_completion_query_mismatch",
+            "completed reminder query was not uniquely matched",
+        )
+    reminder = reminders[0]
+    if (
+        reminder.get("calendar_item_identifier") != identity.calendar_item_identifier
+        or reminder.get("calendar_identifier") != identity.calendar_identifier
+        or reminder.get("is_completed") is not True
+    ):
+        raise AcceptanceFailed(
+            "reminder_completion_readback_mismatch",
+            "native reminder completion read-back differed",
+        )
+    return {
+        "bounded_query_match_count": 1,
+        "native_identity_matched": True,
+        "is_completed": True,
+    }
+
+
 def _redacted_action_receipts(store: DurableStore) -> list[dict[str, Any]]:
     rows = store.execute(
         "SELECT a.action_id,a.kind,a.state,t.state,r.outcome,r.verification_level,"
@@ -1626,6 +1660,7 @@ def _assert_durable_acceptance(
     store: DurableStore,
     *,
     include_reminder: bool = True,
+    include_completion: bool = False,
 ) -> list[dict[str, Any]]:
     receipts = _redacted_action_receipts(store)
     expected = (
@@ -1633,6 +1668,10 @@ def _assert_durable_acceptance(
         if include_reminder
         else {"calendar.create"}
     )
+    if include_completion:
+        if not include_reminder:
+            raise AcceptanceSafetyError("a Reminder completion requires a Reminder acceptance run")
+        expected.add("reminders.complete")
     if len(receipts) != len(expected):
         raise AcceptanceFailed(
             "durable_receipt_count",
@@ -1822,6 +1861,11 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 "surface": "official_even_simulator",
             },
         },
+        "reminder_completion": {
+            "required": include_reminder,
+            "native_readback_verified": False,
+            "wearer_visible": False,
+        },
         "durable_actions": [],
         "cleanup": {
             "calendar_removed_count": 0,
@@ -1861,6 +1905,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
     notification_preflight: NotificationPreflightEvidence | None = None
     alarm_task: asyncio.Task[AlarmDeliveryEvidence] | None = None
     due_monitor_task: asyncio.Task[int] | None = None
+    delivery_blocker: AcceptanceBlocked | None = None
     exit_code = 1
     try:
         if include_reminder:
@@ -2115,11 +2160,6 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     reminders[0],
                 )
             native_readback_verified = True
-            receipt["durable_actions"] = _assert_durable_acceptance(
-                store,
-                include_reminder=include_reminder,
-            )
-
             if include_reminder:
                 async def deliver_due_alert(alert: ProductivityHudView) -> None:
                     # Use the same pure projection as the running Mac app;
@@ -2206,10 +2246,10 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         and notification_preflight.expect_focus_suppression
                         and classification.category == "focus_suppressed"
                     ):
-                        raise AcceptanceBlocked(
+                        delivery_blocker = AcceptanceBlocked(
                             f"reminder_alarm_{classification.category}",
                             "the native alarm trace was retained without content, but JOAT did not observe a matching Accessibility banner",
-                        ) from exc
+                        )
                 else:
                     if (
                         notification_preflight
@@ -2226,12 +2266,69 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         "accessibility_banner_observed": True,
                         **asdict(alarm),
                     }
+
+                # A banner-observation result is a different truth boundary
+                # from a safe completion. Always exercise the exact due
+                # reminder's confirmation and fresh EventKit read-back, then
+                # retain a banner blocker separately if observation failed.
+                completion_confirmation = await _drive_confirmed_command(
+                    controller,
+                    f"complete reminder {titles.reminder}",
+                    automation_base=automation_base,
+                    screenshot_path=evidence_dir / "reminder-completion-confirmation.png",
+                    expected_result_prefix="Completed Reminder:",
+                )
+                completion_confirmation["action_kind"] = "reminders.complete"
+                completion_receipt_digest, completion_receipt_preview_digest = (
+                    await _capture_screenshot(
+                        automation_base,
+                        evidence_dir / "reminder-completed.png",
+                    )
+                )
+                completion_confirmation["receipt_screenshot_digest"] = completion_receipt_digest
+                completion_confirmation["receipt_preview_digest"] = completion_receipt_preview_digest
+                receipt["confirmations"].append(completion_confirmation)
+
+                _, completed_reminders = await _query_exact_items(
+                    bridge,
+                    titles=titles,
+                    schedule=schedule,
+                    include_reminder=True,
+                )
+                assert reminder_identity is not None
+                receipt["reminder_completion"] = {
+                    "required": True,
+                    "native_readback_verified": True,
+                    "wearer_visible": True,
+                    "surface": "official_even_simulator",
+                    "screenshot_digest": completion_receipt_digest,
+                    "screenshot_preview_digest": completion_receipt_preview_digest,
+                    **_verify_completed_reminder_readback(
+                        completed_reminders,
+                        reminder_identity,
+                    ),
+                }
+                receipt["durable_actions"] = _assert_durable_acceptance(
+                    store,
+                    include_reminder=True,
+                    include_completion=True,
+                )
+                if delivery_blocker is not None:
+                    raise delivery_blocker
             else:
                 for stage in ("os_banner_delivery", "hud_enqueue", "wearer_visible"):
                     receipt["delivery_stages"][stage] = {
                         "required": False,
                         "not_applicable": True,
                     }
+                receipt["reminder_completion"] = {
+                    "required": False,
+                    "not_applicable": True,
+                }
+                receipt["durable_actions"] = _assert_durable_acceptance(
+                    store,
+                    include_reminder=False,
+                )
             receipt["result"] = "pending_cleanup"
             write_private_receipt(receipt_path, receipt)
             exit_code = 0

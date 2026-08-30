@@ -1090,7 +1090,13 @@ export class HudPresenter {
   private async repaintReplacementConfirmation(restored: boolean): Promise<boolean> {
     const replacement = this.confirmation;
     if (!replacement) return restored;
-    return (await this.renderConfirmation(replacement.id)) && restored;
+    // The queued dismissal belongs to the confirmation that was visible when
+    // its gesture began. If another confirmation claimed the decision surface
+    // while the prior page was restoring, render that replacement but report
+    // the old dismissal as unsuccessful. Returning success here would let an
+    // old tap authorize action A after the wearer is already reviewing B.
+    await this.renderConfirmation(replacement.id);
+    return false;
   }
 
   private resolveListOptions(options: ListSurfaceOptions): ResolvedListSurfaceOptions {

@@ -211,6 +211,32 @@ def test_native_identifiers_are_hashed_before_the_retained_receipt() -> None:
     assert reference["evidence_digest"] == "a" * 64
 
 
+def test_completed_reminder_readback_requires_the_original_native_identity() -> None:
+    identity = NativeItemIdentity(
+        calendar_item_identifier="reminder-native-id",
+        calendar_item_external_identifier="reminder-external-id",
+        calendar_identifier="reminder-list-id",
+    )
+    completed = {
+        "calendar_item_identifier": "reminder-native-id",
+        "calendar_identifier": "reminder-list-id",
+        "is_completed": True,
+    }
+
+    proof = acceptance._verify_completed_reminder_readback([completed], identity)
+
+    assert proof == {
+        "bounded_query_match_count": 1,
+        "native_identity_matched": True,
+        "is_completed": True,
+    }
+    with pytest.raises(acceptance.AcceptanceFailed, match="completion read-back differed"):
+        acceptance._verify_completed_reminder_readback(
+            [{**completed, "calendar_item_identifier": "other-reminder"}],
+            identity,
+        )
+
+
 def test_retained_receipt_is_owner_only(tmp_path: Path) -> None:
     path = tmp_path / "receipt.json"
 
