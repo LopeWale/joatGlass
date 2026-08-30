@@ -13,6 +13,7 @@ import {
   parseHudLabeledValue,
   parseHudListItem,
   parseMessagesConversationRow,
+  messagesConversationTranscript,
   usesMessagesInstructionCards,
   canRenderPlanningMonthGrid,
   fitHudWrappedText,
@@ -439,6 +440,51 @@ describe('parseMessagesConversationRow', () => {
     expect(parseMessagesConversationRow('Say “JOAT, reply saying …”')).toEqual({
       kind: 'instruction', label: '', body: 'Say “JOAT, reply saying …”',
     });
+  });
+
+  it('keeps a compact six-line transcript free of header and action-card rows', () => {
+    const transcript = messagesConversationTranscript([
+      'Latest messages — down for older',
+      'Dele · newest incoming',
+      'You · newest outgoing',
+      'Dele · third message',
+      'Dele · fourth message',
+      'You · fifth message',
+      'Dele · sixth message',
+      'Dele · seventh message',
+      'Say “JOAT, reply saying …”',
+      'Mic off? Long press to enable.',
+    ], 0);
+
+    expect(transcript.heading).toBe('Latest messages — down for older');
+    expect(transcript.rows).toEqual([
+      { kind: 'incoming', label: 'Dele', body: 'newest incoming' },
+      { kind: 'outgoing', label: 'You', body: 'newest outgoing' },
+      { kind: 'incoming', label: 'Dele', body: 'third message' },
+      { kind: 'incoming', label: 'Dele', body: 'fourth message' },
+      { kind: 'outgoing', label: 'You', body: 'fifth message' },
+      { kind: 'incoming', label: 'Dele', body: 'sixth message' },
+    ]);
+  });
+
+  it('keeps an older selected speaker reachable in the compact transcript window', () => {
+    const transcript = messagesConversationTranscript([
+      'Latest messages — down for older',
+      'Dele · one',
+      'You · two',
+      'Dele · three',
+      'Dele · four',
+      'You · five',
+      'Dele · six',
+      'Dele · seven',
+      'Dele · eight',
+      'Say “JOAT, reply saying …”',
+      'Mic off? Long press to enable.',
+    ], 8);
+
+    expect(transcript.rows.map(({ body }) => body)).toEqual([
+      'three', 'four', 'five', 'six', 'seven', 'eight',
+    ]);
   });
 });
 

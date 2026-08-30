@@ -2,6 +2,19 @@
 
 ## 2026-08-30
 
+- Reworked **Messages · Conversation** as a six-row, aligned transcript: one
+  compact history position line, a divider, then flat sender/body rows. Incoming
+  and outgoing text stays distinguishable by truthful label and brightness, but
+  each message no longer wastes the lens on a rounded card. The native G2
+  list-event tap now also dismisses a transient Home notification before it can
+  select or relay a hidden capability row. Regressions cover notification
+  dismissal, six-row density, and the older-message viewport; the full Hub
+  suite passed 490 tests with typecheck and production build. An isolated
+  official-simulator Canvas launch could render but correctly could not attach
+  to its temporary loopback gateway because that origin is not package
+  allowlisted, so it is not claimed as live-route or physical-G2 evidence. No
+  package was created, installed, or uploaded.
+
 - Repaired the Reminder-due HUD delivery boundary exposed by the official
   simulator. Its escaped-action hint had exceeded the protocol's fixed
   46-character limit, so the generation-bound client acknowledgement was
