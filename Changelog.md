@@ -7,7 +7,7 @@
   utterance is consumed as the Brainstorm topic without requiring a repeated
   wake word or capability name. Repeated taps are harmless; left-double
   explicitly cancels the capture; G2 disconnect/replacement clears it so a
-  later voice command cannot start a stale Brainstorm. Focused Python (281),
+  later voice command cannot start a stale Brainstorm. Focused Python (282),
   full Hub (461), typecheck, and production-build checks pass. The official
   simulator was driven through all nine Brainstorm/Terminal/cancel/reconnect
   HUD states and each optical frame was reviewed; physical-G2 proof remains
