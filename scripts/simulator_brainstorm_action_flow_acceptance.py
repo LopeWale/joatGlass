@@ -331,9 +331,20 @@ def _prepare_simulator_plugin_root(repo: Path, output: Path, websocket_url: str)
 
     root = output / "simulator-plugin-root"
     root.mkdir(mode=0o700)
-    for name in ("index.html", "src", "node_modules", "tsconfig.json"):
+    # The simulator must exercise a coherent source revision. Symlinking the
+    # live `src` tree lets another developer's HMR edit replace the WebView or
+    # its socket mid-gesture, contaminating causal evidence. Snapshot app code
+    # and static entrypoints, while reusing the immutable local dependency tree
+    # so this stays fast and does not re-resolve packages.
+    for name in ("index.html", "src", "tsconfig.json"):
         source = source_root / name
-        os.symlink(source, root / name, target_is_directory=source.is_dir())
+        destination = root / name
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+    dependencies = source_root / "node_modules"
+    os.symlink(dependencies, root / "node_modules", target_is_directory=True)
     manifest_path = root / "app.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     manifest_path.chmod(0o600)

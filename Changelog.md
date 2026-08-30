@@ -17,6 +17,16 @@
   for layout and event logic only—not physical-G2 timing, source routing, or
   lens-legibility proof.
 
+- Corrected the live Brainstorm HUD's first-token legibility: `Thinking…` now
+  inserts one readable boundary before a first lexical Hermes chunk but keeps
+  all later stream chunks byte-contiguous, so an ordinary token split cannot
+  be changed into different prose. The isolated official-simulator runner now
+  snapshots Hub application source instead of symlinking the live `src` tree;
+  a concurrent HMR edit can no longer replace its WebView/socket in the middle
+  of a causal gesture run. The frozen-source simulator pass visually confirmed
+  all nine Brainstorm/Agent Terminal states, including the repaired running
+  text. The retained receipt remains content-free and simulator-only.
+
 - Fixed the live assistant's nearby-place gap: the Mapbox provider and fresh
   iPhone fix were already available, but the local model had never selected
   the advertised lookup. Explicit locality requests such as **coffee near
