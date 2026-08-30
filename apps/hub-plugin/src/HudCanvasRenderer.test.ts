@@ -13,8 +13,9 @@ import {
   parseHudLabeledValue,
   parseHudListItem,
   parseMessagesConversationRow,
+  MESSAGES_COMPOSE_GUIDANCE,
   messagesConversationTranscript,
-  usesMessagesInstructionCards,
+  usesMessagesCompactLayout,
   canRenderPlanningMonthGrid,
   fitHudWrappedText,
   planningGridMarker,
@@ -423,11 +424,11 @@ describe('parseHudListItem', () => {
 });
 
 describe('parseMessagesConversationRow', () => {
-  it('uses instruction cards for conversation and compose surfaces only', () => {
-    expect(usesMessagesInstructionCards('MESSAGES · CONVERSATION')).toBe(true);
-    expect(usesMessagesInstructionCards('MESSAGES · COMPOSE')).toBe(true);
-    expect(usesMessagesInstructionCards('MESSAGES')).toBe(false);
-    expect(usesMessagesInstructionCards('MESSAGES · ACCESS')).toBe(false);
+  it('uses the compact Messages layout for conversation and compose surfaces only', () => {
+    expect(usesMessagesCompactLayout('MESSAGES · CONVERSATION')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · COMPOSE')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · ACCESS')).toBe(false);
   });
 
   it('separates incoming, outgoing, and voice-action rows', () => {
@@ -440,6 +441,10 @@ describe('parseMessagesConversationRow', () => {
     expect(parseMessagesConversationRow('Say “JOAT, reply saying …”')).toEqual({
       kind: 'instruction', label: '', body: 'Say “JOAT, reply saying …”',
     });
+  });
+
+  it('keeps Compose guidance to one voice line instead of a card stack', () => {
+    expect(MESSAGES_COMPOSE_GUIDANCE).toBe('Say: recipient, then message');
   });
 
   it('keeps a compact six-line transcript free of header and action-card rows', () => {
