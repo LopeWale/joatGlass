@@ -89,7 +89,29 @@ class TestHudSink:
         assert frame.active_speaker == "openclaw"
         assert frame.terminal_state == "ready"
         assert frame.no_tools_checked is True
-        assert "formatter" in frame.activity
+        assert frame.activity == "Thinking… Use tabs with a formatter."
+
+    async def test_keeps_the_thinking_marker_readable_without_changing_later_chunk_joining(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["hermes"])
+        await sink.turn("hermes")
+
+        await sink.chunk("first")
+        first = transport.sent[-1]
+        assert isinstance(first, BrainstormHudView)
+        assert first.activity == "Thinking… first"
+
+        await sink.chunk("-chunk")
+        second = transport.sent[-1]
+        assert isinstance(second, BrainstormHudView)
+        assert second.activity == "Thinking… first-chunk"
+
+        await sink.turn("hermes")
+        await sink.chunk(" already spaced")
+        naturally_spaced = transport.sent[-1]
+        assert isinstance(naturally_spaced, BrainstormHudView)
+        assert naturally_spaced.activity == "Thinking… already spaced"
 
     async def test_terminal_overlay_and_replay_keep_the_real_brainstorm_state(self) -> None:
         transport = HudTransport()

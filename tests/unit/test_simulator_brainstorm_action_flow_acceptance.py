@@ -1,15 +1,48 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from joat.services.brainstorm_acceptance import RUN_SCHEMA
 from scripts.simulator_brainstorm_action_flow_acceptance import (
     BrainstormActionFlowError,
     ScreenReceipt,
+    _prepare_simulator_plugin_root,
     default_ws_url,
     validate_visual_artifacts,
     validate_flow,
 )
+
+
+def test_simulator_plugin_root_snapshots_application_source_but_reuses_dependencies(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    plugin = repo / "apps" / "hub-plugin"
+    source = plugin / "src"
+    source.mkdir(parents=True)
+    (source / "main.ts").write_text("export const version = 'before';\n", encoding="utf-8")
+    (plugin / "node_modules").mkdir()
+    (plugin / "index.html").write_text("<main></main>\n", encoding="utf-8")
+    (plugin / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (plugin / "app.json").write_text(json.dumps({
+        "permissions": [{"name": "network", "whitelist": ["wss://mac.local:8787"]}],
+    }), encoding="utf-8")
+
+    output = tmp_path / "out"
+    output.mkdir()
+    root = _prepare_simulator_plugin_root(
+        repo,
+        output,
+        "ws://127.0.0.1:8794/glasses",
+    )
+
+    assert not (root / "src").is_symlink()
+    assert (root / "src" / "main.ts").read_text(encoding="utf-8") == "export const version = 'before';\n"
+    assert (root / "node_modules").is_symlink()
+    (source / "main.ts").write_text("export const version = 'after';\n", encoding="utf-8")
+    assert (root / "src" / "main.ts").read_text(encoding="utf-8") == "export const version = 'before';\n"
 
 
 def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:

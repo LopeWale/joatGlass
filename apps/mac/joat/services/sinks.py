@@ -99,7 +99,15 @@ class HudSink:
         await self._paint("running")
 
     async def chunk(self, text: str) -> None:
-        self._activity = (self._activity + text)[-180:]
+        # `turn()` paints a fixed progress marker before any model bytes
+        # arrive. The first token is usually lexical rather than whitespace,
+        # so concatenate it as readable prose once; later chunks must retain
+        # their exact boundaries because a streaming model may split a word.
+        needs_prefix_separator = (
+            self._activity == "Thinking…" and text and not text[0].isspace()
+        )
+        separator = " " if needs_prefix_separator else ""
+        self._activity = (self._activity + separator + text)[-180:]
         await self._paint("running")
 
     async def close(self, verdict: str) -> None:
