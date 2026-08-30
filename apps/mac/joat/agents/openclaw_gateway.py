@@ -28,7 +28,7 @@ PROTOCOL_VERSION = 4
 # identity, so it must advertise the ordinary canonical operator identity
 # instead of looking like the Gateway's own internal control-plane client.
 CLIENT_ID = "cli"
-CLIENT_MODE = "cli"
+CLIENT_MODE = "operator"
 CLIENT_VERSION = "0.1.0"
 CLIENT_PLATFORM = "darwin"
 CLIENT_DEVICE_FAMILY = "mac"
