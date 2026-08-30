@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Prove the G2 Brainstorm action flow in the official Even simulator.
+"""Exercise the glasses-originating Brainstorm acceptance in the official simulator.
 
-This runner deliberately avoids development visual fixtures. It starts the
-production Hub plugin, connects it to a real ``HubGatewayTransport``, opens
-the production Mac capability view, and drives the simulator input API through
-the production EventRouter. A deterministic local roundtable prevents an
-external model call from becoming the test oracle.
+This is a causal product-path check, not a visual-fixture gallery. It runs the
+current Hub source in the official Even simulator, connects it to a real
+``HubGatewayTransport``, opens Brainstorm through ``CapabilityRouter``, and
+drives the production ``EventRouter`` with the simulator input API.
 
-The simulator emits only the right-temple input source. It therefore proves
-tap actions and the supported downward-swipe cancellation path; physical G2
-is still required for the left-temple-double shortcut.
+The fixed acceptance controller retains only allowlisted gesture metadata and
+completed HUD-frame SHA-256 digests. A deterministic, content-free Hermes
+stream replaces private Gateway I/O in this simulator lane. Physical G2 is a
+separate gate because the simulator always reports the right temple and cannot
+emit the left-temple double press required by the physical acceptance result.
 """
 
 from __future__ import annotations
@@ -34,14 +35,16 @@ from urllib.parse import urlsplit
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.channels.cards import CardLog
-from joat.core.interfaces import SttEngine, Transcript
 from joat.core.protocol import BrainstormAction, BrainstormHudView, DownlinkMessage
+from joat.services.brainstorm_acceptance import (
+    MAX_RETAINED_EVENTS,
+    RUN_SCHEMA,
+    file_sha256,
+    make_g2_gesture_acceptance_session,
+)
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
-from joat.services.orchestrator import VoiceOrchestrator
-from joat.services.roundtable import Participant, RoundTable
-from joat.services.session import DebateSession, SessionManager
-from joat.services.sinks import HudSink
+from joat.services.session import SessionManager
 from joat.services.status import StatusPublisher
 
 
@@ -50,25 +53,15 @@ class BrainstormActionFlowError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class Receipt:
+class ScreenReceipt:
+    """Content-free visible-state receipt from one settled simulator frame."""
+
     name: str
     simulator_input: str | None
     semantic_action: str | None
     screen: str
     state: str
     framebuffer_sha256: str
-
-
-class RecordingGateway(HubGatewayTransport):
-    """Real gateway with a bounded in-memory downlink receipt for this run."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.sent: list[DownlinkMessage] = []
-
-    async def send(self, message: DownlinkMessage) -> None:
-        self.sent.append(message)
-        await super().send(message)
 
 
 @dataclass(slots=True)
@@ -91,7 +84,153 @@ class ManagedProcess:
                 self.process.wait(timeout=2)
 
 
+class RecordingGateway(HubGatewayTransport):
+    """Production gateway plus a bounded observer used only by this runner."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.sent: list[DownlinkMessage] = []
+
+    async def send(self, message: DownlinkMessage) -> None:
+        self.sent.append(message)
+        await super().send(message)
+
+
+class DeterministicHermes:
+    """No-network stream that keeps cancellation observable without content."""
+
+    def __init__(self) -> None:
+        self._hold = asyncio.Event()
+
+    async def stream(self, _prompt: str) -> AsyncIterator[str]:
+        yield "status marker one "
+        yield "status marker two"
+        await self._hold.wait()
+
+    def release(self) -> None:
+        self._hold.set()
+
+
 T = TypeVar("T")
+
+_EXPECTED_FLOW = (
+    ("ready", None, None, "brainstorm", "ready"),
+    ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
+    ("running", "click", "begin_topic_capture", "brainstorm", "running"),
+    ("terminal", "click", "show_terminal", "agent_terminal", "running"),
+    ("returned", "click", "show_brainstorm", "brainstorm", "running"),
+    ("reconnected", None, "authenticated_replay", "brainstorm", "running"),
+    ("cancelled", "down", "cancel", "brainstorm", "cancelled"),
+)
+
+_BANNED_EVIDENCE_KEYS = frozenset({
+    "audio", "content", "endpoint", "message", "payload", "prompt", "topic",
+    "transcript", "url",
+})
+
+
+def _is_sha256(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _walk_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            keys.add(str(key).casefold())
+            keys.update(_walk_keys(child))
+    elif isinstance(value, list):
+        for child in value:
+            keys.update(_walk_keys(child))
+    return keys
+
+
+def validate_flow(
+    receipts: list[ScreenReceipt],
+    acceptance: dict[str, object],
+) -> None:
+    """Require the full simulator sequence while refusing a physical claim."""
+
+    observed = [
+        (
+            item.name,
+            item.simulator_input,
+            item.semantic_action,
+            item.screen,
+            item.state,
+        )
+        for item in receipts
+    ]
+    if observed != list(_EXPECTED_FLOW):
+        raise BrainstormActionFlowError(f"unexpected rendered action flow: {observed!r}")
+    digests = [item.framebuffer_sha256 for item in receipts]
+    if any(not _is_sha256(digest) for digest in digests):
+        raise BrainstormActionFlowError("simulator receipt contains an invalid frame digest")
+    if len(set(digests)) != len(digests):
+        raise BrainstormActionFlowError("simulator flow did not produce distinct visible frames")
+
+    if acceptance.get("schema") != RUN_SCHEMA:
+        raise BrainstormActionFlowError("acceptance receipt has the wrong schema")
+    if acceptance.get("mode") != "simulator_app_engine":
+        raise BrainstormActionFlowError("simulator receipt was mislabeled as physical G2")
+    if acceptance.get("result") == "pass":
+        raise BrainstormActionFlowError("simulator receipt must never claim physical pass")
+    if acceptance.get("g2Reconnect") != "restored":
+        raise BrainstormActionFlowError("replacement simulator connection was not restored")
+    if acceptance.get("hermesRun") != "cancelled":
+        raise BrainstormActionFlowError("the deterministic Hermes stream was not cancelled")
+    hermes_stream = acceptance.get("hermesStream")
+    if not isinstance(hermes_stream, dict) or hermes_stream.get("hud") != "verified":
+        raise BrainstormActionFlowError("the Hermes HUD stream was not verified")
+    stream_digests = hermes_stream.get("frameSha256")
+    if (
+        not isinstance(stream_digests, list)
+        or len(stream_digests) != 2
+        or any(not _is_sha256(digest) for digest in stream_digests)
+        or len(set(stream_digests)) != 2
+    ):
+        raise BrainstormActionFlowError(
+            "the Hermes HUD stream has no distinct ordered frame pair"
+        )
+    events = acceptance.get("events")
+    if not isinstance(events, list):
+        raise BrainstormActionFlowError("the acceptance trace is missing")
+    running_brainstorm_digests = [
+        event.get("sha256")
+        for event in events
+        if isinstance(event, dict)
+        and event.get("type") == "visual_frame"
+        and event.get("kind") == "brainstorm"
+        and event.get("surface") == "brainstorm"
+        and event.get("state") == "running"
+        and _is_sha256(event.get("sha256"))
+    ]
+    if not any(
+        running_brainstorm_digests[index:index + 2] == stream_digests
+        for index in range(max(0, len(running_brainstorm_digests) - 1))
+    ):
+        raise BrainstormActionFlowError(
+            "the Hermes HUD frames are absent or reversed in Brainstorm trace order"
+        )
+    started_by = acceptance.get("startedBy")
+    if started_by != {
+        "interface": "g2",
+        "modality": "gesture",
+        "surface": "brainstorm",
+        "source": "right",
+        "gesture": "double_press",
+        "delivery": "sys",
+    }:
+        raise BrainstormActionFlowError("acceptance did not preserve the simulator gesture source")
+    retained_count = acceptance.get("retainedEventCount")
+    if not isinstance(retained_count, int) or not 0 <= retained_count <= MAX_RETAINED_EVENTS:
+        raise BrainstormActionFlowError("acceptance retained too many events")
+    if _walk_keys(acceptance) & _BANNED_EVIDENCE_KEYS:
+        raise BrainstormActionFlowError("acceptance retained a forbidden content field")
 
 
 def _http_bytes(
@@ -114,22 +253,15 @@ def _port_busy(port: int) -> bool:
 
 
 def _prepare_simulator_plugin_root(repo: Path, output: Path, websocket_url: str) -> Path:
-    """Create a disposable official-simulator root with one isolated WS origin.
+    """Use exact current Hub source with one disposable local allowlist entry."""
 
-    The real manifest deliberately limits production JOAT to port 8787, where
-    a user-owned engine may already be running. This acceptance runner must
-    not stop or replace that engine. Instead, its Vite root symlinks the exact
-    current source and adds one local-only WebSocket origin for the isolated
-    gateway; the production manifest is never changed.
-    """
     parsed = urlsplit(websocket_url)
     if parsed.scheme != "ws" or not parsed.hostname or parsed.path != "/glasses":
         raise BrainstormActionFlowError("simulator WebSocket URL must be ws://host:port/glasses")
     origin = f"{parsed.scheme}://{parsed.netloc}"
     source_root = repo / "apps/hub-plugin"
-    manifest_path = source_root / "app.json"
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads((source_root / "app.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BrainstormActionFlowError("could not read the production Hub manifest") from exc
     permissions = manifest.get("permissions")
@@ -149,9 +281,11 @@ def _prepare_simulator_plugin_root(repo: Path, output: Path, websocket_url: str)
     root = output / "simulator-plugin-root"
     root.mkdir(mode=0o700)
     for name in ("index.html", "src", "node_modules", "tsconfig.json"):
-        os.symlink(source_root / name, root / name, target_is_directory=(source_root / name).is_dir())
-    (root / "app.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    os.chmod(root / "app.json", 0o600)
+        source = source_root / name
+        os.symlink(source, root / name, target_is_directory=source.is_dir())
+    manifest_path = root / "app.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_path.chmod(0o600)
     return root
 
 
@@ -177,7 +311,10 @@ def _start_process(
 
 
 async def _wait_for(
-    predicate: Callable[[], T | None], *, label: str, timeout_s: float = 15.0,
+    predicate: Callable[[], T | None],
+    *,
+    label: str,
+    timeout_s: float = 20.0,
 ) -> T:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -207,7 +344,10 @@ def _alpha_preview(raw_path: Path) -> Path:
         raise BrainstormActionFlowError("ffmpeg is required to inspect simulator alpha framebuffers")
     alpha = raw_path.with_name(f"{raw_path.stem}.alpha.png")
     completed = subprocess.run(
-        [ffmpeg, "-y", "-loglevel", "error", "-i", str(raw_path), "-vf", "alphaextract", str(alpha)],
+        [
+            ffmpeg, "-y", "-loglevel", "error", "-i", str(raw_path),
+            "-vf", "alphaextract", str(alpha),
+        ],
         capture_output=True,
         timeout=15,
         check=False,
@@ -226,10 +366,13 @@ async def _capture(
 ) -> tuple[str, str, str]:
     previous: str | None = None
     stable_since = 0.0
-    deadline = time.monotonic() + 15.0
+    deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         try:
-            raw = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/screenshot/glasses")
+            raw = await asyncio.to_thread(
+                _http_bytes,
+                f"{automation_base}/api/screenshot/glasses",
+            )
         except (OSError, urllib.error.URLError):
             await asyncio.sleep(0.1)
             continue
@@ -240,7 +383,7 @@ async def _capture(
         now = time.monotonic()
         if digest != previous:
             previous, stable_since = digest, now
-        elif now - stable_since >= 0.6:
+        elif now - stable_since >= 0.8:
             raw_path = output / f"{name}.rgba.png"
             raw_path.write_bytes(raw)
             raw_path.chmod(0o600)
@@ -267,7 +410,6 @@ async def _start_official_simulator(
     output: Path,
     log_name: str,
 ) -> ManagedProcess:
-    """Start one official glasses runtime and wait for its automation API."""
     simulator = _start_process(
         "official-evenhub-simulator",
         [str(args.simulator), plugin_url, "--automation-port", str(args.automation_port)],
@@ -280,7 +422,11 @@ async def _start_official_simulator(
 
 
 def _last_brainstorm(
-    gateway: RecordingGateway, *, after: int = 0, screen: str | None = None, state: str | None = None,
+    gateway: RecordingGateway,
+    *,
+    after: int = 0,
+    screen: str | None = None,
+    state: str | None = None,
 ) -> BrainstormHudView | None:
     for message in reversed(gateway.sent[after:]):
         if not isinstance(message, BrainstormHudView):
@@ -303,117 +449,21 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     if not args.simulator.is_file():
         raise BrainstormActionFlowError("official evenhub-simulator is not installed")
 
-    # The official Hub simulator enforces app.json's network allowlist. Bind
-    # the test gateway on every local interface and dial the existing
-    # whitelisted Bonjour hostname instead of inventing a loopback exception.
     gateway = RecordingGateway(host=args.ws_listen_host, port=args.ws_port)
     connected = asyncio.Event()
     hello_count = 0
     actions: list[BrainstormAction] = []
-    retry_actions: list[None] = []
-    hold = asyncio.Event()
-
-    async def codex_stream(_prompt: str) -> AsyncIterator[str]:
-        yield "Exploring the constraints."
-        await hold.wait()
-
-    async def claude_stream(_prompt: str) -> AsyncIterator[str]:
-        yield "Looking for the trade-offs."
-
-    async def hermes_stream(_prompt: str) -> AsyncIterator[str]:
-        yield "Checking the operational constraints."
-
-    def make_session(topic: str) -> DebateSession:
-        table = RoundTable([
-            Participant("codex", "proposer", codex_stream),
-            Participant("claude", "critic", claude_stream),
-            # The isolated acceptance preserves the actual participant shape
-            # after the app has admitted Hermes, while replacing only remote
-            # Gateway I/O with a deterministic stream.
-            Participant("hermes", "operator", hermes_stream),
-        ])
-        return DebateSession(
-            topic,
-            table,
-            HudSink(HudWriter(gateway), lambda: {
-                "state": "ready",
-                "reason": "",
-                "endpoint_host": "home-mac.example-tailnet.ts.net",
-                "no_tools_checked": True,
-            }),
-            judge=None,
-        )
-
-    def topic_capture_view() -> BrainstormHudView:
-        return BrainstormHudView(
-            screen="brainstorm",
-            state="ready",
-            topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity='Say “JOAT, brainstorm …” to begin.',
-            terminal_state="ready",
-            endpoint_host="home-mac.example-tailnet.ts.net",
-            terminal_reason="",
-            no_tools_checked=True,
-        )
-
+    terminal = DeterministicHermes()
+    hud = HudWriter(gateway)
     status = StatusPublisher(path=output / "status.json")
     status.set_openclaw(
         state="connected_operator",
-        endpoint_host="home-mac.example-tailnet.ts.net",
+        endpoint_host="simulator-only",
         scopes=("operator.read", "operator.write"),
         reason="",
     )
     status.set_agent_terminal(state="ready", reason="")
-    hud = HudWriter(gateway)
-
-    async def retry_terminal() -> None:
-        """Deterministic stand-in for the production signed retry boundary.
-
-        This visual acceptance deliberately does not dial the private Gateway,
-        but it drives the same SessionManager retry callback that production
-        invokes after the wearer taps an approval/unavailable terminal frame.
-        """
-        retry_actions.append(None)
-        status.set_openclaw(
-            state="connected_operator",
-            endpoint_host="home-mac.example-tailnet.ts.net",
-            scopes=("operator.read", "operator.write"),
-            reason="",
-        )
-        status.set_agent_terminal(state="ready", reason="")
-        await hud.show_brainstorm(BrainstormHudView(
-            screen="agent_terminal",
-            state="ready",
-            topic="Hermes Agent Terminal",
-            collaborators=[],
-            activity="Dedicated no-tool session ready. Tap to begin a Brainstorm.",
-            terminal_state="ready",
-            endpoint_host="home-mac.example-tailnet.ts.net",
-            terminal_reason="",
-            no_tools_checked=True,
-        ))
-
-    manager = SessionManager(
-        hud,
-        make_session,
-        terminal_retry=retry_terminal,
-        topic_capture_view=topic_capture_view,
-    )
-
-    class InertStt(SttEngine):
-        """The reconnect path never transcribes, but requires an STT shape."""
-
-        async def feed(self, _pcm: bytes) -> Transcript | None:
-            return None
-
-        async def flush(self) -> Transcript | None:
-            return None
-
-        def reset(self) -> None:
-            return None
-
-    orchestrator = VoiceOrchestrator(gateway, InertStt(), sessions=manager)
+    sessions = SessionManager(hud, lambda _topic: None)
     capabilities = CapabilityRouter(
         hud=hud,
         transport=gateway,
@@ -421,22 +471,44 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         messages=None,
         cards=CardLog(),
     )
+    receipt_directory = output / "receipts"
+
     def on_hello(_hello: object) -> None:
         nonlocal hello_count
         hello_count += 1
         connected.set()
-        asyncio.get_running_loop().create_task(orchestrator.on_connect())
 
     gateway.on_hello(on_hello)
 
-    def record_brainstorm_action(action: BrainstormAction) -> None:
+    def on_action(action: BrainstormAction) -> None:
         actions.append(action)
-        manager.handle_brainstorm_action(action)
+        if action.action == "begin_acceptance":
+            candidate = make_g2_gesture_acceptance_session(
+                transport=gateway,
+                terminal=lambda: terminal,
+                trigger=action,
+                output_directory=receipt_directory,
+                action_timeout_s=15.0,
+                connect_timeout_s=30.0,
+                simulator_override=True,
+            )
+            if candidate is None:
+                hello = gateway.hello
+                raise BrainstormActionFlowError(
+                    "fixed acceptance factory rejected simulator classification "
+                    f"model={hello.model if hello else 'missing'} "
+                    f"launch={hello.launch_source if hello else 'missing'} "
+                    f"physical={gateway.physical_g2_connected}"
+                )
+            if not sessions.try_start_session(candidate):
+                raise BrainstormActionFlowError("fixed acceptance session did not start")
+            return
+        sessions.handle_brainstorm_action(action)
 
-    gateway.on_brainstorm_action(record_brainstorm_action)
+    gateway.on_brainstorm_action(on_action)
 
     managed: list[ManagedProcess] = []
-    receipts: list[Receipt] = []
+    receipts: list[ScreenReceipt] = []
     artifacts: dict[str, dict[str, str]] = {}
     try:
         await gateway.start()
@@ -449,7 +521,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "npx", "vite", str(simulator_root),
                 "--config", str(args.repo / "apps/hub-plugin/vite.config.ts"),
                 "--host", "127.0.0.1",
-                "--port", str(args.vite_port), "--strictPort",
+                "--port", str(args.vite_port),
+                "--strictPort",
             ],
             cwd=args.repo / "apps/hub-plugin",
             env=env,
@@ -467,163 +540,147 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         managed.append(simulator)
         automation_base = f"http://127.0.0.1:{args.automation_port}"
+        await _wait_for(
+            lambda: True if gateway.connected else None,
+            label="authenticated simulator WebSocket",
+        )
         try:
-            await _wait_for(
-                lambda: True if gateway.connected else None,
-                label="authenticated simulator WebSocket",
-                timeout_s=20,
-            )
-        except BrainstormActionFlowError as exc:
-            raise BrainstormActionFlowError(
-                "Hub plugin never reached the isolated Mac gateway; the simulator WebSocket dial is blocked"
-            ) from exc
-        try:
-            # Boot may consume the bounded 3s device lookup plus the bounded
-            # 3s optional-account lookup before it can announce itself.
             await asyncio.wait_for(connected.wait(), timeout=15)
         except asyncio.TimeoutError as exc:
-            # Preserve the actual optical boot state when an app-side boot
-            # failure prevents the required hello, rather than leaving only a
-            # terminal timeout to diagnose a wearer-visible failure.
-            try:
-                await _capture(automation_base, output, "00-authenticated-no-hello", None)
-            except BrainstormActionFlowError:
-                pass
-            raise BrainstormActionFlowError(
-                "Hub plugin authenticated but never sent its required hello frame"
-            ) from exc
+            raise BrainstormActionFlowError("simulator authenticated but never sent Hello") from exc
 
-        # This is the real Mac menu target. The simulator cannot send a
-        # left-temple event, so this selects the already-supported row rather
-        # than claiming a menu-source proof it cannot supply.
+        # Open the real capability producer. The simulator cannot inject the
+        # left-temple menu gesture, so menu ingress remains a physical gate.
         await capabilities.open("Brainstorm")
-        ready = await _wait_for(lambda: _last_brainstorm(gateway, screen="brainstorm", state="ready"), label="ready Brainstorm view")
+        ready = await _wait_for(
+            lambda: _last_brainstorm(gateway, screen="brainstorm", state="ready"),
+            label="ready Brainstorm capability",
+        )
         digest, raw, alpha = await _capture(automation_base, output, "01-ready", None)
-        receipts.append(Receipt("ready", None, None, ready.screen, ready.state, digest))
+        receipts.append(ScreenReceipt("ready", None, None, ready.screen, ready.state, digest))
         artifacts["ready"] = {"raw": raw, "alpha": alpha}
 
-        # Recovery is visible and wearer-controlled. Start with the exact
-        # approval-required terminal state, then let the real Hub controller
-        # emit retry_terminal on a simulator click. The callback above is the
-        # deterministic seam replacing only the signed Tailscale retry.
-        status.set_openclaw(
-            state="approval_required",
-            endpoint_host="home-mac.example-tailnet.ts.net",
-            scopes=("operator.read", "operator.write"),
-            reason="device_approval_required",
-        )
-        status.set_agent_terminal(state="approval_required", reason="write_scope_required")
-        sent_before = len(gateway.sent)
-        await capabilities.open("Agent Terminal")
-        approval = await _wait_for(
-            lambda: _last_brainstorm(
-                gateway,
-                after=sent_before,
-                screen="agent_terminal",
-                state="approval_required",
-            ),
-            label="approval-required Hermes terminal frame",
-        )
-        digest, raw, alpha = await _capture(automation_base, output, "02-approval-required", digest)
-        receipts.append(Receipt("approval-required", None, None, approval.screen, approval.state, digest))
-        artifacts["approval-required"] = {"raw": raw, "alpha": alpha}
-
         action_count, sent_before = len(actions), len(gateway.sent)
-        await _input(automation_base, "click")
-        retry = await _wait_for(
-            lambda: next((item for item in actions[action_count:] if item.action == "retry_terminal"), None),
-            label="retry-terminal action",
-        )
-        await _wait_for(
-            lambda: True if retry_actions else None,
-            label="terminal retry callback",
-        )
-        retried = await _wait_for(
-            lambda: _last_brainstorm(
-                gateway,
-                after=sent_before,
-                screen="agent_terminal",
-                state="ready",
+        await _input(automation_base, "double_click")
+        trigger = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "begin_acceptance"),
+                None,
             ),
-            label="recovered Hermes terminal frame",
+            label="fixed begin-acceptance action",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "03-terminal-retried", digest)
-        receipts.append(Receipt("terminal-retried", "click", retry.action, retried.screen, retried.state, digest))
-        artifacts["terminal-retried"] = {"raw": raw, "alpha": alpha}
-
-        # Return to the primary Brainstorm surface before starting a topic.
-        sent_before = len(gateway.sent)
-        await capabilities.open("Brainstorm")
-        ready_after_retry = await _wait_for(
-            lambda: _last_brainstorm(gateway, after=sent_before, screen="brainstorm", state="ready"),
-            label="recovered ready Brainstorm view",
-        )
-
-        action_count, sent_before = len(actions), len(gateway.sent)
-        await _input(automation_base, "click")
-        begin = await _wait_for(
-            lambda: next((item for item in actions[action_count:] if item.action == "begin_topic_capture"), None),
-            label="begin-topic-capture action",
-        )
-        capture = await _wait_for(
+        acceptance_ready = await _wait_for(
             lambda: _last_brainstorm(
                 gateway,
                 after=sent_before,
                 screen="brainstorm",
-                state="ready",
+                state="acceptance_ready",
             ),
-            label="visible topic-capture Brainstorm frame",
+            label="acceptance-ready Brainstorm frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "04-topic-capture", digest)
-        receipts.append(Receipt("topic-capture", "click", begin.action, capture.screen, capture.state, digest))
-        artifacts["topic-capture"] = {"raw": raw, "alpha": alpha}
+        digest, raw, alpha = await _capture(
+            automation_base,
+            output,
+            "02-acceptance-ready",
+            digest,
+        )
+        receipts.append(ScreenReceipt(
+            "acceptance-ready",
+            "double_click",
+            trigger.action,
+            acceptance_ready.screen,
+            acceptance_ready.state,
+            digest,
+        ))
+        artifacts["acceptance-ready"] = {"raw": raw, "alpha": alpha}
 
-        # STT is outside this deterministic simulator lane. This call enters
-        # the real SessionManager trigger grammar that production STT invokes.
-        sent_before = len(gateway.sent)
-        if not manager.handle_transcript("brainstorm compare two safe plans"):
-            raise BrainstormActionFlowError("SessionManager rejected the Brainstorm trigger")
-        running = await _wait_for(
-            lambda: _last_brainstorm(gateway, after=sent_before, screen="brainstorm", state="running"),
-            label="live Brainstorm frame",
+        action_count, sent_before = len(actions), len(gateway.sent)
+        await _input(automation_base, "click")
+        begin = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "begin_topic_capture"),
+                None,
+            ),
+            label="acceptance start tap",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "05-running", digest)
-        receipts.append(Receipt("running", None, "voice_trigger", running.screen, running.state, digest))
+        running = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="brainstorm",
+                state="running",
+            ),
+            label="streaming Brainstorm frame",
+        )
+        await asyncio.sleep(1.0)
+        digest, raw, alpha = await _capture(automation_base, output, "03-running", digest)
+        receipts.append(ScreenReceipt(
+            "running", "click", begin.action, running.screen, running.state, digest,
+        ))
         artifacts["running"] = {"raw": raw, "alpha": alpha}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
-        terminal_action = await _wait_for(
-            lambda: next((item for item in actions[action_count:] if item.action == "show_terminal"), None),
-            label="show-terminal action",
+        show_terminal = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "show_terminal"),
+                None,
+            ),
+            label="show-terminal tap",
         )
-        terminal = await _wait_for(
-            lambda: _last_brainstorm(gateway, after=sent_before, screen="agent_terminal", state="running"),
-            label="live Hermes terminal frame",
+        terminal_view = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="agent_terminal",
+                state="running",
+            ),
+            label="Agent Terminal frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "06-terminal", digest)
-        receipts.append(Receipt("terminal", "click", terminal_action.action, terminal.screen, terminal.state, digest))
+        digest, raw, alpha = await _capture(automation_base, output, "04-terminal", digest)
+        receipts.append(ScreenReceipt(
+            "terminal",
+            "click",
+            show_terminal.action,
+            terminal_view.screen,
+            terminal_view.state,
+            digest,
+        ))
         artifacts["terminal"] = {"raw": raw, "alpha": alpha}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
-        back = await _wait_for(
-            lambda: next((item for item in actions[action_count:] if item.action == "show_brainstorm"), None),
-            label="return-to-brainstorm action",
+        show_brainstorm = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "show_brainstorm"),
+                None,
+            ),
+            label="return-to-brainstorm tap",
         )
-        restored = await _wait_for(
-            lambda: _last_brainstorm(gateway, after=sent_before, screen="brainstorm", state="running"),
-            label="restored Brainstorm frame",
+        returned = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="brainstorm",
+                state="running",
+            ),
+            label="returned Brainstorm frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "07-returned", digest)
-        receipts.append(Receipt("returned", "click", back.action, restored.screen, restored.state, digest))
+        digest, raw, alpha = await _capture(automation_base, output, "05-returned", digest)
+        receipts.append(ScreenReceipt(
+            "returned",
+            "click",
+            show_brainstorm.action,
+            returned.screen,
+            returned.state,
+            digest,
+        ))
         artifacts["returned"] = {"raw": raw, "alpha": alpha}
 
-        # A real Hub replacement loses all in-memory visual objects. Restart
-        # the official simulator against the same production Vite build and
-        # require the production on_hello → VoiceOrchestrator.on_connect
-        # path to replay the active typed Brainstorm frame on the new socket.
+        # Replace the official simulator connection. A duplicate Hello on the
+        # same socket is not accepted as reconnect evidence.
         sent_before = len(gateway.sent)
+        generation_before = gateway.connection_generation
         simulator.stop()
         await _wait_for(
             lambda: True if not _port_busy(args.automation_port) else None,
@@ -638,8 +695,10 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         managed.append(reconnected_simulator)
         await _wait_for(
-            lambda: True if hello_count >= 2 else None,
-            label="authenticated replacement simulator hello",
+            lambda: True
+            if hello_count >= 2 and gateway.connection_generation > generation_before
+            else None,
+            label="authenticated replacement simulator generation",
         )
         replayed = await _wait_for(
             lambda: _last_brainstorm(
@@ -648,67 +707,93 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 screen="brainstorm",
                 state="running",
             ),
-            label="replayed active Brainstorm frame after reconnect",
+            label="restored Brainstorm frame after reconnect",
         )
-        # The gateway receipt is not the same as a finished four-tile draw.
-        # Let the replacement Hub finish the currently accepted downlink
-        # before sampling the optical framebuffer; the frame itself remains
-        # the acceptance criterion below.
-        await asyncio.sleep(2.0)
-        digest, raw, alpha = await _capture(automation_base, output, "08-reconnected", digest)
-        receipts.append(Receipt("reconnected", None, "authenticated_replay", replayed.screen, replayed.state, digest))
+        await asyncio.sleep(1.0)
+        digest, raw, alpha = await _capture(automation_base, output, "06-reconnected", digest)
+        receipts.append(ScreenReceipt(
+            "reconnected",
+            None,
+            "authenticated_replay",
+            replayed.screen,
+            replayed.state,
+            digest,
+        ))
         artifacts["reconnected"] = {"raw": raw, "alpha": alpha}
 
+        # Simulator swipe-down has text delivery and no physical source. The
+        # visible cancel path runs, while the receipt stays non-physical.
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "down")
         cancel = await _wait_for(
-            lambda: next((item for item in actions[action_count:] if item.action == "cancel"), None),
-            label="swipe cancellation action",
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "cancel"),
+                None,
+            ),
+            label="simulator cancellation fallback",
         )
         cancelled = await _wait_for(
-            lambda: _last_brainstorm(gateway, after=sent_before, screen="brainstorm", state="cancelled"),
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="brainstorm",
+                state="cancelled",
+            ),
             label="cancelled Brainstorm frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "09-cancelled", digest)
-        receipts.append(Receipt("cancelled", "down", cancel.action, cancelled.screen, cancelled.state, digest))
+        digest, raw, alpha = await _capture(automation_base, output, "07-cancelled", digest)
+        receipts.append(ScreenReceipt(
+            "cancelled",
+            "down",
+            cancel.action,
+            cancelled.screen,
+            cancelled.state,
+            digest,
+        ))
         artifacts["cancelled"] = {"raw": raw, "alpha": alpha}
 
-        expected = [
-            ("ready", None, "brainstorm", "ready"),
-            ("approval-required", None, "agent_terminal", "approval_required"),
-            ("terminal-retried", "retry_terminal", "agent_terminal", "ready"),
-            ("topic-capture", "begin_topic_capture", "brainstorm", "ready"),
-            ("running", "voice_trigger", "brainstorm", "running"),
-            ("terminal", "show_terminal", "agent_terminal", "running"),
-            ("returned", "show_brainstorm", "brainstorm", "running"),
-            ("reconnected", "authenticated_replay", "brainstorm", "running"),
-            ("cancelled", "cancel", "brainstorm", "cancelled"),
-        ]
-        observed = [(item.name, item.semantic_action, item.screen, item.state) for item in receipts]
-        if observed != expected:
-            raise BrainstormActionFlowError(f"unexpected rendered action flow: {observed!r}")
+        await _wait_for(
+            lambda: True if not sessions.active else None,
+            label="completed simulator acceptance session",
+        )
+        receipt_paths = list(receipt_directory.glob("*-simulator.json"))
+        if len(receipt_paths) != 1:
+            raise BrainstormActionFlowError("acceptance did not write exactly one simulator receipt")
+        receipt_path = receipt_paths[0]
+        try:
+            acceptance = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BrainstormActionFlowError("acceptance receipt is not readable JSON") from exc
+        if not isinstance(acceptance, dict):
+            raise BrainstormActionFlowError("acceptance receipt must be an object")
+        validate_flow(receipts, acceptance)
+
         return {
-            "schemaVersion": 1,
-            "result": "simulator-brainstorm-recovery-flow-pass",
+            "schemaVersion": 2,
+            "result": "simulator-brainstorm-action-flow-pass",
             "evidenceBoundary": {
-                "hud": "official Even simulator alpha-extracted framebuffer",
+                "hud": "official Even simulator raw framebuffer and alpha interpretation",
                 "input": "official simulator input endpoint through production EventRouter",
-                "mac": "real HubGatewayTransport, CapabilityRouter, SessionManager, DebateSession, and HudSink",
-                "topicStart": "real SessionManager trigger grammar; deterministic test seam replaces STT/model I/O",
-                "approvalRetry": "production BrainstormController action and SessionManager retry callback; deterministic seam replaces the signed Gateway retry",
-                "reconnect": "replacement official simulator socket triggers the production on_hello → VoiceOrchestrator replay path",
-                "leftTempleDoublePress": "not available from official simulator; physical G2 remains required",
-                "hermesGateway": "not contacted by this isolated visual acceptance",
-                "physicalG2": "not run",
-                "manifest": "disposable simulator-only root adds the isolated local gateway origin; production app.json is unchanged",
+                "mac": "production gateway, capability router, session manager, and fixed acceptance controller",
+                "hermes": "deterministic no-network stream; no OpenClaw payload retained",
+                "gestureSource": "simulator-fixed right temple only",
+                "leftTempleDoublePress": "not available; physical G2 remains required",
+                "physicalLens": "not run",
+                "manifest": "disposable simulator root only; production manifest unchanged",
             },
             "receipts": [asdict(item) for item in receipts],
             "artifacts": artifacts,
-            "semanticActions": [item.action for item in actions],
+            "acceptanceReceipt": {
+                "file": str(receipt_path.relative_to(output)),
+                "sha256": file_sha256(receipt_path),
+                "mode": acceptance["mode"],
+                "result": acceptance["result"],
+                "retainedEventCount": acceptance["retainedEventCount"],
+            },
         }
     finally:
-        hold.set()
-        await manager.close(timeout_s=1)
+        terminal.release()
+        await sessions.close(timeout_s=2.0)
         for process in reversed(managed):
             process.stop()
         await gateway.stop()
@@ -725,9 +810,13 @@ def main() -> None:
     parser.add_argument(
         "--ws-url",
         default="ws://laptop-mac.local:8793/glasses",
-        help="Local-only isolated WebSocket gateway for the disposable simulator manifest.",
+        help="Isolated local WebSocket gateway for the disposable simulator manifest.",
     )
-    parser.add_argument("--simulator", type=Path, default=Path.home() / ".local/bin/evenhub-simulator")
+    parser.add_argument(
+        "--simulator",
+        type=Path,
+        default=Path.home() / ".local/bin/evenhub-simulator",
+    )
     args = parser.parse_args()
     args.repo = args.repo.resolve()
     args.out = args.out.resolve()

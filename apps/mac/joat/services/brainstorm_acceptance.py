@@ -17,22 +17,22 @@ import asyncio
 import hashlib
 import json
 import os
-import stat
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ..ble.hub_gateway import HubGatewayTransport
 from ..core.protocol import BrainstormAction, BrainstormHudView, Hello
-from ..services.g2_diagnostics import TRACE_SCHEMA
+from ..services.g2_diagnostics import G2DiagnosticStore, TRACE_SCHEMA
 from ..services.hud import HudWriter
+from ..services.session import Session
 from ..services.sinks import HudSink
 
 
 RUN_SCHEMA = "joat.g2-brainstorm-acceptance.v2"
-ARM_SCHEMA = "joat.g2-brainstorm-acceptance-arm.v1"
 MAX_RETAINED_EVENTS = 16
 _HEX_SHA256_LENGTH = 64
 _STREAM_FRAME_TARGET = 2
@@ -40,14 +40,17 @@ _MAX_STREAM_FRAME_ATTEMPTS = 4
 _PHYSICAL_SOURCES = frozenset({"left", "right", "ring"})
 _TERMINAL_TOGGLE_SOURCES = frozenset({"right", "ring"})
 _BRAINSTORM_ACTIONS = frozenset({
-    "begin_topic_capture", "show_terminal", "show_brainstorm", "retry_terminal", "cancel",
+    "begin_acceptance", "begin_topic_capture", "show_terminal", "show_brainstorm",
+    "retry_terminal", "cancel",
 })
 _HUD_STATES = frozenset({
-    "unavailable", "approval_required", "ready", "running", "settled", "cancelled", "failed", "blocked",
+    "unavailable", "approval_required", "ready", "acceptance_ready", "running",
+    "settled", "cancelled", "failed", "blocked",
 })
 _HUD_SURFACES = frozenset({"brainstorm", "agent_terminal"})
 _HERMES_RUN_STATES = frozenset({"not_exercised", "cancelled", "completed", "failed"})
 _G2_RECONNECT_STATES = frozenset({"not_exercised", "restored"})
+EvidenceMode = Literal["physical_g2", "simulator"]
 
 # It is intentionally never copied into the G2 view, receipt, status file,
 # console, or log.  The response is long only so the wearer has time to
@@ -58,38 +61,14 @@ _FIXED_HERMES_PROMPT = (
 )
 
 
-def default_arm_path() -> Path:
-    return Path.home() / "Library/Application Support/JOAT/acceptance/brainstorm/arm.json"
+def default_output_directory() -> Path:
+    return Path.home() / "Library/Application Support/JOAT/acceptance/brainstorm"
 
 
-def consume_arm_request(path: Path) -> bool:
-    """Consume one owner-only, fixed-vocabulary app opt-in request.
-
-    This is intentionally not a general local control API: the request has no
-    topic, endpoint, action, or free-form value.  Its only effect is arming
-    the fixed acceptance flow from the already app-launched engine.
-    """
-
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    try:
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or stat.S_IMODE(info.st_mode) & 0o077
-            or path.read_bytes() != (ARM_SCHEMA + "\n").encode("utf-8")
-        ):
-            return False
-        return True
-    finally:
-        # A malformed request cannot become a standing trigger.  This is a
-        # same-user owner-local preference, not a retry queue.
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+def _next_output_path(directory: Path, mode: EvidenceMode) -> Path:
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    suffix = "physical-g2" if mode == "physical_g2" else "simulator"
+    return directory / f"{stamp}-{uuid.uuid4().hex[:8]}-{suffix}.json"
 
 
 class HermesStream(Protocol):
@@ -325,9 +304,11 @@ def write_owner_only_json(path: Path, payload: dict[str, object]) -> None:
     """Atomic owner-only output.  It never copies a lens recording."""
 
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
@@ -364,6 +345,22 @@ def _view(surface: str, *, state: str = "running", activity: str) -> BrainstormH
     )
 
 
+def acceptance_rejection_view(reason: Literal["unavailable", "busy"]) -> BrainstormHudView:
+    """Fixed wearer-visible response when a glasses-originating arm is refused."""
+
+    if reason == "busy":
+        return _view(
+            "brainstorm",
+            state="blocked",
+            activity="Finish the active session, then retry acceptance",
+        )
+    return _view(
+        "brainstorm",
+        state="failed",
+        activity="Acceptance unavailable; reconnect G2 and retry",
+    )
+
+
 class InAppBrainstormAcceptance:
     """One-shot physical G2 workflow driven by the production engine objects."""
 
@@ -372,20 +369,45 @@ class InAppBrainstormAcceptance:
         out: Path, action_timeout_s: float = 45.0, connect_timeout_s: float = 120.0,
         diagnostic_events: list[dict[str, object]] | None = None,
         is_isolated: Callable[[], bool] | None = None,
+        trigger: BrainstormAction,
+        connection_generation: int,
+        evidence_mode: EvidenceMode,
         on_complete: Callable[[], None] | None = None,
     ) -> None:
+        if (
+            trigger.action != "begin_acceptance"
+            or trigger.surface != "brainstorm"
+            or trigger.source not in ("right", "ring")
+            or trigger.gesture != "double_press"
+        ):
+            raise ValueError("Brainstorm acceptance requires the fixed G2 gesture")
+        if connection_generation < 1:
+            raise ValueError("Brainstorm acceptance requires an authenticated connection")
         self._transport = transport
         self._terminal = terminal
         self._out = out
         self._action_timeout_s = action_timeout_s
         self._connect_timeout_s = connect_timeout_s
+        self._trigger_event: dict[str, object] = {
+            "sequence": 1,
+            "recordedAtMs": int(time.time() * 1_000),
+            "type": "brainstorm_action",
+            "action": "begin_acceptance",
+            "surface": "brainstorm",
+            "source": trigger.source,
+            "gesture": "double_press",
+            "delivery": "sys",
+        }
         self._events = diagnostic_events if diagnostic_events is not None else []
+        self._events.append(dict(self._trigger_event))
         self._is_isolated = is_isolated or (lambda: True)
+        self._connection_generation = connection_generation
+        self._evidence_mode = evidence_mode
         self._on_complete = on_complete
         self._actions: asyncio.Queue[str] = asyncio.Queue()
-        self._hello_count = 0
-        self._physical_hello = asyncio.Event()
+        self._accepted_hello = asyncio.Event()
         self._replacement_hello = asyncio.Event()
+        self._reconnect_generation_floor: int | None = None
         self._task: asyncio.Task[None] | None = None
         self._stream_task: asyncio.Task[None] | None = None
         self._stream_proven = asyncio.Event()
@@ -398,7 +420,12 @@ class InAppBrainstormAcceptance:
     def observe_diagnostics(self, _path: Path, events: list[dict[str, Any]]) -> None:
         """G2DiagnosticStore callback; receives only protocol-sanitized events."""
 
-        self._events[:] = [dict(event) for event in events]
+        retained = [dict(self._trigger_event)]
+        for sequence, event in enumerate(events, start=2):
+            copy = dict(event)
+            copy["sequence"] = sequence
+            retained.append(copy)
+        self._events[:] = retained
 
     def attach(self, *, subscribe_actions: bool = True) -> None:
         """Attach once to the live engine without taking over normal routing.
@@ -448,11 +475,28 @@ class InAppBrainstormAcceptance:
         self._on_action(action)
 
     def _on_hello(self, hello: Hello) -> None:
-        if hello.model != "g2" or not self._transport.physical_g2_connected:
+        accepted = (
+            hello.model == "g2"
+            and (
+                self._transport.physical_g2_connected
+                if self._evidence_mode == "physical_g2"
+                # Entry into simulator mode was already fail-closed by the
+                # factory: either the Hello explicitly said simulator or the
+                # isolated official-simulator runner supplied its one-way
+                # evidence downgrade. The controller must not re-impose the
+                # unreliable launchSource field after that decision.
+                else True
+            )
+        )
+        if not accepted:
             return
-        self._hello_count += 1
-        self._physical_hello.set()
-        if self._hello_count > 1:
+        generation = self._transport.connection_generation
+        if generation == self._connection_generation:
+            self._accepted_hello.set()
+        elif (
+            self._reconnect_generation_floor is not None
+            and generation > self._reconnect_generation_floor
+        ):
             self._replacement_hello.set()
 
     def _on_action(self, action: BrainstormAction) -> None:
@@ -489,6 +533,13 @@ class InAppBrainstormAcceptance:
         observed = await asyncio.wait_for(self._actions.get(), self._action_timeout_s)
         if observed != action:
             raise RuntimeError(f"expected {action} action")
+        # The official simulator exposes swipe-down only as a text-delivery
+        # event and supplies no physical source. Exercise the visible cancel
+        # transition, but do not invent left/right/ring provenance: the final
+        # simulator receipt remains inconclusive because summarize_receipt()
+        # still requires the real left-temple diagnostic event for a pass.
+        if self._evidence_mode == "simulator" and action == "cancel":
+            return
         await self._wait_for(
             lambda: any(event.get("type") == "brainstorm_action" and event.get("action") == action for event in self._events),
             self._action_timeout_s,
@@ -568,12 +619,16 @@ class InAppBrainstormAcceptance:
         g2_reconnect = "not_exercised"
         try:
             self._require_isolated()
-            await asyncio.wait_for(self._physical_hello.wait(), self._connect_timeout_s)
+            await asyncio.wait_for(self._accepted_hello.wait(), self._connect_timeout_s)
             self._require_isolated()
             if self._terminal is None:
                 await self._send("agent_terminal", state="blocked", activity="Hermes is not ready; acceptance stopped")
                 return
-            await self._send("brainstorm", state="ready", activity="Tap to start the Hermes acceptance run")
+            await self._send(
+                "brainstorm",
+                state="acceptance_ready",
+                activity="Tap to start the Hermes acceptance run",
+            )
             await self._expect("begin_topic_capture")
             self._stream_task = asyncio.create_task(self._consume_hermes(self._terminal))
             await asyncio.wait_for(self._stream_proven.wait(), self._action_timeout_s)
@@ -581,13 +636,29 @@ class InAppBrainstormAcceptance:
             await self._send("agent_terminal", activity="Dedicated no-tool Hermes session active")
             await self._expect("show_brainstorm")
             await self._send("brainstorm", activity="Hermes acceptance run active")
+            # Only a connection established after the controller enters the
+            # reconnect-instruction phase can satisfy this transition. An
+            # earlier replacement is ignored and requires another one.
+            self._replacement_hello.clear()
+            self._reconnect_generation_floor = self._transport.connection_generation
             await self._send("brainstorm", activity="Reconnect G2 to restore this Hermes run")
             await asyncio.wait_for(self._replacement_hello.wait(), self._connect_timeout_s)
             await self._send("brainstorm", activity="Hermes run restored after G2 reconnect")
             g2_reconnect = "restored"
             await self._expect("cancel")
             hermes_run = await self._cancel_hermes()
-            await self._send("brainstorm", state="cancelled", activity="Hermes acceptance cancelled")
+            if hermes_run == "cancelled":
+                await self._send(
+                    "brainstorm",
+                    state="cancelled",
+                    activity="Hermes acceptance cancelled",
+                )
+            else:
+                await self._send(
+                    "brainstorm",
+                    state="failed",
+                    activity="Hermes abort was not confirmed; acceptance failed",
+                )
         finally:
             if self._stream_task is not None and not self._stream_task.done():
                 self._stream_task.cancel()
@@ -603,6 +674,145 @@ class InAppBrainstormAcceptance:
             except ValueError:
                 # A malformed diagnostic trace cannot be made into a receipt.
                 summary = _summary("fail", [], None, hermes_run, g2_reconnect)
+            summary["startedBy"] = {
+                "interface": "g2",
+                "modality": "gesture",
+                "surface": "brainstorm",
+                "source": self._trigger_event["source"],
+                "gesture": "double_press",
+                "delivery": "sys",
+            }
+            if self._evidence_mode == "simulator":
+                summary["mode"] = "simulator_app_engine"
+                if summary.get("result") == "pass":
+                    summary["result"] = "simulator_pass"
             write_owner_only_json(self._out, summary)
             if self._on_complete is not None:
                 self._on_complete()
+
+
+class G2GestureBrainstormAcceptanceSession(Session):
+    """Session-manager adapter for a glasses-originating acceptance run."""
+
+    def __init__(
+        self,
+        *,
+        transport: HubGatewayTransport,
+        terminal: HermesStream | None,
+        out: Path,
+        action_timeout_s: float,
+        connect_timeout_s: float,
+        trigger: BrainstormAction,
+        connection_generation: int,
+        evidence_mode: EvidenceMode,
+    ) -> None:
+        events: list[dict[str, object]] = []
+        self._transport = transport
+        self._controller = InAppBrainstormAcceptance(
+            transport=transport,
+            terminal=terminal,
+            out=out,
+            action_timeout_s=action_timeout_s,
+            connect_timeout_s=connect_timeout_s,
+            diagnostic_events=events,
+            trigger=trigger,
+            connection_generation=connection_generation,
+            evidence_mode=evidence_mode,
+        )
+        self._diagnostics = G2DiagnosticStore(writer=self._controller.observe_diagnostics)
+
+    async def run(self) -> None:
+        previous = self._transport.g2_diagnostics
+        await self._transport.set_g2_diagnostics(self._diagnostics)
+        try:
+            self._controller.attach(subscribe_actions=False)
+            await self._controller.wait()
+        except asyncio.CancelledError:
+            await self._controller.close()
+            raise
+        finally:
+            await self._transport.set_g2_diagnostics(previous)
+
+    def cancel(self) -> None:
+        # SessionManager cancels run() immediately after this synchronous hook;
+        # the CancelledError branch above closes the controller and writes its
+        # bounded inconclusive receipt.
+        return None
+
+    async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
+        if action.action not in _BRAINSTORM_ACTIONS:
+            return False
+        self._controller.handle_action(action)
+        return True
+
+    @property
+    def status(self) -> str:
+        return "BRAINSTORM · connection test"
+
+    @property
+    def completion_state(self) -> str:
+        return "settled"
+
+
+def make_g2_gesture_acceptance_session(
+    *,
+    transport: HubGatewayTransport,
+    terminal: Callable[[], HermesStream | None],
+    trigger: BrainstormAction,
+    output_directory: Path | None = None,
+    action_timeout_s: float = 45.0,
+    connect_timeout_s: float = 120.0,
+    simulator_override: bool = False,
+) -> Session | None:
+    """Create the fixed gesture session for physical G2 or simulator proof.
+
+    The official simulator currently reports ``launchSource=unknown``. Its
+    isolated acceptance runner may opt into simulator evidence explicitly;
+    the normal app engine leaves this false, so an unknown launch never gains
+    physical-G2 authority and the override can only produce a downgraded
+    ``simulator_app_engine`` receipt.
+    """
+
+    directory = output_directory or default_output_directory()
+    hello = transport.hello
+    if transport.physical_g2_connected:
+        mode: EvidenceMode = "physical_g2"
+    elif transport.connected and hello is not None \
+            and hello.model == "g2" \
+            and (hello.launch_source == "simulator" or simulator_override):
+        mode = "simulator"
+    else:
+        return None
+    return G2GestureBrainstormAcceptanceSession(
+        transport=transport,
+        terminal=terminal(),
+        out=_next_output_path(directory, mode),
+        action_timeout_s=action_timeout_s,
+        connect_timeout_s=connect_timeout_s,
+        trigger=trigger,
+        connection_generation=transport.connection_generation,
+        evidence_mode=mode,
+    )
+
+
+def try_start_g2_gesture_acceptance(
+    *,
+    transport: HubGatewayTransport,
+    terminal: Callable[[], HermesStream | None],
+    trigger: BrainstormAction,
+    start_session: Callable[[Session], bool],
+    output_directory: Path | None = None,
+) -> BrainstormHudView | None:
+    """Start once or return the exact fixed rejection frame for the G2."""
+
+    candidate = make_g2_gesture_acceptance_session(
+        transport=transport,
+        terminal=terminal,
+        trigger=trigger,
+        output_directory=output_directory,
+    )
+    if candidate is None:
+        return acceptance_rejection_view("unavailable")
+    if not start_session(candidate):
+        return acceptance_rejection_view("busy")
+    return None

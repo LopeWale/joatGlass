@@ -88,7 +88,7 @@ export type G2TraceEvent =
    * its fixed, prompt-free action. */
   | {
     type: 'brainstorm_action';
-    action: 'begin_topic_capture' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
+    action: 'begin_acceptance' | 'begin_topic_capture' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
     surface: 'brainstorm' | 'agent_terminal';
     source: 'left' | 'right' | 'ring';
     gesture: 'tap' | 'double_press';
@@ -100,7 +100,7 @@ export type G2TraceEvent =
     type: 'visual_frame';
     kind: 'brainstorm';
     surface: 'brainstorm' | 'agent_terminal';
-    state: 'unavailable' | 'approval_required' | 'ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
+    state: 'unavailable' | 'approval_required' | 'ready' | 'acceptance_ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
     sha256: string;
   };
 

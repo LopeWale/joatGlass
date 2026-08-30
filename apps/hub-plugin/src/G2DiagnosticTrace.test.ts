@@ -103,6 +103,10 @@ describe('MacG2DiagnosticTrace', () => {
     trace.setEnabled(true);
 
     trace.record({
+      type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
+      source: 'ring', gesture: 'double_press', delivery: 'sys',
+    });
+    trace.record({
       type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
       source: 'right', gesture: 'tap', delivery: 'sys',
     });
@@ -112,6 +116,12 @@ describe('MacG2DiagnosticTrace', () => {
     });
 
     expect(sent).toEqual([{
+      kind: 'g2.diagnostic',
+      event: {
+        type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
+        source: 'ring', gesture: 'double_press', delivery: 'sys',
+      },
+    }, {
       kind: 'g2.diagnostic',
       event: {
         type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',

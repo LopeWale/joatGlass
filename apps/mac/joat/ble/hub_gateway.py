@@ -165,6 +165,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._pending_confirms: dict[str, _PendingConfirm] = {}
         self._pending_location_refreshes: dict[str, _PendingLocationRefresh] = {}
         self._session_id: str | None = None
+        self._connection_generation = 0
         self._session_pairing_identity_digest: bytes | None = None
         # Unlike ordinary JOAT, a field-acceptance receipt must not allow a
         # loopback simulator to stand in for an actual paired wearer session.
@@ -249,6 +250,12 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             and self.hello is not None
             and self.hello.model == "g2"
         )
+
+    @property
+    def connection_generation(self) -> int:
+        """Monotonic authenticated connection generation for stale-event gates."""
+
+        return self._connection_generation
 
     @property
     def g2_diagnostics(self) -> G2DiagnosticStore | None:
@@ -747,6 +754,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             await self._conn.close()
         self._conn = conn
         self._session_id = session_id
+        self._connection_generation += 1
         self._session_pairing_identity_digest = pairing_identity_digest
         self._current_peer_is_loopback = self._peer_is_loopback(conn)
         self._last_seq = None

@@ -236,7 +236,7 @@ class OpenClawAgentTerminal:
         accumulated = ""
         last_seq: int | None = None
         terminal_received = False
-        raised = False
+        raised: BaseException | None = None
         try:
             while True:
                 try:
@@ -343,8 +343,8 @@ class OpenClawAgentTerminal:
                     raise OpenClawGatewayError(
                         "OpenClaw Agent Terminal run did not complete"
                     )
-        except BaseException:
-            raised = True
+        except BaseException as exc:
+            raised = exc
             raise
         finally:
             if not terminal_received:
@@ -352,12 +352,16 @@ class OpenClawAgentTerminal:
                     async with asyncio.timeout(ABORT_CONFIRMATION_TIMEOUT_S):
                         await self.abort(run_id=run_id)
                 except TimeoutError as exc:
-                    if not raised:
+                    if raised is None or isinstance(
+                        raised, (asyncio.CancelledError, GeneratorExit),
+                    ):
                         raise OpenClawGatewayError(
                             "OpenClaw did not confirm the Agent Terminal abort"
                         ) from exc
                 except OpenClawGatewayError:
-                    if not raised:
+                    if raised is None or isinstance(
+                        raised, (asyncio.CancelledError, GeneratorExit),
+                    ):
                         raise
 
     async def _recover_run(

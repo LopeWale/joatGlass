@@ -354,6 +354,16 @@ class TestParseUplink:
             "type": "visual_frame", "kind": "brainstorm", "surface": "agent_terminal",
             "state": "running", "sha256": "a" * 64,
         })
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
+                "state": "acceptance_ready", "sha256": "b" * 64,
+            },
+        }) == G2Diagnostic(event={
+            "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
+            "state": "acceptance_ready", "sha256": "b" * 64,
+        })
 
     @pytest.mark.parametrize("event", [
         {
@@ -624,6 +634,17 @@ class TestDownlinkWire:
             "terminalReason": "",
             "noToolsChecked": True,
         }
+
+        acceptance_ready = BrainstormHudView(
+            screen="brainstorm",
+            state="acceptance_ready",
+            topic="Acceptance run",
+            collaborators=["Hermes"],
+            activity="Tap to start the Hermes acceptance run",
+            terminal_state="ready",
+            no_tools_checked=True,
+        ).to_wire()
+        assert acceptance_ready["brainstorm"]["state"] == "acceptance_ready"
 
     def test_productivity_view_is_typed_and_bounded(self) -> None:
         wire = ProductivityHudView(

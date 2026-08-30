@@ -53,6 +53,7 @@ export type BrainstormHudState =
   | 'unavailable'
   | 'approval_required'
   | 'ready'
+  | 'acceptance_ready'
   | 'running'
   | 'settled'
   | 'cancelled'

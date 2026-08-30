@@ -15,28 +15,6 @@ final class EngineController: ObservableObject {
     static let shared = EngineController()
 
     enum State: Equatable { case stopped, running, crashed(Int32), failed(String) }
-    nonisolated static let g2BrainstormAcceptanceArmSchema =
-        "joat.g2-brainstorm-acceptance-arm.v1\n"
-
-    /// The only local input that can arm the in-engine proof workflow.  It is
-    /// a fixed vocabulary, owner-only one-shot—not a local command channel.
-    nonisolated static func writeG2BrainstormAcceptanceArm(
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) throws -> URL {
-        let directory = homeDirectory
-            .appendingPathComponent("Library/Application Support/JOAT/acceptance/brainstorm")
-        let destination = directory.appendingPathComponent("arm.json")
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try Data(g2BrainstormAcceptanceArmSchema.utf8).write(to: destination, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: destination.path
-        )
-        return destination
-    }
 
     /// Single source of truth for the engine's WS port — passed to the
     /// engine via --port and used by the stale-engine reaper. Overridable
@@ -389,21 +367,6 @@ final class EngineController: ObservableObject {
     func restart() {
         stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
-    }
-
-    /// An explicit Mac-side opt-in that leaves the live engine, STT model, and
-    /// NativeBridge-authorized PID in place.  The engine consumes this fixed,
-    /// owner-only request once; no arbitrary shell gains OpenClaw identity.
-    func runG2BrainstormAcceptance() {
-        do {
-            _ = try Self.writeG2BrainstormAcceptanceArm()
-            appendLog("[shell] live G2 Brainstorm acceptance requested; engine not restarted")
-            if process == nil {
-                start()
-            }
-        } catch {
-            appendLog("[shell] failed to request G2 Brainstorm acceptance: \(type(of: error))")
-        }
     }
 
     private func engineExited(code: Int32) {

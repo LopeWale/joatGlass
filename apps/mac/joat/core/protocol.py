@@ -466,7 +466,8 @@ class HudList:
 
 
 _BRAINSTORM_HUD_STATES = frozenset({
-    "unavailable", "approval_required", "ready", "running", "settled", "cancelled", "failed", "blocked",
+    "unavailable", "approval_required", "ready", "acceptance_ready", "running",
+    "settled", "cancelled", "failed", "blocked",
 })
 _PRODUCTIVITY_HUD_DOMAINS = frozenset({"calendar", "reminders"})
 _PRODUCTIVITY_HUD_PHASES = frozenset({
@@ -1260,7 +1261,10 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
             "state": _trace_enum(
                 event["state"], "state",
-                ("unavailable", "approval_required", "ready", "running", "settled", "cancelled", "failed", "blocked"),
+                (
+                    "unavailable", "approval_required", "ready", "acceptance_ready",
+                    "running", "settled", "cancelled", "failed", "blocked",
+                ),
             ),
             "sha256": digest,
         }
