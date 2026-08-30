@@ -773,6 +773,51 @@ describe('HudPresenter modal surfaces', () => {
     };
     expect(home.textObject?.find((c) => c.containerID === ContainerId.Main)?.content).toBe('');
   });
+
+  it('fails closed for an accepted action replaced while its dismissal repaints', async () => {
+    let holdDismissalRebuild = false;
+    let releaseDismissalRebuild: (() => void) | undefined;
+    let dismissalRebuildStarted: (() => void) | undefined;
+    const dismissalRebuildStartedPromise = new Promise<void>((resolve) => {
+      dismissalRebuildStarted = resolve;
+    });
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async (paint: TextContainerUpgrade) => {
+          paints.push(paint);
+          return true;
+        },
+        rebuildPageContainer: async (page: unknown) => {
+          rebuilds += 1;
+          rebuiltPages.push(page);
+          if (holdDismissalRebuild) {
+            holdDismissalRebuild = false;
+            dismissalRebuildStarted?.();
+            await new Promise<void>((resolve) => {
+              releaseDismissalRebuild = resolve;
+            });
+          }
+          return true;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder());
+    await hud.showConfirmation('Approve action A?', 'action-a');
+
+    holdDismissalRebuild = true;
+    const dismissA = hud.dismissConfirmation('action-a');
+    await dismissalRebuildStartedPromise;
+    const replacement = hud.showConfirmation('Approve action B?', 'action-b');
+    releaseDismissalRebuild?.();
+
+    await expect(dismissA).resolves.toBe(false);
+    await expect(replacement).resolves.toBe(true);
+    const active = rebuiltPages[rebuiltPages.length - 1] as {
+      textObject?: Array<{ containerID?: number; content?: string }>;
+    };
+    expect(active.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+      .toBe('CONFIRM ACTION\n\nApprove action B?');
+  });
 });
 
 
