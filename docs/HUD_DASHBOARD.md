@@ -209,9 +209,13 @@ left-temple double-click. The full-frame transparent layer remains the sole
 event capture; the Overview is retained as spatial context at 24% intensity. Selecting a capability
 removes the rail before its content is requested from the Mac.
 
-`More` keeps the five-row root stable without making secondary capabilities
-look like settings. It reuses the same rail for `QuickNotes`, `Brainstorm`, and
-`Activity`; selecting one still removes the rail into the same full-focus shell.
+The Sidebar is one continuous native-scrollable rail rather than a five-row
+root plus `More`. It exposes `Messages`, `Planning`, `Navigation`,
+`Brainstorm`, `Notifications`, `QuickNotes`, `Agent Terminal`, and `Activity`
+as direct first-level destinations, followed by `Repeat`, `Reconnect`, and
+`Settings`. The five visible optical rows are only a viewport; scrolling never
+changes the hierarchy. Selecting any destination still removes the rail into
+the same full-focus shell.
 
 Every capability open now carries a unique `requestId` through `capmenu`, the
 Mac's `hud.list` response, and any later `capdata` row selection. The Mac drops
