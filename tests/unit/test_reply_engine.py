@@ -81,6 +81,52 @@ async def test_explicit_nearby_intent_bypasses_the_unreliable_model_decision_pas
 
 
 @pytest.mark.asyncio
+async def test_ordinary_question_skips_known_irrelevant_tool_decision() -> None:
+    async def unused_tool(_args: dict[str, Any]) -> str:
+        return "unused"
+
+    engine = MlxReplyEngine(
+        model_id="test-model",
+        tools=ToolBelt([
+            Tool(
+                "get_weather", "", {"type": "object"}, unused_tool,
+                decision_hints=("weather", "rain", "temperature"),
+            ),
+        ]),
+    )
+    engine._decide = lambda _text: (_ for _ in ()).throw(
+        AssertionError("ordinary question must not pay a tool-decision generation")
+    )
+    try:
+        assert await engine._maybe_use_tools("tell me a short joke") is None
+    finally:
+        engine._mlx_thread.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_tool_relevant_question_keeps_model_decision_when_not_explicit() -> None:
+    async def unused_tool(_args: dict[str, Any]) -> str:
+        return "unused"
+
+    decided: list[str] = []
+    engine = MlxReplyEngine(
+        model_id="test-model",
+        tools=ToolBelt([
+            Tool(
+                "get_weather", "", {"type": "object"}, unused_tool,
+                decision_hints=("weather", "rain", "temperature"),
+            ),
+        ]),
+    )
+    engine._decide = lambda text: decided.append(text) or "plain answer"
+    try:
+        assert await engine._maybe_use_tools("weather in Paris") is None
+        assert decided == ["weather in Paris"]
+    finally:
+        engine._mlx_thread.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
 async def test_stream_emits_a_small_first_chunk_then_returns_to_steady_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

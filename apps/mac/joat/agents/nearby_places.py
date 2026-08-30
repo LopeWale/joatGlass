@@ -122,4 +122,9 @@ def nearby_places_tool(
         },
         run=run,
         explicit_intent=nearby_place_intent,
+        # The resolver owns the normal nearby phrases. Keep these hints as a
+        # safe fallback if that convenience resolver ever declines or fails:
+        # the model-directed path remains preferable to silently ignoring a
+        # local-place request.
+        decision_hints=("near", "nearby", "nearest", "closest", "close by"),
     )

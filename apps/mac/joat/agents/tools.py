@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +39,12 @@ class Tool:
     # than a small local model's tool-call reliability.  The resolver returns
     # None for every utterance it does not explicitly own.
     explicit_intent: ToolIntent | None = None
+    # Known word or phrase boundaries that make the tool-decision generation
+    # relevant. ``None`` retains the conservative behavior for a future or
+    # third-party tool: ask the model for every utterance rather than silently
+    # making that tool unreachable. An empty tuple means explicit_intent owns
+    # the tool's entire spoken surface.
+    decision_hints: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,26 @@ class ToolBelt:
             if arguments is not None:
                 return ToolCall(name=tool.name, arguments=arguments)
         return None
+
+    def requires_model_decision(self, text: str) -> bool:
+        """Whether this utterance merits the extra local-model tool pass.
+
+        Production tools declare narrow word/phrase hints, so an ordinary
+        question pays for one answer generation instead of an unproductive
+        decision generation plus its answer. Unknown future tools retain the
+        former always-decide behavior until they explicitly define safe hints.
+        """
+        normalized = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+        padded = f" {normalized} "
+        for tool in self._tools.values():
+            hints = tool.decision_hints
+            if hints is None:
+                return True
+            for hint in hints:
+                normalized_hint = " ".join(re.findall(r"[a-z0-9]+", hint.casefold()))
+                if normalized_hint and f" {normalized_hint} " in padded:
+                    return True
+        return False
 
     @staticmethod
     def parse_call(text: str) -> ToolCall | None:

@@ -164,6 +164,7 @@ def weather_tool(
         },
         run=run,
         explicit_intent=weather_at_wearer_intent,
+        decision_hints=("weather", "rain", "raining", "temperature", "forecast", "wind"),
     )
 
 
@@ -190,6 +191,7 @@ def notifications_tool(log_: "CardLog") -> Tool:
             "required": [],
         },
         run=run,
+        decision_hints=("notification", "notifications", "alert", "alerts", "missed", "miss"),
     )
 
 
@@ -228,4 +230,5 @@ def messages_tool(store: "IMessageStore") -> Tool:
             "required": [],
         },
         run=run,
+        decision_hints=("message", "messages", "text", "texts", "texted", "messaged", "said"),
     )
