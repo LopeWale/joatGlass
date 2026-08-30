@@ -180,6 +180,21 @@ class CleanupOutcome:
     errors: tuple[str, ...]
 
 
+def _blocking_cleanup_errors(errors: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep optional Calendar projections out of EventKit cleanup authority.
+
+    The Calendar app may not answer its separate Reminders projection while
+    EventKit has already removed both exact synthetic identities and a fresh
+    EventKit query confirms their absence. That projection remains useful
+    observability, but cannot truthfully turn a completed native cleanup into
+    a failure.
+    """
+
+    return tuple(
+        error for error in errors if not error.startswith("calendar_projection_")
+    )
+
+
 @dataclass(slots=True)
 class ManagedProcess:
     name: str
@@ -1872,6 +1887,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
             "reminder_removed_count": 0,
             "scheduled_reminder_projection_count_before": 0,
             "scheduled_reminder_projection_count_after": 0,
+            "calendar_projection_observation": "not_attempted",
             "native_absence_verified": False,
         },
         "blockers": [],
@@ -2415,8 +2431,20 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                                     else None
                                 ),
                             )
-                            if cleanup.errors:
-                                cleanup_error = "_and_".join(cleanup.errors)
+                            projection_errors = tuple(
+                                error
+                                for error in cleanup.errors
+                                if error.startswith("calendar_projection_")
+                            )
+                            if projection_errors:
+                                receipt["cleanup"]["calendar_projection_observation"] = (
+                                    "unavailable"
+                                )
+                            else:
+                                receipt["cleanup"]["calendar_projection_observation"] = "verified"
+                            blocking_cleanup_errors = _blocking_cleanup_errors(cleanup.errors)
+                            if blocking_cleanup_errors:
+                                cleanup_error = "_and_".join(blocking_cleanup_errors)
                             elif native_readback_verified and (
                                 cleanup.calendar_removed_count != 1
                                 or cleanup.reminder_removed_count

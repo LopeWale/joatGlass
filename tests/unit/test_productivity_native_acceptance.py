@@ -237,6 +237,17 @@ def test_completed_reminder_readback_requires_the_original_native_identity() -> 
         )
 
 
+def test_calendar_projection_timeout_does_not_override_native_cleanup_proof() -> None:
+    assert acceptance._blocking_cleanup_errors((
+        "calendar_projection_before_TimeoutExpired",
+        "calendar_projection_after_TimeoutExpired",
+    )) == ()
+    assert acceptance._blocking_cleanup_errors((
+        "calendar_projection_before_TimeoutExpired",
+        "reminder_delete_RuntimeError",
+    )) == ("reminder_delete_RuntimeError",)
+
+
 def test_retained_receipt_is_owner_only(tmp_path: Path) -> None:
     path = tmp_path / "receipt.json"
 
