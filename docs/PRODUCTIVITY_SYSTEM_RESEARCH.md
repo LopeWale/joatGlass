@@ -1,7 +1,9 @@
 # JOAT Productivity System: Research and Design Gate
 
-**Status:** research complete; approved safe V1 implemented at contract/build level;
-live TCC, simulator, and physical-G2 acceptance remain open
+**Status:** research complete; approved safe V1 implemented. Contract/build and
+the complete official-simulator interaction flow have been exercised; signed-app
+native EventKit and physical-G2 wearer acceptance remain explicit operator-run
+gates.
 **Scope:** Calendar, Reminders/tasks, AI notes, safe write actions, persistence,
 and notification fan-in  
 **Evidence date:** 2026-08-27
@@ -61,7 +63,42 @@ or physical-G2 behavior.
 
 ### HUD flow delivered on 2026-08-28
 
-The capability UI now uses one shared 576×288 shell and one explicit flow:
+#### Current unified Planning flow (updated 2026-08-30)
+
+Calendar events and incomplete Reminders are deliberately **not** two competing
+wearer destinations. EventKit remains two native stores, but JOAT projects their
+read-only data into one `Planning` hierarchy:
+
+```text
+Planning month (fixed Monday-first 6 × 7 grid, E#/R# count per day)
+  -> tap a displayed week band
+Planning week (seven days, event/reminder counts)
+  -> tap a day
+Planning day (time-ordered mixed Event and Reminder rows)
+  -> tap an item for read-only detail
+```
+
+The app re-queries both native stores at each scope change. A missing
+authorization or bridge is a truthful `SETUP`/`UNAVAILABLE` result, never an
+unbounded loading frame. Calendar and Reminder creation use distinct review and
+verification surfaces, but every terminal outcome returns to the native-time
+anchored day in this shared Planning view (or the wearer can use left double
+press to return earlier). Reminder `SAVED` passes through a separate
+`MONITORING` surface; `DUE` and `COMPLETED` are also explicit, content-safe HUD
+states.
+
+The official simulator has driven this full 34-transition fixture-backed path:
+month/week/day/detail; Calendar review, verifying, saved, failed, check,
+cancelled and not-saved; and Reminder review, verifying, saved, monitoring,
+due, completion review, completed, failed, check, cancelled and not-saved. It
+exercises the actual Hub renderer, Mac-to-Hub transport and action routing, but
+does **not** read a person's EventKit data, prove a native OS banner, or prove a
+physical G2 gesture. Those remain separate acceptance levels.
+
+The capability UI now uses one shared 576×288 shell and one explicit flow.
+The table below is retained as the historical 2026-08-28 design snapshot; its
+separate Calendar/Tasks labels have been superseded by the unified Planning
+flow above:
 
 | Area | Collection state | Selection state | Write/result state |
 |---|---|---|---|
@@ -71,14 +108,14 @@ The capability UI now uses one shared 576×288 shell and one explicit flow:
 | QuickNotes | newest exact-text notes | complete exact text | local reversible note commands; no ambient recording claim |
 | Activity/persistence | payload-free durable action summaries | state plus short action reference | no payload, target, or confirmation secret appears |
 
-The root Sidebar remains five rows: Messages, Notifications, Calendar, Tasks,
-and More. More opens QuickNotes, Brainstorm, and Activity with the same rail,
-type scale, Gray4 hierarchy, and Phosphor regular icon family. Populated
-collections show `tap detail`; setup, empty, detail, and action-lifecycle pages
-are read-only. Development fixtures exercise the production presenter and
-renderer and stitch its actual four Gray4 tiles into a native-size browser
-preview. This is visual renderer evidence, not official Even simulator or
-physical-G2 acceptance.
+The current contextual capability menu puts `Planning` directly in its
+continuous, scrollable first-level list rather than exposing independent
+Calendar and Tasks roots. It preserves the same rail, type scale, Gray4
+hierarchy, and Phosphor regular icon family. Populated collection rows show
+`tap detail`; setup, empty, detail, and action-lifecycle pages are read-only
+except for the explicit safe-write confirmation action. The current simulator
+evidence is renderer-and-routing evidence from the official Even simulator;
+physical-G2 acceptance remains distinct.
 
 The review hardening pass binds each list render and row tap to a unique HUD
 generation, rather than trusting capability titles or one mutable snapshot.
@@ -597,7 +634,12 @@ alone is not identity or authorization.
   before any write action ships. Use a mutually authenticated handshake over a
   protected transport.
 
-## Recommended implementation order
+## Recommended implementation order (historical)
+
+This is the dependency-first order approved at research time. Its foundation
+and Calendar/Reminder verticals are now implemented; the remaining work is the
+operator-run native/physical acceptance described above, not a return to split
+Calendar and Task menus.
 
 1. Resolve ownership and stabilize the active Messages/provenance worktree.
 2. Harden pairing, transport, confirmation authenticity, status/log privacy,
@@ -627,7 +669,7 @@ alone is not identity or authorization.
 - Portal publication, package installation, or real-G2 acceptance without fresh
   retained receipts.
 
-## Verification snapshots and limitations
+## Verification snapshots and limitations (historical 2026-08-27)
 
 - The current dirty shared checkout passed 422 Python tests and strict mypy
   across 61 source files. Hub verification passed 198 tests plus the
