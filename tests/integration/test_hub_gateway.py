@@ -9,6 +9,7 @@ confirm-future paths, which are the parts most likely to break in the field.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -16,7 +17,11 @@ import time
 import pytest
 import websockets
 
-from joat.ble.hub_gateway import HubGatewayTransport
+from joat.ble.hub_gateway import (
+    DEFAULT_LOCATION_REFRESH_TIMEOUT_S,
+    EVEN_LOCATION_ONE_SHOT_TIMEOUT_S,
+    HubGatewayTransport,
+)
 from joat.agents.location_tools import wearer_location_tools
 from joat.agents.tools import ToolBelt, ToolCall
 from joat.channels.imessage import MessageThread
@@ -179,6 +184,15 @@ class TestConnection:
 
 
 class TestUplink:
+    def test_phone_refresh_keeps_relay_time_after_the_even_sdk_deadline(self) -> None:
+        """The Mac must outwait the documented phone-side SDK request."""
+        timeout = inspect.signature(
+            HubGatewayTransport.request_location_refresh,
+        ).parameters["timeout_s"].default
+
+        assert timeout == DEFAULT_LOCATION_REFRESH_TIMEOUT_S
+        assert timeout > EVEN_LOCATION_ONE_SHOT_TIMEOUT_S
+
     async def test_brainstorm_action_is_bound_to_the_current_authenticated_connection(
         self, transport,
     ) -> None:
