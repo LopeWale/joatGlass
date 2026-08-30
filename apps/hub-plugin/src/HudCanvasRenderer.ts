@@ -37,6 +37,47 @@ const HAIRLINE = 51;
 const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
 
+/** The card's header, body, and footer are separate optical regions. Keeping
+ * these anchors together prevents a long reply from sharing the divider row. */
+const ASSISTANT_OVERLAY_GEOMETRY = {
+  dividerY: 92,
+  bodyTopY: 108,
+  bodyBottomY: 184,
+  footerBaselineY: 214,
+} as const;
+
+export interface AssistantOverlayTextLayout {
+  dividerY: number;
+  firstBaselineY: number;
+  firstGlyphTopY: number;
+  lastGlyphBottomY: number;
+  footerBaselineY: number;
+  lineHeight: number;
+}
+
+/** Calculate a centered body block strictly inside the assistant card's
+ * text-safe region. The renderer and regression test share this contract. */
+export function assistantOverlayTextLayout(
+  lineCount: number,
+  fontSize: number,
+): AssistantOverlayTextLayout {
+  const safeLineCount = Math.max(1, Math.min(4, Math.floor(lineCount)));
+  const lineHeight = Math.max(16, fontSize + 2);
+  const bodyCenterY = (
+    ASSISTANT_OVERLAY_GEOMETRY.bodyTopY + ASSISTANT_OVERLAY_GEOMETRY.bodyBottomY
+  ) / 2;
+  const firstBaselineY = bodyCenterY - ((safeLineCount - 1) * lineHeight) / 2;
+  const lastBaselineY = firstBaselineY + (safeLineCount - 1) * lineHeight;
+  return {
+    dividerY: ASSISTANT_OVERLAY_GEOMETRY.dividerY,
+    firstBaselineY,
+    firstGlyphTopY: firstBaselineY - fontSize / 2,
+    lastGlyphBottomY: lastBaselineY + fontSize / 2,
+    footerBaselineY: ASSISTANT_OVERLAY_GEOMETRY.footerBaselineY,
+    lineHeight,
+  };
+}
+
 /** Measured from the selected 576×288 reference panels. Keeping the major
  * anchors together makes visual drift obvious in review and in tests. */
 export const HUD_VISUAL_GEOMETRY = {
@@ -770,19 +811,23 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillText('ASSISTANT', 150, 78);
     context.strokeStyle = gray(HAIRLINE);
     context.beginPath();
-    context.moveTo(82, 94);
-    context.lineTo(494, 94);
+    context.moveTo(82, ASSISTANT_OVERLAY_GEOMETRY.dividerY);
+    context.lineTo(494, ASSISTANT_OVERLAY_GEOMETRY.dividerY);
     context.stroke();
 
     context.fillStyle = gray(BRIGHT);
     context.font = `17px ${HUD_FONT}`;
     context.textAlign = 'center';
-    this.drawFittedWrappedText(context, text, 288, 130, 386, 4);
+    this.drawAssistantOverlayText(context, text);
 
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
-    context.fillText(ASSISTANT_OVERLAY_DISMISS_HINT, 288, 214);
+    context.fillText(
+      ASSISTANT_OVERLAY_DISMISS_HINT,
+      288,
+      ASSISTANT_OVERLAY_GEOMETRY.footerBaselineY,
+    );
     context.restore();
   }
 
@@ -1833,5 +1878,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const firstY = y - ((lines.length - 1) * lineHeight) / 2;
     lines.forEach((line, index) => context.fillText(line, x, firstY + index * lineHeight));
     context.textAlign = previous;
+  }
+
+  private drawAssistantOverlayText(
+    context: CanvasRenderingContext2D,
+    text: string,
+  ): void {
+    const fitted = fitHudWrappedText(text, 386, 4, (value, fontSize) => {
+      context.font = `${fontSize}px ${HUD_FONT}`;
+      return context.measureText(value).width;
+    });
+    context.font = `${fitted.fontSize}px ${HUD_FONT}`;
+    const layout = assistantOverlayTextLayout(fitted.lines.length, fitted.fontSize);
+    fitted.lines.forEach((line, index) => {
+      context.fillText(line, 288, layout.firstBaselineY + index * layout.lineHeight);
+    });
   }
 }

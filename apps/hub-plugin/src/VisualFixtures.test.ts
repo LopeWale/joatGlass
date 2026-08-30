@@ -32,6 +32,11 @@ describe('visual fixtures', () => {
     expect(greenAt(575, 0)).toBe(34);
     expect(greenAt(0, 287)).toBe(51);
     expect(greenAt(575, 287)).toBe(68);
+    for (let offset = 0; offset < rgba.length; offset += 4) {
+      expect(rgba[offset]).toBe(0);
+      expect(rgba[offset + 2]).toBe(0);
+      expect(rgba[offset + 3]).toBe(255);
+    }
   });
 
   it('covers every productivity collection and durable write receipt', () => {
