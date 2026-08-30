@@ -147,7 +147,7 @@ tells you it is blank.
 
 ## Deployment constraints
 
-- **The Mac's WebSocket URL must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, scheme included — the Phase-0 gateway is plain `ws://`, and a `wss://`-only whitelist fails the same silent way. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
+- **The Mac's WebSocket origin must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, including scheme and port. Direct development may use the gateway's plain `ws://…:8787`; an unattended Tailnet home brain instead exposes a private Tailscale Serve port-443 TLS edge and therefore uses `wss://<mini>.ts.net/glasses`. Do not label the local plain-WebSocket port as `wss://…:8787`. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
 - `navigator.geolocation` only works in a **published** Hub plugin, not via QR sideload — use `bridge.getAppLocation()` instead, which works in both.
 - Phone lock/background (official lifecycle doc): on **iOS the WebView keeps running** — JS state and usually the WebSocket survive, and the store QA gate is exactly this (5-minute lock, state preserved). What always stops when the app is suspended is **audio capture** — so the HUD keeps working through a lock, but voice needs the Even app foregrounded. Continuous listening still wants Guided Access / Auto-Lock Never, or Phase 5 (custom companion). Android WebViews may be killed under memory pressure — treat resume as a cold restart (localStorage survives; we already persist settings there).
 - Dev loop: the official CLI + simulator (`npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities/evenhub-simulator`). Binaries: `evenhub` (alias `eh`) — `evenhub init` scaffolds `app.json` only, `evenhub qr` sideloads with hot reload, `evenhub pack app.json dist` builds the `.ehpk`. The simulator (`evenhub-simulator <url> --automation-port 9898`) injects the bridge and exposes an HTTP automation API — see [TESTING.md](TESTING.md) tier 2. No Even account needed for dev; `evenhub login` is only for store submission.
@@ -251,8 +251,10 @@ run on the Mac itself, and a local process could read the token file anyway.
   their own brain until localStorage was wiped by hand.
 - Honest limit: moving the token into an application frame removes URL/log
   leakage but does not encrypt plain `ws://`. An active LAN observer can still
-  read frames. Consequential writes require the tailnet `wss://` path; the
-  current machine has Tailscale HTTPS capability but no Serve route configured.
+  read frames. Consequential writes require the private Tailnet `wss://` path:
+  enable JOAT.app's **Private Tailnet home brain** setting, restart it, and
+  configure Tailscale Serve to proxy only `http://127.0.0.1:8787`. The proxy
+  must not make JOAT trust loopback; paired Hub authentication remains required.
 
 ### Wrong screen: "asking for an auth token"
 

@@ -105,6 +105,35 @@ once while logged into that mini's normal macOS user:
    enable JOAT.app's Login Item. Thereafter the glasses/phone reconnect to the
    remembered healthy home brain without visiting the Mac.
 
+### Private Tailnet transport (one-time)
+
+On the home Mini, enable **Settings → Private Tailnet home brain** and restart
+JOAT.app. That passes `--private-tailnet-gateway` to the app-owned engine: it
+binds the glasses gateway to `127.0.0.1:8787` and keeps its pairing check on.
+This matters because the secure Tailscale reverse proxy itself reaches JOAT
+from loopback; loopback is not an authority boundary for a remote G2 package.
+
+Then, from the Mini's logged-in macOS user, configure private Serve—not public
+Funnel—and retain its status with the Tailnet:
+
+```sh
+tailscale serve --https=443 --bg http://127.0.0.1:8787
+tailscale serve status --json
+```
+
+The wearer-facing candidate in the packaged plugin is the port-443 origin
+`wss://admins-mac-mini.tail3a3363.ts.net/glasses`; the accompanying manifest
+whitelist uses that same origin without a path. Tailscale's HTTPS edge is the
+TLS boundary, while the app-level pairing token is still required after the
+WebSocket upgrade. Do not point the plugin directly at `wss://…:8787`: JOAT's
+local gateway intentionally speaks plain WebSocket and does not mint TLS
+certificates itself.
+
+This is a setup operation, not a daily control step. Tailscale Serve persists
+when configured in background mode, and JOAT.app starts at login. A Mini user
+session must still be logged in and unlocked for its Keychain-backed OpenClaw
+credentials and native bridge to be available.
+
 Home-brain failover is a fresh authenticated session, not transparent process
 migration: pending audio, confirmations, navigation, and a running Hermes turn
 are deliberately cleared rather than replayed on another mini. The Hub stores

@@ -131,6 +131,7 @@ final class EngineController: ObservableObject {
     @Published var remindersAccess = "not determined"
     @Published var g2DiagnosticsEnabled: Bool
     @Published var g2DiagnosticNotice: String?
+    @Published var privateTailnetGateway: Bool
 
     private var process: Process?
     private var userStopped = false
@@ -139,6 +140,7 @@ final class EngineController: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let g2DiagnosticsKey = "G2DiagnosticsEnabled"
+    private let privateTailnetGatewayKey = "PrivateTailnetGateway"
     private let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/joat/brain.log")
 
@@ -153,6 +155,7 @@ final class EngineController: ObservableObject {
 
     init() {
         g2DiagnosticsEnabled = UserDefaults.standard.bool(forKey: "G2DiagnosticsEnabled")
+        privateTailnetGateway = UserDefaults.standard.bool(forKey: "PrivateTailnetGateway")
         guard Self.shouldRunAppServices(
             environment: ProcessInfo.processInfo.environment
         ) else { return }
@@ -294,6 +297,25 @@ final class EngineController: ObservableObject {
 
     // MARK: engine lifecycle
 
+    /// The app, rather than an inherited shell environment, owns the one-time
+    /// home-brain network mode. Login Items therefore retain it after a
+    /// restart, even when the Mini has no interactive terminal open.
+    nonisolated static func engineArguments(
+        enginePort: Int,
+        sttPort: Int,
+        g2DiagnosticsEnabled: Bool,
+        privateTailnetGateway: Bool
+    ) -> [String] {
+        var arguments = [
+            "-u", "-m", "joat",
+            "--port", String(enginePort),
+            "--stt-port", String(sttPort),
+        ]
+        if g2DiagnosticsEnabled { arguments.append("--g2-diagnostics") }
+        if privateTailnetGateway { arguments.append("--private-tailnet-gateway") }
+        return arguments
+    }
+
     func start() {
         guard process == nil else { return }
         guard let repo = repoURL() else {
@@ -314,12 +336,12 @@ final class EngineController: ObservableObject {
 
         let p = Process()
         p.executableURL = repo.appendingPathComponent(".venv/bin/python")
-        p.arguments = [
-            "-u", "-m", "joat",
-            "--port", String(Self.enginePort),
-            "--stt-port", String(Self.sttPort),
-        ]
-            + (g2DiagnosticsEnabled ? ["--g2-diagnostics"] : [])
+        p.arguments = Self.engineArguments(
+            enginePort: Self.enginePort,
+            sttPort: Self.sttPort,
+            g2DiagnosticsEnabled: g2DiagnosticsEnabled,
+            privateTailnetGateway: privateTailnetGateway
+        )
         p.currentDirectoryURL = repo
         // GUI apps do not inherit the login shell's PATH; without brew and
         // ~/.local the engine silently degrades (no whisperkit-cli, no codex).
@@ -454,6 +476,20 @@ final class EngineController: ObservableObject {
             : "G2 diagnostic trace is off. The redacted capture remains available to export."
         appendLog(enabled ? "G2 diagnostic trace enabled" : "G2 diagnostic trace disabled")
         if state == .running { restart() }
+    }
+
+    /// Select the supported unattended-Mini listener topology. This does not
+    /// restart a live wearer session: the choice is applied by the next normal
+    /// engine start, when the Mini's Tailscale Serve route is ready.
+    func setPrivateTailnetGateway(_ enabled: Bool) {
+        guard enabled != privateTailnetGateway else { return }
+        defaults.set(enabled, forKey: privateTailnetGatewayKey)
+        privateTailnetGateway = enabled
+        appendLog(
+            enabled
+                ? "private Tailnet home-brain gateway selected; restart to apply"
+                : "direct development gateway selected; restart to apply"
+        )
     }
 
     func exportG2Diagnostics() {

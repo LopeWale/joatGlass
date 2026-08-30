@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -127,9 +128,53 @@ from .verifier.gate import VerifierGate
 log = logging.getLogger("joat")
 
 
+@dataclass(frozen=True)
+class GatewayNetworkPolicy:
+    """Listener/authentication boundary selected before the gateway starts.
+
+    A Tailnet Serve reverse proxy reaches its backend from loopback.  That is
+    an implementation detail of the proxy, not proof that the caller is the
+    wearer's paired Hub package, so the private-home mode must deliberately
+    keep the normal pairing check enabled.
+    """
+
+    host: str
+    trust_loopback: bool
+
+
+def gateway_network_policy(
+    *,
+    requested_host: str,
+    private_tailnet_gateway: bool,
+) -> GatewayNetworkPolicy:
+    """Resolve direct-development vs private Tailnet home-brain transport.
+
+    The secure mode has one unambiguous topology: JOAT listens only on IPv4
+    loopback and Tailscale Serve supplies the private WSS edge.  Letting an
+    explicit non-loopback ``--host`` slip through would silently defeat that
+    boundary, so reject it rather than picking an arbitrary precedence rule.
+    """
+
+    if not private_tailnet_gateway:
+        return GatewayNetworkPolicy(host=requested_host, trust_loopback=True)
+    if requested_host not in {"", "0.0.0.0", "::", "127.0.0.1"}:
+        raise ValueError(
+            "--private-tailnet-gateway cannot be combined with a non-loopback --host"
+        )
+    return GatewayNetworkPolicy(host="127.0.0.1", trust_loopback=False)
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(prog="joat", description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--private-tailnet-gateway",
+        action="store_true",
+        help=(
+            "bind the glasses gateway to loopback and require pairing behind "
+            "a private Tailscale Serve WSS reverse proxy"
+        ),
+    )
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stt-binary", default="whisperkit-cli")
     parser.add_argument("--stt-model", default="large-v3_turbo")
@@ -155,6 +200,13 @@ async def main() -> None:
                         help="request high-accuracy, privacy-bucketed Gate-0 location telemetry")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
+    try:
+        gateway_policy = gateway_network_policy(
+            requested_host=args.host,
+            private_tailnet_gateway=args.private_tailnet_gateway,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -191,10 +243,10 @@ async def main() -> None:
         else None
     )
     transport = HubGatewayTransport(
-        host=args.host,
+        host=gateway_policy.host,
         port=args.port,
         pairing=PairingStore(),
-        trust_loopback=True,
+        trust_loopback=gateway_policy.trust_loopback,
         g2_diagnostics=g2_diagnostics,
         location_probe=args.location_probe,
     )

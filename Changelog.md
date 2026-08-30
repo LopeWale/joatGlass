@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- Added a one-time **Private Tailnet home brain** engine mode for an unattended
+  JOAT Mac mini. The app persists the setting across Login Item launches and,
+  after a normal engine restart, passes a narrow flag that binds the glasses
+  gateway to `127.0.0.1` while explicitly retaining pairing for traffic that
+  arrives from a Tailscale Serve reverse proxy. The known Mini's correct
+  port-443 WSS origin is now declared in the package manifest; the old
+  misleading `wss://…:8787` entries were removed. This prepares a private
+  deployment but does not configure the Mini, upload a package, pair glasses,
+  or prove a physical connection.
+
 - Completed the actual glasses-first **Brainstorm** topic path: tapping the
   Brainstorm HUD arms one `TOPIC CAPTURE` utterance, and the orchestrator now
   consumes it before the ordinary wake-word gate only when the complete VAD/STT
