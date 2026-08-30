@@ -12,9 +12,10 @@
   passed 20 tests and strict mypy. Final visual evidence in
   `messages-compose-confirmation-final-20260830/` proves the fixture-only
   New message → confirmation → delivery-unverified result; it does not prove
-  later reply-row selection because the simulator's `down` input stays bound
-  to the native sidebar after the custom Messages list paints. Physical-G2
-  input and a real Messages.app submission remain separate gates. No package
+  physical-G2 source delivery or a real Messages.app submission. A subsequent
+  controlled simulator run retained Messages → Adaeze selection → visible
+  **SWIPE · Cancel** confirmation/result with no sender call; the reliable
+  procedure waits for the list frame between individual controls. No package
   was created or uploaded.
 
 - Opening a fresh **Messages** picker now disarms any previously selected

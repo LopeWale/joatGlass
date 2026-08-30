@@ -66,8 +66,17 @@ class ReplyOutcomeExpectation:
     simulator_control: Literal["click", "down"] | None
     wearer_label: Literal["TAP · Confirm", "SWIPE · Cancel"] | None
     sender_called: bool
-    result_text: str
+    result_template: str
     sender_error: MessageSendError | None = None
+
+    @property
+    def result_text(self) -> str:
+        """Legacy fixed-recipient contract used by the unit-level matrix."""
+        return self.result_for("Dele")
+
+    def result_for(self, recipient: str) -> str:
+        """Expected production wording for the thread actually selected."""
+        return self.result_template.format(recipient=recipient)
 
 
 def reply_outcome_expectation(outcome: str) -> ReplyOutcomeExpectation:
@@ -78,29 +87,29 @@ def reply_outcome_expectation(outcome: str) -> ReplyOutcomeExpectation:
             simulator_control="click",
             wearer_label="TAP · Confirm",
             sender_called=True,
-            result_text="Submitted to Messages for Dele; delivery unverified.",
+            result_template="Submitted to Messages for {recipient}; delivery unverified.",
         ),
         "cancelled": ReplyOutcomeExpectation(
             simulator_gesture="swipe",
             simulator_control="down",
             wearer_label="SWIPE · Cancel",
             sender_called=False,
-            result_text="Reply cancelled.",
+            result_template="Reply cancelled.",
         ),
         "timed_out": ReplyOutcomeExpectation(
             simulator_gesture=None,
             simulator_control=None,
             wearer_label=None,
             sender_called=False,
-            result_text="Reply cancelled.",
+            result_template="Reply cancelled.",
         ),
         "uncertain": ReplyOutcomeExpectation(
             simulator_gesture="click",
             simulator_control="click",
             wearer_label="TAP · Confirm",
             sender_called=True,
-            result_text=(
-                "Messages may have submitted the reply to Dele. "
+            result_template=(
+                "Messages may have submitted the reply to {recipient}. "
                 "Check Messages on your Mac before trying again."
             ),
             sender_error=MessageSendError(
@@ -113,7 +122,7 @@ def reply_outcome_expectation(outcome: str) -> ReplyOutcomeExpectation:
             simulator_control="click",
             wearer_label="TAP · Confirm",
             sender_called=True,
-            result_text="Could not send to Dele. Check Messages on your Mac.",
+            result_template="Could not send to {recipient}. Check Messages on your Mac.",
             sender_error=MessageSendError(
                 "simulated unavailable Messages",
                 possible_external_commit=False,
@@ -354,10 +363,12 @@ class ObservedReplies:
     def __init__(self, delegate: MessageReplyController) -> None:
         self._delegate = delegate
         self.selected = asyncio.Event()
+        self.selected_thread: MessageThread | None = None
         self.composing = asyncio.Event()
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
         self._delegate.select(thread, trace_id)
+        self.selected_thread = thread
         self.selected.set()
 
     def begin_compose(self, trace_id: str) -> None:
@@ -467,10 +478,13 @@ async def run(
             result = await asyncio.wait_for(command_task, timeout=90)
             if result is None:
                 raise MessagesFlowError("production reply command was not recognized")
-            expected_result = (
-                "Submitted to Messages for Simulator Contact; delivery unverified."
-                if flow == "compose" else expectation.result_text
-            )
+            if flow == "compose":
+                expected_result = expectation.result_for("Simulator Contact")
+            else:
+                selected_thread = replies.selected_thread
+                if selected_thread is None:
+                    raise MessagesFlowError("reply flow reached a command without a selected thread")
+                expected_result = expectation.result_for(selected_thread.sender)
             if result != expected_result:
                 raise MessagesFlowError(
                     f"{outcome}: expected {expected_result!r}, got {result!r}"

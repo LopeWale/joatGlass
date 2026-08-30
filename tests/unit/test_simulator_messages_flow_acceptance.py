@@ -105,6 +105,28 @@ def test_messages_reply_outcome_contract_is_explicit_and_truthful(
 
 
 @pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        ("accepted", "Submitted to Messages for Adaeze; delivery unverified."),
+        (
+            "uncertain",
+            "Messages may have submitted the reply to Adaeze. "
+            "Check Messages on your Mac before trying again.",
+        ),
+        ("failed", "Could not send to Adaeze. Check Messages on your Mac."),
+    ],
+)
+def test_messages_reply_outcome_uses_the_actual_selected_recipient(
+    outcome: str,
+    expected: str,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    assert driver.reply_outcome_expectation(outcome).result_for("Adaeze") == expected
+
+
+@pytest.mark.parametrize(
     ("outcome", "simulator_control"),
     [
         ("accepted", "click"),
