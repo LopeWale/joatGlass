@@ -18,7 +18,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .contacts import ContactResolver
 from .notifications import Notification
@@ -45,6 +45,10 @@ class MessageThread:
     """False for group chats until Messages.app group targeting is proven."""
     chat_id: int | None = None
     """Private chat identity; never sent to the Hub or accepted from it."""
+    unread: bool = False
+    """True only when the newest incoming row is explicitly unread."""
+    attachment_count: int = 0
+    """Bounded attachment count; filenames and paths never leave the Mac."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +58,18 @@ class MessageEntry:
     text: str
     at: float
     from_me: bool
+    row_id: int = 0
+    unread: bool = False
+    delivery: Literal["sent", "delivered", "read"] | None = None
+    attachment_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MessageHistoryPage:
+    """One newest-first, cursor-addressed conversation page."""
+
+    entries: tuple[MessageEntry, ...]
+    has_older: bool
 
 
 def _unix_time(raw: int | None) -> float:
@@ -183,8 +199,24 @@ class IMessageStore:
         """
         limit = max(1, min(int(limit), 10))
         with self._connect() as conn:
+            columns = self._columns(conn, "message")
+            attachment_expr = (
+                "COALESCE(m.cache_has_attachments, 0)"
+                if "cache_has_attachments" in columns else "0"
+            )
+            unread_expr = (
+                "CASE WHEN COALESCE(m.is_from_me, 0) = 0 "
+                "THEN CASE WHEN COALESCE(m.is_read, 1) = 0 THEN 1 ELSE 0 END "
+                "ELSE 0 END"
+                if "is_read" in columns else "0"
+            )
+            visible_clause = "m.text IS NOT NULL AND m.text != ''"
+            if "cache_has_attachments" in columns:
+                visible_clause = (
+                    f"(({visible_clause}) OR COALESCE(m.cache_has_attachments, 0) != 0)"
+                )
             rows = conn.execute(
-                """
+                f"""
                 SELECT COALESCE(h.id, ''),
                        COALESCE(m.text, ''),
                        m.date,
@@ -194,20 +226,25 @@ class IMessageStore:
                            SELECT COUNT(*)
                            FROM chat_handle_join chj
                            WHERE chj.chat_id = c.ROWID
-                       ), 1)
+                       ), 1),
+                       {unread_expr},
+                       {attachment_expr}
                 FROM message m
                 LEFT JOIN handle h ON m.handle_id = h.ROWID
                 LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                 LEFT JOIN chat c ON c.ROWID = cmj.chat_id
                 WHERE m.is_from_me = 0
-                  AND m.text IS NOT NULL AND m.text != ''
+                  AND {visible_clause}
                 ORDER BY m.ROWID DESC
                 LIMIT 60
                 """
             ).fetchall()
         out: list[MessageThread] = []
         seen: set[tuple[str, str | int]] = set()
-        for handle, text, raw_date, display, chat_id, participant_count in rows:
+        for (
+            handle, text, raw_date, display, chat_id, participant_count,
+            unread, attachment_count,
+        ) in rows:
             sender = display or self._contacts.name_for(handle)
             identity: tuple[str, str | int] = (
                 ("chat", int(chat_id)) if int(chat_id) > 0 else ("handle", str(handle))
@@ -222,6 +259,8 @@ class IMessageStore:
                 at=_unix_time(raw_date),
                 replyable=int(participant_count) <= 1,
                 chat_id=int(chat_id) if int(chat_id) > 0 else None,
+                unread=bool(unread),
+                attachment_count=1 if int(attachment_count) > 0 else 0,
             ))
             if len(out) >= limit:
                 break
@@ -232,31 +271,104 @@ class IMessageStore:
         thread: MessageThread,
         limit: int = 5,
     ) -> list[MessageEntry]:
-        """Recent text context for one Mac-owned chat, oldest row first."""
-        limit = max(1, min(int(limit), 10))
+        """Compatibility context for one Mac-owned chat, oldest row first."""
+        page = self.thread_message_page(thread, limit=limit)
+        return list(reversed(page.entries))
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        """Newest-first text/attachment page for one Mac-owned conversation."""
+        limit = max(1, min(int(limit), 16))
         if thread.chat_id is None:
-            return []
+            return MessageHistoryPage(entries=(), has_older=False)
         with self._connect() as conn:
+            columns = self._columns(conn, "message")
+            unread_expr = (
+                "CASE WHEN COALESCE(m.is_from_me, 0) = 0 "
+                "THEN CASE WHEN COALESCE(m.is_read, 1) = 0 THEN 1 ELSE 0 END "
+                "ELSE 0 END"
+                if "is_read" in columns else "0"
+            )
+            sent_expr = "COALESCE(m.is_sent, 0)" if "is_sent" in columns else "0"
+            delivered_expr = (
+                "COALESCE(m.is_delivered, 0)" if "is_delivered" in columns else "0"
+            )
+            date_delivered_expr = (
+                "COALESCE(m.date_delivered, 0)" if "date_delivered" in columns else "0"
+            )
+            date_read_expr = (
+                "COALESCE(m.date_read, 0)" if "date_read" in columns else "0"
+            )
+            attachment_expr = (
+                "COALESCE(m.cache_has_attachments, 0)"
+                if "cache_has_attachments" in columns else "0"
+            )
+            visible_clause = "m.text IS NOT NULL AND m.text != ''"
+            if "cache_has_attachments" in columns:
+                visible_clause = (
+                    f"(({visible_clause}) OR COALESCE(m.cache_has_attachments, 0) != 0)"
+                )
+            before_clause = " AND m.ROWID < ?" if before_row_id is not None else ""
+            params: tuple[int, ...] = (
+                (thread.chat_id, int(before_row_id), limit + 1)
+                if before_row_id is not None
+                else (thread.chat_id, limit + 1)
+            )
             rows = conn.execute(
-                """
-                SELECT COALESCE(m.text, ''), m.date, m.is_from_me
+                f"""
+                SELECT m.ROWID,
+                       COALESCE(m.text, ''),
+                       m.date,
+                       COALESCE(m.is_from_me, 0),
+                       {unread_expr},
+                       {sent_expr},
+                       {delivered_expr},
+                       {date_delivered_expr},
+                       {date_read_expr},
+                       {attachment_expr}
                 FROM message m
                 JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                 WHERE cmj.chat_id = ?
-                  AND m.text IS NOT NULL AND m.text != ''
+                  AND {visible_clause}
+                  {before_clause}
                 ORDER BY m.ROWID DESC
                 LIMIT ?
                 """,
-                (thread.chat_id, limit),
+                params,
             ).fetchall()
-        return [
-            MessageEntry(
+        entries: list[MessageEntry] = []
+        for (
+            row_id, text, raw_date, from_me, unread, sent, delivered,
+            date_delivered, date_read, attachment_count,
+        ) in rows[:limit]:
+            delivery: Literal["sent", "delivered", "read"] | None = None
+            if bool(from_me):
+                if int(date_read) > 0:
+                    delivery = "read"
+                elif bool(delivered) or int(date_delivered) > 0:
+                    delivery = "delivered"
+                elif bool(sent):
+                    delivery = "sent"
+            entries.append(MessageEntry(
                 text=str(text),
                 at=_unix_time(raw_date),
                 from_me=bool(from_me),
-            )
-            for text, raw_date, from_me in reversed(rows)
-        ]
+                row_id=int(row_id),
+                unread=bool(unread),
+                delivery=delivery,
+                attachment_count=1 if int(attachment_count) > 0 else 0,
+            ))
+        return MessageHistoryPage(entries=tuple(entries), has_older=len(rows) > limit)
+
+    @staticmethod
+    def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        """Feature-detect optional Apple schema fields without assuming a release."""
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
     def _connect(self) -> sqlite3.Connection:
         # immutable=1: the store is live and WAL-journaled; a normal open can

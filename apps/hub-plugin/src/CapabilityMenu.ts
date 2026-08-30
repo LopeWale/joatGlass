@@ -2,7 +2,7 @@ import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
-import { resolveMessagesViewState } from './MessagesViewState';
+import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import type {
   InputEventPayload,
   PlanningGridCell,
@@ -86,6 +86,11 @@ export class CapabilityMenu {
   private dataRowsSelectable = false;
   private dataSelectionPending = false;
   private messagesRetry = false;
+  /** The Mac owns conversation pagination. The Hub only forwards a boundary
+   * gesture when the currently visible, Mac-authored hint says that page exists. */
+  private messagesScreen?: MessagesScreen;
+  private dataHint?: string;
+  private dataPagePending = false;
   private pendingTitle?: string;
   private pendingRequestId?: string;
   private responseTimeout?: ReturnType<typeof setTimeout>;
@@ -126,6 +131,9 @@ export class CapabilityMenu {
     this.dataRowsSelectable = false;
     this.dataSelectionPending = false;
     this.messagesRetry = false;
+    this.messagesScreen = undefined;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
     this.planningDrillDown = false;
     await this.hud.showDefault();
   }
@@ -196,6 +204,9 @@ export class CapabilityMenu {
     this.dataItemCount = items.length;
     this.dataRowsSelectable = effectiveSelectable;
     this.dataSelectionPending = false;
+    this.messagesScreen = messagesState?.screen;
+    this.dataHint = effectiveHint;
+    this.dataPagePending = false;
     this.selectedIndex = 0;
     return true;
   }
@@ -297,8 +308,37 @@ export class CapabilityMenu {
     if (this.view === 'transition') return true;
 
     if (this.view === 'data') {
-      if ((list.eventType ?? 0) !== OsEventTypeList.CLICK_EVENT) return true;
+      const eventType = list.eventType ?? 0;
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
+      if (eventType !== OsEventTypeList.CLICK_EVENT) {
+        // Native List containers move their own highlight before reporting a
+        // scroll. Mirror that index so a second swipe at an actual endpoint
+        // reaches the Mac-owned conversation pager. This is intentionally
+        // different from text-capture scrolls, where handleScroll() moves our
+        // custom selection itself.
+        const before = this.selectedIndex;
+        const delta = eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+          ? 1
+          : eventType === OsEventTypeList.SCROLL_TOP_EVENT
+            ? -1
+            : 0;
+        this.selectedIndex = Math.max(
+          0,
+          Math.min(maximum, list.currentSelectItemIndex ?? before + delta),
+        );
+        const stayedAtBoundary = before === this.selectedIndex
+          && (this.selectedIndex === 0 || this.selectedIndex === maximum);
+        if (
+          stayedAtBoundary
+          && this.pendingTitle === 'MESSAGES'
+          && this.messagesScreen === 'conversation'
+          && !this.dataRowsSelectable
+          && this.canRequestMessagePage(eventType)
+        ) {
+          this.requestMessagePage(eventType);
+        }
+        return true;
+      }
       this.selectedIndex = Math.max(
         0,
         Math.min(maximum, list.currentSelectItemIndex ?? this.selectedIndex),
@@ -330,6 +370,15 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
+      if (
+        this.pendingTitle === 'MESSAGES'
+        && this.messagesScreen === 'conversation'
+        && !this.dataRowsSelectable
+        && this.canRequestMessagePage(eventType)
+      ) {
+        this.requestMessagePage(eventType);
+        return true;
+      }
       // Access/setup has one real G2 action: retry. Keep its first row
       // highlighted while the second row remains Mac Settings guidance.
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
@@ -473,6 +522,9 @@ export class CapabilityMenu {
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
     this.dataSelectionPending = false;
+    this.messagesScreen = undefined;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
     this.selectedIndex = 0;
     const event: InputEventPayload = {
       containerName: 'capmenu',
@@ -538,12 +590,55 @@ export class CapabilityMenu {
     this.messagesRetry = isMessagesRetry;
     this.dataRowsSelectable = isMessagesRetry;
     this.dataItemCount = isMessagesRetry ? 1 : 0;
+    this.messagesScreen = isMessagesRetry ? 'retry' : undefined;
+    this.dataHint = isMessagesRetry ? 'tap retry · left x2 overview' : undefined;
+    this.dataPagePending = false;
     this.selectedIndex = 0;
   }
 
   private randomId(): string {
     return globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  /**
+   * The text and hint shown by the Mac are the wire contract for paging: the
+   * Hub must never fabricate an "older" action on a complete thread. Keeping
+   * the cursor and private chat identity Mac-side also prevents G2 input from
+   * choosing a different recipient.
+   */
+  private canRequestMessagePage(eventType: number): boolean {
+    if (this.dataPagePending || !this.pendingRequestId) return false;
+    const atTop = this.selectedIndex === 0;
+    const atBottom = this.selectedIndex === Math.max(0, this.dataItemCount - 1);
+    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+      return atTop && this.dataHint?.includes('up newer') === true;
+    }
+    if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      return atBottom && this.dataHint?.includes('down older') === true;
+    }
+    return false;
+  }
+
+  private requestMessagePage(eventType: number): void {
+    if (!this.pendingRequestId) return;
+    this.dataPagePending = true;
+    const traceId = `hud-${this.randomId()}`;
+    console.info(`[joat trace] trace=${traceId} stage=message-page-requested event=${eventType}`);
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'cappage',
+        selectedName: 'MESSAGES',
+        eventType,
+        traceId,
+        requestId: this.pendingRequestId,
+      },
+    });
+    // A dropped bridge response must not leave the wearer on a dead-end
+    // conversation card. The existing timeout replaces it with the honest
+    // Messages retry action; a matching page frame clears this timer.
+    this.armResponseTimeout('MESSAGES', this.pendingRequestId);
   }
 
   private beginTransition(): number {
@@ -625,6 +720,9 @@ export class CapabilityMenu {
     this.dataRowsSelectable = false;
     this.dataSelectionPending = false;
     this.messagesRetry = false;
+    this.messagesScreen = undefined;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
     if (leavingMessages) {
       this.link.send({
         kind: 'input',

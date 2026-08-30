@@ -84,6 +84,8 @@ function rig(
 const click = (index: number) =>
   ({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index }) as never;
 const clickRow0 = () => ({ eventType: undefined, currentSelectItemIndex: undefined }) as never;
+const scroll = (eventType: number, index?: number) =>
+  ({ eventType, currentSelectItemIndex: index }) as never;
 
 function latestRequestId(sent: Array<Record<string, unknown>>): string {
   const request = [...sent].reverse().find((message) => {
@@ -418,6 +420,82 @@ describe('CapabilityMenu', () => {
     )).toBe(true);
     expect(sent).toHaveLength(2);
     info.mockRestore();
+  });
+
+  it('requests older and newer conversation pages only at scroll boundaries', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
+    menu.handleList(click(1));
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', rows(4), requestId, false,
+      'down older · say reply · left x2 overview',
+    )).toBe(true);
+
+    for (let index = 0; index < 3; index += 1) {
+      expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    }
+    expect(sent).toHaveLength(2);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'cappage',
+        selectedName: 'MESSAGES',
+        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT,
+        requestId,
+      },
+    });
+
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', rows(3), requestId, false,
+      'up newer · say reply · left x2 overview',
+    )).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(sent).toHaveLength(4);
+    expect(sent[3]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'cappage',
+        selectedName: 'MESSAGES',
+        eventType: OsEventTypeList.SCROLL_TOP_EVENT,
+        requestId,
+      },
+    });
+  });
+
+  it('forwards native list scroll boundary events for a paged conversation', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
+    menu.handleList(click(1));
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', rows(4), requestId, false,
+      'down older · say reply · left x2 overview',
+    )).toBe(true);
+
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 1))).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 2))).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
+    expect(sent).toHaveLength(2);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'cappage',
+        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT,
+        requestId,
+      },
+    });
   });
 
   it('routes non-Messages data clicks as capability detail selections', async () => {

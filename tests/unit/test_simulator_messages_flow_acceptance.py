@@ -64,6 +64,20 @@ def test_messages_compose_flow_requires_new_message_selection_and_confirmation()
     driver.validate_compose_flow(receipts)
 
 
+def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() -> None:
+    driver = _driver()
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
+        driver.ScreenReceipt("messages-latest", "list-select", "2" * 64),
+        driver.ScreenReceipt("messages-older", "scroll-down", "3" * 64),
+        driver.ScreenReceipt("messages-latest-returned", "scroll-up", "4" * 64),
+    ]
+
+    driver.validate_history_flow(receipts)
+
+
 def test_fixture_store_contains_distinct_conversations_and_history(tmp_path) -> None:  # type: ignore[no-untyped-def]
     driver = _driver()
     assert driver is not None
@@ -72,8 +86,9 @@ def test_fixture_store_contains_distinct_conversations_and_history(tmp_path) -> 
     rows = store.recent_threads()
 
     assert [row.sender for row in rows] == ["Adaeze", "Dele"]
-    assert [(entry.from_me, entry.text) for entry in store.thread_messages(rows[1])] == [
-        (False, "Are you coming?"),
-        (True, "On my way"),
-        (False, "Great, see you soon."),
-    ]
+    page = store.thread_message_page(rows[1], limit=8)
+    assert page.has_older is True
+    assert len(page.entries) == 8
+    assert page.entries[0].attachment_count == 1
+    assert page.entries[0].unread is True
+    assert page.entries[1].delivery == "read"
