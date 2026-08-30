@@ -31,6 +31,10 @@ const HIGH_ACCURACY_OPTIONS: Readonly<AppLocationOptions> = {
 const ONE_SHOT_LOCATION_TIMEOUT_MS = 5_000;
 const ONE_SHOT_SETTLE_GRACE_MS = 1_000;
 const ONE_SHOT_WATCHDOG_TIMEOUT_MS = ONE_SHOT_LOCATION_TIMEOUT_MS + ONE_SHOT_SETTLE_GRACE_MS;
+// A route may start immediately after the ambient Even SDK stream delivered a
+// phone fix. Reuse only that short-lived fix so we avoid a second permission /
+// host round trip, while never starting a route from an old position.
+const NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS = 10_000;
 
 // The continuous start call has the same host-boundary risk. A host that
 // neither resolves nor rejects must become an explicit failed capability in
@@ -68,6 +72,7 @@ export class LocationSessionManager {
   private navigationConsumer?: NavigationLocationConsumer;
 
   private lastSent?: { lat: number; lon: number; at: number };
+  private latestLocation?: { location: AppLocation; receivedAt: number };
   private lastQuality?: { lat: number; lon: number; receivedAt: number };
   private qualitySequence = 0;
 
@@ -162,12 +167,16 @@ export class LocationSessionManager {
 
   /** Fresh, explicit route origin; does not change the continuous profile. */
   async requestNavigationOrigin(): Promise<AppLocation | null> {
+    const cached = this.freshNavigationOrigin();
+    if (cached !== undefined) return cached;
     try {
       // Use the same host-boundary timeout as ambient and assistant reads.
       // Some Even host builds acknowledge the request but never settle it;
       // route setup must recover to an actionable error instead of remaining
       // indefinitely on the locating HUD.
-      return await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.High);
+      const current = await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.High);
+      if (current !== null) this.rememberLocation(current, Date.now());
+      return current;
     } catch {
       return null;
     }
@@ -388,6 +397,7 @@ export class LocationSessionManager {
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
 
     const receivedAt = Date.now();
+    this.rememberLocation(location, receivedAt);
     this.forwardAmbient(location, receivedAt);
     if (this.appliedProfile === 'probe') {
       this.recordLocationQuality(location, receivedAt, 'location_probe');
@@ -396,6 +406,24 @@ export class LocationSessionManager {
       this.recordLocationQuality(location, receivedAt, 'navigation_location');
       this.navigationConsumer?.(location, receivedAt);
     }
+  }
+
+  private rememberLocation(location: AppLocation, receivedAt: number): void {
+    this.latestLocation = { location, receivedAt };
+  }
+
+  private freshNavigationOrigin(): AppLocation | undefined {
+    const latest = this.latestLocation;
+    if (latest === undefined) return undefined;
+    const now = Date.now();
+    if (now - latest.receivedAt > NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS) return undefined;
+    const timestamp = latest.location.timestamp;
+    if (
+      Number.isFinite(timestamp)
+      && timestamp !== undefined
+      && now - timestamp > NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS
+    ) return undefined;
+    return latest.location;
   }
 
   private forwardAmbient(

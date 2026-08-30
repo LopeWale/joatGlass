@@ -205,6 +205,133 @@ class TestNavigationSession:
         )
         assert navigation_query("Cajun Corner") is None
 
+    async def test_voice_controls_destination_mode_and_retry_from_the_visible_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            navigation_service,
+            "_MIN_LOCATING_VISIBLE_SECONDS",
+            0,
+            raising=False,
+        )
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Cajun Corner", FakeProvider([candidate]), transport,
+            session_id="nav-voice-controls",
+        )
+        task = asyncio.create_task(session.run())
+
+        destination = await wait_for(transport, NavigationView)
+        assert isinstance(destination, NavigationView)
+        assert destination.navigation.view == "destination"
+        assert session.consume_transcript("confirm") is True
+
+        mode = await wait_for(transport, NavigationView, count=2)
+        assert isinstance(mode, NavigationView)
+        assert mode.navigation.view == "mode"
+        assert session.consume_transcript("cycle") is True
+
+        origin = await wait_for(transport, NavigationOriginRequest)
+        assert isinstance(origin, NavigationOriginRequest)
+        session.accept_origin_failure(NavigationOriginFailure(
+            session_id=origin.session_id, request_id=origin.request_id,
+            generation=origin.generation, reason="unavailable",
+        ))
+        error = await wait_for(transport, NavigationView, count=4)
+        assert isinstance(error, NavigationView)
+        assert error.navigation.primary == "Phone location unavailable"
+        assert session.consume_transcript("try again") is True
+
+        retried = await wait_for(transport, NavigationOriginRequest, count=2)
+        assert isinstance(retried, NavigationOriginRequest)
+        session.cancel()
+        await task
+
+    async def test_voice_can_choose_a_candidate_replace_destination_start_and_finish(
+        self,
+    ) -> None:
+        candidates = [
+            NavigationCandidate(
+                choice_id="west", label="Cajun Corner West",
+                address="100 W Main St", point=NavigationPoint(1, 1),
+            ),
+            NavigationCandidate(
+                choice_id="east", label="Cajun Corner East",
+                address="100 E Main St", point=NavigationPoint(2, 2),
+            ),
+        ]
+        provider = FakeProvider(candidates)
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Cajun Corner", provider, transport, session_id="nav-voice-complete",
+        )
+        task = asyncio.create_task(session.run())
+
+        repair = await wait_for(transport, NavigationView)
+        assert isinstance(repair, NavigationView)
+        assert repair.navigation.view == "repair"
+        assert session.consume_transcript("second") is True
+        destination = await wait_for(transport, NavigationView, count=2)
+        assert isinstance(destination, NavigationView)
+        assert destination.navigation.primary == "Cajun Corner East"
+        assert session.consume_transcript("confirm") is True
+        mode = await wait_for(transport, NavigationView, count=3)
+        assert isinstance(mode, NavigationView)
+        assert session.consume_transcript("walk") is True
+        origin = await wait_for(transport, NavigationOriginRequest)
+        assert isinstance(origin, NavigationOriginRequest)
+        session.accept_origin(NavigationOrigin(
+            session_id=origin.session_id, request_id=origin.request_id,
+            generation=origin.generation, latitude=41.9, longitude=-87.65,
+        ))
+        preview = await wait_for(transport, NavigationView, count=6)
+        assert isinstance(preview, NavigationView)
+        assert preview.navigation.view == "preview"
+        assert session.consume_transcript("start navigation") is True
+        route = await wait_for(transport, NavigationRoute)
+        assert isinstance(route, NavigationRoute)
+        session.accept_route_ack(NavigationRouteAck(
+            session_id=route.session_id, route_id=route.route_id,
+            revision=route.revision, outcome="installed",
+        ))
+        session.accept_state(NavigationState(
+            session_id=route.session_id, route_id=route.route_id,
+            revision=route.revision, sequence=1, state="arrived",
+        ))
+        await asyncio.sleep(0)
+        assert session.consume_transcript("done") is True
+        await task
+        assert isinstance(transport.sent[-1], NavigationStop)
+
+    async def test_voice_can_replace_an_active_destination_or_stop_navigation(self) -> None:
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner", address="2301 N Lincoln Ave",
+            point=NavigationPoint(1, 1),
+        )
+        provider = FakeProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Cajun Corner", provider, transport, session_id="nav-voice-replace",
+        )
+        task = asyncio.create_task(session.run())
+        await wait_for(transport, NavigationView)
+
+        assert session.consume_transcript("JOAT, navigate to the library") is True
+        for _ in range(100):
+            if provider.searches[-1:] == ["the library"]:
+                break
+            await asyncio.sleep(0)
+        assert provider.searches == ["Cajun Corner", "the library"]
+        assert session.consume_transcript("stop navigation") is True
+        await task
+        assert isinstance(transport.sent[-1], NavigationStop)
+
     async def test_missing_provider_is_visible_and_closes_on_bound_tap(self) -> None:
         transport = SinkTransport()
         session = NavigationUnavailableSession(transport, session_id="nav-offline")
@@ -214,6 +341,17 @@ class TestNavigationSession:
         assert view.navigation.view == "error"
         assert "not configured" in view.navigation.secondary
         session.accept_action(action(view, "retry"))
+        await task
+        assert isinstance(transport.sent[-1], NavigationStop)
+
+    async def test_missing_provider_closes_on_voice_cancel(self) -> None:
+        transport = SinkTransport()
+        session = NavigationUnavailableSession(transport, session_id="nav-offline-voice")
+        task = asyncio.create_task(session.run())
+        await wait_for(transport, NavigationView)
+
+        assert session.consume_transcript("cancel navigation") is True
+
         await task
         assert isinstance(transport.sent[-1], NavigationStop)
 

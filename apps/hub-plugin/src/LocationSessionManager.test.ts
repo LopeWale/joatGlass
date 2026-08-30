@@ -192,11 +192,12 @@ describe('LocationSessionManager', () => {
     expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(2);
   });
 
-  it('requests a fresh high-accuracy route origin without restarting the stream', async () => {
+  it('requests a fresh high-accuracy route origin when no current SDK fix is cached', async () => {
     const origin = { latitude: 41.9, longitude: -87.65, accuracy: 6 };
-    const h = harness(origin);
+    const h = harness();
     await h.manager.start();
     h.bridge.getAppLocation.mockClear();
+    h.bridge.getAppLocation.mockResolvedValueOnce(origin);
 
     await expect(h.manager.requestNavigationOrigin()).resolves.toEqual(origin);
     expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
@@ -204,6 +205,40 @@ describe('LocationSessionManager', () => {
       timeoutMs: 5000,
     });
     expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a just-received SDK phone fix before starting another origin lookup', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-30T22:45:00.000Z'));
+    const origin = { latitude: 41.9, longitude: -87.65, accuracy: 6 };
+    const h = harness();
+    await h.manager.start();
+    h.emit(origin);
+    h.bridge.getAppLocation.mockClear();
+
+    await expect(h.manager.requestNavigationOrigin()).resolves.toEqual(origin);
+
+    expect(h.bridge.getAppLocation).not.toHaveBeenCalled();
+  });
+
+  it('does not use a stale cached SDK fix as a navigation origin', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-30T22:45:00.000Z'));
+    const cached = { latitude: 41.9, longitude: -87.65, accuracy: 6 };
+    const current = { latitude: 41.91, longitude: -87.64, accuracy: 4 };
+    const h = harness();
+    await h.manager.start();
+    h.emit(cached);
+    await vi.advanceTimersByTimeAsync(10_001);
+    h.bridge.getAppLocation.mockClear();
+    h.bridge.getAppLocation.mockResolvedValueOnce(current);
+
+    await expect(h.manager.requestNavigationOrigin()).resolves.toEqual(current);
+
+    expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
+      accuracy: AppLocationAccuracy.High,
+      timeoutMs: 5000,
+    });
   });
 
   it('accepts a phone fix that settles at the SDK deadline before the local watchdog', async () => {
