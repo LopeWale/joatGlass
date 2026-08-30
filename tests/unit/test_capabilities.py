@@ -72,10 +72,14 @@ class FakeMessages:
 class FakeReplies:
     def __init__(self) -> None:
         self.selected: list[tuple[MessageThread, str]] = []
+        self.composing: list[str] = []
         self.cleared: list[str] = []
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
         self.selected.append((thread, trace_id))
+
+    def begin_compose(self, trace_id: str) -> None:
+        self.composing.append(trace_id)
 
     def clear_selection(self, reason: str = "explicit") -> None:
         self.cleared.append(reason)
@@ -183,6 +187,14 @@ async def wait_until(predicate, *, attempts: int = 100) -> None:  # type: ignore
     raise AssertionError("condition did not become true")
 
 
+def message_row_index(transport: FakeTransport, label: str) -> int:
+    frame = [
+        item for item in transport.sent
+        if isinstance(item, HudList) and item.title == "MESSAGES"
+    ][-1]
+    return next(index for index, item in enumerate(frame.items) if label in item)
+
+
 def make_router(
     tmp_path,
     rows=None,
@@ -235,9 +247,58 @@ class TestCapabilityViews:
         await router.open("Messages")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert lists and lists[0].to_wire()["items"] == [
-            "[now] Dele · On my way", "[now] Adaeze · Call me"]
+            "New message · voice recipient + text",
+            "[now] Dele · On my way",
+            "[now] Adaeze · Call me",
+        ]
         assert lists[0].title == "MESSAGES"
+        assert lists[0].items[0] == "New message · voice recipient + text"
         assert lists[0].hint == "tap select · left x2 overview"
+
+    async def test_selecting_new_message_opens_voice_compose_without_sending(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(
+            tmp_path,
+            rows=[("Dele", "On my way", time.time())],
+            replies=replies,
+        )
+        await router.open("Messages", request_id="messages-compose")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "New message"),
+            trace_id="hud-compose",
+            request_id="messages-compose",
+        ))
+        await wait_until(lambda: bool(replies.composing))
+
+        assert replies.composing == ["hud-compose"]
+        assert replies.selected == []
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.title == "MESSAGES · COMPOSE"
+        assert detail.items == [
+            'Say “JOAT, message Adele saying …”',
+            "One matching Mac contact is required.",
+            "Mic off? Long press to enable.",
+        ]
+        assert detail.hint == "voice compose · left x2 overview"
+        assert detail.selectable is False
+
+    async def test_new_message_remains_selectable_when_no_conversations_exist(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, rows=[], replies=replies)
+
+        await router.open("Messages", request_id="messages-empty-compose")
+
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.title == "MESSAGES"
+        assert detail.items == ["New message · voice recipient + text"]
+        assert detail.selectable is True
 
     async def test_navigation_capability_explains_the_spoken_destination_handoff(
         self, tmp_path
@@ -274,12 +335,13 @@ class TestCapabilityViews:
         assert len(lists) == 1
         assert lists[0].request_id == "request-new"
         assert lists[0].selectable is True
-        assert "New" in lists[0].items[0]
+        assert "New" in lists[0].items[1]
+        selected_row = message_row_index(transport, "] New ·")
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=selected_row,
             trace_id="selection-old",
             request_id="request-old",
         ))
@@ -289,7 +351,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=selected_row,
             trace_id="selection-new",
             request_id="request-new",
         ))
@@ -310,7 +372,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=1,
+            selected_index=message_row_index(transport, "] Adaeze ·"),
             trace_id="hud-12",
         ))
         await wait_until(lambda: bool(replies.selected))
@@ -334,7 +396,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=message_row_index(transport, "] Dele ·"),
             trace_id="hud-context",
             request_id="messages-context",
         ))
@@ -366,7 +428,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=message_row_index(transport, "] Dele ·"),
             trace_id="hud-history-denied",
             request_id="messages-history-denied",
         ))
@@ -382,7 +444,7 @@ class TestCapabilityViews:
 
     async def test_returning_home_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
-        router, _, _ = make_router(
+        router, transport, _ = make_router(
             tmp_path,
             rows=[("Dele", "On my way", time.time())],
             replies=replies,
@@ -391,7 +453,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=message_row_index(transport, "] Dele ·"),
             trace_id="hud-home",
             request_id="messages-home",
         ))
@@ -408,7 +470,7 @@ class TestCapabilityViews:
 
     async def test_disconnect_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
-        router, _, _ = make_router(
+        router, transport, _ = make_router(
             tmp_path,
             rows=[("Dele", "On my way", time.time())],
             replies=replies,
@@ -417,7 +479,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=message_row_index(transport, "] Dele ·"),
             trace_id="hud-disconnect",
             request_id="messages-disconnect",
         ))
@@ -440,7 +502,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=0,
+            selected_index=message_row_index(transport, "] Project team"),
             trace_id="hud-group",
         ))
         await asyncio.sleep(0)

@@ -12,6 +12,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from ..channels.contacts import ContactResolver
 from ..channels.imessage import MessageThread
 from ..channels.message_sender import MessageSendError
 from ..core.interfaces import MessageSender
@@ -27,6 +28,11 @@ log = logging.getLogger(__name__)
 
 Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
 _REPLY = re.compile(r"^reply(?:\s+(?:saying|with))?\s+(?P<body>.+)$", re.IGNORECASE)
+_NEW_MESSAGE = re.compile(
+    r"^message(?:\s+to)?\s+(?P<recipient>.+?)\s+(?:saying|with)\s+(?P<body>.+)$",
+    re.IGNORECASE,
+)
+ContactSearch = Callable[[str], list[tuple[str, str]]]
 # The plugin begins its eight-second decision clock only after the complete
 # frame is visible. The gateway envelope also has to include that BLE paint.
 CONFIRM_TRANSPORT_SECONDS = 12.0
@@ -38,6 +44,11 @@ class _MessageSelection:
     thread: MessageThread
     trace_id: str
     expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _ComposeSelection:
+    trace_id: str
 
 
 def _recipient_key(handle: str) -> str:
@@ -55,6 +66,7 @@ class MessageReplyController:
         *,
         selection_ttl_s: float = MESSAGE_SELECTION_TTL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        contact_search: ContactSearch | None = None,
     ) -> None:
         if selection_ttl_s <= 0:
             raise ValueError("message selection TTL must be positive")
@@ -63,11 +75,14 @@ class MessageReplyController:
         self._journal = journal
         self._selection_ttl_s = selection_ttl_s
         self._monotonic = monotonic
+        self._contact_search = contact_search or ContactResolver().search
         self._selection: _MessageSelection | None = None
+        self._compose: _ComposeSelection | None = None
         self._draft_lock = asyncio.Lock()
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
         safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
+        self._compose = None
         self._selection = _MessageSelection(
             thread=thread,
             trace_id=safe_trace,
@@ -79,24 +94,44 @@ class MessageReplyController:
             _recipient_key(thread.handle),
         )
 
+    def begin_compose(self, trace_id: str) -> None:
+        safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
+        self._selection = None
+        self._compose = _ComposeSelection(
+            trace_id=safe_trace,
+        )
+        log.info("message reply trace=%s stage=compose-selected", safe_trace)
+
     def clear_selection(self, reason: str = "explicit") -> None:
         selection = self._selection
+        compose = self._compose
         self._selection = None
+        self._compose = None
         if selection is not None:
             log.info(
                 "message reply trace=%s stage=selection-cleared reason=%s",
                 selection.trace_id,
                 re.sub(r"[^a-zA-Z0-9._:-]", "-", reason)[:32] or "explicit",
             )
+        elif compose is not None:
+            log.info(
+                "message reply trace=%s stage=selection-cleared reason=%s",
+                compose.trace_id,
+                re.sub(r"[^a-zA-Z0-9._:-]", "-", reason)[:32] or "explicit",
+            )
 
     async def handle_command(self, text: str) -> str | None:
         match = _REPLY.match(text.strip())
-        if match is None:
+        compose_match = _NEW_MESSAGE.match(text.strip()) if match is None else None
+        if match is None and compose_match is None:
             return None
         if self._draft_lock.locked():
             return "A message reply is already awaiting confirmation."
         async with self._draft_lock:
-            return await self._handle_reply(match)
+            if match is not None:
+                return await self._handle_reply(match)
+            assert compose_match is not None
+            return await self._handle_new_message(compose_match)
 
     async def _handle_reply(self, match: re.Match[str]) -> str:
         if self._selection is None:
@@ -113,6 +148,48 @@ class MessageReplyController:
 
         thread = self._selection.thread
         trace_id = self._selection.trace_id
+        return await self._confirm_and_send(
+            thread,
+            trace_id,
+            body,
+            origin_kind="messages.selection",
+        )
+
+    async def _handle_new_message(self, match: re.Match[str]) -> str:
+        if self._compose is None:
+            return "Open Messages and choose New message first."
+        recipient_query = match.group("recipient").strip()
+        body = match.group("body").strip()
+        matches = await asyncio.to_thread(self._contact_search, recipient_query)
+        if not matches:
+            return f"No Mac contact matched {recipient_query}. Try a fuller name."
+        if len(matches) > 1:
+            return (
+                f"More than one Mac contact address matched {recipient_query}. "
+                "Say the full name and message again."
+            )
+        recipient_name, recipient_handle = matches[0]
+        thread = MessageThread(
+            sender=recipient_name,
+            handle=recipient_handle,
+            text="",
+            at=0.0,
+        )
+        return await self._confirm_and_send(
+            thread,
+            self._compose.trace_id,
+            body,
+            origin_kind="messages.compose",
+        )
+
+    async def _confirm_and_send(
+        self,
+        thread: MessageThread,
+        trace_id: str,
+        body: str,
+        *,
+        origin_kind: str,
+    ) -> str:
         idempotency_key = f"message-reply:{trace_id}:{secrets.token_hex(4)}"
         action_id = idempotency_key
         prompt = f"Send to {thread.sender}? “{body}”"
@@ -143,7 +220,7 @@ class MessageReplyController:
                         b"joat-message-recipient-v1\0" + thread.handle.encode("utf-8")
                     ).digest(),
                     idempotency_key=idempotency_key,
-                    origin_kind="messages.selection",
+                    origin_kind=origin_kind,
                     origin_id=trace_id,
                     origin_ordinal=now_us,
                 ),

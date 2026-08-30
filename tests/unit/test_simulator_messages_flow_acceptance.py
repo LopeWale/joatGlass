@@ -50,6 +50,20 @@ def test_messages_flow_rejects_a_static_conversation_screenshot() -> None:
         ])
 
 
+def test_messages_compose_flow_requires_new_message_selection_and_confirmation() -> None:
+    driver = _driver()
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
+        driver.ScreenReceipt("messages-compose", "list-select", "2" * 64),
+        driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
+        driver.ScreenReceipt("messages-result", "click", "4" * 64),
+    ]
+
+    driver.validate_compose_flow(receipts)
+
+
 def test_fixture_store_contains_distinct_conversations_and_history(tmp_path) -> None:  # type: ignore[no-untyped-def]
     driver = _driver()
     assert driver is not None

@@ -24,6 +24,7 @@ describe('MessagesViewState', () => {
   it.each([
     ['MESSAGES · CONVERSATION', 'conversation'],
     ['MESSAGES · REPLY', 'conversation'],
+    ['MESSAGES · COMPOSE', 'compose'],
     ['MESSAGES · EMPTY', 'empty'],
     ['MESSAGES · READ ONLY', 'read_only'],
   ])('keeps %s informational', (title, screen) => {

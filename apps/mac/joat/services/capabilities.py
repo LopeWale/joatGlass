@@ -57,6 +57,7 @@ MESSAGES_ACCESS_ITEMS = [
     "Tap to retry after granting Full Disk Access.",
     "Mac Settings · Privacy & Security · Full Disk Access",
 ]
+NEW_MESSAGE_ROW = "New message · voice recipient + text"
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,15 +257,14 @@ class CapabilityRouter:
         if not self._request_is_current():
             return
         self._message_rows = rows
-        if not rows:
-            await self._show_focus("MESSAGES · EMPTY", ["No recent messages."])
-            return
+        items = [NEW_MESSAGE_ROW]
+        items.extend(
+            f"[{_age(row.at)}] {row.sender}"
+            f"{' (group · read only)' if not row.replyable else ''} · {row.text}"
+            for row in rows
+        )
         await self._send_list(HudList(
-            items=[
-                f"[{_age(row.at)}] {row.sender}"
-                f"{' (group · read only)' if not row.replyable else ''} · {row.text}"
-                for row in rows
-            ],
+            items=items,
             title="MESSAGES",
             hint="tap select · left x2 overview",
             selectable=True,
@@ -274,10 +274,22 @@ class CapabilityRouter:
         if (
             self._messages is None
             or self._replies is None
-            or not 0 <= index < len(self._message_rows)
+            or not 0 <= index <= len(self._message_rows)
         ):
             return
-        thread = self._message_rows[index]
+        if index == 0:
+            self._replies.begin_compose(trace_id)
+            await self._send_list(HudList(
+                items=[
+                    'Say “JOAT, message Adele saying …”',
+                    "One matching Mac contact is required.",
+                    "Mic off? Long press to enable.",
+                ],
+                title="MESSAGES · COMPOSE",
+                hint="voice compose · left x2 overview",
+            ))
+            return
+        thread = self._message_rows[index - 1]
         if not thread.replyable:
             await self._send_list(HudList(
                 items=[
