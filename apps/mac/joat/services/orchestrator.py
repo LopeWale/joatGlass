@@ -37,6 +37,7 @@ _LATENCY_BUCKETS = (
     (5.0, "2_5s"),
     (10.0, "5_10s"),
 )
+_SPEAKER_ROLES = frozenset({"self", "other", "unknown"})
 
 
 def _latency_bucket(elapsed_s: float) -> str:
@@ -95,6 +96,12 @@ class VoiceOrchestrator:
         # utterance. Keep its provenance through VAD/STT rather than inferring
         # it later from the currently connected device.
         self._utterance_sources: set[AudioSource] = set()
+        # The SDK labels speaker role with an app-side classifier, not a
+        # firmware identity assertion.  Keep the entire observed set so only
+        # an utterance classified *exclusively* as ``other`` is removed from
+        # the scarce STT lane; self, unknown, legacy, and mixed frames remain
+        # eligible for the normal explicit-invocation gate.
+        self._utterance_speaker_roles: set[str] = set()
         # The voice path must stay single-flight: overlapping STT/reply work
         # competes for the resident engines.  It must not, however, appear
         # deaf while that work is in flight.  Keep exactly one *completed*
@@ -163,22 +170,37 @@ class VoiceOrchestrator:
             )
 
     def on_audio(self, pcm: bytes, seq: int) -> None:
-        self._ingest_audio(pcm, seq, source=None)
+        self._ingest_audio(pcm, seq, source=None, speaker=None)
 
     def on_audio_frame(self, frame: AudioFrame) -> None:
-        self._ingest_audio(frame.pcm, frame.seq, source=frame.source)
+        self._ingest_audio(
+            frame.pcm,
+            frame.seq,
+            source=frame.source,
+            speaker=frame.speaker,
+        )
 
-    def _ingest_audio(self, pcm: bytes, seq: int, *, source: AudioSource | None) -> None:
+    def _ingest_audio(
+        self,
+        pcm: bytes,
+        seq: int,
+        *,
+        source: AudioSource | None,
+        speaker: str | None,
+    ) -> None:
         if self._last_seq is not None and seq != self._last_seq + 1:
             # Frames were shed upstream; never splice across the hole.
             log.warning("audio gap (seq %d → %d): resetting utterance", self._last_seq, seq)
             self._vad.reset()
             self._stt.reset()
             self._utterance_sources.clear()
+            self._utterance_speaker_roles.clear()
         self._last_seq = seq
 
         if source is not None:
             self._utterance_sources.add(source)
+        if speaker in _SPEAKER_ROLES:
+            self._utterance_speaker_roles.add(speaker)
 
         utterance = self._vad.feed(pcm)
         if utterance is None:
@@ -188,7 +210,16 @@ class VoiceOrchestrator:
             if len(self._utterance_sources) == 1
             else None
         )
+        only_other_speaker = self._utterance_speaker_roles == {"other"}
         self._utterance_sources.clear()
+        self._utterance_speaker_roles.clear()
+        if only_other_speaker:
+            # Do not transcribe a completed utterance the host classified as
+            # someone else.  This is a capacity hint, never identity proof:
+            # unknown/mixed/legacy speech remains available to the normal
+            # wake-word gate rather than making the wearer appear muted.
+            log.info("ignored other-speaker utterance bytes=%d", len(utterance))
+            return
         if self._utterance_worker is not None and not self._utterance_worker.done():
             replaced = self._pending_utterance is not None
             self._pending_utterance = (utterance, utterance_source)
