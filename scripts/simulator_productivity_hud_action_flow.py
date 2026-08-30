@@ -27,13 +27,20 @@ import signal
 import socket
 import subprocess
 import time
+from datetime import date, datetime
+from types import SimpleNamespace
 from typing import Any, TypeVar, cast
+from zoneinfo import ZoneInfo
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
 from joat.ble.hub_gateway import HubGatewayTransport
-from joat.core.protocol import DownlinkMessage, ProductivityHudView
+from joat.channels.cards import CardLog
+from joat.core.protocol import DownlinkMessage, HudList, ProductivityHudView
+from joat.services.capabilities import CapabilityRouter
+from joat.services.hud import HudWriter
+from joat.services.status import StatusPublisher
 
 
 class ProductivityHudFlowError(RuntimeError):
@@ -52,6 +59,10 @@ class ScreenReceipt:
 
 
 _EXPECTED_FLOW = (
+    ("planning-month", "click", None, "month"),
+    ("planning-week", "click", None, "week"),
+    ("planning-day", "click", None, "day"),
+    ("planning-item-detail", "click", None, "detail"),
     ("calendar-review", None, None, "review"),
     ("calendar-verifying", "click", True, "verifying"),
     ("calendar-saved", None, None, "saved"),
@@ -135,6 +146,66 @@ class RecordingGateway(HubGatewayTransport):
         return await super().request_confirmation(action_id, *args, **kwargs)
 
 
+class FixturePlanningBridge:
+    """A fixed native-shaped snapshot for visualizing the real Planning router.
+
+    It deliberately implements only the read-only EventKit calls used by
+    ``CapabilityRouter``.  The production month/week/day projection, selection
+    routing, Hub gateway, and HUD renderer remain in play; live EventKit data
+    is not touched while a wearer may have a G2 connected to the normal app.
+    """
+
+    def __init__(self) -> None:
+        scheduled = datetime(2026, 9, 1, 9, 30, tzinfo=ZoneInfo("America/Chicago"))
+        self._event_start_unix_ms = int(scheduled.timestamp() * 1_000)
+
+    @staticmethod
+    def _response(*, result: object = None) -> SimpleNamespace:
+        return SimpleNamespace(
+            authorization=SimpleNamespace(calendar="fullAccess", reminders="fullAccess"),
+            result=result,
+            store_instance_id="simulator-eventkit-snapshot",
+            store_generation=1,
+        )
+
+    async def call(
+        self,
+        method: str,
+        params: dict[str, object] | None = None,
+    ) -> SimpleNamespace:
+        del params
+        if method == "authorization.status":
+            return self._response()
+        if method == "calendar.listContainers":
+            return self._response(result=[{
+                "calendar_identifier": "work", "title": "Work",
+            }])
+        if method == "reminders.listContainers":
+            return self._response(result=[{
+                "calendar_identifier": "personal", "title": "Personal",
+            }])
+        if method == "calendar.query":
+            return self._response(result=[{
+                "calendar_item_identifier": "event-design-review",
+                "title": "Design review",
+                "start_unix_ms": self._event_start_unix_ms,
+                "end_unix_ms": self._event_start_unix_ms + 45 * 60_000,
+            }])
+        if method == "reminders.query":
+            return self._response(result=[{
+                "calendar_item_identifier": "reminder-buy-filters",
+                "calendar_identifier": "personal",
+                "title": "Buy filters",
+                "due": {
+                    "year": 2026, "month": 9, "day": 1,
+                    "hour": 18, "minute": 0, "second": 0,
+                    "time_zone_id": "America/Chicago",
+                },
+                "is_completed": False,
+            }])
+        raise ProductivityHudFlowError(f"unexpected fixture Planning call: {method}")
+
+
 T = TypeVar("T")
 
 
@@ -182,6 +253,27 @@ async def _wait_http(url: str, process: ManagedProcess) -> None:
     raise ProductivityHudFlowError(f"timed out waiting for {url}")
 
 
+async def _wait_console_marker(
+    automation_base: str,
+    marker: str,
+    *,
+    timeout_s: float = 15.0,
+) -> None:
+    """Do not inject a menu gesture before the product says it owns a page."""
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
+        except (OSError, urllib.error.URLError):
+            await asyncio.sleep(0.1)
+            continue
+        if marker.encode("utf-8") in console:
+            return
+        await asyncio.sleep(0.1)
+    raise ProductivityHudFlowError(f"timed out waiting for simulator console marker {marker!r}")
+
+
 def _start_process(
     name: str,
     command: list[str],
@@ -227,9 +319,15 @@ def _prepare_simulator_plugin_root(repo: Path, output: Path, websocket_url: str)
 
     root = output / "simulator-plugin-root"
     root.mkdir(mode=0o700)
-    for name in ("index.html", "src", "node_modules", "tsconfig.json"):
-        source = source_root / name
-        os.symlink(source, root / name, target_is_directory=source.is_dir())
+    # Snapshot actual production source into this disposable root.  Vite's
+    # normal HMR follows symlinks, which means an unrelated shared-checkout
+    # edit can silently reload the simulator halfway through an acceptance
+    # gesture.  Dependencies are immutable for this run, so only they remain
+    # symlinked to avoid an expensive copy.
+    shutil.copy2(source_root / "index.html", root / "index.html")
+    shutil.copy2(source_root / "tsconfig.json", root / "tsconfig.json")
+    shutil.copytree(source_root / "src", root / "src", symlinks=True)
+    os.symlink(source_root / "node_modules", root / "node_modules", target_is_directory=True)
     manifest_path = root / "app.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     manifest_path.chmod(0o600)
@@ -288,12 +386,15 @@ async def _capture(
 
 
 async def _input(automation_base: str, action: str) -> None:
-    await asyncio.to_thread(
-        _http_bytes,
-        f"{automation_base}/api/input",
-        method="POST",
-        body=json.dumps({"action": action}).encode("utf-8"),
-    )
+    try:
+        await asyncio.to_thread(
+            _http_bytes,
+            f"{automation_base}/api/input",
+            method="POST",
+            body=json.dumps({"action": action}).encode("utf-8"),
+        )
+    except urllib.error.HTTPError as exc:
+        raise ProductivityHudFlowError(f"official simulator rejected input {action!r}") from exc
 
 
 def _view(domain: str, phase: str, *, title: str, primary: str, secondary: str, hint: str) -> ProductivityHudView:
@@ -331,6 +432,140 @@ async def _confirm(
     return digest, {"raw": raw, "alpha": alpha}
 
 
+def _planning_list_after(
+    gateway: RecordingGateway,
+    *,
+    after: int,
+) -> HudList | None:
+    for message in reversed(gateway.sent[after:]):
+        if isinstance(message, HudList) and message.title.startswith("PLANNING"):
+            return message
+    return None
+
+
+def validate_planning_screen(phase: str, rendered: HudList) -> None:
+    """Reject a rendered Planning page that lost its time or source semantics."""
+
+    expected = {
+        "month": "SEPTEMBER 2026",
+        "week": "AUG 31–SEP 6",
+        "day": "TUE SEP 1",
+        "detail": "PLANNING · EVENT",
+    }.get(phase)
+    if expected is None:
+        raise ProductivityHudFlowError(f"unknown Planning phase {phase!r}")
+    if expected not in rendered.title:
+        raise ProductivityHudFlowError(
+            f"Planning {phase}: expected title containing {expected!r}, got {rendered.title!r}"
+        )
+    if phase == "month":
+        if rendered.planning_grid is None or len(rendered.planning_grid) != 42:
+            raise ProductivityHudFlowError("planning month did not include the required 42-cell grid")
+        return
+    if phase == "week":
+        if "TUE SEP 1 · 1 event · 1 reminder" not in rendered.items:
+            raise ProductivityHudFlowError("Planning week omitted its source-backed mixed-day summary")
+        return
+    if phase == "day":
+        has_event = any("EVENT · Design review" in item for item in rendered.items)
+        has_reminder = any("REMINDER · Buy filters" in item for item in rendered.items)
+        if not (has_event and has_reminder):
+            raise ProductivityHudFlowError("Planning day omitted the mixed Event and Reminder agenda")
+        return
+    if "Design review" not in rendered.items:
+        raise ProductivityHudFlowError("Planning detail omitted the selected native item title")
+
+
+async def _planning_click(
+    gateway: RecordingGateway,
+    *,
+    automation_base: str,
+    output: Path,
+    name: str,
+    phase: str,
+    prior_digest: str | None,
+) -> tuple[str, dict[str, str]]:
+    """Drive one actual menu selection and wait for the authoritative list."""
+
+    before = len(gateway.sent)
+    await _input(automation_base, "click")
+    rendered = await _wait_for(
+        lambda: _planning_list_after(gateway, after=before),
+        label=f"{name} Mac Planning response",
+    )
+    digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
+    validate_planning_screen(phase, rendered)
+    return digest, {"raw": raw, "alpha": alpha}
+
+
+async def _drive_planning_hierarchy(
+    gateway: RecordingGateway,
+    *,
+    automation_base: str,
+    output: Path,
+) -> tuple[list[ScreenReceipt], dict[str, dict[str, str]], str]:
+    """Prove month → week → mixed day → item through real input callbacks.
+
+    The official simulator exposes click and scroll injection, but no
+    left-temple double press.  It can therefore prove the forward hierarchy
+    here; left-double return remains a separately unit-tested physical G2
+    contract.
+    """
+
+    # The live-menu test hook starts with Messages selected.  Move exactly
+    # once to Planning before selecting it.  If the simulator does not accept
+    # its documented scroll action, the following title assertion fails.
+    await _input(automation_base, "down")
+    digest, artifact = await _planning_click(
+        gateway,
+        automation_base=automation_base,
+        output=output,
+        name="01-planning-month",
+        phase="month",
+        prior_digest=None,
+    )
+    receipts = [ScreenReceipt("planning-month", "click", None, "month", digest)]
+    artifacts = {"planning-month": artifact}
+
+    digest, artifact = await _planning_click(
+        gateway,
+        automation_base=automation_base,
+        output=output,
+        name="02-planning-week",
+        phase="week",
+        prior_digest=digest,
+    )
+    receipts.append(ScreenReceipt("planning-week", "click", None, "week", digest))
+    artifacts["planning-week"] = artifact
+
+    # In the week, Monday is empty; select Tuesday so the visual proof must
+    # contain the fixture's merged Event and Reminder agenda, not merely a
+    # free-day state.
+    await _input(automation_base, "down")
+    digest, artifact = await _planning_click(
+        gateway,
+        automation_base=automation_base,
+        output=output,
+        name="03-planning-day",
+        phase="day",
+        prior_digest=digest,
+    )
+    receipts.append(ScreenReceipt("planning-day", "click", None, "day", digest))
+    artifacts["planning-day"] = artifact
+
+    digest, artifact = await _planning_click(
+        gateway,
+        automation_base=automation_base,
+        output=output,
+        name="04-planning-item-detail",
+        phase="detail",
+        prior_digest=digest,
+    )
+    receipts.append(ScreenReceipt("planning-item-detail", "click", None, "detail", digest))
+    artifacts["planning-item-detail"] = artifact
+    return receipts, artifacts, digest
+
+
 async def _run(args: argparse.Namespace) -> dict[str, object]:
     if args.out.exists() and any(args.out.iterdir()):
         raise ProductivityHudFlowError("output directory must be empty")
@@ -344,6 +579,18 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     gateway = RecordingGateway(host="127.0.0.1", port=args.ws_port)
     connected = asyncio.Event()
     gateway.on_hello(lambda _hello: connected.set())
+    planning_router = CapabilityRouter(
+        hud=HudWriter(gateway),
+        transport=gateway,
+        status=StatusPublisher(path=args.out / "planning-status.json"),
+        messages=None,
+        cards=CardLog(),
+        personal_data=FixturePlanningBridge(),  # type: ignore[arg-type]
+    )
+    # Fix the synthetic read model to a month containing both fixture items.
+    # The normal Mac's selected day remains its own live local state.
+    planning_router._planning_selected_day = date(2026, 9, 1)
+    gateway.on_input(planning_router.on_input)
     managed: list[ManagedProcess] = []
     receipts: list[ScreenReceipt] = []
     artifacts: dict[str, dict[str, str]] = {}
@@ -367,7 +614,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         await _wait_http(plugin_url, vite)
         simulator = _start_process(
             "official-evenhub-simulator",
-            [str(args.simulator), plugin_url, "--automation-port", str(args.automation_port)],
+            [
+                str(args.simulator),
+                f"{plugin_url}/?joatTestOpenMenu=1",
+                "--automation-port", str(args.automation_port),
+            ],
             cwd=args.repo,
             env=environment,
             log_path=args.out / "simulator.log",
@@ -381,6 +632,18 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             raise ProductivityHudFlowError(
                 "official simulator did not connect to the isolated Hub gateway"
             ) from exc
+        await _wait_console_marker(
+            automation_base,
+            "[joat] live menu acceptance opened=true",
+        )
+
+        planning_receipts, planning_artifacts, digest = await _drive_planning_hierarchy(
+            gateway,
+            automation_base=automation_base,
+            output=args.out,
+        )
+        receipts.extend(planning_receipts)
+        artifacts.update(planning_artifacts)
 
         digest, artifact = await _confirm(
             gateway,
@@ -388,8 +651,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             prompt="Create event “Design review”? Work · Sep 1, 2026 at 09:30 · 45m · America/Chicago",
             automation_base=automation_base,
             output=args.out,
-            receipt_name="01-calendar-review",
-            prior_digest=None,
+            receipt_name=f"{len(receipts) + 1:02d}-calendar-review",
+            prior_digest=digest,
         )
         receipts.append(ScreenReceipt("calendar-review", None, None, "review", digest))
         artifacts["calendar-review"] = artifact
@@ -461,9 +724,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "artifacts": artifacts,
             "evidenceBoundary": {
                 "hud": "official Even Hub simulator framebuffer",
-                "input": "official simulator click through production confirmation router",
-                "mac": "real local HubGatewayTransport with typed test producer",
-                "eventkit": "not run",
+                "input": "official simulator click through production menu, Planning, and confirmation routers",
+                "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
+                "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",
                 "physicalG2": "not run",
