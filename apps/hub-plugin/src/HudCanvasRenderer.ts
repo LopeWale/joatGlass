@@ -142,6 +142,18 @@ export const HUD_VISUAL_GEOMETRY = {
   confirmationProgressWidth: 367,
 } as const;
 
+/** Safe-write choices are named actions, not faux buttons. */
+export function confirmationActionLabels(): readonly {
+  label: string;
+  x: number;
+  level: number;
+}[] {
+  return [
+    { label: 'TAP · Confirm', x: 188, level: BRIGHT },
+    { label: 'SWIPE · Cancel', x: 388, level: SUPPORT },
+  ];
+}
+
 export type HudIconName =
   | 'messages'
   | 'notifications'
@@ -325,6 +337,17 @@ export function planningGridMarker(cell: PlanningGridCell): string {
   if (cell.eventCount > 0) marker.push(`E${cell.eventCount}`);
   if (cell.reminderCount > 0) marker.push(`R${cell.reminderCount}`);
   return marker.join(' ');
+}
+
+/** A selected calendar week needs a signal, not a seven-cell outline. */
+export function planningMonthSelectionRail(selectedWeek: number): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const week = Math.min(5, Math.max(0, Math.floor(selectedWeek)));
+  return { x: 28, y: 87 + week * 22, width: 3, height: 22 };
 }
 
 /** The graphical calendar owns only the six week action rows. Month controls
@@ -769,6 +792,76 @@ export function messagesListRows(
       ...(index < count - 1 ? { separatorY: baselineY + 13 } : {}),
     };
   });
+}
+
+export interface PlanningFocusRow {
+  primaryBaselineY: number;
+  secondaryBaselineY?: number;
+  railTopY: number;
+  railHeight: number;
+  separatorY?: number;
+}
+
+/** Planning is a time-oriented lens view, not a browser list. Day agendas
+ * need room for a time and kind/title line; all other Planning scopes use six
+ * single-line rows. Both variants reserve space for the persistent footer and
+ * expose selection with a rail rather than a card outline. */
+export function planningFocusRows(
+  title: string,
+  itemCount: number,
+): readonly PlanningFocusRow[] {
+  const normalized = title.trim().toUpperCase();
+  if (!/^(?:PLANNING|CALENDAR|TASKS)(?:\s*·|$)/.test(normalized)) return [];
+
+  const agenda = /^(?:PLANNING|CALENDAR|TASKS) · PLAN · (?:MON|TUE|WED|THU|FRI|SAT|SUN)\b/
+    .test(normalized);
+  const capacity = agenda ? 4 : 6;
+  const count = Math.min(capacity, Math.max(0, Math.floor(itemCount)));
+  if (agenda) {
+    return Array.from({ length: count }, (_, index) => {
+      const primaryBaselineY = 93 + index * 32;
+      return {
+        primaryBaselineY,
+        secondaryBaselineY: primaryBaselineY + 15,
+        railTopY: primaryBaselineY - 12,
+        railHeight: 29,
+        ...(index < count - 1 ? { separatorY: primaryBaselineY + 24 } : {}),
+      };
+    });
+  }
+
+  return Array.from({ length: count }, (_, index) => {
+    const primaryBaselineY = 93 + index * 24;
+    return {
+      primaryBaselineY,
+      railTopY: primaryBaselineY - 11,
+      railHeight: 21,
+      ...(index < count - 1 ? { separatorY: primaryBaselineY + 13 } : {}),
+    };
+  });
+}
+
+export interface ProductivityOutcomeLayout {
+  titleBaselineY: number;
+  dividerY: number;
+  primaryBaselineY: number;
+  secondaryBaselineY: number;
+  progressY: number;
+  footerBaselineY: number;
+}
+
+/** The lifecycle surface carries a single result, so it earns hierarchy—not a
+ * 504-pixel card. A title, hairline, compact evidence rows, and progress mark
+ * leave the lens calm while retaining the return gesture in the footer. */
+export function productivityOutcomeLayout(): ProductivityOutcomeLayout {
+  return {
+    titleBaselineY: 103,
+    dividerY: 125.5,
+    primaryBaselineY: 151,
+    secondaryBaselineY: 174,
+    progressY: 198,
+    footerBaselineY: 267,
+  };
 }
 
 export interface HudVisibleListItem {
@@ -1279,6 +1372,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
+    if (planningFocusRows(frame.title, frame.items.length).length > 0) {
+      this.drawPlanningFocusList(context, frame);
+      return;
+    }
+
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(BRIGHT);
@@ -1331,6 +1429,52 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(CHROME);
       context.font = `9px ${HUD_FONT}`;
       context.fillText(age, 520, top + 8);
+    });
+
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText(frame.hint, 288, 267);
+  }
+
+  private drawPlanningFocusList(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+  ): void {
+    const rows = planningFocusRows(frame.title, frame.items.length);
+    const agenda = rows.some((row) => row.secondaryBaselineY !== undefined);
+
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `20px ${HUD_FONT}`;
+    context.fillText(hudDisplayTitle(frame.title), 36, 64);
+
+    visibleHudListItems(frame.items, frame.selectedIndex, rows.length).forEach((visible, index) => {
+      const row = rows[index];
+      if (!row) return;
+      const selected = frame.selectable && visible.index === frame.selectedIndex;
+      if (selected) {
+        context.fillStyle = gray(BRIGHT);
+        context.fillRect(36, row.railTopY, 3, row.railHeight);
+      }
+      if (row.separatorY !== undefined) {
+        context.fillStyle = gray(HAIRLINE);
+        context.fillRect(52, row.separatorY, 488, 1);
+      }
+
+      context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
+      if (agenda && row.secondaryBaselineY !== undefined) {
+        const { primary, secondary } = parseHudListItem(visible.item);
+        context.font = `14px ${HUD_FONT}`;
+        this.fitText(context, primary || visible.item, 52, row.primaryBaselineY, 488);
+        context.fillStyle = gray(selected ? SUPPORT : CHROME);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(context, secondary, 52, row.secondaryBaselineY, 488);
+      } else {
+        context.font = `12px ${HUD_FONT}`;
+        this.fitText(context, visible.item, 52, row.primaryBaselineY, 488);
+      }
     });
 
     context.fillStyle = gray(QUIET);
@@ -1469,10 +1613,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     for (let row = 0; row < 6; row += 1) {
       const top = gridTop + row * rowHeight;
       if (row === selectedWeek) {
-        context.strokeStyle = gray(BRIGHT);
-        context.lineWidth = 1.2;
-        roundedRect(context, gridLeft - 9, top - 9, gridRight - gridLeft + 18, rowHeight, 4);
-        context.stroke();
+        const rail = planningMonthSelectionRail(selectedWeek);
+        context.fillStyle = gray(BRIGHT);
+        context.fillRect(rail.x, rail.y, rail.width, rail.height);
       } else {
         context.strokeStyle = gray(HAIRLINE);
         context.lineWidth = 0.7;
@@ -1543,31 +1686,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(BRIGHT);
     this.drawFittedWrappedText(context, frame.prompt, 288, 127, 470, 3);
 
-    const drawAction = (x: number, copy: string, level: number): void => {
-      context.strokeStyle = gray(level);
-      context.lineWidth = 1;
-      context.beginPath();
-      context.roundRect(
-        x,
-        HUD_VISUAL_GEOMETRY.confirmationActionsY,
-        HUD_VISUAL_GEOMETRY.confirmationActionWidth,
-        HUD_VISUAL_GEOMETRY.confirmationActionHeight,
-        8,
-      );
-      context.stroke();
+    context.fillStyle = gray(HAIRLINE);
+    context.fillRect(112, 181, 352, 1);
+    context.fillRect(288, 188, 1, 18);
+    context.fillRect(112, 212, 352, 1);
+    context.textAlign = 'center';
+    context.font = `10px ${HUD_FONT}`;
+    confirmationActionLabels().forEach(({ label, x, level }) => {
       context.fillStyle = gray(level);
-      context.font = `10px ${HUD_FONT}`;
-      context.textAlign = 'center';
-      context.fillText(
-        copy,
-        x + HUD_VISUAL_GEOMETRY.confirmationActionWidth / 2,
-        HUD_VISUAL_GEOMETRY.confirmationActionsY
-          + HUD_VISUAL_GEOMETRY.confirmationActionHeight / 2,
-      );
-    };
-
-    drawAction(HUD_VISUAL_GEOMETRY.confirmationPrimaryX, 'TAP · Confirm', BRIGHT);
-    drawAction(HUD_VISUAL_GEOMETRY.confirmationSecondaryX, 'SWIPE · Cancel', SUPPORT);
+      context.fillText(label, x, 197);
+    });
 
     const progress = Math.max(0, Math.min(1, frame.secondsRemaining / 8));
     context.fillStyle = gray(38);
@@ -1619,29 +1747,28 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.fillStyle = gray(BRIGHT);
     context.font = `20px ${HUD_FONT}`;
-    this.drawWrappedText(context, model.title, 36, 105, 504, 18, 2);
-
-    context.strokeStyle = gray(model.phase === 'due' ? SUPPORT : CHROME);
-    context.lineWidth = 1;
-    roundedRect(context, 36, 143, 504, 70, 7);
-    context.stroke();
-    context.fillStyle = gray(BRIGHT);
-    context.font = `14px ${HUD_FONT}`;
-    this.fitText(context, model.primary, 54, 166, 468);
-    context.fillStyle = gray(SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
-    this.drawWrappedText(context, model.secondary, 54, 188, 468, 14, 2);
+    const layout = productivityOutcomeLayout();
+    this.drawWrappedText(context, model.title, 36, layout.titleBaselineY, 504, 18, 2);
 
     context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
-    context.fillRect(36, 230, 504, 3);
+    context.fillRect(36, layout.dividerY, 504, 1);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `14px ${HUD_FONT}`;
+    this.fitText(context, model.primary, 36, layout.primaryBaselineY, 504);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    this.drawWrappedText(context, model.secondary, 36, layout.secondaryBaselineY, 504, 14, 2);
+
+    context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
+    context.fillRect(36, layout.progressY, 504, 3);
     const progress = productivityPhaseProgress(model.phase);
     context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
-    context.fillRect(36, 230, Math.round(504 * progress), 3);
+    context.fillRect(36, layout.progressY, Math.round(504 * progress), 3);
 
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
-    this.fitText(context, productivityActionHint(model), 288, 267, 500);
+    this.fitText(context, productivityActionHint(model), 288, layout.footerBaselineY, 500);
   }
 
   private drawBrainstorm(
