@@ -639,6 +639,9 @@ export interface MessagesConversationTranscript {
   rows: MessagesConversationRow[];
 }
 
+/** One compact instruction is enough for the voice-first Compose surface. */
+export const MESSAGES_COMPOSE_GUIDANCE = 'Say: recipient, then message';
+
 /** Conversation frames are deliberately not rendered as notification rows.
  * The Mac owns the text; this parser only distinguishes the already-labeled
  * speaker rows from truthful voice/microphone instructions. */
@@ -684,9 +687,9 @@ export function messagesConversationTranscript(
   };
 }
 
-/** These Mac-owned screens contain message bubbles and voice instructions,
- * not selectable notification rows. */
-export function usesMessagesInstructionCards(title: string): boolean {
+/** These Mac-owned screens need a compact transcript/guide treatment rather
+ * than generic selectable notification rows. */
+export function usesMessagesCompactLayout(title: string): boolean {
   const normalized = title.trim().toUpperCase();
   return normalized === 'MESSAGES · CONVERSATION'
     || normalized === 'MESSAGES · COMPOSE';
@@ -1195,7 +1198,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    if (usesMessagesInstructionCards(frame.title)) {
+    if (usesMessagesCompactLayout(frame.title)) {
       this.drawMessagesConversation(context, frame);
       return;
     }
@@ -1302,33 +1305,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    visibleHudListItems(frame.items, frame.selectedIndex).forEach((visible, row) => {
-      const parsed = parseMessagesConversationRow(visible.item);
-      const top = 82 + row * 56;
-      if (parsed.kind === 'instruction') {
-        context.strokeStyle = gray(CHROME);
-        context.lineWidth = 0.8;
-        roundedRect(context, 36, top, 504, 40, 5);
-        context.stroke();
-        context.fillStyle = gray(SUPPORT);
-        context.font = `12px ${HUD_FONT}`;
-        this.fitText(context, parsed.body, 50, top + 20, 476);
-        return;
-      }
-
-      const outgoing = parsed.kind === 'outgoing';
-      const left = outgoing ? 202 : 36;
-      const width = 338;
-      context.strokeStyle = gray(outgoing ? BRIGHT : SUPPORT);
-      context.lineWidth = outgoing ? 1.2 : 0.8;
-      roundedRect(context, left, top, width, 44, 6);
-      context.stroke();
-      context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
-      context.font = `9px ${HUD_FONT}`;
-      context.fillText(parsed.label, left + 12, top + 11);
-      context.font = `13px ${HUD_FONT}`;
-      this.fitText(context, parsed.body, left + 12, top + 29, width - 24);
-    });
+    context.fillStyle = gray(SUPPORT);
+    context.font = `13px ${HUD_FONT}`;
+    this.fitText(context, MESSAGES_COMPOSE_GUIDANCE, 36, 103, 504);
 
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
