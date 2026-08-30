@@ -104,7 +104,10 @@ class FakeTransport:
             record = getattr(self._g2_diagnostics, "record", None)
             if record is not None:
                 record(event)
-        message = BrainstormAction(action=action)
+        message = BrainstormAction(
+            action=action,
+            connection_generation=self.connection_generation,
+        )
         for callback in self.action_callbacks:
             callback(message)
 
@@ -136,12 +139,13 @@ class UnconfirmedAbortHermes(FakeHermes):
             raise RuntimeError("abort not confirmed") from exc
 
 
-def acceptance_trigger(source: str = "right") -> BrainstormAction:
+def acceptance_trigger(source: str = "right", generation: int = 1) -> BrainstormAction:
     return BrainstormAction(
         action="begin_acceptance",
         surface="brainstorm",
         source=source,  # type: ignore[arg-type]
         gesture="double_press",
+        connection_generation=generation,
     )
 
 
@@ -365,6 +369,61 @@ def test_glasses_start_returns_an_explicit_rejection_for_unavailable_or_busy(
     assert accepted is None
 
 
+def test_glasses_start_rejects_a_stale_authenticated_generation(tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+    transport = FakeTransport(events)
+    transport.emit_hello()
+    transport.connection_generation = 2
+
+    rejection = try_start_g2_gesture_acceptance(
+        transport=transport,
+        terminal=lambda: FakeHermes(),
+        trigger=acceptance_trigger(generation=1),
+        start_session=lambda _session: True,
+        output_directory=tmp_path,
+    )
+
+    assert rejection is not None
+    assert rejection.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_g2_gesture_session_ignores_stale_actions_after_reconnect(
+    tmp_path: Path,
+) -> None:
+    events: list[dict[str, object]] = []
+    transport = FakeTransport(events)
+    session = InAppBrainstormAcceptance(
+        transport=transport,
+        terminal=FakeHermes(),
+        out=tmp_path / "receipt.json",
+        diagnostic_events=events,
+        trigger=acceptance_trigger(),
+        action_timeout_s=1,
+        connect_timeout_s=1,
+        connection_generation=1,
+        evidence_mode="physical_g2",
+    )
+    session.attach(subscribe_actions=False)
+    transport.emit_hello()
+    await _wait_for(lambda: len(transport.sent) == 1)
+
+    # A replayed control from a prior authenticated connection is not a
+    # wearer action on this post-reconnect Brainstorm surface.
+    session.handle_action(BrainstormAction(
+        action="begin_topic_capture", connection_generation=0,
+    ))
+    await asyncio.sleep(0.01)
+    assert len(transport.sent) == 1
+
+    transport.action("begin_topic_capture", "brainstorm", "right")
+    session.handle_action(BrainstormAction(
+        action="begin_topic_capture", connection_generation=1,
+    ))
+    await _wait_for(lambda: len(transport.sent) == 5)
+    await session.close()
+
+
 @pytest.mark.asyncio
 async def test_in_app_controller_refuses_when_a_normal_session_is_active(
     tmp_path: Path,
@@ -434,7 +493,9 @@ async def test_in_app_controller_accepts_actions_from_the_live_router_without_a_
         "action": "begin_topic_capture", "surface": "brainstorm", "gesture": "tap",
         "delivery": "sys", "source": "right",
     })
-    controller.handle_action(BrainstormAction(action="begin_topic_capture"))
+    controller.handle_action(BrainstormAction(
+        action="begin_topic_capture", connection_generation=1,
+    ))
     await _wait_for(lambda: len(transport.sent) == 5)
     await controller.close()
 
@@ -547,8 +608,15 @@ async def test_g2_gesture_session_proves_source_reconnect_and_restores_diagnosti
     async def gesture(
         action: str, surface: str, source: str, gesture_name: str = "tap",
     ) -> None:
+        assert await session.handle_brainstorm_action(BrainstormAction(
+            action=action,
+            connection_generation=transport.connection_generation,
+        ))
+        # The production EventRouter sends the bounded action first and then
+        # queues its content-free diagnostic on that same WebSocket.  Yield so
+        # the controller records its evidence boundary before the trace arrives.
+        await asyncio.sleep(0)
         transport.action(action, surface, source, gesture_name)
-        assert await session.handle_brainstorm_action(BrainstormAction(action=action))
 
     await gesture("begin_topic_capture", "brainstorm", "right")
     await _wait_for(lambda: len(transport.sent) == 5)
@@ -637,13 +705,17 @@ async def test_simulator_can_render_cancel_without_inventing_physical_source(
         *,
         record_diagnostic: bool = True,
     ) -> None:
+        assert await session.handle_brainstorm_action(BrainstormAction(
+            action=action,
+            connection_generation=transport.connection_generation,
+        ))
+        await asyncio.sleep(0)
         transport.action(
             action,
             surface,
             "right",
             record_diagnostic=record_diagnostic,
         )
-        assert await session.handle_brainstorm_action(BrainstormAction(action=action))
 
     await gesture("begin_topic_capture", "brainstorm")
     await _wait_for(lambda: len(transport.sent) == 5)

@@ -24,6 +24,7 @@ from joat.core.navigation import NavigationCandidate, NavigationPoint
 from joat.core.interfaces import AudioFrame, MessageSender
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
+    BrainstormAction,
     Device,
     EventSource,
     EventType,
@@ -178,6 +179,21 @@ class TestConnection:
 
 
 class TestUplink:
+    async def test_brainstorm_action_is_bound_to_the_current_authenticated_connection(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        received: list[BrainstormAction] = []
+        t.on_brainstorm_action(received.append)
+
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            await ws.send(json.dumps({"kind": "brainstorm.action", "action": "cancel"}))
+            await _wait_for(lambda: bool(received))
+
+        assert received == [BrainstormAction(action="cancel", connection_generation=1)]
+
     async def test_nearby_toolbelt_uses_a_request_bound_phone_refresh(
         self, transport,
     ) -> None:

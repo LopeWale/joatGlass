@@ -921,6 +921,12 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             log.info("plugin disconnected")
 
     def _dispatch(self, raw: str | bytes, session_id: str) -> None:
+        # The newest authenticated WebSocket owns the HUD.  Its predecessor
+        # can still have a buffered frame scheduled on this event loop after
+        # replacement; that frame must never operate the replacement surface.
+        if session_id != self._session_id:
+            log.debug("dropping stale plugin frame")
+            return
         try:
             payload = json.loads(raw)
             message = parse_uplink(payload)
@@ -1029,6 +1035,14 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                         # recorder must not drop a real G2 control session.
                         log.warning("dropping G2 diagnostic after %s", type(exc).__name__)
             case BrainstormAction():
+                # The plugin cannot choose this generation on the wire.  The
+                # gateway attaches it only after selecting the authenticated
+                # current connection, so an acceptance session can reject
+                # stale gestures after a reconnect.
+                message = replace(
+                    message,
+                    connection_generation=self._connection_generation,
+                )
                 for brainstorm_cb in self._brainstorm_action_cbs:
                     brainstorm_cb(message)
             case NavigationAction():

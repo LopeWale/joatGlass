@@ -234,6 +234,7 @@ class TestParseUplink:
         {"kind": "brainstorm.action", "action": "begin_acceptance"},
         {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "left", "gesture": "double_press"},
         {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press", "topic": "leak"},
+        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press", "connectionGeneration": 9},
         {"kind": "brainstorm.action"},
     ])
     def test_brainstorm_action_rejects_freeform_or_unknown_fields(self, payload: object) -> None:

@@ -24,6 +24,7 @@ MAX_EVENTS = 512
 log = logging.getLogger(__name__)
 
 WriteReceipt = Callable[[Path, list[dict[str, Any]]], None]
+ObserveReceipt = Callable[[list[dict[str, Any]]], None]
 
 
 def default_g2_diagnostics_path() -> Path:
@@ -62,6 +63,10 @@ class G2DiagnosticStore:
 
     path: Path = field(default_factory=default_g2_diagnostics_path)
     writer: WriteReceipt = field(default=write_receipt, repr=False)
+    # A live owner may need an already-sanitized frame before the background
+    # receipt write finishes.  It receives a copied bounded snapshot and has
+    # no authority to modify persistence or the incoming event.
+    observer: ObserveReceipt | None = field(default=None, repr=False)
     _events: list[dict[str, Any]] = field(default_factory=list, init=False)
     _persist_task: asyncio.Task[None] | None = field(default=None, init=False)
     _dirty: bool = field(default=False, init=False)
@@ -85,6 +90,7 @@ class G2DiagnosticStore:
             for index, retained in enumerate(self._events, start=1):
                 retained["sequence"] = index
         self._dirty = True
+        self._notify_observer()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -120,6 +126,18 @@ class G2DiagnosticStore:
 
     def _snapshot(self) -> list[dict[str, Any]]:
         return [dict(event) for event in self._events]
+
+    def _notify_observer(self) -> None:
+        observer = self.observer
+        if observer is None:
+            return
+        try:
+            observer(self._snapshot())
+        except Exception as exc:
+            # Observers are optional live consumers.  A degraded acceptance
+            # receipt must not make the glasses transport lose a real gesture
+            # or disable durable diagnostic persistence.
+            log.warning("G2 diagnostic observer failed after %s", type(exc).__name__)
 
     def _disable(self, exc: Exception) -> None:
         self._disabled = True
