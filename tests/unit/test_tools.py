@@ -102,6 +102,23 @@ class TestExecute:
         assert belt.explicit_call("coffee near me") == ToolCall("nearby", {"query": "coffee"})
         assert belt.explicit_call("tell me a joke") is None
 
+    def test_known_tool_hints_skip_an_unrelated_model_decision(self) -> None:
+        belt = ToolBelt([
+            Tool(
+                "weather", "", {"type": "object"}, _resolved,
+                decision_hints=("weather", "rain"),
+            ),
+        ])
+
+        assert belt.requires_model_decision("tell me a joke") is False
+        assert belt.requires_model_decision("tell me about brains") is False
+        assert belt.requires_model_decision("will it rain in Chicago tomorrow") is True
+
+    def test_unknown_future_tools_keep_the_conservative_model_decision_path(self) -> None:
+        belt = ToolBelt([make_tool()])
+
+        assert belt.requires_model_decision("tell me a joke") is True
+
     async def test_execution_log_does_not_retain_tool_arguments(
         self, caplog: Any,
     ) -> None:

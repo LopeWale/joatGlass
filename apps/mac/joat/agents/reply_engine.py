@@ -142,6 +142,8 @@ class MlxReplyEngine(ReplyEngine):
             return None
         call = self._tools.explicit_call(text)
         if call is None:
+            if not self._tools.requires_model_decision(text):
+                return None
             decision = await asyncio.get_running_loop().run_in_executor(
                 self._mlx_thread, self._decide, text
             )
