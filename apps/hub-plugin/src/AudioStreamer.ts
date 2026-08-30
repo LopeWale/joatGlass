@@ -25,8 +25,14 @@ export class AudioStreamer {
   lastSource: AudioInputSource = AudioInputSource.Glasses;
   /** Fired on every real open/close so the Mac's mic pill reflects TRUTH. */
   onState?: (open: boolean) => void;
-  /** Dominant speakerRole across the current batch (SDK 0.0.14). */
+  /**
+   * Speaker attribution is supplied per SDK event, but we send coalesced PCM
+   * batches.  A batch is safe to label only when every included event agrees;
+   * the Mac may discard an utterance labelled entirely "other".
+   */
   private speaker?: string;
+  private speakerMixed = false;
+  private speakerMissing = false;
   private readonly samplesPerMessage: number;
 
   constructor(
@@ -88,6 +94,7 @@ export class AudioStreamer {
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = undefined;
     this.buffer = [];
+    this.resetSpeakerAttribution();
     try {
       await this.client.require().audioControl(false);
     } catch {
@@ -108,13 +115,8 @@ export class AudioStreamer {
    * wire carries real 16-bit samples, as protocol.py documents.
    */
   ingest(pcm: Uint8Array | number[], speakerRole?: string | null): void {
-    // Attribution rides the batch (self/other/unknown). Passed through for
-    // calibration on the Mac; a future gate keeps non-wearer speech out of
-    // STT entirely — which STRENGTHENS the explicit-invocation rule.
-    if (typeof speakerRole === 'string' && speakerRole.length > 0) {
-      this.speaker = speakerRole;
-    }
     if (!this.open) return;
+    this.observeSpeaker(speakerRole);
     const bytes = pcm instanceof Uint8Array ? pcm : Uint8Array.from(pcm);
     let i = 0;
     if (this.carry !== null && bytes.length > 0) {
@@ -130,16 +132,41 @@ export class AudioStreamer {
 
   private flush(source: AudioInputSource): void {
     if (this.buffer.length === 0) return;
+    const speaker = this.speakerMixed ? 'unknown' : this.speaker;
     while (this.buffer.length > 0) {
       this.link.send({
         kind: 'audio',
         source: source === AudioInputSource.Glasses ? 'glasses' : 'phone',
         seq: this.seq++,
         pcm: this.buffer.splice(0, this.samplesPerMessage),
-        ...(this.speaker !== undefined ? { speaker: this.speaker } : {}),
+        ...(speaker !== undefined ? { speaker } : {}),
       });
     }
+    this.resetSpeakerAttribution();
+  }
+
+  private observeSpeaker(speakerRole: string | null | undefined): void {
+    if (typeof speakerRole !== 'string' || speakerRole.length === 0) {
+      this.speakerMissing = true;
+      if (this.speaker !== undefined) this.speakerMixed = true;
+      return;
+    }
+    // Unknown future SDK labels must never become a false "other" claim.
+    const speaker = ['self', 'other', 'unknown'].includes(speakerRole)
+      ? speakerRole
+      : 'unknown';
+    if (this.speaker === undefined) {
+      this.speaker = speaker;
+    } else if (this.speaker !== speaker) {
+      this.speakerMixed = true;
+    }
+    if (this.speakerMissing) this.speakerMixed = true;
+  }
+
+  private resetSpeakerAttribution(): void {
     this.speaker = undefined;
+    this.speakerMixed = false;
+    this.speakerMissing = false;
   }
 }
 
