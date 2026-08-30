@@ -60,7 +60,7 @@ from joat.services.task_monitor import (
 
 log = logging.getLogger("joat.simulator_productivity_native_acceptance")
 
-RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v4"
+RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v5"
 TITLE_PREFIX = "JOAT ACCEPTANCE"
 EVENT_TITLE_SUFFIX = "EVENT"
 REMINDER_TITLE_SUFFIX = "REMINDER"
@@ -81,7 +81,6 @@ DEFAULT_EVIDENCE_ROOT = (
 DEFAULT_APP = Path("/Applications/JOAT.app")
 DEFAULT_APP_BUNDLE_ID = "com.joat.shell"
 DEFAULT_RECOVERY_GUARD = DEFAULT_EVIDENCE_ROOT / ".mac-app-recovery.json"
-DUE_SURFACE_RECEIPT = "[HudVisualSurface] receipt reminder_due bridge-ack"
 INTERRUPTED_ACCEPTANCE_CODE = "acceptance_interrupted"
 WATCHER_STATUS_SCHEMA = "joat.notification-watcher-status.v1"
 WATCHER_STATUS_STATES = frozenset({
@@ -1307,61 +1306,29 @@ async def _wait_for_confirmation_and_click(
     automation_base: str,
     screenshot_path: Path,
     *,
+    prior_screenshot_digest: str,
     timeout_s: float = 10.0,
 ) -> tuple[str, str]:
-    try:
-        await asyncio.to_thread(
-            _http_bytes,
-            f"{automation_base}/api/console",
-            method="DELETE",
-        )
-    except (OSError, urllib.error.URLError) as exc:
-        raise AcceptanceBlocked(
-            "simulator_console_reset_failed",
-            "the simulator console could not be cleared before the confirmation action",
-        ) from exc
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        raw = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
-        if "confirmation-visible" in raw.decode("utf-8", errors="replace"):
-            png = await asyncio.to_thread(
-                _http_bytes,
-                f"{automation_base}/api/screenshot/glasses",
-            )
-            screenshot_path.write_bytes(png)
-            screenshot_path.chmod(0o600)
-            _, preview_digest = await asyncio.to_thread(_write_alpha_preview, screenshot_path)
-            await asyncio.to_thread(
-                _http_bytes,
-                f"{automation_base}/api/input",
-                method="POST",
-                body=b'{"action":"click"}',
-            )
-            return _digest(png), preview_digest
-        await asyncio.sleep(0.1)
-    raise AcceptanceBlocked(
-        "confirmation_not_visible",
-        "the official simulator did not report a visible confirmation before timeout",
+    screenshot_digest, preview_digest = await _wait_for_changed_settled_screenshot(
+        automation_base,
+        screenshot_path,
+        prior_screenshot_digest=prior_screenshot_digest,
+        stage="confirmation",
+        timeout_s=timeout_s,
     )
-
-
-async def _clear_simulator_console(automation_base: str) -> None:
     try:
         await asyncio.to_thread(
             _http_bytes,
-            f"{automation_base}/api/console",
-            method="DELETE",
+            f"{automation_base}/api/input",
+            method="POST",
+            body=b'{"action":"click"}',
         )
     except (OSError, urllib.error.URLError) as exc:
         raise AcceptanceBlocked(
-            "simulator_console_reset_failed",
-            "the official simulator console could not be cleared before the due reminder",
+            "simulator_confirmation_click_failed",
+            "the official simulator could not accept the confirmation action",
         ) from exc
-
-
-def has_due_surface_receipt(console_output: bytes) -> bool:
-    """Match only the fixed, content-free post-paint receipt."""
-    return DUE_SURFACE_RECEIPT in console_output.decode("utf-8", errors="replace")
+    return screenshot_digest, preview_digest
 
 
 async def _capture_screenshot(automation_base: str, path: Path) -> tuple[str, str]:
@@ -1373,36 +1340,65 @@ async def _capture_screenshot(automation_base: str, path: Path) -> tuple[str, st
     return _digest(png), preview_digest
 
 
-async def _wait_for_due_surface_proof(
+async def _screenshot_digest(automation_base: str) -> str:
+    try:
+        png = await asyncio.to_thread(
+            _http_bytes,
+            f"{automation_base}/api/screenshot/glasses",
+        )
+    except (OSError, urllib.error.URLError) as exc:
+        raise AcceptanceBlocked(
+            "simulator_screenshot_unavailable",
+            "the official simulator framebuffer was unavailable",
+        ) from exc
+    return _digest(png)
+
+
+async def _wait_for_changed_settled_screenshot(
     automation_base: str,
     screenshot_path: Path,
     *,
+    prior_screenshot_digest: str,
+    stage: str,
     timeout_s: float = 10.0,
 ) -> tuple[str, str]:
-    """Prove the completed due frame reached the official simulator surface.
+    """Retain an official-simulator frame only after it visibly settles.
 
-    The fixed receipt is emitted only after all four G2 image uploads succeed.
-    It deliberately carries neither reminder text nor an EventKit identifier;
-    the private screenshot is retained separately for visual review.
+    Console output and bridge-transfer telemetry are deliberately excluded from
+    this proof. The evidence is only a changed simulator framebuffer that
+    remains stable for 600 ms, saved privately with its alpha preview.
     """
     deadline = time.monotonic() + timeout_s
+    changed_digest: str | None = None
+    changed_at: float | None = None
     while time.monotonic() < deadline:
         try:
-            console = await asyncio.to_thread(
+            png = await asyncio.to_thread(
                 _http_bytes,
-                f"{automation_base}/api/console",
+                f"{automation_base}/api/screenshot/glasses",
             )
         except (OSError, urllib.error.URLError) as exc:
             raise AcceptanceBlocked(
-                "simulator_console_unavailable",
-                "the official simulator console was unavailable while awaiting the due frame",
+                "simulator_screenshot_unavailable",
+                "the official simulator framebuffer was unavailable while awaiting the HUD frame",
             ) from exc
-        if has_due_surface_receipt(console):
-            return await _capture_screenshot(automation_base, screenshot_path)
+        digest = _digest(png)
+        now = time.monotonic()
+        if digest == prior_screenshot_digest:
+            await asyncio.sleep(0.1)
+            continue
+        if digest != changed_digest:
+            changed_digest = digest
+            changed_at = now
+        elif changed_at is not None and now - changed_at >= 0.6:
+            screenshot_path.write_bytes(png)
+            screenshot_path.chmod(0o600)
+            _, preview_digest = await asyncio.to_thread(_write_alpha_preview, screenshot_path)
+            return digest, preview_digest
         await asyncio.sleep(0.1)
     raise AcceptanceBlocked(
-        "reminder_due_surface_not_visible",
-        "the due reminder was enqueued but the official simulator did not prove a completed wearer-visible frame",
+        f"{stage}_surface_not_visible",
+        f"the official simulator did not show a settled {stage} HUD frame before timeout",
     )
 
 
@@ -1934,12 +1930,25 @@ async def _drive_confirmed_command(
     screenshot_path: Path,
     expected_result_prefix: str,
 ) -> dict[str, str]:
+    prior_screenshot_digest = await _screenshot_digest(automation_base)
     task = asyncio.create_task(controller.handle_command(command))
-    screenshot_digest, preview_digest = await _wait_for_confirmation_and_click(
-        automation_base,
-        screenshot_path,
-    )
-    result = await asyncio.wait_for(task, timeout=20)
+    try:
+        screenshot_digest, preview_digest = await _wait_for_confirmation_and_click(
+            automation_base,
+            screenshot_path,
+            prior_screenshot_digest=prior_screenshot_digest,
+        )
+        result = await asyncio.wait_for(task, timeout=20)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        else:
+            try:
+                task.result()
+            except BaseException:
+                pass
+        raise
     if not isinstance(result, str) or not result.startswith(expected_result_prefix):
         raise AcceptanceFailed("action_result", "production controller did not report success")
     return {
@@ -2354,9 +2363,10 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         bridge,
                     ),
                 )
-                # Ignore pre-due renderer output.  A due proof is meaningful
-                # only when it follows this acceptance run's native boundary.
-                await _clear_simulator_console(automation_base)
+                # Ignore pre-due renderer output. A due proof is meaningful
+                # only when its framebuffer transition follows this
+                # acceptance run's native alarm boundary.
+                prior_due_screenshot_digest = await _screenshot_digest(automation_base)
                 alarm_task = asyncio.create_task(_wait_for_alarm(
                     args.notification_feed,
                     offset=notification_offset,
@@ -2369,6 +2379,14 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     due_monitor,
                     schedule.reminder_due,
                 ))
+                due_screenshot_digest, due_preview_digest = (
+                    await _wait_for_changed_settled_screenshot(
+                        automation_base,
+                        evidence_dir / "reminder-due.png",
+                        prior_screenshot_digest=prior_due_screenshot_digest,
+                        stage="reminder_due",
+                    )
+                )
                 due_delivery_count = await due_monitor_task
                 if due_delivery_count != 1:
                     raise AcceptanceFailed(
@@ -2381,15 +2399,11 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     "delivery_count": due_delivery_count,
                     "proof": "generation_bound_current_hub_client_acceptance",
                 }
-                due_screenshot_digest, due_preview_digest = await _wait_for_due_surface_proof(
-                    automation_base,
-                    evidence_dir / "reminder-due.png",
-                )
                 receipt["delivery_stages"]["wearer_visible"] = {
                     "required": True,
                     "observed": True,
                     "surface": "official_even_simulator",
-                    "receipt": "reminder_due",
+                    "proof": "changed_settled_framebuffer",
                     "screenshot_digest": due_screenshot_digest,
                     "screenshot_preview_digest": due_preview_digest,
                 }
