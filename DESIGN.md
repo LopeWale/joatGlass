@@ -159,19 +159,23 @@ without action also refuses. Nod is not an approval path.
 ### Navigation and data display
 
 Navigation grammar is `Overview -> Sidebar -> full-focus destination -> detail
--> Overview`. The fifth root row is `More`, which opens the same transient rail
-for `QuickNotes`, `Brainstorm`, and `Activity`; it is hierarchy, not a different
-visual language. Only a left-temple double-click opens or closes app navigation;
-a right-temple double-click remains the glasses OS exit confirmation. Populated
-Messages, Notifications, Calendar, Tasks, QuickNotes, and Activity collections
-accept a tap. Setup, empty, detail, and action-lifecycle pages are read-only and
-therefore draw no selection outline or tap promise. A navigation state becomes
-interactive only after its visual paint succeeds; a failed paint restores
-Overview instead of exposing invisible controls.
+-> Overview`. The Sidebar is one continuous, native-scrollable first-level
+rail: `Messages`, `Planning`, `Navigation`, `Brainstorm`, `Notifications`,
+`QuickNotes`, `Agent Terminal`, `Activity`, then direct `Repeat`, `Reconnect`,
+and `Settings` actions. Nothing is hidden behind a `More` choice; the wearer
+can keep scrolling while moving. Only a left-temple double-click opens or
+closes app navigation; a right-temple double-click remains the glasses OS exit
+confirmation. Populated Messages, Notifications, Planning, QuickNotes, and
+Activity collections accept a tap. Setup, empty, detail, and action-lifecycle
+pages are read-only and therefore draw no selection outline or tap promise. A
+navigation state becomes interactive only after its visual paint succeeds; a
+failed paint restores Overview instead of exposing invisible controls.
 
 Brainstorm is the wearer-facing capability name; `debate` remains a legacy
-voice alias, while Agent Terminal and OpenClaw are backend seat/status concepts,
-not additional HUD destinations.
+voice alias. Agent Terminal is a visible, glasses-first status-and-control
+surface for the dedicated Hermes seat: it makes the no-tool preflight and
+return-to-Brainstorm action visible without exposing a raw OpenClaw console.
+OpenClaw itself remains the backend gateway.
 
 ### Forms and overlays
 
@@ -188,10 +192,11 @@ and does not restyle, replace, or pre-empt that platform surface.
 
 ### Iconography
 
-All interface icons come from `@phosphor-icons/core` regular assets. Calendar,
-Messages, Notifications, Tasks, More, QuickNotes, Brainstorm, Activity,
-Settings, microphone, and battery use one stroke family and are rasterized with
-the surrounding frame. Short text labels remain mandatory; icons never carry
+All interface icons come from `@phosphor-icons/core` regular assets.
+Calendar/Planning, Messages, Notifications, Tasks, Navigation, QuickNotes,
+Brainstorm (also the dedicated Agent Terminal seat), Activity, Settings,
+microphone, and battery use one stroke family and are rasterized with the
+surrounding frame. Short text labels remain mandatory; icons never carry
 meaning alone.
 
 ### Motion
