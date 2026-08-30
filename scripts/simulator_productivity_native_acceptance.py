@@ -857,7 +857,13 @@ def classify_alarm_delivery_failure(
     *,
     due: datetime,
 ) -> AlarmDeliveryClassification:
-    """Classify a bounded native-delivery trace without retaining its content."""
+    """Classify a bounded native-delivery trace without retaining its content.
+
+    A successful ``usernoted`` submission proves only that macOS accepted the
+    notification request.  It does not prove that a banner was rendered, so a
+    missing Accessibility observation must remain an unproven banner boundary
+    rather than an asserted delivery failure.
+    """
 
     due_utc = due.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S +0000")
     alarm_fired = "RDTimeAlarmProducer expiredAlarm" in log_text and due_utc in log_text
@@ -879,7 +885,7 @@ def classify_alarm_delivery_failure(
     elif focus_suppressed:
         category, confidence = "focus_suppressed", "high"
     else:
-        category, confidence = "ax_capture_missed", "medium"
+        category, confidence = "banner_accessibility_unobserved", "medium"
     return AlarmDeliveryClassification(
         category=category,
         confidence=confidence,
@@ -2181,6 +2187,14 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     receipt["delivery_stages"]["os_banner_delivery"] = {
                         "required": True,
                         "observed": False,
+                        "delivery_state": (
+                            "focus_suppressed"
+                            if classification.category == "focus_suppressed"
+                            else "unproven"
+                        ),
+                        "native_alarm_fired": classification.alarm_fired,
+                        "native_notification_submitted": classification.notification_submitted,
+                        "accessibility_banner_observed": False,
                         "classification": asdict(classification),
                         "expected_focus_suppression": bool(
                             notification_preflight
@@ -2194,7 +2208,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     ):
                         raise AcceptanceBlocked(
                             f"reminder_alarm_{classification.category}",
-                            "the native reminder banner was not observed; retained classification identifies the failed boundary",
+                            "the native alarm trace was retained without content, but JOAT did not observe a matching Accessibility banner",
                         ) from exc
                 else:
                     if (
@@ -2208,6 +2222,8 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     receipt["delivery_stages"]["os_banner_delivery"] = {
                         "required": True,
                         "observed": True,
+                        "delivery_state": "accessibility_banner_observed",
+                        "accessibility_banner_observed": True,
                         **asdict(alarm),
                     }
             else:
