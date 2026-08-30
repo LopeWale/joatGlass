@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- Replaced the standalone OpenClaw pairing probe's impossible direct native-
+  bridge connection with a content-free, app-owned Mini readiness proof. The
+  bridge intentionally admits only JOAT.app's Python child; the probe now reads
+  its short-lived allowlisted status projection to verify the exact Gateway
+  host, operator scopes, dedicated Hermes session, and no-tool preflight. It
+  never opens Keychain, creates a session, sends a prompt, or emits a
+  transcript/payload. Focused OpenClaw status/session tests and strict mypy
+  passed. This is setup proof only, not a package, upload, or physical-G2
+  claim.
+
 - Built a clean-source **JOAT v0.1.38** EHPK candidate containing the
   committed unified Planning/Reminder fixes that postdate v0.1.37: legacy
   Reminder-row selection now opens the live nested planner, and due-HUD

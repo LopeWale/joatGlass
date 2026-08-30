@@ -1,9 +1,9 @@
-"""Contracts for the bounded production-scope OpenClaw pairing probe."""
+"""Contracts for the content-free app-owned OpenClaw readiness proof."""
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -17,92 +17,107 @@ def _probe_module() -> ModuleType:
     return module
 
 
-class _Bridge:
-    async def __aenter__(self) -> _Bridge:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        return None
-
-
-class _Credentials:
-    device_id = "a" * 64
-
-
-class _Connection:
-    hello = {
-        "server": {"version": "2026.8.0", "connId": "c1"},
-        "auth": {"role": "operator", "scopes": ["operator.read", "operator.write"]},
+def _status(*, at: float = 100.0) -> dict[str, object]:
+    return {
+        "at": at,
+        "openclaw": {
+            "state": "connected_operator",
+            "endpoint_host": "admins-mac-mini.tail3a3363.ts.net",
+            "scopes": ["operator.read", "operator.write"],
+            "reason": "",
+        },
+        "agent_terminal": {"state": "ready", "reason": ""},
     }
-    advertised_methods = {"sessions.list", "sessions.create", "tools.effective"}
-
-    async def close(self) -> None:
-        return None
 
 
-def test_probe_requests_the_exact_scopes_the_agent_terminal_requires(monkeypatch) -> None:
+def _write_status(path: Path, status: dict[str, object]) -> None:
+    path.write_text(json.dumps(status), encoding="utf-8")
+
+
+def test_probe_reports_only_content_free_app_owned_readiness(tmp_path: Path) -> None:
     probe = _probe_module()
-    observed: dict[str, object] = {}
+    status_path = tmp_path / "status.json"
+    _write_status(status_path, _status())
 
-    async def open_credentials(*, bridge: object, profile: object) -> _Credentials:
-        assert isinstance(bridge, _Bridge)
-        observed["profile"] = profile
-        return _Credentials()
+    result = probe._probe(
+        status_path=status_path,
+        expected_host="ADMINS-MAC-MINI.TAIL3A3363.TS.NET.",
+        now=110.0,
+    )
 
-    class Client:
-        def __init__(self, **kwargs: object) -> None:
-            observed.update(kwargs)
-
-        async def connect(self) -> _Connection:
-            return _Connection()
-
-    monkeypatch.setattr(probe, "NativeBridgeClient", lambda _path: _Bridge())
-    monkeypatch.setattr(probe.NativeOpenClawCredentials, "open", open_credentials)
-    monkeypatch.setattr(probe, "OpenClawGatewayClient", Client)
-
-    result = asyncio.run(probe._probe(
-        url="wss://admins-mac-mini.tail3a3363.ts.net",
-        bridge_path=Path("/tmp/joat-native-bridge.sock"),
-    ))
-
-    assert observed["scopes"] == ("operator.read", "operator.write")
-    assert result["requested_scopes"] == ["operator.read", "operator.write"]
-    assert result["status"] == "connected_operator"
-
-
-def test_probe_reports_a_production_scope_approval_request_without_a_session(monkeypatch) -> None:
-    probe = _probe_module()
-    observed: dict[str, object] = {}
-
-    async def open_credentials(*, bridge: object, profile: object) -> _Credentials:
-        assert isinstance(bridge, _Bridge)
-        return _Credentials()
-
-    class Client:
-        def __init__(self, **kwargs: object) -> None:
-            observed.update(kwargs)
-
-        async def connect(self) -> _Connection:
-            raise probe.OpenClawPairingRequired(
-                request_id="pairing-request-123",
-                reason="not-paired",
-            )
-
-    monkeypatch.setattr(probe, "NativeBridgeClient", lambda _path: _Bridge())
-    monkeypatch.setattr(probe.NativeOpenClawCredentials, "open", open_credentials)
-    monkeypatch.setattr(probe, "OpenClawGatewayClient", Client)
-
-    result = asyncio.run(probe._probe(
-        url="wss://admins-mac-mini.tail3a3363.ts.net",
-        bridge_path=Path("/tmp/joat-native-bridge.sock"),
-    ))
-
-    assert observed["scopes"] == ("operator.read", "operator.write")
     assert result == {
-        "status": "approval_required",
-        "gateway": "wss://admins-mac-mini.tail3a3363.ts.net",
-        "device_id": "a" * 64,
-        "request_id": "pairing-request-123",
-        "reason": "not-paired",
-        "requested_scopes": ["operator.read", "operator.write"],
+        "status": "ready",
+        "gateway_host": "admins-mac-mini.tail3a3363.ts.net",
+        "operator_scopes": "verified",
+        "terminal_session": "verified",
+        "tool_preflight": "verified",
     }
+
+
+def test_probe_refuses_stale_or_wrong_home_brain_status(tmp_path: Path) -> None:
+    probe = _probe_module()
+    status_path = tmp_path / "status.json"
+    _write_status(status_path, _status(at=84.0))
+
+    assert probe._probe(
+        status_path=status_path,
+        expected_host="admins-mac-mini.tail3a3363.ts.net",
+        now=100.0,
+    ) == {"status": "not_ready", "reason": "engine_stale"}
+
+    _write_status(status_path, _status())
+    assert probe._probe(
+        status_path=status_path,
+        expected_host="other-mini.tail3a3363.ts.net",
+        now=110.0,
+    ) == {"status": "not_ready", "reason": "gateway_host_mismatch"}
+
+
+def test_probe_does_not_echo_secret_bearing_or_untrusted_status_fields(tmp_path: Path) -> None:
+    probe = _probe_module()
+    status_path = tmp_path / "status.json"
+    status = _status()
+    gateway = status["openclaw"]
+    assert isinstance(gateway, dict)
+    gateway.update({"state": "failed", "reason": "token=super-secret", "token": "super-secret"})
+    status["last_transcript"] = "private Brainstorm topic"
+    status["last_reply"] = "private Hermes response"
+    _write_status(status_path, status)
+
+    result = probe._probe(
+        status_path=status_path,
+        expected_host="admins-mac-mini.tail3a3363.ts.net",
+        now=110.0,
+    )
+
+    assert result == {"status": "not_ready", "reason": "gateway_not_ready"}
+    assert "secret" not in json.dumps(result)
+    assert "private" not in json.dumps(result)
+
+
+def test_probe_requires_operator_scope_and_ready_terminal(tmp_path: Path) -> None:
+    probe = _probe_module()
+    status_path = tmp_path / "status.json"
+    status = _status()
+    gateway = status["openclaw"]
+    assert isinstance(gateway, dict)
+    gateway["scopes"] = ["operator.read"]
+    _write_status(status_path, status)
+
+    assert probe._probe(
+        status_path=status_path,
+        expected_host="admins-mac-mini.tail3a3363.ts.net",
+        now=110.0,
+    ) == {"status": "not_ready", "reason": "operator_scope_missing"}
+
+    gateway["scopes"] = ["operator.read", "operator.write"]
+    terminal = status["agent_terminal"]
+    assert isinstance(terminal, dict)
+    terminal.update({"state": "blocked", "reason": "tools_enabled"})
+    _write_status(status_path, status)
+
+    assert probe._probe(
+        status_path=status_path,
+        expected_host="admins-mac-mini.tail3a3363.ts.net",
+        now=110.0,
+    ) == {"status": "not_ready", "reason": "terminal_not_ready"}
