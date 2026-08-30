@@ -448,6 +448,7 @@ async def _wait_console_marker(
 
 _VISUAL_FRAME_ACK = b"[HudVisualSurface] frame "
 _SIMULATOR_BRIDGE_MESSAGE = b"[Simulator] Flutter Bridge intercepted: evenAppMessage"
+_PRODUCTIVITY_VERIFYING_RECEIPT = b"[HudVisualSurface] receipt productivity_verifying bridge-ack"
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +457,7 @@ class VisualFrameCheckpoint:
 
     completed_frames: int
     simulator_messages: int
+    productivity_verifying_receipts: int
 
 
 def visual_frame_ack_count(console: bytes) -> int:
@@ -481,6 +483,19 @@ def simulator_bridge_message_count(console: bytes) -> int:
     return console.count(_SIMULATOR_BRIDGE_MESSAGE)
 
 
+def productivity_verifying_receipt_count(console: bytes) -> int:
+    """Count the fixed receipt for a Calendar or Reminders verifying frame.
+
+    A generic four-tile acknowledgement proves only that *some* frame
+    completed. It cannot release a pending native-shaped write because that
+    frame could be a confirmation dismissal or unrelated update. The receipt
+    is deliberately fixed and contains no action, title, preview, or native
+    identity.
+    """
+
+    return sum(line == _PRODUCTIVITY_VERIFYING_RECEIPT for line in console.splitlines())
+
+
 async def _visual_frame_checkpoint(automation_base: str) -> VisualFrameCheckpoint:
     """Capture the current completed-frame counter for one causal action."""
 
@@ -491,6 +506,7 @@ async def _visual_frame_checkpoint(automation_base: str) -> VisualFrameCheckpoin
     return VisualFrameCheckpoint(
         completed_frames=visual_frame_ack_count(console),
         simulator_messages=simulator_bridge_message_count(console),
+        productivity_verifying_receipts=productivity_verifying_receipt_count(console),
     )
 
 
@@ -499,14 +515,16 @@ async def _wait_for_visual_frame(
     *,
     after: VisualFrameCheckpoint,
     label: str,
+    required_receipt: str | None = None,
     timeout_s: float = 15.0,
 ) -> VisualFrameCheckpoint:
     """Wait for the full production canvas frame caused after ``after``.
 
     This remains content-free: it validates only the renderer's completed
-    four-tile boundary.  The caller separately validates the Mac-side model
-    and retains the visible framebuffer, so a console acknowledgement alone
-    never becomes UI proof.
+    four-tile boundary. A held write can require the fixed verifying receipt
+    rather than accepting an arbitrary newer frame. The caller separately
+    retains the visible framebuffer, so a console acknowledgement alone never
+    becomes UI proof.
     """
 
     deadline = time.monotonic() + timeout_s
@@ -520,8 +538,16 @@ async def _wait_for_visual_frame(
         current = VisualFrameCheckpoint(
             completed_frames=visual_frame_ack_count(console),
             simulator_messages=simulator_bridge_message_count(console),
+            productivity_verifying_receipts=productivity_verifying_receipt_count(console),
         )
         last = current
+        if required_receipt == "productivity_verifying":
+            if current.productivity_verifying_receipts > after.productivity_verifying_receipts:
+                return current
+            await asyncio.sleep(0.1)
+            continue
+        if required_receipt is not None:
+            raise ProductivityHudFlowError(f"{label}: unsupported visual receipt {required_receipt!r}")
         if current.completed_frames > after.completed_frames:
             return current
         # Official simulator console logs do not expose the app-level console
@@ -534,7 +560,9 @@ async def _wait_for_visual_frame(
     raise ProductivityHudFlowError(
         f"{label}: no completed four-tile HUD frame "
         f"(frames {after.completed_frames}->{last.completed_frames}, "
-        f"bridge messages {after.simulator_messages}->{last.simulator_messages})"
+        f"bridge messages {after.simulator_messages}->{last.simulator_messages}, "
+        f"productivity verifying {after.productivity_verifying_receipts}"
+        f"->{last.productivity_verifying_receipts})"
     )
 
 
@@ -789,6 +817,7 @@ async def _drive_controller_write(
             automation_base,
             after=verifying_checkpoint,
             label=verifying_name,
+            required_receipt="productivity_verifying",
         )
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{verifying_name}", digest,
@@ -1180,17 +1209,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         # consequence path; the failure screens are isolated so a fixture
         # cannot claim it changed EventKit while exercising a no-write state.
         calendar_states = (
-            ("calendar-failed", "failed", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("calendar-uncertain", "check", "Check Calendar", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
-            ("calendar-cancelled", "cancelled", "Cancelled", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("calendar-not-saved", "not_saved", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-failed", "failed", "Failed Calendar draft", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-uncertain", "check", "Uncertain Calendar draft", "Check Calendar", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-cancelled", "cancelled", "Cancelled Calendar draft", "Cancelled", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-not-saved", "not_saved", "Unsaved Calendar draft", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
         )
-        for name, phase, primary, secondary, hint, input_action, accepted in calendar_states:
+        for name, phase, draft_title, primary, secondary, hint, input_action, accepted in calendar_states:
             before = len(gateway.sent)
             await _send_after_full_visual_frame(
                 gateway,
                 _view(
-                    "calendar", phase, title="Submit proposal", primary=primary,
+                    "calendar", phase, title=draft_title, primary=primary,
                     secondary=secondary, hint=hint,
                 ),
                 automation_base=automation_base,
@@ -1312,17 +1341,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         artifacts["reminders-completed-return-planning"] = artifact
 
         completion_states = (
-            ("reminders-failed", "failed", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-uncertain", "check", "Check Reminders", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-cancelled", "cancelled", "Cancelled", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-not-saved", "not_saved", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-failed", "failed", "Failed Reminder draft", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-uncertain", "check", "Uncertain Reminder draft", "Check Reminders", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-cancelled", "cancelled", "Cancelled Reminder draft", "Cancelled", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-not-saved", "not_saved", "Unsaved Reminder draft", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
         )
-        for name, phase, primary, secondary, hint, input_action, accepted in completion_states:
+        for name, phase, draft_title, primary, secondary, hint, input_action, accepted in completion_states:
             before = len(gateway.sent)
             await _send_after_full_visual_frame(
                 gateway,
                 _view(
-                    "reminders", phase, title="Prepare report", primary=primary,
+                    "reminders", phase, title=draft_title, primary=primary,
                     secondary=secondary, hint=hint,
                 ),
                 automation_base=automation_base,

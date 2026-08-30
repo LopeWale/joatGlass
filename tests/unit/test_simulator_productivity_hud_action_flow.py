@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 
 import pytest
+
+from joat.core.confirmation import ConfirmationResult
+from joat.core.protocol import ProductivityHudView
+from joat.persistence.actions import ActionJournal
+from joat.persistence.store import DurableStore
+from joat.persistence.tasks import TaskOccurrenceStore
+from joat.services.productivity_actions import ProductivityActionController
 
 
 def _driver():
@@ -103,6 +111,11 @@ def test_frame_counter_accepts_only_completed_visual_surface_receipts() -> None:
         b"[Simulator] Flutter Bridge intercepted: evenAppMessage\n" * 4
         + b"[HudVisualSurface] frame 4 bridge-ack\n"
     ) == 4
+    assert driver.productivity_verifying_receipt_count(
+        b"[HudVisualSurface] receipt productivity_verifying bridge-ack\n"
+        b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
+        b"[HudVisualSurface] receipt productivity_verifying bridge-ack\n"
+    ) == 2
 
 
 async def test_fixture_bridge_holds_a_controller_write_until_verifying_can_render() -> None:
@@ -140,4 +153,130 @@ async def test_fixture_bridge_holds_a_controller_write_until_verifying_can_rende
         "relative_offset_seconds": None,
         "absolute_unix_ms": 1_788_303_600_000,
     }]
+    assert bridge.write_methods == ["reminders.create"]
+
+
+async def test_driver_releases_controller_write_only_after_verifying_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise controller, confirmation, driver, and visual-order boundary.
+
+    The fixture holds ``reminders.create``. The driver must request the
+    content-free verifying receipt after the real controller published
+    ``verifying`` and before it releases that held native-shaped write.
+    """
+
+    driver = _driver()
+    assert driver is not None
+    bridge = driver.FixtureEventKitBridge()
+    published: list[ProductivityHudView] = []
+    confirmation_requests: list[str] = []
+    accepted = asyncio.Event()
+    store = DurableStore(tmp_path / "controller-order.sqlite3")
+
+    async def confirm(
+        action_id: str,
+        prompt: str,
+        timeout_s: float,
+        *,
+        payload_digest: str,
+    ) -> ConfirmationResult:
+        del timeout_s
+        confirmation_requests.append(action_id)
+        await accepted.wait()
+        return ConfirmationResult(
+            action_id=action_id,
+            accepted=True,
+            challenge_id="simulator-order-check",
+            session_id="simulator-session",
+            payload_digest=bytes.fromhex(payload_digest),
+            preview_digest=hashlib.sha256(prompt.encode()).digest(),
+            pairing_identity_digest=b"p" * 32,
+            authorization_digest=b"a" * 32,
+            issued_at_us=1_000_000,
+            expires_at_us=2_000_000,
+            preview_completed_at_us=1_100_000,
+            decided_at_us=1_200_000,
+        )
+
+    async def publish(view: ProductivityHudView) -> None:
+        published.append(view)
+
+    controller = ProductivityActionController(
+        bridge,
+        confirm,
+        ActionJournal(store),
+        TaskOccurrenceStore(store),
+        publish_status=publish,
+    )
+    gateway = SimpleNamespace(sent=published, confirmation_requests=confirmation_requests)
+    checkpoints = iter([
+        driver.VisualFrameCheckpoint(0, 0, 0),
+        driver.VisualFrameCheckpoint(1, 4, 0),
+        driver.VisualFrameCheckpoint(2, 8, 1),
+    ])
+    captures = iter([
+        ("a" * 64, "review.rgba.png", "review.alpha.png"),
+        ("b" * 64, "verifying.rgba.png", "verifying.alpha.png"),
+        ("c" * 64, "saved.rgba.png", "saved.alpha.png"),
+    ])
+    receipt_requests: list[str | None] = []
+
+    async def visual_checkpoint(_automation_base: str):
+        return next(checkpoints)
+
+    async def input_action(_automation_base: str, action: str) -> None:
+        assert action == "click"
+        accepted.set()
+
+    async def visual_frame(
+        _automation_base: str,
+        *,
+        after,
+        label: str,
+        required_receipt: str | None = None,
+        timeout_s: float = 15.0,
+    ):
+        del after, label, timeout_s
+        receipt_requests.append(required_receipt)
+        if required_receipt == "productivity_verifying":
+            assert [view.phase for view in published] == ["verifying"]
+            assert bridge.write_methods == ["reminders.create"]
+        return driver.VisualFrameCheckpoint(3, 12, 1)
+
+    async def capture(*_args, **_kwargs):
+        return next(captures)
+
+    monkeypatch.setattr(driver, "_visual_frame_checkpoint", visual_checkpoint)
+    monkeypatch.setattr(driver, "_input", input_action)
+    monkeypatch.setattr(driver, "_wait_for_visual_frame", visual_frame)
+    monkeypatch.setattr(driver, "_capture", capture)
+
+    receipts: list[object] = []
+    artifacts: dict[str, dict[str, str]] = {}
+    try:
+        _, before = await driver._drive_controller_write(
+            controller,
+            bridge,
+            gateway,
+            command="remind me to Prepare report on 2026-09-01 at 18:00 in America/Chicago",
+            domain="reminders",
+            title="Prepare report",
+            terminal_phase="saved",
+            terminal_result="Created Reminder: Prepare report.",
+            review_name="review",
+            verifying_name="verifying",
+            terminal_name="saved",
+            automation_base="http://simulator.invalid",
+            output=tmp_path,
+            prior_digest="0" * 64,
+            receipts=receipts,
+            artifacts=artifacts,
+        )
+    finally:
+        store.close()
+
+    assert before == 0
+    assert receipt_requests == [None, "productivity_verifying", None]
+    assert [view.phase for view in published] == ["verifying", "saved"]
     assert bridge.write_methods == ["reminders.create"]
