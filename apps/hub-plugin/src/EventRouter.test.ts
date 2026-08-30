@@ -605,15 +605,17 @@ describe('EventRouter — long-press mutes the mic', () => {
   const LONG_PRESS = OsEventTypeList.LONG_PRESS_EVENT;
   const RELEASE = OsEventTypeList.LONG_PRESS_RELEASE_EVENT;
 
-  it('toggles the mic from a sysEvent', () => {
+  it('toggles the mic when a plain sysEvent long-press reaches release', () => {
     const r = make();
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
   });
 
   it('toggles the mic from a textEvent — the relay must not swallow it', () => {
     const r = make();
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
+    r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
     expect(r.sent).toEqual([]); // not relayed to the Mac as a scroll
   });
@@ -621,6 +623,7 @@ describe('EventRouter — long-press mutes the mic', () => {
   it('toggles the mic from a listEvent', () => {
     const r = make();
     r.fire({ listEvent: { eventType: LONG_PRESS } });
+    r.fire({ listEvent: { eventType: RELEASE } });
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
     expect(r.sent).toEqual([]);
   });
@@ -629,6 +632,7 @@ describe('EventRouter — long-press mutes the mic', () => {
     const r = make();
     r.audio.isOpen = false;
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     expect(r.audio.start).toHaveBeenCalledWith(r.audio.lastSource);
   });
 
@@ -638,6 +642,30 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.audio.start).not.toHaveBeenCalled();
     expect(r.sent).toEqual([]);
+  });
+
+  it('keeps tap-then-long-press contextual navigation from toggling the mic', () => {
+    const r = make();
+
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } });
+
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.audio.start).not.toHaveBeenCalled();
+    expect(r.lifecycle.onForegroundEnter).not.toHaveBeenCalled();
+    expect(r.lifecycle.onForegroundExit).not.toHaveBeenCalled();
+  });
+
+  it('does not leave the app backgrounded after an automation-style menu selection', () => {
+    const r = make();
+
+    r.fire({ menuItemClickEvent: { itemID: 5 } });
+    r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } });
+
+    expect(r.menu.openPlanning).toHaveBeenCalledTimes(1);
+    expect(r.lifecycle.onForegroundExit).not.toHaveBeenCalled();
   });
 
   it('the contextual-menu mute item takes the SAME path as the gesture', () => {
