@@ -189,20 +189,23 @@ describe('LocationSessionManager', () => {
     expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(1);
   });
 
-  it('bounds a hung high-accuracy navigation-origin request at the host timeout', async () => {
+  it('accepts a phone fix that settles at the SDK deadline before the local watchdog', async () => {
     vi.useFakeTimers();
     const h = harness();
     await h.manager.start();
     h.bridge.getAppLocation.mockClear();
+    const origin = { latitude: 41.9, longitude: -87.65, accuracy: 6 };
     h.bridge.getAppLocation.mockImplementationOnce(
-      () => new Promise<AppLocation | null>(() => {}),
+      () => new Promise<AppLocation | null>((resolve) => {
+        setTimeout(() => resolve(origin), 5_000);
+      }),
     );
 
     let result: AppLocation | null | undefined;
     void h.manager.requestNavigationOrigin().then((value) => { result = value; });
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(result).toBeNull();
+    expect(result).toEqual(origin);
     expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
       accuracy: AppLocationAccuracy.High,
       timeoutMs: 5_000,
@@ -324,7 +327,7 @@ describe('LocationSessionManager', () => {
     await h.manager.setProbeEnabled(true);
 
     const started = h.manager.start();
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(6_000);
 
     await expect(started).resolves.toBe(true);
     expect(h.bridge.startAppLocationUpdates).toHaveBeenLastCalledWith({

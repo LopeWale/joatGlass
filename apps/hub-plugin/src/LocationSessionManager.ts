@@ -24,10 +24,13 @@ const HIGH_ACCURACY_OPTIONS: Readonly<AppLocationOptions> = {
   intervalMs: 1000,
 };
 
-// Some host builds acknowledge `getAppLocation({ timeoutMs })` but never
-// settle its promise. Gate 0 must classify that as an unavailable one-shot
-// fix and still attempt the separately requested continuous profile.
+// The Even host owns the actual iPhone acquisition deadline. Keep a small
+// local settling window after it: racing JavaScript at the exact same
+// millisecond can discard a valid result crossing the Flutter/WebView bridge.
+// The watchdog is only for hosts that never settle their promise.
 const ONE_SHOT_LOCATION_TIMEOUT_MS = 5_000;
+const ONE_SHOT_SETTLE_GRACE_MS = 1_000;
+const ONE_SHOT_WATCHDOG_TIMEOUT_MS = ONE_SHOT_LOCATION_TIMEOUT_MS + ONE_SHOT_SETTLE_GRACE_MS;
 
 // The continuous start call has the same host-boundary risk. A host that
 // neither resolves nor rejects must become an explicit failed capability in
@@ -330,7 +333,7 @@ export class LocationSessionManager {
           timeoutMs: ONE_SHOT_LOCATION_TIMEOUT_MS,
         }),
         new Promise<null>((resolve) => {
-          timeout = setTimeout(() => resolve(null), ONE_SHOT_LOCATION_TIMEOUT_MS);
+          timeout = setTimeout(() => resolve(null), ONE_SHOT_WATCHDOG_TIMEOUT_MS);
         }),
       ]);
     } finally {
