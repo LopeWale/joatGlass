@@ -703,12 +703,37 @@ export function messagesConversationTranscript(
   };
 }
 
-/** These Mac-owned screens need a compact transcript/guide treatment rather
- * than generic selectable notification rows. */
+/** Every Mac-authored Messages screen is dense lens text, never a generic
+ * browser-like list card. */
 export function usesMessagesCompactLayout(title: string): boolean {
   const normalized = title.trim().toUpperCase();
-  return normalized === 'MESSAGES · CONVERSATION'
-    || normalized === 'MESSAGES · COMPOSE';
+  return normalized === 'MESSAGES' || normalized.startsWith('MESSAGES ·');
+}
+
+export interface MessagesListRow {
+  baselineY: number;
+  railTopY: number;
+  railHeight: number;
+  separatorY?: number;
+}
+
+/** Six text rows fit between the Messages heading and the persistent gesture
+ * hint. A selected row gets only a slim rail: neither recovery guidance nor
+ * conversation selection consumes the lens with a rounded container. */
+export function messagesListRows(
+  itemCount: number,
+  capacity = 6,
+): readonly MessagesListRow[] {
+  const count = Math.min(Math.max(0, Math.floor(capacity)), Math.max(0, Math.floor(itemCount)));
+  return Array.from({ length: count }, (_, index) => {
+    const baselineY = 93 + index * 24;
+    return {
+      baselineY,
+      railTopY: baselineY - 11,
+      railHeight: 21,
+      ...(index < count - 1 ? { separatorY: baselineY + 13 } : {}),
+    };
+  });
 }
 
 export interface HudVisibleListItem {
@@ -1321,9 +1346,40 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
-    this.fitText(context, MESSAGES_COMPOSE_GUIDANCE, 36, 103, 504);
+    if (frame.title.trim().toUpperCase() === 'MESSAGES · COMPOSE') {
+      context.fillStyle = gray(SUPPORT);
+      context.font = `13px ${HUD_FONT}`;
+      this.fitText(context, MESSAGES_COMPOSE_GUIDANCE, 36, 103, 504);
+
+      context.fillStyle = gray(QUIET);
+      context.font = `9px ${HUD_FONT}`;
+      context.textAlign = 'center';
+      context.fillText(frame.hint, 288, 267);
+      return;
+    }
+
+    const rows = messagesListRows(frame.items.length);
+    visibleHudListItems(frame.items, frame.selectedIndex, rows.length).forEach((visible, index) => {
+      const row = rows[index];
+      if (!row) return;
+      const { primary, secondary, age } = parseHudListItem(visible.item);
+      const leading = [age ? `[${age}]` : '', primary || visible.item]
+        .filter(Boolean)
+        .join(' ');
+      const line = secondary ? `${leading} · ${secondary}` : leading;
+      const selected = frame.selectable && visible.index === frame.selectedIndex;
+      if (selected) {
+        context.fillStyle = gray(BRIGHT);
+        context.fillRect(36, row.railTopY, 3, row.railHeight);
+      }
+      if (row.separatorY !== undefined) {
+        context.fillStyle = gray(HAIRLINE);
+        context.fillRect(52, row.separatorY, 488, 1);
+      }
+      context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
+      context.font = `12px ${HUD_FONT}`;
+      this.fitText(context, line, 52, row.baselineY, 488);
+    });
 
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
