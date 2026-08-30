@@ -90,6 +90,7 @@ from .services.brainstorm_acceptance import (
 )
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
+from .services.voice_latency import VoiceLatencyStore
 from .services.capabilities import CapabilityRouter
 from .services.commands import VoiceCommandRouter
 from .services.hermes_productivity import (
@@ -164,7 +165,7 @@ def gateway_network_policy(
     return GatewayNetworkPolicy(host="127.0.0.1", trust_loopback=False)
 
 
-async def main() -> None:
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="joat", description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument(
@@ -196,9 +197,19 @@ async def main() -> None:
                         help="disable the Notification Center channel")
     parser.add_argument("--g2-diagnostics", action="store_true",
                         help="opt in to a content-free real-G2 support trace")
+    parser.add_argument(
+        "--voice-latency-diagnostics",
+        action="store_true",
+        help="opt in to a bounded, content-free local voice-latency receipt",
+    )
     parser.add_argument("--location-probe", action="store_true",
                         help="request high-accuracy, privacy-bucketed Gate-0 location telemetry")
     parser.add_argument("-v", "--verbose", action="store_true")
+    return parser
+
+
+async def main() -> None:
+    parser = build_argument_parser()
     args = parser.parse_args()
     try:
         gateway_policy = gateway_network_policy(
@@ -933,10 +944,12 @@ async def main() -> None:
         "hey joat",
         "joat", "jote", "jolt", "jokes", "jot",
     )
+    voice_latency = VoiceLatencyStore() if args.voice_latency_diagnostics else None
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,
         sessions=sessions, wake_words=wake_words, status=status,
         commands=voice_commands,
+        latency_observer=voice_latency.record if voice_latency is not None else None,
     )
     orchestrator.attach()
 
@@ -1096,6 +1109,8 @@ async def main() -> None:
         await asyncio.gather(bridge_status_task, return_exceptions=True)
         if personal_data is not None:
             await personal_data.close()
+        if voice_latency is not None:
+            await voice_latency.flush()
         durable_store.close()
 
 

@@ -602,7 +602,7 @@ class TestStreamedReply:
     ) -> None:
         secret_query = "private calendar question"
         secret_reply = "Private answer that must never enter the latency receipt."
-        latency_events: list[tuple[str, str]] = []
+        latency_events: list[tuple[int, str, str]] = []
         transport, engine = FakeTransport(), FakeEngine(f"JOAT, {secret_query}")
         orch = VoiceOrchestrator(
             transport,
@@ -610,23 +610,24 @@ class TestStreamedReply:
             vad=TEST_VAD(),
             replier=StreamingReplier([secret_reply[:8], secret_reply[8:]]),
             wake_words=WAKE,
-            latency_observer=lambda stage, bucket: latency_events.append((stage, bucket)),
+            latency_observer=lambda turn, stage, bucket: latency_events.append((turn, stage, bucket)),
         )
 
         await orch._handle_utterance(LOUD)
 
-        assert [stage for stage, _bucket in latency_events] == [
+        assert [stage for _turn, stage, _bucket in latency_events] == [
             "utterance_ready",
             "ack_sent",
             "stt_complete",
             "first_reply_sent",
             "reply_complete",
         ]
+        assert {turn for turn, _stage, _bucket in latency_events} == {1}
         allowed_buckets = {
             "lte250ms", "250_500ms", "500ms_1s", "1_2s",
             "2_5s", "5_10s", "gt10s",
         }
-        assert all(bucket in allowed_buckets for _stage, bucket in latency_events)
+        assert all(bucket in allowed_buckets for _turn, _stage, bucket in latency_events)
         assert secret_query not in repr(latency_events)
         assert secret_reply not in repr(latency_events)
 
@@ -646,7 +647,7 @@ class TestStreamedReply:
         assert "voice latency" not in caplog.text
 
     async def test_latency_observer_failure_cannot_break_the_voice_path(self) -> None:
-        def fail_observer(_stage: str, _bucket: str) -> None:
+        def fail_observer(_turn: int, _stage: str, _bucket: str) -> None:
             raise RuntimeError("acceptance sink unavailable")
 
         transport, engine = FakeTransport(), FakeEngine("JOAT, hello")
