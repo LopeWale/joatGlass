@@ -53,7 +53,8 @@ def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:
 
 def _frames() -> list[ScreenReceipt]:
     rows = [
-        ("terminal-ready", None, None, "agent_terminal", "ready"),
+        ("terminal-approval-required", None, None, "agent_terminal", "approval_required"),
+        ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready"),
         ("terminal-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
         ("terminal-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
         ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),

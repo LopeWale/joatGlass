@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
   NOTIFICATION_DISMISS_HINT,
+  agentTerminalSafetyLabel,
   assistantOverlayTextLayout,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
@@ -251,6 +252,17 @@ describe('productivity HUD state labels', () => {
 });
 
 describe('Brainstorm wearable actions', () => {
+  it('labels terminal recovery states without implying an unrelated tool failure', () => {
+    expect(agentTerminalSafetyLabel({ state: 'approval_required', noToolsChecked: false }))
+      .toBe('APPROVAL PENDING');
+    expect(agentTerminalSafetyLabel({ state: 'unavailable', noToolsChecked: false }))
+      .toBe('CONNECTION UNAVAILABLE');
+    expect(agentTerminalSafetyLabel({ state: 'blocked', noToolsChecked: false }))
+      .toBe('TERMINAL BLOCKED');
+    expect(agentTerminalSafetyLabel({ state: 'ready', noToolsChecked: true }))
+      .toBe('NO TOOLS CHECKED BEFORE SEND');
+  });
+
   it('discloses both physical cancellation gestures while a session is running', () => {
     expect(brainstormActionHint({
       screen: 'brainstorm',

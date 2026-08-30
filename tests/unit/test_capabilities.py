@@ -15,6 +15,8 @@ import time
 from datetime import date, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from joat.channels.cards import CardLog
 from joat.channels.imessage import MessageEntry, MessageHistoryPage, MessageThread
 from joat.core.protocol import (
@@ -339,6 +341,39 @@ class TestCapabilityViews:
         assert frames[-1].endpoint_host == "admins-mac-mini.tail3a3363.ts.net"
         assert frames[-1].no_tools_checked is True
         assert [frame.acceptance_armed for frame in frames] == [False, False]
+
+    @pytest.mark.parametrize(
+        ("state", "reason", "expected"),
+        [
+            (
+                "approval_required",
+                "write_scope_required",
+                "Approve the JOAT device in OpenClaw, then tap retry.",
+            ),
+            (
+                "unavailable",
+                "gateway_not_ready",
+                "Hermes is unavailable; retry when the Mac connection recovers.",
+            ),
+            (
+                "blocked",
+                "tools_enabled",
+                "Hermes tools are enabled; this JOAT session remains blocked.",
+            ),
+        ],
+    )
+    async def test_agent_terminal_projects_safe_recovery_copy_to_glasses(
+        self, tmp_path, state, reason, expected,
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, status = make_router(tmp_path)
+        status.set_agent_terminal(state=state, reason=reason)
+
+        await router.open("Agent Terminal")
+
+        frame = next(item for item in transport.sent if isinstance(item, BrainstormHudView))
+        assert frame.state == state
+        assert frame.terminal_reason == expected
+        assert reason not in frame.terminal_reason
 
     async def test_brainstorm_acceptance_requires_an_explicit_mac_diagnostics_arm(
         self, tmp_path,

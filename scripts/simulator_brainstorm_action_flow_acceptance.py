@@ -115,7 +115,8 @@ class DeterministicHermes:
 T = TypeVar("T")
 
 _EXPECTED_FLOW = (
-    ("terminal-ready", None, None, "agent_terminal", "ready"),
+    ("terminal-approval-required", None, None, "agent_terminal", "approval_required"),
+    ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready"),
     ("terminal-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
     ("terminal-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
     ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
@@ -520,12 +521,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     hud = HudWriter(gateway)
     status = StatusPublisher(path=output / "status.json")
     status.set_openclaw(
-        state="connected_operator",
+        state="approval_required",
         endpoint_host="simulator-only",
         scopes=("operator.read", "operator.write"),
-        reason="",
+        reason="device_approval_required",
     )
-    status.set_agent_terminal(state="ready", reason="")
+    status.set_agent_terminal(state="approval_required", reason="write_scope_required")
     def topic_capture_view(armed: bool) -> BrainstormHudView:
         return BrainstormHudView(
             screen="brainstorm",
@@ -541,10 +542,29 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             acceptance_armed=True,
         )
 
+    async def retry_terminal() -> None:
+        """Model a completed out-of-band approval without retaining its payload.
+
+        The G2 action proves that the wearable can ask the normal Mac retry
+        route to re-check a terminal that was unavailable at first paint. The
+        harness changes only fixed local status state; it does not contact
+        OpenClaw or create a pairing request.
+        """
+
+        status.set_openclaw(
+            state="connected_operator",
+            endpoint_host="simulator-only",
+            scopes=("operator.read", "operator.write"),
+            reason="",
+        )
+        status.set_agent_terminal(state="ready", reason="")
+        await capabilities.open("Agent Terminal")
+
     sessions = SessionManager(
         hud,
         lambda _topic: None,
         topic_capture_view=topic_capture_view,
+        terminal_retry=retry_terminal,
     )
     capabilities = CapabilityRouter(
         hud=hud,
@@ -637,19 +657,59 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 
         # Open the real Agent Terminal capability producer. The simulator
         # cannot inject the left-temple sidebar gesture that selects this row,
-        # so sidebar ingress remains a physical G2 gate; the terminal's own
-        # rendered ready state and its right-temple action are exercised here.
+        # so sidebar ingress remains a physical G2 gate. It can drive the
+        # terminal's own retry gesture, which must recover from a truthful
+        # approval-required frame without displaying a raw internal code.
         await capabilities.open("Agent Terminal")
-        terminal_ready = await _wait_for(
-            lambda: _last_brainstorm(gateway, screen="agent_terminal", state="ready"),
-            label="ready Agent Terminal capability",
+        terminal_approval = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                screen="agent_terminal",
+                state="approval_required",
+            ),
+            label="approval-required Agent Terminal capability",
         )
-        digest, raw, optical = await _capture(automation_base, output, "01-terminal-ready", None)
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "01-terminal-approval-required",
+            None,
+        )
         receipts.append(ScreenReceipt(
-            "terminal-ready", None, None,
+            "terminal-approval-required", None, None,
+            terminal_approval.screen, terminal_approval.state, digest,
+        ))
+        artifacts["terminal-approval-required"] = {"raw": raw, "optical": optical}
+
+        action_count, sent_before = len(actions), len(gateway.sent)
+        await _input(automation_base, "click")
+        retry_action = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "retry_terminal"),
+                None,
+            ),
+            label="Agent Terminal retry tap",
+        )
+        terminal_ready = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="agent_terminal",
+                state="ready",
+            ),
+            label="ready Agent Terminal after retry",
+        )
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "02-terminal-retry-ready",
+            digest,
+        )
+        receipts.append(ScreenReceipt(
+            "terminal-retry-ready", "click", retry_action.action,
             terminal_ready.screen, terminal_ready.state, digest,
         ))
-        artifacts["terminal-ready"] = {"raw": raw, "optical": optical}
+        artifacts["terminal-retry-ready"] = {"raw": raw, "optical": optical}
 
         # Agent Terminal deliberately starts an ordinary Brainstorm rather
         # than a free-form remote console. Drive its production tap through
@@ -675,7 +735,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "02-terminal-topic-capture", digest,
+            automation_base, output, "03-terminal-topic-capture", digest,
         )
         receipts.append(ScreenReceipt(
             "terminal-topic-capture", "click", topic_capture.action,
@@ -702,7 +762,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="cleared Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "03-terminal-topic-capture-cancelled", digest,
+            automation_base, output, "04-terminal-topic-capture-cancelled", digest,
         )
         receipts.append(ScreenReceipt(
             "terminal-topic-capture-cancelled", "down", clear_capture.action,
@@ -731,7 +791,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "04-acceptance-ready",
+            "05-acceptance-ready",
             digest,
         )
         receipts.append(ScreenReceipt(
@@ -763,7 +823,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="streaming Brainstorm frame",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "05-running", digest)
+        digest, raw, optical = await _capture(automation_base, output, "06-running", digest)
         receipts.append(ScreenReceipt(
             "running", "click", begin.action, running.screen, running.state, digest,
         ))
@@ -787,7 +847,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="Agent Terminal frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "06-terminal", digest)
+        digest, raw, optical = await _capture(automation_base, output, "07-terminal", digest)
         receipts.append(ScreenReceipt(
             "terminal",
             "click",
@@ -816,7 +876,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="returned Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "07-returned", digest)
+        digest, raw, optical = await _capture(automation_base, output, "08-returned", digest)
         receipts.append(ScreenReceipt(
             "returned",
             "click",
@@ -860,7 +920,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="restored Brainstorm frame after reconnect",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "08-reconnected", digest)
+        digest, raw, optical = await _capture(automation_base, output, "09-reconnected", digest)
         receipts.append(ScreenReceipt(
             "reconnected",
             None,
@@ -891,7 +951,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="cancelled Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "09-cancelled", digest)
+        digest, raw, optical = await _capture(automation_base, output, "10-cancelled", digest)
         receipts.append(ScreenReceipt(
             "cancelled",
             "down",
