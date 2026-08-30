@@ -61,6 +61,9 @@ export class BrainstormController {
     if (this.acceptancePending) return true;
 
     if (model.screen === 'brainstorm') {
+      // The Mac has armed exactly one next utterance. A second tap must not
+      // re-arm or queue a duplicate capture while that promise is visible.
+      if (model.state === 'topic_capture') return true;
       if (model.state === 'ready') return this.send('begin_topic_capture');
       if (model.state === 'running') return this.send('show_terminal');
       return false;
@@ -81,7 +84,7 @@ export class BrainstormController {
   /** Left-double-click is a visible cancellation affordance during a live run. */
   handleCancel(): boolean {
     return this.model?.screen === 'brainstorm'
-      && this.model.state === 'running'
+      && (this.model.state === 'running' || this.model.state === 'topic_capture')
       ? this.send('cancel')
       : false;
   }

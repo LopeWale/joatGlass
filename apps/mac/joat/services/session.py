@@ -72,8 +72,8 @@ class Session(ABC):
 SessionFactory = Callable[[str], Session | None]
 """topic → Session, or None when the trigger can't be honored (missing agents)."""
 SessionStarter = Callable[[str], Session | None]
-TopicCaptureView = Callable[[], BrainstormHudView]
-"""Build the exact idle Brainstorm frame shown while the wearer speaks a topic."""
+TopicCaptureView = Callable[[bool], BrainstormHudView]
+"""Build the Brainstorm frame for an armed capture or its cleared recovery."""
 
 
 class SessionManager:
@@ -99,6 +99,10 @@ class SessionManager:
         self._starters = list(starters)
         self._terminal_retry = terminal_retry
         self._topic_capture_view = topic_capture_view
+        # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
+        # not decoration. Keep it explicit so the next wearer phrase starts
+        # the round without requiring them to repeat the capability name.
+        self._topic_capture_armed = False
 
     @property
     def active(self) -> bool:
@@ -198,6 +202,30 @@ class SessionManager:
                     len(text),
                 )
             return True
+        if self._topic_capture_armed:
+            self._topic_capture_armed = False
+            # The capture surface explicitly promises that the next phrase is
+            # the topic. Treat cancel as an exit from that surface rather than
+            # accidentally debating the word "cancel".
+            if lowered in ("stop", "cancel", "never mind", "nevermind"):
+                self._show_topic_capture(armed=False)
+                return True
+            topic = text.strip().rstrip(".!?")
+            if not topic:
+                # An empty STT result is not a topic. Re-arm and preserve the
+                # truthful lens instruction for the next utterance.
+                self._topic_capture_armed = True
+                self._show_topic_capture(armed=True)
+                return True
+            started = self._start(topic)
+            if not started:
+                # A failing factory must not leave a stale "speak now" UI
+                # behind. The cleared recovery frame tells the wearer that a
+                # new tap is required once collaborators are ready. The
+                # utterance was still deliberately captured by the wearer, so
+                # do not let it fall through to the unrelated assistant path.
+                self._show_topic_capture(armed=False)
+            return True
         for starter in self._starters:
             session = starter(text)
             if session is not None:
@@ -230,18 +258,14 @@ class SessionManager:
             return
         active = self._active
         if action.action == "begin_topic_capture" and active is None:
-            view = self._topic_capture_view
-
-            async def show_capture() -> None:
-                if view is not None:
-                    await self._hud.show_brainstorm(view())
-                else:
-                    # Older embeddings can still request a topic before they
-                    # supply the visual factory. Preserve the old status-only
-                    # signal rather than rejecting their action outright.
-                    await self._hud.status("BRAINSTORM · speak your question")
-
-            asyncio.get_running_loop().create_task(show_capture())
+            if self._topic_capture_armed:
+                return
+            self._topic_capture_armed = True
+            self._show_topic_capture(armed=True)
+            return
+        if action.action == "cancel" and active is None and self._topic_capture_armed:
+            self._topic_capture_armed = False
+            self._show_topic_capture(armed=False)
             return
         if active is None:
             return
@@ -269,6 +293,24 @@ class SessionManager:
                 log.exception("brainstorm action failed action=%s", action.action)
 
         asyncio.get_running_loop().create_task(route())
+
+    def clear_topic_capture(self) -> None:
+        """Drop a pending spoken topic when its G2 connection is replaced."""
+        self._topic_capture_armed = False
+
+    def _show_topic_capture(self, *, armed: bool) -> None:
+        view = self._topic_capture_view
+
+        async def show_capture() -> None:
+            if view is not None:
+                await self._hud.show_brainstorm(view(armed))
+            elif armed:
+                # Older embeddings can still request a topic before they
+                # supply the visual factory. Preserve the old status-only
+                # signal rather than rejecting their action outright.
+                await self._hud.status("BRAINSTORM · speak your question")
+
+        asyncio.get_running_loop().create_task(show_capture())
 
     async def replay_active_hud(self) -> bool:
         active = self._active

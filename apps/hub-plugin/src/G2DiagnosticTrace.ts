@@ -100,7 +100,7 @@ export type G2TraceEvent =
     type: 'visual_frame';
     kind: 'brainstorm';
     surface: 'brainstorm' | 'agent_terminal';
-    state: 'unavailable' | 'approval_required' | 'ready' | 'acceptance_ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
+    state: 'unavailable' | 'approval_required' | 'ready' | 'topic_capture' | 'acceptance_ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
     sha256: string;
   };
 

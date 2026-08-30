@@ -248,6 +248,13 @@ describe('Brainstorm wearable actions', () => {
       noToolsChecked: true,
     })).toBe('tap: start test · left x2: menu');
     expect(brainstormStateLabel('acceptance_ready')).toBe('TEST READY');
+    expect(brainstormActionHint({
+      screen: 'brainstorm',
+      state: 'topic_capture',
+      terminalState: 'ready',
+      noToolsChecked: true,
+    })).toBe('speak your question · left x2: cancel');
+    expect(brainstormStateLabel('topic_capture')).toBe('SPEAK NOW');
   });
 });
 

@@ -21,6 +21,8 @@ def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:
 def _frames() -> list[ScreenReceipt]:
     rows = [
         ("ready", None, None, "brainstorm", "ready"),
+        ("topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
+        ("topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
         ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
         ("running", "click", "begin_topic_capture", "brainstorm", "running"),
         ("terminal", "click", "show_terminal", "agent_terminal", "running"),

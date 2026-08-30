@@ -648,6 +648,17 @@ class TestDownlinkWire:
         ).to_wire()
         assert acceptance_ready["brainstorm"]["state"] == "acceptance_ready"
 
+        topic_capture = BrainstormHudView(
+            screen="brainstorm",
+            state="topic_capture",
+            topic="Speak your question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity="Your next spoken phrase starts this Brainstorm.",
+            terminal_state="ready",
+            no_tools_checked=True,
+        ).to_wire()
+        assert topic_capture["brainstorm"]["state"] == "topic_capture"
+
     def test_productivity_view_is_typed_and_bounded(self) -> None:
         wire = ProductivityHudView(
             domain="reminders",

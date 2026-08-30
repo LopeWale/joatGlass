@@ -647,8 +647,8 @@ async def main() -> None:
             phase="opening" if state == "running" else "closing",
         )
 
-    def topic_capture_view() -> BrainstormHudView:
-        """Keep the Brainstorm surface visible while the wearer names a topic."""
+    def topic_capture_view(armed: bool) -> BrainstormHudView:
+        """Show the explicit one-utterance capture or its cleared recovery."""
         terminal = status.agent_terminal_projection()
         labels = [
             "Hermes" if name == "openclaw" else name.capitalize()
@@ -656,10 +656,13 @@ async def main() -> None:
         ]
         return BrainstormHudView(
             screen="brainstorm",
-            state="ready",
-            topic="Speak your question",
+            state="topic_capture" if armed else "ready",
+            topic="Speak your question" if armed else "Ready for a question",
             collaborators=labels[:3],
-            activity='Say “JOAT, brainstorm …” to begin.',
+            activity=(
+                "Your next spoken phrase starts this Brainstorm."
+                if armed else "Tap to choose a question, then speak."
+            ),
             terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=str(terminal["reason"]),
@@ -892,6 +895,9 @@ async def main() -> None:
             grounding.add(static_fact(f"The wearer's name is {hello.user_name}"))
             named["done"] = True
         status.set(glasses="connected", device=f"{hello.model} / {hello.sn}")
+        # A topic armed on a replaced Hub connection is no longer an action
+        # from the current wearer surface. The new G2 must tap again.
+        sessions.clear_topic_capture()
         # Newest-wins socket replacement does not emit the last-disconnect
         # callback. The replacement renderer has no installed route, so the
         # prior Mac session must not continue believing guidance is active.
@@ -908,6 +914,7 @@ async def main() -> None:
         # part of the live-link projection too: retaining it made a stale
         # disconnected row look like the G2 was still attached.
         status.set(glasses="disconnected", device="", mic="off")
+        sessions.clear_topic_capture()
         # A replaced WebContent process has lost its phone-side tracker. Until
         # route rehydration has evidence, keeping the Mac session "installed"
         # would be a stale-direction safety bug.

@@ -2,6 +2,17 @@
 
 ## 2026-08-30
 
+- Repaired the actual glasses-first **Brainstorm** start path: tapping the
+  Brainstorm HUD now enters a typed `TOPIC CAPTURE` state, and the next wearer
+  utterance is consumed as the Brainstorm topic without requiring a repeated
+  wake word or capability name. Repeated taps are harmless; left-double
+  explicitly cancels the capture; G2 disconnect/replacement clears it so a
+  later voice command cannot start a stale Brainstorm. Focused Python (281),
+  full Hub (461), typecheck, and production-build checks pass. The official
+  simulator was driven through all nine Brainstorm/Terminal/cancel/reconnect
+  HUD states and each optical frame was reviewed; physical-G2 proof remains
+  separate and unclaimed.
+
 - Fixed the live assistant's nearby-place gap: the Mapbox provider and fresh
   iPhone fix were already available, but the local model had never selected
   the advertised lookup. Explicit locality requests such as **coffee near
