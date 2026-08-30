@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { NavigationController } from './NavigationController';
-import { navigationVisualFixture } from './NavigationHud';
+import { navigationVisualFixture, type NavigationHudModel } from './NavigationHud';
 import type { UplinkMessage } from './types';
 
 function harness(paintResults: boolean[] = []) {
@@ -426,5 +426,54 @@ describe('NavigationController', () => {
     expect(sent.map((message) => message.kind)).toEqual([
       'navigation.route.ack', 'navigation.state',
     ]);
+  });
+
+  it('coalesces superseded guidance while the current G2 frame is still painting', async () => {
+    let emit: ((locationFix: object, receivedAt?: number) => void) | undefined;
+    let firstPaintStarted!: () => void;
+    let finishFirstPaint!: (painted: boolean) => void;
+    const firstPaint = new Promise<boolean>((resolve) => { finishFirstPaint = resolve; });
+    const firstPaintHasStarted = new Promise<void>((resolve) => { firstPaintStarted = resolve; });
+    const frames: NavigationHudModel[] = [];
+    const sent: UplinkMessage[] = [];
+    let paintCount = 0;
+    const controller = new NavigationController(
+      {
+        showNavigation: (frame) => {
+          frames.push(frame);
+          paintCount += 1;
+          if (paintCount === 1) {
+            firstPaintStarted();
+            return firstPaint;
+          }
+          return Promise.resolve(true);
+        },
+      },
+      { sendNavigation: (message) => { sent.push(message); } },
+      {
+        setNavigationConsumer: async (consumer) => {
+          emit = (locationFix, receivedAt = 10_100) => consumer?.(locationFix as never, receivedAt);
+          return true;
+        },
+        requestNavigationOrigin: async () => null,
+      },
+    );
+    await controller.installRoute({
+      kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
+      generation: 10, routeId: 'route-1', revision: 1,
+      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+    });
+
+    emit?.({ latitude: 0, longitude: 0.0001, accuracy: 5, timestamp: 10_000 });
+    await firstPaintHasStarted;
+    emit?.({ latitude: 0, longitude: 0.001, accuracy: 5, timestamp: 11_000 }, 11_100);
+    emit?.({ latitude: 0, longitude: 0.002, accuracy: 5, timestamp: 12_000 }, 12_100);
+    finishFirstPaint(true);
+    await controller.whenIdle();
+
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toMatchObject({ view: 'guidance' });
+    expect(frames[1]).toMatchObject({ view: 'guidance', maneuverDistanceM: 278 });
+    expect(sent.filter((message) => message.kind === 'navigation.state')).toHaveLength(2);
   });
 });
