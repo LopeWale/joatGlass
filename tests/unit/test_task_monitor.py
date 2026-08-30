@@ -103,7 +103,7 @@ def test_reminder_due_hud_view_is_the_single_read_only_projection() -> None:
     assert (view.primary, view.secondary, view.hint) == (
         "Due now",
         "This reminder is still incomplete.",
-        "left x2 Planning",
+        "say complete reminder title · left x2 Planning",
     )
     assert view.planning_anchor_unix_ms == 1_788_274_200_000
     assert reminder_due_hud_view(
