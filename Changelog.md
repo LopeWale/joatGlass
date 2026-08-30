@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- Added a read-only, content-free home-Mini Tailscale Serve preflight. It
+  verifies only the persisted private topology required for a glasses-first
+  JOAT brain: the preserved OpenClaw/Hermes root handler, `/glasses` proxied
+  to the loopback-only JOAT gateway, HTTPS on 443, and Funnel disabled. It
+  emits fixed readiness reasons without exposing existing routes, hostnames,
+  pairing tokens, G2 traffic, or Hermes content. This detects the concrete
+  failure where `/glasses` falls through to the OpenClaw control page; it does
+  not configure Serve, start JOAT, package, upload, install, or claim a G2
+  connection.
+
 - Corrected JOAT's remote OpenClaw handshake identity. The Tailnet-connected,
   signed device had incorrectly declared OpenClaw's reserved direct-loopback
   `gateway-client` / `backend` helper identity. It now uses the protocol's

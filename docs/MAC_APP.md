@@ -143,6 +143,8 @@ route map with the Tailnet:
 ```sh
 tailscale serve --https=443 --set-path=/glasses --bg http://127.0.0.1:8787
 tailscale serve status --json
+python3 scripts/tailnet_home_brain_preflight.py \
+  --expected-host admins-mac-mini.tail3a3363.ts.net
 ```
 
 On a current Tailscale client, `--set-path=/glasses` adds that HTTPS mount
@@ -152,6 +154,13 @@ existing root handler and `/glasses → http://127.0.0.1:8787`; do **not** use
 a JOAT health check—the endpoint is a WebSocket upgrade—but seeing the
 OpenClaw control page at `/glasses` means the `/glasses` proxy was not added
 and the packaged glasses client cannot reach JOAT.
+
+The preflight is a read-only, content-free check for this exact failure. It
+prints only fixed `ready`/`not_ready` reason codes: it verifies the preserved
+root handler, `/glasses → 127.0.0.1:8787`, port-443 HTTPS, and that Funnel is
+off. It does not print existing route values, connect a WebSocket, touch the
+G2 pairing token, or contact Hermes. Run it once after configuring Serve—not
+before ordinary glasses use.
 
 When producing the EHPK for that Mini, do not let the ignored development
 `.env` choose its raw `:8787` address. Build only with its approved TLS route:
