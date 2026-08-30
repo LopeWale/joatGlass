@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -31,6 +32,7 @@ def test_messages_flow_requires_causal_menu_selection_and_confirmation() -> None
         driver.ScreenReceipt("messages-conversation", "list-select", "2" * 64),
         driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
         driver.ScreenReceipt("messages-result", "click", "4" * 64),
+        driver.ScreenReceipt("messages-returned", "click", "5" * 64),
     ]
 
     driver.validate_flow(receipts)
@@ -47,6 +49,7 @@ def test_messages_flow_rejects_a_static_conversation_screenshot() -> None:
             driver.ScreenReceipt("messages-conversation", None, "2" * 64),
             driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
             driver.ScreenReceipt("messages-result", "click", "4" * 64),
+            driver.ScreenReceipt("messages-returned", "click", "5" * 64),
         ])
 
 
@@ -59,6 +62,7 @@ def test_messages_compose_flow_requires_new_message_selection_and_confirmation()
         driver.ScreenReceipt("messages-compose", "list-select", "2" * 64),
         driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
         driver.ScreenReceipt("messages-result", "click", "4" * 64),
+        driver.ScreenReceipt("messages-returned", "click", "5" * 64),
     ]
 
     driver.validate_compose_flow(receipts)
@@ -76,6 +80,88 @@ def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() ->
     ]
 
     driver.validate_history_flow(receipts)
+
+
+@pytest.mark.parametrize(
+    ("flow", "expected"),
+    [
+        (
+            "reply",
+            (
+                "messages-sidebar",
+                "messages-conversations",
+                "messages-conversation",
+                "messages-confirmation",
+                "messages-result",
+                "messages-returned",
+            ),
+        ),
+        (
+            "compose",
+            (
+                "messages-sidebar",
+                "messages-conversations",
+                "messages-compose",
+                "messages-confirmation",
+                "messages-result",
+                "messages-returned",
+            ),
+        ),
+        (
+            "history",
+            (
+                "messages-sidebar",
+                "messages-conversations",
+                "messages-latest",
+                "messages-older",
+                "messages-latest-returned",
+            ),
+        ),
+    ],
+)
+def test_official_simulator_evidence_retains_every_required_rendered_frame(
+    flow: str,
+    expected: tuple[str, ...],
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    assert driver.required_evidence_frames(flow) == expected
+
+
+def test_evidence_receipt_retains_the_causal_frame_order_without_message_content(
+    tmp_path: Path,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+    frames = [
+        driver.ScreenReceipt(name, action, f"{index:x}" * 64)
+        for index, (name, action) in enumerate(
+            (
+                ("messages-sidebar", "test-hook-open"),
+                ("messages-conversations", "click"),
+                ("messages-conversation", "list-select"),
+                ("messages-confirmation", None),
+                ("messages-result", "click"),
+                ("messages-returned", "click"),
+            )
+        )
+    ]
+
+    driver._write_evidence_receipt(
+        tmp_path,
+        flow="reply",
+        outcome="accepted",
+        expectation=driver.reply_outcome_expectation("accepted"),
+        sender_called=True,
+        frames=frames,
+    )
+
+    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert [frame["name"] for frame in receipt["frames"]] == [frame.name for frame in frames]
+    assert receipt["messages_app_send"] is False
+    assert receipt["physical_g2_proof"] is False
+    assert "Simulator trace only" not in json.dumps(receipt)
 
 
 @pytest.mark.parametrize(

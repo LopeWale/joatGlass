@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- The no-send official-simulator **Messages** harness now retains and verifies
+  every causal 576×288 frame—not only confirmation/result—through Sidebar,
+  Conversations, selected Conversation/Compose, confirmation, result, and
+  post-dismiss return. The receipt records only frame hashes and documented
+  simulator actions; it never records fixture message content or recipient
+  handles. Fresh accepted-reply evidence shows the returned frame exactly
+  matches the selected Adaeze conversation after **TAP OR SWIPE TO DISMISS**.
+  This remains simulator proof with a `RecordingSender`, not a physical-G2
+  interaction or real Messages.app send.
+
 - Hardened the no-send **Messages** official-simulator harness so every reply
   outcome has an explicit production-controller contract: **TAP · Confirm**
   for submitted/uncertain/failed, **SWIPE · Cancel** for cancellation, and a

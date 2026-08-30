@@ -164,12 +164,42 @@ async def _clear_simulator_console(automation_base: str) -> None:
         ) from exc
 
 
+def _write_framebuffer(destination: Path, framebuffer: bytes) -> str:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(framebuffer)
+    destination.chmod(0o600)
+    return hashlib.sha256(framebuffer).hexdigest()
+
+
+async def _capture_frame(
+    automation_base: str,
+    evidence_dir: Path,
+    name: str,
+    simulator_input: str | None,
+    *,
+    settle_s: float = 0.5,
+) -> ScreenReceipt:
+    """Retain one settled 576×288 production frame with its causal input."""
+    await asyncio.sleep(settle_s)
+    try:
+        framebuffer = await asyncio.to_thread(
+            _http_bytes,
+            f"{automation_base}/api/screenshot/glasses",
+        )
+    except (OSError, urllib.error.URLError) as exc:
+        raise MessagesFlowError(
+            f"official simulator did not provide the {name!r} Messages frame"
+        ) from exc
+    digest = _write_framebuffer(evidence_dir / f"{name}.png", framebuffer)
+    return ScreenReceipt(name, simulator_input, digest)
+
+
 async def _wait_for_visible_confirmation(
     automation_base: str,
-    destination: Path,
+    evidence_dir: Path,
     *,
     timeout_s: float = 15.0,
-) -> str:
+) -> ScreenReceipt:
     """Require the production Hub to report its rendered confirmation first."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -179,19 +209,13 @@ async def _wait_for_visible_confirmation(
             await asyncio.sleep(0.1)
             continue
         if b"confirmation-visible" in console:
-            try:
-                framebuffer = await asyncio.to_thread(
-                    _http_bytes,
-                    f"{automation_base}/api/screenshot/glasses",
-                )
-            except (OSError, urllib.error.URLError) as exc:
-                raise MessagesFlowError(
-                    "official simulator reported a confirmation but did not provide its frame"
-                ) from exc
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(framebuffer)
-            destination.chmod(0o600)
-            return hashlib.sha256(framebuffer).hexdigest()
+            return await _capture_frame(
+                automation_base,
+                evidence_dir,
+                "messages-confirmation",
+                None,
+                settle_s=0,
+            )
         await asyncio.sleep(0.1)
     raise MessagesFlowError(
         "official simulator did not report a visible Messages confirmation before timeout"
@@ -212,19 +236,29 @@ async def _send_simulator_input(automation_base: str, action: Literal["click", "
         ) from exc
 
 
-async def _capture_result_frame(automation_base: str, destination: Path) -> str:
-    await asyncio.sleep(0.4)
-    try:
-        framebuffer = await asyncio.to_thread(
-            _http_bytes,
-            f"{automation_base}/api/screenshot/glasses",
-        )
-    except (OSError, urllib.error.URLError) as exc:
-        raise MessagesFlowError("official simulator did not provide the Messages result frame") from exc
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(framebuffer)
-    destination.chmod(0o600)
-    return hashlib.sha256(framebuffer).hexdigest()
+async def _wait_for_sidebar_frame(
+    automation_base: str,
+    evidence_dir: Path,
+    *,
+    timeout_s: float = 15.0,
+) -> ScreenReceipt:
+    """Require the production test hook to report the ordinary sidebar first."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
+        except (OSError, urllib.error.URLError):
+            await asyncio.sleep(0.1)
+            continue
+        if b"live menu acceptance opened=true" in console:
+            return await _capture_frame(
+                automation_base,
+                evidence_dir,
+                "messages-sidebar",
+                "test-hook-open",
+            )
+        await asyncio.sleep(0.1)
+    raise MessagesFlowError("official simulator did not render the Messages sidebar")
 
 
 _EXPECTED_REPLY_FLOW = (
@@ -233,6 +267,7 @@ _EXPECTED_REPLY_FLOW = (
     ("messages-conversation", "list-select"),
     ("messages-confirmation", None),
     ("messages-result", "click"),
+    ("messages-returned", "click"),
 )
 
 _EXPECTED_COMPOSE_FLOW = (
@@ -241,6 +276,7 @@ _EXPECTED_COMPOSE_FLOW = (
     ("messages-compose", "list-select"),
     ("messages-confirmation", None),
     ("messages-result", "click"),
+    ("messages-returned", "click"),
 )
 
 _EXPECTED_HISTORY_FLOW = (
@@ -250,6 +286,63 @@ _EXPECTED_HISTORY_FLOW = (
     ("messages-older", "scroll-down"),
     ("messages-latest-returned", "scroll-up"),
 )
+
+
+def required_evidence_frames(flow: str) -> tuple[str, ...]:
+    """Return every named frame the no-send simulator run must retain."""
+    expected = {
+        "reply": _EXPECTED_REPLY_FLOW,
+        "compose": _EXPECTED_COMPOSE_FLOW,
+        "history": _EXPECTED_HISTORY_FLOW,
+    }.get(flow)
+    if expected is None:
+        raise ValueError(f"unsupported Messages evidence flow: {flow}")
+    return tuple(name for name, _action in expected)
+
+
+def _write_evidence_receipt(
+    evidence_dir: Path,
+    *,
+    flow: Literal["reply", "compose", "history"],
+    outcome: ReplyOutcome,
+    expectation: ReplyOutcomeExpectation,
+    sender_called: bool,
+    frames: list[ScreenReceipt],
+) -> None:
+    """Persist only causal frame metadata, never fixture-message content."""
+    expected_names = required_evidence_frames(flow)
+    actual_names = tuple(frame.name for frame in frames)
+    if actual_names != expected_names:
+        raise MessagesFlowError(
+            f"evidence frames do not match {flow!r} route: {actual_names!r}"
+        )
+    digests = {frame.name: frame.framebuffer_sha256 for frame in frames}
+    receipt = {
+        "proof": "official_simulator",
+        "flow": flow,
+        "outcome": outcome,
+        "wearer_label": expectation.wearer_label,
+        "simulator_control": expectation.simulator_control,
+        "sender_called": sender_called,
+        "confirmation_frame_sha256": digests.get("messages-confirmation"),
+        "result_frame_sha256": digests.get("messages-result"),
+        "frames": [
+            {
+                "name": frame.name,
+                "simulator_input": frame.simulator_input,
+                "framebuffer_sha256": frame.framebuffer_sha256,
+            }
+            for frame in frames
+        ],
+        "physical_g2_proof": False,
+        "messages_app_send": False,
+    }
+    destination = evidence_dir / "receipt.json"
+    destination.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    destination.chmod(0o600)
 
 
 def _validate_receipts(
@@ -270,7 +363,11 @@ def _validate_receipts(
         digest = receipt.framebuffer_sha256
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise MessagesFlowError(f"{name}: invalid framebuffer digest")
-        if digest in seen:
+        # Dismissing the transient result overlay can legitimately reveal the
+        # exact same conversation pixels that preceded confirmation. Every
+        # other state must be visually distinct, so a stale/static capture
+        # cannot satisfy the causal route.
+        if digest in seen and name != "messages-returned":
             raise MessagesFlowError(f"{name}: frame is not visually distinct")
         seen.add(digest)
 
@@ -382,6 +479,12 @@ class ObservedReplies:
         return await self._delegate.handle_command(text)
 
 
+async def _wait_for_messages_picker(router: CapabilityRouter) -> None:
+    """Observe the Mac-produced picker before recording its rendered frame."""
+    while router._active_capability != "MESSAGES" or not router._message_rows:
+        await asyncio.sleep(0.05)
+
+
 async def run(
     port: int,
     flow: Literal["reply", "compose", "history"] = "reply",
@@ -428,26 +531,73 @@ async def run(
         try:
             log.info("stage=waiting-for-official-simulator port=%d", port)
             await asyncio.wait_for(connected.wait(), timeout=60)
+            frames: list[ScreenReceipt] = []
+            if automation_base is not None:
+                assert evidence_dir is not None
+                frames.append(await _wait_for_sidebar_frame(automation_base, evidence_dir))
             selected = replies.composing if flow == "compose" else replies.selected
             log.info("stage=connected flow=%s action=select-Messages-row", flow)
+            if automation_base is not None:
+                assert evidence_dir is not None
+                await asyncio.wait_for(_wait_for_messages_picker(router), timeout=90)
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    "messages-conversations",
+                    "click",
+                ))
             await asyncio.wait_for(selected.wait(), timeout=90)
+            if automation_base is not None:
+                assert evidence_dir is not None
+                selected_frame = (
+                    "messages-compose" if flow == "compose"
+                    else "messages-latest" if flow == "history"
+                    else "messages-conversation"
+                )
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    selected_frame,
+                    "list-select",
+                ))
             if flow == "history":
                 # Select the fixture Dele conversation, then use official
                 # simulator scroll input. No voice command or confirmation is
                 # injected: this trace is deliberately a no-send page-routing
                 # proof, not a Messages.app submission test.
-                await asyncio.sleep(2)
                 await asyncio.wait_for(_wait_for_history_page(router, 1), timeout=90)
                 log.info("stage=older-page-visible action=scroll-down")
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-older",
+                        "scroll-down",
+                    ))
                 await asyncio.wait_for(_wait_for_history_page(router, 0), timeout=90)
                 if sender.sent.is_set():
                     raise MessagesFlowError("history-only trace reached sender")
                 log.info("stage=latest-page-returned action=scroll-up no_send=true")
-                await asyncio.sleep(5)
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-latest-returned",
+                        "scroll-up",
+                    ))
+                    validate_history_flow(frames)
+                    _write_evidence_receipt(
+                        evidence_dir,
+                        flow=flow,
+                        outcome=outcome,
+                        expectation=expectation,
+                        sender_called=False,
+                        frames=frames,
+                    )
+                await asyncio.sleep(1)
                 return
-            # Retain the dedicated conversation frame before the confirmation
-            # replaces it. This delay changes no routing or reply semantics.
-            await asyncio.sleep(2)
             log.info("stage=%s-selected action=voice-draft-injected", flow)
             command = (
                 "message Simulator Contact saying Simulator trace only. No message will be sent."
@@ -457,16 +607,18 @@ async def run(
             if automation_base is not None:
                 await _clear_simulator_console(automation_base)
             command_task = asyncio.create_task(replies.handle_command(command))
+            confirmation_frame: ScreenReceipt | None = None
             if automation_base is not None:
                 assert evidence_dir is not None
-                confirmation_digest = await _wait_for_visible_confirmation(
+                confirmation_frame = await _wait_for_visible_confirmation(
                     automation_base,
-                    evidence_dir / "messages-confirmation.png",
+                    evidence_dir,
                 )
+                frames.append(confirmation_frame)
                 log.info(
                     "stage=confirmation-visible outcome=%s frame_sha256=%s",
                     outcome,
-                    confirmation_digest,
+                    confirmation_frame.framebuffer_sha256,
                 )
                 if expectation.simulator_control is not None:
                     await _send_simulator_input(automation_base, expectation.simulator_control)
@@ -502,27 +654,33 @@ async def run(
                 raise MessagesFlowError(f"{outcome}: fixture sender reported a successful submission")
             if automation_base is not None:
                 assert evidence_dir is not None
-                result_digest = await _capture_result_frame(
+                result_frame = await _capture_frame(
                     automation_base,
-                    evidence_dir / "messages-result.png",
+                    evidence_dir,
+                    "messages-result",
+                    expectation.simulator_control,
                 )
-                receipt = {
-                    "proof": "official_simulator",
-                    "flow": flow,
-                    "outcome": outcome,
-                    "wearer_label": expectation.wearer_label,
-                    "simulator_control": expectation.simulator_control,
-                    "sender_called": sender.called.is_set(),
-                    "confirmation_frame_sha256": confirmation_digest,
-                    "result_frame_sha256": result_digest,
-                    "physical_g2_proof": False,
-                    "messages_app_send": False,
-                }
-                (evidence_dir / "receipt.json").write_text(
-                    json.dumps(receipt, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
+                frames.append(result_frame)
+                await _send_simulator_input(automation_base, "click")
+                log.info("stage=result-dismissed action=click")
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    "messages-returned",
+                    "click",
+                ))
+                if flow == "reply":
+                    validate_flow(frames)
+                else:
+                    validate_compose_flow(frames)
+                _write_evidence_receipt(
+                    evidence_dir,
+                    flow=flow,
+                    outcome=outcome,
+                    expectation=expectation,
+                    sender_called=sender.called.is_set(),
+                    frames=frames,
                 )
-                (evidence_dir / "receipt.json").chmod(0o600)
             log.info(
                 "stage=result-visible outcome=%s gesture=%s sender_called=%s result_chars=%d",
                 outcome,
@@ -530,7 +688,7 @@ async def run(
                 sender.called.is_set(),
                 len(result),
             )
-            await asyncio.sleep(12)
+            await asyncio.sleep(1)
         finally:
             await gateway.stop()
 
