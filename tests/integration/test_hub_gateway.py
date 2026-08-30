@@ -162,7 +162,11 @@ class TestConnection:
 
     async def test_g2_diagnostics_marks_a_loopback_g2_session_nonphysical(self, transport) -> None:
         t, url = transport
-        store = G2DiagnosticStore(writer=lambda _path, _events: None)
+        observed: list[list[dict[str, object]]] = []
+        store = G2DiagnosticStore(
+            writer=lambda _path, _events: None,
+            observer=observed.append,
+        )
         async with websockets.connect(url) as ws:
             await ws.send(json.dumps({"kind": "auth", "token": None}))
             assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
@@ -173,10 +177,14 @@ class TestConnection:
             await ws.send(json.dumps({
                 "kind": "hello", "sn": "SIMULATOR", "model": "g2", "launchSource": "simulator",
             }))
-            await _wait_for(lambda: any(event.get("type") == "g2_session" for event in store._events))
+            await _wait_for(lambda: any(
+                event.get("type") == "g2_session"
+                for snapshot in observed
+                for event in snapshot
+            ))
 
         assert [
-            event["source"] for event in store._events if event["type"] == "g2_session"
+            event["source"] for event in observed[-1] if event["type"] == "g2_session"
         ] == ["nonphysical"]
 
     async def test_newest_connection_wins(self, transport) -> None:
