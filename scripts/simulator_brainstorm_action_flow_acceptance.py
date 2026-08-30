@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -122,6 +123,8 @@ _EXPECTED_FLOW = (
     ("reconnected", None, "authenticated_replay", "brainstorm", "running"),
     ("cancelled", "down", "cancel", "brainstorm", "cancelled"),
 )
+
+_SAFE_ARTIFACT_NAME = re.compile(r"^[0-9]{2}-[a-z-]+\.(?:rgba|optical)\.png$")
 
 _BANNED_EVIDENCE_KEYS = frozenset({
     "audio", "content", "endpoint", "message", "payload", "prompt", "topic",
@@ -233,6 +236,43 @@ def validate_flow(
         raise BrainstormActionFlowError("acceptance retained a forbidden content field")
 
 
+def validate_visual_artifacts(artifacts: dict[str, dict[str, str]]) -> None:
+    """Require reviewable, content-free optical evidence for every driven HUD state.
+
+    The official simulator's raw RGBA framebuffer uses alpha as optical
+    brightness. A normal image viewer can render that carrier incorrectly, so
+    every raw capture is accompanied by a deterministic, opaque green-on-black
+    interpretation. This validator deliberately checks filenames only: the
+    screenshot pixels stay out of the JSON receipt.
+    """
+
+    expected = [item[0] for item in _EXPECTED_FLOW]
+    if list(artifacts) != expected:
+        raise BrainstormActionFlowError("simulator optical artifacts do not match the driven HUD flow")
+    for index, state in enumerate(expected, start=1):
+        artifact = artifacts.get(state)
+        if not isinstance(artifact, dict):
+            raise BrainstormActionFlowError(f"{state}: missing visual artifact record")
+        raw = artifact.get("raw")
+        optical = artifact.get("optical")
+        if (
+            not isinstance(raw, str)
+            or not _SAFE_ARTIFACT_NAME.fullmatch(raw)
+            or not raw.startswith(f"{index:02d}-{state}.")
+            or not raw.endswith(".rgba.png")
+        ):
+            raise BrainstormActionFlowError(f"{state}: invalid raw framebuffer artifact")
+        if (
+            not isinstance(optical, str)
+            or not _SAFE_ARTIFACT_NAME.fullmatch(optical)
+            or not optical.startswith(f"{index:02d}-{state}.")
+            or not optical.endswith(".optical.png")
+        ):
+            raise BrainstormActionFlowError(
+                f"{state}: opaque green-on-black optical preview is required",
+            )
+
+
 def _http_bytes(
     url: str,
     *,
@@ -338,24 +378,25 @@ async def _wait_http(url: str, process: ManagedProcess) -> None:
     raise BrainstormActionFlowError(f"timed out waiting for {url}")
 
 
-def _alpha_preview(raw_path: Path) -> Path:
+def _optical_preview(raw_path: Path) -> Path:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise BrainstormActionFlowError("ffmpeg is required to inspect simulator alpha framebuffers")
-    alpha = raw_path.with_name(f"{raw_path.stem}.alpha.png")
+    optical = raw_path.with_name(raw_path.name.replace(".rgba.png", ".optical.png"))
     completed = subprocess.run(
         [
             ffmpeg, "-y", "-loglevel", "error", "-i", str(raw_path),
-            "-vf", "alphaextract", str(alpha),
+            "-vf", "alphaextract,format=rgb24,lutrgb=r=0:g=val:b=0",
+            "-pix_fmt", "rgb24", str(optical),
         ],
         capture_output=True,
         timeout=15,
         check=False,
     )
-    if completed.returncode != 0 or not alpha.is_file():
-        raise BrainstormActionFlowError("could not alpha-extract simulator framebuffer")
-    alpha.chmod(0o600)
-    return alpha
+    if completed.returncode != 0 or not optical.is_file():
+        raise BrainstormActionFlowError("could not build opaque simulator optical preview")
+    optical.chmod(0o600)
+    return optical
 
 
 async def _capture(
@@ -387,8 +428,8 @@ async def _capture(
             raw_path = output / f"{name}.rgba.png"
             raw_path.write_bytes(raw)
             raw_path.chmod(0o600)
-            alpha = _alpha_preview(raw_path)
-            return digest, raw_path.name, alpha.name
+            optical = _optical_preview(raw_path)
+            return digest, raw_path.name, optical.name
         await asyncio.sleep(0.1)
     raise BrainstormActionFlowError(f"{name}: framebuffer did not visibly settle")
 
@@ -556,9 +597,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: _last_brainstorm(gateway, screen="brainstorm", state="ready"),
             label="ready Brainstorm capability",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "01-ready", None)
+        digest, raw, optical = await _capture(automation_base, output, "01-ready", None)
         receipts.append(ScreenReceipt("ready", None, None, ready.screen, ready.state, digest))
-        artifacts["ready"] = {"raw": raw, "alpha": alpha}
+        artifacts["ready"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "double_click")
@@ -578,7 +619,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="acceptance-ready Brainstorm frame",
         )
-        digest, raw, alpha = await _capture(
+        digest, raw, optical = await _capture(
             automation_base,
             output,
             "02-acceptance-ready",
@@ -592,7 +633,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             acceptance_ready.state,
             digest,
         ))
-        artifacts["acceptance-ready"] = {"raw": raw, "alpha": alpha}
+        artifacts["acceptance-ready"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
@@ -613,11 +654,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="streaming Brainstorm frame",
         )
         await asyncio.sleep(1.0)
-        digest, raw, alpha = await _capture(automation_base, output, "03-running", digest)
+        digest, raw, optical = await _capture(automation_base, output, "03-running", digest)
         receipts.append(ScreenReceipt(
             "running", "click", begin.action, running.screen, running.state, digest,
         ))
-        artifacts["running"] = {"raw": raw, "alpha": alpha}
+        artifacts["running"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
@@ -637,7 +678,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="Agent Terminal frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "04-terminal", digest)
+        digest, raw, optical = await _capture(automation_base, output, "04-terminal", digest)
         receipts.append(ScreenReceipt(
             "terminal",
             "click",
@@ -646,7 +687,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             terminal_view.state,
             digest,
         ))
-        artifacts["terminal"] = {"raw": raw, "alpha": alpha}
+        artifacts["terminal"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
@@ -666,7 +707,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="returned Brainstorm frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "05-returned", digest)
+        digest, raw, optical = await _capture(automation_base, output, "05-returned", digest)
         receipts.append(ScreenReceipt(
             "returned",
             "click",
@@ -675,7 +716,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             returned.state,
             digest,
         ))
-        artifacts["returned"] = {"raw": raw, "alpha": alpha}
+        artifacts["returned"] = {"raw": raw, "optical": optical}
 
         # Replace the official simulator connection. A duplicate Hello on the
         # same socket is not accepted as reconnect evidence.
@@ -710,7 +751,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="restored Brainstorm frame after reconnect",
         )
         await asyncio.sleep(1.0)
-        digest, raw, alpha = await _capture(automation_base, output, "06-reconnected", digest)
+        digest, raw, optical = await _capture(automation_base, output, "06-reconnected", digest)
         receipts.append(ScreenReceipt(
             "reconnected",
             None,
@@ -719,7 +760,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             replayed.state,
             digest,
         ))
-        artifacts["reconnected"] = {"raw": raw, "alpha": alpha}
+        artifacts["reconnected"] = {"raw": raw, "optical": optical}
 
         # Simulator swipe-down has text delivery and no physical source. The
         # visible cancel path runs, while the receipt stays non-physical.
@@ -741,7 +782,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="cancelled Brainstorm frame",
         )
-        digest, raw, alpha = await _capture(automation_base, output, "07-cancelled", digest)
+        digest, raw, optical = await _capture(automation_base, output, "07-cancelled", digest)
         receipts.append(ScreenReceipt(
             "cancelled",
             "down",
@@ -750,7 +791,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             cancelled.state,
             digest,
         ))
-        artifacts["cancelled"] = {"raw": raw, "alpha": alpha}
+        artifacts["cancelled"] = {"raw": raw, "optical": optical}
 
         await _wait_for(
             lambda: True if not sessions.active else None,
@@ -767,12 +808,13 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         if not isinstance(acceptance, dict):
             raise BrainstormActionFlowError("acceptance receipt must be an object")
         validate_flow(receipts, acceptance)
+        validate_visual_artifacts(artifacts)
 
         return {
             "schemaVersion": 2,
             "result": "simulator-brainstorm-action-flow-pass",
             "evidenceBoundary": {
-                "hud": "official Even simulator raw framebuffer and alpha interpretation",
+                "hud": "official Even simulator raw framebuffer plus opaque green-on-black optical preview",
                 "input": "official simulator input endpoint through production EventRouter",
                 "mac": "production gateway, capability router, session manager, and fixed acceptance controller",
                 "hermes": "deterministic no-network stream; no OpenClaw payload retained",

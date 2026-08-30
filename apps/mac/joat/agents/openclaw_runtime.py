@@ -101,6 +101,7 @@ class OpenClawConnectionFactory(Protocol):
 @dataclass(slots=True)
 class OpenClawHistoryRecovery:
     client: OpenClawConnectionFactory
+    policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY
     attempts: int = 3
     backoff_s: tuple[float, ...] = (0.0, 0.25, 1.0)
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -123,10 +124,34 @@ class OpenClawHistoryRecovery:
         await _safe_close(connection)
         recovered = await self._connect_with_backoff()
         try:
-            subscribed = _record(await recovered.request("sessions.subscribe", {}))
+            if agent_id != self.policy.agent_id or not self.policy.owns_session_key(session_key):
+                raise OpenClawGatewayError("OpenClaw recovery does not own the Agent Terminal session")
+            subscribed = _record(await recovered.request(
+                "sessions.subscribe",
+                {
+                    "label": self.policy.session_label,
+                    "agentId": agent_id,
+                    "limit": 2,
+                },
+            ))
             if subscribed is None or subscribed.get("subscribed") is not True:
                 raise OpenClawGatewayError(
                     "OpenClaw did not restore the session catalog subscription"
+                )
+            snapshot = _record(subscribed.get("list"))
+            sessions = snapshot.get("sessions") if snapshot else None
+            if not isinstance(sessions, list) or len(sessions) != 1:
+                raise OpenClawGatewayError(
+                    "OpenClaw did not restore an exact Agent Terminal catalog snapshot"
+                )
+            catalog_session = _record(sessions[0])
+            if (
+                catalog_session is None
+                or catalog_session.get("key") != session_key
+                or catalog_session.get("label") != self.policy.session_label
+            ):
+                raise OpenClawGatewayError(
+                    "OpenClaw catalog snapshot did not preserve the Agent Terminal session"
                 )
             messages_subscribed = _record(await recovered.request(
                 "sessions.messages.subscribe",
@@ -196,7 +221,7 @@ class OpenClawTerminalAgent:
         if self._closed:
             await _safe_close(connection)
             raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
-        recovery = OpenClawHistoryRecovery(client=self.client)
+        recovery = OpenClawHistoryRecovery(client=self.client, policy=self.policy)
         try:
             self._terminal = await OpenClawAgentTerminal.create(
                 connection=connection,
