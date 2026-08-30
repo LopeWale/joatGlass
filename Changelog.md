@@ -2,6 +2,20 @@
 
 ## 2026-08-30
 
+- Hardened the opt-in **Brainstorm / Agent Terminal** G2 acceptance route
+  against controls buffered from a replaced WebSocket: the authenticated
+  gateway now binds every action to its current connection generation, and the
+  acceptance controller rejects stale gestures. Its content-free diagnostic
+  observer now establishes causal gesture/frame evidence before the
+  best-effort receipt write. The official simulator visibly exercised and
+  reviewed seven distinct optical states—ready, armed, running, terminal,
+  returned, reconnect-restored, and cancelled—without retaining a transcript
+  or OpenClaw payload. Focused Python verification passed 263 tests; the Hub
+  suite passed 460 tests plus production build. The local `0.1.35` EHPK was
+  rebuilt with the SDK 0.0.14-required Even App `2.2.9` minimum encoded in
+  source, so an offline registry fallback cannot weaken it. No portal upload,
+  installed-G2, physical-lens, or live Hermes proof is claimed.
+
 - Scoped the glasses Hub pairing store to each approved Mac-brain origin and
   persists the last healthy candidate, so a stale credential from one home
   mini cannot be offered to or erase another mini's pairing. Hub verification
