@@ -2,6 +2,13 @@
 
 ## 2026-08-30
 
+- Opening a fresh **Messages** picker now disarms any previously selected
+  conversation or New message compose context before it draws. A subsequent
+  spoken reply therefore cannot target a conversation the wearer no longer
+  sees; the replacement picker, access guidance, and retry state all start
+  clean. This is source/test hardening only—no package was created, installed,
+  or uploaded.
+
 - Extended the glasses **Messages → Conversation** surface from a three-row
   snapshot to Mac-private, request-bound older/newer pages. Attachment-only
   and unread conversation rows are now distinguished from notification cards,

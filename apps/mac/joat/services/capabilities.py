@@ -117,6 +117,10 @@ class CapabilityRouter:
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
         self._message_page_pending = False
+        # The reply controller keeps its selected handle private. Mirror only
+        # whether this router armed one, so a new wearer-visible picker can
+        # reliably disarm it without clearing an unrelated controller state.
+        self._message_selection_active = False
         self._notification_rows: list[tuple[float, str]] = []
         # Calendar and Reminders have different EventKit stores, but a wearer
         # navigates time, not stores. Keep one bounded read-only projection and
@@ -179,8 +183,9 @@ class CapabilityRouter:
         self._message_rows = []
         self._message_history = None
         self._message_page_pending = False
-        if self._replies is not None:
+        if self._replies is not None and self._message_selection_active:
             self._replies.clear_selection(reason)
+        self._message_selection_active = False
 
     def on_disconnect(self) -> None:
         """Drop any Mac-private reply target when the glasses link disappears."""
@@ -258,6 +263,10 @@ class CapabilityRouter:
         ))
 
     async def _show_messages(self) -> None:
+        # A new Messages visit is a new consent context. Never leave a voice
+        # reply pointing at the conversation from the preceding visit while
+        # the wearer sees the fresh picker (including access/retry states).
+        self.clear_message_selection("messages-open")
         if self._messages is None or not self._messages.available:
             if self._request_is_current():
                 self._message_rows = []
@@ -298,6 +307,7 @@ class CapabilityRouter:
             return
         if index == 0:
             self._replies.begin_compose(trace_id)
+            self._message_selection_active = True
             await self._send_list(HudList(
                 items=[
                     'Say “JOAT, message Adele saying …”',
@@ -333,6 +343,7 @@ class CapabilityRouter:
         if not self._request_is_current():
             return
         self._replies.select(thread, trace_id)
+        self._message_selection_active = True
         self._message_history = _MessageHistoryState(thread=thread, pages=[page])
         await self._show_message_history_page()
 
