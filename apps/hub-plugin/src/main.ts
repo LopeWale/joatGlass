@@ -381,6 +381,9 @@ async function boot(): Promise<void> {
       case 'location.probe.control':
         await awaitCurrent(location.setProbeEnabled(msg.enabled, context.signal));
         break;
+      case 'location.refresh':
+        await awaitCurrent(location.requestAssistantLocation(msg.requestId, context.signal));
+        break;
       case 'navigation.view':
         brainstorm.clear();
         await awaitCurrent(navigation.present(msg, undefined, context.signal));
@@ -534,11 +537,6 @@ async function boot(): Promise<void> {
 
   link.connect();
 
-  if (LIVE_MENU_ACCEPTANCE) {
-    await menu.toggle();
-    console.info('[joat] live menu acceptance opened');
-  }
-
   setPanel('p-status', 'connecting');
 
   // Tolerate a stalled/absent device info — both fields already default, and
@@ -627,6 +625,15 @@ async function boot(): Promise<void> {
   void location.start();
   setPanel('p-status', audio.isOpen ? 'listening' : 'mic off');
   setPanel('p-mic', audio.isOpen ? 'streaming' : 'off');
+
+  // The simulator cannot generate the physical left-double gesture. Open the
+  // exact same menu only after the page, chrome, and Mac handshake have all
+  // settled; opening beside `link.connect()` races startup paints and gives a
+  // false negative for the capability flow. Vite strips this from a package.
+  if (LIVE_MENU_ACCEPTANCE) {
+    await menu.toggle();
+    console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
+  }
 
   async function teardown(): Promise<void> {
     await audio.stop();
