@@ -149,6 +149,23 @@ describe('LocationSessionManager', () => {
     });
   });
 
+  it('re-arms the active high-accuracy navigation stream after foreground return', async () => {
+    const h = harness();
+    await h.manager.start();
+    await h.manager.setNavigationConsumer(() => undefined);
+
+    h.manager.setForeground(false);
+    await h.manager.setForeground(true);
+
+    expect(h.bridge.onAppLocationChanged).toHaveBeenCalledTimes(1);
+    expect(h.bridge.stopAppLocationUpdates).toHaveBeenCalledTimes(2);
+    expect(h.bridge.startAppLocationUpdates.mock.calls).toEqual([
+      [{ accuracy: AppLocationAccuracy.Medium, distanceFilter: 250, intervalMs: 60_000 }],
+      [{ accuracy: AppLocationAccuracy.High, distanceFilter: 1, intervalMs: 1000 }],
+      [{ accuracy: AppLocationAccuracy.High, distanceFilter: 1, intervalMs: 1000 }],
+    ]);
+  });
+
   it('does not let a diagnostic probe preempt an active navigation session', async () => {
     const h = harness();
     await h.manager.start();
