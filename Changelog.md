@@ -2,6 +2,18 @@
 
 ## 2026-08-30
 
+- Fixed the live assistant's nearby-place gap: the Mapbox provider and fresh
+  iPhone fix were already available, but the local model had never selected
+  the advertised lookup. Explicit locality requests such as **coffee near
+  me**, **nearby restaurants**, and **closest pharmacy** now invoke the
+  existing private, request-bound phone-location lookup deterministically;
+  ordinary questions still use model-selected tools. Tool diagnostics now
+  retain only the tool name and result length, never a spoken place query or
+  provider error text. Focused location/tool verification passed 59 tests and
+  strict mypy. This source change awaits the user's controlled JOAT restart
+  and glasses test; it is not a live nearby-search, physical-G2, or package
+  claim.
+
 - Hardened the opt-in **Brainstorm / Agent Terminal** G2 acceptance route
   against controls buffered from a replaced WebSocket: the authenticated
   gateway now binds every action to its current connection generation, and the
