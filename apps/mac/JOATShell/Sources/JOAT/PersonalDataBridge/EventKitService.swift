@@ -385,15 +385,15 @@ actor EventKitService {
         reminder.isCompleted = true
         try store.save(reminder, commit: true)
         storeGeneration &+= 1
-        guard let readBack = store.calendarItem(
-            withIdentifier: request.calendarItemIdentifier
-        ) as? EKReminder else {
-            throw NativeBridgeError(
-                "commit_readback_missing",
-                "completion was saved but the reminder is not yet readable",
-                commitPhase: "committed_unverified"
-            )
-        }
+        // A completion is a safe write just like creation. Do not promote the
+        // terminal HUD to "Completed and verified" from EventKit's live
+        // object cache; reset and re-fetch the exact native item first.
+        let readBack: EKReminder = try Self.committedReadBack(
+            identifier: reminder.calendarItemIdentifier,
+            entity: "reminder completion",
+            resetStore: { store.reset() },
+            fetch: { identifier in store.calendarItem(withIdentifier: identifier) as? EKReminder }
+        )
         let result = try BridgeContract.encode(normalize(reminder: readBack))
         completedAttempts[attemptID] = (payloadDigest, result)
         return result
