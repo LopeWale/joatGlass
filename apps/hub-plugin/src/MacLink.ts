@@ -4,6 +4,13 @@ import type { DownlinkMessage, UplinkMessage } from './types';
 export type LinkState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
 /**
+ * Pairing credentials are scoped to a canonical WebSocket origin. Every
+ * approved Mac brain maintains its own pairing store, so a credential issued
+ * by one brain must never be offered to another.
+ */
+export type PairingTokensByOrigin = Readonly<Record<string, string>>;
+
+/**
  * Lifetime of one socket dispatcher. Handlers must check the signal after
  * every awaited host/HUD operation before publishing follow-up state.
  */
@@ -39,6 +46,17 @@ interface DownlinkDispatcher {
   pendingAssistantAppend?: QueuedDownlink;
 }
 
+function canonicalOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:')
+      ? parsed.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function isAssistantAppendWithText(
   message: DownlinkMessage,
 ): message is Extract<DownlinkMessage, { kind: 'assistant.overlay' }> & {
@@ -58,8 +76,12 @@ export interface MacLinkOptions {
    * whitelisted Mac and the plugin finds it, no rebuild needed.
    */
   urls: readonly string[];
-  /** Pairing token (from a previous pairing.set), sent as the first app frame. */
+  /** Legacy one-brain pairing token, migrated to the first configured origin. */
   token?: string | null;
+  /** Pairing tokens keyed by canonical origin for approved candidate brains. */
+  tokens?: PairingTokensByOrigin;
+  /** Exact approved candidate that most recently authenticated successfully. */
+  preferredUrl?: string | null;
   maxQueue?: number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
@@ -87,7 +109,8 @@ export class MacLink {
   private nextDownlinkGeneration = 0;
   private stateHandler?: (state: LinkState) => void;
   private currentState: LinkState = 'connecting';
-  private token: string | null;
+  private readonly tokensByOrigin = new Map<string, string>();
+  private readonly failedTokensByOrigin = new Map<string, number>();
   private authenticated = false;
 
   private readonly maxQueue: number;
@@ -97,12 +120,26 @@ export class MacLink {
   private readonly downlinkMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
   private reconnectPending = false;
-  private failedWithToken = 0;
-  private staleTokenHandler?: () => void;
+  private staleTokenHandler?: (origin: string, tokens: PairingTokensByOrigin) => void;
 
   constructor(private readonly opts: MacLinkOptions) {
     if (opts.urls.length === 0) throw new Error('MacLink needs at least one URL');
-    this.token = opts.token ?? null;
+    for (const [origin, token] of Object.entries(opts.tokens ?? {})) {
+      if (canonicalOrigin(origin) === origin && token.length > 0) {
+        this.tokensByOrigin.set(origin, token);
+      }
+    }
+    // The old single-token representation could only have been used with
+    // candidate zero. Retaining that interpretation is safe migration; it
+    // never sprays a credential across the remaining approved brains.
+    const initialOrigin = canonicalOrigin(opts.urls[0]!);
+    if (opts.token && initialOrigin && !this.tokensByOrigin.has(initialOrigin)) {
+      this.tokensByOrigin.set(initialOrigin, opts.token);
+    }
+    const preferredIndex = opts.preferredUrl === undefined || opts.preferredUrl === null
+      ? -1
+      : opts.urls.indexOf(opts.preferredUrl);
+    if (preferredIndex >= 0) this.urlIndex = preferredIndex;
     this.maxQueue = opts.maxQueue ?? 200;
     this.baseMs = opts.reconnectBaseMs ?? 500;
     this.capMs = opts.reconnectMaxMs ?? 15_000;
@@ -115,15 +152,40 @@ export class MacLink {
     return this.opts.urls[this.urlIndex % this.opts.urls.length] as string;
   }
 
+  /** Canonical origin of the candidate currently being dialed. */
+  get activeOrigin(): string {
+    return canonicalOrigin(this.activeUrl) ?? '';
+  }
+
+  /** Credential for the current candidate only, never for another host. */
+  get pairingToken(): string | null {
+    return this.tokensByOrigin.get(this.activeOrigin) ?? null;
+  }
+
+  /** Snapshot suitable for durable storage; never include it in HUD/log text. */
+  get pairingTokens(): PairingTokensByOrigin {
+    return Object.fromEntries(this.tokensByOrigin);
+  }
+
   /** Latest lifecycle truth, retained even when the HUD is still booting. */
   get linkState(): LinkState {
     return this.currentState;
   }
 
-  /** Adopt a pairing token mid-session (pairing.set); used from the next dial on. */
+  /** Adopt a pairing token for the current approved origin only. */
   setToken(token: string): void {
-    this.token = token;
-    this.failedWithToken = 0;
+    const origin = this.activeOrigin;
+    if (!origin || !token) return;
+    this.tokensByOrigin.set(origin, token);
+    this.failedTokensByOrigin.delete(origin);
+  }
+
+  /** Drop only the active origin's unacknowledged pairing candidate. */
+  clearToken(): void {
+    const origin = this.activeOrigin;
+    if (!origin) return;
+    this.tokensByOrigin.delete(origin);
+    this.failedTokensByOrigin.delete(origin);
   }
 
   /**
@@ -131,7 +193,7 @@ export class MacLink {
    * (the Mac re-paired without us). The token is already dropped; the
    * handler's job is to forget it durably so a relaunch doesn't resurrect it.
    */
-  onStaleToken(handler: () => void): void {
+  onStaleToken(handler: (origin: string, tokens: PairingTokensByOrigin) => void): void {
     this.staleTokenHandler = handler;
   }
 
@@ -182,7 +244,7 @@ export class MacLink {
     socket.onopen = () => {
       if (this.socket !== socket) return; // superseded by a newer dial
       this.clearDialTimer();
-      this.rawSend({ kind: 'auth', token: this.token });
+      this.rawSend({ kind: 'auth', token: this.pairingToken });
       // TCP/WebSocket open is not application authentication. Bound the
       // second phase too, or a peer can leave the HUD connecting forever.
       this.dialTimer = setTimeout(() => {
@@ -198,7 +260,7 @@ export class MacLink {
             this.authenticated = true;
             this.clearDialTimer();
             this.attempt = 0;
-            this.failedWithToken = 0;
+            this.failedTokensByOrigin.delete(this.activeOrigin);
             this.reportState('connected');
             for (const queued of this.queue.splice(0)) this.rawSend(queued);
           }
@@ -277,12 +339,17 @@ export class MacLink {
       this.authenticated = false;
       // Post-handshake auth gives an explicit close code. Never discard a
       // durable token for generic network failure, sleep, or a dead endpoint.
-      if (this.token !== null && !wasAuthenticated && event.code === 4401) {
-        this.failedWithToken += 1;
-        if (this.failedWithToken >= this.opts.urls.length * 2) {
-          this.token = null;
-          this.failedWithToken = 0;
-          this.staleTokenHandler?.();
+      const origin = this.activeOrigin;
+      if (this.pairingToken !== null && !wasAuthenticated && event.code === 4401) {
+        const failures = (this.failedTokensByOrigin.get(origin) ?? 0) + 1;
+        this.failedTokensByOrigin.set(origin, failures);
+        // This origin is reached once per complete candidate rotation, so two
+        // explicit rejections are already two full passes. Count only its own
+        // failures: a rejecting replacement brain must never erase a healthy
+        // brain's credential.
+        if (failures >= 2) {
+          this.clearToken();
+          this.staleTokenHandler?.(origin, this.pairingTokens);
         }
       }
       if (!this.closed) {

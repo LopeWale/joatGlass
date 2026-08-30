@@ -90,6 +90,68 @@ describe('MacLink pairing token', () => {
     link.connect();
     expect(link.activeUrl).toBe('ws://m:1/g');
   });
+
+  it('uses the pairing token belonging to each approved brain, never a global token', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({
+      urls: ['ws://a:1/g', 'ws://b:1/g'],
+      tokens: { 'ws://a:1': 'token-a', 'ws://b:1': 'token-b' },
+      reconnectBaseMs: 10,
+      reconnectMaxMs: 10,
+    });
+    link.connect();
+    sockets[0]!.open();
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ kind: 'auth', token: 'token-a' })]);
+
+    sockets[0]!.close();
+    vi.advanceTimersByTime(20);
+    sockets[1]!.open();
+    expect(sockets[1]!.sent).toEqual([JSON.stringify({ kind: 'auth', token: 'token-b' })]);
+  });
+
+  it('starts at a stored healthy approved brain rather than always candidate zero', () => {
+    const link = new MacLink({
+      urls: ['wss://a:443/glasses', 'wss://b:443/glasses'],
+      preferredUrl: 'wss://b:443/glasses',
+      tokens: { 'wss://b': 'token-b' },
+    });
+    link.connect();
+
+    expect(dialed).toEqual(['wss://b:443/glasses']);
+    sockets[0]!.open();
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ kind: 'auth', token: 'token-b' })]);
+  });
+
+  it('forgets only the Mac that explicitly rejects its own token', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({
+      urls: ['ws://a:1/g', 'ws://b:1/g'],
+      tokens: { 'ws://a:1': 'token-a', 'ws://b:1': 'token-b' },
+      reconnectBaseMs: 10,
+      reconnectMaxMs: 10,
+    });
+    const stale: Array<{ origin: string; tokens: Record<string, string> }> = [];
+    link.onStaleToken((origin, tokens) => stale.push({ origin, tokens: { ...tokens } }));
+
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.close(4401); // first explicit rejection at A
+    vi.advanceTimersByTime(30);
+
+    sockets[1]!.open();
+    sockets[1]!.receive({ kind: 'auth.accepted' }); // B remains independently healthy
+    sockets[1]!.close(1006);
+    vi.advanceTimersByTime(30);
+
+    sockets[2]!.open();
+    sockets[2]!.close(4401); // second complete rotation reaches A again
+
+    expect(link.pairingTokens).toEqual({ 'ws://b:1': 'token-b' });
+    expect(stale).toEqual([{
+      origin: 'ws://a:1',
+      tokens: { 'ws://b:1': 'token-b' },
+    }]);
+  });
 });
 
 describe('MacLink diagnostic delivery', () => {

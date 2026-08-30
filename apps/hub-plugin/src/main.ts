@@ -13,7 +13,18 @@ import {
   selectHudFirstLight,
 } from './HudPageBootstrap';
 import { Chrome } from './Chrome';
-import { TOKEN_KEY, handlePairingOffer, loadToken } from './Pairing';
+import {
+  PAIRING_TOKENS_KEY,
+  PREFERRED_BRAIN_KEY,
+  TOKEN_KEY,
+  decodePairingTokens,
+  encodePairingTokens,
+  handlePairingOffer,
+  loadPairingTokens,
+  loadToken,
+  mergePairingTokens,
+  migrateLegacyToken,
+} from './Pairing';
 import { LocationSessionManager } from './LocationSessionManager';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
@@ -64,6 +75,21 @@ const MAC_WS_URLS = ((): readonly string[] => {
   // `??` and would otherwise leave zero candidates and abort boot.
   return parsed.length > 0 ? parsed : ['wss://mac.local:8787/glasses'];
 })();
+
+/** Accept a remembered candidate only when it remains in this package's
+ * manifest-allowlisted candidate set. Durable storage must never become an
+ * alternate URL configuration channel. */
+function rememberedBrain(raw: string | null | undefined): string | null {
+  return raw !== null && raw !== undefined && MAC_WS_URLS.includes(raw) ? raw : null;
+}
+
+function loadRememberedBrain(): string | null {
+  try {
+    return rememberedBrain(localStorage.getItem(PREFERRED_BRAIN_KEY));
+  } catch {
+    return null;
+  }
+}
 
 type VisualState =
   | 'overview'
@@ -143,7 +169,11 @@ async function boot(): Promise<void> {
     const preview = new BrowserHudPreview(renderer);
     const previewClient = new BridgeClient();
     const hud = new HudPresenter(previewClient, new HudPageBuilder(), preview);
-    const previewLink = new MacLink({ urls: MAC_WS_URLS, token: loadToken() });
+    const previewLink = new MacLink({
+      urls: MAC_WS_URLS,
+      tokens: migrateLegacyToken(loadPairingTokens(), loadToken(), MAC_WS_URLS[0]),
+      preferredUrl: loadRememberedBrain(),
+    });
     const menu = new CapabilityMenu(
       hud,
       new Settings(),
@@ -155,19 +185,30 @@ async function boot(): Promise<void> {
   }
   const client = new BridgeClient();
   const layouts = new HudPageBuilder();
-  // Bridge FIRST: the pairing token prefers HOST storage (the
-  // WebView's localStorage is origin-scoped, so dev-server and packed
-  // builds held separate tokens and every switch forced a manual re-pair;
-  // host storage is one bucket for both).
+  // Bridge FIRST: host storage mirrors the origin-scoped WebView storage, so
+  // dev and packed builds can use the same approved Mac brains. Credentials
+  // are a per-origin map: a pairing secret from Mac A must never be sent to
+  // Mac B merely because both appear in this package's allowlist.
   await client.init();
-  let token = loadToken();
+  let tokens = loadPairingTokens();
+  let preferredUrl = loadRememberedBrain();
   try {
-    const hosted = await client.require().getLocalStorage(TOKEN_KEY);
-    if (hosted) token = hosted;
+    const [hostedTokensRaw, hostedPreferredRaw, hostedLegacy] = await Promise.all([
+      client.require().getLocalStorage(PAIRING_TOKENS_KEY),
+      client.require().getLocalStorage(PREFERRED_BRAIN_KEY),
+      client.require().getLocalStorage(TOKEN_KEY),
+    ]);
+    // The Even host is the common persistence layer between an installed
+    // package and its development webview, so let its valid per-origin map
+    // win over a stale local mirror. No URL is accepted from storage.
+    tokens = mergePairingTokens(decodePairingTokens(hostedTokensRaw), tokens);
+    tokens = migrateLegacyToken(tokens, hostedLegacy, MAC_WS_URLS[0]);
+    preferredUrl = rememberedBrain(hostedPreferredRaw) ?? preferredUrl;
   } catch {
     // Older host: WebView storage remains the fallback.
   }
-  const link = new MacLink({ urls: MAC_WS_URLS, token });
+  tokens = migrateLegacyToken(tokens, loadToken(), MAC_WS_URLS[0]);
+  const link = new MacLink({ urls: MAC_WS_URLS, tokens, preferredUrl });
   // Disabled by default. Only the local Mac shell can enable this support
   // capture, and the gateway independently redacts every event it accepts.
   const g2Diagnostics = new MacG2DiagnosticTrace(link);
@@ -185,15 +226,23 @@ async function boot(): Promise<void> {
   let audioRef: AudioStreamer | undefined;
   let imuRef: ImuMonitor | undefined;
 
-  // A token the Mac no longer honours must not outlive the session, or
-  // every relaunch dials with it and is refused again.
-  link.onStaleToken(() => {
+  const persistPairingTokens = (next: Readonly<Record<string, string>>): void => {
+    const encoded = encodePairingTokens(next);
     try {
+      localStorage.setItem(PAIRING_TOKENS_KEY, encoded);
       localStorage.removeItem(TOKEN_KEY);
     } catch {
-      // Storage unavailable — the in-memory drop already unblocked us.
+      // Storage unavailable — MacLink's in-memory map still remains correct.
     }
+    void client.require().setLocalStorage(PAIRING_TOKENS_KEY, encoded).catch(() => {});
     void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
+  };
+
+  // A token the Mac no longer honours must not outlive the session, but only
+  // delete the one candidate that rejected it. The other home Macs retain
+  // their independently approved credentials.
+  link.onStaleToken((_origin, next) => {
+    persistPairingTokens(next);
   });
 
   setPanel('p-url', link.activeUrl);
@@ -209,7 +258,16 @@ async function boot(): Promise<void> {
     setPanel('p-link', state);
     chromeRef?.setLink(state);
     setPanel('p-url', link.activeUrl); // failover rotation, made visible
-    if (state === 'connected') announce?.();
+    if (state === 'connected') {
+      const active = link.activeUrl;
+      try {
+        localStorage.setItem(PREFERRED_BRAIN_KEY, active);
+      } catch {
+        // The active authenticated session remains usable without storage.
+      }
+      void client.require().setLocalStorage(PREFERRED_BRAIN_KEY, active).catch(() => {});
+      announce?.();
+    }
     else {
       // A disconnected or replacement brain no longer authorizes either
       // opt-in diagnostic path. A fresh authenticated session will send its
@@ -536,8 +594,14 @@ async function boot(): Promise<void> {
         break;
       }
       case 'pairing.set':
-        handlePairingOffer(msg.token, link, (tok) => {
-          void client.require().setLocalStorage(TOKEN_KEY, tok).catch(() => {});
+        handlePairingOffer(msg.token, link, (encoded) => {
+          try {
+            localStorage.removeItem(TOKEN_KEY);
+          } catch {
+            // The v1 map was already durably written before this callback.
+          }
+          void client.require().setLocalStorage(PAIRING_TOKENS_KEY, encoded).catch(() => {});
+          void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
         });
         break;
       case 'policy.set':
