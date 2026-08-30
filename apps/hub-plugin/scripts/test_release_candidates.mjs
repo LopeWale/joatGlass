@@ -8,9 +8,9 @@ import {
   validateReleaseCandidates,
 } from './release_candidates.mjs';
 
-// Release-candidate validation must exercise the same allowlist packed into
-// JOAT. A hand-written fixture can accidentally "approve" a Mini that the
-// Even Hub manifest will reject before the socket is opened.
+// Release-candidate validation must exercise the checked-in source allowlist.
+// `test_release_manifest.mjs` separately proves that the package narrows it
+// to the exact WSS origins selected for a release.
 const manifest = JSON.parse(
   readFileSync(new URL('../app.json', import.meta.url), 'utf8'),
 );
