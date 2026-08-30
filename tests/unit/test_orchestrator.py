@@ -416,6 +416,72 @@ class StreamingReplier(ReplyEngine):
 
 
 class TestStreamedReply:
+    async def test_opt_in_latency_observer_is_bounded_content_free_and_ordered(
+        self,
+    ) -> None:
+        secret_query = "private calendar question"
+        secret_reply = "Private answer that must never enter the latency receipt."
+        latency_events: list[tuple[str, str]] = []
+        transport, engine = FakeTransport(), FakeEngine(f"JOAT, {secret_query}")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=StreamingReplier([secret_reply[:8], secret_reply[8:]]),
+            wake_words=WAKE,
+            latency_observer=lambda stage, bucket: latency_events.append((stage, bucket)),
+        )
+
+        await orch._handle_utterance(LOUD)
+
+        assert [stage for stage, _bucket in latency_events] == [
+            "utterance_ready",
+            "ack_sent",
+            "stt_complete",
+            "first_reply_sent",
+            "reply_complete",
+        ]
+        allowed_buckets = {
+            "lte250ms", "250_500ms", "500ms_1s", "1_2s",
+            "2_5s", "5_10s", "gt10s",
+        }
+        assert all(bucket in allowed_buckets for _stage, bucket in latency_events)
+        assert secret_query not in repr(latency_events)
+        assert secret_reply not in repr(latency_events)
+
+    async def test_latency_observer_is_disabled_by_default(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        caplog.set_level(logging.INFO)
+        transport, engine = FakeTransport(), FakeEngine("JOAT, hello")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=StreamingReplier(["hello"]),
+            wake_words=WAKE,
+        )
+
+        await orch._handle_utterance(LOUD)
+
+        assert "voice latency" not in caplog.text
+
+    async def test_latency_observer_failure_cannot_break_the_voice_path(self) -> None:
+        def fail_observer(_stage: str, _bucket: str) -> None:
+            raise RuntimeError("acceptance sink unavailable")
+
+        transport, engine = FakeTransport(), FakeEngine("JOAT, hello")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=StreamingReplier(["hello"]),
+            wake_words=WAKE,
+            latency_observer=fail_observer,
+        )
+
+        await orch._handle_utterance(LOUD)
+
+        assert "hello" in [message.text for message in transport.sent]
+
     async def test_chunks_stream_as_show_then_appends(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("tell me a story")
         orch = VoiceOrchestrator(

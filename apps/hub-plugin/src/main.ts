@@ -24,6 +24,7 @@ import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
 import { ContainerId, type DownlinkMessage, type ProductivityHudModel } from './types';
 import {
+  ASSISTANT_OVERLAY_VISUAL_TEXT,
   BrowserHudPreview,
   VISUAL_CONFIRMATION_PROMPT,
   brainstormVisualFixture,
@@ -68,6 +69,7 @@ type VisualState =
   | 'sidebar'
   | 'more'
   | 'confirmation'
+  | 'assistant-overlay'
   | ProductivityVisualState
   | ProductivityLifecycleVisualState
   | BrainstormVisualState
@@ -109,7 +111,8 @@ const VISUAL_STATE = ((): VisualState | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatVisual');
   return requested === 'overview' || requested === 'sidebar' || requested === 'more'
-    || requested === 'confirmation' || isProductivityVisualState(requested)
+    || requested === 'confirmation' || requested === 'assistant-overlay'
+    || isProductivityVisualState(requested)
     || isProductivityLifecycleVisualState(requested)
     || isBrainstormVisualState(requested)
     || (requested !== null && isNavigationVisualState(requested))
@@ -715,6 +718,13 @@ async function renderVisualState(
   if (state === 'confirmation') {
     if (imu) await runVisualConfirmationFixture(hud, imu);
     else await hud.showConfirmation(VISUAL_CONFIRMATION_PROMPT, 'browser-visual-confirmation');
+    return;
+  }
+
+  if (state === 'assistant-overlay') {
+    await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
+    await hud.showText('Reminder monitoring armed', ContainerId.Tray, 2);
+    await hud.showAssistantOverlay(ASSISTANT_OVERLAY_VISUAL_TEXT);
     return;
   }
 

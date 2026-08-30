@@ -2,6 +2,8 @@ import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 
+const SAMPLE_RATE = 16_000;
+
 /**
  * Streams microphone PCM to the Mac.
  *
@@ -25,12 +27,15 @@ export class AudioStreamer {
   onState?: (open: boolean) => void;
   /** Dominant speakerRole across the current batch (SDK 0.0.14). */
   private speaker?: string;
+  private readonly samplesPerMessage: number;
 
   constructor(
     private readonly client: BridgeClient,
     private readonly link: MacLink,
     private readonly flushMs = 200,
-  ) {}
+  ) {
+    this.samplesPerMessage = Math.max(1, Math.round(SAMPLE_RATE * flushMs / 1_000));
+  }
 
   /** True while the mic is streaming. DeviceMonitor keys resume logic off this. */
   get isOpen(): boolean {
@@ -125,13 +130,15 @@ export class AudioStreamer {
 
   private flush(source: AudioInputSource): void {
     if (this.buffer.length === 0) return;
-    this.link.send({
-      kind: 'audio',
-      source: source === AudioInputSource.Glasses ? 'glasses' : 'phone',
-      seq: this.seq++,
-      pcm: this.buffer.splice(0),
-      ...(this.speaker !== undefined ? { speaker: this.speaker } : {}),
-    });
+    while (this.buffer.length > 0) {
+      this.link.send({
+        kind: 'audio',
+        source: source === AudioInputSource.Glasses ? 'glasses' : 'phone',
+        seq: this.seq++,
+        pcm: this.buffer.splice(0, this.samplesPerMessage),
+        ...(this.speaker !== undefined ? { speaker: this.speaker } : {}),
+      });
+    }
     this.speaker = undefined;
   }
 }

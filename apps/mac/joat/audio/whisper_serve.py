@@ -100,7 +100,11 @@ class WhisperServeEngine(SttEngine):
         prompt: str | None = None,
         max_buffer_s: float = 30.0,
         ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S,
+        temperature_fallback_count: int = 0,
+        without_timestamps: bool = True,
     ) -> None:
+        if temperature_fallback_count < 0:
+            raise ValueError("temperature_fallback_count must be non-negative")
         self._binary = binary
         self._model = model
         self._port = port
@@ -114,6 +118,8 @@ class WhisperServeEngine(SttEngine):
         self._external = base_url is not None and command is None
         self._max_bytes = int(max_buffer_s * SAMPLE_RATE * SAMPLE_WIDTH)
         self._ready_timeout_s = ready_timeout_s
+        self._temperature_fallback_count = temperature_fallback_count
+        self._without_timestamps = without_timestamps
         self._buffer = bytearray()
         self._proc: asyncio.subprocess.Process | None = None
 
@@ -173,10 +179,16 @@ class WhisperServeEngine(SttEngine):
                 proc.kill()
 
     async def _spawn(self) -> None:
-        cmd = self._command or [
-            self._binary, "serve", "--model", self._model,
-            "--host", "127.0.0.1", "--port", str(self._port),
-        ]
+        if self._command is not None:
+            cmd = self._command
+        else:
+            cmd = [
+                self._binary, "serve", "--model", self._model,
+                "--host", "127.0.0.1", "--port", str(self._port),
+                "--temperature-fallback-count", str(self._temperature_fallback_count),
+            ]
+            if self._without_timestamps:
+                cmd.append("--without-timestamps")
         self._proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
@@ -237,13 +249,16 @@ class WhisperServeEngine(SttEngine):
                          time.monotonic() - started[0],
                          len(payload) / (16_000 * 2))
         except Exception as exc:
-            log.warning("whisper serve request failed (%s) — respawning once", exc)
+            log.warning(
+                "whisper serve request failed error=%s — respawning once",
+                type(exc).__name__,
+            )
             if not await self._respawn():
                 return None
             try:
                 text = await asyncio.to_thread(self._post, payload)
             except Exception as exc2:
-                log.error("whisper serve retry failed: %s", exc2)
+                log.error("whisper serve retry failed error=%s", type(exc2).__name__)
                 return None
         return Transcript(text=text, is_final=True) if text else None
 

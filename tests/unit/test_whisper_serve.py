@@ -95,6 +95,36 @@ class TestFlush:
         assert await engine.flush() is None
         assert StubHandler.requests == []
 
+    async def test_slow_post_is_not_timed_out_or_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A warm-tail request remains owned until its worker really returns."""
+        started = threading.Event()
+        release = threading.Event()
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1")
+
+        def slow_post(_payload: bytes) -> str:
+            started.set()
+            release.wait()
+            return "eventual transcript"
+
+        async def unexpected_respawn() -> bool:
+            raise AssertionError("a slow in-flight POST must not be retried")
+
+        monkeypatch.setattr(engine, "_post", slow_post)
+        monkeypatch.setattr(engine, "_respawn", unexpected_respawn)
+        await engine.feed(SPEECH)
+        flushing = asyncio.create_task(engine.flush())
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started.wait, 0.5), 1.0)
+            await asyncio.sleep(0)
+            assert not flushing.done()
+        finally:
+            release.set()
+
+        transcript = await flushing
+        assert transcript is not None
+        assert transcript.text == "eventual transcript"
 
 STUB_SERVER_SCRIPT = textwrap.dedent("""
     import json, sys
@@ -116,6 +146,55 @@ STUB_SERVER_SCRIPT = textwrap.dedent("""
 
 
 class TestLifecycle:
+    async def test_spawn_uses_one_text_only_decode_without_temperature_fallbacks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[object] = []
+
+        class Process:
+            returncode = None
+
+        async def create_subprocess_exec(*args: object, **kwargs: object) -> Process:
+            captured.extend(args)
+            captured.append(kwargs)
+            return Process()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+        engine = WhisperServeEngine(port=50_061)
+
+        await engine._spawn()
+
+        assert captured[:-1] == [
+            "whisperkit-cli", "serve", "--model", "large-v3_turbo",
+            "--host", "127.0.0.1", "--port", "50061",
+            "--temperature-fallback-count", "0", "--without-timestamps",
+        ]
+
+    async def test_spawn_decode_policy_remains_configurable_for_ab_trials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[object] = []
+
+        class Process:
+            returncode = None
+
+        async def create_subprocess_exec(*args: object, **kwargs: object) -> Process:
+            captured.extend(args)
+            captured.append(kwargs)
+            return Process()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+        engine = WhisperServeEngine(
+            port=50_062,
+            temperature_fallback_count=2,
+            without_timestamps=False,
+        )
+
+        await engine._spawn()
+
+        assert captured[:-1][-2:] == ["--temperature-fallback-count", "2"]
+        assert "--without-timestamps" not in captured[:-1]
+
     def test_default_readiness_budget_does_not_block_other_capabilities(self) -> None:
         engine = WhisperServeEngine(base_url="http://127.0.0.1:1")
 

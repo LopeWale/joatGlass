@@ -24,12 +24,14 @@ live against the simulator over the tailnet, including HUD text rendered from Py
 Tier 2 complete (see docs/TESTING.md, including the simulator findings: no IMU,
 right-temple-only input, double-click = system exit).
 
-## 4. Wire STT + MLX reply — STT HALF DONE
+## 4. Wire STT + MLX reply — WIRED; PHYSICAL LATENCY OPEN
 
 `python -m joat` runs the voice loop: mic → RmsVad → WhisperKitEngine → transcript
 as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
-Phase 0 CLOSED (metric met at ~2.2 s). Phase 2 in progress: debate loop with
-visible verifier turns and repair, wake-word address gate, and the DebateLoop
+The voice loop is wired, but the earlier desk result did not survive current
+physical use: roughly 15-second replies have been observed and the production-G2
+metric is reopened. Phase 2 is in progress: debate loop with visible verifier
+turns and repair, wake-word address gate, and the DebateLoop
 convergence state machine (agreement >= 0.85, capped rounds). NLI claim-support (MiniCheck flan-t5-large, optional `nli` extra) now runs
 inside the gate: a real quote propping up a misrepresenting claim gets visibly
 downgraded ('claim support 0.12 — quote real but claim weakly supported').
@@ -38,11 +40,22 @@ from prose contracts. CAUTION for future installers: PyPI's 'minicheck' is an
 UNRELATED formal-methods tool — the fact-checker installs from git (pinned in
 pyproject's nli extra).
 
-**Metric: round-trip voice → HUD < 3 s — MET.** With `whisperkit-cli serve`
-(resident model, `WhisperServeEngine`): utterance-end → transcript **0.79–0.89 s**,
-transcript → reply **0.51–0.55 s**; plus the 0.8 s VAD hangover ≈ **2.2 s total**
-(was 8.4 s with the per-utterance CLI). Serve warms once at brain boot (~7 s) and
-auto-respawns if it dies mid-session (verified by killing it live).
+**Metric: round-trip voice → first lens-visible reply < 3 s — OPEN.** The
+historical desk measurement was utterance-end → transcript **0.79–0.89 s** and
+transcript → reply **0.51–0.55 s**, with an older 0.8-second callback-count VAD
+hangover. It is retained as a historical Mac-side measurement, not current
+simulator or physical-G2 proof.
+
+The focused latency repair now keeps Whisper non-dropping while requesting one
+text-only decode (temperature fallback count zero), measures the one-second VAD
+hangover from actual PCM sample duration, preserves 200 ms messages when SDK
+callbacks coalesce, and emits the first reply after eight characters before
+returning to the normal 32-character batching. A local acceptance observer is
+disabled by default and exposes only fixed stage names plus coarse latency
+buckets; it retains no transcript, reply, frame, device, or exact timing data.
+These changes need a fresh app restart and synchronized physical-G2 run before
+the metric can be closed. Simulator, Mac process, bridge acknowledgement, and
+physical lens evidence must remain separate.
 
 **Phase 2 requirement (wearer-stated):** the debate must be LIVE-STREAMED to the HUD
 turn by turn — visible as it happens, one exchange at a time — not a background job

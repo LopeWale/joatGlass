@@ -12,6 +12,11 @@ import type {
 export const VISUAL_CONFIRMATION_PROMPT =
   'Send to SIMULATOR TEST (NO SEND)? “Trace only. No message will be sent.”';
 
+/** Content-free development copy that exercises the longest assistant card
+ * through the production four-tile renderer without exposing a real reply. */
+export const ASSISTANT_OVERLAY_VISUAL_TEXT =
+  'I checked the calendar and reminders. Your design review is next, and reminder monitoring is armed for this evening.';
+
 const VISUAL_CONFIRMATION_ID = 'visual-confirmation';
 
 export const PRODUCTIVITY_VISUAL_STATES = [

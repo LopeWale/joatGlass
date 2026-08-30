@@ -55,6 +55,30 @@ describe('AudioStreamer byte decoding', () => {
     expect(msg.pcm).toEqual([258]);
   });
 
+  it('splits a delayed flush into sample-bounded messages', async () => {
+    const { audio, sent } = make();
+    await audio.start();
+    // Four nominal 200 ms chunks plus a short tail arrive before the timer.
+    const sourceSamples = Array.from(
+      { length: 4 * 3_200 + 137 },
+      (_, index) => (index % 32_768) - 16_384,
+    );
+    const sourceBytes = new Uint8Array(sourceSamples.length * 2);
+    const sourceView = new DataView(sourceBytes.buffer);
+    sourceSamples.forEach((sample, index) => sourceView.setInt16(index * 2, sample, true));
+    audio.ingest(sourceBytes);
+
+    vi.advanceTimersByTime(200);
+
+    const messages = sent.filter((message) => message.kind === 'audio');
+    expect(messages).toHaveLength(5);
+    expect(messages.map((message) => message.pcm.length)).toEqual([
+      3_200, 3_200, 3_200, 3_200, 137,
+    ]);
+    expect(messages.map((message) => message.seq)).toEqual([0, 1, 2, 3, 4]);
+    expect(messages.flatMap((message) => message.pcm)).toEqual(sourceSamples);
+  });
+
   it('a new stop invalidates and compensates an older pending start', async () => {
     let releaseStart!: (started: boolean) => void;
     const pendingStart = new Promise<boolean>((resolve) => { releaseStart = resolve; });

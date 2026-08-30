@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2  # signed 16-bit LE
+NOMINAL_BATCH_SAMPLES = SAMPLE_RATE // 5  # 200 ms, retained for API compatibility
 
 
 def rms(pcm: bytes) -> float:
@@ -37,8 +38,9 @@ class RmsVad:
 
     speech_rms: batch RMS at/above this counts as speech. The right value
     depends on mic gain, so the trigger is adaptive by default (see below).
-    hangover_batches: sub-threshold batches that close an utterance. They may
-    be consecutive, or span one isolated noisy batch.
+    hangover_batches: 200 ms compatibility units of sub-threshold PCM that
+    close an utterance. The actual limit is measured from sample duration and
+    may span one isolated noisy chunk.
     max_utterance_s: hard cut so a noisy room cannot buffer unboundedly.
     """
 
@@ -83,9 +85,9 @@ class RmsVad:
 
     _buffer: bytearray = field(default_factory=bytearray, repr=False)
     _in_speech: bool = False
-    _quiet_run: int = 0
+    _closing_quiet_samples: int = 0
+    _closing_noise_chunks: int = 0
     _loud_run: int = 0
-    _closing_window: deque[bool] = field(default_factory=deque, repr=False)
     _preroll: deque[bytes] = field(
         default_factory=lambda: deque(maxlen=3), repr=False)
     _recent: deque[float] = field(
@@ -119,6 +121,7 @@ class RmsVad:
 
     def feed(self, pcm: bytes) -> bytes | None:
         """Returns the finished utterance's PCM when this batch closes one."""
+        sample_count = len(pcm) // SAMPLE_WIDTH
         level = rms(pcm)
         # History is fed unconditionally — a percentile floor needs to see
         # speech to know what is NOT speech.
@@ -134,31 +137,31 @@ class RmsVad:
             if self._loud_run < self.start_batches:
                 return None  # debounce: not enough consecutive speech yet
             self._in_speech = True
-            self._quiet_run = 0
-            self._closing_window.clear()
+            self._closing_quiet_samples = 0
+            self._closing_noise_chunks = 0
             # Seed with the pre-roll (which already includes this batch and
             # the debounced ones) so the utterance keeps its own beginning.
             self._buffer = bytearray(b"".join(self._preroll))
             self._preroll.clear()
-            return None
-
-        self._buffer.extend(pcm)
-        max_bytes = int(self.max_utterance_s * SAMPLE_RATE * SAMPLE_WIDTH)
-        self._closing_window.append(not loud)
-        while len(self._closing_window) > self.hangover_batches + 1:
-            self._closing_window.popleft()
-        if loud:
-            self._quiet_run = 0
-            if len(self._buffer) >= max_bytes:
+            if self._cap_buffer():
                 return self._finish()
             return None
 
-        self._quiet_run += 1
-        closes_after_one_spike = (
-            len(self._closing_window) == self.hangover_batches + 1
-            and sum(self._closing_window) >= self.hangover_batches
-        )
-        if self._quiet_run >= self.hangover_batches or closes_after_one_spike:
+        self._buffer.extend(pcm)
+        if self._cap_buffer():
+            return self._finish()
+        if loud:
+            if self._closing_quiet_samples > 0:
+                if self._closing_noise_chunks == 0:
+                    self._closing_noise_chunks = 1
+                else:
+                    self._closing_quiet_samples = 0
+                    self._closing_noise_chunks = 0
+            return None
+
+        self._closing_quiet_samples += sample_count
+        hangover_samples = self.hangover_batches * NOMINAL_BATCH_SAMPLES
+        if self._closing_quiet_samples >= hangover_samples:
             return self._finish()
         return None
 
@@ -167,10 +170,19 @@ class RmsVad:
         dropped-frame discontinuity never splices into one bogus utterance."""
         self._buffer = bytearray()
         self._in_speech = False
-        self._quiet_run = 0
+        self._closing_quiet_samples = 0
+        self._closing_noise_chunks = 0
         self._loud_run = 0
-        self._closing_window.clear()
         self._preroll.clear()
+
+    def _cap_buffer(self) -> bool:
+        """Trim to the exact configured sample limit and report completion."""
+        max_samples = max(0, int(self.max_utterance_s * SAMPLE_RATE))
+        max_bytes = max_samples * SAMPLE_WIDTH
+        if len(self._buffer) < max_bytes:
+            return False
+        del self._buffer[max_bytes:]
+        return True
 
     def _finish(self) -> bytes:
         utterance = bytes(self._buffer)
