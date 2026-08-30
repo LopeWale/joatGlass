@@ -172,6 +172,34 @@ describe('LocationSessionManager', () => {
     expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(1);
   });
 
+  it('answers an assistant refresh with a timestamped request-bound phone fix', async () => {
+    const current = {
+      latitude: 41.9,
+      longitude: -87.65,
+      accuracy: 6,
+      timestamp: 1_725_000_000_123,
+    };
+    const h = harness(current);
+    await h.manager.start();
+    h.link.send.mockClear();
+    h.bridge.getAppLocation.mockClear();
+
+    await expect(h.manager.requestAssistantLocation('location-refresh-1')).resolves.toBe(true);
+
+    expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
+      accuracy: AppLocationAccuracy.Medium,
+      timeoutMs: 5000,
+    });
+    expect(h.link.send).toHaveBeenCalledWith({
+      kind: 'location',
+      latitude: 41.9,
+      longitude: -87.65,
+      accuracy: 6,
+      timestamp: 1_725_000_000_123,
+      refreshId: 'location-refresh-1',
+    });
+  });
+
   it('emits only bounded derived probe telemetry, never coordinates or raw motion values', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-28T12:00:00.000Z'));

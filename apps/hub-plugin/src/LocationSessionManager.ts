@@ -151,6 +151,22 @@ export class LocationSessionManager {
     }
   }
 
+  /**
+   * Answer a Mac-requested assistant lookup with one current phone fix.
+   * This deliberately stays medium accuracy and does not change the ambient
+   * stream: it is local context, not an implicit navigation session.
+   */
+  async requestAssistantLocation(requestId: string, signal?: AbortSignal): Promise<boolean> {
+    if (!isRequestId(requestId) || signal?.aborted) return false;
+    try {
+      const location = await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.Medium);
+      if (signal?.aborted || location === null) return false;
+      return this.forwardAmbient(location, Date.now(), true, requestId);
+    } catch {
+      return false;
+    }
+  }
+
   shutdown(): Promise<boolean> {
     this.profileEpoch += 1;
     this.shouldRun = false;
@@ -277,13 +293,21 @@ export class LocationSessionManager {
   }
 
   private async readInitialLocation(bridge: LocationBridge): Promise<AppLocation | null> {
+    return this.readOneShotLocation(
+      bridge,
+      this.desiredProfile === 'ambient' ? AppLocationAccuracy.Medium : AppLocationAccuracy.High,
+    );
+  }
+
+  private async readOneShotLocation(
+    bridge: LocationBridge,
+    accuracy: AppLocationAccuracy,
+  ): Promise<AppLocation | null> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         bridge.getAppLocation({
-          accuracy: this.desiredProfile === 'ambient'
-            ? AppLocationAccuracy.Medium
-            : AppLocationAccuracy.High,
+          accuracy,
           timeoutMs: ONE_SHOT_LOCATION_TIMEOUT_MS,
         }),
         new Promise<null>((resolve) => {
@@ -342,7 +366,7 @@ export class LocationSessionManager {
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
 
     const receivedAt = Date.now();
-    this.forwardAmbient(latitude, longitude, location.accuracy, receivedAt);
+    this.forwardAmbient(location, receivedAt);
     if (this.appliedProfile === 'probe') {
       this.recordLocationQuality(location, receivedAt, 'location_probe');
     }
@@ -353,25 +377,36 @@ export class LocationSessionManager {
   }
 
   private forwardAmbient(
-    latitude: number,
-    longitude: number,
-    accuracy: number | undefined,
+    location: AppLocation,
     receivedAt: number,
-  ): void {
-    if (this.lastSent) {
+    force = false,
+    refreshId?: string,
+  ): boolean {
+    const latitude = location.latitude;
+    const longitude = location.longitude;
+    const accuracy = location.accuracy;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+    if (!force && this.lastSent) {
       const dLat = Math.abs(latitude - this.lastSent.lat);
       const dLon = Math.abs(longitude - this.lastSent.lon);
       const moved = dLat > 0.005 || dLon > 0.005; // ~500m
       const stale = receivedAt - this.lastSent.at > 300_000;
-      if (!moved && !stale) return;
+      if (!moved && !stale) return false;
     }
     this.lastSent = { lat: latitude, lon: longitude, at: receivedAt };
+    const sourceTimestamp = location.timestamp;
+    const timestamp = Number.isSafeInteger(sourceTimestamp) && sourceTimestamp !== undefined && sourceTimestamp >= 0
+      ? sourceTimestamp
+      : undefined;
     this.link.send({
       kind: 'location',
       latitude,
       longitude,
       ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+      ...(timestamp !== undefined ? { timestamp } : {}),
+      ...(refreshId !== undefined ? { refreshId } : {}),
     });
+    return true;
   }
 
   private recordLocationQuality(
@@ -417,6 +452,10 @@ export class LocationSessionManager {
     this.lastQuality = undefined;
     this.qualitySequence = 0;
   }
+}
+
+function isRequestId(value: string): boolean {
+  return value.length > 0 && value.length <= 64;
 }
 
 function fieldMask(location: AppLocation): number {

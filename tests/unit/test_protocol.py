@@ -35,6 +35,7 @@ from joat.core.protocol import (
     Imu,
     ImuTrace,
     Location,
+    LocationRefresh,
     LocationProbeControl,
     NavigationAction,
     NavigationCoordinate,
@@ -711,6 +712,11 @@ class TestDownlinkWire:
             "kind": "location.probe.control", "enabled": True,
         }
 
+    def test_location_refresh_control_is_request_bound(self) -> None:
+        assert LocationRefresh(request_id="location-refresh-1").to_wire() == {
+            "kind": "location.refresh", "requestId": "location-refresh-1",
+        }
+
     def test_navigation_view_is_structured_bounded_and_generation_bound(self) -> None:
         wire = NavigationView(
             session_id="nav-1",
@@ -893,6 +899,27 @@ class TestLocationAndIdentity:
         msg = parse_uplink({"kind": "location", "latitude": 1.0, "longitude": 2.0})
         assert isinstance(msg, Location)
         assert msg.accuracy is None
+
+    def test_location_carries_optional_source_time_and_refresh_binding(self) -> None:
+        msg = parse_uplink({
+            "kind": "location", "latitude": 41.9, "longitude": -87.65,
+            "accuracy": 11, "timestamp": 1_725_000_000_123,
+            "refreshId": "location-refresh-1",
+        })
+        assert msg == Location(
+            latitude=41.9,
+            longitude=-87.65,
+            accuracy=11,
+            timestamp_ms=1_725_000_000_123,
+            refresh_id="location-refresh-1",
+        )
+
+    def test_location_rejects_unsafe_extra_fields(self) -> None:
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "location", "latitude": 41.9, "longitude": -87.65,
+                "debug": "must not cross the location boundary",
+            })
 
     def test_hello_user_name_is_optional(self) -> None:
         msg = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",

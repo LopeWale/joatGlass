@@ -141,7 +141,13 @@ export type UplinkMessage =
   | { kind: 'confirm'; actionId: string; accepted: boolean; challengeId?: string; sessionId?: string; payloadDigest?: string; previewDigest?: string }
   | { kind: 'policy'; resume: ResumePolicy }
   /** Wearer position via bridge.getAppLocation — the sideload-safe API. */
-  | { kind: 'location'; latitude: number; longitude: number; accuracy?: number }
+  | {
+    kind: 'location'; latitude: number; longitude: number; accuracy?: number;
+    /** Optional phone fix timestamp; the Mac combines it with receive time for expiry. */
+    timestamp?: number;
+    /** Present only when replying to a one-shot location.refresh request. */
+    refreshId?: string;
+  }
   /** Confirms a freshly issued pairing token was PERSISTED (not merely received). */
   | { kind: 'pairing'; token: string }
   /** Opt-in and content-free; the Mac validates this allowlisted schema again. */
@@ -241,6 +247,8 @@ export type DownlinkMessage =
   | { kind: 'g2.diagnostic.control'; enabled: boolean }
   /** Gate-0 only: switch the one phone-location stream to/from high accuracy. */
   | { kind: 'location.probe.control'; enabled: boolean }
+  /** Assistant-only one-shot phone fix; it does not alter the location stream profile. */
+  | { kind: 'location.refresh'; requestId: string }
   | {
     kind: 'navigation.view';
     sessionId: string;

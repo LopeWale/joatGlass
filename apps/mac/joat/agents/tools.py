@@ -52,6 +52,10 @@ class ToolBelt:
     def __bool__(self) -> bool:
         return bool(self._tools)
 
+    def register(self, tool: Tool) -> None:
+        """Add or replace a provider that becomes available after engine boot."""
+        self._tools[tool.name] = tool
+
     def schemas(self) -> list[dict[str, Any]]:
         """OpenAI-style schemas, the shape Llama chat templates consume."""
         return [
