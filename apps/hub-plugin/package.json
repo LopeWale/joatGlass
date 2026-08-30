@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:release-candidates": "node --test scripts/test_release_candidates.mjs",
+    "test:release-candidates": "node --test scripts/test_release_candidates.mjs scripts/test_release_manifest.mjs",
     "pack": "zsh scripts/pack.sh"
   },
   "dependencies": {
