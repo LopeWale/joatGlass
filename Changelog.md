@@ -2,6 +2,15 @@
 
 ## 2026-08-30
 
+- Added an owner-only, explicitly opt-in voice-latency receipt
+  (`--voice-latency-diagnostics`) for a controlled live run. It correlates a
+  process-local turn ordinal with fixed voice stages and coarse buckets only;
+  it never persists speech, transcripts, answers, timestamps, identifiers, or
+  lens claims. The write is bounded, atomic, private-permissioned, and cannot
+  disrupt a reply if persistence fails. Focused voice, STT, and startup tests
+  passed (72); this prepares the next measured run and is not a latency or
+  physical-G2 result by itself.
+
 - Hardened the private home-Mini EHPK release path. `npm run pack` now requires
   explicit `JOAT_RELEASE_WS_URLS` and rejects raw development transport,
   unlisted origins, non-`/glasses` paths, and duplicate candidates before Vite

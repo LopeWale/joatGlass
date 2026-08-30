@@ -28,7 +28,7 @@ from .session import SessionManager
 
 log = logging.getLogger(__name__)
 
-LatencyObserver = Callable[[str, str], None]
+LatencyObserver = Callable[[int, str, str], None]
 _LATENCY_BUCKETS = (
     (0.25, "lte250ms"),
     (0.5, "250_500ms"),
@@ -91,6 +91,10 @@ class VoiceOrchestrator:
         # Disabled by default. Acceptance may inject a local observer, which
         # receives only fixed stage names and coarse duration buckets.
         self._latency_observer = latency_observer
+        # One monotonically increasing in-process ordinal correlates a voice
+        # turn's fixed diagnostic stages without exposing an utterance,
+        # timestamp, wearer, device, or cross-run identifier.
+        self._voice_turn = 0
         self._last_seq: int | None = None
         # A G2-armed topic capture is allowed to consume exactly one glasses
         # utterance. Keep its provenance through VAD/STT rather than inferring
@@ -257,9 +261,11 @@ class VoiceOrchestrator:
         source: AudioSource | None = None,
     ) -> None:
         started_at = time.monotonic()
+        self._voice_turn += 1
+        latency_turn = self._voice_turn
         seconds = len(utterance) / (16_000 * 2)
         log.info("utterance ended: %.1fs of audio", seconds)
-        self._observe_latency("utterance_ready", started_at)
+        self._observe_latency(latency_turn, "utterance_ready", started_at)
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")
             return
@@ -268,10 +274,10 @@ class VoiceOrchestrator:
             # unchanged HUD for that long reads as "the assistant is dead" —
             # the wearer has no other signal that they were heard.
             await self._hud.status("JOAT · hearing you…")
-            self._observe_latency("ack_sent", started_at)
+            self._observe_latency(latency_turn, "ack_sent", started_at)
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
-            self._observe_latency("stt_complete", started_at)
+            self._observe_latency(latency_turn, "stt_complete", started_at)
             if transcript is None or not transcript.text:
                 log.info("STT produced no text")
                 return
@@ -341,12 +347,12 @@ class VoiceOrchestrator:
                     await self._hud.assistant(chunk, append=True)
                 else:
                     await self._hud.assistant(chunk)
-                    self._observe_latency("first_reply_sent", started_at)
+                    self._observe_latency(latency_turn, "first_reply_sent", started_at)
                 parts.append(chunk)
             if parts:
                 reply_text = "".join(parts)
                 await self._hud.settle_assistant()
-                self._observe_latency("reply_complete", started_at)
+                self._observe_latency(latency_turn, "reply_complete", started_at)
                 log.info("reply emitted chars=%d", len(reply_text))
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
@@ -361,12 +367,14 @@ class VoiceOrchestrator:
             )
             await self._hud.status(active_status or "JOAT · listening")
 
-    def _observe_latency(self, stage: str, started_at: float) -> None:
+    def _observe_latency(self, turn: int, stage: str, started_at: float) -> None:
         """Emit one opt-in, fixed-vocabulary, coarsely bucketed stage."""
         if self._latency_observer is None:
             return
         try:
-            self._latency_observer(stage, _latency_bucket(time.monotonic() - started_at))
+            self._latency_observer(
+                turn, stage, _latency_bucket(time.monotonic() - started_at),
+            )
         except Exception:
             # Instrumentation is strictly observational and must not affect
             # the voice path even when an acceptance sink fails.

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from joat.__main__ import gateway_network_policy
+from joat.__main__ import build_argument_parser, gateway_network_policy
 
 
 def test_private_tailnet_gateway_binds_only_loopback_and_keeps_pairing() -> None:
@@ -36,6 +36,13 @@ def test_private_tailnet_gateway_rejects_an_ambiguous_explicit_listener() -> Non
             requested_host="192.168.12.200",
             private_tailnet_gateway=True,
         )
+
+
+def test_voice_latency_receipt_is_explicitly_opt_in() -> None:
+    parser = build_argument_parser()
+
+    assert parser.parse_args([]).voice_latency_diagnostics is False
+    assert parser.parse_args(["--voice-latency-diagnostics"]).voice_latency_diagnostics is True
 
 
 def test_known_home_mini_serve_origin_is_declared_without_raw_gateway_tls() -> None:
