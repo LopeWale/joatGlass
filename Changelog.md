@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- Scoped the glasses Hub pairing store to each approved Mac-brain origin and
+  persists the last healthy candidate, so a stale credential from one home
+  mini cannot be offered to or erase another mini's pairing. Hub verification
+  passed 459 tests plus typecheck/build; an official-simulator run visually
+  exercised Brainstorm → Agent Terminal → reconnect → cancel with seven
+  reviewed 576×288 optical frames. The accompanying deployment guidance now
+  distinguishes the raw core-engine service from the JOAT.app native bridge
+  required for Keychain-backed OpenClaw/Hermes credentials. No package was
+  created or uploaded; physical G2 lens/source proof remains separate.
+
 - The no-send **Messages** simulator proof now drives every visible production
   selector itself—sidebar **click**, conversation **down + click** or compose
   **click**, history paging, confirmation control, and result dismissal—and

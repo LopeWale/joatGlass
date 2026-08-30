@@ -63,12 +63,53 @@ can be mistaken for the installed Developer-ID app at `/Applications/JOAT.app`.
 4. No update channel (Sparkle needs the Xcode target's nested-code layout),
    no dSYM archiving, no localization, shell has no os_log.
 
-JOAT.app owns the local Python engine as a child process on the wearer-facing
-Mac. BLE transport, audio, Brainstorm coordination, verification, native
-productivity execution, and action authority stay local. The currently wired
-OpenClaw role is hosted separately on the private Mac mini and is reached only
-through its managed Tailscale Serve WSS origin. Scoped OpenClaw
+JOAT.app owns the local Python engine as a child process on the **home Mac that
+is acting as the brain**. That may be the development Mac during work, but the
+wearer's ordinary interface remains the G2 HUD. BLE transport, audio,
+Brainstorm coordination, verification, native productivity execution, and
+action authority stay on the selected home Mac. The currently wired OpenClaw
+role is hosted separately on the private Mac mini and is reached only through
+its managed Tailscale Serve WSS origin. Scoped OpenClaw
 channels/MCP/cron/skills integration remains planned but is not yet wired.
+
+## Home Mac mini brain contract
+
+`./scripts/setup_brain.sh --service --warm` is intentionally a **core-engine**
+installer, not a complete Agent Terminal installer. It starts the Python
+process through `launchd`; it does not start JOAT.app's native bridge. The
+bridge is the sole authority for the per-Mac Keychain identity and paired
+OpenClaw device token, so a raw service correctly reports Agent Terminal as
+`native_credentials_unavailable` rather than substituting an environment token
+or a shared credential.
+
+For a mini to be an unattended Brainstorm/Agent Terminal brain, perform this
+once while logged into that mini's normal macOS user:
+
+1. Clone JOAT at a conventional location, run `setup_brain.sh --warm`, and
+   install a notarized Developer ID JOAT.app. A merely locally signed build
+   can be blocked by Gatekeeper on a different mini. The app's child-engine
+   discovery deliberately finds `~/joatGlass` without a daily folder-picker
+   step.
+2. Launch JOAT.app once and grant only the permissions that mini will use. It
+   starts the native bridge and its Python child under the same user identity.
+3. Add the approved OpenClaw Gateway origin plus `hermes` agent ID to that
+   mini's `~/Library/Application Support/JOAT/openclaw.json`, then approve the
+   resulting **per-mini** OpenClaw device request. The identity and token stay
+   in that mini's Keychain; they are not copied from the development Mac.
+4. Ensure the mini's exact Tailscale WebSocket origin is present in the packed
+   Even `app.json` network whitelist and in the comma-separated candidate list
+   baked into the package. Even Hub enforces exact declared network origins;
+   adding a new mini requires a reviewed package update, not a runtime URL
+   field.
+5. Pair the G2 once through JOAT.app's local 120-second pairing window, then
+   enable JOAT.app's Login Item. Thereafter the glasses/phone reconnect to the
+   remembered healthy home brain without visiting the Mac.
+
+Home-brain failover is a fresh authenticated session, not transparent process
+migration: pending audio, confirmations, navigation, and a running Hermes turn
+are deliberately cleared rather than replayed on another mini. The Hub stores
+pairing tokens by approved origin and remembers the last healthy candidate, so
+a rejected token for one mini cannot erase a healthy pairing for another.
 
 ## Runtime layout
 
