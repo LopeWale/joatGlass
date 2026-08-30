@@ -104,6 +104,50 @@ def test_frame_counter_accepts_only_completed_visual_surface_receipts() -> None:
         b"[HudVisualSurface] frame paint failed\n"
         b"[HudVisualSurface] frame 5 bridge-ack\n"
     ) == 2
+
+
+def test_visual_latency_separates_complete_frame_from_settled_frame() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    sample = driver.visual_latency(
+        screen="calendar-verifying",
+        trigger="confirmed_tap",
+        started_at_ns=1_000_000_000,
+        completed=driver.VisualFrameCheckpoint(3, 12, 1, observed_at_ns=1_180_000_000),
+        settled_at_ns=1_820_000_000,
+    )
+
+    assert sample == driver.VisualLatency(
+        screen="calendar-verifying",
+        trigger="confirmed_tap",
+        completed_frame_ms=180,
+        settled_frame_ms=820,
+    )
+    assert driver.visual_latency(
+        screen="calendar-verifying",
+        trigger="confirmed_tap",
+        started_at_ns=1_000_000_000,
+        completed=driver.VisualFrameCheckpoint(3, 12, 1),
+        settled_at_ns=1_820_000_000,
+    ) is None
+    with pytest.raises(driver.ProductivityHudFlowError, match="out of order"):
+        driver.visual_latency(
+            screen="calendar-verifying",
+            trigger="confirmed_tap",
+            started_at_ns=1_000_000_000,
+            completed=driver.VisualFrameCheckpoint(3, 12, 1, observed_at_ns=900_000_000),
+            settled_at_ns=1_820_000_000,
+        )
+    assert driver.visual_latency_summary([]) == {"sample_count": 0}
+    assert driver.visual_latency_summary([
+        driver.VisualLatency("planning-month", "menu_click", 120, 720),
+        driver.VisualLatency("calendar-verifying", "confirmed_tap", 240, 840),
+    ]) == {
+        "sample_count": 2,
+        "max_completed_frame_ms": 240,
+        "max_settled_frame_ms": 840,
+    }
     assert driver.visual_frame_ack_count(
         b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
     ) == 0
@@ -254,6 +298,7 @@ async def test_driver_releases_controller_write_only_after_verifying_receipt(
 
     receipts: list[object] = []
     artifacts: dict[str, dict[str, str]] = {}
+    latencies: list[object] = []
     try:
         _, before = await driver._drive_controller_write(
             controller,
@@ -272,6 +317,7 @@ async def test_driver_releases_controller_write_only_after_verifying_receipt(
             prior_digest="0" * 64,
             receipts=receipts,
             artifacts=artifacts,
+            latencies=latencies,
         )
     finally:
         store.close()
@@ -280,3 +326,4 @@ async def test_driver_releases_controller_write_only_after_verifying_receipt(
     assert receipt_requests == [None, "productivity_verifying", None]
     assert [view.phase for view in published] == ["verifying", "saved"]
     assert bridge.write_methods == ["reminders.create"]
+    assert latencies == []
