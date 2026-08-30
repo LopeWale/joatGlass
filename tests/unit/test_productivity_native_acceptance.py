@@ -35,11 +35,14 @@ from scripts.simulator_productivity_native_acceptance import (
     mark_interrupted,
     plan_acceptance_schedule,
     redact_native_reference,
+    read_watcher_sweep_status,
     repo_preference_restore_command,
     repo_preference_from_defaults_result,
     resolve_simulator_ws_url,
     secure_notification_feed,
     validate_acceptance_title,
+    watcher_observation_delta,
+    WatcherSweepStatus,
     write_private_receipt,
 )
 
@@ -706,6 +709,81 @@ def test_alarm_failure_classification_distinguishes_native_delivery_boundaries()
     assert banner_unobserved.notification_submitted is True
     assert banner_unobserved.focus_suppressed is False
     assert banner_unobserved.retained_raw_log is False
+
+
+def test_watcher_observation_delta_is_content_free_and_detects_counter_resets() -> None:
+    before = WatcherSweepStatus(
+        state="swept",
+        sweep_count=10,
+        banner_elements_seen=3,
+        readable_banners_seen=2,
+        emitted_banners=1,
+    )
+    after = WatcherSweepStatus(
+        state="swept",
+        sweep_count=15,
+        banner_elements_seen=3,
+        readable_banners_seen=2,
+        emitted_banners=1,
+    )
+
+    empty = watcher_observation_delta(before, after)
+    assert empty == {
+        "available": True,
+        "state": "swept",
+        "observation": "no_banner_elements_seen",
+        "sweeps": 5,
+        "banner_elements": 0,
+        "readable_banners": 0,
+        "emitted_banners": 0,
+        "counter_reset": False,
+    }
+    assert "title" not in json.dumps(empty, sort_keys=True)
+    assert "body" not in json.dumps(empty, sort_keys=True)
+
+    reset = watcher_observation_delta(
+        after,
+        WatcherSweepStatus(
+            state="swept",
+            sweep_count=1,
+            banner_elements_seen=0,
+            readable_banners_seen=0,
+            emitted_banners=0,
+        ),
+    )
+    assert reset["counter_reset"] is True
+    assert reset["observation"] == "watcher_counter_reset"
+
+
+def test_watcher_status_rejects_notification_fields_and_insecure_files(tmp_path: Path) -> None:
+    status = tmp_path / "notifications.watcher-status.json"
+    payload = {
+        "schema": "joat.notification-watcher-status.v1",
+        "observed_at_unix_ms": 1_788_117_600_000,
+        "state": "swept",
+        "sweep_count": 9,
+        "banner_elements_seen": 2,
+        "readable_banners_seen": 2,
+        "emitted_banners": 1,
+    }
+    status.write_text(json.dumps(payload), encoding="utf-8")
+    status.chmod(0o600)
+
+    assert read_watcher_sweep_status(status) == WatcherSweepStatus(
+        state="swept",
+        sweep_count=9,
+        banner_elements_seen=2,
+        readable_banners_seen=2,
+        emitted_banners=1,
+    )
+
+    status.write_text(json.dumps({**payload, "title": "private"}), encoding="utf-8")
+    status.chmod(0o600)
+    assert read_watcher_sweep_status(status) is None
+
+    status.write_text(json.dumps(payload), encoding="utf-8")
+    status.chmod(0o644)
+    assert read_watcher_sweep_status(status) is None
 
 
 def test_alpha_preview_uses_the_simulator_framebuffers_authoritative_alpha_channel(
