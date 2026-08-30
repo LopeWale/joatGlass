@@ -660,12 +660,15 @@ def test_alarm_failure_classification_distinguishes_native_delivery_boundaries()
     assert focus_suppressed.notification_submitted is True
     assert focus_suppressed.focus_suppressed is True
 
-    ax_missed = classify_alarm_delivery_failure(
+    banner_unobserved = classify_alarm_delivery_failure(
         "\n".join((fired, submitted)),
         due=due,
     )
-    assert ax_missed.category == "ax_capture_missed"
-    assert ax_missed.retained_raw_log is False
+    assert banner_unobserved.category == "banner_accessibility_unobserved"
+    assert banner_unobserved.alarm_fired is True
+    assert banner_unobserved.notification_submitted is True
+    assert banner_unobserved.focus_suppressed is False
+    assert banner_unobserved.retained_raw_log is False
 
 
 def test_alpha_preview_uses_the_simulator_framebuffers_authoritative_alpha_channel(
