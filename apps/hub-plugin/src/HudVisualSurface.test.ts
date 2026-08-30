@@ -129,8 +129,85 @@ describe('HudVisualSurface', () => {
     expect(maxActive).toBe(1);
     expect(calls).toEqual([
       ContainerId.Image, 8, 9, 10,
-      ContainerId.Image, 8, 9, 10,
     ]);
+  });
+
+  it('encodes and uploads only tiles whose rendered pixels changed', async () => {
+    const encoded: number[] = [];
+    const uploaded: number[] = [];
+    let topLeft = new Uint8Array([1]);
+    let topRight = new Uint8Array([2]);
+    const bottomLeft = new Uint8Array([3]);
+    const bottomRight = new Uint8Array([4]);
+    const client = {
+      require: () => ({
+        updateImageRawData: async (update: { containerID?: number }) => {
+          uploaded.push(update.containerID ?? -1);
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: topLeft },
+        { containerId: ContainerId.VisualTopRight, pixels: topRight },
+        { containerId: ContainerId.VisualBottomLeft, pixels: bottomLeft },
+        { containerId: ContainerId.VisualBottomRight, pixels: bottomRight },
+      ],
+    };
+    const encode = vi.fn(async (tile: { containerId: number; pixels: Uint8Array }) => {
+      encoded.push(tile.containerId);
+      return tile.pixels;
+    });
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    const surface = new HudVisualSurface(client, renderer, undefined, encode);
+
+    expect(await surface.paint(frame)).toBe(true);
+    topLeft = new Uint8Array([5]);
+    topRight = new Uint8Array([6]);
+    expect(await surface.paint(frame)).toBe(true);
+
+    expect(encoded).toEqual([4, 8, 9, 10, 4, 8]);
+    expect(uploaded).toEqual([4, 8, 9, 10, 4, 8]);
+  });
+
+  it('invalidates delivered-tile state after an upload failure', async () => {
+    const uploaded: number[] = [];
+    let failTopRight = true;
+    const client = {
+      require: () => ({
+        updateImageRawData: async (update: { containerID?: number }) => {
+          const containerId = update.containerID ?? -1;
+          uploaded.push(containerId);
+          if (containerId === ContainerId.VisualTopRight && failTopRight) {
+            failTopRight = false;
+            return ImageRawDataUpdateResult.sendFailed;
+          }
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([1]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([2]) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([3]) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
+      ],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    const surface = new HudVisualSurface(client, renderer);
+
+    expect(await surface.paint(frame)).toBe(false);
+    expect(await surface.paint(frame)).toBe(true);
+
+    expect(uploaded).toEqual([4, 8, 4, 8, 9, 10]);
   });
 
   it('returns false instead of rejecting when rendering fails', async () => {
