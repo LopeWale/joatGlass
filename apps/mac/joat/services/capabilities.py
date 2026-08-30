@@ -541,7 +541,11 @@ class CapabilityRouter:
                     await self._select_message(index, trace_id)
                 case "NOTIFICATIONS":
                     await self._select_notification(index)
-                case "PLANNING" | "CALENDAR" | "TASKS":
+                # ``Reminders`` was a first-level name in an older installed
+                # HUD.  ``open`` already maps it to the single Planning
+                # projection, so its row taps must use that same handler.
+                # Otherwise the rendered legacy page looks live but is inert.
+                case "PLANNING" | "CALENDAR" | "TASKS" | "REMINDERS":
                     await self._select_planning(index)
                 case "QUICKNOTES":
                     await self._select_note(index)
