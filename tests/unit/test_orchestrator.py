@@ -76,14 +76,20 @@ class FrameTransport(FakeTransport, AudioFrameSource):
     def on_audio_frame(self, callback: AudioFrameCallback) -> None:
         self.frame_cb = callback
 
-    def emit_frame(self, pcm: bytes, seq: int, source: AudioSource) -> None:
+    def emit_frame(
+        self,
+        pcm: bytes,
+        seq: int,
+        source: AudioSource,
+        speaker: str | None = None,
+    ) -> None:
         assert self.frame_cb is not None
         self.frame_cb(AudioFrame(
             pcm=pcm,
             connection_generation="current",
             seq=seq,
             source=source,
-            speaker=None,
+            speaker=speaker,
             received_at_us=0,
         ))
 
@@ -199,6 +205,26 @@ class TestVoiceLoop:
 
         said = region(transport, ContainerId.CONTEXT)
         assert said == ["you  turn on the lights"]
+
+    async def test_other_speaker_audio_skips_stt_but_unknown_remains_eligible(self) -> None:
+        transport, engine = FrameTransport(), FakeEngine("hello from an unknown speaker")
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
+        orch.attach()
+        assert transport.frame_cb is not None
+
+        sequence = 0
+        for pcm in [LOUD, LOUD, QUIET, QUIET, QUIET]:
+            transport.emit_frame(pcm, sequence, "glasses", "other")
+            sequence += 1
+        await drain()
+        # SDK speaker role is only a classifier, so unknown must not share
+        # the other-speaker rejection path.
+        for pcm in [LOUD, LOUD, QUIET, QUIET, QUIET]:
+            transport.emit_frame(pcm, sequence, "glasses", "unknown")
+            sequence += 1
+        await drain()
+
+        assert region(transport, ContainerId.CONTEXT) == ["you  hello from an unknown speaker"]
 
     async def test_seq_gap_resets_vad_and_engine(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
