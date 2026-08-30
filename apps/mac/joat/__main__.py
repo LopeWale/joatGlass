@@ -265,6 +265,7 @@ async def main() -> None:
 
     replier: ReplyEngine | None = None
     belt: ToolBelt | None = None
+    llm_warm_task: asyncio.Task[bool] | None = None
     if args.no_llm:
         log.info("LLM disabled (--no-llm) — echoing transcripts")
     elif mlx_available():
@@ -293,10 +294,12 @@ async def main() -> None:
         if imessage.available:
             belt_tools.append(messages_tool(imessage))
         belt = ToolBelt(belt_tools)
-        replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding,
-                                 tools=belt,
-                                 on_loaded=lambda: status.set(llm="ready"))
-        log.info("reply engine: %s (+%d tools; loads on first utterance)",
+        mlx_replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding,
+                                     tools=belt,
+                                     on_loaded=lambda: status.set(llm="ready"))
+        replier = mlx_replier
+        llm_warm_task = asyncio.create_task(mlx_replier.warm(), name="mlx-warm")
+        log.info("reply engine: %s (+%d tools; warming in background)",
                  args.llm_model, len(belt_tools))
     else:
         log.warning("mlx-lm not installed — echoing transcripts "
@@ -896,6 +899,7 @@ async def main() -> None:
         active = active_navigation()
         if active is not None:
             active.cancel()
+        capabilities.on_disconnect()
         asyncio.get_running_loop().create_task(orchestrator.on_connect())
 
     transport.on_hello(greet)
@@ -911,6 +915,7 @@ async def main() -> None:
         active = active_navigation()
         if active is not None:
             active.cancel()
+        capabilities.on_disconnect()
 
     def on_device(device: Device) -> None:
         # Battery reaches the dashboard, not just the model.
@@ -1027,6 +1032,7 @@ async def main() -> None:
                 terminal=openclaw_terminal,
                 out=acceptance_out,
                 diagnostic_events=events,
+                is_isolated=lambda: sessions.active_session is None,
             )
             acceptance_diagnostics = G2DiagnosticStore(
                 writer=controller.observe_diagnostics,
@@ -1070,6 +1076,10 @@ async def main() -> None:
         task_monitor_task.cancel()
         acceptance_arm_task.cancel()
         await asyncio.gather(acceptance_arm_task, return_exceptions=True)
+        if llm_warm_task is not None:
+            if not llm_warm_task.done():
+                llm_warm_task.cancel()
+            await asyncio.gather(llm_warm_task, return_exceptions=True)
         if brainstorm_acceptance is not None:
             await brainstorm_acceptance.close()
         await sessions.close()

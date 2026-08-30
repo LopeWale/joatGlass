@@ -37,8 +37,8 @@ class RmsVad:
 
     speech_rms: batch RMS at/above this counts as speech. The right value
     depends on mic gain, so the trigger is adaptive by default (see below).
-    hangover_batches: consecutive sub-threshold batches that close an
-    utterance (8 x 200 ms = 1.6 s of silence).
+    hangover_batches: sub-threshold batches that close an utterance. They may
+    be consecutive, or span one isolated noisy batch.
     max_utterance_s: hard cut so a noisy room cannot buffer unboundedly.
     """
 
@@ -85,6 +85,7 @@ class RmsVad:
     _in_speech: bool = False
     _quiet_run: int = 0
     _loud_run: int = 0
+    _closing_window: deque[bool] = field(default_factory=deque, repr=False)
     _preroll: deque[bytes] = field(
         default_factory=lambda: deque(maxlen=3), repr=False)
     _recent: deque[float] = field(
@@ -134,6 +135,7 @@ class RmsVad:
                 return None  # debounce: not enough consecutive speech yet
             self._in_speech = True
             self._quiet_run = 0
+            self._closing_window.clear()
             # Seed with the pre-roll (which already includes this batch and
             # the debounced ones) so the utterance keeps its own beginning.
             self._buffer = bytearray(b"".join(self._preroll))
@@ -142,6 +144,9 @@ class RmsVad:
 
         self._buffer.extend(pcm)
         max_bytes = int(self.max_utterance_s * SAMPLE_RATE * SAMPLE_WIDTH)
+        self._closing_window.append(not loud)
+        while len(self._closing_window) > self.hangover_batches + 1:
+            self._closing_window.popleft()
         if loud:
             self._quiet_run = 0
             if len(self._buffer) >= max_bytes:
@@ -149,7 +154,11 @@ class RmsVad:
             return None
 
         self._quiet_run += 1
-        if self._quiet_run >= self.hangover_batches:
+        closes_after_one_spike = (
+            len(self._closing_window) == self.hangover_batches + 1
+            and sum(self._closing_window) >= self.hangover_batches
+        )
+        if self._quiet_run >= self.hangover_batches or closes_after_one_spike:
             return self._finish()
         return None
 
@@ -160,6 +169,7 @@ class RmsVad:
         self._in_speech = False
         self._quiet_run = 0
         self._loud_run = 0
+        self._closing_window.clear()
         self._preroll.clear()
 
     def _finish(self) -> bytes:

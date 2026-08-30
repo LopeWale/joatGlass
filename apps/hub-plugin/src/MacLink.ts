@@ -25,12 +25,29 @@ type NavigationUplinkMessage = Extract<UplinkMessage, {
 
 type BrainstormUplinkMessage = Extract<UplinkMessage, { kind: 'brainstorm.action' }>;
 
+interface QueuedDownlink {
+  message: DownlinkMessage;
+  started: boolean;
+}
+
 interface DownlinkDispatcher {
   readonly socket: WebSocket;
   readonly generation: number;
   readonly controller: AbortController;
   tail: Promise<void>;
   deadline?: ReturnType<typeof setTimeout>;
+  pendingAssistantAppend?: QueuedDownlink;
+}
+
+function isAssistantAppendWithText(
+  message: DownlinkMessage,
+): message is Extract<DownlinkMessage, { kind: 'assistant.overlay' }> & {
+  operation: 'append';
+  text: string;
+} {
+  return message.kind === 'assistant.overlay'
+    && message.operation === 'append'
+    && typeof message.text === 'string';
 }
 
 export interface MacLinkOptions {
@@ -192,6 +209,27 @@ export class MacLink {
         if (!this.authenticated && message.kind !== 'pairing.set') return;
         const handler = this.handler;
         if (handler !== undefined) {
+          if (isAssistantAppendWithText(message)) {
+            const pending = dispatcher.pendingAssistantAppend;
+            if (
+              pending !== undefined
+              && !pending.started
+              && isAssistantAppendWithText(pending.message)
+            ) {
+              pending.message = {
+                ...pending.message,
+                text: pending.message.text + message.text,
+              };
+              return;
+            }
+          }
+          // Any non-coalesced frame is a wire-order boundary. In particular,
+          // settle/dismiss must never overtake or absorb pending text.
+          dispatcher.pendingAssistantAppend = undefined;
+          const work: QueuedDownlink = { message, started: false };
+          if (isAssistantAppendWithText(message)) {
+            dispatcher.pendingAssistantAppend = work;
+          }
           // WebSocket invokes callbacks synchronously, but HUD operations are
           // asynchronous. Preserve wire order so a rebuild cannot race the
           // status/text frames that follow it, and contain one rejected
@@ -202,6 +240,10 @@ export class MacLink {
           };
           dispatcher.tail = dispatcher.tail
             .then(async () => {
+              work.started = true;
+              if (dispatcher.pendingAssistantAppend === work) {
+                dispatcher.pendingAssistantAppend = undefined;
+              }
               if (
                 this.socket !== socket
                 || this.downlinkDispatcher !== dispatcher
@@ -213,7 +255,7 @@ export class MacLink {
                 socket.close();
               }, this.downlinkMs);
               try {
-                await handler(message, context);
+                await handler(work.message, context);
               } finally {
                 if (dispatcher.deadline !== undefined) {
                   clearTimeout(dispatcher.deadline);

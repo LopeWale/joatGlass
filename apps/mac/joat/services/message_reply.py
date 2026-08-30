@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -9,6 +10,7 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from ..channels.imessage import MessageThread
 from ..channels.message_sender import MessageSendError
@@ -28,6 +30,14 @@ _REPLY = re.compile(r"^reply(?:\s+(?:saying|with))?\s+(?P<body>.+)$", re.IGNOREC
 # The plugin begins its eight-second decision clock only after the complete
 # frame is visible. The gateway envelope also has to include that BLE paint.
 CONFIRM_TRANSPORT_SECONDS = 12.0
+MESSAGE_SELECTION_TTL_SECONDS = 120.0
+
+
+@dataclass(frozen=True, slots=True)
+class _MessageSelection:
+    thread: MessageThread
+    trace_id: str
+    expires_at: float
 
 
 def _recipient_key(handle: str) -> str:
@@ -42,32 +52,67 @@ class MessageReplyController:
         sender: MessageSender,
         confirm: Confirm,
         journal: ActionJournal | None = None,
+        *,
+        selection_ttl_s: float = MESSAGE_SELECTION_TTL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        if selection_ttl_s <= 0:
+            raise ValueError("message selection TTL must be positive")
         self._sender = sender
         self._confirm = confirm
         self._journal = journal
-        self._selection: tuple[MessageThread, str] | None = None
+        self._selection_ttl_s = selection_ttl_s
+        self._monotonic = monotonic
+        self._selection: _MessageSelection | None = None
+        self._draft_lock = asyncio.Lock()
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
         safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
-        self._selection = (thread, safe_trace)
+        self._selection = _MessageSelection(
+            thread=thread,
+            trace_id=safe_trace,
+            expires_at=self._monotonic() + self._selection_ttl_s,
+        )
         log.info(
             "message reply trace=%s stage=selected recipient=%s",
             safe_trace,
             _recipient_key(thread.handle),
         )
 
+    def clear_selection(self, reason: str = "explicit") -> None:
+        selection = self._selection
+        self._selection = None
+        if selection is not None:
+            log.info(
+                "message reply trace=%s stage=selection-cleared reason=%s",
+                selection.trace_id,
+                re.sub(r"[^a-zA-Z0-9._:-]", "-", reason)[:32] or "explicit",
+            )
+
     async def handle_command(self, text: str) -> str | None:
         match = _REPLY.match(text.strip())
         if match is None:
             return None
+        if self._draft_lock.locked():
+            return "A message reply is already awaiting confirmation."
+        async with self._draft_lock:
+            return await self._handle_reply(match)
+
+    async def _handle_reply(self, match: re.Match[str]) -> str:
         if self._selection is None:
             return "Select a Messages conversation first."
+        if self._monotonic() > self._selection.expires_at:
+            self.clear_selection("expired")
+            return (
+                "Message selection expired. "
+                "Open Messages and choose the conversation again."
+            )
         body = match.group("body").strip()
         if not body:
             return "Say what you want the reply to contain."
 
-        thread, trace_id = self._selection
+        thread = self._selection.thread
+        trace_id = self._selection.trace_id
         idempotency_key = f"message-reply:{trace_id}:{secrets.token_hex(4)}"
         action_id = idempotency_key
         prompt = f"Send to {thread.sender}? “{body}”"
@@ -158,6 +203,7 @@ class MessageReplyController:
                 if state in ("rejected", "expired"):
                     self._journal.purge_payload(action_id)
             return "Reply cancelled."
+        self.clear_selection("confirmation-accepted")
         attempt = None
         if self._journal is not None:
             attempt = self._journal.begin_attempt(
@@ -185,6 +231,11 @@ class MessageReplyController:
                 action_id,
                 type(exc).__name__,
             )
+            if exc.possible_external_commit:
+                return (
+                    f"Messages may have submitted the reply to {thread.sender}. "
+                    "Check Messages on your Mac before trying again."
+                )
             return f"Could not send to {thread.sender}. Check Messages on your Mac."
         if self._journal is not None and attempt is not None:
             self._journal.record_success(

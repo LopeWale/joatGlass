@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ASSISTANT_OVERLAY_DISMISS_HINT,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
   hudBrightnessGray,
@@ -7,6 +8,7 @@ import {
   hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
+  parseMessagesConversationRow,
   canRenderPlanningMonthGrid,
   planningGridMarker,
   planningGridMatchesMonth,
@@ -61,6 +63,10 @@ describe('selected visual geometry', () => {
 });
 
 describe('semantic HUD chrome', () => {
+  it('labels the assistant overlay with actions that actually dismiss it', () => {
+    expect(ASSISTANT_OVERLAY_DISMISS_HINT).toBe('TAP OR SWIPE TO DISMISS');
+  });
+
   it('maps sidebar glyphs by capability name rather than stale row position', () => {
     expect(hudSidebarIconName('Messages')).toBe('messages');
     expect(hudSidebarIconName('Notifications')).toBe('notifications');
@@ -281,6 +287,20 @@ describe('parseHudListItem', () => {
       primary: 'Loading recent notifications…',
       secondary: '',
       age: '',
+    });
+  });
+});
+
+describe('parseMessagesConversationRow', () => {
+  it('separates incoming, outgoing, and voice-action rows', () => {
+    expect(parseMessagesConversationRow('Dele · Are you coming?')).toEqual({
+      kind: 'incoming', label: 'Dele', body: 'Are you coming?',
+    });
+    expect(parseMessagesConversationRow('You · On my way')).toEqual({
+      kind: 'outgoing', label: 'You', body: 'On my way',
+    });
+    expect(parseMessagesConversationRow('Say “JOAT, reply saying …”')).toEqual({
+      kind: 'instruction', label: '', body: 'Say “JOAT, reply saying …”',
     });
   });
 });

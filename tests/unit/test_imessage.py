@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from joat.channels.imessage import IMessageStore
+from joat.channels.imessage import IMessageStore, MessageThread
 
 
 def _incoming_message_db(path: Path, count: int) -> Path:
@@ -102,4 +102,78 @@ def test_recent_threads_marks_group_chats_non_replyable(tmp_path) -> None:  # ty
     assert [(row.sender, row.replyable) for row in rows] == [
         ("Project team", False),
         ("Dele", True),
+    ]
+
+
+def test_recent_threads_preserves_distinct_chats_with_the_same_display_name(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "chat.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE message (handle_id INTEGER, text TEXT, date INTEGER, is_from_me INTEGER);
+        CREATE TABLE handle (id TEXT);
+        CREATE TABLE chat (display_name TEXT);
+        CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+        CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+        INSERT INTO handle VALUES ('+14055550101');
+        INSERT INTO handle VALUES ('+14055550102');
+        INSERT INTO chat VALUES ('Alex');
+        INSERT INTO chat VALUES ('Alex');
+        INSERT INTO message VALUES (1, 'First chat', 1, 0);
+        INSERT INTO chat_message_join VALUES (1, 1);
+        INSERT INTO chat_handle_join VALUES (1, 1);
+        INSERT INTO message VALUES (2, 'Second chat', 2, 0);
+        INSERT INTO chat_message_join VALUES (2, 2);
+        INSERT INTO chat_handle_join VALUES (2, 2);
+    """)
+    conn.commit()
+    conn.close()
+
+    rows = IMessageStore(db).recent_threads()
+
+    assert [(row.chat_id, row.handle, row.text) for row in rows] == [
+        (2, "+14055550102", "Second chat"),
+        (1, "+14055550101", "First chat"),
+    ]
+
+
+def test_thread_messages_returns_incoming_and_outgoing_context_oldest_first(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "chat.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE message (handle_id INTEGER, text TEXT, date INTEGER, is_from_me INTEGER);
+        CREATE TABLE handle (id TEXT);
+        CREATE TABLE chat (display_name TEXT);
+        CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+        CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+        INSERT INTO handle VALUES ('+14055550101');
+        INSERT INTO chat VALUES ('Dele');
+        INSERT INTO chat_handle_join VALUES (1, 1);
+        INSERT INTO message VALUES (1, 'Are you coming?', 1, 0);
+        INSERT INTO chat_message_join VALUES (1, 1);
+        INSERT INTO message VALUES (1, 'On my way', 2, 1);
+        INSERT INTO chat_message_join VALUES (2, 1);
+        INSERT INTO message VALUES (1, 'Great', 3, 0);
+        INSERT INTO chat_message_join VALUES (3, 1);
+    """)
+    conn.commit()
+    conn.close()
+    store = IMessageStore(db)
+    thread = MessageThread(
+        sender="Dele",
+        handle="+14055550101",
+        text="Great",
+        at=3.0,
+        chat_id=1,
+    )
+
+    messages = store.thread_messages(thread, limit=5)
+
+    assert [(item.from_me, item.text) for item in messages] == [
+        (False, "Are you coming?"),
+        (True, "On my way"),
+        (False, "Great"),
     ]

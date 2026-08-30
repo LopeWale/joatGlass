@@ -35,6 +35,7 @@ const CHROME = 102;
 const QUIET = 68;
 const HAIRLINE = 51;
 const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
+export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
 
 /** Measured from the selected 576×288 reference panels. Keeping the major
  * anchors together makes visual drift obvious in review and in tests. */
@@ -485,6 +486,25 @@ export function parseHudListItem(value: string): HudListItemParts {
   return { primary, secondary, age: ageMatch?.[1]?.trim() ?? '' };
 }
 
+export interface MessagesConversationRow {
+  kind: 'incoming' | 'outgoing' | 'instruction';
+  label: string;
+  body: string;
+}
+
+/** Conversation frames are deliberately not rendered as notification rows.
+ * The Mac owns the text; this parser only distinguishes the already-labeled
+ * speaker rows from truthful voice/microphone instructions. */
+export function parseMessagesConversationRow(value: string): MessagesConversationRow {
+  const [label, body] = splitMessage(value);
+  if (!body) return { kind: 'instruction', label: '', body: label };
+  return {
+    kind: label.trim().toLowerCase() === 'you' ? 'outgoing' : 'incoming',
+    label,
+    body,
+  };
+}
+
 export interface HudVisibleListItem {
   item: string;
   index: number;
@@ -723,7 +743,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
-    context.fillText('TAP TO CONTINUE', 288, 214);
+    context.fillText(ASSISTANT_OVERLAY_DISMISS_HINT, 288, 214);
     context.restore();
   }
 
@@ -934,6 +954,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
+    if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
+      this.drawMessagesConversation(context, frame);
+      return;
+    }
+
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(BRIGHT);
@@ -986,6 +1011,50 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(CHROME);
       context.font = `9px ${HUD_FONT}`;
       context.fillText(age, 520, top + 8);
+    });
+
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText(frame.hint, 288, 267);
+  }
+
+  private drawMessagesConversation(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+  ): void {
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `20px ${HUD_FONT}`;
+    context.fillText(hudDisplayTitle(frame.title), 36, 64);
+
+    visibleHudListItems(frame.items, frame.selectedIndex).forEach((visible, row) => {
+      const parsed = parseMessagesConversationRow(visible.item);
+      const top = 82 + row * 56;
+      if (parsed.kind === 'instruction') {
+        context.strokeStyle = gray(CHROME);
+        context.lineWidth = 0.8;
+        roundedRect(context, 36, top, 504, 40, 5);
+        context.stroke();
+        context.fillStyle = gray(SUPPORT);
+        context.font = `12px ${HUD_FONT}`;
+        this.fitText(context, parsed.body, 50, top + 20, 476);
+        return;
+      }
+
+      const outgoing = parsed.kind === 'outgoing';
+      const left = outgoing ? 202 : 36;
+      const width = 338;
+      context.strokeStyle = gray(outgoing ? BRIGHT : SUPPORT);
+      context.lineWidth = outgoing ? 1.2 : 0.8;
+      roundedRect(context, left, top, width, 44, 6);
+      context.stroke();
+      context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText(parsed.label, left + 12, top + 11);
+      context.font = `13px ${HUD_FONT}`;
+      this.fitText(context, parsed.body, left + 12, top + 29, width - 24);
     });
 
     context.fillStyle = gray(QUIET);

@@ -1,6 +1,30 @@
 # Changelog
 
+## 2026-08-30
+
+- Completed the production Messages wearer flow from the first-level G2
+  sidebar through stable conversation selection, bounded incoming/outgoing
+  history, voice-reply guidance, bound confirmation, and truthful submitted,
+  uncertain, failed, access, timeout, Home, and disconnect states. The Hub now
+  routes physical `listEvent` selections with the owning request, suppresses
+  duplicate taps, and renders a conversation separately from notifications.
+  JOAT.app adds a privacy-minimized Full Disk Access status/recovery surface.
+  The full Hub suite passed 407 tests and its production bundle built; focused
+  Python Messages suites passed 47 tests and all Swift package suites passed 48
+  XCTest plus 3 Swift Testing cases. Five inspected official-simulator frames
+  prove the forward path with a disposable database and recording sender. No
+  package was created or uploaded; physical-G2 ingress, Home return, live voice,
+  optical legibility, and real Messages.app submission remain device gates.
+
 ## 2026-08-29
+
+- Routed the in-app physical-G2 Hermes acceptance stream through the production
+  `HudSink`. The owner-only receipt now requires exactly two ordered, distinct
+  Brainstorm running-frame hashes before the Agent Terminal transition, retains
+  no response text, and fails closed when a normal wearer session is active.
+  The official simulator flow remains separate support evidence; physical lens
+  acceptance is still required. No package was built or uploaded for this
+  change.
 
 - Released the next canonical private Even Hub artifact under the existing
   `com.example.joat` project as `v0.1.26`, rather than attempting to upload

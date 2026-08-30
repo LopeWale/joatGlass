@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The app's canonical window: what the assistant IS DOING right now.
@@ -8,6 +9,9 @@ struct MainWindowView: View {
     @State private var live = false
     @State private var showLog = false
     @State private var logTail = ""
+    @State private var messagesAccess: MessagesAccessState = .blocked
+
+    private let messagesAccessProbe = MessagesAccessProbe()
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -102,6 +106,34 @@ struct MainWindowView: View {
                     .padding(4)
                 }
 
+                GroupBox("Messages") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            LabeledContent("Conversation history", value: messagesAccess.label)
+                            if messagesAccess == .granted {
+                                Label("Granted", systemImage: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            } else {
+                                Button("Open Full Disk Access…") {
+                                    openMessagesPrivacySettings()
+                                }
+                                Button("Check Again") {
+                                    messagesAccess = messagesAccessProbe.state()
+                                }
+                            }
+                        }
+                        Text("JOAT checks only whether its signed app can open the Messages database; this status check does not read a conversation.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if messagesAccess != .granted {
+                            Text("Grant JOAT in Privacy & Security → Full Disk Access, then check again. If access still shows blocked, restart JOAT before retrying Messages on the glasses.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(4)
+                }
+
                 Divider()
 
                 HStack {
@@ -152,6 +184,7 @@ struct MainWindowView: View {
         .onAppear {
             refresh()
             engine.refreshPersonalDataAccess()
+            messagesAccess = messagesAccessProbe.state()
         }
         .onReceive(tick) { _ in refresh() }
     }
@@ -302,6 +335,13 @@ struct MainWindowView: View {
             live = false
         }
         if showLog { logTail = engine.logTail(lines: 30) }
+    }
+
+    private func openMessagesPrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        ) else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 
