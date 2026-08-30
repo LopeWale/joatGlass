@@ -56,6 +56,20 @@ class TestSegmentation:
         assert vad.feed(LOUD) is None  # same utterance continues
         assert vad.in_speech
 
+    def test_one_noise_spike_during_closing_silence_does_not_hold_open(self) -> None:
+        """One room-noise batch must not reset an otherwise complete pause."""
+        vad = RmsVad(hangover_batches=5, adaptive=False, start_batches=1)
+        assert vad.feed(LOUD) is None
+        for _ in range(4):
+            assert vad.feed(QUIET) is None
+        assert vad.feed(LOUD) is None  # isolated chair/room spike
+
+        utterance = vad.feed(QUIET)
+
+        assert utterance is not None
+        assert len(utterance) == 7 * len(LOUD)
+        assert not vad.in_speech
+
     def test_max_length_forces_cut(self) -> None:
         vad = RmsVad(max_utterance_s=0.6, adaptive=False, start_batches=1)
         assert vad.feed(LOUD) is None

@@ -53,6 +53,10 @@ log = logging.getLogger(__name__)
 BACK_HINT = "left x2 overview"
 DETAIL_HINT = "tap detail · left x2 overview"
 PLANNING_HINT = "tap choose · swipe move · left x2 overview"
+MESSAGES_ACCESS_ITEMS = [
+    "Tap to retry after granting Full Disk Access.",
+    "Mac Settings · Privacy & Security · Full Disk Access",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,8 +143,24 @@ class CapabilityRouter:
             ))
         elif event.container_name == "sysmenu" and event.selected_index == 1:
             asyncio.get_running_loop().create_task(self._repeat())
+        elif (
+            event.container_name == "capability-lifecycle"
+            and event.selected_name == "messages-home"
+        ):
+            self.clear_message_selection("home")
         elif event.container_name == "menu" and event.selected_name == "closed":
+            self.clear_message_selection("home")
             asyncio.get_running_loop().create_task(self.repaint_home())
+
+    def clear_message_selection(self, reason: str) -> None:
+        """Disarm a private reply target when its wearer-visible context ends."""
+        self._message_rows = []
+        if self._replies is not None:
+            self._replies.clear_selection(reason)
+
+    def on_disconnect(self) -> None:
+        """Drop any Mac-private reply target when the glasses link disappears."""
+        self.clear_message_selection("disconnect")
 
     async def open(
         self,
@@ -219,7 +239,7 @@ class CapabilityRouter:
                 self._message_rows = []
             await self._show_focus(
                 "MESSAGES · SETUP",
-                ["Messages needs Full Disk Access on the Mac."],
+                MESSAGES_ACCESS_ITEMS,
             )
             return
         try:
@@ -230,10 +250,7 @@ class CapabilityRouter:
                 self._message_rows = []
             await self._show_focus(
                 "MESSAGES · ACCESS",
-                [
-                    "Messages access is blocked on this Mac.",
-                    "Allow Full Disk Access for JOAT, then reopen Messages.",
-                ],
+                MESSAGES_ACCESS_ITEMS,
             )
             return
         if not self._request_is_current():
@@ -254,7 +271,11 @@ class CapabilityRouter:
         ))
 
     async def _select_message(self, index: int, trace_id: str) -> None:
-        if self._replies is None or not 0 <= index < len(self._message_rows):
+        if (
+            self._messages is None
+            or self._replies is None
+            or not 0 <= index < len(self._message_rows)
+        ):
             return
         thread = self._message_rows[index]
         if not thread.replyable:
@@ -267,14 +288,31 @@ class CapabilityRouter:
                 hint=BACK_HINT,
             ))
             return
+        try:
+            history = await asyncio.to_thread(
+                self._messages.thread_messages, thread, 3,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("Messages history unavailable: %s", type(exc).__name__)
+            if not self._request_is_current():
+                return
+            self.clear_message_selection("access-denied")
+            await self._show_focus("MESSAGES · ACCESS", MESSAGES_ACCESS_ITEMS)
+            return
+        if not self._request_is_current():
+            return
         self._replies.select(thread, trace_id)
+        context = [
+            f"{'You' if entry.from_me else thread.sender} · {entry.text}"
+            for entry in history
+        ] or [f"{thread.sender} · {thread.text}"]
         await self._send_list(HudList(
-            items=[
-                f"{thread.sender} · {thread.text}",
+            items=[*context,
                 'Say “JOAT, reply saying …”',
+                "Mic off? Long press to enable.",
             ],
-            title="MESSAGES · REPLY",
-            hint="voice draft · left x2 overview",
+            title="MESSAGES · CONVERSATION",
+            hint="voice reply · left x2 overview",
         ))
 
     async def _select_capability_row(

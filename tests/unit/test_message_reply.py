@@ -45,6 +45,23 @@ class ScriptedConfirm:
         return self.accepted
 
 
+class BlockingConfirm:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(
+        self,
+        _action_id: str,
+        _prompt: str,
+        _timeout_s: float,
+        **_binding: str,
+    ) -> bool:
+        self.started.set()
+        await self.release.wait()
+        return True
+
+
 THREAD = MessageThread(
     sender="Dele",
     handle="+14055550123",
@@ -91,13 +108,76 @@ class TestMessageReplyController:
         assert result == "Submitted to Messages for Dele; delivery unverified."
         assert sender.sent == [("+14055550123", "On my way")]
 
+    async def test_accepted_confirmation_clears_the_selected_recipient(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-one-shot")
+
+        assert await replies.handle_command("reply saying First") == (
+            "Submitted to Messages for Dele; delivery unverified."
+        )
+        assert await replies.handle_command("reply saying Second") == (
+            "Select a Messages conversation first."
+        )
+        assert sender.sent == [("+14055550123", "First")]
+
+    async def test_selected_recipient_expires_before_a_late_voice_draft(self) -> None:
+        now = [100.0]
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            selection_ttl_s=120.0,
+            monotonic=lambda: now[0],
+        )
+        replies.select(THREAD, trace_id="hud-expiring")
+        now[0] = 221.0
+
+        assert await replies.handle_command("reply saying Too late") == (
+            "Message selection expired. Open Messages and choose the conversation again."
+        )
+        assert confirm.calls == []
+        assert sender.sent == []
+
+    async def test_second_draft_cannot_open_while_confirmation_is_visible(self) -> None:
+        sender, confirm = FakeSender(), BlockingConfirm()
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-confirming")
+
+        first = asyncio.create_task(replies.handle_command("reply saying First"))
+        await confirm.started.wait()
+        second: str | None = None
+        try:
+            second = await asyncio.wait_for(
+                replies.handle_command("reply saying Second"), timeout=0.05,
+            )
+        finally:
+            confirm.release.set()
+            await first
+        assert second == "A message reply is already awaiting confirmation."
+        assert sender.sent == [("+14055550123", "First")]
+
     async def test_sender_failure_is_visible_and_never_claims_sent(self) -> None:
-        sender = FakeSender(MessageSendError("Messages unavailable"))
+        sender = FakeSender(MessageSendError(
+            "Messages unavailable", possible_external_commit=False,
+        ))
         replies = MessageReplyController(sender, ScriptedConfirm(True))
         replies.select(THREAD, trace_id="hud-9")
 
         assert await replies.handle_command("reply saying On my way") == (
             "Could not send to Dele. Check Messages on your Mac."
+        )
+
+    async def test_uncertain_sender_failure_never_claims_the_reply_failed(self) -> None:
+        sender = FakeSender(MessageSendError(
+            "Messages outcome unknown", possible_external_commit=True,
+        ))
+        replies = MessageReplyController(sender, ScriptedConfirm(True))
+        replies.select(THREAD, trace_id="hud-uncertain")
+
+        assert await replies.handle_command("reply saying On my way") == (
+            "Messages may have submitted the reply to Dele. "
+            "Check Messages on your Mac before trying again."
         )
 
     async def test_never_sends_text_the_confirmation_screen_cannot_show(self) -> None:

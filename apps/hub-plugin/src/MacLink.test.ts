@@ -152,6 +152,42 @@ describe('MacLink navigation delivery', () => {
 });
 
 describe('MacLink downlink ordering', () => {
+  it('coalesces adjacent queued assistant appends before the HUD renders them', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const handled: Array<{ operation: string; text?: string }> = [];
+    let releaseReplace!: () => void;
+    const replaceBlocked = new Promise<void>((resolve) => { releaseReplace = resolve; });
+    link.onMessage(async (message) => {
+      if (message.kind !== 'assistant.overlay') return;
+      handled.push({ operation: message.operation, text: message.text });
+      if (message.operation === 'replace') await replaceBlocked;
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    sockets[0]!.receive({ kind: 'assistant.overlay', operation: 'replace', text: 'Hello' });
+    await Promise.resolve();
+    expect(handled).toEqual([{ operation: 'replace', text: 'Hello' }]);
+
+    sockets[0]!.receive({ kind: 'assistant.overlay', operation: 'append', text: ' one' });
+    sockets[0]!.receive({ kind: 'assistant.overlay', operation: 'append', text: ' two' });
+    sockets[0]!.receive({ kind: 'assistant.overlay', operation: 'append', text: ' three' });
+    sockets[0]!.receive({
+      kind: 'assistant.overlay', operation: 'settle', dismissAfterMs: 6_000,
+    });
+
+    releaseReplace();
+    await replaceBlocked;
+    await vi.waitFor(() => {
+      expect(handled).toEqual([
+        { operation: 'replace', text: 'Hello' },
+        { operation: 'append', text: ' one two three' },
+        { operation: 'settle', text: undefined },
+      ]);
+    });
+  });
+
   it('awaits each async HUD handler before dispatching the next frame', async () => {
     const link = new MacLink({ urls: ['ws://m:1/g'] });
     const order: string[] = [];

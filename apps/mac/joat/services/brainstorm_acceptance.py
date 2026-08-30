@@ -6,8 +6,9 @@ exact child PID launched by the signed macOS shell, so an external script must
 never be granted its OpenClaw identity just to run a field test.
 
 The controller sends one fixed no-tool Hermes prompt after a physical G2
-gesture and discards every response chunk.  Its owner-only receipt contains
-only allowlisted G2 diagnostic metadata and visual-frame hashes.
+gesture and routes a bounded pair of response deltas through the production
+HUD sink.  Its owner-only receipt contains only allowlisted G2 diagnostic
+metadata and visual-frame hashes.
 """
 
 from __future__ import annotations
@@ -26,12 +27,16 @@ from typing import Any, Protocol
 from ..ble.hub_gateway import HubGatewayTransport
 from ..core.protocol import BrainstormAction, BrainstormHudView, Hello
 from ..services.g2_diagnostics import TRACE_SCHEMA
+from ..services.hud import HudWriter
+from ..services.sinks import HudSink
 
 
 RUN_SCHEMA = "joat.g2-brainstorm-acceptance.v2"
 ARM_SCHEMA = "joat.g2-brainstorm-acceptance-arm.v1"
-MAX_RETAINED_EVENTS = 12
+MAX_RETAINED_EVENTS = 16
 _HEX_SHA256_LENGTH = 64
+_STREAM_FRAME_TARGET = 2
+_MAX_STREAM_FRAME_ATTEMPTS = 4
 _PHYSICAL_SOURCES = frozenset({"left", "right", "ring"})
 _TERMINAL_TOGGLE_SOURCES = frozenset({"right", "ring"})
 _BRAINSTORM_ACTIONS = frozenset({
@@ -184,7 +189,8 @@ def _find_after(
 
 def _summary(
     result: str, retained: list[dict[str, str]], lens_video_sha256: str | None,
-    hermes_run: str, g2_reconnect: str,
+    hermes_run: str, g2_reconnect: str, stream_frame_sha256: tuple[str, ...] = (),
+    stream_verified: bool = False,
 ) -> dict[str, object]:
     return {
         "schema": RUN_SCHEMA,
@@ -198,14 +204,41 @@ def _summary(
         },
         "lensVideoSha256": lens_video_sha256,
         "hermesRun": hermes_run,
+        "hermesStream": {
+            "hud": "verified" if stream_verified else "not_verified",
+            "frameSha256": list(stream_frame_sha256),
+        },
         "g2Reconnect": g2_reconnect,
     }
+
+
+def _ordered_stream_frames(
+    retained: list[dict[str, str]], frame_sha256: tuple[str, ...],
+) -> bool:
+    if (
+        len(frame_sha256) != _STREAM_FRAME_TARGET
+        or len(set(frame_sha256)) != len(frame_sha256)
+    ):
+        return False
+    cursor = -1
+    for digest in frame_sha256:
+        found = _find_after(retained, cursor, lambda event: (
+            event.get("type") == "visual_frame"
+            and event.get("surface") == "brainstorm"
+            and event.get("state") == "running"
+            and event.get("sha256") == digest
+        ))
+        if found is None:
+            return False
+        cursor = found[0]
+    return True
 
 
 def summarize_receipt(
     receipt: dict[str, object], *, lens_video_sha256: str | None = None,
     hermes_run: str = "not_exercised", g2_reconnect: str = "not_exercised",
     require_cancel: bool = False, require_reconnect: bool = False,
+    stream_frame_sha256: tuple[str, ...] = (), require_stream: bool = False,
 ) -> dict[str, object]:
     """Fail closed unless the full physical G2 flow is represented."""
 
@@ -215,59 +248,77 @@ def summarize_receipt(
         raise ValueError("hermes run state is invalid")
     if g2_reconnect not in _G2_RECONNECT_STATES:
         raise ValueError("G2 reconnect state is invalid")
+    stream_frame_sha256 = tuple(
+        _sha256(digest, "stream frame SHA-256") for digest in stream_frame_sha256
+    )
+    if len(stream_frame_sha256) > _STREAM_FRAME_TARGET:
+        raise ValueError("stream frame evidence exceeds bounded pair")
     retained = retained_events(receipt)
+    stream_verified = False
+
+    def finish(result: str) -> dict[str, object]:
+        if result == "pass" and require_stream and not stream_verified:
+            result = "inconclusive"
+        return _summary(
+            result, retained, lens_video_sha256, hermes_run, g2_reconnect,
+            stream_frame_sha256, stream_verified,
+        )
+
     initial = next(((index, event) for index, event in enumerate(retained) if (
         event.get("type") == "visual_frame" and event["kind"] == "brainstorm"
         and event["surface"] == "brainstorm" and event["state"] == "running"
     )), None)
     if initial is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     terminal_action = _find_after(retained, initial[0], lambda event: (
         event.get("type") == "brainstorm_action" and event.get("action") == "show_terminal"
         and event.get("surface") == "brainstorm" and event.get("gesture") == "tap"
         and event.get("delivery") == "sys" and event.get("source") in _TERMINAL_TOGGLE_SOURCES
     ))
     if terminal_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
+    stream_verified = _ordered_stream_frames(
+        retained[:terminal_action[0]], stream_frame_sha256,
+    )
     terminal_frame = _find_after(retained, terminal_action[0], lambda event: (
         event.get("type") == "visual_frame" and event.get("kind") == "brainstorm"
         and event.get("surface") == "agent_terminal" and event.get("state") == "running"
     ))
     if terminal_frame is None or terminal_frame[1]["sha256"] == initial[1]["sha256"]:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
     return_action = _find_after(retained, terminal_frame[0], lambda event: (
         event.get("type") == "brainstorm_action" and event.get("action") == "show_brainstorm"
         and event.get("surface") == "agent_terminal" and event.get("gesture") == "tap"
         and event.get("delivery") == "sys" and event.get("source") in _TERMINAL_TOGGLE_SOURCES
     ))
     if return_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     returned = _find_after(retained, return_action[0], lambda event: (
         event.get("type") == "visual_frame" and event.get("kind") == "brainstorm"
         and event.get("surface") == "brainstorm" and event.get("state") == "running"
     ))
     if returned is None or returned[1]["sha256"] == terminal_frame[1]["sha256"]:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
     if require_reconnect and g2_reconnect != "restored":
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     if not require_cancel:
-        return _summary("pass", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("pass")
     cancelled = _find_after(retained, returned[0], lambda event: (
         event.get("type") == "brainstorm_action" and event.get("action") == "cancel"
         and event.get("surface") == "brainstorm" and event.get("gesture") == "double_press"
         and event.get("delivery") == "sys" and event.get("source") == "left"
     ))
     if cancelled is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     cancelled_frame = _find_after(retained, cancelled[0], lambda event: (
         event.get("type") == "visual_frame" and event.get("kind") == "brainstorm"
         and event.get("surface") == "brainstorm" and event.get("state") == "cancelled"
     ))
     if cancelled_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
     if hermes_run != "cancelled":
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
-    return _summary("pass", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
+    return finish("pass")
 
 
 def write_owner_only_json(path: Path, payload: dict[str, object]) -> None:
@@ -320,6 +371,7 @@ class InAppBrainstormAcceptance:
         self, *, transport: HubGatewayTransport, terminal: HermesStream | None,
         out: Path, action_timeout_s: float = 45.0, connect_timeout_s: float = 120.0,
         diagnostic_events: list[dict[str, object]] | None = None,
+        is_isolated: Callable[[], bool] | None = None,
         on_complete: Callable[[], None] | None = None,
     ) -> None:
         self._transport = transport
@@ -328,6 +380,7 @@ class InAppBrainstormAcceptance:
         self._action_timeout_s = action_timeout_s
         self._connect_timeout_s = connect_timeout_s
         self._events = diagnostic_events if diagnostic_events is not None else []
+        self._is_isolated = is_isolated or (lambda: True)
         self._on_complete = on_complete
         self._actions: asyncio.Queue[str] = asyncio.Queue()
         self._hello_count = 0
@@ -335,7 +388,8 @@ class InAppBrainstormAcceptance:
         self._replacement_hello = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._stream_task: asyncio.Task[None] | None = None
-        self._first_chunk = asyncio.Event()
+        self._stream_proven = asyncio.Event()
+        self._stream_frame_sha256: list[str] = []
 
     @property
     def output_path(self) -> Path:
@@ -411,17 +465,25 @@ class InAppBrainstormAcceptance:
                 raise TimeoutError(message)
             await asyncio.sleep(0.05)
 
+    def _require_isolated(self) -> None:
+        if not self._is_isolated():
+            raise RuntimeError("another wearer session is active")
+
     async def _send(self, surface: str, *, state: str = "running", activity: str) -> None:
+        self._require_isolated()
+        before = len(self._events)
         await self._transport.send(_view(surface, state=state, activity=activity))
+        self._require_isolated()
         await self._wait_for(
             lambda: any(
                 event.get("type") == "visual_frame" and event.get("kind") == "brainstorm"
                 and event.get("surface") == surface and event.get("state") == state
-                for event in self._events
+                for event in self._events[before:]
             ),
             self._action_timeout_s,
             f"{surface} {state} visual frame was not acknowledged",
         )
+        self._require_isolated()
 
     async def _expect(self, action: str) -> None:
         observed = await asyncio.wait_for(self._actions.get(), self._action_timeout_s)
@@ -433,9 +495,57 @@ class InAppBrainstormAcceptance:
             f"{action} action did not retain a G2 receipt",
         )
 
+    async def _next_running_frame_sha256(self, after: int) -> str:
+        def next_frame() -> dict[str, object] | None:
+            return next((event for event in self._events[after:] if (
+                event.get("type") == "visual_frame"
+                and event.get("kind") == "brainstorm"
+                and event.get("surface") == "brainstorm"
+                and event.get("state") == "running"
+            )), None)
+
+        self._require_isolated()
+        await self._wait_for(
+            lambda: next_frame() is not None,
+            self._action_timeout_s,
+            "streamed Brainstorm visual frame was not acknowledged",
+        )
+        self._require_isolated()
+        frame = next_frame()
+        assert frame is not None
+        return _sha256(frame.get("sha256"), "stream frame SHA-256")
+
     async def _consume_hermes(self, terminal: HermesStream) -> None:
-        async for _ignored in terminal.stream(_FIXED_HERMES_PROMPT):
-            self._first_chunk.set()
+        def terminal_projection() -> dict[str, str | bool]:
+            return {
+                "state": "running", "reason": "", "endpoint_host": "",
+                "no_tools_checked": True,
+            }
+
+        sink = HudSink(HudWriter(self._transport), terminal_projection)
+        self._require_isolated()
+        before = len(self._events)
+        await sink.open("Acceptance run", ["Hermes"])
+        await self._next_running_frame_sha256(before)
+        before = len(self._events)
+        await sink.turn("Hermes")
+        await self._next_running_frame_sha256(before)
+
+        attempts = 0
+        async for chunk in terminal.stream(_FIXED_HERMES_PROMPT):
+            if not chunk or len(self._stream_frame_sha256) >= _STREAM_FRAME_TARGET:
+                continue
+            if attempts >= _MAX_STREAM_FRAME_ATTEMPTS:
+                continue
+            attempts += 1
+            self._require_isolated()
+            before = len(self._events)
+            await sink.chunk(chunk)
+            digest = await self._next_running_frame_sha256(before)
+            if digest not in self._stream_frame_sha256:
+                self._stream_frame_sha256.append(digest)
+            if len(self._stream_frame_sha256) >= _STREAM_FRAME_TARGET:
+                self._stream_proven.set()
 
     async def _cancel_hermes(self) -> str:
         task = self._stream_task
@@ -457,15 +567,16 @@ class InAppBrainstormAcceptance:
         hermes_run = "not_exercised"
         g2_reconnect = "not_exercised"
         try:
+            self._require_isolated()
             await asyncio.wait_for(self._physical_hello.wait(), self._connect_timeout_s)
+            self._require_isolated()
             if self._terminal is None:
                 await self._send("agent_terminal", state="blocked", activity="Hermes is not ready; acceptance stopped")
                 return
             await self._send("brainstorm", state="ready", activity="Tap to start the Hermes acceptance run")
             await self._expect("begin_topic_capture")
             self._stream_task = asyncio.create_task(self._consume_hermes(self._terminal))
-            await asyncio.wait_for(self._first_chunk.wait(), self._action_timeout_s)
-            await self._send("brainstorm", activity="Hermes acceptance run active")
+            await asyncio.wait_for(self._stream_proven.wait(), self._action_timeout_s)
             await self._expect("show_terminal")
             await self._send("agent_terminal", activity="Dedicated no-tool Hermes session active")
             await self._expect("show_brainstorm")
@@ -486,6 +597,8 @@ class InAppBrainstormAcceptance:
                 summary = summarize_receipt(
                     receipt, hermes_run=hermes_run, g2_reconnect=g2_reconnect,
                     require_cancel=True, require_reconnect=True,
+                    stream_frame_sha256=tuple(self._stream_frame_sha256),
+                    require_stream=True,
                 )
             except ValueError:
                 # A malformed diagnostic trace cannot be made into a receipt.

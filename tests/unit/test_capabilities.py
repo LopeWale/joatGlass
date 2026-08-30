@@ -15,7 +15,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 from joat.channels.cards import CardLog
-from joat.channels.imessage import MessageThread
+from joat.channels.imessage import MessageEntry, MessageThread
 from joat.core.protocol import (
     AssistantOverlay,
     BrainstormHudView,
@@ -62,13 +62,23 @@ class FakeMessages:
             for index, row in enumerate(self._rows[:limit])
         ]
 
+    def thread_messages(
+        self, thread: MessageThread, limit: int = 5,
+    ) -> list[MessageEntry]:
+        del limit
+        return [MessageEntry(thread.text, thread.at, False)]
+
 
 class FakeReplies:
     def __init__(self) -> None:
         self.selected: list[tuple[MessageThread, str]] = []
+        self.cleared: list[str] = []
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
         self.selected.append((thread, trace_id))
+
+    def clear_selection(self, reason: str = "explicit") -> None:
+        self.cleared.append(reason)
 
 
 class BlockingMessages:
@@ -88,6 +98,12 @@ class BlockingMessages:
             return [MessageThread("Old", "old", "stale", time.time())]
         return [MessageThread("New", "new", "current", time.time())]
 
+    def thread_messages(
+        self, thread: MessageThread, limit: int = 5,
+    ) -> list[MessageEntry]:
+        del limit
+        return [MessageEntry(thread.text, thread.at, False)]
+
 
 class PermissionDeniedMessages:
     available = True
@@ -95,6 +111,26 @@ class PermissionDeniedMessages:
     def recent_threads(self, limit: int = 5) -> list[MessageThread]:
         del limit
         raise PermissionError("Messages database read denied")
+
+
+class HistoryMessages(FakeMessages):
+    def thread_messages(
+        self, thread: MessageThread, limit: int = 5,
+    ) -> list[MessageEntry]:
+        del thread, limit
+        return [
+            MessageEntry("Are you coming?", 1.0, False),
+            MessageEntry("On my way", 2.0, True),
+            MessageEntry("Great", 3.0, False),
+        ]
+
+
+class HistoryPermissionDeniedMessages(FakeMessages):
+    def thread_messages(
+        self, thread: MessageThread, limit: int = 5,
+    ) -> list[MessageEntry]:
+        del thread, limit
+        raise PermissionError("Messages history read denied")
 
 
 class FakePersonalData:
@@ -137,6 +173,14 @@ def bridge_response(*, calendar="full_access", reminders="full_access", result=N
         store_instance_id="eventkit-store",
         store_generation=1,
     )
+
+
+async def wait_until(predicate, *, attempts: int = 100) -> None:  # type: ignore[no-untyped-def]
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition did not become true")
 
 
 def make_router(
@@ -249,7 +293,7 @@ class TestCapabilityViews:
             trace_id="selection-new",
             request_id="request-new",
         ))
-        await asyncio.sleep(0)
+        await wait_until(lambda: bool(replies.selected))
         assert replies.selected[0][0].sender == "New"
         assert replies.selected[0][1] == "selection-new"
 
@@ -269,15 +313,119 @@ class TestCapabilityViews:
             selected_index=1,
             trace_id="hud-12",
         ))
-        await asyncio.sleep(0)
+        await wait_until(lambda: bool(replies.selected))
 
         assert replies.selected == [(
             MessageThread("Adaeze", "handle-1", "Call me", now),
             "hud-12",
         )]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.title == "MESSAGES · REPLY"
+        assert detail.title == "MESSAGES · CONVERSATION"
         assert any("JOAT, reply" in item for item in detail.items)
+
+    async def test_selecting_a_message_opens_bounded_conversation_context(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = HistoryMessages([  # type: ignore[assignment]
+            ("Dele", "Great", time.time()),
+        ])
+        await router.open("Messages", request_id="messages-context")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=0,
+            trace_id="hud-context",
+            request_id="messages-context",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
+            for item in transport.sent
+        ))
+
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.title == "MESSAGES · CONVERSATION"
+        assert detail.items == [
+            "Dele · Are you coming?",
+            "You · On my way",
+            "Dele · Great",
+            'Say “JOAT, reply saying …”',
+            "Mic off? Long press to enable.",
+        ]
+        assert detail.hint == "voice reply · left x2 overview"
+        assert detail.selectable is False
+
+    async def test_selection_time_permission_loss_replaces_the_list_with_retry(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = HistoryPermissionDeniedMessages([  # type: ignore[assignment]
+            ("Dele", "Great", time.time()),
+        ])
+        await router.open("Messages", request_id="messages-history-denied")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=0,
+            trace_id="hud-history-denied",
+            request_id="messages-history-denied",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · ACCESS"
+            for item in transport.sent
+        ))
+
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.items[0] == "Tap to retry after granting Full Disk Access."
+        assert detail.request_id == "messages-history-denied"
+        assert replies.selected == []
+
+    async def test_returning_home_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, _, _ = make_router(
+            tmp_path,
+            rows=[("Dele", "On my way", time.time())],
+            replies=replies,
+        )
+        await router.open("Messages", request_id="messages-home")
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=0,
+            trace_id="hud-home",
+            request_id="messages-home",
+        ))
+        await wait_until(lambda: bool(replies.selected))
+        assert replies.selected
+
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle",
+            selected_name="messages-home",
+        ))
+        await asyncio.sleep(0)
+
+        assert replies.cleared == ["home"]
+
+    async def test_disconnect_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, _, _ = make_router(
+            tmp_path,
+            rows=[("Dele", "On my way", time.time())],
+            replies=replies,
+        )
+        await router.open("Messages", request_id="messages-disconnect")
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=0,
+            trace_id="hud-disconnect",
+            request_id="messages-disconnect",
+        ))
+        await wait_until(lambda: bool(replies.selected))
+
+        router.on_disconnect()
+
+        assert replies.cleared == ["disconnect"]
 
     async def test_group_message_cannot_be_misrouted_to_one_participant(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         now = time.time()
@@ -306,8 +454,11 @@ class TestCapabilityViews:
         router, transport, _ = make_router(tmp_path, rows=None)
         await router.open("Messages")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert any("Full Disk Access" in item for item in lists[0].items)
         assert lists[0].title == "MESSAGES · SETUP"
+        assert lists[0].items == [
+            "Tap to retry after granting Full Disk Access.",
+            "Mac Settings · Privacy & Security · Full Disk Access",
+        ]
         # The focus title owns capability state. A separate status message can
         # arrive after Back and stale Home for twelve seconds even when the
         # plugin correctly rejects the delayed list response.
@@ -332,8 +483,8 @@ class TestCapabilityViews:
         rendered = [message for message in transport.sent if isinstance(message, HudList)][-1]
         assert rendered.title == "MESSAGES · ACCESS"
         assert rendered.items == [
-            "Messages access is blocked on this Mac.",
-            "Allow Full Disk Access for JOAT, then reopen Messages.",
+            "Tap to retry after granting Full Disk Access.",
+            "Mac Settings · Privacy & Security · Full Disk Access",
         ]
         assert rendered.request_id == "messages-denied"
 

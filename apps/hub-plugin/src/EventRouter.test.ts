@@ -5,7 +5,9 @@ import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
-import type { CapabilityMenu } from './CapabilityMenu';
+import { CapabilityMenu } from './CapabilityMenu';
+import { Settings } from './Settings';
+import type { HudPresenter } from './HudPresenter';
 import type { UplinkMessage } from './types';
 
 function make(
@@ -541,5 +543,99 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(events).toEqual([{
       type: 'gesture', gesture: 'long_press', delivery: 'sys',
     }]);
+  });
+});
+
+describe('EventRouter — production Messages menu composition', () => {
+  it('routes physical menu and list events into the bound Mac request, then returns Home', async () => {
+    let dispatch: (event: EvenHubEvent) => void = () => {};
+    const sent: UplinkMessage[] = [];
+    const sidebars: string[][] = [];
+    const hud = {
+      showSidebar: vi.fn(async (items: string[]) => {
+        sidebars.push(items);
+        return true;
+      }),
+      showList: vi.fn(async () => true),
+      showDefault: vi.fn(async () => true),
+      setStatus: vi.fn(async () => true),
+      setSelection: vi.fn(async () => true),
+      moveSelection: vi.fn(async () => true),
+      showProductivity: vi.fn(async () => true),
+    } as unknown as HudPresenter;
+    const link = {
+      send: (message: UplinkMessage) => { sent.push(message); },
+    } as unknown as MacLink;
+    const menu = new CapabilityMenu(hud, new Settings(), link);
+    const client = {
+      track: (unsubscribe: () => void) => unsubscribe,
+      require: () => ({
+        onEvenHubEvent: (handler: (event: EvenHubEvent) => void) => {
+          dispatch = handler;
+          return () => {};
+        },
+        shutDownPageContainer: vi.fn(),
+      }),
+    } as unknown as BridgeClient;
+    const audio = {
+      isOpen: false,
+      ingest: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    } as unknown as AudioStreamer;
+    const imu = {
+      isPending: vi.fn(() => false),
+      ingest: vi.fn(),
+      confirmByTap: vi.fn(),
+    } as unknown as ImuMonitor;
+    new EventRouter(client, link, audio, imu, menu).attach();
+
+    dispatch({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } } as EvenHubEvent);
+    await vi.waitFor(() => expect(sidebars).toHaveLength(1));
+    expect(sidebars[0]?.[0]).toBe('Messages');
+
+    dispatch(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) as EvenHubEvent);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const request = sent[0] as Extract<UplinkMessage, { kind: 'input' }>;
+    expect(request.event).toMatchObject({
+      containerName: 'capmenu', selectedName: 'Messages', selectedIndex: 0,
+    });
+
+    expect(await menu.presentList(
+      'MESSAGES',
+      ['[now] Dele · Are you coming?', '[2m] Adaeze · Call me'],
+      request.event.requestId,
+      true,
+      'tap select · left x2 overview',
+    )).toBe(true);
+    dispatch({ listEvent: {
+      eventType: OsEventTypeList.CLICK_EVENT,
+      currentSelectItemIndex: 1,
+    } } as EvenHubEvent);
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capdata',
+        selectedName: 'MESSAGES',
+        selectedIndex: 1,
+        requestId: request.event.requestId,
+      },
+    });
+
+    dispatch({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } } as EvenHubEvent);
+    await vi.waitFor(() => expect(hud.showDefault).toHaveBeenCalledTimes(1));
+    expect(sent[2]).toEqual({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'messages-home',
+      },
+    });
   });
 });

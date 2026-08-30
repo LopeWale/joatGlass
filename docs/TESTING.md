@@ -170,6 +170,48 @@ Expected trace stages are `selected`, `confirmation-requested`,
 only action IDs, character counts, and a recipient hash—not message text or the
 recipient handle.
 
+### Complete simulator Messages flow
+
+`scripts/simulator_messages_flow_acceptance.py` extends the narrow confirmation
+trace through the actual Messages menu and conversation router. It creates a
+disposable two-conversation `chat.db`, then composes the production
+`HubGatewayTransport`, `CapabilityRouter`, `IMessageStore`, and
+`MessageReplyController`. The final sender is still a `RecordingSender`, so the
+run cannot invoke Messages.app or contact a recipient.
+
+Point a disposable development manifest at its isolated gateway and open the
+ordinary plugin with `?joatTestOpenMenu=1`:
+
+```bash
+# terminal 1
+PYTHONPATH=apps/mac uv run python -u \
+  scripts/simulator_messages_flow_acceptance.py --port 18791
+
+# terminal 2 — use a disposable manifest that allowlists only this loopback origin
+VITE_MAC_WS_URL=ws://127.0.0.1:18791/glasses npx vite <simulator-plugin-root> \
+  --config apps/hub-plugin/vite.config.ts --host 127.0.0.1 --port 5193 --strictPort
+
+# terminal 3
+evenhub-simulator 'http://127.0.0.1:5193/?joatTestOpenMenu=1' \
+  --automation-port 9901
+```
+
+The causal frame order is Sidebar → Conversations → Conversation → Confirm →
+Result. The first sidebar frame uses the development-only live-menu hook because
+the official simulator cannot inject a left-temple double-click. Click/list
+selection and confirmation use the official simulator input endpoint and the
+production EventRouter/runtime path. Home return is covered by a
+production-composed Hub test but remains a physical-G2 acceptance gate, as do
+left-temple ingress, optical legibility, live voice transcription, and any real
+Messages.app submission.
+
+On the Mac, JOAT.app now shows **Messages → Conversation history** with
+**Open Full Disk Access…** and **Check Again**. The probe only attempts to open
+the database from JOAT's signed process; it does not query a table or read a
+conversation. The glasses `MESSAGES · ACCESS` page puts the real retry action
+first and identifies the external System Settings path rather than claiming a
+tap can grant macOS permission.
+
 ### Opt-in G2 diagnostic receipt
 
 The Mac shell’s **Record G2 trace** switch is off by default. When enabled it

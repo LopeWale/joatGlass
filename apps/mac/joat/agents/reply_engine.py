@@ -86,6 +86,19 @@ class MlxReplyEngine(ReplyEngine):
             if self._on_loaded is not None:
                 self._on_loaded()
 
+    async def warm(self) -> bool:
+        """Load model weights ahead of the first wearer request.
+
+        Startup warm-up is opportunistic: a temporary model/download failure
+        must not stop the bridge, and the normal reply path may retry later.
+        """
+        try:
+            await self._ensure_loaded()
+        except Exception:
+            log.exception("MLX model warm-up failed")
+            return False
+        return True
+
     def _load(self) -> tuple[Any, Any]:
         from mlx_lm import load  # lazy: optional dependency
 

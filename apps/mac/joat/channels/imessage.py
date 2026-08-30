@@ -43,6 +43,17 @@ class MessageThread:
     at: float
     replyable: bool = True
     """False for group chats until Messages.app group targeting is proven."""
+    chat_id: int | None = None
+    """Private chat identity; never sent to the Hub or accepted from it."""
+
+
+@dataclass(frozen=True, slots=True)
+class MessageEntry:
+    """One bounded conversation row for wearer-visible context."""
+
+    text: str
+    at: float
+    from_me: bool
 
 
 def _unix_time(raw: int | None) -> float:
@@ -178,6 +189,7 @@ class IMessageStore:
                        COALESCE(m.text, ''),
                        m.date,
                        COALESCE(c.display_name, ''),
+                       COALESCE(c.ROWID, 0),
                        COALESCE((
                            SELECT COUNT(*)
                            FROM chat_handle_join chj
@@ -194,22 +206,57 @@ class IMessageStore:
                 """
             ).fetchall()
         out: list[MessageThread] = []
-        seen: set[str] = set()
-        for handle, text, raw_date, display, participant_count in rows:
+        seen: set[tuple[str, str | int]] = set()
+        for handle, text, raw_date, display, chat_id, participant_count in rows:
             sender = display or self._contacts.name_for(handle)
-            if sender in seen:
-                continue  # newest message per sender only
-            seen.add(sender)
+            identity: tuple[str, str | int] = (
+                ("chat", int(chat_id)) if int(chat_id) > 0 else ("handle", str(handle))
+            )
+            if identity in seen:
+                continue  # newest preview per stable conversation
+            seen.add(identity)
             out.append(MessageThread(
                 sender=sender,
                 handle=str(handle),
                 text=str(text),
                 at=_unix_time(raw_date),
                 replyable=int(participant_count) <= 1,
+                chat_id=int(chat_id) if int(chat_id) > 0 else None,
             ))
             if len(out) >= limit:
                 break
         return out
+
+    def thread_messages(
+        self,
+        thread: MessageThread,
+        limit: int = 5,
+    ) -> list[MessageEntry]:
+        """Recent text context for one Mac-owned chat, oldest row first."""
+        limit = max(1, min(int(limit), 10))
+        if thread.chat_id is None:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(m.text, ''), m.date, m.is_from_me
+                FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id = ?
+                  AND m.text IS NOT NULL AND m.text != ''
+                ORDER BY m.ROWID DESC
+                LIMIT ?
+                """,
+                (thread.chat_id, limit),
+            ).fetchall()
+        return [
+            MessageEntry(
+                text=str(text),
+                at=_unix_time(raw_date),
+                from_me=bool(from_me),
+            )
+            for text, raw_date, from_me in reversed(rows)
+        ]
 
     def _connect(self) -> sqlite3.Connection:
         # immutable=1: the store is live and WAL-journaled; a normal open can
