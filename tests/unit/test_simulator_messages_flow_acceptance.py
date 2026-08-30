@@ -78,6 +78,76 @@ def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() ->
     driver.validate_history_flow(receipts)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "gesture", "sender_called", "result_fragment"),
+    [
+        ("accepted", "click", True, "Submitted to Messages"),
+        ("cancelled", "swipe", False, "Reply cancelled."),
+        ("timed_out", None, False, "Reply cancelled."),
+        ("uncertain", "click", True, "may have submitted"),
+        ("failed", "click", True, "Could not send"),
+    ],
+)
+def test_messages_reply_outcome_contract_is_explicit_and_truthful(
+    outcome: str,
+    gesture: str | None,
+    sender_called: bool,
+    result_fragment: str,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    expectation = driver.reply_outcome_expectation(outcome)
+
+    assert expectation.simulator_gesture == gesture
+    assert expectation.sender_called is sender_called
+    assert result_fragment in expectation.result_text
+
+
+@pytest.mark.parametrize(
+    ("outcome", "simulator_control"),
+    [
+        ("accepted", "click"),
+        ("cancelled", "down"),
+        ("timed_out", None),
+        ("uncertain", "click"),
+        ("failed", "click"),
+    ],
+)
+def test_messages_reply_outcomes_map_labels_to_official_simulator_controls(
+    outcome: str,
+    simulator_control: str | None,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    expectation = driver.reply_outcome_expectation(outcome)
+
+    assert expectation.simulator_control == simulator_control
+
+
+@pytest.mark.parametrize(
+    ("outcome", "wearer_label"),
+    [
+        ("accepted", "TAP · Confirm"),
+        ("cancelled", "SWIPE · Cancel"),
+        ("timed_out", None),
+        ("uncertain", "TAP · Confirm"),
+        ("failed", "TAP · Confirm"),
+    ],
+)
+def test_messages_reply_outcomes_name_the_visible_g2_action(
+    outcome: str,
+    wearer_label: str | None,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    expectation = driver.reply_outcome_expectation(outcome)
+
+    assert expectation.wearer_label == wearer_label
+
+
 def test_fixture_store_contains_distinct_conversations_and_history(tmp_path) -> None:  # type: ignore[no-untyped-def]
     driver = _driver()
     assert driver is not None

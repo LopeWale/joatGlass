@@ -216,6 +216,41 @@ or sending a real message. `tests/unit/test_contacts.py` separately exercises
 the real read-only Contacts SQLite adapter with a disposable schema and proves
 that missing or ambiguous names never reach confirmation.
 
+For the reply path, `--outcome` makes the terminal contract explicit without
+ever invoking Messages.app: `accepted` (the default), `uncertain`, and `failed`
+use the visible **TAP · Confirm** action; `cancelled` uses the visible
+**SWIPE · Cancel** action (the official simulator's `down` control);
+`timed_out` deliberately sends no input until the displayed eight-second
+window expires. For retained
+official-simulator proof, run the gateway with the simulator origin and a fresh
+evidence directory:
+
+```bash
+PYTHONPATH=apps/mac uv run python -u scripts/simulator_messages_flow_acceptance.py \
+  --port 18791 --flow reply --outcome cancelled \
+  --automation-base http://127.0.0.1:9901 \
+  --evidence-dir /absolute/path/to/messages-cancel-evidence
+```
+
+The driver clears prior simulator logs, waits for the production Hub's
+content-free `confirmation-visible` receipt, saves the real confirmation frame
+before injecting the documented control, then saves the resulting frame and a
+privacy-minimized receipt. It checks the exact production-controller result
+text and whether its `RecordingSender` was called: cancellation and timeout
+must not call it, uncertain must never claim failure, and failed must never
+claim submission. The fixture remains a no-send boundary, and this evidence is
+not physical-G2 proof. Non-success outcomes apply to `--flow reply` only;
+compose and history remain their narrow no-send fixtures.
+
+The current official simulator API can drive the first visible **New message**
+row, but its `down` action remains bound to the native sidebar after the
+custom Messages list is painted. It cannot therefore autonomously select a
+later conversation row or establish the physical G2 swipe delivery for a
+reply-outcome run. The reply driver intentionally waits for a real
+`capdata` selection instead of preselecting a fixture thread; use a physical
+G2 (or a future simulator input that delivers that event) for that evidence.
+The retained official-simulator compose receipt is separate proof only.
+
 Run `--flow history` for the non-writing conversation proof. Select the
 fixture **Dele** conversation (it has more than one eight-message page), scroll
 down until the HUD says **Older messages — up for newer**, then scroll up until
