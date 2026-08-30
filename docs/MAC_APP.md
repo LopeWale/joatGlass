@@ -105,6 +105,24 @@ once while logged into that mini's normal macOS user:
    enable JOAT.app's Login Item. Thereafter the glasses/phone reconnect to the
    remembered healthy home brain without visiting the Mac.
 
+After the one-time OpenClaw approval, verify this Mini **once** from its local
+user session (or through the Mini's own administrative terminal):
+
+```sh
+cd ~/joatGlass
+.venv/bin/python scripts/openclaw_pair_probe.py \
+  --expected-host home-mac.example-tailnet.ts.net
+```
+
+`{"status":"ready", ...}` proves the app-owned engine—not a separate CLI—has
+authenticated its per-Mini operator identity, initialized JOAT's dedicated
+Hermes session, and observed the empty-tool preflight. The command reads only
+the engine's short-lived, allowlisted status projection; it does not read a
+Keychain token, open the native bridge, create a second session, send a prompt,
+or retain a Brainstorm/Hermes payload. A nonzero result has only a fixed reason
+code such as `gateway_not_ready` or `terminal_not_ready`. This is deployment
+proof, not a daily control step: everyday use starts from the glasses.
+
 ### Private Tailnet transport (one-time)
 
 On the home Mini, enable **Settings → Private Tailnet home brain** and restart
