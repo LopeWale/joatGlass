@@ -232,15 +232,18 @@ PYTHONPATH=apps/mac uv run python -u scripts/simulator_messages_flow_acceptance.
   --evidence-dir /absolute/path/to/messages-cancel-evidence
 ```
 
-The driver clears prior simulator logs, waits for the production Hub's
-content-free `confirmation-visible` receipt, saves the real confirmation frame
-before injecting the documented control, then saves the resulting frame and a
-privacy-minimized receipt. It checks the exact production-controller result
-text and whether its `RecordingSender` was called: cancellation and timeout
-must not call it, uncertain must never claim failure, and failed must never
-claim submission. The fixture remains a no-send boundary, and this evidence is
-not physical-G2 proof. Non-success outcomes apply to `--flow reply` only;
-compose and history remain their narrow no-send fixtures.
+The driver retains the complete causal frame sequence as raw 576×288 PNGs and
+hashes in a privacy-minimized receipt: Sidebar → Conversations → selected
+Conversation/Compose → Confirmation → Result → returned Conversation/Compose.
+It waits for the production Hub's content-free `confirmation-visible` receipt
+before injecting the documented control, then taps the visible result dismissal
+and requires the underlying selected frame to return. It checks the exact
+production-controller result text and whether its `RecordingSender` was
+called: cancellation and timeout must not call it, uncertain must never claim
+failure, and failed must never claim submission. The fixture remains a no-send
+boundary, and this evidence is not physical-G2 proof. Non-success outcomes
+apply to `--flow reply` only; compose and history remain their narrow no-send
+fixtures.
 
 For a conversation reply, do not batch controls. After tapping **Messages**,
 wait for the complete **MESSAGES** list, send one official-simulator `down`,
