@@ -105,6 +105,7 @@ interface ConfirmationReturnState extends HudContentState {
   id: string;
   prompt: string;
   surface: HudSurface;
+  onDeferredProductivityVisible?: () => void;
 }
 
 interface AssistantOverlayState extends AssistantOverlayVisual {
@@ -455,6 +456,7 @@ export class HudPresenter {
   async showProductivity(
     productivity: ProductivityHudModel,
     statusOverride?: string,
+    onDeferredProductivityVisible?: () => void,
   ): Promise<boolean> {
     if (!this.visual) return false;
     const surface: HudSurface = {
@@ -466,6 +468,7 @@ export class HudPresenter {
       // finishes its last tile. Defer the page rather than claiming a screen
       // paint which the wearer never saw; dismiss restores it atomically.
       this.confirmation.surface = surface;
+      this.confirmation.onDeferredProductivityVisible = onDeferredProductivityVisible;
       return true;
     }
     const prior = this.capturePresenterSnapshot();
@@ -493,6 +496,25 @@ export class HudPresenter {
       await this.visual.paint(this.visualFrame());
     }
     return painted;
+  }
+
+  /** Whether this exact productivity surface is currently retained after a
+   * successful paint. A deferred confirmation or a failed paint is not a
+   * visible surface and must not be used as a delivery acknowledgement. */
+  isProductivityVisible(productivity: ProductivityHudModel): boolean {
+    if (this.surface.kind !== 'productivity') return false;
+    const visible = this.surface.productivity;
+    return visible.domain === productivity.domain
+      && visible.phase === productivity.phase
+      && visible.title === productivity.title
+      && visible.primary === productivity.primary
+      && visible.secondary === productivity.secondary
+      && visible.hint === productivity.hint
+      && visible.planningAnchorUnixMs === productivity.planningAnchorUnixMs
+      && visible.monitoringArmed === productivity.monitoringArmed
+      && visible.reminderDueId === productivity.reminderDueId
+      && visible.reminderDueAttemptId === productivity.reminderDueAttemptId
+      && visible.reminderDueGeneration === productivity.reminderDueGeneration;
   }
 
   async setSelection(index: number): Promise<boolean> {
@@ -903,6 +925,9 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.showProductivity(prior.surface.productivity);
+      if (restored && this.isProductivityVisible(prior.surface.productivity)) {
+        prior.onDeferredProductivityVisible?.();
+      }
       const result = await this.repaintReplacementConfirmation(restored);
       this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;

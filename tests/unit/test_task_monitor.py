@@ -48,6 +48,16 @@ def register(store: DurableStore, *, due_unix_ms: int = 1_000):
     return occurrences, occurrence
 
 
+def accepted_delivery(cards: list[ProductivityHudView]):
+    """Test adapter for the production plugin-acceptance receipt boundary."""
+
+    def deliver(view: ProductivityHudView) -> bool:
+        cards.append(view)
+        return True
+
+    return deliver
+
+
 class ReminderEvaluationBridge:
     def __init__(
         self,
@@ -166,7 +176,7 @@ async def test_restart_catches_up_due_once_without_duplicate(tmp_path: Path) -> 
     cards: list[ProductivityHudView] = []
     with DurableStore(path) as reopened:
         occurrences = TaskOccurrenceStore(reopened)
-        monitor = TaskMonitor(occurrences, cards.append)
+        monitor = TaskMonitor(occurrences, accepted_delivery(cards))
         assert await monitor.run_due_once(now_unix_ms=2_000, now_us=2_000_000) == 1
         assert await monitor.run_due_once(now_unix_ms=3_000, now_us=3_000_000) == 0
         assert [
@@ -180,7 +190,7 @@ async def test_future_occurrence_is_not_alerted(tmp_path: Path) -> None:
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         occurrences, _ = register(store, due_unix_ms=10_000)
         cards: list[ProductivityHudView] = []
-        assert await TaskMonitor(occurrences, cards.append).run_due_once(
+        assert await TaskMonitor(occurrences, accepted_delivery(cards)).run_due_once(
             now_unix_ms=9_999, now_us=20
         ) == 0
         assert cards == []
@@ -191,16 +201,53 @@ async def test_enqueue_failure_leaves_pending_for_retry(tmp_path: Path) -> None:
         occurrences, _ = register(store)
         calls = 0
 
-        def flaky(_card: ProductivityHudView) -> None:
+        def flaky(_card: ProductivityHudView) -> bool:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise RuntimeError("HUD unavailable")
+            return True
 
         monitor = TaskMonitor(occurrences, flaky)
         assert await monitor.run_due_once(now_unix_ms=2_000, now_us=20) == 0
         assert await monitor.run_due_once(now_unix_ms=2_000, now_us=30) == 1
         assert calls == 2
+
+
+async def test_absent_plugin_receipt_leaves_due_occurrence_pending_for_retry(tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        occurrences, occurrence = register(store)
+        views: list[ProductivityHudView] = []
+
+        def receipt_after_retry(view: ProductivityHudView) -> bool:
+            views.append(view)
+            return len(views) > 1
+
+        monitor = TaskMonitor(occurrences, receipt_after_retry)
+        assert await monitor.run_due_once(now_unix_ms=2_000, now_us=20) == 0
+        assert occurrences._get_with(store._db, occurrence.occurrence_id).state == "pending"
+        assert views[0].reminder_due_id == occurrence.occurrence_id
+        assert views[0].reminder_due_attempt_id is None
+        assert views[0].reminder_due_generation is None
+        assert await monitor.run_due_once(now_unix_ms=2_000, now_us=30) == 1
+        assert occurrences._get_with(store._db, occurrence.occurrence_id).state == "alerted"
+
+
+async def test_due_receipt_rechecks_eventkit_before_marking_alerted(tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        occurrences, occurrence = register(store)
+        states = iter((ReminderNativeState.INCOMPLETE, ReminderNativeState.COMPLETED))
+
+        async def changes_after_receipt(_occurrence):  # type: ignore[no-untyped-def]
+            return next(states)
+
+        monitor = TaskMonitor(
+            occurrences,
+            lambda _view: True,
+            evaluate=changes_after_receipt,
+        )
+        assert await monitor.run_due_once(now_unix_ms=2_000, now_us=20) == 0
+        assert occurrences._get_with(store._db, occurrence.occurrence_id).state == "completed"
 
 
 async def test_completed_native_reminder_is_completed_locally_without_alert(
@@ -213,7 +260,7 @@ async def test_completed_native_reminder_is_completed_locally_without_alert(
         async def completed(_occurrence):  # type: ignore[no-untyped-def]
             return ReminderNativeState.COMPLETED
 
-        monitor = TaskMonitor(occurrences, cards.append, evaluate=completed)
+        monitor = TaskMonitor(occurrences, accepted_delivery(cards), evaluate=completed)
         assert await monitor.run_due_once(now_unix_ms=2_000, now_us=20) == 0
         assert cards == []
         assert occurrences._get_with(store._db, occurrence.occurrence_id).state == "completed"
@@ -227,7 +274,7 @@ async def test_unknown_native_state_defers_without_false_alert(tmp_path: Path) -
         async def unknown(_occurrence):  # type: ignore[no-untyped-def]
             return None
 
-        monitor = TaskMonitor(occurrences, cards.append, evaluate=unknown)
+        monitor = TaskMonitor(occurrences, accepted_delivery(cards), evaluate=unknown)
         assert await monitor.run_due_once(now_unix_ms=2_000, now_us=20) == 0
         assert cards == []
         assert occurrences._get_with(store._db, occurrence.occurrence_id).state == "pending"
@@ -246,7 +293,7 @@ async def test_rescheduled_native_reminder_retires_old_local_due_overlay(
         })
         monitor = TaskMonitor(
             occurrences,
-            cards.append,
+            accepted_delivery(cards),
             evaluate=lambda current: evaluate_reminder_occurrence(current, bridge),  # type: ignore[arg-type]
         )
 
@@ -267,7 +314,7 @@ async def test_failed_native_evaluation_defers_without_stopping_monitor(
         async def broken(_occurrence):  # type: ignore[no-untyped-def]
             raise RuntimeError("EventKit unavailable")
 
-        monitor = TaskMonitor(occurrences, cards.append, evaluate=broken)
+        monitor = TaskMonitor(occurrences, accepted_delivery(cards), evaluate=broken)
         assert await monitor.run_due_once(now_unix_ms=2_000, now_us=20) == 0
         assert cards == []
         assert occurrences._get_with(store._db, occurrence.occurrence_id).state == "pending"

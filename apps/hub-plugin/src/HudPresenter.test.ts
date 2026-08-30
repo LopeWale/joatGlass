@@ -411,6 +411,43 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
+  it('marks a due surface visible only after its exact frame survives paint', async () => {
+    const due = {
+      domain: 'reminders' as const,
+      phase: 'due' as const,
+      title: 'Private reminder',
+      primary: 'Due now',
+      secondary: 'Still incomplete',
+      hint: 'left x2 Planning',
+      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      reminderDueGeneration: 7,
+    };
+    const frames: HudVisualFrame[] = [];
+    const results = [true, false, false, true];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => {
+        frames.push(frame);
+        return results.shift() ?? true;
+      },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    let visibleCallbacks = 0;
+
+    expect(await hud.showText('home', ContainerId.Main)).toBe(true);
+    expect(await hud.showProductivity(due, undefined, () => { visibleCallbacks += 1; })).toBe(false);
+    expect(hud.isProductivityVisible(due)).toBe(false);
+    expect(visibleCallbacks).toBe(0);
+
+    await hud.showConfirmation('Create reminder “Private reminder”?', 'due-deferred');
+    expect(await hud.showProductivity(due, undefined, () => { visibleCallbacks += 1; })).toBe(true);
+    expect(hud.isProductivityVisible(due)).toBe(false);
+    expect(visibleCallbacks).toBe(0);
+    await hud.dismissConfirmation('due-deferred');
+    expect(hud.isProductivityVisible(due)).toBe(true);
+    expect(visibleCallbacks).toBe(1);
+  });
+
   it('keeps Mac-owned Overview regions blank during status-only boot', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {

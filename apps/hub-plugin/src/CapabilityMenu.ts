@@ -241,16 +241,19 @@ export class CapabilityMenu {
   /** A real Calendar/Reminders outcome screen. Back reloads the unified
    * native-backed Planning collection so an outcome cannot strand the wearer
    * on a stale Calendar- or Tasks-only list. */
-  async presentProductivity(productivity: ProductivityHudModel): Promise<boolean> {
+  async presentProductivity(
+    productivity: ProductivityHudModel,
+    onVisible?: () => void,
+  ): Promise<boolean> {
     this.clearResponseTimeout();
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
-    const shown = await this.hud.showProductivity(productivity);
-    if (!this.isCurrentTransition(transition)) return true;
+    const shown = await this.hud.showProductivity(productivity, undefined, onVisible);
+    if (!this.isCurrentTransition(transition)) return false;
     if (!shown) {
       await this.close();
-      return true;
+      return false;
     }
     this.view = 'productivity';
     this.productivityReturn = 'Planning';
@@ -269,7 +272,12 @@ export class CapabilityMenu {
     } else {
       this.scheduleProductivityReturn(productivity.phase);
     }
-    return true;
+    // A deferred confirmation, failed paint, or newer transition can be
+    // handled without a current visual page. Only a retained exact surface is
+    // eligible for the due-HUD acknowledgement.
+    const visible = this.hud.isProductivityVisible(productivity);
+    if (visible) onVisible?.();
+    return visible;
   }
 
   /** Left double-tap. Closed: open the capability menu. Anywhere else: BACK

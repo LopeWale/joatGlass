@@ -77,6 +77,7 @@ def reminder_due_hud_view(
     card: str,
     *,
     planning_anchor_unix_ms: int | None = None,
+    reminder_due_id: str | None = None,
 ) -> ProductivityHudView:
     """Turn a durable due card into the one read-only G2 reminder surface.
 
@@ -109,6 +110,7 @@ def reminder_due_hud_view(
         # dead-end alarm that only offers navigation away.
         hint="say complete reminder title · left x2 Planning",
         planning_anchor_unix_ms=anchor,
+        reminder_due_id=reminder_due_id,
     )
 
 
@@ -177,15 +179,16 @@ async def evaluate_reminder_occurrence(
 class TaskMonitor:
     """Enqueue each persisted due occurrence at least once.
 
-    The durable receipt is deliberately named `alert_enqueued`: until the Hub
-    protocol has a render acknowledgement it is not evidence that the wearer
-    saw the card. EventKit's own alarm remains the primary system reminder.
+    The durable receipt is deliberately named `alert_enqueued`: it records a
+    generation-bound, current admitted Hub-client acceptance, not a macOS
+    banner, G2 pixels, or wearer attention. EventKit's own alarm remains the
+    primary system reminder.
     """
 
     def __init__(
         self,
         occurrences: TaskOccurrenceStore,
-        deliver: Callable[[ProductivityHudView], None | Awaitable[None]],
+        deliver: Callable[[ProductivityHudView], bool | Awaitable[bool]],
         *,
         poll_interval_s: float = 15.0,
         evaluate: Callable[
@@ -250,10 +253,38 @@ class TaskMonitor:
                 payload = reminder_due_hud_view(
                     card,
                     planning_anchor_unix_ms=occurrence.due_unix_ms,
+                    reminder_due_id=occurrence.occurrence_id,
                 )
                 delivery = self._deliver(payload)
-                if inspect.isawaitable(delivery):
-                    await delivery
+                accepted = await delivery if inspect.isawaitable(delivery) else delivery
+                if accepted is not True:
+                    # The plugin did not send a generation-bound receipt for
+                    # this typed due view. Keep it pending for a retry rather
+                    # than promoting a local write to an alert claim.
+                    log.info(
+                        "task alert receipt absent occurrence=%s",
+                        occurrence.occurrence_id,
+                    )
+                    continue
+                # The native Reminder may have been completed or rescheduled
+                # while the current client painted the due HUD. EventKit stays
+                # authoritative at the durable state boundary.
+                if self._evaluate is not None:
+                    native_state = await self._evaluate(occurrence)
+                    if native_state is ReminderNativeState.COMPLETED:
+                        self._occurrences.mark_completed(
+                            occurrence.occurrence_id,
+                            now_us=receipt_us,
+                        )
+                        continue
+                    if native_state is ReminderNativeState.RESCHEDULED:
+                        self._occurrences.retire_due_tracking(
+                            occurrence.occurrence_id,
+                            now_us=receipt_us,
+                        )
+                        continue
+                    if native_state is not ReminderNativeState.INCOMPLETE:
+                        continue
             except Exception:
                 log.exception(
                     "task alert enqueue failed occurrence=%s",

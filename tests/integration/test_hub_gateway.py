@@ -37,6 +37,7 @@ from joat.core.protocol import (
     NavigationRouteAck,
     NavigationState,
     NavigationViewAck,
+    ProductivityHudView,
 )
 from joat.services.message_reply import MessageReplyController
 from joat.services.g2_diagnostics import G2DiagnosticStore
@@ -69,6 +70,20 @@ def _confirm_reply(request: dict[str, object], accepted: bool) -> str:
         "payloadDigest": request["payloadDigest"],
         "previewDigest": request["previewDigest"],
     })
+
+
+def _due_view(
+    reminder_due_id: str = "67ec97c5-a0fd-48ec-89cb-1b756ddaf87a",
+) -> ProductivityHudView:
+    return ProductivityHudView(
+        domain="reminders",
+        phase="due",
+        title="Synthetic reminder",
+        primary="Due now",
+        secondary="Still incomplete",
+        hint="say complete reminder title",
+        reminder_due_id=reminder_due_id,
+    )
 
 
 @pytest.fixture
@@ -499,6 +514,161 @@ class TestDownlink:
     async def test_send_with_no_plugin_is_dropped_not_raised(self, transport) -> None:
         t, _ = transport
         await t.send(HudText(text="into the void"))  # must not raise
+
+    async def test_reminder_due_without_plugin_has_no_acceptance_receipt(self, transport) -> None:
+        t, _ = transport
+        assert await t.request_reminder_due_ack(_due_view()) is False
+
+    async def test_reminder_due_requires_current_plugin_acceptance_receipt(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            delivery = asyncio.create_task(t.request_reminder_due_ack(_due_view()))
+            view = json.loads(await ws.recv())
+            assert view["kind"] == "productivity.view"
+            receipt = view["productivity"]
+            assert receipt["reminderDueId"] == "67ec97c5-a0fd-48ec-89cb-1b756ddaf87a"
+            assert isinstance(receipt["reminderDueAttemptId"], str)
+            assert receipt["reminderDueGeneration"] == t.connection_generation
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": receipt["reminderDueId"],
+                "reminderDueAttemptId": receipt["reminderDueAttemptId"],
+                "generation": receipt["reminderDueGeneration"] - 1,
+                "outcome": "accepted",
+            }))
+            await asyncio.sleep(0.01)
+            assert not delivery.done()
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": receipt["reminderDueId"],
+                "reminderDueAttemptId": receipt["reminderDueAttemptId"],
+                "generation": receipt["reminderDueGeneration"],
+                "outcome": "accepted",
+            }))
+            assert await delivery is True
+
+    async def test_reminder_due_disconnect_without_ack_is_retryable(self, transport) -> None:
+        t, url = transport
+        ws = await websockets.connect(url)
+        try:
+            await _wait_for(lambda: t.connected)
+            delivery = asyncio.create_task(t.request_reminder_due_ack(_due_view()))
+            assert json.loads(await ws.recv())["kind"] == "productivity.view"
+            await ws.close()
+            assert await delivery is False
+        finally:
+            await ws.close()
+
+    async def test_delayed_prior_due_ack_cannot_satisfy_a_retry(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            first = asyncio.create_task(
+                t.request_reminder_due_ack(_due_view(), timeout_s=0.01),
+            )
+            first_view = json.loads(await ws.recv())["productivity"]
+            assert await first is False
+            # Isolate attempt binding from bounded rollout reprobe: a test
+            # client simulates a transient missed receipt, then permits the
+            # next same-generation attempt.
+            t._reminder_due_ack_reprobe_at_s = 0
+            t._reminder_due_ack_last_attempt_at_s = 0
+
+            retry = asyncio.create_task(t.request_reminder_due_ack(_due_view()))
+            retry_view = json.loads(await ws.recv())["productivity"]
+            assert retry_view["reminderDueAttemptId"] != first_view["reminderDueAttemptId"]
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": first_view["reminderDueId"],
+                "reminderDueAttemptId": first_view["reminderDueAttemptId"],
+                "generation": first_view["reminderDueGeneration"],
+                "outcome": "accepted",
+            }))
+            await asyncio.sleep(0.01)
+            assert not retry.done()
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": retry_view["reminderDueId"],
+                "reminderDueAttemptId": retry_view["reminderDueAttemptId"],
+                "generation": retry_view["reminderDueGeneration"],
+                "outcome": "accepted",
+            }))
+            assert await retry is True
+
+    async def test_unacknowledged_client_generation_pauses_then_reprobes_due_hud(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            first = asyncio.create_task(
+                t.request_reminder_due_ack(_due_view(), timeout_s=0.01),
+            )
+            assert json.loads(await ws.recv())["kind"] == "productivity.view"
+            assert await first is False
+            assert await t.request_reminder_due_ack(_due_view(
+                "9b38eafb-6fda-4d4c-bb6e-80b9365854b5",
+            )) is False
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.02)
+            t._reminder_due_ack_reprobe_at_s = 0
+            t._reminder_due_ack_last_attempt_at_s = 0
+            recovery = asyncio.create_task(t.request_reminder_due_ack(_due_view(
+                "9b38eafb-6fda-4d4c-bb6e-80b9365854b5",
+            )))
+            recovery_view = json.loads(await ws.recv())["productivity"]
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": recovery_view["reminderDueId"],
+                "reminderDueAttemptId": recovery_view["reminderDueAttemptId"],
+                "generation": recovery_view["reminderDueGeneration"],
+                "outcome": "accepted",
+            }))
+            assert await recovery is True
+
+    async def test_current_generation_rate_limits_consecutive_due_views(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            first = asyncio.create_task(t.request_reminder_due_ack(_due_view()))
+            first_view = json.loads(await ws.recv())["productivity"]
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": first_view["reminderDueId"],
+                "reminderDueAttemptId": first_view["reminderDueAttemptId"],
+                "generation": first_view["reminderDueGeneration"],
+                "outcome": "accepted",
+            }))
+            assert await first is True
+
+            assert await t.request_reminder_due_ack(_due_view(
+                "9b38eafb-6fda-4d4c-bb6e-80b9365854b5",
+            )) is False
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.02)
+
+    async def test_current_generation_serializes_inflight_due_views(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            first = asyncio.create_task(t.request_reminder_due_ack(_due_view()))
+            first_view = json.loads(await ws.recv())["productivity"]
+            # Simulate a long acknowledgement wait after the rate-limit window
+            # has elapsed: the per-generation in-flight lease still owns the
+            # only due surface.
+            t._reminder_due_ack_last_attempt_at_s = 0
+            assert await t.request_reminder_due_ack(_due_view(
+                "9b38eafb-6fda-4d4c-bb6e-80b9365854b5",
+            )) is False
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.02)
+            await ws.send(json.dumps({
+                "kind": "reminder_due.ack",
+                "reminderDueId": first_view["reminderDueId"],
+                "reminderDueAttemptId": first_view["reminderDueAttemptId"],
+                "generation": first_view["reminderDueGeneration"],
+                "outcome": "accepted",
+            }))
+            assert await first is True
 
 
 class TestConfirm:

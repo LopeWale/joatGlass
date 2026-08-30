@@ -43,6 +43,7 @@ import {
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
 import { BrainstormController } from './BrainstormController';
+import { reminderDueAckFor } from './ReminderDueReceipt';
 import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
 import {
   replaySyntheticAudioFixture,
@@ -399,7 +400,20 @@ async function boot(): Promise<void> {
         break;
       case 'productivity.view':
         brainstorm.clear();
-        await awaitCurrent(menu.presentProductivity(msg.productivity));
+        {
+          const receipt = reminderDueAckFor(msg.productivity);
+          await awaitCurrent(menu.presentProductivity(
+            msg.productivity,
+            receipt
+              ? () => {
+                // This is a current-client acceptance receipt only. If the
+                // socket closes before this write, the Mac rejects the stale
+                // generation/attempt after reconnect.
+                link.send(receipt);
+              }
+              : undefined,
+          ));
+        }
         break;
       case 'navigation.origin.request':
         await awaitCurrent(navigation.requestOrigin(msg, context.signal));

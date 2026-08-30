@@ -2177,11 +2177,14 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 )
             native_readback_verified = True
             if include_reminder:
-                async def deliver_due_alert(alert: ProductivityHudView) -> None:
-                    # Use the same pure projection as the running Mac app;
-                    # a textual card or generic action receipt would not
-                    # establish that the wearer sees the real due surface.
-                    await gateway.send(alert)
+                async def deliver_due_alert(alert: ProductivityHudView) -> bool:
+                    # Exercise the production generation-bound acknowledgement
+                    # rather than treating a local websocket write as delivery.
+                    # This receipt proves only that the active Hub plugin
+                    # accepted the typed due surface; the independent
+                    # simulator screenshot and macOS alarm checks below keep
+                    # visual and native-notification proof distinct.
+                    return await gateway.request_reminder_due_ack(alert)
 
                 due_monitor = TaskMonitor(
                     occurrences,
@@ -2216,7 +2219,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                     "required": True,
                     "completed": True,
                     "delivery_count": due_delivery_count,
-                    "proof": "task_monitor_gateway_send_completed",
+                    "proof": "generation_bound_current_hub_client_acceptance",
                 }
                 due_screenshot_digest, due_preview_digest = await _wait_for_due_surface_proof(
                     automation_base,

@@ -9,7 +9,9 @@ replace the user's app-launched engine or a connected G2 on port 8787.
 
 This is renderer-and-gesture evidence only.  Its test producer sends typed
 ``ProductivityHudView`` outcomes after a real confirmation response; it never
-writes EventKit and must not be used as native write or physical-G2 proof.
+writes EventKit and must not be used as native write or physical-G2 proof.  A
+due view additionally checks the live Hub-plugin acceptance receipt, which is
+still distinct from pixels on a physical G2 or OS notification delivery.
 """
 
 from __future__ import annotations
@@ -422,6 +424,7 @@ def _view(
     secondary: str,
     hint: str,
     monitoring_armed: bool = False,
+    reminder_due_id: str | None = None,
 ) -> ProductivityHudView:
     return ProductivityHudView(
         domain=domain,
@@ -432,6 +435,7 @@ def _view(
         hint=hint,
         planning_anchor_unix_ms=1_788_274_200_000,
         monitoring_armed=monitoring_armed,
+        reminder_due_id=reminder_due_id,
     )
 
 
@@ -793,17 +797,24 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(ScreenReceipt("reminders-monitoring-return-planning", None, None, "day", digest))
         artifacts["reminders-monitoring-return-planning"] = artifact
 
-        await gateway.send(_view(
+        due_delivery = asyncio.create_task(gateway.request_reminder_due_ack(_view(
             "reminders",
             "due",
             title="Buy filters",
             primary="Due now",
             secondary="This reminder is still incomplete.",
             hint="say complete reminder title · left x2 Planning",
-        ))
+            # Simulator-only occurrence ID; no personal native identifier or
+            # reminder content participates in the receipt protocol.
+            reminder_due_id="67ec97c5-a0fd-48ec-89cb-1b756ddaf87a",
+        )))
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
         )
+        if not await asyncio.wait_for(due_delivery, timeout=5):
+            raise ProductivityHudFlowError(
+                "current Hub plugin did not accept the typed reminder due view"
+            )
         receipts.append(ScreenReceipt("reminders-due", None, None, "due", digest))
         artifacts["reminders-due"] = {"raw": raw, "alpha": alpha}
 
@@ -858,6 +869,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
+                "hubClientAcceptance": "generation-bound reminder_due acknowledgement from the current production Hub client; not a macOS banner or physical-G2 visual proof",
                 "terminalOutcomeReturn": "every terminal Calendar and Reminders outcome waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",
                 "physicalG2": "not run",

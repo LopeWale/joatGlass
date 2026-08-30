@@ -52,6 +52,7 @@ from joat.core.protocol import (
     PairingAck,
     PairingSet,
     ProductivityHudView,
+    ReminderDueAck,
     Input,
     Policy,
     ProtocolError,
@@ -668,6 +669,56 @@ class TestDownlinkWire:
                 "planningAnchorUnixMs": 1_788_274_200_000,
             },
         }
+
+    def test_due_ack_is_content_free_and_generation_bound(self) -> None:
+        reminder_due_id = "67ec97c5-a0fd-48ec-89cb-1b756ddaf87a"
+        attempt_id = "a76b12f1-45e4-41fd-aed8-086f6b6b1954"
+        wire = ProductivityHudView(
+            domain="reminders",
+            phase="due",
+            title="Private reminder",
+            primary="Due now",
+            secondary="Still incomplete",
+            hint="say complete reminder title",
+            reminder_due_id=reminder_due_id,
+            reminder_due_attempt_id=attempt_id,
+            reminder_due_generation=7,
+        ).to_wire()
+        assert wire["productivity"] == {
+            "domain": "reminders",
+            "phase": "due",
+            "title": "Private reminder",
+            "primary": "Due now",
+            "secondary": "Still incomplete",
+            "hint": "say complete reminder title",
+            "reminderDueId": reminder_due_id,
+            "reminderDueAttemptId": attempt_id,
+            "reminderDueGeneration": 7,
+        }
+        acknowledgement = {
+            "kind": "reminder_due.ack",
+            "reminderDueId": reminder_due_id,
+            "reminderDueAttemptId": attempt_id,
+            "generation": 7,
+            "outcome": "accepted",
+        }
+        assert "Private reminder" not in acknowledgement.values()
+        assert parse_uplink(acknowledgement) == ReminderDueAck(
+            reminder_due_id=reminder_due_id,
+            reminder_due_attempt_id=attempt_id,
+            generation=7,
+            outcome="accepted",
+        )
+
+    @pytest.mark.parametrize("payload", [
+        {"kind": "reminder_due.ack", "reminderDueId": "private title", "reminderDueAttemptId": "a76b12f1-45e4-41fd-aed8-086f6b6b1954", "generation": 7, "outcome": "accepted"},
+        {"kind": "reminder_due.ack", "reminderDueId": "67ec97c5-a0fd-48ec-89cb-1b756ddaf87a", "reminderDueAttemptId": "prior attempt", "generation": 7, "outcome": "accepted"},
+        {"kind": "reminder_due.ack", "reminderDueId": "67ec97c5-a0fd-48ec-89cb-1b756ddaf87a", "reminderDueAttemptId": "a76b12f1-45e4-41fd-aed8-086f6b6b1954", "generation": 0, "outcome": "accepted"},
+        {"kind": "reminder_due.ack", "reminderDueId": "67ec97c5-a0fd-48ec-89cb-1b756ddaf87a", "reminderDueAttemptId": "a76b12f1-45e4-41fd-aed8-086f6b6b1954", "generation": 7, "outcome": "rendered"},
+    ])
+    def test_due_ack_rejects_content_or_unbound_generation(self, payload: object) -> None:
+        with pytest.raises(ProtocolError):
+            parse_uplink(payload)  # type: ignore[arg-type]
 
     def test_productivity_view_and_planning_input_reject_invalid_anchors(self) -> None:
         with pytest.raises(ProtocolError, match="planning anchor"):

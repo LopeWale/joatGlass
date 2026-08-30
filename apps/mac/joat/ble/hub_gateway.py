@@ -19,8 +19,9 @@ import logging
 import secrets
 import struct
 import time
+import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from ipaddress import ip_address
 from urllib.parse import parse_qs, urlsplit
@@ -72,6 +73,8 @@ from ..core.protocol import (
     PairingSet,
     Policy,
     ProtocolError,
+    ProductivityHudView,
+    ReminderDueAck,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     parse_uplink,
     utf16_units,
@@ -79,6 +82,8 @@ from ..core.protocol import (
 from ..services.g2_diagnostics import G2DiagnosticStore
 
 log = logging.getLogger(__name__)
+REMINDER_DUE_ACK_REPROBE_SECONDS = 30.0
+REMINDER_DUE_ACK_MIN_INTERVAL_SECONDS = 5.0
 
 
 ImuCallback = Callable[[Imu], None]
@@ -109,6 +114,14 @@ class _PendingConfirm:
 class _PendingLocationRefresh:
     future: asyncio.Future[Location | None]
     session_id: str
+
+
+@dataclass(slots=True)
+class _PendingReminderDueAck:
+    future: asyncio.Future[bool]
+    session_id: str
+    generation: int
+    attempt_id: str
 
 
 class HubGatewayTransport(GlassesTransport, AudioFrameSource):
@@ -164,6 +177,12 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
         self._pending_confirms: dict[str, _PendingConfirm] = {}
         self._pending_location_refreshes: dict[str, _PendingLocationRefresh] = {}
+        self._pending_reminder_due_acks: dict[str, _PendingReminderDueAck] = {}
+        self._reminder_due_ack_unavailable_generation: int | None = None
+        self._reminder_due_ack_reprobe_at_s: float | None = None
+        self._reminder_due_ack_last_attempt_generation: int | None = None
+        self._reminder_due_ack_last_attempt_at_s: float | None = None
+        self._reminder_due_ack_inflight_generation: int | None = None
         self._session_id: str | None = None
         self._connection_generation = 0
         self._session_pairing_identity_digest: bytes | None = None
@@ -216,6 +235,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         if self._conn is not None:
             if self._session_id is not None:
                 self._invalidate_confirms(self._session_id)
+                self._clear_reminder_due_acks(self._session_id)
             await self._conn.close()
             self._conn = None
             self._session_id = None
@@ -366,6 +386,111 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             # fail-closed rather than explode inside the safety gate.
             log.info("dropping %s — plugin disconnected mid-send",
                      type(message).__name__)
+
+    async def request_reminder_due_ack(
+        self,
+        view: ProductivityHudView,
+        *,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        """Wait for the active plugin to accept one typed due Reminder view.
+
+        The acknowledgement is bound to the current admitted Hub-client
+        session, its generation, and a fresh attempt UUID. It establishes
+        client acceptance, not an EventKit banner, physical G2 rasterization,
+        or wearer attention. A timeout or reconnect is deliberately retryable.
+        """
+
+        if (
+            view.domain != "reminders"
+            or view.phase != "due"
+            or view.reminder_due_id is None
+            or view.reminder_due_generation is not None
+        ):
+            raise ValueError("reminder due acknowledgement requires an unbound due view")
+        conn = self._conn
+        session_id = self._session_id
+        if conn is None or session_id is None:
+            return False
+        generation = self._connection_generation
+        now_s = time.monotonic()
+        # A rollout-skewed client can paint an older due screen but cannot
+        # produce this newer receipt. One bounded timeout suppresses further
+        # sends briefly, preventing every due occurrence from serially waiting
+        # and repeatedly replacing its HUD. A later reprobe keeps a supported
+        # client recoverable after a transient dropped receipt.
+        if self._reminder_due_ack_unavailable_generation == generation:
+            retry_at_s = self._reminder_due_ack_reprobe_at_s
+            if retry_at_s is not None and now_s < retry_at_s:
+                return False
+            self._reminder_due_ack_unavailable_generation = None
+            self._reminder_due_ack_reprobe_at_s = None
+        # A due view is a foreground interruption. Serialize accepted/reprobe
+        # attempts per client generation so a backlog cannot replace the HUD
+        # with dozens of stale reminders in one monitor pass.
+        if (
+            self._reminder_due_ack_last_attempt_generation == generation
+            and self._reminder_due_ack_last_attempt_at_s is not None
+            and now_s - self._reminder_due_ack_last_attempt_at_s
+            < REMINDER_DUE_ACK_MIN_INTERVAL_SECONDS
+        ):
+            return False
+        if self._reminder_due_ack_inflight_generation == generation:
+            return False
+        reminder_due_id = view.reminder_due_id
+        if reminder_due_id in self._pending_reminder_due_acks:
+            return False
+        attempt_id = str(uuid.uuid4())
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        pending = _PendingReminderDueAck(
+            future=future,
+            session_id=session_id,
+            generation=generation,
+            attempt_id=attempt_id,
+        )
+        self._pending_reminder_due_acks[reminder_due_id] = pending
+        self._reminder_due_ack_last_attempt_generation = generation
+        self._reminder_due_ack_last_attempt_at_s = now_s
+        self._reminder_due_ack_inflight_generation = generation
+        outbound = replace(
+            view,
+            reminder_due_attempt_id=attempt_id,
+            reminder_due_generation=generation,
+        )
+        try:
+            await conn.send(json.dumps(outbound.to_wire()))
+            if self._conn is not conn or self._session_id != session_id:
+                return False
+            return await asyncio.wait_for(
+                asyncio.shield(future), timeout=max(0.01, min(timeout_s, 10.0)),
+            )
+        except asyncio.TimeoutError:
+            if self._connection_generation == generation:
+                self._reminder_due_ack_unavailable_generation = generation
+                self._reminder_due_ack_reprobe_at_s = (
+                    time.monotonic() + REMINDER_DUE_ACK_REPROBE_SECONDS
+                )
+            return False
+        except websockets.ConnectionClosed:
+            return False
+        finally:
+            current = self._pending_reminder_due_acks.get(reminder_due_id)
+            if current is pending:
+                self._pending_reminder_due_acks.pop(reminder_due_id, None)
+                if not future.done():
+                    future.cancel()
+            if self._reminder_due_ack_inflight_generation == generation:
+                self._reminder_due_ack_inflight_generation = None
+
+    def _clear_reminder_due_acks(self, session_id: str | None = None) -> None:
+        """Resolve in-flight due receipts false when their socket is gone."""
+
+        for reminder_due_id, pending in tuple(self._pending_reminder_due_acks.items()):
+            if session_id is not None and pending.session_id != session_id:
+                continue
+            self._pending_reminder_due_acks.pop(reminder_due_id, None)
+            if not pending.future.done():
+                pending.future.set_result(False)
 
     def fresh_location(self, *, max_age_s: float = 120.0) -> Location | None:
         """Return only a connected, recently received, plausibly fresh phone fix."""
@@ -751,10 +876,16 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             if self._session_id is not None:
                 self._invalidate_confirms(self._session_id)
                 self._clear_location(self._session_id)
+                self._clear_reminder_due_acks(self._session_id)
             await self._conn.close()
         self._conn = conn
         self._session_id = session_id
         self._connection_generation += 1
+        self._reminder_due_ack_unavailable_generation = None
+        self._reminder_due_ack_reprobe_at_s = None
+        self._reminder_due_ack_last_attempt_generation = None
+        self._reminder_due_ack_last_attempt_at_s = None
+        self._reminder_due_ack_inflight_generation = None
         self._session_pairing_identity_digest = pairing_identity_digest
         self._current_peer_is_loopback = self._peer_is_loopback(conn)
         self._last_seq = None
@@ -784,6 +915,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 self._current_peer_is_loopback = False
                 self.hello = None
                 self._clear_location(session_id)
+                self._clear_reminder_due_acks(session_id)
                 for cb in self._disconnect_cbs:
                     cb()
             log.info("plugin disconnected")
@@ -920,6 +1052,18 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             case NavigationOriginFailure():
                 for navigation_origin_failure_cb in self._navigation_origin_failure_cbs:
                     navigation_origin_failure_cb(message)
+            case ReminderDueAck():
+                reminder_pending = self._pending_reminder_due_acks.get(
+                    message.reminder_due_id,
+                )
+                if (
+                    reminder_pending is not None
+                    and reminder_pending.session_id == session_id == self._session_id
+                    and reminder_pending.generation == message.generation == self._connection_generation
+                    and reminder_pending.attempt_id == message.reminder_due_attempt_id
+                    and not reminder_pending.future.done()
+                ):
+                    reminder_pending.future.set_result(True)
 
     def _handle_audio(self, message: Audio, session_id: str) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:
