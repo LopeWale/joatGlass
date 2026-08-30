@@ -1,0 +1,43 @@
+"""Contract for the isolated official-simulator productivity HUD flow."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import sys
+
+
+def _driver():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "simulator_productivity_hud_action_flow.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("productivity_hud_flow", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -> None:
+    driver = _driver()
+
+    assert driver is not None, "productivity HUD action-flow driver is missing"
+    receipts = [
+        driver.ScreenReceipt("calendar-review", None, None, "review", "a" * 64),
+        driver.ScreenReceipt("calendar-verifying", "click", True, "verifying", "b" * 64),
+        driver.ScreenReceipt("calendar-saved", None, None, "saved", "c" * 64),
+        driver.ScreenReceipt("calendar-failed", None, None, "failed", "d" * 64),
+        driver.ScreenReceipt("calendar-uncertain", None, None, "check", "e" * 64),
+        driver.ScreenReceipt("reminders-review", None, None, "review", "f" * 64),
+        driver.ScreenReceipt("reminders-verifying", "click", True, "verifying", "0" * 64),
+        driver.ScreenReceipt("reminders-saved", None, None, "saved", "1" * 64),
+        driver.ScreenReceipt("reminders-due", None, None, "due", "2" * 64),
+        driver.ScreenReceipt("reminders-complete-review", None, None, "review", "3" * 64),
+        driver.ScreenReceipt("reminders-completing", "click", True, "verifying", "4" * 64),
+        driver.ScreenReceipt("reminders-completed", None, None, "completed", "5" * 64),
+        driver.ScreenReceipt("reminders-failed", None, None, "failed", "6" * 64),
+        driver.ScreenReceipt("reminders-uncertain", None, None, "check", "7" * 64),
+    ]
+
+    driver.validate_flow(receipts)
