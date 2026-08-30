@@ -2,6 +2,13 @@
 
 ## 2026-08-30
 
+- Hardened the private home-Mini EHPK release path. `npm run pack` now requires
+  explicit `JOAT_RELEASE_WS_URLS` and rejects raw development transport,
+  unlisted origins, non-`/glasses` paths, and duplicate candidates before Vite
+  can read the ignored `.env`. This makes the intended Tailscale Serve WSS
+  route a reviewable package input; it does not build, upload, install, or
+  prove a device package by itself.
+
 - Made the real-G2 **Brainstorm / Agent Terminal acceptance route explicitly
   diagnostic-only**. A production `begin_acceptance` gesture is now refused
   before it can allocate a session unless the app-owned engine was deliberately
