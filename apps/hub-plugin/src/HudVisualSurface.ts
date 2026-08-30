@@ -8,6 +8,7 @@ import type { NavigationHudModel } from './NavigationHud';
 import {
   CANVAS,
   ContainerId,
+  VisualContainerName,
   type BrainstormHudModel,
   type HudContentKind,
   type PlanningGridCell,
@@ -104,6 +105,10 @@ export interface HudFramePainter {
   paint(frame: HudVisualFrame): Promise<boolean>;
 }
 
+/** Converts one raw raster tile into an image format the native bridge and
+ * the official simulator both decode. */
+export type HudImageEncoder = (tile: HudImageTile) => Promise<Uint8Array>;
+
 /** A dev-only simulator receipt must name a fixed state, never its content. */
 export function visibleSurfaceReceipt(frame: HudVisualFrame): 'reminder_due' | undefined {
   if (
@@ -147,13 +152,13 @@ interface PendingPaint {
 }
 
 /**
- * Split one row-major unpacked Gray4 frame into the SDK's four maximum-size
- * images. The SDK boundary takes one grayscale byte per pixel, with each byte
- * already quantized to the Gray4 range 0...15.
+ * Split one row-major raw Gray8 frame into the SDK's four maximum-size
+ * images. A byte-per-pixel buffer must remain Gray8; it is neither packed
+ * Gray4 nor the old invalid hybrid of one 4-bit value in every byte.
  */
-export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
+export function splitGrayscaleTiles(pixels: Uint8Array): HudImageTile[] {
   if (pixels.length !== CANVAS.width * CANVAS.height) {
-    throw new Error(`expected ${CANVAS.width * CANVAS.height} Gray4 pixels, got ${pixels.length}`);
+    throw new Error(`expected ${CANVAS.width * CANVAS.height} grayscale pixels, got ${pixels.length}`);
   }
   const definitions = [
     { containerId: ContainerId.Image, x: 0, y: 0 },
@@ -172,6 +177,37 @@ export function splitGray4Tiles(pixels: Uint8Array): HudImageTile[] {
   });
 }
 
+/** The SDK accepts encoded image bytes and performs the device's Gray4
+ * conversion itself. Encode the canvas tile rather than sending an invalid
+ * byte-per-pixel Gray4 hybrid. */
+export async function encodeGray8TilePng(tile: HudImageTile): Promise<Uint8Array> {
+  const expectedLength = TILE_WIDTH * TILE_HEIGHT;
+  if (tile.pixels.length !== expectedLength) {
+    throw new Error(`expected ${expectedLength} grayscale tile pixels, got ${tile.pixels.length}`);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = TILE_WIDTH;
+  canvas.height = TILE_HEIGHT;
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('2D canvas is unavailable for HUD tile encoding');
+  const image = context.createImageData(TILE_WIDTH, TILE_HEIGHT);
+  for (let source = 0, target = 0; source < tile.pixels.length; source += 1, target += 4) {
+    const gray = tile.pixels[source] ?? 0;
+    image.data[target] = gray;
+    image.data[target + 1] = gray;
+    image.data[target + 2] = gray;
+    image.data[target + 3] = 255;
+  }
+  context.putImageData(image, 0, 0);
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((value) => {
+      if (value) resolve(value);
+      else reject(new Error('HUD tile PNG encoding failed'));
+    }, 'image/png');
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 export class HudVisualSurface implements HudFramePainter {
   private painting = false;
   private readonly queue: PendingPaint[] = [];
@@ -181,6 +217,7 @@ export class HudVisualSurface implements HudFramePainter {
     private readonly client: BridgeClient,
     private readonly renderer: HudFrameRenderer,
     private readonly diagnostics?: G2DiagnosticTrace,
+    private readonly imageEncoder: HudImageEncoder = async (tile) => tile.pixels,
   ) {}
 
   paint(frame: HudVisualFrame): Promise<boolean> {
@@ -223,13 +260,17 @@ export class HudVisualSurface implements HudFramePainter {
       const tiles = await this.renderer.render(frame);
       for (const [order, tile] of tiles.entries()) {
         current = { order, tile };
+        const containerName = VisualContainerName[tile.containerId];
+        if (!containerName) throw new Error(`unknown visual container ${tile.containerId}`);
+        const imageData = await this.imageEncoder(tile);
         const result = await this.client.require().updateImageRawData(
           new ImageRawDataUpdate({
             containerID: tile.containerId,
+            containerName,
             // The phone bridge is a Dart List<int> boundary.  Keep the
             // payload as a normal JS array instead of relying on a typed-array
             // structured-clone conversion that the host does not guarantee.
-            imageData: Array.from(tile.pixels),
+            imageData: Array.from(imageData),
           }),
         );
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';

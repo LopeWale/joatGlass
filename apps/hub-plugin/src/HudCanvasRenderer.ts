@@ -18,7 +18,7 @@ import {
   type ProductivityHudModel,
 } from './types';
 import {
-  splitGray4Tiles,
+  splitGrayscaleTiles,
   type HudFrameRenderer,
   type HudImageTile,
   type HudVisualFrame,
@@ -291,13 +291,6 @@ function gray(level: number): string {
  * canvas palette so Mac urgency survives the custom raster renderer. */
 export function hudBrightnessGray(level: number): number {
   return [34, QUIET, CHROME, SUPPORT, BRIGHT][Math.max(0, Math.min(4, Math.round(level)))]!;
-}
-
-/** The canvas uses normal 8-bit color for antialiasing; its G2 transport is
- * packed Gray4. Quantize before tile packing so authored hierarchy survives
- * inside the 16 native grayscale levels. */
-export function gray8ToGray4(value: number): number {
-  return Math.max(0, Math.min(15, Math.round(value * 15 / 255)));
 }
 
 export function hudDisplayTitle(value: string): string {
@@ -639,11 +632,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const rgba = context.getImageData(0, 0, CANVAS.width, CANVAS.height).data;
     const pixels = new Uint8Array(CANVAS.width * CANVAS.height);
     for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
-      pixels[target] = gray8ToGray4(
-        Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0),
-      );
+      pixels[target] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
     }
-    return splitGray4Tiles(pixels);
+    return splitGrayscaleTiles(pixels);
   }
 
   private drawShell(

@@ -3,15 +3,15 @@ import { ImageRawDataUpdateResult } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import {
   HudVisualSurface,
-  splitGray4Tiles,
+  splitGrayscaleTiles,
   visibleSurfaceReceipt,
   type HudFrameRenderer,
   type HudVisualFrame,
 } from './HudVisualSurface';
 import { ContainerId } from './types';
 
-describe('splitGray4Tiles', () => {
-  it('maps the canvas into four ordered unpacked-Gray4 SDK images', () => {
+describe('splitGrayscaleTiles', () => {
+  it('maps the raw Gray8 canvas into four ordered SDK images', () => {
     const pixels = new Uint8Array(576 * 288);
     pixels[0] = 1;
     pixels[287] = 2;
@@ -19,7 +19,7 @@ describe('splitGray4Tiles', () => {
     pixels[576 * 144] = 4;
     pixels[576 * 144 + 288] = 5;
 
-    const tiles = splitGray4Tiles(pixels);
+    const tiles = splitGrayscaleTiles(pixels);
     expect(tiles.map((tile) => tile.containerId)).toEqual([
       ContainerId.Image,
       ContainerId.VisualTopRight,
@@ -54,7 +54,39 @@ describe('HudVisualSurface', () => {
     expect(JSON.stringify(visibleSurfaceReceipt(due))).not.toContain('private');
   });
 
-  it('sends one unpacked Gray4 byte per pixel through the host List<int> boundary', async () => {
+  it('addresses every raw Gray8 upload by the exact visual container ID and name', async () => {
+    const payloads: Array<{ imageData?: unknown; containerName?: unknown }> = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async (update: { imageData?: unknown; containerName?: unknown }) => {
+          payloads.push(update);
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const pixels = new Uint8Array(576 * 288);
+    pixels.fill(170);
+    pixels[0] = 0;
+    pixels[576 * 288 - 1] = 255;
+    const renderer: HudFrameRenderer = { render: async () => splitGrayscaleTiles(pixels) };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+
+    await new HudVisualSurface(client, renderer).paint(frame);
+
+    expect(payloads).toHaveLength(4);
+    expect(payloads.map((payload) => payload.containerName)).toEqual([
+      'visual-tl', 'visual-tr', 'visual-bl', 'visual-br',
+    ]);
+    expect(payloads.every((payload) => Array.isArray(payload.imageData) && payload.imageData.length === 41_472)).toBe(true);
+    expect((payloads[0]?.imageData as number[])[0]).toBe(0);
+    expect((payloads[3]?.imageData as number[])[41_471]).toBe(255);
+    expect(payloads.flatMap((payload) => payload.imageData as number[]).every((value) => value <= 255)).toBe(true);
+  });
+
+  it('sends encoded image bytes when the production tile encoder is supplied', async () => {
     const payloads: unknown[] = [];
     const client = {
       require: () => ({
@@ -64,23 +96,20 @@ describe('HudVisualSurface', () => {
         },
       }),
     } as unknown as BridgeClient;
-    const pixels = new Uint8Array(576 * 288);
-    pixels.fill(10);
-    pixels[0] = 0;
-    pixels[576 * 288 - 1] = 15;
-    const renderer: HudFrameRenderer = { render: async () => splitGray4Tiles(pixels) };
+    const renderer: HudFrameRenderer = {
+      render: async () => splitGrayscaleTiles(new Uint8Array(576 * 288).fill(170)),
+    };
+    const encoded = new Uint8Array([137, 80, 78, 71]);
+    const encode = vi.fn(async () => encoded);
     const frame: HudVisualFrame = {
       kind: 'overview', status: '', micOn: false, mainBrightness: 4,
       main: '', context: '', tray: '', hint: '',
     };
 
-    await new HudVisualSurface(client, renderer).paint(frame);
+    await new HudVisualSurface(client, renderer, undefined, encode).paint(frame);
 
-    expect(payloads).toHaveLength(4);
-    expect(payloads.every((payload) => Array.isArray(payload) && payload.length === 41_472)).toBe(true);
-    expect((payloads[0] as number[])[0]).toBe(0);
-    expect((payloads[3] as number[])[41_471]).toBe(15);
-    expect(payloads.flatMap((payload) => payload as number[]).every((value) => value <= 15)).toBe(true);
+    expect(encode).toHaveBeenCalledTimes(4);
+    expect(payloads).toEqual(Array.from({ length: 4 }, () => [137, 80, 78, 71]));
   });
 
   it('awaits all four image updates serially', async () => {

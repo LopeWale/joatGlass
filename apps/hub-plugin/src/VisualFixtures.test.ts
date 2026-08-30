@@ -14,10 +14,10 @@ describe('visual fixtures', () => {
   it('stitches renderer tiles into one native-size green optical preview', () => {
     const pixels = (value: number) => new Uint8Array(288 * 144).fill(value);
     const rgba = stitchHudPreviewRgba([
-      { containerId: 4, pixels: pixels(1) },
-      { containerId: 8, pixels: pixels(2) },
-      { containerId: 9, pixels: pixels(3) },
-      { containerId: 10, pixels: pixels(4) },
+      { containerId: 4, pixels: pixels(17) },
+      { containerId: 8, pixels: pixels(34) },
+      { containerId: 9, pixels: pixels(51) },
+      { containerId: 10, pixels: pixels(68) },
     ]);
     const greenAt = (x: number, y: number) => rgba[(y * 576 + x) * 4 + 1];
     expect(rgba).toHaveLength(576 * 288 * 4);

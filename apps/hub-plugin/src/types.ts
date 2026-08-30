@@ -19,6 +19,17 @@ export const ContainerId = {
 } as const;
 export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
 
+/** Image updates must identify the same named visual container that the
+ * layout declared. Keeping the mapping beside stable IDs prevents a bridge
+ * acknowledgement from being mistaken for a visible tile when a host routes
+ * raw pixels by name. */
+export const VisualContainerName: Readonly<Record<number, string>> = {
+  [ContainerId.Image]: 'visual-tl',
+  [ContainerId.VisualTopRight]: 'visual-tr',
+  [ContainerId.VisualBottomLeft]: 'visual-bl',
+  [ContainerId.VisualBottomRight]: 'visual-br',
+};
+
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
 /** JavaScript UTF-16 code units. Longer previews must fail, never truncate. */
