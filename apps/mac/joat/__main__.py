@@ -16,12 +16,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .agents.builtin_tools import (
-    messages_tool,
-    notifications_tool,
-    weather_tool,
-)
-from .agents.nearby_places import nearby_places_tool
+from .agents.builtin_tools import messages_tool, notifications_tool
 from .agents.grounding import (
     Grounding,
     device_facts,
@@ -29,6 +24,7 @@ from .agents.grounding import (
     location_facts,
     static_fact,
 )
+from .agents.location_tools import wearer_location_tools
 from .agents.tools import ToolBelt
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.openclaw_gateway import (
@@ -263,6 +259,20 @@ async def main() -> None:
         loc = await transport.request_location_refresh()
         return (loc.latitude, loc.longitude) if loc is not None else None
 
+    # Nearby places must be in the reply engine's initial tool schemas.  The
+    # provider is also later reused by the separately opt-in navigation flow;
+    # configuring it here does not enable route guidance.
+    mapbox_token = os.environ.get("MAPBOX_ACCESS_TOKEN", "").strip()
+    experimental_navigation = os.environ.get(
+        "JOAT_EXPERIMENTAL_NAVIGATION", "",
+    ).strip().lower() in {"1", "true", "yes"}
+    mapbox_provider: MapboxNavigationProvider | None = None
+    if mapbox_token:
+        mapbox_provider = MapboxNavigationProvider(
+            mapbox_token,
+            candidate_navigation_policies(),
+        )
+
     replier: ReplyEngine | None = None
     belt: ToolBelt | None = None
     llm_warm_task: asyncio.Task[bool] | None = None
@@ -288,7 +298,11 @@ async def main() -> None:
         # wearer's ruling — an assistant that stops at "I don't know" is as
         # fired as one that invents the answer.
         belt_tools = [
-            weather_tool(wearer_coords, refresh_wearer_coords),
+            *wearer_location_tools(
+                wearer_coords,
+                refresh_wearer_coords,
+                mapbox_provider.search if mapbox_provider is not None else None,
+            ),
             notifications_tool(card_log),
         ]
         if imessage.available:
@@ -567,23 +581,6 @@ async def main() -> None:
     # One snapshot outlives any single debate: the wearer opens the Debate
     # panel after the fact and must still see what was said.
     debate_state = DebateStateSink()
-
-    mapbox_token = os.environ.get("MAPBOX_ACCESS_TOKEN", "").strip()
-    experimental_navigation = os.environ.get(
-        "JOAT_EXPERIMENTAL_NAVIGATION", "",
-    ).strip().lower() in {"1", "true", "yes"}
-    mapbox_provider: MapboxNavigationProvider | None = None
-    if mapbox_token:
-        mapbox_provider = MapboxNavigationProvider(
-            mapbox_token,
-            candidate_navigation_policies(),
-        )
-        if belt is not None:
-            belt.register(nearby_places_tool(
-                wearer_coords,
-                refresh_wearer_coords,
-                mapbox_provider.search,
-            ))
 
     navigation_provider: NavigationProvider | None = None
     if mapbox_provider is not None and experimental_navigation:
