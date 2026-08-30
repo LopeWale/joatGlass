@@ -1368,13 +1368,16 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             # Coerce samples HERE so one malformed value is a ProtocolError
             # (logged and dropped by the caller) — not a TypeError escaping
             # pack_pcm later and killing the whole session.
+            source = payload.get("source")
+            if source not in ("glasses", "phone"):
+                raise ProtocolError("audio source is invalid")
             try:
                 pcm = [int(v) for v in _require(payload, "pcm", kind)]
             except (TypeError, ValueError) as exc:
                 raise ProtocolError(f"audio pcm contains a non-numeric sample: {exc}") from exc
             speaker = payload.get("speaker")
             return Audio(
-                source=payload.get("source", "glasses"),
+                source=source,
                 seq=int(_require(payload, "seq", kind)),
                 pcm=pcm,
                 speaker=str(speaker) if speaker is not None else None,

@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 from ..core.interfaces import ReplyEngine
-from ..core.protocol import BrainstormAction, BrainstormHudView
+from ..core.protocol import AudioSource, BrainstormAction, BrainstormHudView
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
 from ..channels.cards import CardLog
@@ -117,6 +117,11 @@ class SessionManager:
         """Typed event-routing seam; ownership remains read-only to callers."""
         return self._active
 
+    @property
+    def topic_capture_armed(self) -> bool:
+        """Whether a visible G2 tap is waiting for one glasses-mic phrase."""
+        return self._topic_capture_armed
+
     def notify(self, card: str) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
         shows the card now; an active session is never interrupted — cards
@@ -181,7 +186,12 @@ class SessionManager:
 
         asyncio.get_running_loop().create_task(show_and_resolve())
 
-    def handle_transcript(self, text: str) -> bool:
+    def handle_transcript(
+        self,
+        text: str,
+        *,
+        capture_source: AudioSource | None = None,
+    ) -> bool:
         """True = consumed (session active or started); False = default flow."""
         lowered = text.lower().strip().rstrip(".!?")
         if self._active is not None:
@@ -203,6 +213,13 @@ class SessionManager:
                 )
             return True
         if self._topic_capture_armed:
+            # The wearer armed this path on the glasses. A phone or legacy
+            # source may still exist as a general voice fallback, but it must
+            # not satisfy the explicit glasses-owned next-utterance promise.
+            if capture_source != "glasses":
+                log.info("ignoring non-glasses transcript while G2 topic capture is armed")
+                self._show_topic_capture(armed=True)
+                return True
             self._topic_capture_armed = False
             # The capture surface explicitly promises that the next phrase is
             # the topic. Treat cancel as an exit from that surface rather than

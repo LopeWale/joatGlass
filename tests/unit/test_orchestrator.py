@@ -8,6 +8,9 @@ import struct
 
 from joat.audio.vad import RmsVad
 from joat.core.interfaces import (
+    AudioFrame,
+    AudioFrameCallback,
+    AudioFrameSource,
     ReplyEngine,
     AudioCallback,
     DeviceCallback,
@@ -19,13 +22,17 @@ from joat.core.interfaces import (
 from joat.core.protocol import (
     AssistantOverlay,
     AudioControl,
+    AudioSource,
+    BrainstormAction,
+    BrainstormHudView,
     ContainerId,
     DownlinkMessage,
     HudText,
 )
 from joat.services.orchestrator import VoiceOrchestrator
 from joat.services.greetings import greeting_response
-from joat.services.session import Session
+from joat.services.hud import HudWriter
+from joat.services.session import Session, SessionManager
 
 BATCH_SAMPLES = 3200
 
@@ -59,6 +66,26 @@ class FakeTransport(GlassesTransport):
 
     def on_input(self, callback: InputCallback) -> None: ...
     def on_device(self, callback: DeviceCallback) -> None: ...
+
+
+class FrameTransport(FakeTransport, AudioFrameSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frame_cb: AudioFrameCallback | None = None
+
+    def on_audio_frame(self, callback: AudioFrameCallback) -> None:
+        self.frame_cb = callback
+
+    def emit_frame(self, pcm: bytes, seq: int, source: AudioSource) -> None:
+        assert self.frame_cb is not None
+        self.frame_cb(AudioFrame(
+            pcm=pcm,
+            connection_generation="current",
+            seq=seq,
+            source=source,
+            speaker=None,
+            received_at_us=0,
+        ))
 
 
 class FakeEngine(SttEngine):
@@ -220,6 +247,88 @@ class FakeReplier(ReplyEngine):
     async def reply(self, text: str) -> str | None:
         self.asked.append(text)
         return self.text
+
+
+class HeldTopicSession(Session):
+    def __init__(self, entered: asyncio.Event) -> None:
+        self._entered = entered
+
+    async def run(self) -> None:
+        self._entered.set()
+        await asyncio.Event().wait()
+
+    def cancel(self) -> None:
+        return None
+
+
+class TestGlassesFirstTopicCapture:
+    async def test_tapped_capture_consumes_glasses_speech_before_the_wake_word_gate(self) -> None:
+        transport = FrameTransport()
+        engine = FakeEngine("compare a home mini with this laptop")
+        entered = asyncio.Event()
+        topics: list[str] = []
+        capture = BrainstormHudView(
+            screen="brainstorm", state="topic_capture", topic="Speak your question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity="Your next spoken phrase starts this Brainstorm.",
+            terminal_state="ready", no_tools_checked=True,
+        )
+        sessions = SessionManager(
+            HudWriter(transport),
+            lambda topic: topics.append(topic) or HeldTopicSession(entered),
+            topic_capture_view=lambda _armed: capture,
+        )
+        replier = FakeReplier()
+        sessions.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+        orchestrator = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), sessions=sessions,
+            replier=replier, wake_words=("joat",),
+        )
+        orchestrator.attach()
+        assert transport.frame_cb is not None
+
+        for sequence, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.emit_frame(pcm, sequence, "glasses")
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        assert topics == ["compare a home mini with this laptop"]
+        assert replier.asked == []
+        await sessions.close(timeout_s=0.1)
+
+    async def test_phone_audio_cannot_satisfy_a_glasses_armed_capture(self) -> None:
+        transport = FrameTransport()
+        engine = FakeEngine("a phone-originated topic")
+        entered = asyncio.Event()
+        topics: list[str] = []
+        capture = BrainstormHudView(
+            screen="brainstorm", state="topic_capture", topic="Speak your question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity="Your next spoken phrase starts this Brainstorm.",
+            terminal_state="ready", no_tools_checked=True,
+        )
+        sessions = SessionManager(
+            HudWriter(transport),
+            lambda topic: topics.append(topic) or HeldTopicSession(entered),
+            topic_capture_view=lambda _armed: capture,
+        )
+        replier = FakeReplier()
+        sessions.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+        orchestrator = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), sessions=sessions,
+            replier=replier, wake_words=("joat",),
+        )
+        orchestrator.attach()
+
+        for sequence, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.emit_frame(pcm, sequence, "phone")
+        await drain()
+
+        assert topics == []
+        assert not entered.is_set()
+        assert sessions.topic_capture_armed
+        assert replier.asked == []
 
 
 class TestReplyFlow:

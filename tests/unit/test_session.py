@@ -322,7 +322,10 @@ class TestSessionManager:
         assert not manager.active
         assert brainstorm_frames(transport) == [capture]
         assert not any(isinstance(message, HudText) for message in transport.sent)
-        assert manager.handle_transcript("compare a hosted Mac brain with a local one")
+        assert manager.handle_transcript(
+            "compare a hosted Mac brain with a local one",
+            capture_source="glasses",
+        )
         await entered.wait()
         assert started == ["compare a hosted Mac brain with a local one"]
         await manager.close(timeout_s=0.1)
@@ -380,9 +383,34 @@ class TestSessionManager:
 
         manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
         await asyncio.sleep(0)
-        assert manager.handle_transcript("should the home brain use a mini?") is True
+        assert manager.handle_transcript(
+            "should the home brain use a mini?", capture_source="glasses",
+        ) is True
         await asyncio.sleep(0)
         assert brainstorm_frames(transport)[-1] == ready
+
+    async def test_topic_capture_keeps_its_promise_for_glasses_audio_only(self) -> None:
+        transport = SinkTransport()
+        capture = BrainstormHudView(
+            screen="brainstorm", state="topic_capture", topic="Speak your question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity="Your next spoken phrase starts this Brainstorm.",
+            terminal_state="ready", no_tools_checked=True,
+        )
+        started: list[str] = []
+        manager = SessionManager(
+            HudWriter(transport),
+            lambda topic: started.append(topic) or None,
+            topic_capture_view=lambda _armed: capture,
+        )
+
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+        assert manager.handle_transcript("phone fallback must not start it", capture_source="phone")
+        await asyncio.sleep(0)
+        assert started == []
+        assert manager.topic_capture_armed
+        assert brainstorm_frames(transport)[-1] == capture
 
     async def test_glasses_cancel_action_interrupts_the_active_session(self) -> None:
         entered = asyncio.Event()
