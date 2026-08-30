@@ -81,6 +81,15 @@ export interface AssistantOverlayInputOwner {
  * up looking wired while never firing.
  */
 export class EventRouter {
+  /**
+   * The SDK still delivers raw long-press/release events when the OS opens a
+   * contextual menu with tap-then-long-press. Hold the mic action until the
+   * release so the subsequent foreground-overlay event can disambiguate a
+   * menu gesture without stealing plain long-press mute.
+   */
+  private pendingMicLongPress = false;
+  private contextualMenuOverlayOpen = false;
+
   constructor(
     private readonly client: BridgeClient,
     private readonly link: MacLink,
@@ -102,13 +111,11 @@ export class EventRouter {
    * Long-press → mute/unmute the glasses mic.
    *
    * Checked in EVERY event class because the SDK README is explicit that
-   * 9/10 are "delivered inside the matching list, text, or system event
-   * rather than as separate top-level events" (README:392) and that they
-   * "remain regular list/text/sys events" (README:433). An earlier build
-   * ceded this gesture to the glasses OS on the theory that a declared
-   * menuObject makes long-press open the contextual menu — the SDK says
-   * the opposite, there is no bridge verb that opens a menu, and on
-   * hardware the gesture simply did nothing.
+   * Long press/release are delivered inside the matching list, text, or
+   * system event. Separately, the supported contextual menu opens after
+   * tap-then-long-press and emits foreground enter/exit plus a top-level
+   * menu item event. The two paths must compose: raw long press alone mutes;
+   * a menu-opening long press does not also mute the microphone.
    *
    * The action is LOCAL: a privacy control must not need the Mac, and
    * handling it here also sidesteps the relay, which routed these events
@@ -119,15 +126,18 @@ export class EventRouter {
   private handleLongPress(eventType: number | undefined, via: string): boolean {
     const type = eventType ?? 0;
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
-      // Consumed silently: one press is one toggle, and the release must
-      // not reach the Mac as a phantom input.
+      const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
+      this.pendingMicLongPress = false;
+      if (toggleMic) {
+        console.info(`[EventRouter] long-press via ${via} — toggling mic`);
+        this.toggleMic();
+      }
+      // Consumed silently: one press is one toggle, and the release must not
+      // reach the Mac as a phantom input.
       return true;
     }
     if (type !== OsEventTypeList.LONG_PRESS_EVENT) return false;
-    // Logged with its event class: if firmware never delivers long-press,
-    // this line's ABSENCE is the proof, instead of a third guess.
-    console.info(`[EventRouter] long-press via ${via} — toggling mic`);
-    this.toggleMic();
+    this.pendingMicLongPress = !this.contextualMenuOverlayOpen;
     return true;
   }
 
@@ -168,6 +178,11 @@ export class EventRouter {
     // menu renders but every selection vanishes silently — the event has
     // its own field and matches none of the other branches.
     if (event.menuItemClickEvent) {
+      // The simulator's `context_menu` automation input does not replay the
+      // physical raw long-press. Preserve the same overlay boundary before
+      // its following foreground-exit event reaches lifecycle consumers.
+      this.contextualMenuOverlayOpen = true;
+      this.pendingMicLongPress = false;
       this.recordGesture('menu_item', 'menu');
       this.handleMenu(event.menuItemClickEvent.itemID ?? 0);
       return;
@@ -330,9 +345,23 @@ export class EventRouter {
     // mistaken for confirms.
     switch (type) {
       case OsEventTypeList.FOREGROUND_ENTER_EVENT:
+        if (this.pendingMicLongPress) {
+          // OS contextual overlay, not an app foreground transition. Do not
+          // pause location or repaint underneath the still-mounted HUD.
+          this.pendingMicLongPress = false;
+          this.contextualMenuOverlayOpen = true;
+          return;
+        }
         this.lifecycle?.onForegroundEnter();
         return;
       case OsEventTypeList.FOREGROUND_EXIT_EVENT:
+        if (this.contextualMenuOverlayOpen) {
+          // Closing the contextual overlay is not app backgrounding. In
+          // particular, do not leave LocationSessionManager marked background
+          // after the wearer chose a menu action.
+          this.contextualMenuOverlayOpen = false;
+          return;
+        }
         this.lifecycle?.onForegroundExit();
         return;
       case OsEventTypeList.SYSTEM_EXIT_EVENT:
