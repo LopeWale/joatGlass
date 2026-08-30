@@ -36,7 +36,10 @@ export interface BrainstormInputOwner {
   handleClick(): boolean;
   /** Left-temple double press cancels an active Brainstorm round. */
   handleCancel(): boolean;
-  /** Right-temple/ring double press starts the fixed content-free test. */
+  /** True only when the Mac has explicitly armed the isolated diagnostic. */
+  isAcceptanceArmed(): boolean;
+  /** Right-temple/ring double press starts the fixed content-free test only
+   * after that arm is visible on the current Brainstorm frame. */
   handleAcceptance(source: 'right' | 'ring'): boolean;
   /** Fixed receipt of a successfully handed-off action; never prompt content. */
   consumeAcceptedAction(): { action: BrainstormAction; surface: BrainstormHudScreen } | undefined;
@@ -48,6 +51,8 @@ export interface BrainstormInputOwner {
 export interface AssistantOverlayInputOwner {
   hasAssistantOverlay(): boolean;
   dismissAssistantOverlay(): Promise<boolean>;
+  hasVisibleNotification(): boolean;
+  dismissVisibleNotification(): Promise<boolean>;
 }
 
 /**
@@ -197,6 +202,7 @@ export class EventRouter {
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
       if (this.dismissAssistantOverlayFor(event.textEvent.eventType)) return;
+      if (this.dismissVisibleNotificationFor(event.textEvent.eventType)) return;
       if (this.navigation?.isActive()) {
         const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -352,11 +358,12 @@ export class EventRouter {
     }
 
     if (this.dismissAssistantOverlayFor(type)) return;
+    if (this.dismissVisibleNotificationFor(type)) return;
 
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
       // Left temple: the transient capability sidebar. Consumed locally,
       // never relayed to the Mac or confused with the OS exit gesture.
-      if (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L) {
+      if (this.isBackSource(source)) {
         // Navigation owns the wearer surface as a single interaction. Do not
         // paint a sidebar over an active route while tap/swipe continue to
         // target the hidden navigation frame. The same deliberate gesture
@@ -379,6 +386,7 @@ export class EventRouter {
       if (
         acceptanceSource !== undefined
         && this.brainstorm?.isActive()
+        && this.brainstorm.isAcceptanceArmed()
         && this.brainstorm.handleAcceptance(acceptanceSource)
       ) {
         this.recordAcceptedBrainstormAction(source, 'double_press');
@@ -395,11 +403,7 @@ export class EventRouter {
     if (
       type === OsEventTypeList.CLICK_EVENT
       && this.navigation?.isActive()
-      && (
-        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
-        || source === EventSourceType.TOUCH_EVENT_FROM_RING
-        || source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
-      )
+      && this.isLocalTapSource(source)
     ) {
       this.navigation.handleClick();
       return;
@@ -420,19 +424,15 @@ export class EventRouter {
 
     if (
       type === OsEventTypeList.CLICK_EVENT &&
-      (source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L ||
-        source === EventSourceType.TOUCH_EVENT_FROM_RING ||
-        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) &&
+      this.isLocalTapSource(source) &&
       this.menu.handleClick()
     ) {
       return;
     }
 
-    // Long-press belongs to the glasses OS: with a menuObject declared it
-    // opens the contextual menu (Repeat / Mute / Reconnect). Our own
-    // long-press handler competed with that — double-firing where the OS
-    // passed the event through, dead where the OS consumed it — so repeat
-    // now lives ONLY as contextual-menu item 1.
+    // Long-press start/release are regular SDK list/text/sys events. They are
+    // consumed before this method so this generic system route never erases
+    // the microphone control or reinterprets its gesture vocabulary.
 
     // Relayed after local handling — the Mac may want the raw input too.
     this.link.send({ kind: 'input', event: { eventType: type, eventSource: source } });
@@ -468,6 +468,30 @@ export class EventRouter {
       && type !== OsEventTypeList.SCROLL_BOTTOM_EVENT
     ) return false;
     void this.assistantOverlay.dismissAssistantOverlay();
+    return true;
+  }
+
+  /** Firmware/simulator builds that omit the physical source still expose a
+   * real local gesture. Treat only the dummy source as the compatibility
+   * fallback; explicit right/ring double presses retain their OS/Brainstorm
+   * meaning. */
+  private isBackSource(source: number): boolean {
+    return source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+      || source === EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL;
+  }
+
+  private isLocalTapSource(source: number): boolean {
+    return this.isBackSource(source)
+      || source === EventSourceType.TOUCH_EVENT_FROM_RING
+      || source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R;
+  }
+
+  /** A Home notification is a local, transient visual card. One tap removes
+   * it before a hidden capability row or generic Mac input can activate. */
+  private dismissVisibleNotificationFor(eventType: number | undefined): boolean {
+    if (!this.assistantOverlay?.hasVisibleNotification()) return false;
+    if ((eventType ?? OsEventTypeList.CLICK_EVENT) !== OsEventTypeList.CLICK_EVENT) return false;
+    void this.assistantOverlay.dismissVisibleNotification();
     return true;
   }
 }

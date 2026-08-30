@@ -12,6 +12,17 @@ class CommandController(Protocol):
     async def handle_command(self, text: str) -> str | None: ...
 
 
+class ComposeCommandController(CommandController, Protocol):
+    """The one controller allowed to claim a phrase before greetings.
+
+    Productivity, notes, and Hermes are ordinary command controllers. Keeping
+    this short-lived compose state on the Messages controller avoids widening
+    their interface merely because a greeting-shaped message body is valid.
+    """
+
+    def is_compose_armed(self) -> bool: ...
+
+
 class VoiceCommandRouter:
     """Claim exact commands in safe precedence order.
 
@@ -23,7 +34,7 @@ class VoiceCommandRouter:
 
     def __init__(
         self,
-        message_replies: CommandController,
+        message_replies: ComposeCommandController,
         models: ModelRegistry,
         productivity: CommandController | None = None,
         notes: CommandController | None = None,
@@ -38,6 +49,13 @@ class VoiceCommandRouter:
         self._hermes = hermes
 
     async def __call__(self, text: str) -> str | None:
+        # New Message is an explicit, short-lived wearer flow. It gets first
+        # refusal while armed so a body such as “Good morning” is not mistaken
+        # for a generic greeting and sent to inference instead.
+        if self._message_replies.is_compose_armed():
+            compose_result = await self._message_replies.handle_command(text)
+            if compose_result is not None:
+                return compose_result
         greeting_result = greeting_response(text)
         if greeting_result is not None:
             return greeting_result

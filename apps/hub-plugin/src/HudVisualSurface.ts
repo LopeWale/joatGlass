@@ -109,21 +109,6 @@ export interface HudFramePainter {
  * the official simulator both decode. */
 export type HudImageEncoder = (tile: HudImageTile) => Promise<Uint8Array>;
 
-/** A dev-only simulator receipt must name a fixed state, never its content. */
-export function visibleSurfaceReceipt(
-  frame: HudVisualFrame,
-): 'assistant_overlay' | 'reminder_due' | undefined {
-  if (frame.assistantOverlay) return 'assistant_overlay';
-  if (
-    frame.kind === 'productivity'
-    && frame.productivity.domain === 'reminders'
-    && frame.productivity.phase === 'due'
-  ) {
-    return 'reminder_due';
-  }
-  return undefined;
-}
-
 async function completedBrainstormFrameReceipt(
   frame: HudVisualFrame,
   tiles: readonly HudImageTile[],
@@ -293,13 +278,6 @@ export class HudVisualSurface implements HudFramePainter {
       void completedBrainstormFrameReceipt(frame, tiles)
         .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })
         .catch(() => undefined);
-      if (import.meta.env.DEV) {
-        console.info(`[HudVisualSurface] frame ${frameNumber} bridge-ack`);
-        const receipt = visibleSurfaceReceipt(frame);
-        if (receipt) {
-          console.info(`[HudVisualSurface] receipt ${receipt} bridge-ack`);
-        }
-      }
       return true;
     } catch {
       if (current) {

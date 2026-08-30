@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 import time
 from datetime import date, datetime
@@ -143,6 +144,14 @@ class PermissionDeniedMessages:
     def recent_threads(self, limit: int = 5) -> list[MessageThread]:
         del limit
         raise PermissionError("Messages database read denied")
+
+
+class TransientDatabaseMessages:
+    available = True
+
+    def recent_threads(self, limit: int = 5) -> list[MessageThread]:
+        del limit
+        raise sqlite3.DatabaseError("temporary database rotation")
 
 
 class HistoryMessages(FakeMessages):
@@ -290,6 +299,7 @@ def make_router(
     personal_data=None,
     notes=None,
     actions=None,
+    acceptance_armed=False,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -306,6 +316,7 @@ def make_router(
         personal_data=personal_data,  # type: ignore[arg-type]
         notes=notes,
         actions=actions,
+        acceptance_armed=acceptance_armed,
     )
     return router, transport, status
 
@@ -326,6 +337,18 @@ class TestCapabilityViews:
         assert [frame.screen for frame in frames] == ["brainstorm", "agent_terminal"]
         assert frames[-1].endpoint_host == "home-mac.example-tailnet.ts.net"
         assert frames[-1].no_tools_checked is True
+        assert [frame.acceptance_armed for frame in frames] == [False, False]
+
+    async def test_brainstorm_acceptance_requires_an_explicit_mac_diagnostics_arm(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, status = make_router(tmp_path, acceptance_armed=True)
+        status.set_agent_terminal(state="ready", reason="")
+
+        await router.open("Brainstorm")
+
+        frame = next(item for item in transport.sent if isinstance(item, BrainstormHudView))
+        assert frame.acceptance_armed is True
 
     async def test_messages_view_lists_recent_conversations(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         now = time.time()
@@ -340,7 +363,7 @@ class TestCapabilityViews:
         ]
         assert lists[0].title == "MESSAGES"
         assert lists[0].items[0] == "New message · voice recipient + text"
-        assert lists[0].hint == "tap select · left x2 overview"
+        assert lists[0].hint == "tap: select · left x2: back"
 
     async def test_messages_list_marks_unread_attachment_only_conversations(
         self, tmp_path,
@@ -383,11 +406,11 @@ class TestCapabilityViews:
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · COMPOSE"
         assert detail.items == [
-            'Say “JOAT, message Adele saying …”',
+            "Say the recipient name first.",
+            "Then say the message.",
             "One matching Mac contact is required.",
-            "Mic off? Long press to enable.",
         ]
-        assert detail.hint == "voice compose · left x2 overview"
+        assert detail.hint == "speak: recipient · left x2: back"
         assert detail.selectable is False
 
     async def test_new_message_remains_selectable_when_no_conversations_exist(
@@ -417,7 +440,7 @@ class TestCapabilityViews:
             'Say “JOAT, navigate to …”',
             "I’ll confirm the exact place before starting.",
         ]
-        assert lists[0].hint == "say destination · left x2 overview"
+        assert lists[0].hint == "say destination · left x2: back"
         assert lists[0].request_id == "navigation-entry"
 
     async def test_newest_same_capability_generation_owns_render_and_selection(
@@ -518,7 +541,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert detail.hint == "say reply · left x2 overview"
+        assert detail.hint == "say reply · left x2: back"
         assert detail.selectable is False
 
     async def test_conversation_pages_are_request_bound_and_show_message_metadata(
@@ -551,7 +574,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert latest.hint == "down older · say reply · left x2 overview"
+        assert latest.hint == "down older · say reply · left x2: back"
 
         router.on_input(InputEvent(
             container_name="cappage",
@@ -574,7 +597,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert older.hint == "up newer · say reply · left x2 overview"
+        assert older.hint == "up newer · say reply · left x2: back"
         # The async page task clears its duplicate-input guard after its
         # replacement frame is committed, as the production bridge does.
         await asyncio.sleep(0)
@@ -764,6 +787,23 @@ class TestCapabilityViews:
             "Mac Settings · Privacy & Security · Full Disk Access",
         ]
         assert rendered.request_id == "messages-denied"
+
+    async def test_messages_transient_database_failure_is_a_retry_not_access_guidance(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path, rows=[])
+        router._messages = TransientDatabaseMessages()  # type: ignore[assignment]
+
+        await router.open("Messages", request_id="messages-transient")
+
+        rendered = [message for message in transport.sent if isinstance(message, HudList)][-1]
+        assert rendered.title == "MESSAGES · RETRY"
+        assert rendered.items == [
+            "Messages is temporarily unavailable.",
+            "Tap to try Messages again.",
+        ]
+        assert rendered.selectable is True
+        assert rendered.request_id == "messages-transient"
 
     async def test_notifications_view_lists_recent_cards(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, cards=["!! Adaeze · Messages\nCall me now"])

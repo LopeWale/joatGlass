@@ -719,6 +719,7 @@ async def main() -> None:
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
+            acceptance_armed=args.g2_diagnostics,
         )
 
     async def show_terminal_retry_view(activity: str) -> None:
@@ -1004,6 +1005,7 @@ async def main() -> None:
         personal_data=personal_data,
         notes=note_store,
         actions=action_journal,
+        acceptance_armed=args.g2_diagnostics,
     )
     transport.on_input(capabilities.on_input)
 

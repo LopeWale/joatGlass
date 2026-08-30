@@ -112,6 +112,15 @@ interface AssistantOverlayState extends AssistantOverlayVisual {
   dismissTimer?: ReturnType<typeof setTimeout>;
 }
 
+/** A Home notification temporarily replaces Main, but must never destroy the
+ * card it covered. Keep only the local visual tuple; acknowledging or
+ * mutating a native notification remains a separate Mac-owned operation. */
+interface NotificationReturnState {
+  text?: string;
+  brightness?: number;
+  kind?: HudContentKind;
+}
+
 /**
  * Renders text to the HUD.
  *
@@ -140,6 +149,7 @@ export class HudPresenter {
   private assistantOverlayPaintTimer?: ReturnType<typeof setTimeout>;
   private assistantOverlayPaintDirty = false;
   private assistantOverlayPaintStartedAt = 0;
+  private notificationReturn?: NotificationReturnState;
   private micOn = false;
 
   constructor(
@@ -182,6 +192,21 @@ export class HudPresenter {
     textColor?: number,
     contentKind?: HudContentKind,
   ): Promise<boolean> {
+    if (containerId === ContainerId.Main) {
+      if (contentKind === 'notification') {
+        if (!this.notificationReturn) {
+          this.notificationReturn = {
+            text: this.streams.get(ContainerId.Main),
+            brightness: this.brightness.get(ContainerId.Main),
+            kind: this.kinds.get(ContainerId.Main),
+          };
+        }
+      } else {
+        // A newer normal card is authoritative Home content; never resurrect
+        // an older snapshot when the wearer later taps the screen.
+        this.notificationReturn = undefined;
+      }
+    }
     this.cancelPending(containerId);
     this.streams.set(containerId, text);
     if (textColor !== undefined) {
@@ -323,6 +348,33 @@ export class HudPresenter {
    * wearer cannot accidentally activate the obscured feature underneath. */
   hasAssistantOverlay(): boolean {
     return this.assistantOverlay !== undefined;
+  }
+
+  /** Only a fully visible Home card is tappable. Focus pages keep incoming
+   * notifications deferred, assistant overlays keep their higher priority,
+   * and confirmations remain exclusive. */
+  hasVisibleNotification(): boolean {
+    return this.surface.kind === 'default'
+      && !this.confirmation
+      && !this.assistantOverlay
+      && this.kinds.get(ContainerId.Main) === 'notification'
+      && (this.streams.get(ContainerId.Main)?.trim().length ?? 0) > 0;
+  }
+
+  /** Hide the visible card locally and restore the exact displaced Main
+   * content. This deliberately does not mark a native notification read. */
+  async dismissVisibleNotification(): Promise<boolean> {
+    if (!this.hasVisibleNotification()) return false;
+    const prior = this.notificationReturn;
+    this.notificationReturn = undefined;
+    this.cancelPending(ContainerId.Main);
+    this.streams.delete(ContainerId.Main);
+    this.brightness.delete(ContainerId.Main);
+    this.kinds.delete(ContainerId.Main);
+    if (prior?.text !== undefined) this.streams.set(ContainerId.Main, prior.text);
+    if (prior?.brightness !== undefined) this.brightness.set(ContainerId.Main, prior.brightness);
+    if (prior?.kind !== undefined) this.kinds.set(ContainerId.Main, prior.kind);
+    return this.paint(ContainerId.Main);
   }
 
   /**

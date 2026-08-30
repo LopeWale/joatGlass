@@ -27,9 +27,18 @@ function make(accepted = true) {
 }
 
 describe('BrainstormController', () => {
-  it('starts the fixed acceptance only from a safe ready Brainstorm gesture', () => {
+  it('does not start diagnostic acceptance from an ordinary ready Brainstorm', () => {
     const { controller, sent } = make();
     controller.present(model());
+
+    expect(controller.handleAcceptance('right')).toBe(false);
+    expect(sent).toEqual([]);
+    expect(controller.consumeAcceptedAction()).toBeUndefined();
+  });
+
+  it('starts the fixed acceptance only from an explicitly armed ready Brainstorm', () => {
+    const { controller, sent } = make();
+    controller.present({ ...model(), acceptanceArmed: true });
 
     expect(controller.handleAcceptance('right')).toBe(true);
     expect(sent).toEqual([{
@@ -44,9 +53,9 @@ describe('BrainstormController', () => {
     });
   });
 
-  it('consumes pending and disconnected test gestures without leaking into capture or exit', () => {
+  it('consumes pending and disconnected armed test gestures without leaking into capture or exit', () => {
     const { controller, sent } = make();
-    controller.present(model());
+    controller.present({ ...model(), acceptanceArmed: true });
     expect(controller.handleAcceptance('ring')).toBe(true);
     expect(controller.handleAcceptance('ring')).toBe(true);
     expect(controller.handleClick()).toBe(true);
@@ -66,7 +75,7 @@ describe('BrainstormController', () => {
     expect(sent).toHaveLength(2);
 
     const offline = make(false);
-    offline.controller.present(model());
+    offline.controller.present({ ...model(), acceptanceArmed: true });
     expect(offline.controller.handleAcceptance('right')).toBe(true);
     expect(offline.sent).toEqual([]);
   });

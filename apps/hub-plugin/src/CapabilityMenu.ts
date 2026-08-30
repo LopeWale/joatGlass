@@ -12,6 +12,17 @@ import type {
 
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
+interface DataSurfaceSnapshot {
+  title: string;
+  items: string[];
+  selectable: boolean;
+  hint?: string;
+  planningGrid?: PlanningGridCell[];
+  selectedIndex: number;
+  messagesRetry: boolean;
+  messagesScreen?: MessagesScreen;
+}
+
 const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
 /**
  * The native bridge itself has a bounded call deadline. Give it a small
@@ -72,7 +83,10 @@ const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
 
 const SETTINGS_SURFACE = {
   title: 'LISTENING RESUME',
-  hint: 'tap apply · left x2 overview',
+  // Only the left-temple double press owns contextual Back. Do not advertise
+  // a generic double-click: the right/ring double gesture has other runtime
+  // meanings.
+  hint: 'tap: apply · left x2: back',
 } as const;
 
 export function isActionLifecycleTitle(title?: string): boolean {
@@ -91,6 +105,10 @@ export class CapabilityMenu {
   private messagesScreen?: MessagesScreen;
   private dataHint?: string;
   private dataPagePending = false;
+  /** One local parent is sufficient for the currently supported focus flows:
+   * a Messages/Notifications/Planning collection opens one detail page. */
+  private dataSurface?: DataSurfaceSnapshot;
+  private dataReturn?: DataSurfaceSnapshot;
   private pendingTitle?: string;
   private pendingRequestId?: string;
   private responseTimeout?: ReturnType<typeof setTimeout>;
@@ -134,6 +152,8 @@ export class CapabilityMenu {
     this.messagesScreen = undefined;
     this.dataHint = undefined;
     this.dataPagePending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
     this.planningDrillDown = false;
     await this.hud.showDefault();
   }
@@ -175,8 +195,11 @@ export class CapabilityMenu {
       : undefined;
     const effectiveSelectable = messagesState?.selectable ?? selectable;
     const effectiveHint = messagesState?.rowAction === 'retry'
-      ? 'tap retry · left x2 overview'
+      ? 'tap: retry · left x2: back'
       : hint;
+
+    const parent = this.detailReturnSurface(title);
+    if (parent) this.dataReturn = parent;
 
     this.clearResponseTimeout();
     this.messagesRetry = messagesState?.rowAction === 'retry';
@@ -208,6 +231,16 @@ export class CapabilityMenu {
     this.dataHint = effectiveHint;
     this.dataPagePending = false;
     this.selectedIndex = 0;
+    this.dataSurface = {
+      title,
+      items: [...items],
+      selectable: effectiveSelectable,
+      hint: effectiveHint,
+      planningGrid: planningGrid ? [...planningGrid] : undefined,
+      selectedIndex: 0,
+      messagesRetry: this.messagesRetry,
+      messagesScreen: this.messagesScreen,
+    };
     return true;
   }
 
@@ -280,8 +313,8 @@ export class CapabilityMenu {
     return visible;
   }
 
-  /** Left double-tap. Closed: open the capability menu. Anywhere else: BACK
-   *  home — one gesture, one meaning, matching the hint line. */
+  /** Left double-tap. Closed: open the capability menu. Otherwise return one
+   * contextual level, preserving a list/detail parent where it exists. */
   async toggle(): Promise<void> {
     if (this.view === 'closed') {
       const transition = this.beginTransition();
@@ -304,6 +337,10 @@ export class CapabilityMenu {
     ) {
       this.planningDrillDown = false;
       await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
+    } else if (this.view === 'data' && this.dataReturn) {
+      await this.returnToDataSurface();
+    } else if (this.view === 'data' || this.view === 'settings') {
+      await this.returnToSidebar();
     } else {
       await this.close();
     }
@@ -517,7 +554,7 @@ export class CapabilityMenu {
     const requestId = `hud-request-${this.randomId()}`;
     const shown = await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
       title,
-      hint: 'left x2 overview',
+      hint: 'left x2: back',
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -534,6 +571,8 @@ export class CapabilityMenu {
     this.dataHint = undefined;
     this.dataPagePending = false;
     this.selectedIndex = 0;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
     const event: InputEventPayload = {
       containerName: 'capmenu',
       eventType: 0,
@@ -583,7 +622,7 @@ export class CapabilityMenu {
         'Return to Overview, then open Planning to retry.',
       ], {
       title: `${title} · RETRY`,
-      hint: isMessagesRetry ? 'tap retry · left x2 overview' : 'left x2 overview',
+      hint: isMessagesRetry ? 'tap: retry · left x2: back' : 'left x2: back',
       selectable: isMessagesRetry,
     });
     if (
@@ -599,7 +638,7 @@ export class CapabilityMenu {
     this.dataRowsSelectable = isMessagesRetry;
     this.dataItemCount = isMessagesRetry ? 1 : 0;
     this.messagesScreen = isMessagesRetry ? 'retry' : undefined;
-    this.dataHint = isMessagesRetry ? 'tap retry · left x2 overview' : undefined;
+    this.dataHint = isMessagesRetry ? 'tap: retry · left x2: back' : undefined;
     this.dataPagePending = false;
     this.selectedIndex = 0;
   }
@@ -654,6 +693,86 @@ export class CapabilityMenu {
     this.view = 'transition';
     this.transitionId += 1;
     return this.transitionId;
+  }
+
+  private detailReturnSurface(nextTitle: string): DataSurfaceSnapshot | undefined {
+    if (this.dataReturn || !this.pendingTitle || !this.dataSurface) return undefined;
+    const current = this.dataSurface.title.trim().toUpperCase();
+    const next = nextTitle.trim().toUpperCase();
+    if (current !== this.pendingTitle || next === this.pendingTitle) return undefined;
+    if (!next.startsWith(`${this.pendingTitle} ·`)) return undefined;
+    return {
+      ...this.dataSurface,
+      items: [...this.dataSurface.items],
+      planningGrid: this.dataSurface.planningGrid ? [...this.dataSurface.planningGrid] : undefined,
+      selectedIndex: this.selectedIndex,
+    };
+  }
+
+  private async returnToDataSurface(): Promise<void> {
+    const parent = this.dataReturn;
+    if (!parent) return;
+    this.dataReturn = undefined;
+    this.clearResponseTimeout();
+    const transition = this.beginTransition();
+    const shown = await this.hud.showList(parent.items, {
+      title: parent.title,
+      hint: parent.hint,
+      selectable: parent.selectable,
+      planningGrid: parent.planningGrid,
+    });
+    if (!this.isCurrentTransition(transition)) return;
+    if (!shown) {
+      await this.close();
+      return;
+    }
+    this.view = 'data';
+    this.dataItemCount = parent.items.length;
+    this.dataRowsSelectable = parent.selectable;
+    this.dataSelectionPending = false;
+    this.messagesRetry = parent.messagesRetry;
+    this.messagesScreen = parent.messagesScreen;
+    this.dataHint = parent.hint;
+    this.dataPagePending = false;
+    this.selectedIndex = parent.selectedIndex;
+    this.dataSurface = parent;
+    if (this.pendingTitle === 'MESSAGES') {
+      this.link.send({
+        kind: 'input',
+        event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
+      });
+    }
+  }
+
+  private async returnToSidebar(): Promise<void> {
+    const leavingMessages = this.pendingTitle === 'MESSAGES';
+    const activeIndex = this.pendingTitle
+      ? Math.max(0, CAPABILITIES.findIndex((item) => item.toUpperCase() === this.pendingTitle))
+      : this.view === 'settings' ? CAPABILITIES.indexOf('Settings') : 0;
+    this.clearResponseTimeout();
+    this.messagesRetry = false;
+    this.messagesScreen = undefined;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
+    this.dataItemCount = 0;
+    this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
+    this.pendingTitle = undefined;
+    this.pendingRequestId = undefined;
+    const transition = this.beginTransition();
+    this.selectedIndex = activeIndex;
+    if (leavingMessages) {
+      this.link.send({
+        kind: 'input',
+        event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
+      });
+    }
+    const shown = await this.hud.showSidebar([...CAPABILITIES], activeIndex);
+    if (!this.isCurrentTransition(transition)) return;
+    if (shown) this.view = 'caps';
+    else await this.close();
   }
 
   private scheduleProductivityReturn(phase: ProductivityHudModel['phase']): void {
@@ -731,6 +850,8 @@ export class CapabilityMenu {
     this.messagesScreen = undefined;
     this.dataHint = undefined;
     this.dataPagePending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
     if (leavingMessages) {
       this.link.send({
         kind: 'input',

@@ -18,7 +18,7 @@ function harness(first: AppLocation | null = null) {
       return vi.fn();
     }),
   };
-  const link = { send: vi.fn() };
+  const link = { send: vi.fn(), sendLatestLocation: vi.fn() };
   const diagnostics = { record: vi.fn() };
   const manager = new LocationSessionManager(
     { require: () => bridge } as never,
@@ -55,8 +55,25 @@ describe('LocationSessionManager', () => {
       distanceFilter: 250,
       intervalMs: 60_000,
     });
-    expect(h.link.send).toHaveBeenCalledWith({
+    expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
       kind: 'location', latitude: 35.2, longitude: -97.4, accuracy: 12,
+      timestamp: expect.any(Number),
+    });
+  });
+
+  it('stamps an SDK location without a timestamp at phone receipt time', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-30T22:31:00.000Z'));
+    const h = harness({ latitude: 35.2, longitude: -97.4, accuracy: 12 });
+
+    await h.manager.start();
+
+    expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
+      kind: 'location',
+      latitude: 35.2,
+      longitude: -97.4,
+      accuracy: 12,
+      timestamp: Date.now(),
     });
   });
 
@@ -132,7 +149,7 @@ describe('LocationSessionManager', () => {
     }]);
     expect(fixes).toHaveLength(2);
     expect(fixes[0]?.location).toMatchObject({ heading: 90, speed: 1.4, timestamp: 123 });
-    expect(h.link.send.mock.calls.filter(([message]) => message.kind === 'location')).toHaveLength(1);
+    expect(h.link.sendLatestLocation.mock.calls.filter(([message]) => message.kind === 'location')).toHaveLength(1);
     expect(h.diagnostics.record.mock.calls.flat()).not.toContainEqual(
       expect.objectContaining({ type: 'location_probe' }),
     );
@@ -221,7 +238,7 @@ describe('LocationSessionManager', () => {
     };
     const h = harness(current);
     await h.manager.start();
-    h.link.send.mockClear();
+    h.link.sendLatestLocation.mockClear();
     h.bridge.getAppLocation.mockClear();
 
     await expect(h.manager.requestAssistantLocation('location-refresh-1')).resolves.toBe(true);
@@ -230,7 +247,7 @@ describe('LocationSessionManager', () => {
       accuracy: AppLocationAccuracy.Medium,
       timeoutMs: 5000,
     });
-    expect(h.link.send).toHaveBeenCalledWith({
+    expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
       kind: 'location',
       latitude: 41.9,
       longitude: -87.65,

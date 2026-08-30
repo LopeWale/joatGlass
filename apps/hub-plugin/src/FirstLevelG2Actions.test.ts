@@ -189,7 +189,7 @@ describe('first-level G2 sidebar actions', () => {
     expect(harness.hud.showDefault).toHaveBeenCalledTimes(1);
   });
 
-  it('opens the persisted listening Settings surface and returns Home on left-double', async () => {
+  it('opens the persisted listening Settings surface and returns to the sidebar on left-double', async () => {
     const harness = rig();
 
     await openAndScrollTo(harness, 'Settings');
@@ -201,11 +201,12 @@ describe('first-level G2 sidebar actions', () => {
       '  Resume mic: ask me first',
     ]);
     expect(harness.lists[0]?.options).toEqual({
-      title: 'LISTENING RESUME', hint: 'tap apply · left x2 overview',
+      title: 'LISTENING RESUME', hint: 'tap: apply · left x2: back',
     });
 
     harness.fire(leftDoublePress());
-    await vi.waitFor(() => expect(harness.hud.showDefault).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(harness.sidebars).toHaveLength(2));
+    expect(harness.hud.showDefault).not.toHaveBeenCalled();
     expect(sockets).toEqual([]);
   });
 });

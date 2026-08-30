@@ -106,6 +106,43 @@ class TestMessageReplyController:
         assert sender.sent == [("+14055550177", "Running late")]
         assert confirm.calls[0][1] == "Send to Adele Vance? “Running late”"
 
+    async def test_new_message_arms_a_two_step_recipient_then_body_flow(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        contacts = FakeContacts([("Adele Vance", "+14055550177")])
+        replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
+        replies.begin_compose(trace_id="hud-two-step-compose")
+
+        assert await replies.handle_command("Adele") == (
+            "Recipient Adele Vance selected. Say the message."
+        )
+        assert sender.sent == []
+        assert confirm.calls == []
+
+        assert await replies.handle_command("Good morning") == (
+            "Submitted to Messages for Adele Vance; delivery unverified."
+        )
+        assert contacts.queries == ["Adele"]
+        assert sender.sent == [("+14055550177", "Good morning")]
+
+    async def test_new_message_compose_expiry_never_falls_through_to_a_send(self) -> None:
+        now = [100.0]
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            selection_ttl_s=120.0,
+            monotonic=lambda: now[0],
+            contact_search=FakeContacts([("Adele", "+14055550177")]).search,
+        )
+        replies.begin_compose(trace_id="hud-expired-compose")
+        now[0] = 221.0
+
+        assert await replies.handle_command("Adele") == (
+            "New message draft expired. Open Messages and choose New message again."
+        )
+        assert confirm.calls == []
+        assert sender.sent == []
+
     @pytest.mark.parametrize(
         ("matches", "expected"),
         [

@@ -4,7 +4,6 @@ import type { BridgeClient } from './BridgeClient';
 import {
   HudVisualSurface,
   splitGrayscaleTiles,
-  visibleSurfaceReceipt,
   type HudFrameRenderer,
   type HudVisualFrame,
 } from './HudVisualSurface';
@@ -36,32 +35,6 @@ describe('splitGrayscaleTiles', () => {
 });
 
 describe('HudVisualSurface', () => {
-  it('marks only fixed simulator-visible states with content-free receipt keys', () => {
-    const due: HudVisualFrame = {
-      kind: 'productivity', status: '', micOn: false,
-      productivity: {
-        domain: 'reminders', phase: 'due', title: 'private title',
-        primary: 'Due now', secondary: 'private subtitle', hint: 'left x2 Planning',
-      },
-    };
-    const saved: HudVisualFrame = {
-      ...due,
-      productivity: { ...due.productivity, phase: 'saved' },
-    };
-    const assistant: HudVisualFrame = {
-      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
-      main: 'private underlay', context: '', tray: '', hint: '',
-      assistantOverlay: { text: 'private assistant reply' },
-    };
-
-    expect(visibleSurfaceReceipt(due)).toBe('reminder_due');
-    expect(visibleSurfaceReceipt(assistant)).toBe('assistant_overlay');
-    expect(visibleSurfaceReceipt(saved)).toBeUndefined();
-    expect(JSON.stringify([
-      visibleSurfaceReceipt(due), visibleSurfaceReceipt(assistant),
-    ])).not.toContain('private');
-  });
-
   it('addresses every raw Gray8 upload by the exact visual container ID and name', async () => {
     const payloads: Array<{ imageData?: unknown; containerName?: unknown }> = [];
     const client = {

@@ -643,6 +643,7 @@ class TestDownlinkWire:
             "terminalState": "ready",
             "terminalReason": "",
             "noToolsChecked": True,
+            "acceptanceArmed": False,
         }
 
         acceptance_ready = BrainstormHudView(
@@ -653,8 +654,10 @@ class TestDownlinkWire:
             activity="Tap to start the Hermes acceptance run",
             terminal_state="ready",
             no_tools_checked=True,
+            acceptance_armed=True,
         ).to_wire()
         assert acceptance_ready["brainstorm"]["state"] == "acceptance_ready"
+        assert acceptance_ready["brainstorm"]["acceptanceArmed"] is True
 
         topic_capture = BrainstormHudView(
             screen="brainstorm",

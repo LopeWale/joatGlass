@@ -73,7 +73,7 @@ export class LocationSessionManager {
 
   constructor(
     private readonly client: Pick<BridgeClient, 'require'>,
-    private readonly link: Pick<MacLink, 'send'>,
+    private readonly link: Pick<MacLink, 'sendLatestLocation'>,
     private readonly diagnostics: G2DiagnosticTrace,
   ) {}
 
@@ -419,8 +419,8 @@ export class LocationSessionManager {
     const sourceTimestamp = location.timestamp;
     const timestamp = Number.isSafeInteger(sourceTimestamp) && sourceTimestamp !== undefined && sourceTimestamp >= 0
       ? sourceTimestamp
-      : undefined;
-    this.link.send({
+      : receivedAt;
+    this.link.sendLatestLocation({
       kind: 'location',
       latitude,
       longitude,
