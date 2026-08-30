@@ -95,7 +95,15 @@ class VoiceOrchestrator:
         # utterance. Keep its provenance through VAD/STT rather than inferring
         # it later from the currently connected device.
         self._utterance_sources: set[AudioSource] = set()
-        self._busy = False
+        # The voice path must stay single-flight: overlapping STT/reply work
+        # competes for the resident engines.  It must not, however, appear
+        # deaf while that work is in flight.  Keep exactly one *completed*
+        # utterance as a latest-wins handoff.  The bounded slot prevents a
+        # noisy room from creating an unbounded latency tail, while keeping
+        # the wearer's newest question (and its source provenance) available
+        # as soon as the active turn settles.
+        self._pending_utterance: tuple[bytes, AudioSource | None] | None = None
+        self._utterance_worker: asyncio.Task[None] | None = None
 
     def attach(self) -> None:
         if isinstance(self._transport, AudioFrameSource):
@@ -181,15 +189,36 @@ class VoiceOrchestrator:
             else None
         )
         self._utterance_sources.clear()
-        if self._busy:
-            # One transcription at a time; a new utterance while Whisper is
-            # still chewing gets dropped with a log rather than queueing
-            # unboundedly. Revisit when a streaming engine lands.
-            log.warning("dropping utterance (%d bytes) — transcription in flight", len(utterance))
+        if self._utterance_worker is not None and not self._utterance_worker.done():
+            replaced = self._pending_utterance is not None
+            self._pending_utterance = (utterance, utterance_source)
+            # Content-free: audio is transient, and diagnostics must not
+            # expose transcripts or raw voice.  A replacement means the
+            # newest completed utterance wins over an older queued one.
+            log.info(
+                "%s pending utterance (%d bytes) while voice work is in flight",
+                "replaced" if replaced else "retained",
+                len(utterance),
+            )
             return
-        asyncio.get_running_loop().create_task(
-            self._handle_utterance(utterance, utterance_source)
+        self._utterance_worker = asyncio.get_running_loop().create_task(
+            self._drain_utterances(utterance, utterance_source)
         )
+
+    async def _drain_utterances(
+        self,
+        utterance: bytes,
+        source: AudioSource | None,
+    ) -> None:
+        """Run one voice turn at a time, then hand off the newest queued turn."""
+        current: tuple[bytes, AudioSource | None] | None = (utterance, source)
+        try:
+            while current is not None:
+                await self._handle_utterance(*current)
+                current = self._pending_utterance
+                self._pending_utterance = None
+        finally:
+            self._utterance_worker = None
 
     async def _handle_utterance(
         self,
@@ -203,9 +232,6 @@ class VoiceOrchestrator:
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")
             return
-        # Busy covers STT AND the reply: overlapping generations raced the
-        # MLX engine and produced garbage before this held to the end.
-        self._busy = True
         try:
             # Acknowledge FIRST. Transcription takes seconds, and an
             # unchanged HUD for that long reads as "the assistant is dead" —
@@ -294,7 +320,6 @@ class VoiceOrchestrator:
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
-            self._busy = False
             # "hearing you" is transient. Empty STT, unaddressed room speech,
             # a deterministic command, and a normal model reply must all
             # return the chrome to its truthful idle state.

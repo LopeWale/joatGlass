@@ -476,36 +476,82 @@ class TestReplyFlow:
         assert region(transport, ContainerId.MAIN) == []
         assert region(transport, ContainerId.CONTEXT) == ["you  hm"]
 
-    async def test_utterance_during_reply_is_dropped_single_flight(self) -> None:
-        transport, engine = FakeTransport(), FakeEngine("first question")
+    async def test_busy_voice_lane_keeps_latest_completed_glasses_utterance(self) -> None:
+        transport = FrameTransport()
+
+        class UtteranceEngine(FakeEngine):
+            async def flush(self) -> Transcript | None:
+                if not self.fed:
+                    return None
+                amplitude = max(abs(sample[0]) for sample in struct.iter_unpack("<h", self.fed))
+                self.fed.clear()
+                return Transcript(
+                    text={8000: "first question", 7000: "middle question", 6000: "latest question"}[amplitude],
+                    is_final=True,
+                )
+
+        engine = UtteranceEngine()
+
+        class ArmedCapture:
+            active = False
+            active_status = ""
+
+            def __init__(self) -> None:
+                self.topic_capture_armed = False
+                self.captured: list[tuple[str, AudioSource | None]] = []
+
+            def handle_transcript(
+                self,
+                text: str,
+                capture_source: AudioSource | None = None,
+            ) -> bool:
+                if not self.topic_capture_armed or capture_source != "glasses":
+                    return False
+                self.captured.append((text, capture_source))
+                return True
+
+        sessions = ArmedCapture()
 
         class SlowReplier(ReplyEngine):
             def __init__(self) -> None:
                 self.gate = asyncio.Event()
+                self.entered = asyncio.Event()
                 self.asked: list[str] = []
 
             async def reply(self, text: str) -> str | None:
                 self.asked.append(text)
+                self.entered.set()
                 await self.gate.wait()
                 return "slow answer"
 
         replier = SlowReplier()
-        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(), replier=replier)
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=replier, sessions=sessions  # type: ignore[arg-type]
+        )
         orch.attach()
-        assert transport.audio_cb is not None
+        assert transport.frame_cb is not None
 
         seq = 0
-        for pcm in [LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]:
-            transport.audio_cb(pcm, seq); seq += 1
-        await drain()
-        # second utterance arrives while the reply is still generating
-        for pcm in [LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]:
-            transport.audio_cb(pcm, seq); seq += 1
-        await drain()
+        def emit_utterance(amplitude: int, source: AudioSource) -> None:
+            nonlocal seq
+            for pcm in [batch(amplitude), batch(amplitude), QUIET, QUIET, QUIET]:
+                transport.emit_frame(pcm, seq, source)
+                seq += 1
+
+        emit_utterance(8000, "phone")
+        await asyncio.wait_for(replier.entered.wait(), timeout=1)
+        # Two finished utterances arrive while the resident reply engine is
+        # occupied.  The one-slot handoff replaces the older phone utterance
+        # with the newest glasses one, retaining its source for the G2 topic
+        # capture security gate.
+        sessions.topic_capture_armed = True
+        emit_utterance(7000, "phone")
+        emit_utterance(6000, "glasses")
         replier.gate.set()
         await drain()
 
-        assert replier.asked == ["first question"]  # second was dropped, not raced
+        assert replier.asked == ["first question"]  # no overlapping reply work
+        assert sessions.captured == [("latest question", "glasses")]
         assert assistant_text(transport) == ["slow answer"]
         assert region(transport, ContainerId.CONTEXT) == ["you  first question"]
 
