@@ -2,6 +2,42 @@ import XCTest
 @testable import JOAT
 
 final class EventKitReminderFetchTests: XCTestCase {
+    func testCommittedReadBackClearsEventKitCacheBeforeFetchingByNativeID() throws {
+        var calls: [String] = []
+
+        let value: Int = try EventKitService.committedReadBack(
+            identifier: "event-native-id",
+            entity: "event",
+            resetStore: { calls.append("reset") },
+            fetch: { identifier in
+                calls.append("fetch:\(identifier)")
+                return 42
+            }
+        )
+
+        XCTAssertEqual(value, 42)
+        XCTAssertEqual(calls, ["reset", "fetch:event-native-id"])
+    }
+
+    func testCommittedReadBackRejectsMissingNativeIdentityWithoutFetching() {
+        var calls: [String] = []
+
+        XCTAssertThrowsError(try EventKitService.committedReadBack(
+            identifier: "",
+            entity: "event",
+            resetStore: { calls.append("reset") },
+            fetch: { identifier in
+                calls.append("fetch:\(identifier)")
+                return 42
+            }
+        )) { error in
+            let bridgeError = error as? NativeBridgeError
+            XCTAssertEqual(bridgeError?.code, "commit_readback_missing")
+            XCTAssertEqual(bridgeError?.commitPhase, "committed_unverified")
+        }
+        XCTAssertTrue(calls.isEmpty)
+    }
+
     func testReminderDueWindowIsHalfOpenAndExcludesUndatedItems() throws {
         let request = ReminderQueryRequest(
             calendarIdentifiers: ["personal"],

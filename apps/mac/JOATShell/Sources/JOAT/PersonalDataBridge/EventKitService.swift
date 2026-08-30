@@ -54,6 +54,35 @@ actor EventKitService {
         self.store = store
     }
 
+    /// EventKit keeps a live object cache. A post-save value is only a
+    /// committed read-back after we clear that cache and re-fetch it by the
+    /// native identity EventKit assigned during the commit.
+    nonisolated static func committedReadBack<Value>(
+        identifier: String?,
+        entity: String,
+        resetStore: () -> Void,
+        fetch: (String) -> Value?
+    ) throws -> Value {
+        guard let identifier, !identifier.isEmpty else {
+            throw NativeBridgeError(
+                "commit_readback_missing",
+                "EventKit saved the \(entity) but did not return its identity",
+                retryable: false,
+                commitPhase: "committed_unverified"
+            )
+        }
+        resetStore()
+        guard let readBack = fetch(identifier) else {
+            throw NativeBridgeError(
+                "commit_readback_missing",
+                "EventKit accepted the save but read-back is unavailable",
+                retryable: false,
+                commitPhase: "committed_unverified"
+            )
+        }
+        return readBack
+    }
+
     func startObservingChanges() {
         changeObservation.install(for: store) { [weak self] in
             Task { await self?.invalidate() }
@@ -188,16 +217,12 @@ actor EventKitService {
         event.alarms = try normalizedAlarms(request.alarmOffsetsSeconds)
         try store.save(event, span: .thisEvent, commit: true)
         storeGeneration &+= 1
-        guard let identifier = event.eventIdentifier,
-              let readBack = store.event(withIdentifier: identifier)
-        else {
-            throw NativeBridgeError(
-                "commit_readback_missing",
-                "EventKit accepted the save but read-back is unavailable",
-                retryable: false,
-                commitPhase: "committed_unverified"
-            )
-        }
+        let readBack: EKEvent = try Self.committedReadBack(
+            identifier: event.eventIdentifier,
+            entity: "event",
+            resetStore: { store.reset() },
+            fetch: { identifier in store.event(withIdentifier: identifier) }
+        )
         let result = try BridgeContract.encode(normalize(event: readBack))
         completedAttempts[attemptID] = (payloadDigest, result)
         return result
@@ -260,24 +285,12 @@ actor EventKitService {
         // same object is not an independent native read-back. Clear the
         // EventKit cache and look the reminder up by its assigned identity so
         // a saved HUD state always describes a fresh post-commit fetch.
-        let identifier = reminder.calendarItemIdentifier
-        guard !identifier.isEmpty else {
-            throw NativeBridgeError(
-                "commit_readback_missing",
-                "EventKit saved the reminder but did not return its identity",
-                retryable: false,
-                commitPhase: "committed_unverified"
-            )
-        }
-        store.reset()
-        guard let readBack = store.calendarItem(withIdentifier: identifier) as? EKReminder else {
-            throw NativeBridgeError(
-                "commit_readback_missing",
-                "EventKit saved the reminder but read-back is unavailable",
-                retryable: false,
-                commitPhase: "committed_unverified"
-            )
-        }
+        let readBack: EKReminder = try Self.committedReadBack(
+            identifier: reminder.calendarItemIdentifier,
+            entity: "reminder",
+            resetStore: { store.reset() },
+            fetch: { identifier in store.calendarItem(withIdentifier: identifier) as? EKReminder }
+        )
         let normalized = normalize(reminder: readBack)
         let result = try BridgeContract.encode(normalized)
         completedAttempts[attemptID] = (payloadDigest, result)

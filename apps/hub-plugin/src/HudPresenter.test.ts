@@ -758,7 +758,9 @@ describe('HudPresenter modal surfaces', () => {
 
     const replacement = hud.showConfirmation('Approve action B?', 'action-b');
     const staleDismissal = hud.dismissConfirmation('action-a');
-    await Promise.all([replacement, staleDismissal]);
+    const [, staleResult] = await Promise.all([replacement, staleDismissal]);
+
+    expect(staleResult).toBe(false);
 
     const active = rebuiltPages[rebuiltPages.length - 1] as {
       textObject?: Array<{ containerID?: number; content?: string }>;
