@@ -135,8 +135,26 @@ export class LocationSessionManager {
     });
   }
 
-  setForeground(foreground: boolean): void {
+  /**
+   * The host may suspend a live WebView's location stream while backgrounded.
+   * On return, retain the user-authorized profile but force its one host
+   * subscription to start again. If the WebView was actually killed, normal
+   * bootstrap/reconnect owns recovery instead.
+   */
+  setForeground(foreground: boolean): Promise<boolean> {
+    const resumed = foreground && !this.foreground;
     this.foreground = foreground;
+    if (!resumed) return Promise.resolve(true);
+
+    const profileEpoch = ++this.profileEpoch;
+    // `applyDesiredProfile` normally avoids duplicate starts for the same
+    // profile. A foreground transition is the deliberate exception: the host
+    // can have stopped it without notifying JavaScript.
+    this.appliedProfile = undefined;
+    return this.enqueue(async () => {
+      if (!this.shouldRun || this.unsubscribe === undefined || !this.foreground) return true;
+      return this.applyDesiredProfile(profileEpoch);
+    });
   }
 
   /** Fresh, explicit route origin; does not change the continuous profile. */
