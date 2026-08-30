@@ -2,6 +2,7 @@ import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
+import { resolveMessagesViewState } from './MessagesViewState';
 import type {
   InputEventPayload,
   PlanningGridCell,
@@ -18,6 +19,18 @@ const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
  * instead of leaving a wearer on a spinner indefinitely.
  */
 const CAPABILITY_RESPONSE_TIMEOUT_MS = 12_000;
+/** Terminal native-write receipts must remain readable, then lead back to the
+ * live, unified planner rather than stranding the wearer on a dead end. */
+const PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS = 5_000;
+
+function isTerminalProductivityOutcome(phase: ProductivityHudModel['phase']): boolean {
+  return phase === 'saved'
+    || phase === 'completed'
+    || phase === 'failed'
+    || phase === 'check'
+    || phase === 'cancelled'
+    || phase === 'not_saved';
+}
 
 function isPlanningAnchor(value: unknown): value is number {
   return typeof value === 'number'
@@ -70,11 +83,15 @@ export class CapabilityMenu {
   private selectedIndex = 0;
   private dataItemCount = 0;
   private dataRowsSelectable = false;
+  private dataSelectionPending = false;
+  private messagesRetry = false;
   private pendingTitle?: string;
   private pendingRequestId?: string;
   private responseTimeout?: ReturnType<typeof setTimeout>;
   private productivityReturn?: 'Planning';
   private productivityAnchorUnixMs?: number;
+  private productivityReturnTimer?: ReturnType<typeof setTimeout>;
+  private productivityReturnEpoch = 0;
   /** A Planning row may open a day or item detail. Back returns to the live
    * schedule rather than throwing the wearer all the way to the overview. */
   private planningDrillDown = false;
@@ -98,6 +115,7 @@ export class CapabilityMenu {
   async beginLiveSession(session: 'brainstorm'): Promise<void> {
     void session;
     this.clearResponseTimeout();
+    this.clearProductivityReturn();
     this.transitionId += 1;
     this.view = 'closed';
     this.selectedIndex = 0;
@@ -105,6 +123,8 @@ export class CapabilityMenu {
     this.pendingRequestId = undefined;
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.messagesRetry = false;
     this.planningDrillDown = false;
     await this.hud.showDefault();
   }
@@ -141,13 +161,26 @@ export class CapabilityMenu {
     const matches = normalized === this.pendingTitle
       || normalized.startsWith(`${this.pendingTitle} ·`);
     if (!matches) return false;
+    const messagesState = this.pendingTitle === 'MESSAGES'
+      ? resolveMessagesViewState(title, selectable)
+      : undefined;
+    const effectiveSelectable = messagesState?.selectable ?? selectable;
+    const effectiveHint = messagesState?.rowAction === 'retry'
+      ? 'tap retry · left x2 overview'
+      : hint;
 
     this.clearResponseTimeout();
+    this.messagesRetry = messagesState?.rowAction === 'retry';
     const expectedRequestId = this.pendingRequestId;
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
-    const shown = await this.hud.showList(items, { title, hint, selectable, planningGrid });
+    const shown = await this.hud.showList(items, {
+      title,
+      hint: effectiveHint,
+      selectable: effectiveSelectable,
+      planningGrid,
+    });
     if (
       !this.isCurrentTransition(transition)
       || this.pendingRequestId !== expectedRequestId
@@ -160,7 +193,8 @@ export class CapabilityMenu {
     }
     this.view = 'data';
     this.dataItemCount = items.length;
-    this.dataRowsSelectable = selectable;
+    this.dataRowsSelectable = effectiveSelectable;
+    this.dataSelectionPending = false;
     this.selectedIndex = 0;
     return true;
   }
@@ -214,6 +248,7 @@ export class CapabilityMenu {
     this.pendingTitle = this.productivityReturn.toUpperCase();
     this.pendingRequestId = undefined;
     this.selectedIndex = 0;
+    this.scheduleProductivityReturn(productivity.phase);
     return true;
   }
 
@@ -248,9 +283,19 @@ export class CapabilityMenu {
 
   /** Returns true when the event was consumed (a menu view is open). */
   handleList(list: ListEvent): boolean {
-    if (this.view === 'closed' || this.view === 'data') return false;
+    if (this.view === 'closed') return false;
     if (this.view === 'productivity') return true;
     if (this.view === 'transition') return true;
+
+    if (this.view === 'data') {
+      if ((list.eventType ?? 0) !== OsEventTypeList.CLICK_EVENT) return true;
+      const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
+      this.selectedIndex = Math.max(
+        0,
+        Math.min(maximum, list.currentSelectItemIndex ?? this.selectedIndex),
+      );
+      return this.selectDataRow();
+    }
 
     // `?? 0` on both reads: the protobuf transport omits zero-valued fields,
     // so CLICK_EVENT (0) and the first row's index (0) both arrive as
@@ -276,7 +321,9 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
-      const maximum = Math.max(0, this.dataItemCount - 1);
+      // Access/setup has one real G2 action: retry. Keep its first row
+      // highlighted while the second row remains Mac Settings guidance.
+      const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
       const next = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
       const applied = next - this.selectedIndex;
       this.selectedIndex = next;
@@ -295,28 +342,39 @@ export class CapabilityMenu {
     if (this.view === 'productivity') return true;
     if (this.view === 'transition') return true;
     if (this.view === 'data') {
-      if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
-      if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
-      const random = globalThis.crypto?.randomUUID?.()
-        ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      const traceId = `hud-${random}`;
-      const stage = this.pendingTitle === 'MESSAGES'
-        ? 'message-selected'
-        : 'capability-row-selected';
-      console.info(`[joat trace] trace=${traceId} stage=${stage} index=${this.selectedIndex}`);
-      this.link.send({
-        kind: 'input',
-        event: {
-          containerName: 'capdata',
-          selectedIndex: this.selectedIndex,
-          selectedName: this.pendingTitle,
-          traceId,
-          requestId: this.pendingRequestId,
-        },
-      });
-      return true;
+      return this.selectDataRow();
     }
     return this.select(this.selectedIndex);
+  }
+
+  private selectDataRow(): true {
+    if (this.messagesRetry) {
+      this.messagesRetry = false;
+      void this.openCapability('Messages', 0);
+      return true;
+    }
+    if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
+    if (this.dataSelectionPending) return true;
+    this.dataSelectionPending = true;
+    if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
+    const random = globalThis.crypto?.randomUUID?.()
+      ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const traceId = `hud-${random}`;
+    const stage = this.pendingTitle === 'MESSAGES'
+      ? 'message-selected'
+      : 'capability-row-selected';
+    console.info(`[joat trace] trace=${traceId} stage=${stage} index=${this.selectedIndex}`);
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capdata',
+        selectedIndex: this.selectedIndex,
+        selectedName: this.pendingTitle,
+        traceId,
+        requestId: this.pendingRequestId,
+      },
+    });
+    return true;
   }
 
   private select(index: number): boolean {
@@ -387,6 +445,7 @@ export class CapabilityMenu {
   ): Promise<void> {
     if (picked === 'Planning') this.planningDrillDown = false;
     this.clearResponseTimeout();
+    this.messagesRetry = false;
     const transition = this.beginTransition();
     const title = picked.toUpperCase();
     const requestId = `hud-request-${this.randomId()}`;
@@ -404,6 +463,7 @@ export class CapabilityMenu {
     this.pendingRequestId = requestId;
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
     this.selectedIndex = 0;
     const event: InputEventPayload = {
       containerName: 'capmenu',
@@ -419,7 +479,9 @@ export class CapabilityMenu {
       kind: 'input',
       event,
     });
-    if (picked === 'Planning') this.armResponseTimeout(title, requestId);
+    if (picked === 'Planning' || picked === 'Messages') {
+      this.armResponseTimeout(title, requestId);
+    }
   }
 
   private armResponseTimeout(title: string, requestId: string): void {
@@ -442,15 +504,18 @@ export class CapabilityMenu {
       || this.pendingRequestId !== requestId
     ) return;
 
+    const isMessagesRetry = title === 'MESSAGES';
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
-    const shown = await this.hud.showList([
-      'No response from the Mac yet.',
-      'Return to Overview, then open Planning to retry.',
-    ], {
+    const shown = await this.hud.showList(isMessagesRetry
+      ? ['Mac did not answer. Tap to retry Messages.']
+      : [
+        'No response from the Mac yet.',
+        'Return to Overview, then open Planning to retry.',
+      ], {
       title: `${title} · RETRY`,
-      hint: 'left x2 overview',
-      selectable: false,
+      hint: isMessagesRetry ? 'tap retry · left x2 overview' : 'left x2 overview',
+      selectable: isMessagesRetry,
     });
     if (
       this.view !== 'data'
@@ -461,6 +526,9 @@ export class CapabilityMenu {
       await this.close();
       return;
     }
+    this.messagesRetry = isMessagesRetry;
+    this.dataRowsSelectable = isMessagesRetry;
+    this.dataItemCount = isMessagesRetry ? 1 : 0;
     this.selectedIndex = 0;
   }
 
@@ -470,9 +538,36 @@ export class CapabilityMenu {
   }
 
   private beginTransition(): number {
+    this.clearProductivityReturn();
     this.view = 'transition';
     this.transitionId += 1;
     return this.transitionId;
+  }
+
+  private scheduleProductivityReturn(phase: ProductivityHudModel['phase']): void {
+    if (!isTerminalProductivityOutcome(phase) || !this.productivityReturn) return;
+    const epoch = ++this.productivityReturnEpoch;
+    this.productivityReturnTimer = setTimeout(() => {
+      this.productivityReturnTimer = undefined;
+      if (
+        this.productivityReturnEpoch !== epoch
+        || this.view !== 'productivity'
+        || this.productivityReturn !== 'Planning'
+      ) return;
+      void this.openCapability(
+        'Planning',
+        CAPABILITIES.indexOf('Planning'),
+        this.productivityAnchorUnixMs,
+      );
+    }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);
+  }
+
+  private clearProductivityReturn(): void {
+    this.productivityReturnEpoch += 1;
+    if (this.productivityReturnTimer !== undefined) {
+      clearTimeout(this.productivityReturnTimer);
+      this.productivityReturnTimer = undefined;
+    }
   }
 
   private isCurrentTransition(transition: number): boolean {
@@ -480,7 +575,9 @@ export class CapabilityMenu {
   }
 
   private async close(): Promise<void> {
+    const leavingMessages = this.pendingTitle === 'MESSAGES';
     this.clearResponseTimeout();
+    this.clearProductivityReturn();
     this.transitionId += 1;
     this.view = 'closed';
     this.selectedIndex = 0;
@@ -491,6 +588,17 @@ export class CapabilityMenu {
     this.planningDrillDown = false;
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.messagesRetry = false;
+    if (leavingMessages) {
+      this.link.send({
+        kind: 'input',
+        event: {
+          containerName: 'capability-lifecycle',
+          selectedName: 'messages-home',
+        },
+      });
+    }
     // Restore a LIVE home, not a souvenir of the menu — a stale status line
     // over a blank page reads as a dead assistant (observed on hardware).
     await this.hud.showDefault();
