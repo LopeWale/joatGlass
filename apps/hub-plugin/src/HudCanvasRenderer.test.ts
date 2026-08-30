@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as HudCanvas from './HudCanvasRenderer';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
   NOTIFICATION_DISMISS_HINT,
@@ -172,6 +173,45 @@ describe('compact navigation decisions', () => {
   });
 });
 
+describe('compact Planning focus rows', () => {
+  it('fits a mixed Planning day into four flat agenda rows with selection rails', () => {
+    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 4)).toEqual([
+      { primaryBaselineY: 93, secondaryBaselineY: 108, railTopY: 81, railHeight: 29, separatorY: 117 },
+      { primaryBaselineY: 125, secondaryBaselineY: 140, railTopY: 113, railHeight: 29, separatorY: 149 },
+      { primaryBaselineY: 157, secondaryBaselineY: 172, railTopY: 145, railHeight: 29, separatorY: 181 },
+      { primaryBaselineY: 189, secondaryBaselineY: 204, railTopY: 177, railHeight: 29 },
+    ]);
+  });
+
+  it('uses six one-line rows for Planning week controls without calendar cards', () => {
+    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · AUG 31–SEP 6', 7)).toEqual([
+      { primaryBaselineY: 93, railTopY: 82, railHeight: 21, separatorY: 106 },
+      { primaryBaselineY: 117, railTopY: 106, railHeight: 21, separatorY: 130 },
+      { primaryBaselineY: 141, railTopY: 130, railHeight: 21, separatorY: 154 },
+      { primaryBaselineY: 165, railTopY: 154, railHeight: 21, separatorY: 178 },
+      { primaryBaselineY: 189, railTopY: 178, railHeight: 21, separatorY: 202 },
+      { primaryBaselineY: 213, railTopY: 202, railHeight: 21 },
+    ]);
+  });
+
+  it('does not apply the Planning treatment to Messages', () => {
+    expect(HudCanvas.planningFocusRows('MESSAGES', 4)).toEqual([]);
+  });
+});
+
+describe('compact productivity outcome geometry', () => {
+  it('uses a text stack and divider rather than reserving a card-sized body', () => {
+    expect(HudCanvas.productivityOutcomeLayout()).toEqual({
+      titleBaselineY: 103,
+      dividerY: 125.5,
+      primaryBaselineY: 151,
+      secondaryBaselineY: 174,
+      progressY: 198,
+      footerBaselineY: 267,
+    });
+  });
+});
+
 describe('assistant overlay text fitting', () => {
   it('keeps a four-line assistant reply below the header divider and above its footer', () => {
     const layout = assistantOverlayTextLayout(4, 17);
@@ -246,6 +286,24 @@ describe('Planning month geometry', () => {
     expect(parsePlanningMonthTitle('PLANNING · PLAN · TUE SEP 1')).toBeUndefined();
     expect(parsePlanningMonthTitle('SEPTEMBER 2026')).toBeUndefined();
     expect(parsePlanningMonthTitle('PLANNING · PLAN · JANUARY 0099')).toBeUndefined();
+  });
+
+  it('marks the selected month week with a slim rail instead of an enclosing box', () => {
+    expect(HudCanvas.planningMonthSelectionRail(3)).toEqual({
+      x: 28,
+      y: 153,
+      width: 3,
+      height: 22,
+    });
+  });
+});
+
+describe('flat confirmation actions', () => {
+  it('keeps the safe-write actions explicit without button outlines', () => {
+    expect(HudCanvas.confirmationActionLabels()).toEqual([
+      { label: 'TAP · Confirm', x: 188, level: 238 },
+      { label: 'SWIPE · Cancel', x: 388, level: 170 },
+    ]);
   });
 });
 
