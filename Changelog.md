@@ -2,6 +2,14 @@
 
 ## 2026-08-30
 
+- Replaced the native Calendar/Reminder acceptance driver’s obsolete
+  console-receipt dependency with a private official-simulator framebuffer
+  transition followed by the existing 600 ms stability window. The harness now
+  rejects console-only output as visual proof and retains only private hashes
+  and screenshots for review; this changes neither EventKit, Focus, nor macOS
+  notification settings. A live native write/alarm run remains a separate,
+  operator-controlled gate.
+
 - Reworked **Messages · Conversation** as a six-row, aligned transcript: one
   compact history position line, a divider, then flat sender/body rows. Incoming
   and outgoing text stays distinguishable by truthful label and brightness, but

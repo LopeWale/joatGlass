@@ -31,7 +31,6 @@ from scripts.simulator_productivity_native_acceptance import (
     classify_alarm_delivery_failure,
     create_engine_stub_repo,
     evaluate_notification_preflight,
-    has_due_surface_receipt,
     mark_interrupted,
     plan_acceptance_schedule,
     redact_native_reference,
@@ -77,16 +76,45 @@ def test_event_and_reminder_use_distinct_randomized_acceptance_identities() -> N
         )
 
 
-def test_due_surface_receipt_is_fixed_and_carries_no_reminder_content() -> None:
-    assert has_due_surface_receipt(
-        b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
+@pytest.mark.asyncio
+async def test_screenshot_completion_never_reads_console_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    requested_urls: list[str] = []
+    current_time = [0.0]
+
+    def fake_http(url: str, **_: object) -> bytes:
+        requested_urls.append(url)
+        if "/api/console" in url:
+            raise AssertionError("console output must not satisfy HUD completion")
+        assert url.endswith("/api/screenshot/glasses")
+        return b"changed-frame"
+
+    async def advance_time(delay: float) -> None:
+        current_time[0] += delay
+
+    def fake_preview(path: Path) -> tuple[Path, str]:
+        return path.with_name("preview.png"), "preview-digest"
+
+    monkeypatch.setattr(acceptance, "_http_bytes", fake_http)
+    monkeypatch.setattr(acceptance.time, "monotonic", lambda: current_time[0])
+    monkeypatch.setattr(acceptance.asyncio, "sleep", advance_time)
+    monkeypatch.setattr(acceptance, "_write_alpha_preview", fake_preview)
+
+    screenshot_path = tmp_path / "due.png"
+    digest, preview_digest = await acceptance._wait_for_changed_settled_screenshot(
+        "http://simulator",
+        screenshot_path,
+        prior_screenshot_digest=acceptance._digest(b"baseline-frame"),
+        stage="reminder_due",
     )
-    assert not has_due_surface_receipt(
-        b"[HudVisualSurface] receipt saved bridge-ack\n"
-    )
-    assert not has_due_surface_receipt(
-        b"reminder_due private title bridge-ack\n"
-    )
+
+    assert digest == acceptance._digest(b"changed-frame")
+    assert preview_digest == "preview-digest"
+    assert screenshot_path.read_bytes() == b"changed-frame"
+    assert requested_urls
+    assert all("/api/console" not in url for url in requested_urls)
 
 
 def test_interruption_receipt_never_promotes_a_partial_run_to_delivery() -> None:
