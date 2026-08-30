@@ -119,3 +119,21 @@ class TestFailureNotices:
 
         assert not is_failure("Cache the model in RAM. [1] is the weak claim.")
         assert not is_failure("")
+
+
+class TestNoLengthCap:
+    def test_prompts_ask_for_depth_not_brevity(self) -> None:
+        """The wearer: "why are we trying to limit the responses like I can
+        not scroll to read?" — swipe scrolls, so the cap was limiting the
+        ANSWER, not the screen. The gist line is presentation; the body is
+        as deep as the question deserves."""
+        from joat.services.roundtable import Participant, RoundTable, build_prompt
+
+        async def noop(prompt: str):  # pragma: no cover - never driven
+            yield ""
+
+        seat = Participant(name="codex", role="proposer", stream=noop)
+        prompt = build_prompt("heat pumps", seat, [])
+        assert "120 words" not in prompt          # the cap is gone
+        assert "GIST:" in prompt                  # the glass line is asked for
+        assert "as much depth" in prompt          # and depth is invited

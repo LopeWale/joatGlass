@@ -178,5 +178,16 @@ def build_prompt(topic: str, speaker: Participant, transcript: Sequence[tuple[st
             f"You are {speaker.label}. Open the discussion with a concrete "
             "position."
         )
-    lines.append("Under 120 words, plain text, no markdown.")
+    # No length cap. The 120-word ceiling this replaces was a holdover from
+    # the convergence debate, where short turns kept rounds cheap and the
+    # judge legible — but it capped the answer AT THE SOURCE, so the wearer
+    # could never scroll to more than the model was allowed to write. A
+    # brainstorm wants depth; the glasses problem is presentation, and the
+    # gist line is the presentation contract: first line on the glass and in
+    # the panel row, the body behind a swipe, everything on the Mac.
+    lines.append(
+        "Open with one line, exactly 'GIST: <your position in a dozen "
+        "words>', then develop it in as much depth as the question "
+        "deserves. Plain text, no markdown."
+    )
     return "\n".join(lines) + contract
