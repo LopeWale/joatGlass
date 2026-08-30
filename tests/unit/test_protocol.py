@@ -184,6 +184,14 @@ class TestParseUplink:
         assert isinstance(msg, Audio)
         assert msg.seq == 7 and msg.pcm == [1, -1]
 
+    @pytest.mark.parametrize("source", [None, "unknown", 3])
+    def test_audio_rejects_missing_or_unknown_source(self, source: object) -> None:
+        payload: dict[str, object] = {"kind": "audio", "seq": 7, "pcm": [1, -1]}
+        if source is not None:
+            payload["source"] = source
+        with pytest.raises(ProtocolError, match="audio source is invalid"):
+            parse_uplink(payload)
+
     def test_imu_defaults_missing_axes_to_zero(self) -> None:
         msg = parse_uplink({"kind": "imu", "y": 0.5, "at": 100})
         assert msg == Imu(x=0.0, y=0.5, z=0.0, at=100)

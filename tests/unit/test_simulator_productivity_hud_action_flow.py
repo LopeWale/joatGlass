@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -102,3 +103,41 @@ def test_frame_counter_accepts_only_completed_visual_surface_receipts() -> None:
         b"[Simulator] Flutter Bridge intercepted: evenAppMessage\n" * 4
         + b"[HudVisualSurface] frame 4 bridge-ack\n"
     ) == 4
+
+
+async def test_fixture_bridge_holds_a_controller_write_until_verifying_can_render() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    bridge = driver.FixtureEventKitBridge()
+    bridge.hold_next_write()
+    due = {
+        "year": 2026,
+        "month": 9,
+        "day": 1,
+        "hour": 18,
+        "minute": 0,
+        "second": 0,
+        "time_zone_id": "America/Chicago",
+        "repeated_time_choice": None,
+    }
+    pending = asyncio.create_task(bridge.call("reminders.create", {
+        "calendar_identifier": "personal",
+        "title": "Prepare report",
+        "due": due,
+        "resolved_due_unix_ms": 1_788_303_600_000,
+        "alarm_offsets_seconds": [0],
+    }))
+
+    await bridge.wait_for_write()
+    assert not pending.done(), "the fake bridge must not hide the verifying HUD frame"
+    bridge.release_next_write()
+    response = await pending
+
+    assert response.commit_phase == "committed_readback"
+    assert response.result["calendar_item_identifier"] == "fixture-reminder-prepare-report"
+    assert response.result["alarms"] == [{
+        "relative_offset_seconds": None,
+        "absolute_unix_ms": 1_788_303_600_000,
+    }]
+    assert bridge.write_methods == ["reminders.create"]

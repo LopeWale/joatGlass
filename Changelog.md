@@ -2,16 +2,20 @@
 
 ## 2026-08-30
 
-- Repaired the actual glasses-first **Brainstorm** start path: tapping the
-  Brainstorm HUD now enters a typed `TOPIC CAPTURE` state, and the next wearer
-  utterance is consumed as the Brainstorm topic without requiring a repeated
-  wake word or capability name. Repeated taps are harmless; left-double
-  explicitly cancels the capture; G2 disconnect/replacement clears it so a
-  later voice command cannot start a stale Brainstorm. Focused Python (282),
-  full Hub (461), typecheck, and production-build checks pass. The official
-  simulator was driven through all nine Brainstorm/Terminal/cancel/reconnect
-  HUD states and each optical frame was reviewed; physical-G2 proof remains
-  separate and unclaimed.
+- Completed the actual glasses-first **Brainstorm** topic path: tapping the
+  Brainstorm HUD arms one `TOPIC CAPTURE` utterance, and the orchestrator now
+  consumes it before the ordinary wake-word gate only when the complete VAD/STT
+  utterance is verified as **glasses** audio. Phone, mixed, missing, and
+  unknown-source audio cannot satisfy that promise and leave the visible capture
+  state armed. Repeated taps remain harmless; cancellation and connection
+  replacement clear the capture. The focused Brainstorm/OpenClaw/gateway suite
+  passed 309 tests and strict mypy. The current official simulator was driven
+  through all nine Ready → Topic Capture → Cancel → Acceptance → Running →
+  Agent Terminal → Return → Reconnect → Cancel HUD states, with every raw RGBA
+  frame converted to and visually reviewed as its proper green-on-black optical
+  interpretation. Per Even's current documentation, that is simulator evidence
+  for layout and event logic only—not physical-G2 timing, source routing, or
+  lens-legibility proof.
 
 - Fixed the live assistant's nearby-place gap: the Mapbox provider and fresh
   iPhone fix were already available, but the local model had never selected

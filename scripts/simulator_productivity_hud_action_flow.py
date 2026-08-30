@@ -7,11 +7,14 @@ and the ordinary confirmation protocol.  It deliberately binds an isolated
 loopback port and creates a disposable simulator-only manifest, so it cannot
 replace the user's app-launched engine or a connected G2 on port 8787.
 
-This is renderer-and-gesture evidence only.  Its test producer sends typed
-``ProductivityHudView`` outcomes after a real confirmation response; it never
-writes EventKit and must not be used as native write or physical-G2 proof.  A
-due view additionally checks the live Hub-plugin acceptance receipt, which is
-still distinct from pixels on a physical G2 or OS notification delivery.
+This is renderer-and-gesture evidence only.  Successful Calendar creation,
+Reminder creation, monitoring, and Reminder completion are produced by the
+production ``ProductivityActionController`` against a disposable native-shaped
+fixture; it never writes EventKit and must not be used as native write or
+physical-G2 proof.  Fallback outcome frames remain typed downlink rendering
+checks.  A due view additionally checks the live Hub-plugin acceptance
+receipt, which is still distinct from pixels on a physical G2 or OS
+notification delivery.
 """
 
 from __future__ import annotations
@@ -40,9 +43,14 @@ from urllib.parse import urlsplit
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.channels.cards import CardLog
 from joat.core.protocol import DownlinkMessage, HudList, ProductivityHudView
+from joat.persistence.actions import ActionJournal
+from joat.persistence.store import DurableStore
+from joat.persistence.tasks import TaskOccurrenceStore
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
+from joat.services.productivity_actions import ProductivityActionController
 from joat.services.status import StatusPublisher
+from joat.services.task_monitor import TaskMonitor, evaluate_reminder_occurrence
 
 
 class ProductivityHudFlowError(RuntimeError):
@@ -154,6 +162,7 @@ class RecordingGateway(HubGatewayTransport):
         super().__init__(*args, **kwargs)
         self.sent: list[DownlinkMessage] = []
         self.confirmation_requests: list[str] = []
+        self.reminder_due_requests: list[ProductivityHudView] = []
 
     async def send(self, message: DownlinkMessage) -> None:
         self.sent.append(message)
@@ -163,19 +172,62 @@ class RecordingGateway(HubGatewayTransport):
         self.confirmation_requests.append(action_id)
         return await super().request_confirmation(action_id, *args, **kwargs)
 
+    async def request_reminder_due_ack(
+        self,
+        view: ProductivityHudView,
+        *,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        self.reminder_due_requests.append(view)
+        return await super().request_reminder_due_ack(view, timeout_s=timeout_s)
 
-class FixturePlanningBridge:
-    """A fixed native-shaped snapshot for visualizing the real Planning router.
 
-    It deliberately implements only the read-only EventKit calls used by
-    ``CapabilityRouter``.  The production month/week/day projection, selection
-    routing, Hub gateway, and HUD renderer remain in play; live EventKit data
-    is not touched while a wearer may have a G2 connected to the normal app.
+class FixtureEventKitBridge:
+    """Disposable EventKit-shaped data behind the real productivity controller.
+
+    The fixture starts with one Event and one Reminder so the Planning flow can
+    prove the unified agenda.  Confirmed controller writes update only this
+    in-memory snapshot.  Each write can be paused after the controller emits
+    its genuine ``verifying`` phase; that makes a simulator capture able to
+    falsify a missing verification state instead of letting an immediate fake
+    read-back hide it.
     """
 
     def __init__(self) -> None:
-        scheduled = datetime(2026, 9, 1, 9, 30, tzinfo=ZoneInfo("America/Chicago"))
-        self._event_start_unix_ms = int(scheduled.timestamp() * 1_000)
+        event_start = datetime(2026, 9, 1, 10, 30, tzinfo=ZoneInfo("America/Chicago"))
+        reminder_due = datetime(2026, 9, 1, 19, 0, tzinfo=ZoneInfo("America/Chicago"))
+        self._events: list[dict[str, object]] = [{
+            "calendar_item_identifier": "fixture-event-design-review",
+            "calendar_identifier": "work",
+            "title": "Design review",
+            "is_all_day": False,
+            "start_unix_ms": int(event_start.timestamp() * 1_000),
+            "end_unix_ms": int((event_start.timestamp() + 45 * 60) * 1_000),
+        }]
+        self._reminders: list[dict[str, object]] = [{
+            "calendar_item_identifier": "fixture-reminder-buy-filters",
+            "calendar_identifier": "personal",
+            "title": "Buy filters",
+            "due": self._civil_wire(reminder_due),
+            "is_completed": False,
+            "has_recurrence_rules": False,
+        }]
+        self._write_entered = asyncio.Event()
+        self._release_write = asyncio.Event()
+        self._release_write.set()
+        self.write_methods: list[str] = []
+
+    @staticmethod
+    def _civil_wire(value: datetime) -> dict[str, object]:
+        return {
+            "year": value.year,
+            "month": value.month,
+            "day": value.day,
+            "hour": value.hour,
+            "minute": value.minute,
+            "second": value.second,
+            "time_zone_id": value.tzinfo.key if isinstance(value.tzinfo, ZoneInfo) else "UTC",
+        }
 
     @staticmethod
     def _response(*, result: object = None) -> SimpleNamespace:
@@ -186,41 +238,143 @@ class FixturePlanningBridge:
             store_generation=1,
         )
 
+    def hold_next_write(self) -> None:
+        """Stop a synthetic native write after the real verifying publication."""
+
+        self._write_entered.clear()
+        self._release_write.clear()
+
+    async def wait_for_write(self) -> None:
+        try:
+            await asyncio.wait_for(self._write_entered.wait(), timeout=5)
+        except TimeoutError as exc:
+            raise ProductivityHudFlowError("controller did not reach native write") from exc
+
+    def release_next_write(self) -> None:
+        self._release_write.set()
+
+    async def _write_boundary(self, method: str) -> None:
+        self.write_methods.append(method)
+        self._write_entered.set()
+        await self._release_write.wait()
+
+    @staticmethod
+    def _resolved_time(civil: object) -> tuple[int, int]:
+        if not isinstance(civil, dict):
+            raise ProductivityHudFlowError("fixture local time request was malformed")
+        try:
+            value = datetime(
+                int(civil["year"]), int(civil["month"]), int(civil["day"]),
+                int(civil["hour"]), int(civil["minute"]), int(civil.get("second", 0)),
+                tzinfo=ZoneInfo(str(civil["time_zone_id"])),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProductivityHudFlowError("fixture local time request was invalid") from exc
+        offset = value.utcoffset()
+        if offset is None:
+            raise ProductivityHudFlowError("fixture local time had no UTC offset")
+        return int(value.timestamp() * 1_000), int(offset.total_seconds())
+
     async def call(
         self,
         method: str,
         params: dict[str, object] | None = None,
+        *,
+        attempt_id: str | None = None,
+        payload_digest: str | None = None,
+        timeout_s: float | None = None,
     ) -> SimpleNamespace:
-        del params
+        del attempt_id, payload_digest, timeout_s
+        params = params or {}
         if method == "authorization.status":
             return self._response()
         if method == "calendar.listContainers":
             return self._response(result=[{
                 "calendar_identifier": "work", "title": "Work",
+                "allows_content_modifications": True, "is_default": True,
             }])
         if method == "reminders.listContainers":
             return self._response(result=[{
                 "calendar_identifier": "personal", "title": "Personal",
+                "allows_content_modifications": True, "is_default": True,
             }])
+        if method == "localTime.resolve":
+            chosen, offset = self._resolved_time(params.get("civil_time"))
+            return self._response(result={
+                "status": "unique",
+                "chosen_unix_ms": chosen,
+                "chosen_utc_offset_seconds": offset,
+            })
         if method == "calendar.query":
-            return self._response(result=[{
-                "calendar_item_identifier": "event-design-review",
-                "title": "Design review",
-                "start_unix_ms": self._event_start_unix_ms,
-                "end_unix_ms": self._event_start_unix_ms + 45 * 60_000,
-            }])
+            return self._response(result=[dict(item) for item in self._events])
         if method == "reminders.query":
-            return self._response(result=[{
-                "calendar_item_identifier": "reminder-buy-filters",
-                "calendar_identifier": "personal",
-                "title": "Buy filters",
-                "due": {
-                    "year": 2026, "month": 9, "day": 1,
-                    "hour": 18, "minute": 0, "second": 0,
-                    "time_zone_id": "America/Chicago",
-                },
+            include_completed = params.get("include_completed") is True
+            return self._response(result=[
+                dict(item) for item in self._reminders
+                if include_completed or item.get("is_completed") is False
+            ])
+        if method == "calendar.create":
+            await self._write_boundary(method)
+            result = {
+                "calendar_item_identifier": "fixture-event-submit-proposal",
+                "calendar_identifier": params.get("calendar_identifier"),
+                "title": params.get("title"),
+                "is_all_day": params.get("is_all_day"),
+                "start_unix_ms": params.get("start_unix_ms"),
+                "end_unix_ms": params.get("end_unix_ms"),
+                "time_zone_id": params.get("time_zone_id"),
+                "alarms": [
+                    {"relative_offset_seconds": -int(offset), "absolute_unix_ms": None}
+                    for offset in params.get("alarm_offsets_seconds", [])
+                ],
+            }
+            self._events.append({key: value for key, value in result.items() if key != "alarms"})
+            response = self._response(result=result)
+            response.commit_phase = "committed_readback"
+            return response
+        if method == "reminders.create":
+            await self._write_boundary(method)
+            due = params.get("due")
+            due_unix_ms = params.get("resolved_due_unix_ms")
+            if not isinstance(due, dict) or isinstance(due_unix_ms, bool) or not isinstance(due_unix_ms, int):
+                raise ProductivityHudFlowError("fixture reminder create request was malformed")
+            result = {
+                "calendar_item_identifier": "fixture-reminder-prepare-report",
+                "calendar_identifier": params.get("calendar_identifier"),
+                "title": params.get("title"),
+                "due": due,
                 "is_completed": False,
-            }])
+                "alarms": [
+                    {"relative_offset_seconds": None, "absolute_unix_ms": due_unix_ms - int(offset) * 1_000}
+                    for offset in params.get("alarm_offsets_seconds", [])
+                ],
+            }
+            self._reminders.append({
+                **{key: value for key, value in result.items() if key != "alarms"},
+                "has_recurrence_rules": False,
+            })
+            response = self._response(result=result)
+            response.commit_phase = "committed_readback"
+            return response
+        if method == "reminders.complete":
+            await self._write_boundary(method)
+            item_id = params.get("calendar_item_identifier")
+            calendar_id = params.get("calendar_identifier")
+            matches = [
+                item for item in self._reminders
+                if item.get("calendar_item_identifier") == item_id
+                and item.get("calendar_identifier") == calendar_id
+            ]
+            if len(matches) != 1:
+                raise ProductivityHudFlowError("fixture completion did not identify exactly one reminder")
+            matches[0]["is_completed"] = True
+            response = self._response(result={
+                "calendar_item_identifier": item_id,
+                "calendar_identifier": calendar_id,
+                "is_completed": True,
+            })
+            response.commit_phase = "committed_readback"
+            return response
         raise ProductivityHudFlowError(f"unexpected fixture Planning call: {method}")
 
 
@@ -549,33 +703,134 @@ def _view(
     )
 
 
-async def _confirm(
+def _productivity_view_after(
     gateway: RecordingGateway,
     *,
-    action_id: str,
-    prompt: str,
+    after: int,
+    domain: str,
+    phase: str,
+) -> ProductivityHudView | None:
+    for message in reversed(gateway.sent[after:]):
+        if (
+            isinstance(message, ProductivityHudView)
+            and message.domain == domain
+            and message.phase == phase
+        ):
+            return message
+    return None
+
+
+async def _drive_controller_write(
+    controller: ProductivityActionController,
+    bridge: FixtureEventKitBridge,
+    gateway: RecordingGateway,
+    *,
+    command: str,
+    domain: str,
+    title: str,
+    terminal_phase: str,
+    terminal_result: str,
+    review_name: str,
+    verifying_name: str,
+    terminal_name: str,
     automation_base: str,
     output: Path,
-    receipt_name: str,
-    prior_digest: str | None,
-) -> tuple[str, dict[str, str]]:
-    frame_checkpoint = await _visual_frame_checkpoint(automation_base)
-    request = asyncio.create_task(gateway.request_confirmation(action_id, prompt, timeout_s=8))
-    await _wait_for(
-        lambda: action_id if action_id in gateway.confirmation_requests else None,
-        label=f"{action_id} confirmation downlink",
-    )
-    await _wait_for_visual_frame(
-        automation_base,
-        after=frame_checkpoint,
-        label=f"{action_id} confirmation",
-    )
-    digest, raw, alpha = await _capture(automation_base, output, receipt_name, prior_digest)
-    await _input(automation_base, "click")
-    decision = await asyncio.wait_for(request, timeout=5)
-    if decision is None or not decision.accepted:
-        raise ProductivityHudFlowError(f"{action_id}: simulator click did not bind an accepted confirmation")
-    return digest, {"raw": raw, "alpha": alpha}
+    prior_digest: str,
+    receipts: list[ScreenReceipt],
+    artifacts: dict[str, dict[str, str]],
+) -> tuple[str, int]:
+    """Drive one confirmed controller write through the official simulator.
+
+    The bridge is deliberately paused at its write boundary.  Consequently the
+    verifying frame has to be published by the actual controller before the
+    fixture can yield a matching committed read-back.  This rejects the former
+    shortcut where the acceptance driver manufactured both states itself.
+    """
+
+    before = len(gateway.sent)
+    confirmation_after = len(gateway.confirmation_requests)
+    bridge.hold_next_write()
+    task: asyncio.Task[str | None] | None = None
+    try:
+        review_checkpoint = await _visual_frame_checkpoint(automation_base)
+        task = asyncio.create_task(controller.handle_command(command))
+        action_id = await _wait_for(
+            lambda: (
+                gateway.confirmation_requests[confirmation_after]
+                if len(gateway.confirmation_requests) > confirmation_after
+                else None
+            ),
+            label=f"{review_name} controller confirmation downlink",
+        )
+        await _wait_for_visual_frame(
+            automation_base,
+            after=review_checkpoint,
+            label=f"{review_name} controller confirmation",
+        )
+        digest, raw, alpha = await _capture(
+            automation_base, output, f"{len(receipts) + 1:02d}-{review_name}", prior_digest,
+        )
+        receipts.append(ScreenReceipt(review_name, None, None, "review", digest))
+        artifacts[review_name] = {"raw": raw, "alpha": alpha}
+
+        verifying_checkpoint = await _visual_frame_checkpoint(automation_base)
+        await _input(automation_base, "click")
+        verifying = await _wait_for(
+            lambda: _productivity_view_after(
+                gateway, after=before, domain=domain, phase="verifying",
+            ),
+            label=f"{action_id} controller verifying status",
+        )
+        if verifying.title != title:
+            raise ProductivityHudFlowError(
+                f"{verifying_name}: controller emitted unexpected title {verifying.title!r}"
+            )
+        await _wait_for_visual_frame(
+            automation_base,
+            after=verifying_checkpoint,
+            label=verifying_name,
+        )
+        digest, raw, alpha = await _capture(
+            automation_base, output, f"{len(receipts) + 1:02d}-{verifying_name}", digest,
+        )
+        receipts.append(ScreenReceipt(verifying_name, "click", True, "verifying", digest))
+        artifacts[verifying_name] = {"raw": raw, "alpha": alpha}
+
+        await bridge.wait_for_write()
+        terminal_checkpoint = await _visual_frame_checkpoint(automation_base)
+        bridge.release_next_write()
+        terminal = await _wait_for(
+            lambda: _productivity_view_after(
+                gateway, after=before, domain=domain, phase=terminal_phase,
+            ),
+            label=f"{action_id} controller {terminal_phase} status",
+        )
+        if terminal.title != title:
+            raise ProductivityHudFlowError(
+                f"{terminal_name}: controller emitted unexpected title {terminal.title!r}"
+            )
+        await _wait_for_visual_frame(
+            automation_base,
+            after=terminal_checkpoint,
+            label=terminal_name,
+        )
+        digest, raw, alpha = await _capture(
+            automation_base, output, f"{len(receipts) + 1:02d}-{terminal_name}", digest,
+        )
+        receipts.append(ScreenReceipt(terminal_name, None, None, terminal_phase, digest))
+        artifacts[terminal_name] = {"raw": raw, "alpha": alpha}
+        result = await asyncio.wait_for(task, timeout=5)
+        if result != terminal_result:
+            raise ProductivityHudFlowError(
+                f"{terminal_name}: controller returned {result!r}, expected {terminal_result!r}"
+            )
+        return digest, before
+    except BaseException:
+        bridge.release_next_write()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 def _planning_list_after(
@@ -589,7 +844,13 @@ def _planning_list_after(
     return None
 
 
-def validate_planning_screen(phase: str, rendered: HudList) -> None:
+def validate_planning_screen(
+    phase: str,
+    rendered: HudList,
+    *,
+    required_item: str | None = None,
+    absent_item: str | None = None,
+) -> None:
     """Reject a rendered Planning page that lost its time or source semantics."""
 
     expected = {
@@ -617,6 +878,14 @@ def validate_planning_screen(phase: str, rendered: HudList) -> None:
         has_reminder = any("REMINDER · Buy filters" in item for item in rendered.items)
         if not (has_event and has_reminder):
             raise ProductivityHudFlowError("Planning day omitted the mixed Event and Reminder agenda")
+        if required_item is not None and not any(required_item in item for item in rendered.items):
+            raise ProductivityHudFlowError(
+                f"Planning day omitted controller-created item {required_item!r}"
+            )
+        if absent_item is not None and any(absent_item in item for item in rendered.items):
+            raise ProductivityHudFlowError(
+                f"Planning day retained completed item {absent_item!r}"
+            )
         return
     if "Design review" not in rendered.items:
         raise ProductivityHudFlowError("Planning detail omitted the selected native item title")
@@ -658,6 +927,8 @@ async def _wait_for_productivity_return(
     output: Path,
     name: str,
     prior_digest: str,
+    required_item: str | None = None,
+    absent_item: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Prove a terminal receipt actually re-enters the anchored live agenda.
 
@@ -678,7 +949,12 @@ async def _wait_for_productivity_return(
         label=name,
     )
     digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
-    validate_planning_screen("day", rendered)
+    validate_planning_screen(
+        "day",
+        rendered,
+        required_item=required_item,
+        absent_item=absent_item,
+    )
     return digest, {"raw": raw, "alpha": alpha}
 
 
@@ -763,13 +1039,50 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     gateway = RecordingGateway(host="127.0.0.1", port=args.ws_port)
     connected = asyncio.Event()
     gateway.on_hello(lambda _hello: connected.set())
+    fixture_bridge = FixtureEventKitBridge()
+    durable_store = DurableStore(args.out / "simulator-productivity.sqlite3")
+    occurrences = TaskOccurrenceStore(durable_store)
+
+    async def confirm_from_simulator(
+        action_id: str,
+        prompt: str,
+        timeout_s: float,
+        *,
+        payload_digest: str,
+    ) -> object:
+        return await gateway.request_confirmation(
+            action_id,
+            prompt,
+            timeout_s,
+            payload_digest=payload_digest,
+        )
+
+    async def publish_controller_status(view: ProductivityHudView) -> None:
+        await gateway.send(view)
+
+    controller = ProductivityActionController(
+        fixture_bridge,  # type: ignore[arg-type]
+        confirm_from_simulator,
+        ActionJournal(durable_store),
+        occurrences,
+        publish_status=publish_controller_status,
+    )
+    task_monitor = TaskMonitor(
+        occurrences,
+        gateway.request_reminder_due_ack,
+        evaluate=lambda occurrence: evaluate_reminder_occurrence(
+            occurrence,
+            fixture_bridge,  # type: ignore[arg-type]
+        ),
+        poll_interval_s=60.0,
+    )
     planning_router = CapabilityRouter(
         hud=HudWriter(gateway),
         transport=gateway,
         status=StatusPublisher(path=args.out / "planning-status.json"),
         messages=None,
         cards=CardLog(),
-        personal_data=FixturePlanningBridge(),  # type: ignore[arg-type]
+        personal_data=fixture_bridge,  # type: ignore[arg-type]
     )
     # Fix the synthetic read model to a month containing both fixture items.
     # The normal Mac's selected day remains its own live local state.
@@ -829,21 +1142,44 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.extend(planning_receipts)
         artifacts.update(planning_artifacts)
 
-        digest, artifact = await _confirm(
+        digest, calendar_before = await _drive_controller_write(
+            controller,
+            fixture_bridge,
             gateway,
-            action_id="calendar-create",
-            prompt="Create event “Design review”? Work · Sep 1, 2026 at 09:30 · 45m · America/Chicago",
+            command=(
+                "schedule Submit proposal on 2026-09-01 at 09:30 for 45 minutes "
+                "in America/Chicago"
+            ),
+            domain="calendar",
+            title="Submit proposal",
+            terminal_phase="saved",
+            terminal_result="Created Calendar event: Submit proposal.",
+            review_name="calendar-review",
+            verifying_name="calendar-verifying",
+            terminal_name="calendar-saved",
             automation_base=automation_base,
             output=args.out,
-            receipt_name=f"{len(receipts) + 1:02d}-calendar-review",
             prior_digest=digest,
+            receipts=receipts,
+            artifacts=artifacts,
         )
-        receipts.append(ScreenReceipt("calendar-review", None, None, "review", digest))
-        artifacts["calendar-review"] = artifact
+        digest, artifact = await _wait_for_productivity_return(
+            gateway,
+            after=calendar_before,
+            automation_base=automation_base,
+            output=args.out,
+            name=f"{len(receipts) + 1:02d}-calendar-return-planning",
+            prior_digest=digest,
+            required_item="EVENT · Submit proposal",
+        )
+        receipts.append(ScreenReceipt("calendar-return-planning", None, None, "day", digest))
+        artifacts["calendar-return-planning"] = artifact
 
+        # These adverse terminal models deliberately remain typed downlink
+        # render checks. The controller-backed success above proves the
+        # consequence path; the failure screens are isolated so a fixture
+        # cannot claim it changed EventKit while exercising a no-write state.
         calendar_states = (
-            ("calendar-verifying", "verifying", "Saving calendar event", "Checking native read-back", "Please wait", "click", True),
-            ("calendar-saved", "saved", "Saved and verified", "Calendar read-back matched", "Planning in 5s · left x2 now", None, None),
             ("calendar-failed", "failed", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
             ("calendar-uncertain", "check", "Check Calendar", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
             ("calendar-cancelled", "cancelled", "Cancelled", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
@@ -854,7 +1190,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             await _send_after_full_visual_frame(
                 gateway,
                 _view(
-                    "calendar", phase, title="Design review", primary=primary,
+                    "calendar", phase, title="Submit proposal", primary=primary,
                     secondary=secondary, hint=hint,
                 ),
                 automation_base=automation_base,
@@ -864,11 +1200,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
             if phase in {"saved", "failed", "check", "cancelled", "not_saved"}:
-                return_name = (
-                    "calendar-return-planning"
-                    if name == "calendar-saved"
-                    else f"{name}-return-planning"
-                )
+                return_name = f"{name}-return-planning"
                 digest, artifact = await _wait_for_productivity_return(
                     gateway,
                     after=before,
@@ -880,56 +1212,27 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
                 artifacts[return_name] = artifact
 
-        digest, artifact = await _confirm(
+        digest, reminder_before = await _drive_controller_write(
+            controller,
+            fixture_bridge,
             gateway,
-            action_id="reminder-create",
-            prompt="Create reminder + JOAT alert “Buy filters”? Personal · Sep 1, 2026 at 18:00 · America/Chicago",
+            command=(
+                "remind me to Prepare report on 2026-09-01 at 18:00 "
+                "in America/Chicago"
+            ),
+            domain="reminders",
+            title="Prepare report",
+            terminal_phase="saved",
+            terminal_result="Created Reminder: Prepare report.",
+            review_name="reminders-review",
+            verifying_name="reminders-verifying",
+            terminal_name="reminders-saved",
             automation_base=automation_base,
             output=args.out,
-            receipt_name=f"{len(receipts) + 2:02d}-reminders-review",
             prior_digest=digest,
+            receipts=receipts,
+            artifacts=artifacts,
         )
-        receipts.append(ScreenReceipt("reminders-review", None, None, "review", digest))
-        artifacts["reminders-review"] = artifact
-
-        reminder_states = (
-            ("reminders-verifying", "verifying", "Saving reminder", "Checking native read-back", "Please wait", "click", True),
-        )
-        for name, phase, primary, secondary, hint, input_action, accepted in reminder_states:
-            before = len(gateway.sent)
-            await _send_after_full_visual_frame(
-                gateway,
-                _view(
-                    "reminders", phase, title="Buy filters", primary=primary,
-                    secondary=secondary, hint=hint,
-                ),
-                automation_base=automation_base,
-                label=name,
-            )
-            digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
-            receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
-            artifacts[name] = {"raw": raw, "alpha": alpha}
-
-        before = len(gateway.sent)
-        await _send_after_full_visual_frame(
-            gateway,
-            _view(
-                "reminders",
-                "saved",
-                title="Buy filters",
-                primary="Saved and verified",
-                secondary="Native alarm set · JOAT monitoring armed.",
-                hint="Monitoring next · left x2 Planning",
-                monitoring_armed=True,
-            ),
-            automation_base=automation_base,
-            label="reminders-saved",
-        )
-        digest, raw, alpha = await _capture(
-            automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-saved", digest,
-        )
-        receipts.append(ScreenReceipt("reminders-saved", None, None, "saved", digest))
-        artifacts["reminders-saved"] = {"raw": raw, "alpha": alpha}
         monitoring_checkpoint = await _visual_frame_checkpoint(automation_base)
         await _wait_for_visual_frame(
             automation_base,
@@ -943,27 +1246,24 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         artifacts["reminders-monitoring"] = {"raw": raw, "alpha": alpha}
         digest, artifact = await _wait_for_productivity_return(
             gateway,
-            after=before,
+            after=reminder_before,
             automation_base=automation_base,
             output=args.out,
             name=f"{len(receipts) + 2:02d}-reminders-monitoring-return-planning",
             prior_digest=digest,
+            required_item="REMINDER · Prepare report",
         )
         receipts.append(ScreenReceipt("reminders-monitoring-return-planning", None, None, "day", digest))
         artifacts["reminders-monitoring-return-planning"] = artifact
 
+        due_occurrences = occurrences.due(now_unix_ms=32_503_680_000_000)
+        if len(due_occurrences) != 1:
+            raise ProductivityHudFlowError("controller did not persist exactly one monitoring occurrence")
         due_checkpoint = await _visual_frame_checkpoint(automation_base)
-        due_delivery = asyncio.create_task(gateway.request_reminder_due_ack(_view(
-            "reminders",
-            "due",
-            title="Buy filters",
-            primary="Due now",
-            secondary="This reminder is still incomplete.",
-            hint="say complete reminder title · left x2 Planning",
-            # Simulator-only occurrence ID; no personal native identifier or
-            # reminder content participates in the receipt protocol.
-            reminder_due_id="67ec97c5-a0fd-48ec-89cb-1b756ddaf87a",
-        )))
+        due_delivery = asyncio.create_task(task_monitor.run_due_once(
+            now_unix_ms=due_occurrences[0].due_unix_ms,
+            now_us=1_800_000_000_000_000,
+        ))
         await _wait_for_visual_frame(
             automation_base,
             after=due_checkpoint,
@@ -972,28 +1272,46 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
         )
-        if not await asyncio.wait_for(due_delivery, timeout=5):
+        if await asyncio.wait_for(due_delivery, timeout=5) != 1:
             raise ProductivityHudFlowError(
-                "current Hub plugin did not accept the typed reminder due view"
+                "TaskMonitor did not receive a current Hub acknowledgement for the due reminder"
             )
+        if not gateway.reminder_due_requests or gateway.reminder_due_requests[-1].title != "Prepare report":
+            raise ProductivityHudFlowError("TaskMonitor lost the due reminder title before HUD delivery")
         receipts.append(ScreenReceipt("reminders-due", None, None, "due", digest))
         artifacts["reminders-due"] = {"raw": raw, "alpha": alpha}
 
-        digest, artifact = await _confirm(
+        digest, completion_before = await _drive_controller_write(
+            controller,
+            fixture_bridge,
             gateway,
-            action_id="reminder-complete",
-            prompt="Complete reminder “Buy filters”? Personal",
+            command="complete reminder Prepare report",
+            domain="reminders",
+            title="Prepare report",
+            terminal_phase="completed",
+            terminal_result="Completed Reminder: Prepare report.",
+            review_name="reminders-complete-review",
+            verifying_name="reminders-completing",
+            terminal_name="reminders-completed",
             automation_base=automation_base,
             output=args.out,
-            receipt_name=f"{len(receipts) + 2:02d}-reminders-complete-review",
             prior_digest=digest,
+            receipts=receipts,
+            artifacts=artifacts,
         )
-        receipts.append(ScreenReceipt("reminders-complete-review", None, None, "review", digest))
-        artifacts["reminders-complete-review"] = artifact
+        digest, artifact = await _wait_for_productivity_return(
+            gateway,
+            after=completion_before,
+            automation_base=automation_base,
+            output=args.out,
+            name=f"{len(receipts) + 1:02d}-reminders-completed-return-planning",
+            prior_digest=digest,
+            absent_item="REMINDER · Prepare report",
+        )
+        receipts.append(ScreenReceipt("reminders-completed-return-planning", None, None, "day", digest))
+        artifacts["reminders-completed-return-planning"] = artifact
 
         completion_states = (
-            ("reminders-completing", "verifying", "Saving reminder", "Checking native read-back", "Please wait", "click", True),
-            ("reminders-completed", "completed", "Completed and verified", "Reminders read-back matched", "Planning in 5s · left x2 now", None, None),
             ("reminders-failed", "failed", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
             ("reminders-uncertain", "check", "Check Reminders", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
             ("reminders-cancelled", "cancelled", "Cancelled", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
@@ -1004,7 +1322,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             await _send_after_full_visual_frame(
                 gateway,
                 _view(
-                    "reminders", phase, title="Buy filters", primary=primary,
+                    "reminders", phase, title="Prepare report", primary=primary,
                     secondary=secondary, hint=hint,
                 ),
                 automation_base=automation_base,
@@ -1026,6 +1344,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
                 artifacts[return_name] = artifact
 
+        expected_writes = ["calendar.create", "reminders.create", "reminders.complete"]
+        if fixture_bridge.write_methods != expected_writes:
+            raise ProductivityHudFlowError(
+                f"controller did not exercise the expected native-shaped writes: "
+                f"{fixture_bridge.write_methods!r}"
+            )
         validate_flow(receipts)
         return {
             "schemaVersion": 1,
@@ -1036,6 +1360,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "hud": "official Even Hub simulator framebuffer",
                 "input": "official simulator click through production menu, Planning, and confirmation routers",
                 "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
+                "controllerWrites": "calendar.create, reminders.create, and reminders.complete are emitted by the production ProductivityActionController after a real bound confirmation; a fixture blocks each native-shaped write until its verifying HUD frame is retained",
+                "reminderMonitoring": "production TaskMonitor reconciles the fixture Reminder and obtains a generation-bound current Hub-client due acknowledgement before alert_enqueued",
+                "fallbackStates": "failed, uncertain, cancelled, and not-saved frames are typed production-downlink rendering and timed-return checks only; they do not claim an EventKit write",
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
                 "hubClientAcceptance": "generation-bound reminder_due acknowledgement from the current production Hub client; not a macOS banner or physical-G2 visual proof",
@@ -1049,6 +1376,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         for process in reversed(managed):
             process.stop()
         await gateway.stop()
+        durable_store.close()
 
 
 def _parser() -> argparse.ArgumentParser:

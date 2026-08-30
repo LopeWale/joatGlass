@@ -21,8 +21,8 @@ import re
 import time
 
 from ..audio.vad import RmsVad
-from ..core.interfaces import GlassesTransport, ReplyEngine, SttEngine
-from ..core.protocol import AudioControl, ContainerId, HudText
+from ..core.interfaces import AudioFrame, AudioFrameSource, GlassesTransport, ReplyEngine, SttEngine
+from ..core.protocol import AudioControl, AudioSource, ContainerId, HudText
 from .hud import HudWriter
 from .session import SessionManager
 
@@ -91,10 +91,19 @@ class VoiceOrchestrator:
         # receives only fixed stage names and coarse duration buckets.
         self._latency_observer = latency_observer
         self._last_seq: int | None = None
+        # A G2-armed topic capture is allowed to consume exactly one glasses
+        # utterance. Keep its provenance through VAD/STT rather than inferring
+        # it later from the currently connected device.
+        self._utterance_sources: set[AudioSource] = set()
         self._busy = False
 
     def attach(self) -> None:
-        self._transport.on_audio(self.on_audio)
+        if isinstance(self._transport, AudioFrameSource):
+            self._transport.on_audio_frame(self.on_audio_frame)
+        else:
+            # Older/direct transports retain ordinary voice support, but cannot
+            # satisfy a glasses-armed capture because they provide no source.
+            self._transport.on_audio(self.on_audio)
 
     async def on_connect(self) -> None:
         """Greet the wearer so a live brain is visibly different from none."""
@@ -146,25 +155,47 @@ class VoiceOrchestrator:
             )
 
     def on_audio(self, pcm: bytes, seq: int) -> None:
+        self._ingest_audio(pcm, seq, source=None)
+
+    def on_audio_frame(self, frame: AudioFrame) -> None:
+        self._ingest_audio(frame.pcm, frame.seq, source=frame.source)
+
+    def _ingest_audio(self, pcm: bytes, seq: int, *, source: AudioSource | None) -> None:
         if self._last_seq is not None and seq != self._last_seq + 1:
             # Frames were shed upstream; never splice across the hole.
             log.warning("audio gap (seq %d → %d): resetting utterance", self._last_seq, seq)
             self._vad.reset()
             self._stt.reset()
+            self._utterance_sources.clear()
         self._last_seq = seq
+
+        if source is not None:
+            self._utterance_sources.add(source)
 
         utterance = self._vad.feed(pcm)
         if utterance is None:
             return
+        utterance_source = (
+            next(iter(self._utterance_sources))
+            if len(self._utterance_sources) == 1
+            else None
+        )
+        self._utterance_sources.clear()
         if self._busy:
             # One transcription at a time; a new utterance while Whisper is
             # still chewing gets dropped with a log rather than queueing
             # unboundedly. Revisit when a streaming engine lands.
             log.warning("dropping utterance (%d bytes) — transcription in flight", len(utterance))
             return
-        asyncio.get_running_loop().create_task(self._handle_utterance(utterance))
+        asyncio.get_running_loop().create_task(
+            self._handle_utterance(utterance, utterance_source)
+        )
 
-    async def _handle_utterance(self, utterance: bytes) -> None:
+    async def _handle_utterance(
+        self,
+        utterance: bytes,
+        source: AudioSource | None = None,
+    ) -> None:
         started_at = time.monotonic()
         seconds = len(utterance) / (16_000 * 2)
         log.info("utterance ended: %.1fs of audio", seconds)
@@ -191,6 +222,20 @@ class VoiceOrchestrator:
             if self._status is not None:
                 self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
                 self._status.bump("utterances")  # type: ignore[attr-defined]
+            # A tap has explicitly armed the next glasses phrase as a
+            # Brainstorm topic. This path intentionally runs before the normal
+            # wake-word gate: requiring the wearer to say JOAT again would
+            # contradict the HUD instruction. SessionManager rejects phone,
+            # mixed, and legacy-source utterances while the capture is armed.
+            if (
+                self._sessions is not None
+                and self._sessions.topic_capture_armed
+                and self._sessions.handle_transcript(
+                    transcript.text,
+                    capture_source=source,
+                )
+            ):
+                return
             # An ACTIVE session owns the HUD and consumes transcripts
             # ("stop", turn directions) without needing the wake word — the
             # wearer already invoked it.
