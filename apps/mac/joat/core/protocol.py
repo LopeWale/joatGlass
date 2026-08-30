@@ -852,9 +852,10 @@ class ConfirmRequest:
     payload_digest: str
     preview_digest: str
     expires_at_ms: int
+    diagnostic_kind: Literal["messages"] | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        wire = {
             "kind": "confirm.request",
             "actionId": self.action_id,
             "prompt": self.prompt,
@@ -864,6 +865,9 @@ class ConfirmRequest:
             "previewDigest": self.preview_digest,
             "expiresAtMs": self.expires_at_ms,
         }
+        if self.diagnostic_kind is not None:
+            wire["diagnosticKind"] = self.diagnostic_kind
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -1320,7 +1324,13 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "delivery": _trace_enum(event["delivery"], "delivery", ("sys",)),
         }
     if event_type == "visual_frame":
-        _trace_shape(event, {"type", "kind", "surface", "state", "sha256"})
+        kind = event.get("kind")
+        if kind == "brainstorm":
+            _trace_shape(event, {"type", "kind", "surface", "state", "sha256"})
+        elif kind == "messages":
+            _trace_shape(event, {"type", "kind", "surface", "sha256"})
+        else:
+            raise ProtocolError("g2 diagnostic visual frame kind is invalid")
         digest = event["sha256"]
         if (
             not isinstance(digest, str)
@@ -1328,18 +1338,34 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise ProtocolError("g2 diagnostic sha256 is invalid")
+        if kind == "brainstorm":
+            return {
+                "type": "visual_frame",
+                "kind": "brainstorm",
+                "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
+                "state": _trace_enum(
+                    event["state"], "state",
+                    (
+                        "unavailable", "approval_required", "ready", "topic_capture", "acceptance_ready",
+                        "running", "settled", "cancelled", "failed", "blocked",
+                    ),
+                ),
+                "sha256": digest,
+            }
         return {
             "type": "visual_frame",
-            "kind": _trace_enum(event["kind"], "kind", ("brainstorm",)),
-            "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
-            "state": _trace_enum(
-                event["state"], "state",
-                (
-                    "unavailable", "approval_required", "ready", "topic_capture", "acceptance_ready",
-                    "running", "settled", "cancelled", "failed", "blocked",
-                ),
+            "kind": "messages",
+            "surface": _trace_enum(
+                event["surface"], "surface",
+                ("picker", "conversation", "compose", "access", "setup", "retry", "empty", "read_only", "confirmation"),
             ),
             "sha256": digest,
+        }
+    if event_type == "messages_confirmation":
+        _trace_shape(event, {"type", "outcome"})
+        return {
+            "type": "messages_confirmation",
+            "outcome": _trace_enum(event["outcome"], "outcome", ("accepted", "declined", "timed_out")),
         }
     raise ProtocolError("g2 diagnostic type is invalid")
 

@@ -54,7 +54,10 @@ export async function initializeHudPage(
 ): Promise<HudPageBootResult> {
   const startup = await client.start(layouts.visualStartup(), layouts.compatibilityLayout());
   if (startup === 'created') {
-    return { surface: 'visual', contextualMenu: false };
+    // `visualStartup()` declares the menu alongside the image containers. A
+    // future visual rebuild must carry that declaration forward: omitting it
+    // would clear the OS overlay while keeping the rest of the HUD visible.
+    return { surface: 'visual', contextualMenu: true };
   }
 
   if (!await rebuild(client, layouts.dashboardCompatibilityLayout())) {

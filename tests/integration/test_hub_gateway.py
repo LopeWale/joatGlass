@@ -160,6 +160,25 @@ class TestConnection:
             }
             assert t.g2_diagnostics is None
 
+    async def test_g2_diagnostics_marks_a_loopback_g2_session_nonphysical(self, transport) -> None:
+        t, url = transport
+        store = G2DiagnosticStore(writer=lambda _path, _events: None)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            await t.set_g2_diagnostics(store)
+            assert json.loads(await ws.recv()) == {
+                "kind": "g2.diagnostic.control", "enabled": True,
+            }
+            await ws.send(json.dumps({
+                "kind": "hello", "sn": "SIMULATOR", "model": "g2", "launchSource": "simulator",
+            }))
+            await _wait_for(lambda: any(event.get("type") == "g2_session" for event in store._events))
+
+        assert [
+            event["source"] for event in store._events if event["type"] == "g2_session"
+        ] == ["nonphysical"]
+
     async def test_newest_connection_wins(self, transport) -> None:
         """Reconnect-after-sleep is common; two live plugins are not."""
         t, url = transport
@@ -853,6 +872,7 @@ class TestConfirm:
             request = json.loads(await ws.recv())
             assert request["kind"] == "confirm.request"
             assert request["actionId"].startswith("message-reply:hud-real-reply-2:")
+            assert request["diagnosticKind"] == "messages"
             await ws.send(json.dumps({
                 "kind": "confirm",
                 "actionId": request["actionId"],

@@ -300,6 +300,7 @@ class MessageReplyController:
             prompt,
             CONFIRM_TRANSPORT_SECONDS,
             payload_digest=payload_digest.hex(),
+            diagnostic_kind="messages",
         )
         accepted = decision.accepted if isinstance(decision, ConfirmationResult) else bool(decision)
         if self._journal is not None:

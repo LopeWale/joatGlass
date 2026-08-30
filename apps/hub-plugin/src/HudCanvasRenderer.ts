@@ -46,6 +46,41 @@ export function showNavigationSecondaryInHeader(
   return view !== 'error';
 }
 
+/** Geometry for choice rows on the G2 lens. Decisions use an intensity rail
+ * and a separator—not a browser-like button outline—so the wearer can scan
+ * several choices without losing the content area to chrome. */
+export interface NavigationDecisionRow {
+  baselineY: number;
+  railTopY: number;
+  railHeight: number;
+  separatorY?: number;
+  fontSize: number;
+}
+
+export function navigationDecisionRows(optionCount: number): readonly NavigationDecisionRow[] {
+  const count = Math.min(3, Math.max(0, Math.floor(optionCount)));
+  if (count === 0) return [];
+
+  const compact = count > 2;
+  const firstBaselineY = compact ? 134 : 137;
+  const rowGap = compact ? 28 : 34;
+  const railHeight = compact ? 21 : 24;
+  const railOffset = compact ? 11 : 12;
+  const fontSize = compact ? 11 : 14;
+  const separatorOffset = compact ? 14 : 16;
+
+  return Array.from({ length: count }, (_, index) => {
+    const baselineY = firstBaselineY + index * rowGap;
+    return {
+      baselineY,
+      railTopY: baselineY - railOffset,
+      railHeight,
+      ...(index < count - 1 ? { separatorY: baselineY + separatorOffset } : {}),
+      fontSize,
+    };
+  });
+}
+
 /** The card's header, body, and footer are separate optical regions. Keeping
  * these anchors together prevents a long reply from sharing the divider row. */
 const ASSISTANT_OVERLAY_GEOMETRY = {
@@ -1732,22 +1767,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
 
     if (navigation.options.length > 0) {
-      const rowHeight = navigation.options.length > 2 ? 36 : 45;
-      const firstY = navigation.options.length > 2 ? 124 : 130;
-      navigation.options.slice(0, 3).forEach((option, index) => {
-        const y = firstY + index * rowHeight;
+      const rows = navigationDecisionRows(navigation.options.length);
+      navigation.options.slice(0, rows.length).forEach((option, index) => {
+        const row = rows[index]!;
         const selected = index === navigation.selectedIndex;
-        context.strokeStyle = gray(selected ? BRIGHT : HAIRLINE);
-        context.lineWidth = selected ? 1.2 : 0.8;
-        roundedRect(context, 36, y, 504, rowHeight - 7, 5);
-        context.stroke();
         if (selected) {
           context.fillStyle = gray(BRIGHT);
-          context.fillRect(36, y, 3, rowHeight - 7);
+          context.fillRect(36, row.railTopY, 3, row.railHeight);
+        }
+        if (row.separatorY !== undefined) {
+          context.fillStyle = gray(HAIRLINE);
+          context.fillRect(52, row.separatorY, 452, 1);
         }
         context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-        context.font = `${navigation.options.length > 2 ? 11 : 14}px ${HUD_FONT}`;
-        this.fitText(context, option, 52, y + (rowHeight - 7) / 2, 470);
+        context.font = `${row.fontSize}px ${HUD_FONT}`;
+        this.fitText(context, option, 52, row.baselineY, 470);
       });
     } else {
       context.strokeStyle = gray(navigation.view === 'error' ? SUPPORT : CHROME);

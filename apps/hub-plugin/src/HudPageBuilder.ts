@@ -139,10 +139,13 @@ export class HudPageBuilder {
   static readonly MENU_MUTE = 2;
   static readonly MENU_REDIAL = 3;
   static readonly MENU_SETTINGS = 4;
+  /** A non-destructive escape from any visual or text focus surface. */
+  static readonly MENU_PLANNING = 5;
 
   private systemMenu(): MenuContainerProperty {
     return new MenuContainerProperty({
       menuItems: [
+        new MenuItemProperty({ itemID: HudPageBuilder.MENU_PLANNING, itemName: 'Open Planning' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_REDIAL, itemName: 'Reconnect brain' }),
@@ -248,6 +251,7 @@ export class HudPageBuilder {
     return new CreateStartUpPageContainer({
       containerTotalNum: 5,
       ...this.visualObjects(),
+      ...this.menuConfig(),
     });
   }
 
@@ -255,15 +259,18 @@ export class HudPageBuilder {
     return new RebuildPageContainer({
       containerTotalNum: 5,
       ...this.visualObjects(),
+      // Rebuild replaces a contextual menu wholesale when it is omitted.
+      // Keep the same declared actions on the production image HUD as on the
+      // text fallback, so a visual transition never removes the wearer's
+      // non-destructive escape route.
+      ...this.menuConfig(),
     });
   }
 
   /**
-   * Kept as a named alias for older focused fixtures. The modern visual
-   * surface intentionally never includes the OS menu: omitting it clears a
-   * stale text-page menu and avoids coupling image-page support to that
-   * optional host capability. Its transparent text layer remains the sole
-   * gesture owner.
+   * Kept as a named alias for older focused fixtures. The transparent text
+   * layer remains the sole gesture owner; the OS-owned contextual overlay is
+   * independently declared on the page when the negotiated host supports it.
    */
   visualCompatibilityLayout(): RebuildPageContainer {
     return this.visualLayout();

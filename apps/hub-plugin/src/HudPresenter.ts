@@ -104,6 +104,7 @@ type HudSurface =
 interface ConfirmationReturnState extends HudContentState {
   id: string;
   prompt: string;
+  diagnosticKind?: 'messages';
   surface: HudSurface;
   onDeferredProductivityVisible?: () => void;
 }
@@ -796,7 +797,11 @@ export class HudPresenter {
    * content, and defers ordinary paints until the gate settles. Dismissal
    * rebuilds the exact prior surface rather than dropping the wearer at Home.
    */
-  showConfirmation(prompt: string, id = 'hud:confirmation'): Promise<boolean> {
+  showConfirmation(
+    prompt: string,
+    id = 'hud:confirmation',
+    diagnosticKind?: 'messages',
+  ): Promise<boolean> {
     const priorPage = this.tracePage();
     const openedHere = this.confirmation === undefined;
     const safePrompt = prompt.trim() || 'Confirm requested action.';
@@ -811,6 +816,7 @@ export class HudPresenter {
       this.confirmation = {
         id,
         prompt: safePrompt,
+        ...(diagnosticKind ? { diagnosticKind } : {}),
         surface: this.cloneSurface(this.surface),
         streams: new Map(content.streams),
         brightness: new Map(content.brightness),
@@ -821,6 +827,7 @@ export class HudPresenter {
       // result callback can now only enqueue a no-op dismissal for its old id.
       this.confirmation.id = id;
       this.confirmation.prompt = safePrompt;
+      this.confirmation.diagnosticKind = diagnosticKind;
     }
 
     if (this.visual) this.stopVisualConfirmationCountdown();
@@ -1269,6 +1276,9 @@ export class HudPresenter {
         prompt: this.confirmation.prompt,
         secondsRemaining: Math.max(0, 8 - elapsed),
         reviewDomain: this.productivityReviewDomain(this.confirmation.prompt),
+        ...(this.confirmation.diagnosticKind
+          ? { diagnosticKind: this.confirmation.diagnosticKind }
+          : {}),
       };
     }
     if (this.surface.kind === 'sidebar') {

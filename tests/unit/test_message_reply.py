@@ -33,15 +33,17 @@ class ScriptedConfirm:
     def __init__(self, accepted: bool) -> None:
         self.accepted = accepted
         self.calls: list[tuple[str, str, float]] = []
+        self.bindings: list[dict[str, str]] = []
 
     async def __call__(
         self,
         action_id: str,
         prompt: str,
         timeout_s: float,
-        **_binding: str,
+        **binding: str,
     ) -> bool:
         self.calls.append((action_id, prompt, timeout_s))
+        self.bindings.append(binding)
         return self.accepted
 
 
@@ -218,6 +220,7 @@ class TestMessageReplyController:
         # The plugin owns an eight-second VISIBLE window. The transport gets
         # four extra seconds for the four-tile HUD paint before that begins.
         assert timeout_s == 12.0
+        assert confirm.bindings == [{"diagnostic_kind": "messages", "payload_digest": confirm.bindings[0]["payload_digest"]}]
 
     async def test_confirmed_draft_sends_exactly_once_to_the_selected_handle(self) -> None:
         sender, confirm = FakeSender(), ScriptedConfirm(True)
@@ -361,7 +364,9 @@ class TestMessageReplyController:
             _timeout_s: float,
             *,
             payload_digest: str,
+            diagnostic_kind: str | None = None,
         ) -> ConfirmationResult:
+            assert diagnostic_kind == "messages"
             return ConfirmationResult(
                 action_id=action_id,
                 accepted=True,

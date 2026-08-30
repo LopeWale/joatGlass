@@ -706,6 +706,33 @@ describe('CapabilityMenu', () => {
     }
   });
 
+  it('contextual Planning preserves the current safe-write day anchor', async () => {
+    const { menu, lists, sent } = rig();
+    expect(await menu.presentProductivity({
+      domain: 'reminders',
+      phase: 'saved',
+      title: 'Prepare report',
+      primary: 'Saved and verified',
+      secondary: 'Native alarm set',
+      hint: 'Back: left x2 to Planning',
+      planningAnchorUnixMs: 1_788_274_200_000,
+    })).toBe(true);
+
+    await menu.openPlanning();
+
+    expect(lists).toEqual([['Loading recent planning…']]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capmenu',
+        selectedIndex: 1,
+        selectedName: 'Planning',
+        planningAnchorUnixMs: 1_788_274_200_000,
+      },
+    });
+  });
+
   it('keeps an independently verified reminder visible as monitoring before returning to Planning', async () => {
     vi.useFakeTimers();
     try {

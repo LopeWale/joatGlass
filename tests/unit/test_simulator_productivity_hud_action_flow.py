@@ -36,6 +36,7 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
 
     assert driver is not None, "productivity HUD action-flow driver is missing"
     receipts = [
+        driver.ScreenReceipt("planning-context-menu", "context_menu", None, "context_menu", "f" * 64),
         driver.ScreenReceipt("planning-month", "click", None, "month", "0" * 64),
         driver.ScreenReceipt("planning-week", "click", None, "week", "1" * 64),
         driver.ScreenReceipt("planning-day", "click", None, "day", "2" * 64),
@@ -73,6 +74,18 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
     ]
 
     driver.validate_flow(receipts)
+
+
+def test_productivity_flow_rejects_a_month_capture_without_the_contextual_escape() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt("planning-month", "click", None, "month", "0" * 64),
+    ]
+
+    with pytest.raises(driver.ProductivityHudFlowError, match="expected"):
+        driver.validate_flow(receipts)
 
 
 def test_planning_day_receipt_requires_both_native_kinds() -> None:
@@ -134,6 +147,21 @@ async def test_screenshot_completion_never_reads_console_output(
     assert observation.settled_at_ns >= observation.first_changed_at_ns
     assert not hasattr(driver, "_wait_for_visual_frame")
     assert not hasattr(driver, "visual_frame_ack_count")
+
+
+async def test_screenshot_capture_refuses_to_overwrite_an_earlier_frame(tmp_path: Path) -> None:
+    driver = _driver()
+
+    assert driver is not None
+    (tmp_path / "frame.rgba.png").write_bytes(b"earlier-proof")
+
+    with pytest.raises(driver.ProductivityHudFlowError, match="refusing to overwrite"):
+        await driver._capture(
+            "http://simulator.invalid",
+            tmp_path,
+            "frame",
+            None,
+        )
 
 
 def test_visual_latency_separates_first_changed_framebuffer_from_settled_framebuffer() -> None:

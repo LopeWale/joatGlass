@@ -261,6 +261,19 @@ describe('confirm window expiry at the tap path', () => {
     vi.useRealTimers();
   });
 
+  it('reports a timeout outcome separately from an explicit cancellation', () => {
+    vi.useFakeTimers();
+    const { imu } = make();
+    const outcomes = vi.fn();
+
+    imu.prepare('message-timeout', undefined, undefined, outcomes);
+    expect(imu.activate('message-timeout', 1000)).toBe(true);
+    vi.advanceTimersByTime(1000);
+
+    expect(outcomes).toHaveBeenCalledWith('timed_out');
+    vi.useRealTimers();
+  });
+
   it('dispose clears expiry without writing to a closed link', () => {
     vi.useFakeTimers();
     const sent: Array<{ kind: string }> = [];

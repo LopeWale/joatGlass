@@ -456,6 +456,9 @@ export class EventRouter {
       case 4: // Five sidebar rows are spoken for; settings lives here.
         void this.menu.openSettings();
         return;
+      case 5: // Non-destructive escape from visual safe-write outcomes.
+        void this.menu.openPlanning();
+        return;
       default:
         // Future firmware items: relay so the Mac can learn about them.
         this.link.send({ kind: 'input', event: { containerName: 'sysmenu', selectedIndex: itemID } });

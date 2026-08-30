@@ -103,6 +103,7 @@ class CaptureObservation:
 
 
 _EXPECTED_FLOW = (
+    ("planning-context-menu", "context_menu", None, "context_menu"),
     ("planning-month", "click", None, "month"),
     ("planning-week", "click", None, "week"),
     ("planning-day", "click", None, "day"),
@@ -624,6 +625,12 @@ async def _capture(
     app-console text, bridge-transfer logs, or renderer acknowledgements.
     """
 
+    raw_path = output / f"{name}.rgba.png"
+    if raw_path.exists():
+        raise ProductivityHudFlowError(
+            f"{name}: refusing to overwrite an earlier simulator framebuffer"
+        )
+
     previous: str | None = None
     stable_since = 0.0
     deadline = time.monotonic() + 15.0
@@ -643,7 +650,6 @@ async def _capture(
             if observation is not None and observation.first_changed_at_ns is None:
                 observation.first_changed_at_ns = time.monotonic_ns()
         elif now - stable_since >= 0.6:
-            raw_path = output / f"{name}.rgba.png"
             raw_path.write_bytes(raw)
             raw_path.chmod(0o600)
             preview = _alpha_preview(raw_path)
@@ -967,33 +973,49 @@ async def _drive_planning_hierarchy(
 ) -> tuple[list[ScreenReceipt], dict[str, dict[str, str]], str]:
     """Prove month → week → mixed day → item through real input callbacks.
 
-    The official simulator exposes click and scroll injection, but no
-    left-temple double press.  It can therefore prove the forward hierarchy
-    here; left-double return remains a separately unit-tested physical G2
-    contract.
+    The official simulator exposes the documented OS contextual-menu action,
+    but no left-temple double press. It therefore proves the image-HUD menu
+    escape and the forward hierarchy here; left-double return remains a
+    separately unit-tested physical G2 contract.
     """
 
-    # The live-menu test hook starts with Messages selected.  Move exactly
-    # once to Planning before selecting it.  If the simulator does not accept
-    # its documented scroll action, the following title assertion fails.
-    await _input(automation_base, "down")
-    digest, artifact = await _planning_click(
-        gateway,
-        automation_base=automation_base,
-        output=output,
-        name="01-planning-month",
-        phase="month",
-        prior_digest=None,
-        latencies=latencies,
+    # The visual HUD's first app-owned contextual action is Open Planning.
+    # Retain the overlay itself before selecting it: this proves the SDK did
+    # not silently clear `menuObject` when the image page was rebuilt.
+    context_started_at_ns = time.monotonic_ns()
+    await _input(automation_base, "context_menu")
+    context_observation = CaptureObservation()
+    digest, raw, alpha = await _capture(
+        automation_base, output, "01-planning-context-menu", None,
+        observation=context_observation,
     )
-    receipts = [ScreenReceipt("planning-month", "click", None, "month", digest)]
-    artifacts = {"planning-month": artifact}
+    record_visual_latency(
+        latencies,
+        screen="planning-context-menu",
+        trigger="menu_click",
+        started_at_ns=context_started_at_ns,
+        observation=context_observation,
+    )
+    receipts = [ScreenReceipt("planning-context-menu", "context_menu", None, "context_menu", digest)]
+    artifacts = {"planning-context-menu": {"raw": raw, "alpha": alpha}}
 
     digest, artifact = await _planning_click(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="02-planning-week",
+        name="02-planning-month",
+        phase="month",
+        prior_digest=digest,
+        latencies=latencies,
+    )
+    receipts.append(ScreenReceipt("planning-month", "click", None, "month", digest))
+    artifacts["planning-month"] = artifact
+
+    digest, artifact = await _planning_click(
+        gateway,
+        automation_base=automation_base,
+        output=output,
+        name="03-planning-week",
         phase="week",
         prior_digest=digest,
         latencies=latencies,
@@ -1009,7 +1031,7 @@ async def _drive_planning_hierarchy(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="03-planning-day",
+        name="04-planning-day",
         phase="day",
         prior_digest=digest,
         latencies=latencies,
@@ -1021,7 +1043,7 @@ async def _drive_planning_hierarchy(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="04-planning-item-detail",
+        name="05-planning-item-detail",
         phase="detail",
         prior_digest=digest,
         latencies=latencies,
@@ -1119,7 +1141,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "official-evenhub-simulator",
             [
                 str(args.simulator),
-                f"{plugin_url}/?joatTestOpenMenu=1",
+                f"{plugin_url}/",
                 "--automation-port", str(args.automation_port),
             ],
             cwd=args.repo,
@@ -1204,7 +1226,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             )
             observation = CaptureObservation()
             digest, raw, alpha = await _capture(
-                automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest,
+                automation_base, args.out, f"{len(receipts) + 1:02d}-{name}", digest,
                 observation=observation,
             )
             record_visual_latency(
@@ -1223,7 +1245,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                     after=before,
                     automation_base=automation_base,
                     output=args.out,
-                    name=f"{len(receipts) + 2:02d}-{return_name}",
+                    name=f"{len(receipts) + 1:02d}-{return_name}",
                     prior_digest=digest,
                 )
                 receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
@@ -1255,7 +1277,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         # seconds after the Mac's saved+armed downlink. It has no Mac uplink,
         # so only a changed, settled simulator screenshot may prove it here.
         digest, raw, alpha = await _capture(
-            automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-monitoring", digest,
+            automation_base, args.out, f"{len(receipts) + 1:02d}-reminders-monitoring", digest,
         )
         receipts.append(ScreenReceipt("reminders-monitoring", None, None, "monitoring", digest))
         artifacts["reminders-monitoring"] = {"raw": raw, "alpha": alpha}
@@ -1264,7 +1286,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             after=reminder_before,
             automation_base=automation_base,
             output=args.out,
-            name=f"{len(receipts) + 2:02d}-reminders-monitoring-return-planning",
+            name=f"{len(receipts) + 1:02d}-reminders-monitoring-return-planning",
             prior_digest=digest,
             required_item="REMINDER · Prepare report",
         )
@@ -1285,7 +1307,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         due_observation = CaptureObservation()
         digest, raw, alpha = await _capture(
-            automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
+            automation_base, args.out, f"{len(receipts) + 1:02d}-reminders-due", digest,
             observation=due_observation,
         )
         record_visual_latency(
@@ -1352,7 +1374,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             )
             observation = CaptureObservation()
             digest, raw, alpha = await _capture(
-                automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest,
+                automation_base, args.out, f"{len(receipts) + 1:02d}-{name}", digest,
                 observation=observation,
             )
             record_visual_latency(
@@ -1371,7 +1393,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                     after=before,
                     automation_base=automation_base,
                     output=args.out,
-                    name=f"{len(receipts) + 2:02d}-{return_name}",
+                    name=f"{len(receipts) + 1:02d}-{return_name}",
                     prior_digest=digest,
                 )
                 receipts.append(ScreenReceipt(return_name, None, None, "day", digest))

@@ -932,6 +932,7 @@ class TestDownlinkWire:
             payload_digest="pd",
             preview_digest="vd",
             expires_at_ms=1234,
+            diagnostic_kind="messages",
         ).to_wire()
         assert wire == {
             "kind": "confirm.request",
@@ -942,6 +943,7 @@ class TestDownlinkWire:
             "payloadDigest": "pd",
             "previewDigest": "vd",
             "expiresAtMs": 1234,
+            "diagnosticKind": "messages",
         }
 
     def test_shutdown_defaults_to_confirmation_dialog(self) -> None:

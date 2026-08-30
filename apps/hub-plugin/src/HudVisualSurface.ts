@@ -71,6 +71,9 @@ type HudVisualBaseFrame =
     prompt: string;
     secondsRemaining: number;
     reviewDomain?: ProductivityHudDomain;
+    /** Explicit Mac-provided diagnostic category; never inferred from the
+     * private confirmation prompt. */
+    diagnosticKind?: 'messages';
   }
   | {
     kind: 'navigation';
@@ -109,11 +112,33 @@ export interface HudFramePainter {
  * the official simulator both decode. */
 export type HudImageEncoder = (tile: HudImageTile) => Promise<Uint8Array>;
 
-async function completedBrainstormFrameReceipt(
+function messagesDiagnosticSurface(frame: HudVisualFrame): Extract<G2TraceEvent, {
+  type: 'visual_frame'; kind: 'messages';
+}>['surface'] | undefined {
+  if (frame.kind === 'confirmation') {
+    return frame.diagnosticKind === 'messages' ? 'confirmation' : undefined;
+  }
+  if (frame.kind !== 'list') return undefined;
+  switch (frame.title.trim().toUpperCase()) {
+    case 'MESSAGES': return 'picker';
+    case 'MESSAGES · CONVERSATION': return 'conversation';
+    case 'MESSAGES · COMPOSE': return 'compose';
+    case 'MESSAGES · ACCESS': return 'access';
+    case 'MESSAGES · SETUP': return 'setup';
+    case 'MESSAGES · RETRY': return 'retry';
+    case 'MESSAGES · EMPTY': return 'empty';
+    case 'MESSAGES · READ ONLY': return 'read_only';
+    default: return undefined;
+  }
+}
+
+async function completedVisualFrameReceipt(
   frame: HudVisualFrame,
   tiles: readonly HudImageTile[],
 ): Promise<Extract<G2TraceEvent, { type: 'visual_frame' }> | undefined> {
-  if (frame.kind !== 'brainstorm' || tiles.length !== 4 || !globalThis.crypto?.subtle) {
+  const messagesSurface = messagesDiagnosticSurface(frame);
+  if ((frame.kind !== 'brainstorm' && messagesSurface === undefined)
+    || tiles.length !== 4 || !globalThis.crypto?.subtle) {
     return undefined;
   }
   const rasterLength = tiles.reduce((total, tile) => total + tile.pixels.length, 0);
@@ -125,11 +150,19 @@ async function completedBrainstormFrameReceipt(
   }
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raster));
   const sha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  if (frame.kind === 'brainstorm') {
+    return {
+      type: 'visual_frame',
+      kind: 'brainstorm',
+      surface: frame.brainstorm.screen,
+      state: frame.brainstorm.state,
+      sha256,
+    };
+  }
   return {
     type: 'visual_frame',
-    kind: 'brainstorm',
-    surface: frame.brainstorm.screen,
-    state: frame.brainstorm.state,
+    kind: 'messages',
+    surface: messagesSurface!,
     sha256,
   };
 }
@@ -275,7 +308,7 @@ export class HudVisualSurface implements HudFramePainter {
       // four-tile output without retaining a frame, text, topic, or device
       // identifier. Hashing is detached: it must not delay a visual ack or a
       // generation-bound navigation action after those four uploads succeed.
-      void completedBrainstormFrameReceipt(frame, tiles)
+      void completedVisualFrameReceipt(frame, tiles)
         .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })
         .catch(() => undefined);
       return true;

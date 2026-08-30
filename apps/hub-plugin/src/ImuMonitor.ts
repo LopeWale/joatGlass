@@ -3,6 +3,8 @@ import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { IMU_Report_Data } from '@evenrealities/even_hub_sdk';
 
+export type ConfirmationOutcome = 'accepted' | 'declined' | 'timed_out';
+
 /**
  * Exclusive confirmation gate for consequential actions (RULES.md #6).
  *
@@ -16,6 +18,7 @@ export class ImuMonitor {
     active: boolean;
     expiresAt: number;
     onResult?: (accepted: boolean) => void;
+    onOutcome?: (outcome: ConfirmationOutcome) => void;
     abort?: { signal: AbortSignal; handler: () => void };
   };
   private expiryTimer?: ReturnType<typeof setTimeout>;
@@ -72,8 +75,13 @@ export class ImuMonitor {
    * resume-on-don): the callback gets the verdict and NOTHING goes to the
    * Mac — it never asked, so it gets no answer.
    */
-  await(actionId: string, timeoutMs = 8000, onResult?: (accepted: boolean) => void): void {
-    this.prepare(actionId, onResult);
+  await(
+    actionId: string,
+    timeoutMs = 8000,
+    onResult?: (accepted: boolean) => void,
+    onOutcome?: (outcome: ConfirmationOutcome) => void,
+  ): void {
+    this.prepare(actionId, onResult, undefined, onOutcome);
     this.activate(actionId, timeoutMs);
   }
 
@@ -82,16 +90,18 @@ export class ImuMonitor {
     actionId: string,
     onResult?: (accepted: boolean) => void,
     signal?: AbortSignal,
+    onOutcome?: (outcome: ConfirmationOutcome) => void,
   ): void {
     // One decision surface at a time. Replacing a pending request refuses it
     // before the new prompt is armed, so an old action can never be approved
     // by a gesture intended for the new one.
-    if (this.pending) this.resolve(false);
+    if (this.pending) this.resolve(false, 'declined');
     const pending = {
       actionId,
       active: false,
       expiresAt: Number.POSITIVE_INFINITY,
       ...(onResult ? { onResult } : {}),
+      ...(onOutcome ? { onOutcome } : {}),
       ...(signal ? {
         abort: {
           signal,
@@ -112,7 +122,7 @@ export class ImuMonitor {
     if (this.pending?.actionId !== actionId) return false;
     this.pending.active = true;
     this.pending.expiresAt = Date.now() + timeoutMs;
-    this.expiryTimer = setTimeout(() => this.resolve(false), Math.max(0, timeoutMs));
+    this.expiryTimer = setTimeout(() => this.resolve(false, 'timed_out'), Math.max(0, timeoutMs));
     console.info(`[joat trace] trace=${actionId} stage=confirmation-visible`);
     return true;
   }
@@ -134,7 +144,7 @@ export class ImuMonitor {
   /** Fail closed only if the named action still owns the decision surface. */
   cancel(actionId: string): boolean {
     if (this.pending?.actionId !== actionId) return false;
-    this.resolve(false);
+    this.resolve(false, 'declined');
     return true;
   }
 
@@ -159,7 +169,7 @@ export class ImuMonitor {
     if (!this.pending?.active) return;
 
     if (now > this.pending.expiresAt) {
-      this.resolve(false);
+      this.resolve(false, 'timed_out');
       return;
     }
 
@@ -185,24 +195,24 @@ export class ImuMonitor {
     // had long since treated as declined (observed live). An
     // expired window resolves REFUSED, clearing the pending state.
     if (Date.now() > this.pending.expiresAt) {
-      this.resolve(false);
+      this.resolve(false, 'timed_out');
       return true;
     }
-    this.resolve(true);
+    this.resolve(true, 'accepted');
     return true;
   }
 
   /** Explicit refusal routed from a G2 swipe while a gate is live. */
   declineByTap(): boolean {
     if (!this.pending) return false;
-    this.resolve(false);
+    this.resolve(false, 'declined');
     return true;
   }
 
-  private resolve(accepted: boolean): void {
+  private resolve(accepted: boolean, outcome: ConfirmationOutcome): void {
     if (!this.pending) return;
     const pending = this.pending;
-    const { actionId, onResult } = pending;
+    const { actionId, onResult, onOutcome } = pending;
     this.pending = undefined;
     this.detachAbort(pending);
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
@@ -215,6 +225,7 @@ export class ImuMonitor {
     } else {
       this.link.send({ kind: 'confirm', actionId, accepted });
     }
+    onOutcome?.(outcome);
   }
 
   private detachAbort(pending: typeof this.pending): void {
