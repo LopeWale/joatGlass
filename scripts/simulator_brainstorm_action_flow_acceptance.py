@@ -116,6 +116,8 @@ T = TypeVar("T")
 
 _EXPECTED_FLOW = (
     ("ready", None, None, "brainstorm", "ready"),
+    ("topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
+    ("topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
     ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
     ("running", "click", "begin_topic_capture", "brainstorm", "running"),
     ("terminal", "click", "show_terminal", "agent_terminal", "running"),
@@ -513,7 +515,25 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         reason="",
     )
     status.set_agent_terminal(state="ready", reason="")
-    sessions = SessionManager(hud, lambda _topic: None)
+    def topic_capture_view(armed: bool) -> BrainstormHudView:
+        return BrainstormHudView(
+            screen="brainstorm",
+            state="topic_capture" if armed else "ready",
+            topic="Speak your question" if armed else "Ready for a question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity=(
+                "Your next spoken phrase starts this Brainstorm."
+                if armed else "Tap to choose a question, then speak."
+            ),
+            terminal_state="ready",
+            no_tools_checked=True,
+        )
+
+    sessions = SessionManager(
+        hud,
+        lambda _topic: None,
+        topic_capture_view=topic_capture_view,
+    )
     capabilities = CapabilityRouter(
         hud=hud,
         transport=gateway,
@@ -610,6 +630,65 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(ScreenReceipt("ready", None, None, ready.screen, ready.state, digest))
         artifacts["ready"] = {"raw": raw, "optical": optical}
 
+        # The ordinary Brainstorm entry flow is independent from the fixed
+        # acceptance run. Drive the production tap through EventRouter, then
+        # prove that the one-utterance state and its explicit cancellation
+        # are visibly distinct before beginning the content-free test.
+        action_count, sent_before = len(actions), len(gateway.sent)
+        await _input(automation_base, "click")
+        topic_capture = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:]
+                 if item.action == "begin_topic_capture"),
+                None,
+            ),
+            label="ordinary topic-capture tap",
+        )
+        capture_view = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="brainstorm",
+                state="topic_capture",
+            ),
+            label="armed topic-capture Brainstorm frame",
+        )
+        digest, raw, optical = await _capture(
+            automation_base, output, "02-topic-capture", digest,
+        )
+        receipts.append(ScreenReceipt(
+            "topic-capture", "click", topic_capture.action,
+            capture_view.screen, capture_view.state, digest,
+        ))
+        artifacts["topic-capture"] = {"raw": raw, "optical": optical}
+
+        action_count, sent_before = len(actions), len(gateway.sent)
+        await _input(automation_base, "down")
+        clear_capture = await _wait_for(
+            lambda: next(
+                (item for item in actions[action_count:] if item.action == "cancel"),
+                None,
+            ),
+            label="topic-capture cancellation",
+        )
+        cleared_view = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="brainstorm",
+                state="ready",
+            ),
+            label="cleared topic-capture Brainstorm frame",
+        )
+        digest, raw, optical = await _capture(
+            automation_base, output, "03-topic-capture-cancelled", digest,
+        )
+        receipts.append(ScreenReceipt(
+            "topic-capture-cancelled", "down", clear_capture.action,
+            cleared_view.screen, cleared_view.state, digest,
+        ))
+        artifacts["topic-capture-cancelled"] = {"raw": raw, "optical": optical}
+
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "double_click")
         trigger = await _wait_for(
@@ -631,7 +710,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "02-acceptance-ready",
+            "04-acceptance-ready",
             digest,
         )
         receipts.append(ScreenReceipt(
@@ -663,7 +742,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="streaming Brainstorm frame",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "03-running", digest)
+        digest, raw, optical = await _capture(automation_base, output, "05-running", digest)
         receipts.append(ScreenReceipt(
             "running", "click", begin.action, running.screen, running.state, digest,
         ))
@@ -687,7 +766,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="Agent Terminal frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "04-terminal", digest)
+        digest, raw, optical = await _capture(automation_base, output, "06-terminal", digest)
         receipts.append(ScreenReceipt(
             "terminal",
             "click",
@@ -716,7 +795,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="returned Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "05-returned", digest)
+        digest, raw, optical = await _capture(automation_base, output, "07-returned", digest)
         receipts.append(ScreenReceipt(
             "returned",
             "click",
@@ -760,7 +839,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="restored Brainstorm frame after reconnect",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "06-reconnected", digest)
+        digest, raw, optical = await _capture(automation_base, output, "08-reconnected", digest)
         receipts.append(ScreenReceipt(
             "reconnected",
             None,
@@ -791,7 +870,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="cancelled Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "07-cancelled", digest)
+        digest, raw, optical = await _capture(automation_base, output, "09-cancelled", digest)
         receipts.append(ScreenReceipt(
             "cancelled",
             "down",

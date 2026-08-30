@@ -279,22 +279,41 @@ class TestSessionManager:
         assert manager.active_session is first
         await manager.close(timeout_s=0.1)
 
-    async def test_glasses_begin_action_keeps_a_typed_brainstorm_capture_frame_visible(self) -> None:
+    async def test_glasses_begin_action_arms_and_consumes_the_next_topic(self) -> None:
         transport = SinkTransport()
         capture = BrainstormHudView(
             screen="brainstorm",
-            state="ready",
+            state="topic_capture",
             topic="Speak your question",
             collaborators=["Codex", "Claude", "Hermes"],
-            activity='Say “JOAT, brainstorm …” to begin.',
+            activity="Your next spoken phrase starts this Brainstorm.",
             terminal_state="ready",
             endpoint_host="home-mac.example-tailnet.ts.net",
             no_tools_checked=True,
         )
+        entered = asyncio.Event()
+        started: list[str] = []
+
+        class HeldSession(Session):
+            async def run(self) -> None:
+                entered.set()
+                await asyncio.Event().wait()
+
+            def cancel(self) -> None:
+                return None
+
         manager = SessionManager(
             HudWriter(transport),
-            lambda _topic: None,
-            topic_capture_view=lambda: capture,
+            lambda topic: started.append(topic) or HeldSession(),
+            topic_capture_view=lambda armed: capture if armed else BrainstormHudView(
+                screen="brainstorm",
+                state="ready",
+                topic="Ready for a question",
+                collaborators=capture.collaborators,
+                activity="Tap to choose a question, then speak.",
+                terminal_state="ready",
+                no_tools_checked=True,
+            ),
         )
 
         manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
@@ -303,6 +322,67 @@ class TestSessionManager:
         assert not manager.active
         assert brainstorm_frames(transport) == [capture]
         assert not any(isinstance(message, HudText) for message in transport.sent)
+        assert manager.handle_transcript("compare a hosted Mac brain with a local one")
+        await entered.wait()
+        assert started == ["compare a hosted Mac brain with a local one"]
+        await manager.close(timeout_s=0.1)
+
+    async def test_topic_capture_deduplicates_taps_and_clears_on_cancel_or_reconnect(self) -> None:
+        transport = SinkTransport()
+        capture = BrainstormHudView(
+            screen="brainstorm", state="topic_capture", topic="Speak your question",
+            collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.",
+            terminal_state="ready", no_tools_checked=True,
+        )
+        ready = BrainstormHudView(
+            screen="brainstorm", state="ready", topic="Ready for a question",
+            collaborators=capture.collaborators, activity="Tap to choose a question, then speak.",
+            terminal_state="ready", no_tools_checked=True,
+        )
+        manager = SessionManager(
+            HudWriter(transport),
+            lambda _topic: None,
+            topic_capture_view=lambda armed: capture if armed else ready,
+        )
+
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+        assert brainstorm_frames(transport) == [capture]
+
+        manager.handle_brainstorm_action(BrainstormAction("cancel"))
+        await asyncio.sleep(0)
+        assert brainstorm_frames(transport)[-1] == ready
+        assert manager.handle_transcript("ordinary assistant question") is False
+
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        manager.clear_topic_capture()
+        assert manager.handle_transcript("ordinary assistant question") is False
+
+    async def test_topic_capture_consumes_a_phrase_when_collaborators_cannot_start(self) -> None:
+        transport = SinkTransport()
+        ready = BrainstormHudView(
+            screen="brainstorm", state="ready", topic="Ready for a question",
+            collaborators=["Codex", "Claude", "Hermes"],
+            activity="Tap to choose a question, then speak.", terminal_state="unavailable",
+            no_tools_checked=True,
+        )
+        manager = SessionManager(
+            HudWriter(transport),
+            lambda _topic: None,
+            topic_capture_view=lambda armed: BrainstormHudView(
+                screen="brainstorm", state="topic_capture", topic="Speak your question",
+                collaborators=ready.collaborators,
+                activity="Your next spoken phrase starts this Brainstorm.",
+                terminal_state="unavailable", no_tools_checked=True,
+            ) if armed else ready,
+        )
+
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+        assert manager.handle_transcript("should the home brain use a mini?") is True
+        await asyncio.sleep(0)
+        assert brainstorm_frames(transport)[-1] == ready
 
     async def test_glasses_cancel_action_interrupts_the_active_session(self) -> None:
         entered = asyncio.Event()

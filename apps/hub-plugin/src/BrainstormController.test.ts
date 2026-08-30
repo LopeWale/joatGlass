@@ -114,6 +114,20 @@ describe('BrainstormController', () => {
     expect(controller.consumeAcceptedAction()).toEqual({ action: 'cancel', surface: 'brainstorm' });
   });
 
+  it('keeps an armed topic capture single-use until the wearer cancels it', () => {
+    const { controller, sent } = make();
+    controller.present(model({
+      state: 'topic_capture',
+      topic: 'Speak your question',
+      activity: 'Your next spoken phrase starts this Brainstorm.',
+    }));
+
+    expect(controller.handleClick()).toBe(true);
+    expect(sent).toEqual([]);
+    expect(controller.handleCancel()).toBe(true);
+    expect(sent).toEqual([{ kind: 'brainstorm.action', action: 'cancel' }]);
+  });
+
   it('requests a terminal retry only from an explicitly blocked terminal page', () => {
     const { controller, sent } = make();
     controller.present(model({

@@ -192,6 +192,9 @@ export function brainstormActionHint(
     if (model.state === 'acceptance_ready') {
       return 'tap: start test · left x2: menu';
     }
+    if (model.state === 'topic_capture') {
+      return 'speak your question · left x2: cancel';
+    }
     return model.state === 'ready'
       && model.terminalState === 'ready'
       && model.noToolsChecked
@@ -205,7 +208,9 @@ export function brainstormActionHint(
 }
 
 export function brainstormStateLabel(state: BrainstormHudModel['state']): string {
-  return state === 'acceptance_ready'
+  return state === 'topic_capture'
+    ? 'SPEAK NOW'
+    : state === 'acceptance_ready'
     ? 'TEST READY'
     : state.replace(/_/g, ' ').toUpperCase();
 }
