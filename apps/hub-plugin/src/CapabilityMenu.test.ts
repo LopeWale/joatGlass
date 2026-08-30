@@ -24,6 +24,7 @@ function rig(
   const listOptions: Array<{ title?: string; hint?: string } | undefined> = [];
   const statuses: string[] = [];
   const operations: string[] = [];
+  const productivities: ProductivityHudModel[] = [];
   const selections: number[] = [];
   const moves: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
@@ -65,8 +66,9 @@ function rig(
       moves.push(delta);
       return true;
     }),
-    showProductivity: vi.fn(async () => {
+    showProductivity: vi.fn(async (productivity: ProductivityHudModel) => {
       operations.push('productivity');
+      productivities.push(productivity);
       return true;
     }),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
@@ -74,7 +76,7 @@ function rig(
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
-    menu, sidebars, lists, listOptions, operations, selections, moves, statuses, sent,
+    menu, sidebars, lists, listOptions, operations, productivities, selections, moves, statuses, sent,
     defaultsCount: () => defaults,
   };
 }
@@ -488,6 +490,7 @@ describe('CapabilityMenu', () => {
     { domain: 'calendar', phase: 'not_saved', title: 'Design review', secondary: 'No calendar item was changed.' },
     { domain: 'reminders', phase: 'verifying', title: 'Buy filters', secondary: 'Checking native read-back' },
     { domain: 'reminders', phase: 'saved', title: 'Buy filters', secondary: 'Native alarm set · JOAT monitoring armed.' },
+    { domain: 'reminders', phase: 'monitoring', title: 'Buy filters', secondary: 'Native alarm is scheduled. JOAT will check at due time.' },
     { domain: 'reminders', phase: 'failed', title: 'Buy filters', secondary: 'No reminders item was changed.' },
     { domain: 'reminders', phase: 'check', title: 'Buy filters', secondary: 'It may have changed. Do not retry.' },
     { domain: 'reminders', phase: 'cancelled', title: 'Buy filters', secondary: 'No reminders item was changed.' },
@@ -532,6 +535,7 @@ describe('CapabilityMenu', () => {
     { domain: 'calendar', phase: 'cancelled' },
     { domain: 'calendar', phase: 'not_saved' },
     { domain: 'reminders', phase: 'saved' },
+    { domain: 'reminders', phase: 'monitoring' },
     { domain: 'reminders', phase: 'completed' },
     { domain: 'reminders', phase: 'failed' },
     { domain: 'reminders', phase: 'check' },
@@ -573,6 +577,76 @@ describe('CapabilityMenu', () => {
     }
   });
 
+  it('keeps an independently verified reminder visible as monitoring before returning to Planning', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, productivities, sent } = rig();
+      const planningAnchorUnixMs = 1_788_274_200_000;
+      await menu.presentProductivity({
+        domain: 'reminders',
+        phase: 'saved',
+        title: 'Buy filters',
+        primary: 'Saved and verified',
+        secondary: 'Reminders read-back matched',
+        hint: 'Monitoring next · left x2 Planning',
+        planningAnchorUnixMs,
+        monitoringArmed: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(productivities).toHaveLength(1);
+      expect(sent).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(productivities).toHaveLength(2);
+      expect(productivities[1]).toMatchObject({
+        domain: 'reminders',
+        phase: 'monitoring',
+        title: 'Buy filters',
+        primary: 'Monitoring armed',
+        secondary: 'Native alarm is scheduled. JOAT will check at due time.',
+        hint: 'Planning in 5s · left x2 now',
+        planningAnchorUnixMs,
+      });
+      expect(sent).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        kind: 'input',
+        event: { containerName: 'capmenu', selectedName: 'Planning', planningAnchorUnixMs },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the local monitoring transition when the wearer returns to Planning early', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, productivities, sent } = rig();
+      await menu.presentProductivity({
+        domain: 'reminders',
+        phase: 'saved',
+        title: 'Buy filters',
+        primary: 'Saved and verified',
+        secondary: 'Native alarm set · JOAT monitoring armed.',
+        hint: 'Monitoring next · left x2 Planning',
+        planningAnchorUnixMs: 1_788_274_200_000,
+        monitoringArmed: true,
+      });
+
+      await menu.toggle();
+      expect(sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(productivities).toHaveLength(1);
+      expect(sent).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not abandon a newer due reminder when replacing a terminal outcome', async () => {
     vi.useFakeTimers();
     try {
@@ -585,6 +659,7 @@ describe('CapabilityMenu', () => {
         secondary: 'Native alarm set · JOAT monitoring armed.',
         hint: 'Planning in 5s · left x2 now',
         planningAnchorUnixMs: 1_788_274_200_000,
+        monitoringArmed: true,
       });
       await menu.presentProductivity({
         domain: 'reminders',

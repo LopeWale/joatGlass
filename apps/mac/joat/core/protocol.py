@@ -85,6 +85,7 @@ NAVIGATION_ACTIONS: tuple[str, ...] = (
     "cancel",
 )
 BRAINSTORM_ACTIONS: tuple[str, ...] = (
+    "begin_acceptance",
     "begin_topic_capture",
     "show_terminal",
     "show_brainstorm",
@@ -248,6 +249,9 @@ class BrainstormAction:
     """A bounded wearer gesture while the Brainstorm HUD owns input."""
 
     action: str
+    surface: Literal["brainstorm"] | None = None
+    source: Literal["right", "ring"] | None = None
+    gesture: Literal["double_press"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,7 +470,7 @@ _BRAINSTORM_HUD_STATES = frozenset({
 })
 _PRODUCTIVITY_HUD_DOMAINS = frozenset({"calendar", "reminders"})
 _PRODUCTIVITY_HUD_PHASES = frozenset({
-    "verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved", "due",
+    "verifying", "saved", "monitoring", "completed", "failed", "check", "cancelled", "not_saved", "due",
 })
 _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
@@ -532,7 +536,7 @@ class ProductivityHudView:
     """
 
     domain: Literal["calendar", "reminders"]
-    phase: Literal["verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved", "due"]
+    phase: Literal["verifying", "saved", "monitoring", "completed", "failed", "check", "cancelled", "not_saved", "due"]
     title: str
     primary: str
     secondary: str
@@ -541,12 +545,20 @@ class ProductivityHudView:
     # an ambiguous local date back through the wearable transport. The Mac
     # converts it to its current planning zone when the wearer returns.
     planning_anchor_unix_ms: int | None = None
+    # This is intentionally a small boolean rather than Reminder text, an
+    # EventKit ID, or an OS notification claim. It is true only after both
+    # native read-back and durable monitor-occurrence registration succeeded.
+    monitoring_armed: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         if self.domain not in _PRODUCTIVITY_HUD_DOMAINS:
             raise ProtocolError("Productivity HUD domain is invalid")
         if self.phase not in _PRODUCTIVITY_HUD_PHASES:
             raise ProtocolError("Productivity HUD phase is invalid")
+        if self.phase == "monitoring" and self.domain != "reminders":
+            raise ProtocolError("Productivity monitoring is reminders-only")
+        if self.monitoring_armed and (self.domain != "reminders" or self.phase != "saved"):
+            raise ProtocolError("Productivity monitoring marker requires a saved reminder")
         productivity: dict[str, Any] = {
             "domain": self.domain,
             "phase": self.phase,
@@ -562,6 +574,8 @@ class ProductivityHudView:
             )
             assert anchor is not None
             productivity["planningAnchorUnixMs"] = anchor
+        if self.monitoring_armed:
+            productivity["monitoringArmed"] = True
         return {
             "kind": "productivity.view",
             "productivity": productivity,
@@ -1224,7 +1238,7 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "type": "brainstorm_action",
             "action": _trace_enum(
                 event["action"], "action",
-                ("begin_topic_capture", "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
+                ("begin_acceptance", "begin_topic_capture", "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
             ),
             "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
             "source": _trace_enum(event["source"], "source", ("left", "right", "ring")),
@@ -1375,11 +1389,26 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 choice_id=choice_id,
             )
         case "brainstorm.action":
-            if set(payload) != {"kind", "action"}:
-                raise ProtocolError("brainstorm action has unsupported fields")
-            action = _require(payload, "action", kind)
+            action = payload.get("action")
             if not isinstance(action, str) or action not in BRAINSTORM_ACTIONS:
                 raise ProtocolError("brainstorm action is invalid")
+            if action == "begin_acceptance":
+                if set(payload) != {"kind", "action", "surface", "source", "gesture"}:
+                    raise ProtocolError("brainstorm action acceptance has unsupported fields")
+                surface = payload.get("surface")
+                source = payload.get("source")
+                gesture = payload.get("gesture")
+                if surface != "brainstorm" or source not in ("right", "ring") \
+                        or gesture != "double_press":
+                    raise ProtocolError("brainstorm action acceptance is invalid")
+                return BrainstormAction(
+                    action=action,
+                    surface="brainstorm",
+                    source=source,
+                    gesture="double_press",
+                )
+            if set(payload) != {"kind", "action"}:
+                raise ProtocolError("brainstorm action has unsupported fields")
             return BrainstormAction(action=action)
         case "navigation.route.ack":
             if set(payload) != {"kind", "sessionId", "routeId", "revision", "outcome"}:

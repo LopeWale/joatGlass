@@ -213,9 +213,26 @@ class TestParseUplink:
         message = parse_uplink({"kind": "brainstorm.action", "action": "cancel"})
         assert message == BrainstormAction(action="cancel")
 
+        acceptance = parse_uplink({
+            "kind": "brainstorm.action",
+            "action": "begin_acceptance",
+            "surface": "brainstorm",
+            "source": "ring",
+            "gesture": "double_press",
+        })
+        assert acceptance == BrainstormAction(
+            action="begin_acceptance",
+            surface="brainstorm",
+            source="ring",
+            gesture="double_press",
+        )
+
     @pytest.mark.parametrize("payload", [
         {"kind": "brainstorm.action", "action": "invent"},
         {"kind": "brainstorm.action", "action": "cancel", "topic": "leak"},
+        {"kind": "brainstorm.action", "action": "begin_acceptance"},
+        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "left", "gesture": "double_press"},
+        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press", "topic": "leak"},
         {"kind": "brainstorm.action"},
     ])
     def test_brainstorm_action_rejects_freeform_or_unknown_fields(self, payload: object) -> None:
@@ -685,6 +702,28 @@ class TestDownlinkWire:
                 primary="Saved",
                 secondary="Read-back matched",
                 hint="left x2 overview",
+            ).to_wire()
+
+    def test_productivity_monitoring_armed_is_reminder_saved_only(self) -> None:
+        assert ProductivityHudView(
+            domain="reminders",
+            phase="saved",
+            title="Buy filters",
+            primary="Saved and verified",
+            secondary="Reminders read-back matched",
+            hint="Monitoring next · left x2 Planning",
+            monitoring_armed=True,
+        ).to_wire()["productivity"]["monitoringArmed"] is True
+
+        with pytest.raises(ProtocolError, match="monitoring"):
+            ProductivityHudView(
+                domain="calendar",
+                phase="saved",
+                title="Design review",
+                primary="Saved and verified",
+                secondary="Calendar read-back matched",
+                hint="Planning in 5s · left x2 now",
+                monitoring_armed=True,
             ).to_wire()
         with pytest.raises(ProtocolError, match="title"):
             ProductivityHudView(

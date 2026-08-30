@@ -134,14 +134,16 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState'>,
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState' | 'noToolsChecked'>,
 ): string {
   if (model.screen === 'brainstorm') {
     if (model.state === 'running') {
       return 'tap: Hermes · swipe down or left x2: cancel';
     }
     return model.state === 'ready'
-      ? 'tap: speak question · left x2: menu'
+      && model.terminalState === 'ready'
+      && model.noToolsChecked
+      ? 'tap: speak · right/ring x2: test · left x2: menu'
       : 'left x2: menu · long-press: mic';
   }
   if (model.state === 'running') return 'tap: return to Brainstorm · left x2: menu';
@@ -258,6 +260,7 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
   const labels: Readonly<Record<ProductivityHudModel['phase'], string>> = {
     verifying: 'VERIFYING',
     saved: 'SAVED',
+    monitoring: 'MONITORING',
     completed: 'COMPLETED',
     // These are terminal truth states, not generic progress failures.  The
     // wearer needs to know whether EventKit definitely refused the write or
@@ -272,7 +275,7 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
 }
 
 export function productivityPhaseProgress(phase: ProductivityHudModel['phase']): number {
-  if (phase === 'saved' || phase === 'completed' || phase === 'due') return 1;
+  if (phase === 'saved' || phase === 'monitoring' || phase === 'completed' || phase === 'due') return 1;
   if (phase === 'verifying') return 0.45;
   return 0.18;
 }
@@ -505,6 +508,14 @@ export function parseMessagesConversationRow(value: string): MessagesConversatio
   };
 }
 
+/** These Mac-owned screens contain message bubbles and voice instructions,
+ * not selectable notification rows. */
+export function usesMessagesInstructionCards(title: string): boolean {
+  const normalized = title.trim().toUpperCase();
+  return normalized === 'MESSAGES · CONVERSATION'
+    || normalized === 'MESSAGES · COMPOSE';
+}
+
 export interface HudVisibleListItem {
   item: string;
   index: number;
@@ -558,6 +569,34 @@ export function visibleHudTailLines(
   const visible = lines.slice(-count);
   if (lines.length > count && visible.length > 0) visible[0] = `…${visible[0]}`;
   return visible;
+}
+
+export interface FittedHudText {
+  fontSize: number;
+  lines: string[];
+}
+
+/** Fit bounded HUD copy without ever drawing outside its optical region.
+ * When even the minimum readable size overflows, retain the newest lines so
+ * a streamed reply still exposes its conclusion. */
+export function fitHudWrappedText(
+  text: string,
+  maxWidth: number,
+  maximumLines: number,
+  measureAtSize: (value: string, fontSize: number) => number,
+): FittedHudText {
+  const lineLimit = Math.max(1, maximumLines);
+  let minimumLines: string[] = [];
+  for (let fontSize = 21; fontSize >= 12; fontSize -= 1) {
+    const lines = wrapHudText(
+      text,
+      maxWidth,
+      (value) => measureAtSize(value, fontSize),
+    );
+    if (lines.length <= lineLimit) return { fontSize, lines };
+    minimumLines = lines;
+  }
+  return { fontSize: 12, lines: visibleHudTailLines(minimumLines, lineLimit) };
 }
 
 /** Keep the selected row visible on the three-row optical page without
@@ -954,7 +993,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
+    if (usesMessagesInstructionCards(frame.title)) {
       this.drawMessagesConversation(context, frame);
       return;
     }
@@ -1783,13 +1822,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   ): void {
     const previous = context.textAlign;
     context.textAlign = 'center';
-    let lines: string[] = [];
-    let fontSize = 21;
-    for (; fontSize >= 12; fontSize -= 1) {
+    const fitted = fitHudWrappedText(text, maxWidth, maximumLines, (value, fontSize) => {
       context.font = `${fontSize}px ${HUD_FONT}`;
-      lines = wrapHudText(text, maxWidth, (value) => context.measureText(value).width);
-      if (lines.length <= maximumLines) break;
-    }
+      return context.measureText(value).width;
+    });
+    context.font = `${fitted.fontSize}px ${HUD_FONT}`;
+    const { lines } = fitted;
+    const fontSize = fitted.fontSize;
     const lineHeight = Math.max(16, fontSize + 2);
     const firstY = y - ((lines.length - 1) * lineHeight) / 2;
     lines.forEach((line, index) => context.fillText(line, x, firstY + index * lineHeight));
