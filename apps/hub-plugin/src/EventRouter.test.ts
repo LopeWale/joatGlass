@@ -565,6 +565,20 @@ describe('EventRouter — text and list', () => {
     expect(closed.sent[0]?.kind).toBe('input');
   });
 
+  it('dismisses a Home notification from the native list-event tap before it can relay', () => {
+    const { fire, assistantOverlay, menu, sent } = make(
+      false, undefined, false, false, false, true,
+    );
+
+    // Some G2 firmware surfaces the current Home tile as a List event rather
+    // than a system/text event. A protobuf-zero click is omitted on the wire.
+    fire({ listEvent: { containerID: 3 } });
+
+    expect(assistantOverlay.dismissVisibleNotification).toHaveBeenCalledTimes(1);
+    expect(menu.handleList).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('a first-item selection relays index 0, not undefined', () => {
     // currentSelectItemIndex 0 is omitted by protobuf; without `?? 0` the Mac
     // would receive undefined and mis-handle the top row.

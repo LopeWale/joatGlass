@@ -632,6 +632,13 @@ export interface MessagesConversationRow {
   body: string;
 }
 
+export interface MessagesConversationTranscript {
+  /** Mac-owned history position, for example “Latest messages — down for older”. */
+  heading: string;
+  /** Speaker rows only. Voice and microphone guidance belongs in the HUD hint. */
+  rows: MessagesConversationRow[];
+}
+
 /** Conversation frames are deliberately not rendered as notification rows.
  * The Mac owns the text; this parser only distinguishes the already-labeled
  * speaker rows from truthful voice/microphone instructions. */
@@ -642,6 +649,38 @@ export function parseMessagesConversationRow(value: string): MessagesConversatio
     kind: label.trim().toLowerCase() === 'you' ? 'outgoing' : 'incoming',
     label,
     body,
+  };
+}
+
+/**
+ * A Messages conversation is a compact transcript, not a stack of selectable
+ * cards. Keep the Mac's history heading above it and leave the voice controls
+ * in the existing truthful HUD hint below it. The raw list index remains the
+ * selection contract, so paging keeps the selected speaker row in view
+ * without inventing a second local selection model.
+ */
+export function messagesConversationTranscript(
+  items: readonly string[],
+  selectedIndex: number,
+  capacity = 6,
+): MessagesConversationTranscript {
+  const parsed = items.map((item, index) => ({ index, row: parseMessagesConversationRow(item) }));
+  const heading = parsed.find(({ row }) => row.kind === 'instruction')?.row.body ?? 'Conversation';
+  const speakerRows = parsed.filter(({ row }) => row.kind !== 'instruction');
+  if (speakerRows.length === 0) return { heading, rows: [] };
+
+  const count = Math.max(1, capacity);
+  const selectedSpeaker = Math.max(
+    0,
+    speakerRows.filter(({ index }) => index <= selectedIndex).length - 1,
+  );
+  const start = Math.min(
+    Math.max(0, selectedSpeaker - count + 1),
+    Math.max(0, speakerRows.length - count),
+  );
+  return {
+    heading,
+    rows: speakerRows.slice(start, start + count).map(({ row }) => row),
   };
 }
 
@@ -1230,6 +1269,38 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(BRIGHT);
     context.font = `20px ${HUD_FONT}`;
     context.fillText(hudDisplayTitle(frame.title), 36, 64);
+
+    if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
+      const transcript = messagesConversationTranscript(frame.items, frame.selectedIndex);
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, transcript.heading, 36, 87, 504);
+      context.strokeStyle = gray(HAIRLINE);
+      context.lineWidth = 0.7;
+      context.beginPath();
+      context.moveTo(36, 98);
+      context.lineTo(540, 98);
+      context.stroke();
+
+      transcript.rows.forEach((parsed, row) => {
+        const y = 113 + row * 22;
+        const outgoing = parsed.kind === 'outgoing';
+        context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
+        context.font = `9px ${HUD_FONT}`;
+        this.fitText(context, parsed.label, 36, y, 54);
+        context.fillStyle = gray(CHROME);
+        context.fillText('·', 92, y);
+        context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
+        context.font = `12px ${HUD_FONT}`;
+        this.fitText(context, parsed.body, 104, y, 436);
+      });
+
+      context.fillStyle = gray(QUIET);
+      context.font = `9px ${HUD_FONT}`;
+      context.textAlign = 'center';
+      context.fillText(frame.hint, 288, 267);
+      return;
+    }
 
     visibleHudListItems(frame.items, frame.selectedIndex).forEach((visible, row) => {
       const parsed = parseMessagesConversationRow(visible.item);

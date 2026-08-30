@@ -253,6 +253,10 @@ export class EventRouter {
       this.recordGesture(this.classify(event.listEvent.eventType), 'list');
       if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
       if (this.dismissAssistantOverlayFor(event.listEvent.eventType)) return;
+      // Some G2 firmware represents a Home-tile tap as a List event. A
+      // transient notification must own that ordinary tap before the hidden
+      // capability row can select or relay it to the Mac.
+      if (this.dismissVisibleNotificationFor(event.listEvent.eventType)) return;
       // Settings menu open → selection is a local concern, not Mac input.
       if (this.menu.handleList(event.listEvent)) return;
       this.link.send({
