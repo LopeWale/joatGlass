@@ -557,7 +557,7 @@ async function boot(): Promise<void> {
         imu.setTrace(msg.enabled);
         break;
       case 'confirm.request': {
-        const rendered = hud.showConfirmation(msg.prompt, msg.actionId);
+        const rendered = hud.showConfirmation(msg.prompt, msg.actionId, msg.diagnosticKind);
         imu.prepare(msg.actionId, (accepted) => {
           void deliverAfterConfirmationDismissal({
             accepted,
@@ -577,7 +577,11 @@ async function boot(): Promise<void> {
               console.error('[joat] confirmation dismissal failed:', err);
             }
           });
-        }, context.signal);
+        }, context.signal, (outcome) => {
+          if (msg.diagnosticKind === 'messages') {
+            g2Diagnostics.record({ type: 'messages_confirmation', outcome });
+          }
+        });
         let visible = false;
         try {
           visible = await awaitCurrent(rendered);

@@ -174,6 +174,18 @@ export class CapabilityMenu {
     else await this.close();
   }
 
+  /**
+   * Contextual-menu escape. This intentionally uses the same Mac-owned
+   * Planning request as left-double Back: it cannot mutate Calendar or
+   * Reminders, and it retains the active safe-write day's anchor when there
+   * is one. The OS menu itself stays one-shot; the rebuilt Planning page
+   * carries the contextual menu forward.
+   */
+  async openPlanning(): Promise<void> {
+    const anchor = this.view === 'productivity' ? this.productivityAnchorUnixMs : undefined;
+    await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'), anchor);
+  }
+
   /** Match, paint, then activate one capability response. Row actions remain
    * disabled until the replacement frame is completely visible. */
   async presentList(

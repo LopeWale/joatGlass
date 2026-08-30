@@ -42,7 +42,7 @@ describe('initializeHudPage', () => {
 
     await expect(initializeHudPage(client as never, layouts as never)).resolves.toEqual({
       surface: 'visual',
-      contextualMenu: false,
+      contextualMenu: true,
     });
 
     expect(client.start).toHaveBeenCalledWith(pages.visual, pages.minimal);

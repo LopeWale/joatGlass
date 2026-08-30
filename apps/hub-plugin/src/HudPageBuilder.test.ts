@@ -67,7 +67,10 @@ describe('HudPageBuilder invariants', () => {
   it('makes the one-shot startup an image-first hardware surface', () => {
     const startup = builder.visualStartup() as Page;
     expect(startup.containerTotalNum).toBe(5);
-    expect(startup.menuObject).toBeUndefined();
+    expect(startup.menuObject?.menuItems).toContainEqual({
+      itemID: HudPageBuilder.MENU_PLANNING,
+      itemName: 'Open Planning',
+    });
     expect(startup.imageObject).toHaveLength(4);
     expect(startup.textObject).toHaveLength(1);
     expect(startup.textObject?.[0]).toMatchObject({
@@ -98,13 +101,20 @@ describe('HudPageBuilder invariants', () => {
       compatible.visualLayout() as Page,
     ];
     expect(pages.every((page) => page.menuObject === undefined)).toBe(true);
-    expect((builder.defaultLayout() as Page).menuObject?.menuItems).toHaveLength(4);
+    expect((builder.defaultLayout() as Page).menuObject?.menuItems).toHaveLength(5);
   });
 
-  it('keeps the modern image HUD menu-free even after text-menu negotiation', () => {
+  it('keeps the contextual escape available on every image-first rebuild', () => {
     const visual = builder.visualLayout() as Page;
-    expect(visual.menuObject).toBeUndefined();
-    expect((builder.visualCompatibilityLayout() as Page).menuObject).toBeUndefined();
+    const expected = [
+      { itemID: HudPageBuilder.MENU_PLANNING, itemName: 'Open Planning' },
+      { itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' },
+      { itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' },
+      { itemID: HudPageBuilder.MENU_REDIAL, itemName: 'Reconnect brain' },
+      { itemID: HudPageBuilder.MENU_SETTINGS, itemName: 'Listening settings' },
+    ];
+    expect(visual.menuObject?.menuItems).toEqual(expected);
+    expect((builder.visualCompatibilityLayout() as Page).menuObject?.menuItems).toEqual(expected);
   });
 
   it.each(LAYOUTS)('%s: exactly one container captures events', (_name, page) => {

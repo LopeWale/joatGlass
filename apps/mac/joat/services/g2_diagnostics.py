@@ -101,6 +101,19 @@ class G2DiagnosticStore:
         if self._persist_task is None or self._persist_task.done():
             self._persist_task = loop.create_task(self._persist_pending())
 
+    def record_session(self, *, physical_g2: bool) -> None:
+        """Record the gateway's own source classification, never a device ID.
+
+        This fact cannot come from the plugin: only the trusted Mac knows
+        whether the authenticated peer is a non-loopback G2.  A simulator is
+        useful for regression work, but it must never become physical proof.
+        """
+
+        self.record({
+            "type": "g2_session",
+            "source": "physical_g2" if physical_g2 else "nonphysical",
+        })
+
     async def flush(self) -> None:
         """Finish a pending receipt write during normal gateway shutdown."""
 

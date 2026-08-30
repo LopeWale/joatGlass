@@ -40,6 +40,7 @@ function make(
     handleScroll: vi.fn(() => menuConsumesLists),
     handleClick: vi.fn(() => menuConsumesLists),
     openSettings: vi.fn(),
+    openPlanning: vi.fn(),
   };
   const navigation = {
     isActive: vi.fn(() => navigationActive),
@@ -649,6 +650,12 @@ describe('EventRouter — long-press mutes the mic', () => {
     const r = make();
     r.fire({ menuItemClickEvent: { itemID: 4 } });
     expect(r.menu.openSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens unified Planning from contextual-menu item five', () => {
+    const r = make();
+    r.fire({ menuItemClickEvent: { itemID: 5 } });
+    expect(r.menu.openPlanning).toHaveBeenCalledTimes(1);
   });
 
   it('classifies the delivered gesture without forwarding source or content', () => {

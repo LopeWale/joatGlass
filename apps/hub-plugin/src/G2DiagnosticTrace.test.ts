@@ -135,4 +135,28 @@ describe('MacG2DiagnosticTrace', () => {
       },
     }]);
   });
+
+  it('forwards a Messages frame and confirmation outcome without private copy', () => {
+    const sent: UplinkMessage[] = [];
+    const trace = new MacG2DiagnosticTrace({ sendDiagnostic: (message) => sent.push(message) });
+    trace.setEnabled(true);
+
+    trace.record({
+      type: 'visual_frame', kind: 'messages', surface: 'conversation',
+      sha256: 'b'.repeat(64),
+    });
+    trace.record({ type: 'messages_confirmation', outcome: 'timed_out' });
+
+    expect(sent).toEqual([{
+      kind: 'g2.diagnostic',
+      event: {
+        type: 'visual_frame', kind: 'messages', surface: 'conversation',
+        sha256: 'b'.repeat(64),
+      },
+    }, {
+      kind: 'g2.diagnostic',
+      event: { type: 'messages_confirmation', outcome: 'timed_out' },
+    }]);
+    expect(JSON.stringify(sent)).not.toMatch(/private|draft|recipient|message body/i);
+  });
 });

@@ -72,3 +72,20 @@ async def test_store_observes_the_sanitized_snapshot_before_background_persisten
     assert writes == []
     await store.flush()
     assert len(writes) == 1
+
+
+async def test_store_records_only_the_authoritative_g2_session_classification(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    store = G2DiagnosticStore(path=tmp_path / "g2-diagnostics.json")
+
+    store.record_session(physical_g2=True)
+    store.record_session(physical_g2=False)
+    await store.flush()
+
+    receipt = json.loads(store.path.read_text())
+    assert [
+        {key: value for key, value in event.items() if key not in {"sequence", "recordedAtMs"}}
+        for event in receipt["events"]
+    ] == [
+        {"type": "g2_session", "source": "physical_g2"},
+        {"type": "g2_session", "source": "nonphysical"},
+    ]

@@ -370,6 +370,20 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
+  it('labels a Messages confirmation for the content-free physical receipt', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showConfirmation('Send to a private person?', 'message-reply:physical', 'messages');
+
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'confirmation', diagnosticKind: 'messages',
+    });
+  });
+
   it('rejects a navigation view while confirmation owns the visible HUD', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {

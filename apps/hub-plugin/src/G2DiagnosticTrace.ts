@@ -8,6 +8,11 @@ import type { UplinkMessage } from './types';
  */
 export type G2TracePage = 'overview' | 'sidebar' | 'list' | 'confirmation' | 'navigation';
 export type G2TraceCadence = 'first' | 'lte1s' | '1_5s' | '5_30s' | 'gt30s';
+/** Fixed Messages surfaces only. The trace never receives list rows, sender
+ * names, contact handles, draft text, or the confirmation prompt. */
+export type G2TraceMessagesSurface =
+  | 'picker' | 'conversation' | 'compose' | 'access' | 'setup' | 'retry'
+  | 'empty' | 'read_only' | 'confirmation';
 export type NavigationCue =
   | 'destination' | 'repair' | 'mode' | 'preview' | 'guidance'
   | 'uncertain' | 'wrong_way' | 'off_route' | 'rerouting' | 'arrived' | 'error'
@@ -102,6 +107,21 @@ export type G2TraceEvent =
     surface: 'brainstorm' | 'agent_terminal';
     state: 'unavailable' | 'approval_required' | 'ready' | 'topic_capture' | 'acceptance_ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
     sha256: string;
+  }
+  /** A completed four-tile Messages state, bound only to its fixed surface
+   * name and raster digest. The digest is not reversible HUD copy. */
+  | {
+    type: 'visual_frame';
+    kind: 'messages';
+    surface: G2TraceMessagesSurface;
+    sha256: string;
+  }
+  /** Outcome after the already-tagged Messages confirmation gate settles.
+   * It distinguishes explicit decline from silence without preserving a
+   * message body or recipient. */
+  | {
+    type: 'messages_confirmation';
+    outcome: 'accepted' | 'declined' | 'timed_out';
   };
 
 /** Narrow observer seam so instrumentation cannot change HUD control flow. */

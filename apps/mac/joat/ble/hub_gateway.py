@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from ipaddress import ip_address
+from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 import websockets
@@ -156,6 +157,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._trust_loopback = trust_loopback
         self._auth_timeout_s = auth_timeout_s
         self._g2_diagnostics = g2_diagnostics
+        self._g2_diagnostic_session_marker: tuple[int, int] | None = None
         self._location_probe = location_probe
         self._auth_lock = asyncio.Lock()
         self._refusals: dict[str, int] = {}
@@ -298,6 +300,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
         previous = self._g2_diagnostics
         self._g2_diagnostics = store
+        self._record_g2_diagnostic_session()
         connection = self._conn
         if connection is not None:
             try:
@@ -310,6 +313,18 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 pass
         if previous is not None and previous is not store:
             await previous.flush()
+
+    def _record_g2_diagnostic_session(self) -> None:
+        """Retain the trusted-Mac physical-vs-simulator fact once per session."""
+
+        store = self._g2_diagnostics
+        if store is None or self.hello is None:
+            return
+        marker = (id(store), self._connection_generation)
+        if marker == self._g2_diagnostic_session_marker:
+            return
+        store.record_session(physical_g2=self.physical_g2_connected)
+        self._g2_diagnostic_session_marker = marker
 
     # ── subscriptions ────────────────────────────────────────────────────────
 
@@ -563,6 +578,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         timeout_s: float = 8.0,
         *,
         payload_digest: str | None = None,
+        diagnostic_kind: Literal["messages"] | None = None,
     ) -> bool:
         """Ask the wearer to approve an action; await their answer.
 
@@ -575,6 +591,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             prompt,
             timeout_s,
             payload_digest=payload_digest,
+            diagnostic_kind=diagnostic_kind,
         )
         return result.accepted if result is not None else False
 
@@ -585,6 +602,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         timeout_s: float = 8.0,
         *,
         payload_digest: str | None = None,
+        diagnostic_kind: Literal["messages"] | None = None,
     ) -> ConfirmationResult | None:
         """Return durable evidence only for an explicit bound HUD decision."""
 
@@ -593,6 +611,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 "confirm %s declined — exact preview exceeds HUD capacity",
                 action_id,
             )
+            return None
+        if diagnostic_kind not in (None, "messages"):
+            log.warning("confirm %s declined — diagnostic kind is invalid", action_id)
             return None
         conn = self._conn
         session_id = self._session_id
@@ -644,6 +665,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 payload_digest=payload_digest,
                 preview_digest=preview_digest,
                 expires_at_ms=int(expires_at_s * 1000),
+                diagnostic_kind=diagnostic_kind,
             ).to_wire()))
             if self._conn is not conn or self._session_id != session_id:
                 return None
@@ -955,6 +977,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             case Hello():
                 self.hello = message
                 log.info("device %s / %s", message.model, message.sn)
+                self._record_g2_diagnostic_session()
                 for hello_cb in self._hello_cbs:
                     hello_cb(message)
             case Audio():

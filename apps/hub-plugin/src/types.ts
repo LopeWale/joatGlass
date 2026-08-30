@@ -274,7 +274,7 @@ export type DownlinkMessage =
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */
   | { kind: 'imu.trace'; enabled: boolean }
-  | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number }
+  | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages' }
   | { kind: 'policy.set'; resume: ResumePolicy }
   /** Explicit-window pairing: issued only after an auth frame with a null token. */
   | { kind: 'pairing.set'; token: string }

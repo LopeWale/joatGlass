@@ -17,6 +17,7 @@ import {
   MESSAGES_COMPOSE_GUIDANCE,
   messagesListRows,
   messagesConversationTranscript,
+  navigationDecisionRows,
   usesMessagesCompactLayout,
   canRenderPlanningMonthGrid,
   fitHudWrappedText,
@@ -154,6 +155,20 @@ describe('navigation error hierarchy', () => {
     expect(showNavigationSecondaryInHeader('destination')).toBe(true);
     expect(showNavigationSecondaryInHeader('mode')).toBe(true);
     expect(showNavigationSecondaryInHeader('error')).toBe(false);
+  });
+});
+
+describe('compact navigation decisions', () => {
+  it('uses dense optical rows with a selection rail instead of option cards', () => {
+    expect(navigationDecisionRows(2)).toEqual([
+      { baselineY: 137, railTopY: 125, railHeight: 24, separatorY: 153, fontSize: 14 },
+      { baselineY: 171, railTopY: 159, railHeight: 24, fontSize: 14 },
+    ]);
+    expect(navigationDecisionRows(3)).toEqual([
+      { baselineY: 134, railTopY: 123, railHeight: 21, separatorY: 148, fontSize: 11 },
+      { baselineY: 162, railTopY: 151, railHeight: 21, separatorY: 176, fontSize: 11 },
+      { baselineY: 190, railTopY: 179, railHeight: 21, fontSize: 11 },
+    ]);
   });
 });
 
