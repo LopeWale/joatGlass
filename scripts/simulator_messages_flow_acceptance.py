@@ -52,6 +52,7 @@ class ScreenReceipt:
 
 
 ReplyOutcome = Literal["accepted", "cancelled", "timed_out", "uncertain", "failed"]
+MessagesFlow = Literal["reply", "compose", "history", "recovery"]
 SimulatorControl = Literal["click", "down", "up"]
 MenuSelectionControl = Literal["click", "down"]
 
@@ -310,6 +311,12 @@ _EXPECTED_HISTORY_FLOW = (
     ("messages-latest-returned", "scroll-up"),
 )
 
+_EXPECTED_RECOVERY_FLOW = (
+    ("messages-sidebar", "test-hook-open"),
+    ("messages-retry", "click"),
+    ("messages-conversations", "click"),
+)
+
 
 def menu_selection_controls(flow: str) -> tuple[MenuSelectionControl, ...]:
     """Return the exact simulator gestures that enter and select a Messages row.
@@ -322,6 +329,7 @@ def menu_selection_controls(flow: str) -> tuple[MenuSelectionControl, ...]:
         "reply": ("click", "down", "click"),
         "compose": ("click", "click"),
         "history": ("click", "down", "down", "click"),
+        "recovery": ("click", "click"),
     }
     controls = controls_by_flow.get(flow)
     if controls is None:
@@ -371,6 +379,7 @@ def required_evidence_frames(flow: str) -> tuple[str, ...]:
         "reply": _EXPECTED_REPLY_FLOW,
         "compose": _EXPECTED_COMPOSE_FLOW,
         "history": _EXPECTED_HISTORY_FLOW,
+        "recovery": _EXPECTED_RECOVERY_FLOW,
     }.get(flow)
     if expected is None:
         raise ValueError(f"unsupported Messages evidence flow: {flow}")
@@ -380,7 +389,7 @@ def required_evidence_frames(flow: str) -> tuple[str, ...]:
 def _write_evidence_receipt(
     evidence_dir: Path,
     *,
-    flow: Literal["reply", "compose", "history"],
+    flow: MessagesFlow,
     outcome: ReplyOutcome,
     expectation: ReplyOutcomeExpectation,
     sender_called: bool,
@@ -474,6 +483,10 @@ def validate_history_flow(receipts: list[ScreenReceipt]) -> None:
     _validate_receipts(receipts, _EXPECTED_HISTORY_FLOW)
 
 
+def validate_recovery_flow(receipts: list[ScreenReceipt]) -> None:
+    _validate_receipts(receipts, _EXPECTED_RECOVERY_FLOW)
+
+
 def build_fixture_store(path: Path) -> IMessageStore:
     """Create disposable conversations with a scrollable, metadata-rich thread."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -521,6 +534,33 @@ def build_fixture_store(path: Path) -> IMessageStore:
     connection.commit()
     connection.close()
     return IMessageStore(path)
+
+
+class RecoverOnceMessagesStore:
+    """Fail the first list read, then delegate the retry to the real store.
+
+    This is a narrow test boundary for a database rotation. It never exposes
+    fixture content in the receipt, and the production CapabilityRouter still
+    owns the access/retry state and the subsequent populated list.
+    """
+
+    def __init__(self, delegate: IMessageStore) -> None:
+        self._delegate = delegate
+        self.read_attempts = 0
+
+    @property
+    def available(self) -> bool:
+        return self._delegate.available
+
+    @property
+    def retry_visible(self) -> bool:
+        return self.read_attempts == 1
+
+    def recent_threads(self, limit: int = 5) -> list[MessageThread]:
+        self.read_attempts += 1
+        if self.read_attempts == 1:
+            raise sqlite3.DatabaseError("simulated transient Messages database rotation")
+        return self._delegate.recent_threads(limit)
 
 
 class RecordingSender(MessageSender):
@@ -575,9 +615,15 @@ async def _wait_for_messages_picker(router: CapabilityRouter) -> None:
         await asyncio.sleep(0.05)
 
 
+async def _wait_for_messages_retry(store: RecoverOnceMessagesStore) -> None:
+    """Wait until the real Mac router has consumed the injected read failure."""
+    while not store.retry_visible:
+        await asyncio.sleep(0.05)
+
+
 async def run(
     port: int,
-    flow: Literal["reply", "compose", "history"] = "reply",
+    flow: MessagesFlow = "reply",
     outcome: ReplyOutcome = "accepted",
     *,
     automation_base: str | None = None,
@@ -585,7 +631,7 @@ async def run(
 ) -> None:
     if flow != "reply" and outcome != "accepted":
         raise MessagesFlowError(
-            "only reply flow accepts a non-success outcome; compose/history stay no-send fixtures"
+            "only reply flow accepts a non-success outcome; compose/history/recovery stay no-send fixtures"
         )
     if (automation_base is None) != (evidence_dir is None):
         raise MessagesFlowError(
@@ -596,6 +642,8 @@ async def run(
     with tempfile.TemporaryDirectory(prefix="joat-messages-simulator-") as root:
         evidence_root = Path(root)
         store = build_fixture_store(evidence_root / "chat.db")
+        recovery_store = RecoverOnceMessagesStore(store) if flow == "recovery" else None
+        messages = recovery_store or store
         gateway = HubGatewayTransport(host="127.0.0.1", port=port)
         gateway.on_hello(lambda _hello: connected.set())
         hud = HudWriter(gateway)
@@ -611,7 +659,7 @@ async def run(
             hud=hud,
             transport=gateway,
             status=StatusPublisher(evidence_root / "status.json"),
-            messages=store,
+            messages=messages,  # type: ignore[arg-type]
             cards=CardLog(),
             replies=replies,  # type: ignore[arg-type]
         )
@@ -629,6 +677,52 @@ async def run(
                     automation_base,
                     menu_selection_controls(flow)[0],
                 )
+            if flow == "recovery":
+                if recovery_store is None:
+                    raise MessagesFlowError("recovery flow did not configure its transient store")
+                await asyncio.wait_for(_wait_for_messages_retry(recovery_store), timeout=90)
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-retry",
+                        "click",
+                    ))
+                    await _send_simulator_input(automation_base, "click")
+                await asyncio.wait_for(_wait_for_messages_picker(router), timeout=90)
+                if recovery_store.read_attempts != 2:
+                    raise MessagesFlowError(
+                        "Messages retry did not reach the recovering Mac database store"
+                    )
+                if sender.called.is_set() or sender.sent.is_set():
+                    raise MessagesFlowError("recovery-only trace reached sender")
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-conversations",
+                        "click",
+                    ))
+                    validate_recovery_flow(frames)
+                    _write_evidence_receipt(
+                        evidence_dir,
+                        flow=flow,
+                        outcome=outcome,
+                        expectation=ReplyOutcomeExpectation(
+                            simulator_gesture=None,
+                            simulator_control=None,
+                            wearer_label=None,
+                            sender_called=False,
+                            result_template="",
+                        ),
+                        sender_called=False,
+                        frames=frames,
+                    )
+                log.info("stage=messages-recovered read_attempts=%d no_send=true", recovery_store.read_attempts)
+                await asyncio.sleep(1)
+                return
             selected = replies.composing if flow == "compose" else replies.selected
             log.info("stage=connected flow=%s action=select-Messages-row", flow)
             if automation_base is not None:
@@ -806,7 +900,7 @@ async def _wait_for_history_page(router: CapabilityRouter, index: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18791)
-    parser.add_argument("--flow", choices=("reply", "compose", "history"), default="reply")
+    parser.add_argument("--flow", choices=("reply", "compose", "history", "recovery"), default="reply")
     parser.add_argument(
         "--outcome",
         choices=("accepted", "cancelled", "timed_out", "uncertain", "failed"),
