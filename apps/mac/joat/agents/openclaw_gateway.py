@@ -23,8 +23,12 @@ from ..core.log_redaction import install_websocket_secret_redaction
 
 
 PROTOCOL_VERSION = 4
-CLIENT_ID = "gateway-client"
-CLIENT_MODE = "backend"
+# ``gateway-client`` / ``backend`` is OpenClaw's reserved direct-loopback
+# helper identity.  JOAT crosses a Tailnet boundary with a signed paired-device
+# identity, so it must advertise the ordinary canonical operator identity
+# instead of looking like the Gateway's own internal control-plane client.
+CLIENT_ID = "cli"
+CLIENT_MODE = "cli"
 CLIENT_VERSION = "0.1.0"
 CLIENT_PLATFORM = "darwin"
 CLIENT_DEVICE_FAMILY = "mac"

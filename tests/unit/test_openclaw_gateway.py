@@ -565,8 +565,8 @@ def test_device_auth_payload_matches_openclaw_v3_contract() -> None:
 
     payload = gateway.build_device_auth_payload_v3(
         device_id="a" * 64,
-        client_id="gateway-client",
-        client_mode="backend",
+        client_id="cli",
+        client_mode="cli",
         role="operator",
         scopes=("operator.read",),
         signed_at_ms=1_777_777_777_000,
@@ -579,14 +579,14 @@ def test_device_auth_payload_matches_openclaw_v3_contract() -> None:
     assert payload == (
         "v3|"
         + "a" * 64
-        + "|gateway-client|backend|operator|operator.read|1777777777000||"
+        + "|cli|cli|operator|operator.read|1777777777000||"
         + "nonce-123|darwin|macbookpro"
     )
 
 
 @pytest.mark.asyncio
-async def test_connect_params_bind_identity_to_challenge_and_read_scope() -> None:
-    """Regression caught: connect is unsigned or signs a different challenge."""
+async def test_remote_connect_uses_paired_operator_identity() -> None:
+    """A Tailnet device must never claim OpenClaw's loopback backend identity."""
     gateway = importlib.import_module("joat.agents.openclaw_gateway")
     identity = RecordingIdentity()
 
@@ -601,19 +601,19 @@ async def test_connect_params_bind_identity_to_challenge_and_read_scope() -> Non
     assert identity.signed_payloads == [
         "v3|"
         + "b" * 64
-        + "|gateway-client|backend|operator|operator.read|1777777777001||"
+        + "|cli|cli|operator|operator.read|1777777777001||"
         + "server-nonce|darwin|mac"
     ]
     assert params == {
         "minProtocol": 4,
         "maxProtocol": 4,
         "client": {
-            "id": "gateway-client",
+            "id": "cli",
             "displayName": "JOAT Brainstorm",
             "version": "0.1.0",
             "platform": "darwin",
             "deviceFamily": "mac",
-            "mode": "backend",
+            "mode": "cli",
         },
         "caps": [],
         "role": "operator",
@@ -716,7 +716,7 @@ async def test_connect_params_bind_device_token_without_exposing_it_elsewhere() 
     assert identity.signed_payloads == [
         "v3|"
         + "b" * 64
-        + "|gateway-client|backend|operator|operator.read|1777777777002|"
+        + "|cli|cli|operator|operator.read|1777777777002|"
         + "paired-device-token|server-nonce|darwin|mac"
     ]
     assert params["auth"] == {
