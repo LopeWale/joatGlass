@@ -242,14 +242,15 @@ claim submission. The fixture remains a no-send boundary, and this evidence is
 not physical-G2 proof. Non-success outcomes apply to `--flow reply` only;
 compose and history remain their narrow no-send fixtures.
 
-The current official simulator API can drive the first visible **New message**
-row, but its `down` action remains bound to the native sidebar after the
-custom Messages list is painted. It cannot therefore autonomously select a
-later conversation row or establish the physical G2 swipe delivery for a
-reply-outcome run. The reply driver intentionally waits for a real
-`capdata` selection instead of preselecting a fixture thread; use a physical
-G2 (or a future simulator input that delivers that event) for that evidence.
-The retained official-simulator compose receipt is separate proof only.
+For a conversation reply, do not batch controls. After tapping **Messages**,
+wait for the complete **MESSAGES** list, send one official-simulator `down`,
+wait for its new highlighted-row frame, then tap the selected conversation.
+The reply driver intentionally waits for that real `capdata` selection instead
+of preselecting a fixture thread. The controlled official-simulator record
+shows **Adaeze** selected this way, followed by the visible **SWIPE · Cancel**
+confirmation outcome with no sender invocation. It remains simulator-only:
+physical-G2 source delivery, temple behavior, optical legibility, live voice,
+and a real Messages.app submission still require separate evidence.
 
 Run `--flow history` for the non-writing conversation proof. Select the
 fixture **Dele** conversation (it has more than one eight-message page), scroll
