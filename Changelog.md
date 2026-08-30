@@ -2,6 +2,21 @@
 
 ## 2026-08-30
 
+- Hardened the no-send **Messages** official-simulator harness so every reply
+  outcome has an explicit production-controller contract: **TAP · Confirm**
+  for submitted/uncertain/failed, **SWIPE · Cancel** for cancellation, and a
+  deliberate eight-second silence for timeout. The harness now clears stale
+  console output, requires the Hub's content-free `confirmation-visible`
+  receipt before it can inject an outcome control, and retains the confirmation
+  and result frames with a privacy-minimized receipt. Focused verification
+  passed 20 tests and strict mypy. Final visual evidence in
+  `messages-compose-confirmation-final-20260830/` proves the fixture-only
+  New message → confirmation → delivery-unverified result; it does not prove
+  later reply-row selection because the simulator's `down` input stays bound
+  to the native sidebar after the custom Messages list paints. Physical-G2
+  input and a real Messages.app submission remain separate gates. No package
+  was created or uploaded.
+
 - Opening a fresh **Messages** picker now disarms any previously selected
   conversation or New message compose context before it draws. A subsequent
   spoken reply therefore cannot target a conversation the wearer no longer
