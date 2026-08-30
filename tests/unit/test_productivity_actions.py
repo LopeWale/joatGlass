@@ -601,7 +601,7 @@ class TestReminderCreation:
         ).fetchone()[0] == 1
         assert workflow_projection(updates) == [
             ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
-            ("reminders", "saved", "Buy filters", "Saved and verified", "Reminders read-back matched", "left x2 Planning"),
+            ("reminders", "saved", "Buy filters", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "left x2 Planning"),
         ]
         store.close()
 

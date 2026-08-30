@@ -804,6 +804,10 @@ class ProductivityActionController:
                             success_phase,
                             display_title,
                             terminal_planning_anchor,
+                            reminder_monitoring_armed=(
+                                method == "reminders.create"
+                                and self._task_occurrences is not None
+                            ),
                         )
                         return success
                 except Exception:
@@ -820,6 +824,9 @@ class ProductivityActionController:
             success_phase,
             display_title,
             terminal_planning_anchor,
+            reminder_monitoring_armed=(
+                method == "reminders.create" and self._task_occurrences is not None
+            ),
         )
         return success
 
@@ -851,10 +858,16 @@ class ProductivityActionController:
         phase: WorkflowPhase,
         display_title: str,
         planning_anchor_unix_ms: int | None,
+        *,
+        reminder_monitoring_armed: bool = False,
     ) -> None:
         if self._publish_status is None:
             return
-        primary, secondary, hint = self._workflow_copy(kind, phase)
+        primary, secondary, hint = self._workflow_copy(
+            kind,
+            phase,
+            reminder_monitoring_armed=reminder_monitoring_armed,
+        )
         try:
             await self._publish_status(ProductivityHudView(
                 domain=self._workflow_domain(kind),
@@ -879,6 +892,8 @@ class ProductivityActionController:
         cls,
         kind: str,
         phase: WorkflowPhase,
+        *,
+        reminder_monitoring_armed: bool = False,
     ) -> tuple[str, str, str]:
         native_app = "Calendar" if cls._workflow_domain(kind) == "calendar" else "Reminders"
         # Both productivity domains return to one live planner, rather than
@@ -887,6 +902,12 @@ class ProductivityActionController:
         if phase == "verifying":
             subject = "calendar event" if kind == "calendar.create" else "reminder"
             return (f"Saving {subject}", "Checking native read-back", "Please wait")
+        if phase == "saved" and reminder_monitoring_armed:
+            # A durable occurrence was written only after EventKit's own
+            # alarm and the post-save receipt were accepted.  This informs
+            # the wearer that the unified due overlay is armed without
+            # pretending it proves a future macOS notification banner.
+            return ("Saved and verified", "Native alarm set · JOAT monitoring armed.", return_hint)
         if phase == "saved":
             return ("Saved and verified", f"{native_app} read-back matched", return_hint)
         if phase == "completed":

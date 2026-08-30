@@ -258,8 +258,11 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
     verifying: 'VERIFYING',
     saved: 'SAVED',
     completed: 'COMPLETED',
-    failed: 'NOT SAVED',
-    check: 'CHECK REQUIRED',
+    // These are terminal truth states, not generic progress failures.  The
+    // wearer needs to know whether EventKit definitely refused the write or
+    // whether it may have committed and therefore must not be retried.
+    failed: 'FAILED',
+    check: 'UNCERTAIN',
     cancelled: 'CANCELLED',
     not_saved: 'NOT SAVED',
     due: 'DUE NOW',

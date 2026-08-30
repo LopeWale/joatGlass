@@ -256,7 +256,29 @@ actor EventKitService {
         )
         try store.save(reminder, commit: true)
         storeGeneration &+= 1
-        let normalized = normalize(reminder: reminder)
+        // `save` leaves the in-memory EKReminder usable, but normalizing that
+        // same object is not an independent native read-back. Clear the
+        // EventKit cache and look the reminder up by its assigned identity so
+        // a saved HUD state always describes a fresh post-commit fetch.
+        let identifier = reminder.calendarItemIdentifier
+        guard !identifier.isEmpty else {
+            throw NativeBridgeError(
+                "commit_readback_missing",
+                "EventKit saved the reminder but did not return its identity",
+                retryable: false,
+                commitPhase: "committed_unverified"
+            )
+        }
+        store.reset()
+        guard let readBack = store.calendarItem(withIdentifier: identifier) as? EKReminder else {
+            throw NativeBridgeError(
+                "commit_readback_missing",
+                "EventKit saved the reminder but read-back is unavailable",
+                retryable: false,
+                commitPhase: "committed_unverified"
+            )
+        }
+        let normalized = normalize(reminder: readBack)
         let result = try BridgeContract.encode(normalized)
         completedAttempts[attemptID] = (payloadDigest, result)
         return result
