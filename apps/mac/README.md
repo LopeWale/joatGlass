@@ -46,9 +46,10 @@ Naming convention across the boundary: the wire is **camelCase** (`actionId`, `c
 
 The `Orchestrator` in `joat/services/`: subscribe to transport audio, feed `SttEngine`, route transcripts to a reply, and send `HudText` back. That closes Phase 0.
 
-## Deploying to a new Mac (mini, Studio, anything)
+## Deploying the core engine to a new Mac (mini, Studio, anything)
 
-One command, idempotent — no manual reconfiguration:
+One command, idempotent — no manual reconfiguration of the Python voice/G2
+engine:
 
 ```bash
 git clone <this repo> && cd joatGlass
@@ -58,7 +59,27 @@ git clone <this repo> && cd joatGlass
 The script installs Python ≥3.12 and `whisperkit-cli` (via Homebrew) if missing,
 creates the venv, installs the package, runs the test suite, pre-downloads the
 Whisper model (`--warm`), and installs a launchd agent (`--service`) so the
-brain starts at login and restarts if it dies. Logs: `~/Library/Logs/joat/brain.log`.
+core brain starts at login and restarts if it dies. Logs:
+`~/Library/Logs/joat/brain.log`.
+
+This raw service is deliberately **not** a complete Agent Terminal deployment.
+It has no `JOAT.app` native bridge, so it cannot use the Keychain-backed
+OpenClaw device identity/token; the engine reports Agent Terminal as
+`native_credentials_unavailable` instead of silently attempting Hermes with a
+weaker credential. For Brainstorm/Agent Terminal on a home Mac mini, run
+`./scripts/setup_brain.sh --warm` **without** `--service`, then install and
+launch `/Applications/JOAT.app` under that mini's logged-in user. Do not leave
+the raw `com.joat.brain` service running alongside JOAT.app: both own the
+same engine port, and the app is the supported owner for Agent Terminal. The
+app discovers the conventional `~/joatGlass` clone, starts the same Python
+child, owns the native bridge, and can be enabled once as a Login Item. Daily
+glasses use does not require opening the Mac app.
+
+Each home brain has one-time setup: its `openclaw.json` contains only the
+approved Gateway origin and `hermes` agent ID; JOAT.app keeps the resulting
+device identity/token in that Mac's Keychain and the OpenClaw host approves
+that device. See [the Mac app deployment contract](../../docs/MAC_APP.md#home-mac-mini-brain-contract)
+before treating a new mini as an Agent Terminal failover.
 
 The one step it will not automate: adding the new Mac's hostname to the plugin's
 `app.json` network whitelist (and `VITE_MAC_WS_URL`). That is a deliberate
