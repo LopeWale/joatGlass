@@ -461,8 +461,8 @@ class NavigationSession(Session):
         self._error_recovery = "origin"
         await self._send_view(NavigationHudView(
             view="error",
-            primary="Location unavailable",
-            secondary="Keep the phone foreground and unlocked",
+            primary="Phone location unavailable",
+            secondary="Allow Location for Even Hub, then retry",
             hint="tap retry · swipe cancel",
             interaction="stationary",
         ), "origin-error")

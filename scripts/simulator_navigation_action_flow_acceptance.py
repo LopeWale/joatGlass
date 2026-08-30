@@ -60,6 +60,15 @@ class FlowReceipt:
     visible_view: str
     bridge_acknowledged: bool
     framebuffer_sha256: str
+    visible_content_alpha_pixels: int
+
+
+# Exclude the fixed chrome and border. A changed framebuffer without enough
+# alpha-bearing pixels in this central region is a failed paint, not evidence
+# that a downlink became wearer-visible.
+_MIN_VISIBLE_CONTENT_ALPHA_PIXELS = 120
+_VISIBLE_CONTENT_X = range(52, 524)
+_VISIBLE_CONTENT_Y = range(70, 212)
 
 
 _EXPECTED_FLOW = (
@@ -72,6 +81,21 @@ _EXPECTED_FLOW = (
     ("location-unavailable-again", None, None, "error"),
     ("cancelled", "down", "cancel", "overview"),
 )
+
+
+def is_actionable_location_recovery(
+    primary: str,
+    secondary: str,
+    *,
+    has_origin_failure: bool,
+) -> bool:
+    """Require a real phone-origin failure plus a concrete wearer recovery action."""
+
+    return (
+        has_origin_failure
+        and primary == "Phone location unavailable"
+        and secondary == "Allow Location for Even Hub, then retry"
+    )
 
 
 def validate_action_flow(receipts: list[FlowReceipt]) -> None:
@@ -100,6 +124,10 @@ def validate_action_flow(receipts: list[FlowReceipt]) -> None:
             raise ActionFlowError(f"step {index} {expected_name}: Hub did not acknowledge the view")
         if len(receipt.framebuffer_sha256) != 64:
             raise ActionFlowError(f"step {index} {expected_name}: framebuffer digest is invalid")
+        if receipt.visible_content_alpha_pixels < _MIN_VISIBLE_CONTENT_ALPHA_PIXELS:
+            raise ActionFlowError(
+                f"step {index} {expected_name}: framebuffer changed but is visually empty"
+            )
     if len(receipts) != len(_EXPECTED_FLOW):
         raise ActionFlowError(
             f"expected {len(_EXPECTED_FLOW)} action-flow receipts, got {len(receipts)}"
@@ -260,6 +288,42 @@ def _write_alpha_preview(raw_path: Path) -> Path:
     return preview
 
 
+def _decode_rgba(png: bytes) -> bytes:
+    """Decode the official screenshot once for an optical-content check."""
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ActionFlowError("ffmpeg is required to inspect the simulator framebuffer")
+    completed = subprocess.run(
+        [
+            ffmpeg, "-loglevel", "error", "-i", "pipe:0",
+            "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1",
+        ],
+        input=png,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    expected_bytes = 576 * 288 * 4
+    if completed.returncode != 0 or len(completed.stdout) != expected_bytes:
+        raise ActionFlowError("could not decode the official simulator framebuffer")
+    return completed.stdout
+
+
+def visible_content_alpha_pixels(rgba: bytes) -> int:
+    """Count central, wearer-facing alpha pixels while excluding static chrome."""
+
+    expected_bytes = 576 * 288 * 4
+    if len(rgba) != expected_bytes:
+        raise ValueError("expected a 576x288 RGBA framebuffer")
+    return sum(
+        1
+        for y in _VISIBLE_CONTENT_Y
+        for x in _VISIBLE_CONTENT_X
+        if rgba[(y * 576 + x) * 4 + 3] >= 16
+    )
+
+
 async def _capture_visible_frame(
     *,
     automation_base: str,
@@ -267,7 +331,7 @@ async def _capture_visible_frame(
     name: str,
     prior_digest: str | None,
     require_changed: bool,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, int]:
     """Wait until the device framebuffer settles, then retain raw and reviewable pixels."""
 
     deadline = time.monotonic() + 12.0
@@ -275,6 +339,7 @@ async def _capture_visible_frame(
     stable_since = 0.0
     raw = b""
     digest = ""
+    last_content_alpha_pixels = 0
     while time.monotonic() < deadline:
         try:
             raw = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/screenshot/glasses")
@@ -289,13 +354,20 @@ async def _capture_visible_frame(
         if digest != previous:
             previous, stable_since = digest, now
         elif now - stable_since >= 0.6:
+            last_content_alpha_pixels = visible_content_alpha_pixels(_decode_rgba(raw))
+            if last_content_alpha_pixels < _MIN_VISIBLE_CONTENT_ALPHA_PIXELS:
+                await asyncio.sleep(0.1)
+                continue
             raw_path = output / f"{name}.rgba.png"
             raw_path.write_bytes(raw)
             raw_path.chmod(0o600)
             preview = _write_alpha_preview(raw_path)
-            return digest, raw_path.name, preview.name
+            return digest, raw_path.name, preview.name, last_content_alpha_pixels
         await asyncio.sleep(0.1)
-    raise ActionFlowError(f"{name}: simulator framebuffer did not settle")
+    raise ActionFlowError(
+        f"{name}: simulator framebuffer did not settle with readable wearer content "
+        f"({last_content_alpha_pixels} central alpha pixels)"
+    )
 
 
 async def _send_input(automation_base: str, action: str) -> None:
@@ -409,11 +481,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: next((ack for ack in view_acks if ack.request_id == destination.request_id), None),
             label="destination view acknowledgement",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="01-destination",
             prior_digest=None, require_changed=False,
         )
-        receipts.append(FlowReceipt("destination", None, None, "destination", True, digest))
+        receipts.append(FlowReceipt("destination", None, None, "destination", True, digest, content_pixels))
         artifacts: dict[str, dict[str, str]] = {"destination": {"raw": raw, "alpha": alpha}}
 
         action_count = len(actions)
@@ -430,19 +502,19 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: next((ack for ack in view_acks if ack.request_id == mode_walk.request_id), None),
             label="mode view acknowledgement",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="02-mode-walk",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("mode-walk", "click", confirmation.action, "mode", True, digest))
+        receipts.append(FlowReceipt("mode-walk", "click", confirmation.action, "mode", True, digest, content_pixels))
         artifacts["mode-walk"] = {"raw": raw, "alpha": alpha}
 
         await _request_input(automation_base, "down", manual=args.manual_input)
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="03-mode-cycle",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("mode-cycle", "down", None, "mode", True, digest))
+        receipts.append(FlowReceipt("mode-cycle", "down", None, "mode", True, digest, content_pixels))
         artifacts["mode-cycle"] = {"raw": raw, "alpha": alpha}
 
         action_count = len(actions)
@@ -461,29 +533,33 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: next((ack for ack in view_acks if ack.request_id == locating.request_id), None),
             label="locating view acknowledgement",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="04-locating",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("locating", "click", select_mode.action, "uncertain", True, digest))
+        receipts.append(FlowReceipt("locating", "click", select_mode.action, "uncertain", True, digest, content_pixels))
         artifacts["locating"] = {"raw": raw, "alpha": alpha}
 
         error = await _wait_for(
             lambda: _last_view(gateway, "error", after=view_count), label="location unavailable error"
         )
-        if error.navigation.primary != "Location unavailable" or not origin_failures:
+        if not is_actionable_location_recovery(
+            error.navigation.primary,
+            error.navigation.secondary,
+            has_origin_failure=bool(origin_failures),
+        ):
             raise ActionFlowError(
-                "simulator did not prove the genuine high-accuracy location-unavailable recovery path"
+                "simulator did not prove the actionable high-accuracy phone-location recovery path"
             )
         await _wait_for(
             lambda: next((ack for ack in view_acks if ack.request_id == error.request_id), None),
             label="location error view acknowledgement",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="05-location-unavailable",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("location-unavailable", None, None, "error", True, digest))
+        receipts.append(FlowReceipt("location-unavailable", None, None, "error", True, digest, content_pixels))
         artifacts["location-unavailable"] = {"raw": raw, "alpha": alpha}
 
         action_count = len(actions)
@@ -500,11 +576,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: next((ack for ack in view_acks if ack.request_id == retrying.request_id), None),
             label="retry locating view acknowledgement",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="06-retrying-location",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("retrying-location", "click", retry.action, "uncertain", True, digest))
+        receipts.append(FlowReceipt("retrying-location", "click", retry.action, "uncertain", True, digest, content_pixels))
         artifacts["retrying-location"] = {"raw": raw, "alpha": alpha}
 
         error_again = await _wait_for(
@@ -514,11 +590,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: next((ack for ack in view_acks if ack.request_id == error_again.request_id), None),
             label="second location error view acknowledgement",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="07-location-unavailable-again",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("location-unavailable-again", None, None, "error", True, digest))
+        receipts.append(FlowReceipt("location-unavailable-again", None, None, "error", True, digest, content_pixels))
         artifacts["location-unavailable-again"] = {"raw": raw, "alpha": alpha}
 
         action_count = len(actions)
@@ -539,11 +615,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ) if len([message for message in gateway.sent if isinstance(message, NavigationStop)]) > stop_count else None,
             label="navigation.stop downlink",
         )
-        digest, raw, alpha = await _capture_visible_frame(
+        digest, raw, alpha, content_pixels = await _capture_visible_frame(
             automation_base=automation_base, output=output, name="08-overview-after-cancel",
             prior_digest=digest, require_changed=True,
         )
-        receipts.append(FlowReceipt("cancelled", "down", cancelled.action, "overview", True, digest))
+        receipts.append(FlowReceipt("cancelled", "down", cancelled.action, "overview", True, digest, content_pixels))
         artifacts["cancelled"] = {"raw": raw, "alpha": alpha}
 
         validate_action_flow(receipts)

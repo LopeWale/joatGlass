@@ -276,8 +276,8 @@ class TestNavigationSession:
         await asyncio.sleep(0.06)
         error = await wait_for(transport, NavigationView, count=4)
         assert isinstance(error, NavigationView)
-        assert error.navigation.primary == "Location unavailable"
-        assert "foreground" in error.navigation.secondary
+        assert error.navigation.primary == "Phone location unavailable"
+        assert error.navigation.secondary == "Allow Location for Even Hub, then retry"
         session.accept_action(action(error, "retry"))
         retried_origin = await wait_for(transport, NavigationOriginRequest, count=2)
         assert isinstance(retried_origin, NavigationOriginRequest)

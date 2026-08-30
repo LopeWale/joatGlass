@@ -160,10 +160,11 @@ export class LocationSessionManager {
   /** Fresh, explicit route origin; does not change the continuous profile. */
   async requestNavigationOrigin(): Promise<AppLocation | null> {
     try {
-      return await this.bridge().getAppLocation({
-        accuracy: AppLocationAccuracy.High,
-        timeoutMs: 5000,
-      });
+      // Use the same host-boundary timeout as ambient and assistant reads.
+      // Some Even host builds acknowledge the request but never settle it;
+      // route setup must recover to an actionable error instead of remaining
+      // indefinitely on the locating HUD.
+      return await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.High);
     } catch {
       return null;
     }

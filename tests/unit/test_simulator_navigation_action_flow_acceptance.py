@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from scripts.simulator_navigation_action_flow_acceptance import (
     ActionFlowError,
     FlowReceipt,
+    is_actionable_location_recovery,
     validate_action_flow,
 )
 
@@ -23,6 +26,7 @@ def receipt(
         visible_view=visible_view,
         bridge_acknowledged=True,
         framebuffer_sha256="a" * 64,
+        visible_content_alpha_pixels=2_000,
     )
 
 
@@ -99,3 +103,31 @@ def test_action_flow_rejects_a_frame_that_changed_without_the_expected_semantic_
 
     with pytest.raises(ActionFlowError, match="confirm_destination"):
         validate_action_flow(receipts)
+
+
+def test_action_flow_rejects_a_changed_but_visually_empty_frame() -> None:
+    receipts = [
+        receipt(
+            "destination",
+            input_action=None,
+            semantic_action=None,
+            visible_view="destination",
+        ),
+    ]
+    receipts[0] = replace(receipts[0], visible_content_alpha_pixels=0)
+
+    with pytest.raises(ActionFlowError, match="visually empty"):
+        validate_action_flow(receipts)
+
+
+def test_location_failure_requires_actionable_even_hub_permission_recovery() -> None:
+    assert is_actionable_location_recovery(
+        "Phone location unavailable",
+        "Allow Location for Even Hub, then retry",
+        has_origin_failure=True,
+    )
+    assert not is_actionable_location_recovery(
+        "Location unavailable",
+        "Keep the phone foreground and unlocked",
+        has_origin_failure=True,
+    )

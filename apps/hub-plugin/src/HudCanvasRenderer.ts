@@ -37,6 +37,14 @@ const HAIRLINE = 51;
 const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
 
+/** Error recovery copy belongs in its warning card; repeating it in the
+ * decision header makes the action harder to scan at a glance. */
+export function showNavigationSecondaryInHeader(
+  view: NavigationHudModel['view'],
+): boolean {
+  return view !== 'error';
+}
+
 /** The card's header, body, and footer are separate optical regions. Keeping
  * these anchors together prevents a long reply from sharing the divider row. */
 const ASSISTANT_OVERLAY_GEOMETRY = {
@@ -1498,9 +1506,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(BRIGHT);
     context.font = `21px ${HUD_FONT}`;
     this.fitText(context, navigation.primary, 36, 84, 504);
-    context.fillStyle = gray(SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
-    this.fitText(context, navigation.secondary, 36, 108, 504);
+    if (showNavigationSecondaryInHeader(navigation.view)) {
+      context.fillStyle = gray(SUPPORT);
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(context, navigation.secondary, 36, 108, 504);
+    }
 
     if (navigation.options.length > 0) {
       const rowHeight = navigation.options.length > 2 ? 36 : 45;
