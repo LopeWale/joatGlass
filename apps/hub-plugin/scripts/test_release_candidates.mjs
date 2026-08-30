@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -7,26 +8,22 @@ import {
   validateReleaseCandidates,
 } from './release_candidates.mjs';
 
-const manifest = {
-  permissions: [{
-    name: 'network',
-    whitelist: [
-      'wss://admins-mac-mini.tail3a3363.ts.net',
-      'wss://second-mini.tail3a3363.ts.net',
-      'ws://emmanuels-macbook-pro.local:8787',
-    ],
-  }],
-};
+// Release-candidate validation must exercise the same allowlist packed into
+// JOAT. A hand-written fixture can accidentally "approve" a Mini that the
+// Even Hub manifest will reject before the socket is opened.
+const manifest = JSON.parse(
+  readFileSync(new URL('../app.json', import.meta.url), 'utf8'),
+);
 
-test('accepts explicitly whitelisted private G2 gateway URLs', () => {
+test('accepts only actual explicitly whitelisted private G2 gateway URLs', () => {
   assert.deepEqual(
     validateReleaseCandidates(
-      'wss://admins-mac-mini.tail3a3363.ts.net/glasses,wss://second-mini.tail3a3363.ts.net/glasses',
+      'wss://admins-mac-mini.tail3a3363.ts.net/glasses,wss://emmanuels-macbook-pro.tail3a3363.ts.net/glasses',
       manifest,
     ),
     [
       'wss://admins-mac-mini.tail3a3363.ts.net/glasses',
-      'wss://second-mini.tail3a3363.ts.net/glasses',
+      'wss://emmanuels-macbook-pro.tail3a3363.ts.net/glasses',
     ],
   );
 });
