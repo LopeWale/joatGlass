@@ -38,6 +38,23 @@ final class EventKitReminderFetchTests: XCTestCase {
         XCTAssertTrue(calls.isEmpty)
     }
 
+    func testReminderCompletionReadBackClearsCacheBeforeFetchingTheCommittedReminder() throws {
+        var calls: [String] = []
+
+        let value: String = try EventKitService.committedReadBack(
+            identifier: "reminder-native-id",
+            entity: "reminder completion",
+            resetStore: { calls.append("reset") },
+            fetch: { identifier in
+                calls.append("fetch:\(identifier)")
+                return "fresh-completed-reminder"
+            }
+        )
+
+        XCTAssertEqual(value, "fresh-completed-reminder")
+        XCTAssertEqual(calls, ["reset", "fetch:reminder-native-id"])
+    }
+
     func testReminderDueWindowIsHalfOpenAndExcludesUndatedItems() throws {
         let request = ReminderQueryRequest(
             calendarIdentifiers: ["personal"],
