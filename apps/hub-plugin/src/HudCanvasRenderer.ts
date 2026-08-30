@@ -1783,28 +1783,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context.font = `${row.fontSize}px ${HUD_FONT}`;
         this.fitText(context, option, 52, row.baselineY, 470);
       });
+    } else if (navigation.view === 'destination') {
+      // The title and address above already are the canonical place. A second
+      // outlined copy makes a two-line decision feel like a web dialog.
+      this.drawMapPin(context, 51, 151, BRIGHT);
+      context.fillStyle = gray(CHROME);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText('CANONICAL PLACE', 80, 151);
     } else {
-      context.strokeStyle = gray(navigation.view === 'error' ? SUPPORT : CHROME);
-      context.lineWidth = 1;
-      roundedRect(context, 36, 130, 504, 78, 8);
-      context.stroke();
-      if (navigation.view === 'destination') {
-        this.drawMapPin(context, 67, 169, BRIGHT);
-        context.fillStyle = gray(CHROME);
-        context.font = `9px ${HUD_FONT}`;
-        context.fillText('CANONICAL PLACE', 99, 153);
-        context.fillStyle = gray(BRIGHT);
-        context.font = `16px ${HUD_FONT}`;
-        this.fitText(context, navigation.primary, 99, 177, 420);
-        context.fillStyle = gray(SUPPORT);
-        context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, navigation.secondary, 99, 197, 420);
-      } else {
-        this.drawWarningMark(context, 76, 169, SUPPORT);
-        context.fillStyle = gray(SUPPORT);
-        context.font = `13px ${HUD_FONT}`;
-        this.drawWrappedText(context, navigation.secondary, 112, 157, 390, 18, 2);
-      }
+      // A recovery state needs an unmistakable marker and plain instruction,
+      // not a container that competes with the error's primary wording.
+      this.drawWarningMark(context, 61, 155, SUPPORT);
+      context.fillStyle = gray(SUPPORT);
+      context.font = `13px ${HUD_FONT}`;
+      this.drawWrappedText(context, navigation.secondary, 99, 144, 420, 18, 2);
     }
     this.drawNavigationFooter(context, navigation.hint);
   }
@@ -1864,10 +1856,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `10px ${HUD_FONT}`;
     context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 59);
 
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 1;
-    roundedRect(context, 36, 76, 92, 108, 12);
-    context.stroke();
+    // One divider keeps the maneuver as a stable scan column without turning
+    // the active guidance view into a dashboard of outlined cards.
+    context.fillStyle = gray(HAIRLINE);
+    context.fillRect(128, 76, 1, 108);
     this.drawManeuver(context, navigation.maneuver ?? 'continue', 82, 118, BRIGHT);
     context.fillStyle = gray(BRIGHT);
     context.font = `16px ${HUD_FONT}`;
@@ -1877,13 +1869,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.fillStyle = gray(BRIGHT);
     context.font = `25px ${HUD_FONT}`;
-    this.fitText(context, navigation.primary, 156, 95, 384);
+    this.fitText(context, navigation.primary, 150, 95, 390);
     context.fillStyle = gray(SUPPORT);
     context.font = `16px ${HUD_FONT}`;
-    this.drawWrappedText(context, navigation.secondary, 156, 128, 384, 21, 2);
+    this.drawWrappedText(context, navigation.secondary, 150, 128, 390, 21, 2);
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, navigation.hint, 156, 190, 384);
+    this.fitText(context, navigation.hint, 150, 190, 390);
 
     this.drawNavigationProgress(context, navigation.progress ?? 0);
     const footer = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
