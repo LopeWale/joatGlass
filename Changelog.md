@@ -2,6 +2,15 @@
 
 ## 2026-08-29
 
+- Released the next canonical private Even Hub artifact under the existing
+  `com.akinwale.joat` project as `v0.1.26`, rather than attempting to upload
+  a changed artifact under the already-existing `v0.1.25` version. The fresh
+  package was built from clean `d1c1185`, is 72,653 bytes, and has SHA-256
+  `09cd82bf131ed4b2fa00e2336f7b4abd8ed15b9ac8979d5b7c0971a45ff231e3`.
+  The full Hub suite (389 tests), Gate 0 protocol/trace checks (32 tests),
+  typecheck, production build, and private-stage package build passed.
+  Portal upload/install and physical-G2 location proof remain separate gates.
+
 - Fixed the installed Finder-launched JOAT app's experimental-navigation
   configuration handoff. It now forwards only the selected repository's
   Mapbox token (`MAPBOX_ACCESS_TOKEN` or legacy `MAPBOX_API_KEY`) to its Python
