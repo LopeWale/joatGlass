@@ -26,8 +26,12 @@ right-temple-only input, double-click = system exit).
 
 ## 4. Wire STT + MLX reply — WIRED; PHYSICAL LATENCY OPEN
 
-`python -m joat` runs the voice loop: mic → RmsVad → WhisperKitEngine → transcript
-as `hud.text`. Deploy to any Mac with `./scripts/setup_brain.sh --service --warm`.
+`python -m joat` runs the core voice loop: mic → RmsVad → WhisperKitEngine →
+transcript as `hud.text`. `./scripts/setup_brain.sh --service --warm` is only
+the legacy Python-core deployment. An unattended glasses-first Brainstorm /
+Agent Terminal Mini must run the installed **JOAT.app** with **Launch at Login**
+so its app-owned native bridge can use the Mini's Keychain identity; see
+`docs/MAC_APP.md`.
 The voice loop is wired, but the earlier desk result did not survive current
 physical use: roughly 15-second replies have been observed and the production-G2
 metric is reopened. Phase 2 is in progress: debate loop with visible verifier

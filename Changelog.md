@@ -2,6 +2,13 @@
 
 ## 2026-08-30
 
+- Marked `setup_brain.sh --service` as the legacy **core-only** Python service
+  it actually is. Its launchd process has no JOAT.app native bridge and cannot
+  host the Mini's Keychain-backed Hermes/Agent Terminal identity. The installer
+  and historical next-steps guide now direct the unattended glasses-first Mini
+  to the signed JOAT.app's Launch at Login path instead. This is a deployment
+  guard only; it does not alter a live engine, package, or G2 surface.
+
 - Replaced the standalone OpenClaw pairing probe's impossible direct native-
   bridge connection with a content-free, app-owned Mini readiness proof. The
   bridge intentionally admits only JOAT.app's Python child; the probe now reads

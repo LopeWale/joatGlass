@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# setup_brain.sh — stand up the JOAT Mac brain on any Mac, idempotently.
+# setup_brain.sh — prepare JOAT's Python core on any Mac, idempotently.
 #
 #   git clone <repo> && cd <repo> && ./scripts/setup_brain.sh [--service] [--warm]
 #
 # Safe to re-run: every step checks before it acts. Flags:
-#   --service   install + start a launchd agent so the brain runs at login
-#               and restarts if it dies (the always-on Mac Studio mode)
+#   --service   install + start a *legacy core-only* launchd agent. It runs
+#               Python without JOAT.app's native bridge, so it cannot host
+#               Keychain-backed Agent Terminal/Hermes. Use JOAT.app's
+#               Launch at Login for the unattended glasses-first home brain.
 #   --warm      pre-download the Whisper model now (~1.5 GB) instead of on
 #               the first utterance
 #
-# What it does NOT do: edit the plugin's app.json whitelist. Adding a new
-# Mac's hostname there is a deliberate security decision — this script only
-# TELLS you when the current machine isn't whitelisted.
+# What it does NOT do: start JOAT.app's native bridge or edit the plugin's
+# app.json whitelist. Adding a new Mac's hostname is a deliberate security
+# decision — this script only TELLS you when the current machine isn't
+# whitelisted.
 
 set -euo pipefail
 
@@ -127,11 +130,13 @@ if [ "$WANT_SERVICE" = 1 ]; then
 PLIST
   launchctl unload "$PLIST_PATH" 2>/dev/null || true
   launchctl load "$PLIST_PATH"
-  say "launchd agent installed: $PLIST_LABEL (logs: $LOG_DIR/brain.log)"
+  warn "legacy core-only launchd agent installed: $PLIST_LABEL (logs: $LOG_DIR/brain.log)"
+  warn "Agent Terminal and Hermes stay unavailable because JOAT.app owns their native bridge."
+  warn "For the unattended glasses-first home brain, install JOAT.app and enable Launch at Login."
   say "stop with: launchctl unload $PLIST_PATH"
 else
   say "run the brain:  $VENV/bin/python -m joat"
-  say "(or re-run with --service to keep it always on)"
+  say "(--service keeps only this legacy Python core running; see docs/MAC_APP.md for JOAT.app home-brain setup)"
 fi
 
 say "done."

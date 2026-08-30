@@ -82,6 +82,10 @@ OpenClaw device token, so a raw service correctly reports Agent Terminal as
 `native_credentials_unavailable` rather than substituting an environment token
 or a shared credential.
 
+Do not use that legacy service as the home brain for a glasses-first Hermes
+deployment. It is retained for core-only development/voice work; the unattended
+Mini contract below is JOAT.app plus its Login Item.
+
 For a mini to be an unattended Brainstorm/Agent Terminal brain, perform this
 once while logged into that mini's normal macOS user:
 
