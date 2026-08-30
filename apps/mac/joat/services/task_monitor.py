@@ -108,7 +108,10 @@ def reminder_due_hud_view(
         # requires the existing spoken intent and exact confirmation preview.
         # Tell the wearer how to enter that safe path instead of presenting a
         # dead-end alarm that only offers navigation away.
-        hint="Say complete reminder title · Back: left x2 Planning",
+        # Keep this within the wire protocol's 46-character productivity-hint
+        # bound. The visible title identifies the due reminder, so repeating
+        # it in the spoken command would waste the only escape-line budget.
+        hint="Say complete reminder · Back: left x2",
         planning_anchor_unix_ms=anchor,
         reminder_due_id=reminder_due_id,
     )

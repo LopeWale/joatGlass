@@ -95,18 +95,48 @@ def test_planning_day_receipt_requires_both_native_kinds() -> None:
         ))
 
 
-def test_frame_counter_accepts_only_completed_visual_surface_receipts() -> None:
+async def test_screenshot_completion_never_reads_console_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     driver = _driver()
 
     assert driver is not None
-    assert driver.visual_frame_ack_count(
-        b"[HudVisualSurface] frame 4 bridge-ack\n"
-        b"[HudVisualSurface] frame paint failed\n"
-        b"[HudVisualSurface] frame 5 bridge-ack\n"
-    ) == 2
+    calls: list[str] = []
+
+    def screenshot_only(url: str, **_kwargs: object) -> bytes:
+        calls.append(url)
+        assert "/api/console" not in url
+        assert url.endswith("/api/screenshot/glasses")
+        return b"stable-frame"
+
+    def alpha_preview(raw_path: Path) -> Path:
+        preview = raw_path.with_name(f"{raw_path.stem}.alpha.png")
+        preview.write_bytes(b"preview")
+        return preview
+
+    monkeypatch.setattr(driver, "_http_bytes", screenshot_only)
+    monkeypatch.setattr(driver, "_alpha_preview", alpha_preview)
+
+    observation = driver.CaptureObservation()
+    digest, _, _ = await driver._capture(
+        "http://simulator.invalid",
+        tmp_path,
+        "frame",
+        "0" * 64,
+        observation=observation,
+    )
+
+    assert digest == hashlib.sha256(b"stable-frame").hexdigest()
+    assert len(calls) >= 2
+    assert all(url.endswith("/api/screenshot/glasses") for url in calls)
+    assert observation.first_changed_at_ns is not None
+    assert observation.settled_at_ns is not None
+    assert observation.settled_at_ns >= observation.first_changed_at_ns
+    assert not hasattr(driver, "_wait_for_visual_frame")
+    assert not hasattr(driver, "visual_frame_ack_count")
 
 
-def test_visual_latency_separates_complete_frame_from_settled_frame() -> None:
+def test_visual_latency_separates_first_changed_framebuffer_from_settled_framebuffer() -> None:
     driver = _driver()
 
     assert driver is not None
@@ -114,30 +144,33 @@ def test_visual_latency_separates_complete_frame_from_settled_frame() -> None:
         screen="calendar-verifying",
         trigger="confirmed_tap",
         started_at_ns=1_000_000_000,
-        completed=driver.VisualFrameCheckpoint(3, 12, 1, observed_at_ns=1_180_000_000),
-        settled_at_ns=1_820_000_000,
+        observation=driver.CaptureObservation(
+            first_changed_at_ns=1_180_000_000,
+            settled_at_ns=1_820_000_000,
+        ),
     )
 
     assert sample == driver.VisualLatency(
         screen="calendar-verifying",
         trigger="confirmed_tap",
-        completed_frame_ms=180,
-        settled_frame_ms=820,
+        first_changed_framebuffer_ms=180,
+        settled_framebuffer_ms=820,
     )
     assert driver.visual_latency(
         screen="calendar-verifying",
         trigger="confirmed_tap",
         started_at_ns=1_000_000_000,
-        completed=driver.VisualFrameCheckpoint(3, 12, 1),
-        settled_at_ns=1_820_000_000,
+        observation=driver.CaptureObservation(),
     ) is None
     with pytest.raises(driver.ProductivityHudFlowError, match="out of order"):
         driver.visual_latency(
             screen="calendar-verifying",
             trigger="confirmed_tap",
             started_at_ns=1_000_000_000,
-            completed=driver.VisualFrameCheckpoint(3, 12, 1, observed_at_ns=900_000_000),
-            settled_at_ns=1_820_000_000,
+            observation=driver.CaptureObservation(
+                first_changed_at_ns=900_000_000,
+                settled_at_ns=1_820_000_000,
+            ),
         )
     assert driver.visual_latency_summary([]) == {"sample_count": 0}
     assert driver.visual_latency_summary([
@@ -145,21 +178,9 @@ def test_visual_latency_separates_complete_frame_from_settled_frame() -> None:
         driver.VisualLatency("calendar-verifying", "confirmed_tap", 240, 840),
     ]) == {
         "sample_count": 2,
-        "max_completed_frame_ms": 240,
-        "max_settled_frame_ms": 840,
+        "max_first_changed_framebuffer_ms": 240,
+        "max_settled_framebuffer_ms": 840,
     }
-    assert driver.visual_frame_ack_count(
-        b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
-    ) == 0
-    assert driver.simulator_bridge_message_count(
-        b"[Simulator] Flutter Bridge intercepted: evenAppMessage\n" * 4
-        + b"[HudVisualSurface] frame 4 bridge-ack\n"
-    ) == 4
-    assert driver.productivity_verifying_receipt_count(
-        b"[HudVisualSurface] receipt productivity_verifying bridge-ack\n"
-        b"[HudVisualSurface] receipt reminder_due bridge-ack\n"
-        b"[HudVisualSurface] receipt productivity_verifying bridge-ack\n"
-    ) == 2
 
 
 async def test_fixture_bridge_holds_a_controller_write_until_verifying_can_render() -> None:
@@ -200,14 +221,15 @@ async def test_fixture_bridge_holds_a_controller_write_until_verifying_can_rende
     assert bridge.write_methods == ["reminders.create"]
 
 
-async def test_driver_releases_controller_write_only_after_verifying_receipt(
+async def test_driver_retains_verifying_frame_before_releasing_controller_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise controller, confirmation, driver, and visual-order boundary.
 
     The fixture holds ``reminders.create``. The driver must request the
-    content-free verifying receipt after the real controller published
-    ``verifying`` and before it releases that held native-shaped write.
+    actual screenshot capture after the real controller published ``verifying``
+    and before it releases that held native-shaped write. Console output cannot
+    satisfy this boundary.
     """
 
     driver = _driver()
@@ -254,46 +276,34 @@ async def test_driver_releases_controller_write_only_after_verifying_receipt(
         publish_status=publish,
     )
     gateway = SimpleNamespace(sent=published, confirmation_requests=confirmation_requests)
-    checkpoints = iter([
-        driver.VisualFrameCheckpoint(0, 0, 0),
-        driver.VisualFrameCheckpoint(1, 4, 0),
-        driver.VisualFrameCheckpoint(2, 8, 1),
-    ])
     captures = iter([
         ("a" * 64, "review.rgba.png", "review.alpha.png"),
         ("b" * 64, "verifying.rgba.png", "verifying.alpha.png"),
         ("c" * 64, "saved.rgba.png", "saved.alpha.png"),
     ])
-    receipt_requests: list[str | None] = []
-
-    async def visual_checkpoint(_automation_base: str):
-        return next(checkpoints)
-
     async def input_action(_automation_base: str, action: str) -> None:
         assert action == "click"
         accepted.set()
 
-    async def visual_frame(
+    captured_names: list[str] = []
+
+    async def capture(
         _automation_base: str,
+        _output: Path,
+        name: str,
+        _prior_digest: str | None,
         *,
-        after,
-        label: str,
-        required_receipt: str | None = None,
-        timeout_s: float = 15.0,
+        observation,
     ):
-        del after, label, timeout_s
-        receipt_requests.append(required_receipt)
-        if required_receipt == "productivity_verifying":
+        captured_names.append(name)
+        if name.endswith("-verifying"):
             assert [view.phase for view in published] == ["verifying"]
             assert bridge.write_methods == ["reminders.create"]
-        return driver.VisualFrameCheckpoint(3, 12, 1)
-
-    async def capture(*_args, **_kwargs):
+        assert observation.first_changed_at_ns is None
+        assert observation.settled_at_ns is None
         return next(captures)
 
-    monkeypatch.setattr(driver, "_visual_frame_checkpoint", visual_checkpoint)
     monkeypatch.setattr(driver, "_input", input_action)
-    monkeypatch.setattr(driver, "_wait_for_visual_frame", visual_frame)
     monkeypatch.setattr(driver, "_capture", capture)
 
     receipts: list[object] = []
@@ -323,7 +333,7 @@ async def test_driver_releases_controller_write_only_after_verifying_receipt(
         store.close()
 
     assert before == 0
-    assert receipt_requests == [None, "productivity_verifying", None]
+    assert captured_names == ["01-review", "02-verifying", "03-saved"]
     assert [view.phase for view in published] == ["verifying", "saved"]
     assert bridge.write_methods == ["reminders.create"]
     assert latencies == []
