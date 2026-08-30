@@ -132,8 +132,10 @@ describe('CapabilityMenu', () => {
       event: { containerName: 'capmenu', eventType: 0, selectedIndex: 0, selectedName: 'Messages' },
     });
     expect(latestRequestId(sent)).toMatch(/^hud-request-/);
-    // In the data view, list events are the Mac's business, not the menu's.
-    expect(menu.handleList(click(1))).toBe(false);
+    // The loading data view owns firmware list events, but no row can activate
+    // until a matching Mac response explicitly marks the rows selectable.
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent).toHaveLength(1);
   });
 
   it('moves the custom sidebar selection with text-capture scrolls and opens that row on click', async () => {
@@ -174,6 +176,66 @@ describe('CapabilityMenu', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('replaces a missing Messages response with a working tap-to-retry action', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, listOptions, sent } = rig();
+      await menu.toggle();
+      menu.handleList(clickRow0());
+      await vi.advanceTimersByTimeAsync(0);
+      const firstRequestId = latestRequestId(sent);
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(lists[1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
+      expect(listOptions[1]).toMatchObject({
+        title: 'MESSAGES · RETRY', hint: 'tap retry · left x2 overview', selectable: true,
+      });
+
+      expect(menu.handleClick()).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent).toHaveLength(2);
+      expect(sent[1]).toMatchObject({
+        kind: 'input',
+        event: { containerName: 'capmenu', selectedIndex: 0, selectedName: 'Messages' },
+      });
+      expect(latestRequestId(sent)).not.toBe(firstRequestId);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('turns Messages access guidance into a real retry action after Mac recovery', async () => {
+    const { menu, sent, listOptions, moves } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const firstRequestId = latestRequestId(sent);
+
+    expect(await menu.presentList(
+      'MESSAGES · ACCESS',
+      [
+        'Messages access is blocked on this Mac.',
+        'Allow Full Disk Access for JOAT, then tap retry.',
+      ],
+      firstRequestId,
+      false,
+      'left x2 overview',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      selectable: true, hint: 'tap retry · left x2 overview',
+    });
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(moves).toEqual([]);
+
+    expect(menu.handleClick()).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capmenu', selectedName: 'Messages', selectedIndex: 0 },
+    });
+    expect(latestRequestId(sent)).not.toBe(firstRequestId);
   });
 
   it('does not discard a matching Planning response while the retry frame is still painting', async () => {
@@ -309,6 +371,53 @@ describe('CapabilityMenu', () => {
     info.mockRestore();
   });
 
+  it('routes a physical listEvent selection through the owned Messages request', async () => {
+    const { menu, sent } = rig();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
+
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capdata',
+        selectedIndex: 1,
+        selectedName: 'MESSAGES',
+        requestId,
+      },
+    });
+    const traceId = (sent[1]?.event as { traceId?: string }).traceId;
+    expect(traceId).toMatch(/^hud-/);
+    expect(info).toHaveBeenCalledWith(
+      `[joat trace] trace=${traceId} stage=message-selected index=1`,
+    );
+    info.mockRestore();
+  });
+
+  it('suppresses repeated physical message selections until the Mac replaces the frame', async () => {
+    const { menu, sent } = rig();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
+
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent).toHaveLength(2);
+
+    expect(await menu.presentList(
+      'MESSAGES · REPLY', ['Ada · latest', 'Say “JOAT, reply saying …”'], requestId, false,
+    )).toBe(true);
+    expect(sent).toHaveLength(2);
+    info.mockRestore();
+  });
+
   it('routes non-Messages data clicks as capability detail selections', async () => {
     const { menu, sent } = rig();
     await menu.toggle();
@@ -416,6 +525,84 @@ describe('CapabilityMenu', () => {
     });
   });
 
+  it.each([
+    { domain: 'calendar', phase: 'saved' },
+    { domain: 'calendar', phase: 'failed' },
+    { domain: 'calendar', phase: 'check' },
+    { domain: 'calendar', phase: 'cancelled' },
+    { domain: 'calendar', phase: 'not_saved' },
+    { domain: 'reminders', phase: 'saved' },
+    { domain: 'reminders', phase: 'completed' },
+    { domain: 'reminders', phase: 'failed' },
+    { domain: 'reminders', phase: 'check' },
+    { domain: 'reminders', phase: 'cancelled' },
+    { domain: 'reminders', phase: 'not_saved' },
+  ] satisfies ReadonlyArray<{
+    domain: ProductivityHudModel['domain'];
+    phase: ProductivityHudModel['phase'];
+  }>)('returns terminal $domain $phase to its anchored Planning day after a readable outcome', async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const { menu, sent } = rig();
+      const planningAnchorUnixMs = 1_788_274_200_000;
+      await menu.presentProductivity({
+        ...outcome,
+        title: 'Native-backed item',
+        primary: 'Outcome recorded',
+        secondary: 'Read-back complete',
+        hint: 'Planning in 5s · left x2 now',
+        planningAnchorUnixMs,
+      });
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(sent).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        kind: 'input',
+        event: {
+          containerName: 'capmenu',
+          selectedIndex: 1,
+          selectedName: 'Planning',
+          planningAnchorUnixMs,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not abandon a newer due reminder when replacing a terminal outcome', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, sent } = rig();
+      await menu.presentProductivity({
+        domain: 'reminders',
+        phase: 'saved',
+        title: 'Buy filters',
+        primary: 'Saved and verified',
+        secondary: 'Native alarm set · JOAT monitoring armed.',
+        hint: 'Planning in 5s · left x2 now',
+        planningAnchorUnixMs: 1_788_274_200_000,
+      });
+      await menu.presentProductivity({
+        domain: 'reminders',
+        phase: 'due',
+        title: 'Buy filters',
+        primary: 'Due now',
+        secondary: 'This reminder is still incomplete.',
+        hint: 'left x2 Planning',
+        planningAnchorUnixMs: 1_788_274_200_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sent).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls back to generic Planning when a stale outcome has an invalid anchor', async () => {
     const { menu, sent } = rig();
     await menu.presentProductivity({
@@ -454,7 +641,7 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(2); // no second/stale conversation selection
   });
 
-  it('double-tap is BACK from data — buffered home restores without an obsolete repaint', async () => {
+  it('double-tap restores buffered Home and clears Mac-private Messages state', async () => {
     const { menu, sent, defaultsCount } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
@@ -462,7 +649,14 @@ describe('CapabilityMenu', () => {
     await menu.toggle();          // back
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(1);
-    expect(sent).toHaveLength(1); // only the capability selection request
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'messages-home',
+      },
+    });
   });
 
   it('a live Brainstorm atomically releases its instruction page and menu input', async () => {

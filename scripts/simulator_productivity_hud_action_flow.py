@@ -66,6 +66,7 @@ _EXPECTED_FLOW = (
     ("calendar-review", None, None, "review"),
     ("calendar-verifying", "click", True, "verifying"),
     ("calendar-saved", None, None, "saved"),
+    ("calendar-return-planning", None, None, "day"),
     ("calendar-failed", None, None, "failed"),
     ("calendar-uncertain", None, None, "check"),
     ("reminders-review", None, None, "review"),
@@ -498,6 +499,32 @@ async def _planning_click(
     return digest, {"raw": raw, "alpha": alpha}
 
 
+async def _wait_for_productivity_return(
+    gateway: RecordingGateway,
+    *,
+    after: int,
+    automation_base: str,
+    output: Path,
+    name: str,
+    prior_digest: str,
+) -> tuple[str, dict[str, str]]:
+    """Prove a terminal receipt actually re-enters the anchored live agenda.
+
+    No synthetic gesture is sent here. The Hub timer must emit its ordinary
+    ``capmenu Planning`` request, and the production CapabilityRouter must
+    answer with the native-shaped day projection before a framebuffer is kept.
+    """
+
+    rendered = await _wait_for(
+        lambda: _planning_list_after(gateway, after=after),
+        label=f"{name} automatic Planning response",
+        timeout_s=8.0,
+    )
+    digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
+    validate_planning_screen("day", rendered)
+    return digest, {"raw": raw, "alpha": alpha}
+
+
 async def _drive_planning_hierarchy(
     gateway: RecordingGateway,
     *,
@@ -659,15 +686,27 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 
         calendar_states = (
             ("calendar-verifying", "verifying", "Saving calendar event", "Checking native read-back", "Please wait", "click", True),
-            ("calendar-saved", "saved", "Saved and verified", "Calendar read-back matched", "left x2 Planning", None, None),
-            ("calendar-failed", "failed", "Not saved", "No calendar item was changed.", "left x2 Planning", None, None),
-            ("calendar-uncertain", "check", "Check Calendar", "It may have changed. Do not retry.", "left x2 Planning", None, None),
+            ("calendar-saved", "saved", "Saved and verified", "Calendar read-back matched", "Planning in 5s · left x2 now", None, None),
+            ("calendar-failed", "failed", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("calendar-uncertain", "check", "Check Calendar", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in calendar_states:
+            before = len(gateway.sent)
             await gateway.send(_view("calendar", phase, title="Design review", primary=primary, secondary=secondary, hint=hint))
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
+            if phase == "saved":
+                digest, artifact = await _wait_for_productivity_return(
+                    gateway,
+                    after=before,
+                    automation_base=automation_base,
+                    output=args.out,
+                    name=f"{len(receipts) + 2:02d}-calendar-return-planning",
+                    prior_digest=digest,
+                )
+                receipts.append(ScreenReceipt("calendar-return-planning", None, None, "day", digest))
+                artifacts["calendar-return-planning"] = artifact
 
         digest, artifact = await _confirm(
             gateway,
@@ -683,7 +722,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 
         reminder_states = (
             ("reminders-verifying", "verifying", "Saving reminder", "Checking native read-back", "Please wait", "click", True),
-            ("reminders-saved", "saved", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "left x2 Planning", None, None),
+            ("reminders-saved", "saved", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "Planning in 5s · left x2 now", None, None),
             ("reminders-due", "due", "Due now", "This reminder is still incomplete.", "say complete reminder title · left x2 Planning", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in reminder_states:
@@ -706,9 +745,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 
         completion_states = (
             ("reminders-completing", "verifying", "Saving reminder", "Checking native read-back", "Please wait", "click", True),
-            ("reminders-completed", "completed", "Completed and verified", "Reminders read-back matched", "left x2 Planning", None, None),
-            ("reminders-failed", "failed", "Not saved", "No reminders item was changed.", "left x2 Planning", None, None),
-            ("reminders-uncertain", "check", "Check Reminders", "It may have changed. Do not retry.", "left x2 Planning", None, None),
+            ("reminders-completed", "completed", "Completed and verified", "Reminders read-back matched", "Planning in 5s · left x2 now", None, None),
+            ("reminders-failed", "failed", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
+            ("reminders-uncertain", "check", "Check Reminders", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in completion_states:
             await gateway.send(_view("reminders", phase, title="Buy filters", primary=primary, secondary=secondary, hint=hint))
@@ -728,6 +767,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
+                "terminalOutcomeReturn": "calendar saved waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",
                 "physicalG2": "not run",
             },
