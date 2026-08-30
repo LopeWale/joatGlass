@@ -114,12 +114,22 @@ This matters because the secure Tailscale reverse proxy itself reaches JOAT
 from loopback; loopback is not an authority boundary for a remote G2 package.
 
 Then, from the Mini's logged-in macOS user, configure private Serve—not public
-Funnel—and retain its status with the Tailnet:
+Funnel. **Do not replace the root handler**: this Mini already uses `/` for
+OpenClaw/Hermes. Add JOAT as the distinct `/glasses` handler and retain the
+route map with the Tailnet:
 
 ```sh
-tailscale serve --https=443 --bg http://127.0.0.1:8787
+tailscale serve --https=443 --set-path=/glasses --bg http://127.0.0.1:8787
 tailscale serve status --json
 ```
+
+On a current Tailscale client, `--set-path=/glasses` adds that HTTPS mount
+without removing the existing root mount. The status must show both the
+existing root handler and `/glasses → http://127.0.0.1:8787`; do **not** use
+`tailscale serve reset` during this setup. A normal HTTP `GET /glasses` is not
+a JOAT health check—the endpoint is a WebSocket upgrade—but seeing the
+OpenClaw control page at `/glasses` means the `/glasses` proxy was not added
+and the packaged glasses client cannot reach JOAT.
 
 When producing the EHPK for that Mini, do not let the ignored development
 `.env` choose its raw `:8787` address. Build only with its approved TLS route:
