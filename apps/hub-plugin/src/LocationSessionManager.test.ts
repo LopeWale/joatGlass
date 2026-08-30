@@ -189,6 +189,26 @@ describe('LocationSessionManager', () => {
     expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(1);
   });
 
+  it('bounds a hung high-accuracy navigation-origin request at the host timeout', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.manager.start();
+    h.bridge.getAppLocation.mockClear();
+    h.bridge.getAppLocation.mockImplementationOnce(
+      () => new Promise<AppLocation | null>(() => {}),
+    );
+
+    let result: AppLocation | null | undefined;
+    void h.manager.requestNavigationOrigin().then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(result).toBeNull();
+    expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
+      accuracy: AppLocationAccuracy.High,
+      timeoutMs: 5_000,
+    });
+  });
+
   it('answers an assistant refresh with a timestamped request-bound phone fix', async () => {
     const current = {
       latitude: 41.9,

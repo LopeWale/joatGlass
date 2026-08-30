@@ -22,6 +22,7 @@ import {
   productivityPhaseProgress,
   resolveHudOverview,
   resolveHudListKind,
+  showNavigationSecondaryInHeader,
   visibleHudSidebarItems,
   visibleHudListItems,
   visibleHudTailLines,
@@ -96,6 +97,14 @@ describe('semantic HUD chrome', () => {
     expect(resolveHudListKind('LISTENING RESUME')).toBe('generic');
   });
 
+});
+
+describe('navigation error hierarchy', () => {
+  it('keeps the recovery instruction in the warning card instead of rendering it twice', () => {
+    expect(showNavigationSecondaryInHeader('destination')).toBe(true);
+    expect(showNavigationSecondaryInHeader('mode')).toBe(true);
+    expect(showNavigationSecondaryInHeader('error')).toBe(false);
+  });
 });
 
 describe('assistant overlay text fitting', () => {
