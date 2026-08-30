@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
+  assistantOverlayTextLayout,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
   hudBrightnessGray,
@@ -97,6 +98,19 @@ describe('semantic HUD chrome', () => {
 });
 
 describe('assistant overlay text fitting', () => {
+  it('keeps a four-line assistant reply below the header divider and above its footer', () => {
+    const layout = assistantOverlayTextLayout(4, 17);
+
+    expect(layout).toMatchObject({
+      dividerY: 92,
+      firstGlyphTopY: 109,
+      lastGlyphBottomY: 183,
+      footerBaselineY: 214,
+    });
+    expect(layout.firstGlyphTopY).toBeGreaterThan(layout.dividerY);
+    expect(layout.lastGlyphBottomY).toBeLessThan(layout.footerBaselineY);
+  });
+
   it('keeps only the newest four lines when the minimum font still overflows', () => {
     const fitted = fitHudWrappedText(
       'one two three four five six seven eight nine ten eleven twelve thirteen fourteen',
