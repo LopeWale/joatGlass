@@ -79,6 +79,51 @@ describe('AudioStreamer byte decoding', () => {
     expect(messages.flatMap((message) => message.pcm)).toEqual(sourceSamples);
   });
 
+  it('marks a mixed-speaker batch unknown without changing its PCM sequence', async () => {
+    const { audio, sent } = make();
+    await audio.start();
+
+    // Speaker attribution is per SDK audio event, while the wire batch may
+    // contain several events.  It must never relabel the first samples with
+    // the final event's role: the Mac rejects an utterance only when every
+    // received frame is "other".
+    audio.ingest(new Uint8Array([0x02, 0x01]), 'self');
+    audio.ingest(new Uint8Array([0xff, 0xff]), 'other');
+    vi.advanceTimersByTime(200);
+
+    const message = sent[0];
+    if (message?.kind !== 'audio') throw new Error('expected audio');
+    expect(message.pcm).toEqual([258, -1]);
+    expect(message.speaker).toBe('unknown');
+  });
+
+  it('does not promote an unlabeled event to other-speaker audio', async () => {
+    const { audio, sent } = make();
+    await audio.start();
+
+    audio.ingest(new Uint8Array([0x02, 0x01]));
+    audio.ingest(new Uint8Array([0xff, 0xff]), 'other');
+    vi.advanceTimersByTime(200);
+
+    const message = sent[0];
+    if (message?.kind !== 'audio') throw new Error('expected audio');
+    expect(message.pcm).toEqual([258, -1]);
+    expect(message.speaker).toBe('unknown');
+  });
+
+  it('retains unanimous other-speaker attribution for the Mac admission gate', async () => {
+    const { audio, sent } = make();
+    await audio.start();
+
+    audio.ingest(new Uint8Array([0x02, 0x01]), 'other');
+    audio.ingest(new Uint8Array([0xff, 0xff]), 'other');
+    vi.advanceTimersByTime(200);
+
+    const message = sent[0];
+    if (message?.kind !== 'audio') throw new Error('expected audio');
+    expect(message.speaker).toBe('other');
+  });
+
   it('a new stop invalidates and compensates an older pending start', async () => {
     let releaseStart!: (started: boolean) => void;
     const pendingStart = new Promise<boolean>((resolve) => { releaseStart = resolve; });
