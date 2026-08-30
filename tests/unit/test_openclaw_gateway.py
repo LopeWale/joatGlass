@@ -462,6 +462,7 @@ async def test_calendar_connection_can_only_use_its_own_session_namespace() -> N
                 "to": "telegram:123",
             },
         ),
+        ("sessions.subscribe", {}),
         ("sessions.subscribe", {"includeTelegram": True}),
     ],
 )
@@ -490,7 +491,10 @@ async def test_authenticated_connection_never_transmits_outside_hermes_session(
 @pytest.mark.parametrize(
     ("method", "params"),
     [
-        ("sessions.subscribe", {}),
+        (
+            "sessions.subscribe",
+            {"label": "JOAT Agent Terminal", "agentId": "hermes", "limit": 2},
+        ),
         (
             "sessions.list",
             {"label": "JOAT Agent Terminal", "agentId": "hermes", "limit": 2},
@@ -925,7 +929,10 @@ async def test_authenticated_connection_correlates_response_with_interleaved_eve
             scopes=("operator.read",),
         )
         connection = await client.connect()
-        response = await connection.request("sessions.subscribe", {})
+        response = await connection.request(
+            "sessions.subscribe",
+            {"label": "JOAT Agent Terminal", "agentId": "hermes", "limit": 2},
+        )
         event = await connection.next_event()
         await connection.close()
 

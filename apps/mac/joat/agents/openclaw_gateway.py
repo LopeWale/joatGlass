@@ -181,7 +181,13 @@ def _enforce_agent_terminal_request_policy(
 
     permitted = False
     if method == "sessions.subscribe":
-        permitted = not params
+        permitted = (
+            set(params) == {"label", "agentId", "limit"}
+            and params.get("label") == policy.session_label
+            and params.get("agentId") == policy.agent_id
+            and params.get("limit") == 2
+            and not isinstance(params.get("limit"), bool)
+        )
     elif method == "sessions.list":
         permitted = (
             set(params) == {"label", "agentId", "limit"}

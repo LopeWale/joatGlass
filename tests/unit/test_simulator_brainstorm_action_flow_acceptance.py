@@ -6,6 +6,7 @@ from joat.services.brainstorm_acceptance import RUN_SCHEMA
 from scripts.simulator_brainstorm_action_flow_acceptance import (
     BrainstormActionFlowError,
     ScreenReceipt,
+    validate_visual_artifacts,
     validate_flow,
 )
 
@@ -61,6 +62,16 @@ def _acceptance() -> dict[str, object]:
             "gesture": "double_press",
             "delivery": "sys",
         },
+    }
+
+
+def _artifacts() -> dict[str, dict[str, str]]:
+    return {
+        frame.name: {
+            "raw": f"{index:02d}-{frame.name}.rgba.png",
+            "optical": f"{index:02d}-{frame.name}.optical.png",
+        }
+        for index, frame in enumerate(_frames(), start=1)
     }
 
 
@@ -145,3 +156,17 @@ def test_flow_requires_hermes_frames_in_brainstorm_running_trace_order() -> None
 
     with pytest.raises(BrainstormActionFlowError, match="trace order"):
         validate_flow(_frames(), acceptance)
+
+
+def test_visual_artifacts_require_an_opaque_optical_preview_for_every_hud_state() -> None:
+    validate_visual_artifacts(_artifacts())
+
+    missing_preview = _artifacts()
+    del missing_preview["terminal"]["optical"]
+    with pytest.raises(BrainstormActionFlowError, match="terminal.*optical"):
+        validate_visual_artifacts(missing_preview)
+
+    alpha_only = _artifacts()
+    alpha_only["returned"]["optical"] = "05-returned.rgba.alpha.png"
+    with pytest.raises(BrainstormActionFlowError, match="opaque green-on-black"):
+        validate_visual_artifacts(alpha_only)

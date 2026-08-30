@@ -137,7 +137,18 @@ class RuntimeFactory:
 def recovery_connection(history: object) -> RuntimeConnection:
     return RuntimeConnection(
         {
-            "sessions.subscribe": {"subscribed": True, "key": "catalog"},
+            "sessions.subscribe": {
+                "subscribed": True,
+                "list": {
+                    "sessions": [
+                        {
+                            "key": "agent:hermes:joat-123",
+                            "sessionId": "session-1",
+                            "label": "JOAT Agent Terminal",
+                        },
+                    ],
+                },
+            },
             "sessions.messages.subscribe": {
                 "subscribed": True,
                 "key": "agent:hermes:joat-123",
@@ -182,6 +193,44 @@ async def test_recovery_adopts_exact_active_run_snapshot() -> None:
         "sessions.subscribe",
         "sessions.messages.subscribe",
         "chat.history",
+    ]
+    assert reconnected.calls[0] == (
+        "sessions.subscribe",
+        {"label": "JOAT Agent Terminal", "agentId": "hermes", "limit": 2},
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_requires_a_filtered_catalog_snapshot_after_reconnect() -> None:
+    reconnected = recovery_connection(
+        {
+            "messages": [],
+            "sessionInfo": {"hasActiveRun": True, "activeRunIds": ["run-1"]},
+            "inFlightRun": {"runId": "run-1", "text": "partial"},
+        }
+    )
+    reconnected.responses["sessions.subscribe"] = {"subscribed": True}
+    recovery = OpenClawHistoryRecovery(
+        client=RuntimeFactory([reconnected]),
+        attempts=1,
+        backoff_s=(0.0,),
+    )
+
+    with pytest.raises(OpenClawGatewayError, match="catalog snapshot"):
+        await recovery.recover(
+            connection=RuntimeConnection({}),
+            agent_id="hermes",
+            session_key="agent:hermes:joat-123",
+            run_id="run-1",
+            prompt="question",
+        )
+
+    assert reconnected.closed
+    assert reconnected.calls == [
+        (
+            "sessions.subscribe",
+            {"label": "JOAT Agent Terminal", "agentId": "hermes", "limit": 2},
+        ),
     ]
 
 
