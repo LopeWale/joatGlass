@@ -69,13 +69,21 @@ struct MainWindowView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             LabeledContent("Calendar", value: engine.calendarAccess)
-                            Button("Connect…") { engine.requestCalendarAccess() }
-                                .disabled(engine.calendarAccess == "full access")
+                            if engine.calendarAccess == "full access" {
+                                Label("Granted", systemImage: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            } else {
+                                Button("Grant access…") { engine.requestCalendarAccess() }
+                            }
                         }
                         HStack {
                             LabeledContent("Reminders", value: engine.remindersAccess)
-                            Button("Connect…") { engine.requestRemindersAccess() }
-                                .disabled(engine.remindersAccess == "full access")
+                            if engine.remindersAccess == "full access" {
+                                Label("Granted", systemImage: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            } else {
+                                Button("Grant access…") { engine.requestRemindersAccess() }
+                            }
                         }
                         StatusLine(
                             label: "Engine bridge",
