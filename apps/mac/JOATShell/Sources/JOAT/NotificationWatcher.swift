@@ -36,6 +36,57 @@ struct BannerAppearanceTracker {
     }
 }
 
+/// One content-free Accessibility sweep receipt. This is operational
+/// observability, not a notification archive: it deliberately contains only
+/// counters and the query state, never app names, titles, subtitles, or body
+/// text. The native productivity acceptance driver compares two snapshots to
+/// explain a missing banner without changing notification settings.
+struct NotificationWatcherSweepStatus: Codable, Equatable, Sendable {
+    static let schemaVersion = "joat.notification-watcher-status.v1"
+
+    enum State: String, Codable, Sendable {
+        case notTrusted = "not_trusted"
+        case notificationCenterNotRunning = "notification_center_not_running"
+        case windowsQueryFailed = "windows_query_failed"
+        case swept
+    }
+
+    let schema: String
+    let observedAtUnixMs: Int64
+    let state: State
+    let sweepCount: Int
+    let bannerElementsSeen: Int
+    let readableBannersSeen: Int
+    let emittedBanners: Int
+
+    init(
+        observedAtUnixMs: Int64,
+        state: State,
+        sweepCount: Int,
+        bannerElementsSeen: Int,
+        readableBannersSeen: Int,
+        emittedBanners: Int
+    ) {
+        self.schema = Self.schemaVersion
+        self.observedAtUnixMs = observedAtUnixMs
+        self.state = state
+        self.sweepCount = sweepCount
+        self.bannerElementsSeen = bannerElementsSeen
+        self.readableBannersSeen = readableBannersSeen
+        self.emittedBanners = emittedBanners
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case observedAtUnixMs = "observed_at_unix_ms"
+        case state
+        case sweepCount = "sweep_count"
+        case bannerElementsSeen = "banner_elements_seen"
+        case readableBannersSeen = "readable_banners_seen"
+        case emittedBanners = "emitted_banners"
+    }
+}
+
 /// Reads OTHER apps' notification banners via the Accessibility API and
 /// hands them to the Python engine (docs/MAC_APP.md §Notification source).
 ///
@@ -84,6 +135,11 @@ final class NotificationWatcher {
         .appendingPathComponent("Library/Application Support/JOAT/notifications.jsonl")
     private let heartbeatURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JOAT/notifications.heartbeat")
+    private let statusURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/JOAT/notifications.watcher-status.json")
+    private var bannerElementsSeen = 0
+    private var readableBannersSeen = 0
+    private var emittedBanners = 0
 
     var isTrusted: Bool { AXIsProcessTrusted() }
 
@@ -144,11 +200,13 @@ final class NotificationWatcher {
 
         guard AXIsProcessTrusted() else {
             if vitals { appendDebug("NOT TRUSTED for accessibility") }
+            writeSweepStatus(at: Date(), state: .notTrusted)
             return
         }
         guard let app = NSRunningApplication
             .runningApplications(withBundleIdentifier: Self.bundleID).first else {
             if vitals { appendDebug("notificationcenterui NOT RUNNING") }
+            writeSweepStatus(at: Date(), state: .notificationCenterNotRunning)
             return
         }
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
@@ -156,6 +214,7 @@ final class NotificationWatcher {
         // AXMenuBar, whose "Apple/File/Edit" items are not notifications.
         guard let windows = copy(axApp, kAXWindowsAttribute) as? [AXUIElement] else {
             if vitals { appendDebug("windows query FAILED (AX denied despite trusted?)") }
+            writeSweepStatus(at: Date(), state: .windowsQueryFailed)
             return
         }
 
@@ -176,10 +235,12 @@ final class NotificationWatcher {
             appendDebug("sweep \(sweepCount): windows=\(windows.count) "
                         + "banners=\(banners.count) nodes=\(budget.nodes)")
         }
+        bannerElementsSeen += banners.count
 
         var observed: [(id: String, app: String, title: String, body: String)] = []
         for banner in banners {
             guard let f = fields(of: banner) else { continue }
+            readableBannersSeen += 1
             let id = "\(f.app)\u{1}\(f.title)\u{1}\(f.body)"
             observed.append((id, f.app, f.title, f.body))
             if debugEnabled {
@@ -193,8 +254,11 @@ final class NotificationWatcher {
 
         let fresh = appearances.freshMask(for: observed.map(\.id))
         for (item, isFresh) in zip(observed, fresh) where isFresh {
-            emit(app: item.app, title: item.title, body: item.body, at: now)
+            if emit(app: item.app, title: item.title, body: item.body, at: now) {
+                emittedBanners += 1
+            }
         }
+        writeSweepStatus(at: now, state: .swept)
         writeHeartbeat(at: now)
     }
 
@@ -288,15 +352,15 @@ final class NotificationWatcher {
 
     // MARK: output
 
-    private func emit(app: String, title: String, body: String, at date: Date) {
+    private func emit(app: String, title: String, body: String, at date: Date) -> Bool {
         let payload: [String: Any] = [
             "at": date.timeIntervalSince1970,
             "app": app, "title": title, "body": body,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              var line = String(data: data, encoding: .utf8) else { return }
+              var line = String(data: data, encoding: .utf8) else { return false }
         line += "\n"
-        append(line, to: outURL)
+        return append(line, to: outURL)
     }
 
     private func appendDebug(_ line: String) {
@@ -319,19 +383,48 @@ final class NotificationWatcher {
         }
     }
 
-    private func append(_ line: String, to url: URL) {
-        if let h = try? FileHandle(forWritingTo: url) {
-            try? FileManager.default.setAttributes(
+    private func writeSweepStatus(at date: Date, state: NotificationWatcherSweepStatus.State) {
+        let status = NotificationWatcherSweepStatus(
+            observedAtUnixMs: Int64((date.timeIntervalSince1970 * 1_000).rounded()),
+            state: state,
+            sweepCount: sweepCount,
+            bannerElementsSeen: bannerElementsSeen,
+            readableBannersSeen: readableBannersSeen,
+            emittedBanners: emittedBanners
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(status) else { return }
+        do {
+            try data.write(to: statusURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: statusURL.path
+            )
+        } catch {
+            // Best-effort observability must never turn a transient sidecar
+            // failure into a once-per-second debug-log write.
+        }
+    }
+
+    @discardableResult
+    private func append(_ line: String, to url: URL) -> Bool {
+        do {
+            let data = Data(line.utf8)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: url)
+            }
+            try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: url.path
             )
-            _ = try? h.seekToEnd()
-            try? h.write(contentsOf: Data(line.utf8))
-            try? h.close()
-        } else {
-            try? Data(line.utf8).write(to: url)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: url.path
-            )
+            return true
+        } catch {
+            return false
         }
     }
 }

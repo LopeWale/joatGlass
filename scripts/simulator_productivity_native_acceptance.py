@@ -72,6 +72,9 @@ DEFAULT_NOTIFICATION_FEED = (
 DEFAULT_NOTIFICATION_HEARTBEAT = (
     Path.home() / "Library/Application Support/JOAT/notifications.heartbeat"
 )
+DEFAULT_NOTIFICATION_STATUS = (
+    Path.home() / "Library/Application Support/JOAT/notifications.watcher-status.json"
+)
 DEFAULT_EVIDENCE_ROOT = (
     Path.home() / "Library/Application Support/JOAT/acceptance/productivity"
 )
@@ -80,6 +83,13 @@ DEFAULT_APP_BUNDLE_ID = "com.joat.shell"
 DEFAULT_RECOVERY_GUARD = DEFAULT_EVIDENCE_ROOT / ".mac-app-recovery.json"
 DUE_SURFACE_RECEIPT = "[HudVisualSurface] receipt reminder_due bridge-ack"
 INTERRUPTED_ACCEPTANCE_CODE = "acceptance_interrupted"
+WATCHER_STATUS_SCHEMA = "joat.notification-watcher-status.v1"
+WATCHER_STATUS_STATES = frozenset({
+    "not_trusted",
+    "notification_center_not_running",
+    "windows_query_failed",
+    "swept",
+})
 
 
 class AcceptanceSafetyError(RuntimeError):
@@ -169,6 +179,23 @@ class AlarmDeliveryEvidence:
     observed_at_unix_ms: int
     source_digest: str
     content_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class WatcherSweepStatus:
+    """Content-free counters from the Mac Accessibility watcher.
+
+    The companion Swift writer emits a strict fixed schema.  This model
+    intentionally omits its timestamp and every notification field, so the
+    retained acceptance receipt can explain the health of the observer without
+    becoming another notification-text store.
+    """
+
+    state: str
+    sweep_count: int
+    banner_elements_seen: int
+    readable_banners_seen: int
+    emitted_banners: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1006,6 +1033,132 @@ def secure_notification_feed(path: Path) -> None:
     if path.is_symlink() or info.st_uid != os.geteuid() or not path.is_file():
         raise AcceptanceSafetyError("notification feed is not an owned regular file")
     os.chmod(path, 0o600)
+
+
+def read_watcher_sweep_status(path: Path) -> WatcherSweepStatus | None:
+    """Read the optional, strict, content-free Accessibility sweep receipt.
+
+    An older installed JOAT.app has no status sidecar, which must not turn a
+    safe native reminder cleanup into a failed write.  Any unexpected file is
+    likewise ignored rather than copied into retained evidence.
+    """
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_mode & 0o077
+    ):
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "observed_at_unix_ms",
+        "state",
+        "sweep_count",
+        "banner_elements_seen",
+        "readable_banners_seen",
+        "emitted_banners",
+    }:
+        return None
+    if value.get("schema") != WATCHER_STATUS_SCHEMA:
+        return None
+    state = value.get("state")
+    if not isinstance(state, str) or state not in WATCHER_STATUS_STATES:
+        return None
+    numeric_keys = (
+        "observed_at_unix_ms",
+        "sweep_count",
+        "banner_elements_seen",
+        "readable_banners_seen",
+        "emitted_banners",
+    )
+    if any(
+        isinstance(value.get(key), bool)
+        or not isinstance(value.get(key), int)
+        or int(value[key]) < 0
+        for key in numeric_keys
+    ):
+        return None
+    return WatcherSweepStatus(
+        state=state,
+        sweep_count=int(value["sweep_count"]),
+        banner_elements_seen=int(value["banner_elements_seen"]),
+        readable_banners_seen=int(value["readable_banners_seen"]),
+        emitted_banners=int(value["emitted_banners"]),
+    )
+
+
+def watcher_observation_delta(
+    before: WatcherSweepStatus | None,
+    after: WatcherSweepStatus | None,
+) -> dict[str, object]:
+    """Describe only the observer's post-due counters, never banner content."""
+
+    if before is None or after is None:
+        return {
+            "available": False,
+            "state": "unavailable",
+            "observation": "watcher_status_unavailable",
+            "sweeps": 0,
+            "banner_elements": 0,
+            "readable_banners": 0,
+            "emitted_banners": 0,
+            "counter_reset": False,
+        }
+    pairs = (
+        (before.sweep_count, after.sweep_count),
+        (before.banner_elements_seen, after.banner_elements_seen),
+        (before.readable_banners_seen, after.readable_banners_seen),
+        (before.emitted_banners, after.emitted_banners),
+    )
+    counter_reset = any(current < prior for prior, current in pairs)
+    if counter_reset:
+        return {
+            "available": True,
+            "state": after.state,
+            "observation": "watcher_counter_reset",
+            "sweeps": 0,
+            "banner_elements": 0,
+            "readable_banners": 0,
+            "emitted_banners": 0,
+            "counter_reset": True,
+        }
+    sweeps = after.sweep_count - before.sweep_count
+    banner_elements = after.banner_elements_seen - before.banner_elements_seen
+    readable_banners = after.readable_banners_seen - before.readable_banners_seen
+    emitted_banners = after.emitted_banners - before.emitted_banners
+    if after.state != "swept":
+        observation = f"watcher_{after.state}"
+    elif sweeps == 0:
+        observation = "no_post_due_sweep"
+    elif banner_elements == 0:
+        observation = "no_banner_elements_seen"
+    elif readable_banners == 0:
+        observation = "banner_elements_unreadable"
+    elif emitted_banners == 0:
+        observation = "no_fresh_banner_emitted"
+    else:
+        observation = "nonmatching_banner_emitted"
+    return {
+        "available": True,
+        "state": after.state,
+        "observation": observation,
+        "sweeps": sweeps,
+        "banner_elements": banner_elements,
+        "readable_banners": readable_banners,
+        "emitted_banners": emitted_banners,
+        "counter_reset": False,
+    }
 
 
 def alarm_delivery_after(
@@ -1919,6 +2072,7 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
     event_identity: NativeItemIdentity | None = None
     reminder_identity: NativeItemIdentity | None = None
     notification_preflight: NotificationPreflightEvidence | None = None
+    watcher_status_before_due: WatcherSweepStatus | None = None
     alarm_task: asyncio.Task[AlarmDeliveryEvidence] | None = None
     due_monitor_task: asyncio.Task[int] | None = None
     delivery_blocker: AcceptanceBlocked | None = None
@@ -1987,6 +2141,12 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                 notification_feed_identity = (
                     notification_stat.st_dev,
                     notification_stat.st_ino,
+                )
+                # Optional with an older installed app. The sidecar contains
+                # only sweep counters and lets a failed banner observation say
+                # whether the Accessibility watcher saw any banner elements.
+                watcher_status_before_due = read_watcher_sweep_status(
+                    args.notification_status,
                 )
 
             existing_events, existing_reminders = await _query_exact_items(
@@ -2259,6 +2419,10 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                             notification_preflight
                             and notification_preflight.expect_focus_suppression
                         ),
+                        "accessibility_watcher": watcher_observation_delta(
+                            watcher_status_before_due,
+                            read_watcher_sweep_status(args.notification_status),
+                        ),
                     }
                     if not (
                         notification_preflight
@@ -2283,6 +2447,10 @@ async def run(args: argparse.Namespace) -> tuple[int, Path]:
                         "observed": True,
                         "delivery_state": "accessibility_banner_observed",
                         "accessibility_banner_observed": True,
+                        "accessibility_watcher": watcher_observation_delta(
+                            watcher_status_before_due,
+                            read_watcher_sweep_status(args.notification_status),
+                        ),
                         **asdict(alarm),
                     }
 
@@ -2530,6 +2698,12 @@ def _parser() -> argparse.ArgumentParser:
         "--notification-heartbeat",
         type=Path,
         default=DEFAULT_NOTIFICATION_HEARTBEAT,
+    )
+    parser.add_argument(
+        "--notification-status",
+        type=Path,
+        default=DEFAULT_NOTIFICATION_STATUS,
+        help="optional content-free Accessibility watcher sweep status sidecar",
     )
     parser.add_argument("--evidence-root", type=Path, default=DEFAULT_EVIDENCE_ROOT)
     parser.add_argument("--app", type=Path, default=DEFAULT_APP)
