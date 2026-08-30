@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -112,6 +113,35 @@ def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() ->
     driver.validate_history_flow(receipts)
 
 
+def test_messages_recovery_flow_requires_a_visible_retry_then_a_real_list() -> None:
+    driver = _driver()
+    assert driver is not None
+
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-retry", "click", "1" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "2" * 64),
+    ]
+
+    driver.validate_recovery_flow(receipts)
+
+
+def test_recovery_store_fails_once_then_delegates_to_the_real_fixture(tmp_path: Path) -> None:
+    driver = _driver()
+    assert driver is not None
+    recovering = driver.RecoverOnceMessagesStore(driver.build_fixture_store(tmp_path / "chat.db"))
+
+    with pytest.raises(sqlite3.DatabaseError):
+        recovering.recent_threads()
+
+    assert recovering.retry_visible is True
+    rows = recovering.recent_threads()
+
+    assert recovering.read_attempts == 2
+    assert recovering.retry_visible is False
+    assert len(rows) == 2
+
+
 @pytest.mark.parametrize(
     ("flow", "expected"),
     [
@@ -147,6 +177,14 @@ def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() ->
                 "messages-latest-returned",
             ),
         ),
+        (
+            "recovery",
+            (
+                "messages-sidebar",
+                "messages-retry",
+                "messages-conversations",
+            ),
+        ),
     ],
 )
 def test_official_simulator_evidence_retains_every_required_rendered_frame(
@@ -165,6 +203,7 @@ def test_official_simulator_evidence_retains_every_required_rendered_frame(
         ("reply", ("click", "down", "click"), "down + click"),
         ("compose", ("click", "click"), "click"),
         ("history", ("click", "down", "down", "click"), "down + down + click"),
+        ("recovery", ("click", "click"), "click"),
     ],
 )
 def test_official_simulator_drives_each_visible_messages_selection_control(
