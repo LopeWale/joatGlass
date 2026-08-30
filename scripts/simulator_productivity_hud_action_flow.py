@@ -34,7 +34,7 @@ import subprocess
 import time
 from datetime import date, datetime
 from types import SimpleNamespace
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 from zoneinfo import ZoneInfo
 import urllib.error
 import urllib.request
@@ -57,6 +57,16 @@ class ProductivityHudFlowError(RuntimeError):
     """The official-simulator flow did not satisfy its bounded contract."""
 
 
+VisualTrigger = Literal[
+    "menu_click",
+    "command_dispatch",
+    "confirmed_tap",
+    "native_readback",
+    "typed_downlink",
+    "due_dispatch",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class ScreenReceipt:
     """Content-free proof that one named state produced a distinct framebuffer."""
@@ -66,6 +76,22 @@ class ScreenReceipt:
     confirmation_accepted: bool | None
     phase: str
     framebuffer_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class VisualLatency:
+    """Content-free timing of one causal simulator-to-HUD transition.
+
+    ``completed_frame_ms`` ends when the driver first observes the production
+    four-tile acknowledgement.  ``settled_frame_ms`` includes the driver's
+    deliberate 600 ms screenshot-stability window, so it is evidence quality
+    timing, not a claim about physical G2 lens latency.
+    """
+
+    screen: str
+    trigger: VisualTrigger
+    completed_frame_ms: int
+    settled_frame_ms: int
 
 
 _EXPECTED_FLOW = (
@@ -458,6 +484,10 @@ class VisualFrameCheckpoint:
     completed_frames: int
     simulator_messages: int
     productivity_verifying_receipts: int
+    # Monotonic time is local to this driver.  It deliberately measures only
+    # the simulator pipeline, never a physical G2's clock or a person's input
+    # time.  Unit fakes may omit it, in which case no latency claim is made.
+    observed_at_ns: int | None = None
 
 
 def visual_frame_ack_count(console: bytes) -> int:
@@ -507,6 +537,7 @@ async def _visual_frame_checkpoint(automation_base: str) -> VisualFrameCheckpoin
         completed_frames=visual_frame_ack_count(console),
         simulator_messages=simulator_bridge_message_count(console),
         productivity_verifying_receipts=productivity_verifying_receipt_count(console),
+        observed_at_ns=time.monotonic_ns(),
     )
 
 
@@ -539,6 +570,7 @@ async def _wait_for_visual_frame(
             completed_frames=visual_frame_ack_count(console),
             simulator_messages=simulator_bridge_message_count(console),
             productivity_verifying_receipts=productivity_verifying_receipt_count(console),
+            observed_at_ns=time.monotonic_ns(),
         )
         last = current
         if required_receipt == "productivity_verifying":
@@ -566,22 +598,86 @@ async def _wait_for_visual_frame(
     )
 
 
+def visual_latency(
+    *,
+    screen: str,
+    trigger: VisualTrigger,
+    started_at_ns: int,
+    completed: VisualFrameCheckpoint,
+    settled_at_ns: int,
+) -> VisualLatency | None:
+    """Build a bounded simulator latency receipt, or omit fake-clock data.
+
+    The source timestamp comes from the driver immediately before an actual
+    input/downlink.  The completion timestamp is sampled only after the
+    official simulator has exposed the full visual receipt.  We intentionally
+    do not infer a device time from either value.
+    """
+
+    completed_at_ns = completed.observed_at_ns
+    if completed_at_ns is None:
+        return None
+    if started_at_ns <= 0 or completed_at_ns < started_at_ns or settled_at_ns < completed_at_ns:
+        raise ProductivityHudFlowError("visual latency timestamps were out of order")
+    return VisualLatency(
+        screen=screen,
+        trigger=trigger,
+        completed_frame_ms=(completed_at_ns - started_at_ns) // 1_000_000,
+        settled_frame_ms=(settled_at_ns - started_at_ns) // 1_000_000,
+    )
+
+
+def record_visual_latency(
+    latencies: list[VisualLatency],
+    *,
+    screen: str,
+    trigger: VisualTrigger,
+    started_at_ns: int,
+    completed: VisualFrameCheckpoint,
+) -> None:
+    """Record the settled screenshot timing after one observed frame receipt."""
+
+    sample = visual_latency(
+        screen=screen,
+        trigger=trigger,
+        started_at_ns=started_at_ns,
+        completed=completed,
+        settled_at_ns=time.monotonic_ns(),
+    )
+    if sample is not None:
+        latencies.append(sample)
+
+
+def visual_latency_summary(latencies: list[VisualLatency]) -> dict[str, int]:
+    """Summarize bounded simulator observations without pretending to time G2."""
+
+    if not latencies:
+        return {"sample_count": 0}
+    return {
+        "sample_count": len(latencies),
+        "max_completed_frame_ms": max(sample.completed_frame_ms for sample in latencies),
+        "max_settled_frame_ms": max(sample.settled_frame_ms for sample in latencies),
+    }
+
+
 async def _send_after_full_visual_frame(
     gateway: RecordingGateway,
     message: DownlinkMessage,
     *,
     automation_base: str,
     label: str,
-) -> None:
+) -> tuple[int, VisualFrameCheckpoint]:
     """Deliver a production downlink and wait for its complete canvas frame."""
 
     checkpoint = await _visual_frame_checkpoint(automation_base)
+    started_at_ns = time.monotonic_ns()
     await gateway.send(message)
-    await _wait_for_visual_frame(
+    completed = await _wait_for_visual_frame(
         automation_base,
         after=checkpoint,
         label=label,
     )
+    return started_at_ns, completed
 
 
 def _start_process(
@@ -766,6 +862,7 @@ async def _drive_controller_write(
     prior_digest: str,
     receipts: list[ScreenReceipt],
     artifacts: dict[str, dict[str, str]],
+    latencies: list[VisualLatency],
 ) -> tuple[str, int]:
     """Drive one confirmed controller write through the official simulator.
 
@@ -781,6 +878,7 @@ async def _drive_controller_write(
     task: asyncio.Task[str | None] | None = None
     try:
         review_checkpoint = await _visual_frame_checkpoint(automation_base)
+        review_started_at_ns = time.monotonic_ns()
         task = asyncio.create_task(controller.handle_command(command))
         action_id = await _wait_for(
             lambda: (
@@ -790,7 +888,7 @@ async def _drive_controller_write(
             ),
             label=f"{review_name} controller confirmation downlink",
         )
-        await _wait_for_visual_frame(
+        review_completed = await _wait_for_visual_frame(
             automation_base,
             after=review_checkpoint,
             label=f"{review_name} controller confirmation",
@@ -798,10 +896,18 @@ async def _drive_controller_write(
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{review_name}", prior_digest,
         )
+        record_visual_latency(
+            latencies,
+            screen=review_name,
+            trigger="command_dispatch",
+            started_at_ns=review_started_at_ns,
+            completed=review_completed,
+        )
         receipts.append(ScreenReceipt(review_name, None, None, "review", digest))
         artifacts[review_name] = {"raw": raw, "alpha": alpha}
 
         verifying_checkpoint = await _visual_frame_checkpoint(automation_base)
+        verifying_started_at_ns = time.monotonic_ns()
         await _input(automation_base, "click")
         verifying = await _wait_for(
             lambda: _productivity_view_after(
@@ -813,7 +919,7 @@ async def _drive_controller_write(
             raise ProductivityHudFlowError(
                 f"{verifying_name}: controller emitted unexpected title {verifying.title!r}"
             )
-        await _wait_for_visual_frame(
+        verifying_completed = await _wait_for_visual_frame(
             automation_base,
             after=verifying_checkpoint,
             label=verifying_name,
@@ -822,11 +928,19 @@ async def _drive_controller_write(
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{verifying_name}", digest,
         )
+        record_visual_latency(
+            latencies,
+            screen=verifying_name,
+            trigger="confirmed_tap",
+            started_at_ns=verifying_started_at_ns,
+            completed=verifying_completed,
+        )
         receipts.append(ScreenReceipt(verifying_name, "click", True, "verifying", digest))
         artifacts[verifying_name] = {"raw": raw, "alpha": alpha}
 
         await bridge.wait_for_write()
         terminal_checkpoint = await _visual_frame_checkpoint(automation_base)
+        terminal_started_at_ns = time.monotonic_ns()
         bridge.release_next_write()
         terminal = await _wait_for(
             lambda: _productivity_view_after(
@@ -838,13 +952,20 @@ async def _drive_controller_write(
             raise ProductivityHudFlowError(
                 f"{terminal_name}: controller emitted unexpected title {terminal.title!r}"
             )
-        await _wait_for_visual_frame(
+        terminal_completed = await _wait_for_visual_frame(
             automation_base,
             after=terminal_checkpoint,
             label=terminal_name,
         )
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{terminal_name}", digest,
+        )
+        record_visual_latency(
+            latencies,
+            screen=terminal_name,
+            trigger="native_readback",
+            started_at_ns=terminal_started_at_ns,
+            completed=terminal_completed,
         )
         receipts.append(ScreenReceipt(terminal_name, None, None, terminal_phase, digest))
         artifacts[terminal_name] = {"raw": raw, "alpha": alpha}
@@ -928,22 +1049,31 @@ async def _planning_click(
     name: str,
     phase: str,
     prior_digest: str | None,
+    latencies: list[VisualLatency],
 ) -> tuple[str, dict[str, str]]:
     """Drive one actual menu selection and wait for the authoritative list."""
 
     before = len(gateway.sent)
     frame_checkpoint = await _visual_frame_checkpoint(automation_base)
+    started_at_ns = time.monotonic_ns()
     await _input(automation_base, "click")
     rendered = await _wait_for(
         lambda: _planning_list_after(gateway, after=before),
         label=f"{name} Mac Planning response",
     )
-    await _wait_for_visual_frame(
+    completed = await _wait_for_visual_frame(
         automation_base,
         after=frame_checkpoint,
         label=name,
     )
     digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
+    record_visual_latency(
+        latencies,
+        screen=name,
+        trigger="menu_click",
+        started_at_ns=started_at_ns,
+        completed=completed,
+    )
     validate_planning_screen(phase, rendered)
     return digest, {"raw": raw, "alpha": alpha}
 
@@ -992,6 +1122,7 @@ async def _drive_planning_hierarchy(
     *,
     automation_base: str,
     output: Path,
+    latencies: list[VisualLatency],
 ) -> tuple[list[ScreenReceipt], dict[str, dict[str, str]], str]:
     """Prove month → week → mixed day → item through real input callbacks.
 
@@ -1012,6 +1143,7 @@ async def _drive_planning_hierarchy(
         name="01-planning-month",
         phase="month",
         prior_digest=None,
+        latencies=latencies,
     )
     receipts = [ScreenReceipt("planning-month", "click", None, "month", digest)]
     artifacts = {"planning-month": artifact}
@@ -1023,6 +1155,7 @@ async def _drive_planning_hierarchy(
         name="02-planning-week",
         phase="week",
         prior_digest=digest,
+        latencies=latencies,
     )
     receipts.append(ScreenReceipt("planning-week", "click", None, "week", digest))
     artifacts["planning-week"] = artifact
@@ -1038,6 +1171,7 @@ async def _drive_planning_hierarchy(
         name="03-planning-day",
         phase="day",
         prior_digest=digest,
+        latencies=latencies,
     )
     receipts.append(ScreenReceipt("planning-day", "click", None, "day", digest))
     artifacts["planning-day"] = artifact
@@ -1049,6 +1183,7 @@ async def _drive_planning_hierarchy(
         name="04-planning-item-detail",
         phase="detail",
         prior_digest=digest,
+        latencies=latencies,
     )
     receipts.append(ScreenReceipt("planning-item-detail", "click", None, "detail", digest))
     artifacts["planning-item-detail"] = artifact
@@ -1120,6 +1255,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     managed: list[ManagedProcess] = []
     receipts: list[ScreenReceipt] = []
     artifacts: dict[str, dict[str, str]] = {}
+    latencies: list[VisualLatency] = []
     try:
         await gateway.start()
         root = _prepare_simulator_plugin_root(args.repo, args.out, websocket_url)
@@ -1167,6 +1303,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             gateway,
             automation_base=automation_base,
             output=args.out,
+            latencies=latencies,
         )
         receipts.extend(planning_receipts)
         artifacts.update(planning_artifacts)
@@ -1191,6 +1328,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             prior_digest=digest,
             receipts=receipts,
             artifacts=artifacts,
+            latencies=latencies,
         )
         digest, artifact = await _wait_for_productivity_return(
             gateway,
@@ -1216,7 +1354,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, draft_title, primary, secondary, hint, input_action, accepted in calendar_states:
             before = len(gateway.sent)
-            await _send_after_full_visual_frame(
+            started_at_ns, completed = await _send_after_full_visual_frame(
                 gateway,
                 _view(
                     "calendar", phase, title=draft_title, primary=primary,
@@ -1226,6 +1364,13 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 label=name,
             )
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
+            record_visual_latency(
+                latencies,
+                screen=name,
+                trigger="typed_downlink",
+                started_at_ns=started_at_ns,
+                completed=completed,
+            )
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
             if phase in {"saved", "failed", "check", "cancelled", "not_saved"}:
@@ -1261,6 +1406,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             prior_digest=digest,
             receipts=receipts,
             artifacts=artifacts,
+            latencies=latencies,
         )
         monitoring_checkpoint = await _visual_frame_checkpoint(automation_base)
         await _wait_for_visual_frame(
@@ -1289,17 +1435,25 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         if len(due_occurrences) != 1:
             raise ProductivityHudFlowError("controller did not persist exactly one monitoring occurrence")
         due_checkpoint = await _visual_frame_checkpoint(automation_base)
+        due_started_at_ns = time.monotonic_ns()
         due_delivery = asyncio.create_task(task_monitor.run_due_once(
             now_unix_ms=due_occurrences[0].due_unix_ms,
             now_us=1_800_000_000_000_000,
         ))
-        await _wait_for_visual_frame(
+        due_completed = await _wait_for_visual_frame(
             automation_base,
             after=due_checkpoint,
             label="reminders-due",
         )
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
+        )
+        record_visual_latency(
+            latencies,
+            screen="reminders-due",
+            trigger="due_dispatch",
+            started_at_ns=due_started_at_ns,
+            completed=due_completed,
         )
         if await asyncio.wait_for(due_delivery, timeout=5) != 1:
             raise ProductivityHudFlowError(
@@ -1327,6 +1481,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             prior_digest=digest,
             receipts=receipts,
             artifacts=artifacts,
+            latencies=latencies,
         )
         digest, artifact = await _wait_for_productivity_return(
             gateway,
@@ -1348,7 +1503,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, draft_title, primary, secondary, hint, input_action, accepted in completion_states:
             before = len(gateway.sent)
-            await _send_after_full_visual_frame(
+            started_at_ns, completed = await _send_after_full_visual_frame(
                 gateway,
                 _view(
                     "reminders", phase, title=draft_title, primary=primary,
@@ -1358,6 +1513,13 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 label=name,
             )
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
+            record_visual_latency(
+                latencies,
+                screen=name,
+                trigger="typed_downlink",
+                started_at_ns=started_at_ns,
+                completed=completed,
+            )
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
             if phase in {"completed", "failed", "check", "cancelled", "not_saved"}:
@@ -1384,6 +1546,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "schemaVersion": 1,
             "result": "simulator-productivity-hud-action-flow-pass",
             "receipts": [asdict(receipt) for receipt in receipts],
+            "latency": {
+                "scope": "official simulator only; driver-observed image-frame and settled-frame timing, not physical G2 lens latency",
+                "samples": [asdict(sample) for sample in latencies],
+                "summary": visual_latency_summary(latencies),
+            },
             "artifacts": artifacts,
             "evidenceBoundary": {
                 "hud": "official Even Hub simulator framebuffer",
