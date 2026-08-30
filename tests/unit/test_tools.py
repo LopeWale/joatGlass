@@ -9,6 +9,7 @@ do); this layer runs it with timeouts and error containment.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from joat.agents.tools import Tool, ToolBelt, ToolCall
@@ -56,13 +57,18 @@ class TestExecute:
         out = await belt.execute(ToolCall("nope", {}))
         assert out.startswith("error:")
 
-    async def test_a_raising_tool_becomes_information(self) -> None:
+    async def test_a_raising_tool_becomes_content_free_information(
+        self, caplog: Any,
+    ) -> None:
         async def boom(args: dict[str, Any]) -> str:
-            raise RuntimeError("sensor offline")
+            raise RuntimeError("sensor offline: the place I told you about")
 
+        caplog.set_level(logging.WARNING, logger="joat.agents.tools")
         belt = ToolBelt([Tool("bad", "", {"type": "object"}, boom)])
         out = await belt.execute(ToolCall("bad", {}))
-        assert "sensor offline" in out
+        assert out == "error: bad failed"
+        assert "the place I told you about" not in caplog.text
+        assert "tool bad failed (RuntimeError)" in caplog.text
 
     async def test_a_hung_tool_times_out_into_information(self) -> None:
         async def hang(args: dict[str, Any]) -> str:
@@ -82,3 +88,31 @@ class TestExecute:
         belt.register(make_tool(name="find_nearby_places", result="one nearby café"))
 
         assert await belt.execute(ToolCall("find_nearby_places", {})) == "one nearby café"
+
+    def test_explicit_intent_is_opt_in_and_returns_a_typed_call(self) -> None:
+        belt = ToolBelt([
+            make_tool(),
+            Tool(
+                "nearby", "", {"type": "object"},
+                lambda _args: _resolved("nearby"),
+                explicit_intent=lambda text: {"query": "coffee"} if text == "coffee near me" else None,
+            ),
+        ])
+
+        assert belt.explicit_call("coffee near me") == ToolCall("nearby", {"query": "coffee"})
+        assert belt.explicit_call("tell me a joke") is None
+
+    async def test_execution_log_does_not_retain_tool_arguments(
+        self, caplog: Any,
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="joat.agents.tools")
+        private_query = "the place I told you about"
+        belt = ToolBelt([make_tool(result="one result")])
+
+        assert await belt.execute(ToolCall("probe", {"query": private_query})) == "one result"
+        assert private_query not in caplog.text
+        assert "tool probe -> 10 chars" in caplog.text
+
+
+async def _resolved(value: str) -> str:
+    return value

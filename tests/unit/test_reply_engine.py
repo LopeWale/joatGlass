@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from joat.agents.reply_engine import MlxReplyEngine
+from joat.agents.tools import Tool, ToolBelt
 
 
 class FakeMlxReplyEngine(MlxReplyEngine):
@@ -48,6 +49,33 @@ async def test_warm_failure_is_contained_and_can_be_retried() -> None:
         engine.fail_load = False
         assert await engine.reply("retry") == "ready:retry"
         assert engine.load_calls == 2
+    finally:
+        engine._mlx_thread.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_explicit_nearby_intent_bypasses_the_unreliable_model_decision_pass() -> None:
+    called: list[dict[str, Any]] = []
+
+    async def nearby(args: dict[str, Any]) -> str:
+        called.append(args)
+        return "Nearby places: Lakeview Cafe"
+
+    engine = MlxReplyEngine(
+        model_id="test-model",
+        tools=ToolBelt([
+            Tool(
+                "find_nearby_places", "", {"type": "object"}, nearby,
+                explicit_intent=lambda text: {"query": "coffee"} if text == "coffee near me" else None,
+            ),
+        ]),
+    )
+    engine._decide = lambda _text: (_ for _ in ()).throw(AssertionError("model should not decide"))
+    try:
+        assert await engine._maybe_use_tools("coffee near me") == (
+            "You looked this up with find_nearby_places: Nearby places: Lakeview Cafe"
+        )
+        assert called == [{"query": "coffee"}]
     finally:
         engine._mlx_thread.shutdown(wait=True)
 

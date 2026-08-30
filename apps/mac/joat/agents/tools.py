@@ -25,6 +25,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 ToolRunner = Callable[[dict[str, Any]], Awaitable[str]]
+ToolIntent = Callable[[str], dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,10 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     run: ToolRunner
+    # A narrow, deterministic route for an utterance whose intent is clearer
+    # than a small local model's tool-call reliability.  The resolver returns
+    # None for every utterance it does not explicitly own.
+    explicit_intent: ToolIntent | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,29 @@ class ToolBelt:
             }
             for t in self._tools.values()
         ]
+
+    def explicit_call(self, text: str) -> ToolCall | None:
+        """Return a narrowly owned direct tool call, if any.
+
+        This is deliberately opt-in per tool.  It is not a keyword router for
+        the whole belt: ordinary questions still go through the model's tool
+        decision pass.  An intent resolver never receives or returns private
+        context beyond the spoken utterance and its public tool arguments.
+        """
+        for tool in self._tools.values():
+            resolver = tool.explicit_intent
+            if resolver is None:
+                continue
+            try:
+                arguments = resolver(text)
+            except Exception:
+                # A resolver is a convenience, never a reason to lose the
+                # normal model-directed tool path.  Do not log the utterance.
+                log.warning("tool intent resolver failed: %s", tool.name)
+                continue
+            if arguments is not None:
+                return ToolCall(name=tool.name, arguments=arguments)
+        return None
 
     @staticmethod
     def parse_call(text: str) -> ToolCall | None:
@@ -115,11 +143,16 @@ class ToolBelt:
         try:
             result = await asyncio.wait_for(
                 tool.run(call.arguments), self._timeout_s)
-            log.info("tool %s(%s) -> %d chars", call.name,
-                     json.dumps(call.arguments)[:80], len(result))
+            # Tool arguments may be an exact place category, a message search,
+            # or another piece of wearer speech.  A tool name and bounded
+            # result length are sufficient operational evidence.
+            log.info("tool %s -> %d chars", call.name, len(result))
             return result
         except asyncio.TimeoutError:
             return f"error: {call.name} timed out after {self._timeout_s:.0f}s"
         except Exception as exc:
-            log.warning("tool %s failed: %s", call.name, exc)
-            return f"error: {call.name} failed: {exc}"
+            # Provider error strings can include request echoing.  Keep the
+            # diagnostic content-free while preserving a stable result for
+            # the answer pass to turn into a truthful recovery message.
+            log.warning("tool %s failed (%s)", call.name, type(exc).__name__)
+            return f"error: {call.name} failed"

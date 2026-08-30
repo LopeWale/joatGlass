@@ -140,10 +140,12 @@ class MlxReplyEngine(ReplyEngine):
         """
         if self._tools is None or not self._tools:
             return None
-        decision = await asyncio.get_running_loop().run_in_executor(
-            self._mlx_thread, self._decide, text
-        )
-        call = self._tools.parse_call(decision)
+        call = self._tools.explicit_call(text)
+        if call is None:
+            decision = await asyncio.get_running_loop().run_in_executor(
+                self._mlx_thread, self._decide, text
+            )
+            call = self._tools.parse_call(decision)
         if call is None:
             return None
         result = await self._tools.execute(call)
