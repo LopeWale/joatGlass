@@ -99,6 +99,17 @@ struct SettingsView: View {
                 get: { engine.launchAtLogin },
                 set: { engine.setLaunchAtLogin($0) }
             ))
+            Toggle("Private Tailnet home brain", isOn: Binding(
+                get: { engine.privateTailnetGateway },
+                set: { engine.setPrivateTailnetGateway($0) }
+            ))
+            Text(
+                "For an unattended home Mac behind private Tailscale Serve. "
+                + "JOAT listens only on loopback and still requires G2 pairing. "
+                + "Restart JOAT after changing this setting."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
             LabeledContent("Engine repo") {
                 Text(engine.repoURL()?.path ?? "not found")
                     .truncationMode(.middle)

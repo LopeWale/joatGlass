@@ -75,6 +75,14 @@ app discovers the conventional `~/joatGlass` clone, starts the same Python
 child, owns the native bridge, and can be enabled once as a Login Item. Daily
 glasses use does not require opening the Mac app.
 
+For the private Tailnet home-Mini topology, enable **Private Tailnet home
+brain** in the app's Settings once and restart it. The engine then listens only
+on `127.0.0.1:8787` while still requiring Hub pairing; configure the Mini's
+private Tailscale Serve HTTPS proxy to that loopback address and build the
+plugin with the port-443 `wss://<mini>.ts.net/glasses` candidate. The exact
+origin must already appear in `app.json`. This is not a public Funnel and does
+not make loopback an authentication exemption.
+
 Each home brain has one-time setup: its `openclaw.json` contains only the
 approved Gateway origin and `hermes` agent ID; JOAT.app keeps the resulting
 device identity/token in that Mac's Keychain and the OpenClaw host approves

@@ -21,7 +21,11 @@ See [../../docs/HUB_PLUGIN.md](../../docs/HUB_PLUGIN.md) for the SDK reference a
 ## Status
 
 - Build is wired: `package.json`, `vite.config.ts`, `tsconfig.json`, and `app.json` all exist. `npm run build` typechecks + bundles; `npm test` runs vitest.
-- `app.json`'s `network` permission `whitelist` must carry the Mac's WebSocket URL exactly (scheme included — the Phase-0 gateway is plain `ws://`). Keep it in sync with `VITE_MAC_WS_URL` in `.env`; a mismatch fails silently.
+- `app.json`'s `network` permission `whitelist` must carry the Mac's WebSocket
+  origin exactly (scheme and port included). Direct development can use plain
+  `ws://…:8787`; an unattended Tailnet home brain uses portless
+  `wss://<mini>.ts.net` behind Tailscale Serve. Keep that build-time candidate
+  in sync with `.env`; a mismatch fails silently.
 - IMU nod thresholds in `ImuMonitor` are untuned guesses — calibrate with `scripts/imu_capture.py` (see [docs/TESTING.md](../../docs/TESTING.md)).
 
 ## Dev loop
