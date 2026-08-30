@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 
 def _driver():
@@ -24,6 +27,10 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
 
     assert driver is not None, "productivity HUD action-flow driver is missing"
     receipts = [
+        driver.ScreenReceipt("planning-month", "click", None, "month", "0" * 64),
+        driver.ScreenReceipt("planning-week", "click", None, "week", "1" * 64),
+        driver.ScreenReceipt("planning-day", "click", None, "day", "2" * 64),
+        driver.ScreenReceipt("planning-item-detail", "click", None, "detail", "3" * 64),
         driver.ScreenReceipt("calendar-review", None, None, "review", "a" * 64),
         driver.ScreenReceipt("calendar-verifying", "click", True, "verifying", "b" * 64),
         driver.ScreenReceipt("calendar-saved", None, None, "saved", "c" * 64),
@@ -41,3 +48,23 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
     ]
 
     driver.validate_flow(receipts)
+
+
+def test_planning_day_receipt_requires_both_native_kinds() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    driver.validate_planning_screen("day", SimpleNamespace(
+        title="PLANNING · PLAN · TUE SEP 1",
+        items=[
+            "10:30 · EVENT · Design review",
+            "19:00 · REMINDER · Buy filters",
+        ],
+        planning_grid=None,
+    ))
+    with pytest.raises(driver.ProductivityHudFlowError, match="mixed Event and Reminder"):
+        driver.validate_planning_screen("day", SimpleNamespace(
+            title="PLANNING · PLAN · TUE SEP 1",
+            items=["10:30 · EVENT · Design review"],
+            planning_grid=None,
+        ))
