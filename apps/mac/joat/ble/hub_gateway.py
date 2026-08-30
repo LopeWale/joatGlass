@@ -84,6 +84,11 @@ from ..services.g2_diagnostics import G2DiagnosticStore
 log = logging.getLogger(__name__)
 REMINDER_DUE_ACK_REPROBE_SECONDS = 30.0
 REMINDER_DUE_ACK_MIN_INTERVAL_SECONDS = 5.0
+# The Hub plugin gives the Even SDK five seconds for ``getAppLocation``.
+# The Mac must still leave time for that result to cross phone WebView ->
+# WebSocket -> gateway; matching the SDK deadline races a valid late fix.
+EVEN_LOCATION_ONE_SHOT_TIMEOUT_S = 5.0
+DEFAULT_LOCATION_REFRESH_TIMEOUT_S = 7.0
 
 
 ImuCallback = Callable[[Imu], None]
@@ -510,8 +515,16 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             return None
         return self.location
 
-    async def request_location_refresh(self, *, timeout_s: float = 5.0) -> Location | None:
-        """Ask the plugin for one medium-accuracy fix bound to this socket session."""
+    async def request_location_refresh(
+        self,
+        *,
+        timeout_s: float = DEFAULT_LOCATION_REFRESH_TIMEOUT_S,
+    ) -> Location | None:
+        """Ask the plugin for one medium-accuracy fix bound to this socket session.
+
+        ``timeout_s`` includes both the phone SDK call and relay delivery.  It
+        is deliberately longer than the plugin's five-second SDK request.
+        """
         conn = self._conn
         session_id = self._session_id
         if conn is None or session_id is None:
