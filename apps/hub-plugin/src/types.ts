@@ -124,6 +124,14 @@ export interface ProductivityHudModel {
    * bounded monitor occurrence. The Hub uses this to present a truthful
    * monitoring page after the readable Saved receipt. */
   monitoringArmed?: boolean;
+  /** Opaque local occurrence UUID. Present only on a due view that requests
+   * a generation-bound plugin acceptance receipt; never Reminder content. */
+  reminderDueId?: string;
+  /** Fresh gateway-generated attempt UUID. It prevents a delayed receipt
+   * from satisfying a later retry for the same occurrence. */
+  reminderDueAttemptId?: string;
+  /** Mac gateway connection generation paired with reminderDueId. */
+  reminderDueGeneration?: number;
 }
 export type NavigationAction =
   | 'confirm_destination'
@@ -225,6 +233,14 @@ export type UplinkMessage =
     requestId: string;
     generation: number;
     reason: 'unavailable';
+  }
+  /** The plugin accepted the typed due surface. This is not wearer attention. */
+  | {
+    kind: 'reminder_due.ack';
+    reminderDueId: string;
+    reminderDueAttemptId: string;
+    generation: number;
+    outcome: 'accepted';
   };
 
 /** Messages sent Mac → plugin. */

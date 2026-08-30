@@ -947,10 +947,8 @@ async def main() -> None:
     )
     transport.on_input(capabilities.on_input)
 
-    async def deliver_task_alert(alert: ProductivityHudView) -> None:
-        if not transport.connected:
-            raise RuntimeError("glasses are not connected")
-        await transport.send(alert)
+    async def deliver_task_alert(alert: ProductivityHudView) -> bool:
+        return await transport.request_reminder_due_ack(alert)
 
     task_monitor = TaskMonitor(
         task_occurrences,

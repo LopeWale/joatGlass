@@ -16,6 +16,7 @@ from datetime import date
 from enum import IntEnum
 import math
 from typing import Any, Literal
+from uuid import UUID
 
 # ── Constants mirrored from the SDK ──────────────────────────────────────────
 
@@ -307,11 +308,27 @@ class NavigationOriginFailure:
     reason: Literal["unavailable"]
 
 
+@dataclass(frozen=True, slots=True)
+class ReminderDueAck:
+    """Plugin acknowledgement of a content-free Reminder due presentation.
+
+    This proves that the current admitted Hub client accepted the typed
+    due-view operation.
+    It does not prove a native Reminders banner, physical G2 pixels, or wearer
+    attention; those are deliberately separate delivery boundaries.
+    """
+
+    reminder_due_id: str
+    reminder_due_attempt_id: str
+    generation: int
+    outcome: Literal["accepted"]
+
+
 UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
-    | NavigationOrigin | NavigationOriginFailure
+    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck
 )
 
 
@@ -550,6 +567,13 @@ class ProductivityHudView:
     # EventKit ID, or an OS notification claim. It is true only after both
     # native read-back and durable monitor-occurrence registration succeeded.
     monitoring_armed: bool = False
+    # A one-time opaque UUID assigned by the local task-occurrence store. The
+    # gateway fills the connection generation and a fresh per-attempt UUID
+    # immediately before it writes the view. The client echoes all three only
+    # after accepting that exact due surface.
+    reminder_due_id: str | None = None
+    reminder_due_attempt_id: str | None = None
+    reminder_due_generation: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.domain not in _PRODUCTIVITY_HUD_DOMAINS:
@@ -560,6 +584,19 @@ class ProductivityHudView:
             raise ProtocolError("Productivity monitoring is reminders-only")
         if self.monitoring_armed and (self.domain != "reminders" or self.phase != "saved"):
             raise ProtocolError("Productivity monitoring marker requires a saved reminder")
+        receipt_fields = (
+            self.reminder_due_id,
+            self.reminder_due_attempt_id,
+            self.reminder_due_generation,
+        )
+        if any(value is None for value in receipt_fields) and any(
+            value is not None for value in receipt_fields
+        ):
+            raise ProtocolError("Productivity reminder due receipt fields must be paired")
+        if self.reminder_due_id is not None and (
+            self.domain != "reminders" or self.phase != "due"
+        ):
+            raise ProtocolError("Productivity reminder due receipt requires a reminder due view")
         productivity: dict[str, Any] = {
             "domain": self.domain,
             "phase": self.phase,
@@ -577,6 +614,14 @@ class ProductivityHudView:
             productivity["planningAnchorUnixMs"] = anchor
         if self.monitoring_armed:
             productivity["monitoringArmed"] = True
+        if self.reminder_due_id is not None:
+            productivity["reminderDueId"] = _reminder_due_identifier(self.reminder_due_id)
+            productivity["reminderDueAttemptId"] = _reminder_due_identifier(
+                self.reminder_due_attempt_id,
+            )
+            productivity["reminderDueGeneration"] = _reminder_due_generation(
+                self.reminder_due_generation,
+            )
         return {
             "kind": "productivity.view",
             "productivity": productivity,
@@ -921,6 +966,26 @@ def _planning_anchor(value: Any, *, field_name: str) -> int | None:
 def _navigation_generation(value: Any) -> int:
     if type(value) is not int or not 0 <= value <= 2_147_483_647:
         raise ProtocolError("navigation generation is invalid")
+    return value
+
+
+def _reminder_due_identifier(value: Any) -> str:
+    """Accept only a UUID occurrence key, never Reminder content or an ID."""
+
+    if not isinstance(value, str):
+        raise ProtocolError("reminder due identifier is invalid")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ProtocolError("reminder due identifier is invalid") from exc
+    if str(parsed) != value:
+        raise ProtocolError("reminder due identifier is invalid")
+    return value
+
+
+def _reminder_due_generation(value: Any) -> int:
+    if type(value) is not int or not 1 <= value <= 2_147_483_647:
+        raise ProtocolError("reminder due generation is invalid")
     return value
 
 
@@ -1539,6 +1604,24 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     _require(payload, "generation", kind),
                 ),
                 reason=reason,
+            )
+        case "reminder_due.ack":
+            if set(payload) != {
+                "kind", "reminderDueId", "reminderDueAttemptId", "generation", "outcome",
+            }:
+                raise ProtocolError("reminder due acknowledgement has unsupported fields")
+            outcome = _require(payload, "outcome", kind)
+            if outcome != "accepted":
+                raise ProtocolError("reminder due acknowledgement outcome is invalid")
+            return ReminderDueAck(
+                reminder_due_id=_reminder_due_identifier(
+                    _require(payload, "reminderDueId", kind),
+                ),
+                reminder_due_attempt_id=_reminder_due_identifier(
+                    _require(payload, "reminderDueAttemptId", kind),
+                ),
+                generation=_reminder_due_generation(_require(payload, "generation", kind)),
+                outcome="accepted",
             )
         case "location":
             if not set(payload) <= {

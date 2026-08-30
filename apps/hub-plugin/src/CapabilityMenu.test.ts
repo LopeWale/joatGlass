@@ -18,6 +18,8 @@ type PaintResult = boolean | Promise<boolean>;
 function rig(
   sidebarResult: boolean | boolean[] = true,
   listResult: PaintResult | PaintResult[] = true,
+  productivityResult: PaintResult | PaintResult[] = true,
+  productivityVisible = true,
 ) {
   const sidebars: string[][] = [];
   const lists: string[][] = [];
@@ -25,12 +27,14 @@ function rig(
   const statuses: string[] = [];
   const operations: string[] = [];
   const productivities: ProductivityHudModel[] = [];
+  const deferredProductivityVisibleCallbacks: Array<(() => void) | undefined> = [];
   const selections: number[] = [];
   const moves: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
   let sidebarCall = 0;
   let listCall = 0;
+  let productivityCall = 0;
   const hud = {
     showSidebar: vi.fn(async (items: string[]) => {
       operations.push('sidebar');
@@ -66,17 +70,28 @@ function rig(
       moves.push(delta);
       return true;
     }),
-    showProductivity: vi.fn(async (productivity: ProductivityHudModel) => {
+    showProductivity: vi.fn(async (
+      productivity: ProductivityHudModel,
+      _status?: string,
+      onDeferredProductivityVisible?: () => void,
+    ) => {
       operations.push('productivity');
       productivities.push(productivity);
-      return true;
+      deferredProductivityVisibleCallbacks.push(onDeferredProductivityVisible);
+      const result = Array.isArray(productivityResult)
+        ? (productivityResult[productivityCall] ?? true)
+        : productivityResult;
+      productivityCall += 1;
+      return result;
     }),
+    isProductivityVisible: vi.fn(() => productivityVisible),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
-    menu, sidebars, lists, listOptions, operations, productivities, selections, moves, statuses, sent,
+    menu, sidebars, lists, listOptions, operations, productivities,
+    deferredProductivityVisibleCallbacks, selections, moves, statuses, sent,
     defaultsCount: () => defaults,
   };
 }
@@ -604,6 +619,42 @@ describe('CapabilityMenu', () => {
         planningAnchorUnixMs: 1_788_274_200_000,
       },
     });
+  });
+
+  it('does not report a failed or superseded due paint as visible', async () => {
+    const due: ProductivityHudModel = {
+      domain: 'reminders', phase: 'due', title: 'Private reminder',
+      primary: 'Due now', secondary: 'Still incomplete', hint: 'left x2 Planning',
+      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      reminderDueGeneration: 7,
+    };
+    expect(await rig(true, true, false).menu.presentProductivity(due)).toBe(false);
+
+    let resolveFirst: (value: boolean) => void = () => undefined;
+    const firstPaint = new Promise<boolean>((resolve) => { resolveFirst = resolve; });
+    const { menu } = rig(true, true, [firstPaint, true]);
+    const stale = menu.presentProductivity(due);
+    await Promise.resolve();
+    expect(await menu.presentProductivity({ ...due, reminderDueAttemptId: '9b38eafb-6fda-4d4c-bb6e-80b9365854b5' })).toBe(true);
+    resolveFirst(true);
+    expect(await stale).toBe(false);
+  });
+
+  it('hands a deferred due acknowledgement to the presenter without sending it early', async () => {
+    const { menu, deferredProductivityVisibleCallbacks } = rig(true, true, true, false);
+    const due: ProductivityHudModel = {
+      domain: 'reminders', phase: 'due', title: 'Private reminder',
+      primary: 'Due now', secondary: 'Still incomplete', hint: 'left x2 Planning',
+      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      reminderDueGeneration: 7,
+    };
+    let acknowledged = 0;
+    expect(await menu.presentProductivity(due, () => { acknowledged += 1; })).toBe(false);
+    expect(acknowledged).toBe(0);
+    deferredProductivityVisibleCallbacks[0]?.();
+    expect(acknowledged).toBe(1);
   });
 
   it.each([
