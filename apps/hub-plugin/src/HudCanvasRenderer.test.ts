@@ -149,8 +149,8 @@ describe('productivity HUD state labels', () => {
     expect(productivityPhaseLabel('verifying')).toBe('VERIFYING');
     expect(productivityPhaseLabel('saved')).toBe('SAVED');
     expect(productivityPhaseLabel('completed')).toBe('COMPLETED');
-    expect(productivityPhaseLabel('failed')).toBe('NOT SAVED');
-    expect(productivityPhaseLabel('check')).toBe('CHECK REQUIRED');
+    expect(productivityPhaseLabel('failed')).toBe('FAILED');
+    expect(productivityPhaseLabel('check')).toBe('UNCERTAIN');
     expect(productivityPhaseLabel('due')).toBe('DUE NOW');
     expect(productivityPhaseProgress('saved')).toBe(1);
     expect(productivityPhaseProgress('completed')).toBe(1);

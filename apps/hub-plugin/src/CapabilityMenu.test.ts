@@ -377,6 +377,12 @@ describe('CapabilityMenu', () => {
     { domain: 'calendar', phase: 'check', title: 'Design review', secondary: 'It may have changed. Do not retry.' },
     { domain: 'calendar', phase: 'cancelled', title: 'Design review', secondary: 'No calendar item was changed.' },
     { domain: 'calendar', phase: 'not_saved', title: 'Design review', secondary: 'No calendar item was changed.' },
+    { domain: 'reminders', phase: 'verifying', title: 'Buy filters', secondary: 'Checking native read-back' },
+    { domain: 'reminders', phase: 'saved', title: 'Buy filters', secondary: 'Native alarm set · JOAT monitoring armed.' },
+    { domain: 'reminders', phase: 'failed', title: 'Buy filters', secondary: 'No reminders item was changed.' },
+    { domain: 'reminders', phase: 'check', title: 'Buy filters', secondary: 'It may have changed. Do not retry.' },
+    { domain: 'reminders', phase: 'cancelled', title: 'Buy filters', secondary: 'No reminders item was changed.' },
+    { domain: 'reminders', phase: 'not_saved', title: 'Buy filters', secondary: 'No reminders item was changed.' },
     { domain: 'reminders', phase: 'completed', title: 'Buy filters', secondary: 'Reminders read-back matched' },
     { domain: 'reminders', phase: 'due', title: 'Buy filters', secondary: 'This reminder is still incomplete.' },
   ] satisfies ReadonlyArray<{

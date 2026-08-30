@@ -83,11 +83,14 @@ const PRODUCTIVITY_LIFECYCLE_VISUAL_STATES = [
   'calendar-failed',
   'calendar-check',
   'calendar-cancelled',
+  'calendar-not-saved',
   'reminders-review',
   'reminders-verifying',
   'reminders-saved',
   'reminders-failed',
   'reminders-check',
+  'reminders-cancelled',
+  'reminders-not-saved',
   'reminders-completed',
   'reminders-due',
 ] as const;
@@ -713,7 +716,9 @@ function productivityLifecycleFixture(
   const domain = calendar ? 'calendar' : 'reminders';
   const title = calendar ? 'Design review' : 'Buy filters';
   const nativeApp = calendar ? 'Calendar' : 'Reminders';
-  const returnHint = `left x2 ${nativeApp}`;
+  // The production workflow returns to one live, mixed planner (not stale
+  // app-specific lists) after every terminal status.
+  const returnHint = 'left x2 Planning';
   switch (state) {
     case 'calendar-verifying':
     case 'reminders-verifying':
@@ -723,10 +728,14 @@ function productivityLifecycleFixture(
         secondary: 'Checking native read-back', hint: 'Please wait',
       };
     case 'calendar-saved':
-    case 'reminders-saved':
       return {
         domain, phase: 'saved', title,
         primary: 'Saved and verified', secondary: `${nativeApp} read-back matched`, hint: returnHint,
+      };
+    case 'reminders-saved':
+      return {
+        domain, phase: 'saved', title,
+        primary: 'Saved and verified', secondary: 'Native alarm set · JOAT monitoring armed.', hint: returnHint,
       };
     case 'calendar-failed':
     case 'reminders-failed':
@@ -739,12 +748,19 @@ function productivityLifecycleFixture(
       return {
         domain, phase: 'check', title,
         primary: `Check ${nativeApp}`, secondary: 'It may have changed. Do not retry.',
-        hint: `Open ${nativeApp} on Mac`,
+        hint: returnHint,
       };
     case 'calendar-cancelled':
+    case 'calendar-not-saved':
+    case 'reminders-cancelled':
+    case 'reminders-not-saved':
       return {
-        domain, phase: 'cancelled', title,
-        primary: 'Cancelled', secondary: 'No calendar item was changed.', hint: returnHint,
+        domain,
+        phase: state.endsWith('cancelled') ? 'cancelled' : 'not_saved',
+        title,
+        primary: state.endsWith('cancelled') ? 'Cancelled' : 'Not saved',
+        secondary: `No ${nativeApp.toLowerCase()} item was changed.`,
+        hint: returnHint,
       };
     case 'reminders-completed':
       return {
