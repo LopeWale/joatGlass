@@ -18,7 +18,9 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 from typing import Literal, cast
@@ -50,6 +52,8 @@ class ScreenReceipt:
 
 
 ReplyOutcome = Literal["accepted", "cancelled", "timed_out", "uncertain", "failed"]
+SimulatorControl = Literal["click", "down", "up"]
+MenuSelectionControl = Literal["click", "down"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,10 +168,29 @@ async def _clear_simulator_console(automation_base: str) -> None:
         ) from exc
 
 
+def _write_alpha_preview(raw_frame: Path) -> Path:
+    """Make the transparent simulator frame reviewable as monochrome pixels."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise MessagesFlowError("ffmpeg is required to retain a reviewable simulator frame")
+    preview = raw_frame.with_name(f"{raw_frame.stem}.alpha.png")
+    completed = subprocess.run(
+        [ffmpeg, "-y", "-loglevel", "error", "-i", str(raw_frame), "-vf", "alphaextract", str(preview)],
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode != 0 or not preview.is_file():
+        raise MessagesFlowError(f"could not alpha-extract {raw_frame.name} for review")
+    preview.chmod(0o600)
+    return preview
+
+
 def _write_framebuffer(destination: Path, framebuffer: bytes) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(framebuffer)
     destination.chmod(0o600)
+    _write_alpha_preview(destination)
     return hashlib.sha256(framebuffer).hexdigest()
 
 
@@ -222,7 +245,7 @@ async def _wait_for_visible_confirmation(
     )
 
 
-async def _send_simulator_input(automation_base: str, action: Literal["click", "down"]) -> None:
+async def _send_simulator_input(automation_base: str, action: SimulatorControl) -> None:
     try:
         await asyncio.to_thread(
             _http_bytes,
@@ -264,7 +287,7 @@ async def _wait_for_sidebar_frame(
 _EXPECTED_REPLY_FLOW = (
     ("messages-sidebar", "test-hook-open"),
     ("messages-conversations", "click"),
-    ("messages-conversation", "list-select"),
+    ("messages-conversation", "down + click"),
     ("messages-confirmation", None),
     ("messages-result", "click"),
     ("messages-returned", "click"),
@@ -273,7 +296,7 @@ _EXPECTED_REPLY_FLOW = (
 _EXPECTED_COMPOSE_FLOW = (
     ("messages-sidebar", "test-hook-open"),
     ("messages-conversations", "click"),
-    ("messages-compose", "list-select"),
+    ("messages-compose", "click"),
     ("messages-confirmation", None),
     ("messages-result", "click"),
     ("messages-returned", "click"),
@@ -282,10 +305,64 @@ _EXPECTED_COMPOSE_FLOW = (
 _EXPECTED_HISTORY_FLOW = (
     ("messages-sidebar", "test-hook-open"),
     ("messages-conversations", "click"),
-    ("messages-latest", "list-select"),
-    ("messages-older", "scroll-down"),
+    ("messages-latest", "down + down + click"),
+    ("messages-older", "down × 11"),
     ("messages-latest-returned", "scroll-up"),
 )
+
+
+def menu_selection_controls(flow: str) -> tuple[MenuSelectionControl, ...]:
+    """Return the exact simulator gestures that enter and select a Messages row.
+
+    The development hook opens only the ordinary sidebar. It deliberately
+    does not select a capability, because that would bypass the production
+    EventRouter, CapabilityMenu and Mac selection path the proof must cover.
+    """
+    controls_by_flow: dict[str, tuple[MenuSelectionControl, ...]] = {
+        "reply": ("click", "down", "click"),
+        "compose": ("click", "click"),
+        "history": ("click", "down", "down", "click"),
+    }
+    controls = controls_by_flow.get(flow)
+    if controls is None:
+        raise ValueError(f"unsupported Messages selection flow: {flow}")
+    return controls
+
+
+def initial_selection_receipt_input(flow: str) -> str:
+    """Describe the user-visible input that produced the selected state."""
+    return " + ".join(menu_selection_controls(flow)[1:])
+
+
+def history_page_boundary_controls(entry_count: int) -> tuple[Literal["down"], ...]:
+    """Move the local conversation cursor to its Mac-owned older-page edge."""
+    if entry_count <= 0:
+        raise ValueError("a Messages history page needs at least one entry")
+    # The rendered page also includes its heading, spoken-reply instruction,
+    # and microphone guidance. Paging is intentionally forwarded only when
+    # the wearer reaches the final visible row and presses down once more.
+    return cast(tuple[Literal["down"], ...], ("down",) * (entry_count + 3))
+
+
+def history_page_receipt_input(entry_count: int) -> str:
+    """Keep the retained page action exact without leaking message contents."""
+    return f"down × {len(history_page_boundary_controls(entry_count))}"
+
+
+async def _drive_initial_messages_selection(
+    automation_base: str,
+    flow: Literal["reply", "compose", "history"],
+) -> None:
+    """Drive the documented sidebar and picker controls through Even Hub.
+
+    The small settle after each input is intentionally only transport/painter
+    synchronization. The resulting Mac handler events remain the authority
+    for a captured selected Conversation or Compose frame.
+    """
+    controls = menu_selection_controls(flow)
+    for action in controls[1:]:
+        await _send_simulator_input(automation_base, action)
+        await asyncio.sleep(0.25)
 
 
 def required_evidence_frames(flow: str) -> tuple[str, ...]:
@@ -363,17 +440,30 @@ def _validate_receipts(
         digest = receipt.framebuffer_sha256
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise MessagesFlowError(f"{name}: invalid framebuffer digest")
-        # Dismissing the transient result overlay can legitimately reveal the
-        # exact same conversation pixels that preceded confirmation. Every
-        # other state must be visually distinct, so a stale/static capture
-        # cannot satisfy the causal route.
-        if digest in seen and name != "messages-returned":
+        # A transient result dismissal and an older-page return must expose
+        # the exact selected state that preceded them. Every other state must
+        # be visually distinct, so a stale/static capture cannot satisfy the
+        # causal route.
+        if name in {"messages-returned", "messages-latest-returned"}:
+            if digest != receipts[2].framebuffer_sha256:
+                raise MessagesFlowError(f"{name}: did not restore the selected Messages frame")
+        elif digest in seen:
             raise MessagesFlowError(f"{name}: frame is not visually distinct")
         seen.add(digest)
 
 
-def validate_flow(receipts: list[ScreenReceipt]) -> None:
-    _validate_receipts(receipts, _EXPECTED_REPLY_FLOW)
+def expected_reply_flow(outcome: str) -> tuple[tuple[str, str | None], ...]:
+    """Bind the result-frame cause to the visible confirmation action."""
+    expected = list(_EXPECTED_REPLY_FLOW)
+    expected[4] = (
+        "messages-result",
+        reply_outcome_expectation(outcome).simulator_control,
+    )
+    return tuple(expected)
+
+
+def validate_flow(receipts: list[ScreenReceipt], outcome: str = "accepted") -> None:
+    _validate_receipts(receipts, expected_reply_flow(outcome))
 
 
 def validate_compose_flow(receipts: list[ScreenReceipt]) -> None:
@@ -535,6 +625,10 @@ async def run(
             if automation_base is not None:
                 assert evidence_dir is not None
                 frames.append(await _wait_for_sidebar_frame(automation_base, evidence_dir))
+                await _send_simulator_input(
+                    automation_base,
+                    menu_selection_controls(flow)[0],
+                )
             selected = replies.composing if flow == "compose" else replies.selected
             log.info("stage=connected flow=%s action=select-Messages-row", flow)
             if automation_base is not None:
@@ -546,6 +640,7 @@ async def run(
                     "messages-conversations",
                     "click",
                 ))
+                await _drive_initial_messages_selection(automation_base, flow)
             await asyncio.wait_for(selected.wait(), timeout=90)
             if automation_base is not None:
                 assert evidence_dir is not None
@@ -558,13 +653,21 @@ async def run(
                     automation_base,
                     evidence_dir,
                     selected_frame,
-                    "list-select",
+                    initial_selection_receipt_input(flow),
                 ))
             if flow == "history":
                 # Select the fixture Dele conversation, then use official
                 # simulator scroll input. No voice command or confirmation is
                 # injected: this trace is deliberately a no-send page-routing
                 # proof, not a Messages.app submission test.
+                initial_history = router._message_history
+                if initial_history is None:
+                    raise MessagesFlowError("history flow did not retain its selected conversation")
+                entry_count = len(initial_history.pages[0].entries)
+                if automation_base is not None:
+                    for action in history_page_boundary_controls(entry_count):
+                        await _send_simulator_input(automation_base, action)
+                        await asyncio.sleep(0.1)
                 await asyncio.wait_for(_wait_for_history_page(router, 1), timeout=90)
                 log.info("stage=older-page-visible action=scroll-down")
                 if automation_base is not None:
@@ -573,8 +676,10 @@ async def run(
                         automation_base,
                         evidence_dir,
                         "messages-older",
-                        "scroll-down",
+                        history_page_receipt_input(entry_count),
                     ))
+                if automation_base is not None:
+                    await _send_simulator_input(automation_base, "up")
                 await asyncio.wait_for(_wait_for_history_page(router, 0), timeout=90)
                 if sender.sent.is_set():
                     raise MessagesFlowError("history-only trace reached sender")
@@ -670,7 +775,7 @@ async def run(
                     "click",
                 ))
                 if flow == "reply":
-                    validate_flow(frames)
+                    validate_flow(frames, outcome)
                 else:
                     validate_compose_flow(frames)
                 _write_evidence_receipt(

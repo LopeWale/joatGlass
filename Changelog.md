@@ -2,6 +2,14 @@
 
 ## 2026-08-30
 
+- The no-send **Messages** simulator proof now drives every visible production
+  selector itself—sidebar **click**, conversation **down + click** or compose
+  **click**, history paging, confirmation control, and result dismissal—and
+  records each causal action truthfully. Each retained transparent 576×288
+  framebuffer now has an owner-only alpha preview for visual review; the
+  runner fails rather than claim reviewable proof if that preview cannot be
+  produced. This remains simulator-only with a `RecordingSender`.
+
 - The no-send official-simulator **Messages** harness now retains and verifies
   every causal 576×288 frame—not only confirmation/result—through Sidebar,
   Conversations, selected Conversation/Compose, confirmation, result, and

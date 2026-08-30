@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -29,10 +30,10 @@ def test_messages_flow_requires_causal_menu_selection_and_confirmation() -> None
     receipts = [
         driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
         driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
-        driver.ScreenReceipt("messages-conversation", "list-select", "2" * 64),
+        driver.ScreenReceipt("messages-conversation", "down + click", "2" * 64),
         driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
         driver.ScreenReceipt("messages-result", "click", "4" * 64),
-        driver.ScreenReceipt("messages-returned", "click", "5" * 64),
+        driver.ScreenReceipt("messages-returned", "click", "2" * 64),
     ]
 
     driver.validate_flow(receipts)
@@ -49,8 +50,37 @@ def test_messages_flow_rejects_a_static_conversation_screenshot() -> None:
             driver.ScreenReceipt("messages-conversation", None, "2" * 64),
             driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
             driver.ScreenReceipt("messages-result", "click", "4" * 64),
-            driver.ScreenReceipt("messages-returned", "click", "5" * 64),
+            driver.ScreenReceipt("messages-returned", "click", "2" * 64),
         ])
+
+
+@pytest.mark.parametrize(
+    ("outcome", "result_input"),
+    [
+        ("accepted", "click"),
+        ("cancelled", "down"),
+        ("timed_out", None),
+        ("uncertain", "click"),
+        ("failed", "click"),
+    ],
+)
+def test_messages_result_receipt_names_the_control_that_caused_that_outcome(
+    outcome: str,
+    result_input: str | None,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
+        driver.ScreenReceipt("messages-conversation", "down + click", "2" * 64),
+        driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
+        driver.ScreenReceipt("messages-result", result_input, "4" * 64),
+        driver.ScreenReceipt("messages-returned", "click", "2" * 64),
+    ]
+
+    driver.validate_flow(receipts, outcome)
 
 
 def test_messages_compose_flow_requires_new_message_selection_and_confirmation() -> None:
@@ -59,10 +89,10 @@ def test_messages_compose_flow_requires_new_message_selection_and_confirmation()
     receipts = [
         driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
         driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
-        driver.ScreenReceipt("messages-compose", "list-select", "2" * 64),
+        driver.ScreenReceipt("messages-compose", "click", "2" * 64),
         driver.ScreenReceipt("messages-confirmation", None, "3" * 64),
         driver.ScreenReceipt("messages-result", "click", "4" * 64),
-        driver.ScreenReceipt("messages-returned", "click", "5" * 64),
+        driver.ScreenReceipt("messages-returned", "click", "2" * 64),
     ]
 
     driver.validate_compose_flow(receipts)
@@ -74,9 +104,9 @@ def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() ->
     receipts = [
         driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
         driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
-        driver.ScreenReceipt("messages-latest", "list-select", "2" * 64),
-        driver.ScreenReceipt("messages-older", "scroll-down", "3" * 64),
-        driver.ScreenReceipt("messages-latest-returned", "scroll-up", "4" * 64),
+        driver.ScreenReceipt("messages-latest", "down + down + click", "2" * 64),
+        driver.ScreenReceipt("messages-older", "down × 11", "3" * 64),
+        driver.ScreenReceipt("messages-latest-returned", "scroll-up", "2" * 64),
     ]
 
     driver.validate_history_flow(receipts)
@@ -129,18 +159,52 @@ def test_official_simulator_evidence_retains_every_required_rendered_frame(
     assert driver.required_evidence_frames(flow) == expected
 
 
+@pytest.mark.parametrize(
+    ("flow", "controls", "selection_input"),
+    [
+        ("reply", ("click", "down", "click"), "down + click"),
+        ("compose", ("click", "click"), "click"),
+        ("history", ("click", "down", "down", "click"), "down + down + click"),
+    ],
+)
+def test_official_simulator_drives_each_visible_messages_selection_control(
+    flow: str,
+    controls: tuple[str, ...],
+    selection_input: str,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+
+    assert driver.menu_selection_controls(flow) == controls
+    assert driver.initial_selection_receipt_input(flow) == selection_input
+
+
+def test_history_paging_reaches_the_real_boundary_before_requesting_older_rows() -> None:
+    driver = _driver()
+    assert driver is not None
+
+    controls = driver.history_page_boundary_controls(8)
+
+    assert controls == ("down",) * 11
+    assert driver.history_page_receipt_input(8) == "down × 11"
+
+
 def test_evidence_receipt_retains_the_causal_frame_order_without_message_content(
     tmp_path: Path,
 ) -> None:
     driver = _driver()
     assert driver is not None
     frames = [
-        driver.ScreenReceipt(name, action, f"{index:x}" * 64)
+        driver.ScreenReceipt(
+            name,
+            action,
+            f"{(2 if name == 'messages-returned' else index):x}" * 64,
+        )
         for index, (name, action) in enumerate(
             (
                 ("messages-sidebar", "test-hook-open"),
                 ("messages-conversations", "click"),
-                ("messages-conversation", "list-select"),
+                ("messages-conversation", "down + click"),
                 ("messages-confirmation", None),
                 ("messages-result", "click"),
                 ("messages-returned", "click"),
@@ -162,6 +226,28 @@ def test_evidence_receipt_retains_the_causal_frame_order_without_message_content
     assert receipt["messages_app_send"] is False
     assert receipt["physical_g2_proof"] is False
     assert "Simulator trace only" not in json.dumps(receipt)
+
+
+def test_official_simulator_frame_has_a_reviewable_alpha_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _driver()
+    assert driver is not None
+    raw = tmp_path / "messages-sidebar.png"
+    raw.write_bytes(b"rgba")
+
+    def extract_alpha(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        Path(arguments[-1]).write_bytes(b"alpha")
+        return subprocess.CompletedProcess(arguments, 0)
+
+    monkeypatch.setattr(driver.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(driver.subprocess, "run", extract_alpha)
+
+    preview = driver._write_alpha_preview(raw)
+
+    assert preview.name == "messages-sidebar.alpha.png"
+    assert preview.read_bytes() == b"alpha"
 
 
 @pytest.mark.parametrize(
