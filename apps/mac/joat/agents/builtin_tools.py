@@ -93,6 +93,39 @@ _WEARER_LOCATION_SENTINELS = frozenset({
     "current location",
     "here",
 })
+_WEARER_WEATHER_REQUESTS = frozenset({
+    "weather",
+    "weather outside",
+    "weather here",
+    "weather near me",
+    "what's the weather",
+    "what's the weather outside",
+    "what's the weather here",
+    "what is the weather",
+    "what is the weather outside",
+    "what is the weather here",
+    "how's the weather",
+    "how is the weather",
+    "is it raining",
+    "is it raining outside",
+    "will it rain",
+    "will it rain today",
+    "temperature outside",
+    "what's the temperature outside",
+    "what is the temperature outside",
+})
+
+
+def weather_at_wearer_intent(utterance: str) -> dict[str, Any] | None:
+    """Own only fixed, no-city current-weather requests.
+
+    This avoids an otherwise mandatory local-model tool-decision pass for a
+    request whose destination is already unambiguous: the existing weather
+    tool obtains the phone location privately. Named places and every broader
+    forecast question continue through model-directed tool selection.
+    """
+    request = " ".join(utterance.strip().casefold().rstrip("?!.,").split())
+    return {} if request in _WEARER_WEATHER_REQUESTS else None
 
 
 def weather_tool(
@@ -130,6 +163,7 @@ def weather_tool(
             "required": [],
         },
         run=run,
+        explicit_intent=weather_at_wearer_intent,
     )
 
 
