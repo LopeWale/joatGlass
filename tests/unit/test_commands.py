@@ -12,6 +12,18 @@ class RecordingReplies:
         self.seen.append(text)
         return None
 
+    def is_compose_armed(self) -> bool:
+        return False
+
+
+class ArmedComposeReplies(RecordingReplies):
+    def is_compose_armed(self) -> bool:
+        return True
+
+    async def handle_command(self, text: str) -> str | None:
+        self.seen.append(text)
+        return "Recipient Adele selected. Say the message."
+
 
 class RecordingProductivity:
     def __init__(self, result: str | None = None) -> None:
@@ -30,6 +42,13 @@ class TestVoiceCommandRouter:
 
         assert await commands("Good morning.") == "Good morning. How can I help?"
         assert replies.seen == []
+
+    async def test_armed_new_message_compose_claims_a_greeting_shaped_body_before_greeting(self) -> None:
+        replies = ArmedComposeReplies()
+        commands = VoiceCommandRouter(replies, ModelRegistry([]))
+
+        assert await commands("Good morning") == "Recipient Adele selected. Say the message."
+        assert replies.seen == ["Good morning"]
 
     async def test_substantive_greeting_falls_through(self) -> None:
         replies = RecordingReplies()

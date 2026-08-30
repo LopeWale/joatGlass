@@ -36,6 +36,7 @@ const QUIET = 68;
 const HAIRLINE = 51;
 const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
+export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
 
 /** Error recovery copy belongs in its warning card; repeating it in the
  * decision header makes the action harder to scan at a glance. */
@@ -183,7 +184,7 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState' | 'noToolsChecked'>,
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState' | 'noToolsChecked' | 'acceptanceArmed'>,
 ): string {
   if (model.screen === 'brainstorm') {
     if (model.state === 'running') {
@@ -195,11 +196,16 @@ export function brainstormActionHint(
     if (model.state === 'topic_capture') {
       return 'speak your question · left x2: cancel';
     }
-    return model.state === 'ready'
+    if (
+      model.state === 'ready'
       && model.terminalState === 'ready'
       && model.noToolsChecked
-      ? 'tap: speak · right/ring x2: test · left x2: menu'
-      : 'left x2: menu · long-press: mic';
+    ) {
+      return model.acceptanceArmed === true
+        ? 'tap: speak · right/ring x2: test · left x2: menu'
+        : 'tap: speak · left x2: menu';
+    }
+    return 'left x2: menu · long-press: mic';
   }
   if (model.state === 'running') return 'tap: return to Brainstorm · left x2: menu';
   return model.terminalState === 'ready'
@@ -363,6 +369,32 @@ export function productivityPhaseProgress(phase: ProductivityHudModel['phase']):
   if (phase === 'saved' || phase === 'monitoring' || phase === 'completed' || phase === 'due') return 1;
   if (phase === 'verifying') return 0.45;
   return 0.18;
+}
+
+/** The wearable owns the escape wording for a live productivity surface.
+ *
+ * Native status text may describe a write or a due reminder, but it must not
+ * conceal the one local action that is always available: return to the
+ * unified Planning screen. This changes only the display route; it neither
+ * cancels an in-flight native write nor claims an unavailable post-save undo.
+ */
+export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase' | 'monitoringArmed'>): string {
+  if (model.phase === 'due') return 'say: complete reminder · Back: left x2 to Planning';
+  if (model.phase === 'saved' && model.monitoringArmed) {
+    return 'Back: left x2 to Planning · monitoring next';
+  }
+  if (
+    model.phase === 'saved'
+    || model.phase === 'monitoring'
+    || model.phase === 'completed'
+    || model.phase === 'failed'
+    || model.phase === 'check'
+    || model.phase === 'cancelled'
+    || model.phase === 'not_saved'
+  ) {
+    return 'Back: left x2 to Planning · auto in 5s';
+  }
+  return 'Back: left x2 to Planning';
 }
 
 interface StatusParts {
@@ -676,6 +708,22 @@ export function visibleHudTailLines(
   return visible;
 }
 
+/** Incoming notifications are previews, not a live stream. Keep the sender
+ * and opening sentence visible; the final ellipsis makes omitted tail copy
+ * explicit instead of silently showing only the last words. */
+export function visibleHudLeadingLines(
+  lines: readonly string[],
+  maximumLines: number,
+): string[] {
+  const count = Math.max(1, maximumLines);
+  const visible = lines.slice(0, count);
+  if (lines.length > count && visible.length > 0) {
+    const last = visible.length - 1;
+    visible[last] = `${visible[last]}…`;
+  }
+  return visible;
+}
+
 export interface FittedHudText {
   fontSize: number;
   lines: string[];
@@ -901,6 +949,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       status: string;
       main: string;
       mainBrightness: number;
+      mainKind?: HudContentKind;
       context: string;
       tray: string;
       hint: string;
@@ -967,6 +1016,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
           359,
           22,
           2,
+          frame.mainKind === 'notification' ? 'leading' : 'tail',
         );
       }
     }
@@ -1004,7 +1054,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
-    context.fillText(frame.hint, 288 - offsetX, 263);
+    context.fillText(
+      frame.mainKind === 'notification' ? NOTIFICATION_DISMISS_HINT : frame.hint,
+      288 - offsetX,
+      263,
+    );
     context.restore();
   }
 
@@ -1430,7 +1484,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
-    this.fitText(context, model.hint, 288, 267, 500);
+    this.fitText(context, productivityActionHint(model), 288, 267, 500);
   }
 
   private drawBrainstorm(
@@ -1915,9 +1969,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     maxWidth: number,
     lineHeight: number,
     maximumLines: number,
+    retention: 'tail' | 'leading' = 'tail',
   ): void {
     const lines = wrapHudText(text, maxWidth, (value) => context.measureText(value).width);
-    const visible = visibleHudTailLines(lines, maximumLines);
+    const visible = retention === 'leading'
+      ? visibleHudLeadingLines(lines, maximumLines)
+      : visibleHudTailLines(lines, maximumLines);
     visible.forEach((value, index) => {
       this.fitText(context, value, x, y + index * lineHeight, maxWidth);
     });

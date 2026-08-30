@@ -49,6 +49,8 @@ class _MessageSelection:
 @dataclass(frozen=True, slots=True)
 class _ComposeSelection:
     trace_id: str
+    expires_at: float
+    recipient: MessageThread | None = None
 
 
 def _recipient_key(handle: str) -> str:
@@ -99,6 +101,7 @@ class MessageReplyController:
         self._selection = None
         self._compose = _ComposeSelection(
             trace_id=safe_trace,
+            expires_at=self._monotonic() + self._selection_ttl_s,
         )
         log.info("message reply trace=%s stage=compose-selected", safe_trace)
 
@@ -121,8 +124,13 @@ class MessageReplyController:
             )
 
     async def handle_command(self, text: str) -> str | None:
-        match = _REPLY.match(text.strip())
-        compose_match = _NEW_MESSAGE.match(text.strip()) if match is None else None
+        command = text.strip()
+        match = _REPLY.match(command)
+        compose_match = _NEW_MESSAGE.match(command) if match is None else None
+        if self._compose is not None:
+            if compose_match is not None:
+                return await self._handle_new_message(compose_match)
+            return await self._handle_compose_turn(command)
         if match is None and compose_match is None:
             return None
         if self._draft_lock.locked():
@@ -132,6 +140,52 @@ class MessageReplyController:
                 return await self._handle_reply(match)
             assert compose_match is not None
             return await self._handle_new_message(compose_match)
+
+    def is_compose_armed(self) -> bool:
+        return self._compose is not None
+
+    async def _handle_compose_turn(self, command: str) -> str:
+        compose = self._compose
+        assert compose is not None
+        if self._monotonic() > compose.expires_at:
+            self.clear_selection("expired")
+            return "New message draft expired. Open Messages and choose New message again."
+        if command.casefold() in {"cancel", "cancel message", "never mind"}:
+            self.clear_selection("cancelled")
+            return "New message cancelled."
+        if not command:
+            return (
+                "Say the recipient name."
+                if compose.recipient is None
+                else "Say the message."
+            )
+        if compose.recipient is None:
+            matches = await asyncio.to_thread(self._contact_search, command)
+            if not matches:
+                return f"No Mac contact matched {command}. Try a fuller name."
+            if len(matches) > 1:
+                return (
+                    f"More than one Mac contact address matched {command}. "
+                    "Say the full name."
+                )
+            recipient_name, recipient_handle = matches[0]
+            self._compose = _ComposeSelection(
+                trace_id=compose.trace_id,
+                expires_at=compose.expires_at,
+                recipient=MessageThread(
+                    sender=recipient_name,
+                    handle=recipient_handle,
+                    text="",
+                    at=0.0,
+                ),
+            )
+            return f"Recipient {recipient_name} selected. Say the message."
+        return await self._confirm_and_send(
+            compose.recipient,
+            compose.trace_id,
+            command,
+            origin_kind="messages.compose",
+        )
 
     async def _handle_reply(self, match: re.Match[str]) -> str:
         if self._selection is None:
@@ -158,6 +212,9 @@ class MessageReplyController:
     async def _handle_new_message(self, match: re.Match[str]) -> str:
         if self._compose is None:
             return "Open Messages and choose New message first."
+        if self._monotonic() > self._compose.expires_at:
+            self.clear_selection("expired")
+            return "New message draft expired. Open Messages and choose New message again."
         recipient_query = match.group("recipient").strip()
         body = match.group("body").strip()
         matches = await asyncio.to_thread(self._contact_search, recipient_query)

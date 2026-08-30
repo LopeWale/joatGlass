@@ -511,6 +511,9 @@ class BrainstormHudView:
     endpoint_host: str = ""
     terminal_reason: str = ""
     no_tools_checked: bool = False
+    # The diagnostic acceptance gesture is never inferred from readiness.
+    # It is an explicit local-Mac opt-in and contains no wearer content.
+    acceptance_armed: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         if self.screen not in {"brainstorm", "agent_terminal"}:
@@ -545,6 +548,7 @@ class BrainstormHudView:
                     self.terminal_reason, "terminal reason", 64, allow_empty=True,
                 ),
                 "noToolsChecked": self.no_tools_checked,
+                "acceptanceArmed": self.acceptance_armed,
             },
         }
 

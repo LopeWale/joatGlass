@@ -144,7 +144,7 @@ describe('CapabilityMenu', () => {
     expect(menu.handleList(clickRow0())).toBe(true); // protobuf zero-drop: row 0
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
-    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2 overview' });
+    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back' });
     expect(operations).toEqual(['sidebar', 'list']);
     expect(sent[0]).toMatchObject({
       kind: 'input',
@@ -185,7 +185,7 @@ describe('CapabilityMenu', () => {
         'Return to Overview, then open Planning to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
-        title: 'PLANNING · RETRY', hint: 'left x2 overview',
+        title: 'PLANNING · RETRY', hint: 'left x2: back',
       });
 
       expect(await menu.presentList(
@@ -209,7 +209,7 @@ describe('CapabilityMenu', () => {
       await vi.advanceTimersByTimeAsync(12_000);
       expect(lists[1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
       expect(listOptions[1]).toMatchObject({
-        title: 'MESSAGES · RETRY', hint: 'tap retry · left x2 overview', selectable: true,
+        title: 'MESSAGES · RETRY', hint: 'tap: retry · left x2: back', selectable: true,
       });
 
       expect(menu.handleClick()).toBe(true);
@@ -240,10 +240,10 @@ describe('CapabilityMenu', () => {
       ],
       firstRequestId,
       false,
-      'left x2 overview',
+      'left x2: back',
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({
-      selectable: true, hint: 'tap retry · left x2 overview',
+      selectable: true, hint: 'tap: retry · left x2: back',
     });
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(moves).toEqual([]);
@@ -320,7 +320,7 @@ describe('CapabilityMenu', () => {
 
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent navigation…']);
-    expect(listOptions[0]).toEqual({ title: 'NAVIGATION', hint: 'left x2 overview' });
+    expect(listOptions[0]).toEqual({ title: 'NAVIGATION', hint: 'left x2: back' });
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
@@ -447,7 +447,7 @@ describe('CapabilityMenu', () => {
     menu.handleList(click(1));
     expect(await menu.presentList(
       'MESSAGES · CONVERSATION', rows(4), requestId, false,
-      'down older · say reply · left x2 overview',
+      'down older · say reply · left x2: back',
     )).toBe(true);
 
     for (let index = 0; index < 3; index += 1) {
@@ -469,7 +469,7 @@ describe('CapabilityMenu', () => {
 
     expect(await menu.presentList(
       'MESSAGES · CONVERSATION', rows(3), requestId, false,
-      'up newer · say reply · left x2 overview',
+      'up newer · say reply · left x2: back',
     )).toBe(true);
     expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
     expect(sent).toHaveLength(4);
@@ -494,7 +494,7 @@ describe('CapabilityMenu', () => {
     menu.handleList(click(1));
     expect(await menu.presentList(
       'MESSAGES · CONVERSATION', rows(4), requestId, false,
-      'down older · say reply · left x2 overview',
+      'down older · say reply · left x2: back',
     )).toBe(true);
 
     expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 1))).toBe(true);
@@ -845,14 +845,49 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(2); // no second/stale conversation selection
   });
 
-  it('double-tap restores buffered Home and clears Mac-private Messages state', async () => {
+  it('walks Messages detail back to its cached conversation list, then sidebar, then Home', async () => {
+    const { menu, sidebars, lists, sent, defaultsCount } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    const conversationRows = ['New message · voice recipient + text', '[now] Adele · Good morning'];
+    expect(await menu.presentList('MESSAGES', conversationRows, requestId, true)).toBe(true);
+    menu.handleList(click(1));
+    expect(sent).toHaveLength(2);
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', ['Adele · Good morning', 'Say reply saying …'], requestId, false,
+    )).toBe(true);
+
+    await menu.toggle();
+    expect(lists[lists.length - 1]).toEqual(conversationRows);
+    expect(defaultsCount()).toBe(0);
+    expect(sent[2]).toEqual({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
+    });
+
+    await menu.toggle();
+    expect(sidebars).toHaveLength(2);
+    expect(menu.isOpen()).toBe(true);
+    expect(sent[3]).toEqual({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
+    });
+
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(1);
+  });
+
+  it('double-tap from the Messages root returns to the sidebar and clears Mac-private Messages state', async () => {
     const { menu, sent, defaultsCount } = rig();
     await menu.toggle();
     menu.handleList(clickRow0());
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.toggle();          // back
-    expect(menu.isOpen()).toBe(false);
-    expect(defaultsCount()).toBe(1);
+    expect(menu.isOpen()).toBe(true);
+    expect(defaultsCount()).toBe(0);
     expect(sent).toHaveLength(2);
     expect(sent[1]).toEqual({
       kind: 'input',
@@ -902,6 +937,7 @@ describe('CapabilityMenu', () => {
     menu.handleList(clickRow0());
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const oldRequest = latestRequestId(sent);
+    await menu.toggle();
     await menu.toggle();
     await menu.toggle();
     menu.handleList(click(1));
@@ -984,7 +1020,7 @@ describe('CapabilityMenu', () => {
     expect(lists[0]!.some((r) => r.includes('Resume mic'))).toBe(true);
     expect(listOptions[0]).toEqual({
       title: 'LISTENING RESUME',
-      hint: 'tap apply · left x2 overview',
+      hint: 'tap: apply · left x2: back',
     });
     menu.handleList(clickRow0()); // pick 'instantly' (row 0, zero-dropped)
     expect(sent.some((m) => m.kind === 'policy' && (m as { resume?: string }).resume === 'auto')).toBe(true);

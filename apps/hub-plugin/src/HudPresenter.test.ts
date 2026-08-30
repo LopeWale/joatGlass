@@ -569,6 +569,26 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
+  it('locally dismisses a visible Home notification and restores the displaced card', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4, 'calendar');
+    await hud.showText('Dele · Messages\nOn my way', ContainerId.Main, 3, 'notification');
+
+    expect(hud.hasVisibleNotification()).toBe(true);
+    expect(await hud.dismissVisibleNotification()).toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview',
+      main: 'NEXT\nDesign review · 4:30',
+      mainKind: 'calendar',
+    });
+    expect(hud.hasVisibleNotification()).toBe(false);
+  });
+
   it('renders the transient sidebar over a dim snapshot, then full-focus Messages restores the latest overview', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showText('Next\nDesign review · 4:30', ContainerId.Main, 4);

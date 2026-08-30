@@ -72,6 +72,9 @@ export interface BrainstormHudModel {
   terminalReason?: string;
   /** Local preflight only; this is never an atomic remote guarantee. */
   noToolsChecked: boolean;
+  /** Default-off Mac diagnostics arm. Only this explicit state may expose the
+   * isolated G2 acceptance gesture; ordinary Brainstorm never does. */
+  acceptanceArmed?: boolean;
 }
 
 /**

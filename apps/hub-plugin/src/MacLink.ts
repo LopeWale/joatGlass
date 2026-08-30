@@ -31,6 +31,7 @@ type NavigationUplinkMessage = Extract<UplinkMessage, {
 }>;
 
 type BrainstormUplinkMessage = Extract<UplinkMessage, { kind: 'brainstorm.action' }>;
+type PhoneLocationUplink = Extract<UplinkMessage, { kind: 'location' }>;
 
 interface QueuedDownlink {
   message: DownlinkMessage;
@@ -101,6 +102,8 @@ export interface MacLinkOptions {
 export class MacLink {
   private socket?: WebSocket;
   private queue: UplinkMessage[] = [];
+  /** Latest private phone fix, kept out of the audio backlog until auth. */
+  private pendingLocation?: PhoneLocationUplink;
   private attempt = 0;
   private urlIndex = 0;
   private closed = false;
@@ -262,6 +265,9 @@ export class MacLink {
             this.attempt = 0;
             this.failedTokensByOrigin.delete(this.activeOrigin);
             this.reportState('connected');
+            const location = this.pendingLocation;
+            this.pendingLocation = undefined;
+            if (location !== undefined) this.rawSend(location);
             for (const queued of this.queue.splice(0)) this.rawSend(queued);
           }
           return;
@@ -372,6 +378,20 @@ export class MacLink {
     }
     if (this.queue.length >= this.maxQueue) this.queue.shift();
     this.queue.push(msg);
+  }
+
+  /**
+   * Preserve only the newest phone fix while a WebSocket authenticates.
+   * Location is current context, not a replayable audio stream: placing it in
+   * the bounded normal queue lets microphone frames evict the only startup
+   * fix before the Mac can ask a nearby-place or navigation question.
+   */
+  sendLatestLocation(msg: PhoneLocationUplink): void {
+    if (this.socket?.readyState === WebSocket.OPEN && this.authenticated) {
+      this.rawSend(msg);
+      return;
+    }
+    this.pendingLocation = msg;
   }
 
   /**

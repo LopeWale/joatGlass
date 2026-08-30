@@ -50,12 +50,16 @@ from .message_reply import MessageReplyController
 
 log = logging.getLogger(__name__)
 
-BACK_HINT = "left x2 overview"
-DETAIL_HINT = "tap detail · left x2 overview"
-PLANNING_HINT = "tap choose · swipe move · left x2 overview"
+BACK_HINT = "left x2: back"
+DETAIL_HINT = "tap: detail · left x2: back"
+PLANNING_HINT = "tap: choose · swipe: move · left x2: back"
 MESSAGES_ACCESS_ITEMS = [
     "Tap to retry after granting Full Disk Access.",
     "Mac Settings · Privacy & Security · Full Disk Access",
+]
+MESSAGES_RETRY_ITEMS = [
+    "Messages is temporarily unavailable.",
+    "Tap to try Messages again.",
 ]
 NEW_MESSAGE_ROW = "New message · voice recipient + text"
 
@@ -104,6 +108,7 @@ class CapabilityRouter:
         personal_data: NativeBridgeClient | None = None,
         notes: NoteStore | None = None,
         actions: ActionJournal | None = None,
+        acceptance_armed: bool = False,
     ) -> None:
         self._hud = hud
         self._transport = transport
@@ -114,6 +119,7 @@ class CapabilityRouter:
         self._personal_data = personal_data
         self._notes = notes
         self._actions = actions
+        self._acceptance_armed = acceptance_armed
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
         self._message_page_pending = False
@@ -171,9 +177,11 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(self._repeat())
         elif (
             event.container_name == "capability-lifecycle"
-            and event.selected_name == "messages-home"
+            and event.selected_name in ("messages-home", "messages-list")
         ):
-            self.clear_message_selection("home")
+            self.clear_message_selection(
+                "home" if event.selected_name == "messages-home" else "list"
+            )
         elif event.container_name == "menu" and event.selected_name == "closed":
             self.clear_message_selection("home")
             asyncio.get_running_loop().create_task(self.repaint_home())
@@ -244,6 +252,7 @@ class CapabilityRouter:
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
+            acceptance_armed=self._acceptance_armed,
         ))
 
     async def _show_agent_terminal(self) -> None:
@@ -277,14 +286,17 @@ class CapabilityRouter:
             return
         try:
             rows = await asyncio.to_thread(self._messages.recent_threads, 5)
-        except (OSError, sqlite3.Error) as exc:
+        except PermissionError as exc:
             log.warning("Messages capability unavailable: %s", type(exc).__name__)
             if self._request_is_current():
                 self._message_rows = []
-            await self._show_focus(
-                "MESSAGES · ACCESS",
-                MESSAGES_ACCESS_ITEMS,
-            )
+            await self._show_messages_read_failure(exc)
+            return
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("Messages capability temporarily unavailable: %s", type(exc).__name__)
+            if self._request_is_current():
+                self._message_rows = []
+            await self._show_messages_read_failure(exc)
             return
         if not self._request_is_current():
             return
@@ -294,7 +306,7 @@ class CapabilityRouter:
         await self._send_list(HudList(
             items=items,
             title="MESSAGES",
-            hint="tap select · left x2 overview",
+            hint="tap: select · left x2: back",
             selectable=True,
         ))
 
@@ -310,12 +322,12 @@ class CapabilityRouter:
             self._message_selection_active = True
             await self._send_list(HudList(
                 items=[
-                    'Say “JOAT, message Adele saying …”',
+                    "Say the recipient name first.",
+                    "Then say the message.",
                     "One matching Mac contact is required.",
-                    "Mic off? Long press to enable.",
                 ],
                 title="MESSAGES · COMPOSE",
-                hint="voice compose · left x2 overview",
+                hint="speak: recipient · left x2: back",
             ))
             return
         thread = self._message_rows[index - 1]
@@ -338,7 +350,7 @@ class CapabilityRouter:
             if not self._request_is_current():
                 return
             self.clear_message_selection("access-denied")
-            await self._show_focus("MESSAGES · ACCESS", MESSAGES_ACCESS_ITEMS)
+            await self._show_messages_read_failure(exc)
             return
         if not self._request_is_current():
             return
@@ -389,7 +401,7 @@ class CapabilityRouter:
                     self.clear_message_selection("access-denied")
                     token = self._request_context.set(request_id)
                     try:
-                        await self._show_focus("MESSAGES · ACCESS", MESSAGES_ACCESS_ITEMS)
+                        await self._show_messages_read_failure(exc)
                     finally:
                         self._request_context.reset(token)
                     return
@@ -424,8 +436,8 @@ class CapabilityRouter:
                 if page.has_older else "Complete conversation on this Mac"
             )
             hint = (
-                "down older · say reply · left x2 overview"
-                if page.has_older else "say reply · left x2 overview"
+                "down older · say reply · left x2: back"
+                if page.has_older else "say reply · left x2: back"
             )
         else:
             page_label = (
@@ -433,8 +445,8 @@ class CapabilityRouter:
                 if page.has_older else "Older messages — up for newer"
             )
             hint = (
-                "up newer · down older · say reply · left x2"
-                if page.has_older else "up newer · say reply · left x2 overview"
+                "up newer · down older · say reply · left x2: back"
+                if page.has_older else "up newer · say reply · left x2: back"
             )
         context = [self._message_history_row(state.thread, entry) for entry in page.entries]
         await self._send_list(HudList(
@@ -445,6 +457,27 @@ class CapabilityRouter:
             title="MESSAGES · CONVERSATION",
             hint=hint,
         ))
+
+    async def _show_messages_read_failure(self, error: BaseException) -> None:
+        """Keep a real permission denial distinct from a retryable DB blip.
+
+        iMessage's live database can briefly reject a read while it is being
+        rotated. That is not evidence that Full Disk Access is absent, and the
+        recovery card must be an actionable retry rather than stale setup
+        instructions. No exception text or Message content reaches the HUD.
+        """
+        if isinstance(error, PermissionError):
+            await self._show_focus(
+                "MESSAGES · ACCESS",
+                MESSAGES_ACCESS_ITEMS,
+                selectable=True,
+            )
+            return
+        await self._show_focus(
+            "MESSAGES · RETRY",
+            MESSAGES_RETRY_ITEMS,
+            selectable=True,
+        )
 
     @staticmethod
     def _message_list_row(thread: MessageThread) -> str:
@@ -885,7 +918,7 @@ class CapabilityRouter:
                 'Say “JOAT, navigate to …”',
                 "I’ll confirm the exact place before starting.",
             ],
-            hint="say destination · left x2 overview",
+            hint="say destination · left x2: back",
         )
 
     async def _show_activity(self) -> None:

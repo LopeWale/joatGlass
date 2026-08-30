@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
+  NOTIFICATION_DISMISS_HINT,
   assistantOverlayTextLayout,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
@@ -19,6 +20,7 @@ import {
   planningGridMatchesMonth,
   parsePlanningMonthTitle,
   planningMonthDays,
+  productivityActionHint,
   productivityPhaseLabel,
   productivityPhaseProgress,
   resolveHudOverview,
@@ -26,6 +28,7 @@ import {
   showNavigationSecondaryInHeader,
   visibleHudSidebarItems,
   visibleHudListItems,
+  visibleHudLeadingLines,
   visibleHudTailLines,
   wrapHudText,
 } from './HudCanvasRenderer';
@@ -37,6 +40,29 @@ describe('hudBrightnessGray', () => {
     expect(hudBrightnessGray(4)).toBe(238);
   });
 
+});
+
+describe('bounded HUD copy', () => {
+  it('keeps the beginning of an incoming notification preview visible', () => {
+    expect(visibleHudLeadingLines(['Sender and subject', 'First sentence', 'Older tail'], 2))
+      .toEqual(['Sender and subject', 'First sentence…']);
+  });
+});
+
+describe('productivity escape copy', () => {
+  it.each([
+    [{ phase: 'verifying', monitoringArmed: false }, 'Back: left x2 to Planning'],
+    [{ phase: 'saved', monitoringArmed: true }, 'Back: left x2 to Planning · monitoring next'],
+    [{ phase: 'monitoring', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
+    [{ phase: 'completed', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
+    [{ phase: 'failed', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
+    [{ phase: 'check', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
+    [{ phase: 'cancelled', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
+    [{ phase: 'not_saved', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
+    [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: left x2 to Planning'],
+  ] as const)('keeps %o visibly escapable', (model, hint) => {
+    expect(productivityActionHint(model)).toBe(hint);
+  });
 });
 
 describe('selected visual geometry', () => {
@@ -75,6 +101,10 @@ describe('selected visual geometry', () => {
 describe('semantic HUD chrome', () => {
   it('labels the assistant overlay with actions that actually dismiss it', () => {
     expect(ASSISTANT_OVERLAY_DISMISS_HINT).toBe('TAP OR SWIPE TO DISMISS');
+  });
+
+  it('does not advertise the right-temple exit gesture as notification navigation', () => {
+    expect(NOTIFICATION_DISMISS_HINT).toBe('tap: dismiss · left x2: menu');
   });
 
   it('maps sidebar glyphs by capability name rather than stale row position', () => {
@@ -228,13 +258,23 @@ describe('Brainstorm wearable actions', () => {
     })).toBe('tap: Hermes · swipe down or left x2: cancel');
   });
 
-  it('shows the content-free test gesture only when the dedicated Hermes seat is safe', () => {
+  it('keeps the diagnostic test gesture off an ordinary ready Brainstorm', () => {
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
       terminalState: 'ready',
       noToolsChecked: true,
-    })).toBe('tap: speak · right/ring x2: test · left x2: menu');
+    })).toBe('tap: speak · left x2: menu');
+  });
+
+  it('shows the diagnostic test gesture only when the Mac explicitly arms it', () => {
+    expect(brainstormActionHint({
+      screen: 'brainstorm',
+      state: 'ready',
+      terminalState: 'ready',
+      noToolsChecked: true,
+      acceptanceArmed: true,
+    } as Parameters<typeof brainstormActionHint>[0])).toBe('tap: speak · right/ring x2: test · left x2: menu');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',

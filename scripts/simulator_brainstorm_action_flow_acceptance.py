@@ -538,6 +538,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             terminal_state="ready",
             no_tools_checked=True,
+            acceptance_armed=True,
         )
 
     sessions = SessionManager(
@@ -551,6 +552,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         status=status,
         messages=None,
         cards=CardLog(),
+        acceptance_armed=True,
     )
     receipt_directory = output / "receipts"
 

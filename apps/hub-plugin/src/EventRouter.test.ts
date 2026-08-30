@@ -16,6 +16,8 @@ function make(
   navigationActive = false,
   brainstormActive = false,
   assistantOverlayVisible = false,
+  notificationVisible = false,
+  brainstormAcceptanceArmed = false,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -48,6 +50,7 @@ function make(
   let acceptedBrainstormAction = 'show_terminal' as 'show_terminal' | 'begin_acceptance';
   const brainstorm = {
     isActive: vi.fn(() => brainstormActive),
+    isAcceptanceArmed: vi.fn(() => brainstormAcceptanceArmed),
     handleClick: vi.fn(() => brainstormActive),
     handleCancel: vi.fn(() => brainstormActive),
     handleAcceptance: vi.fn(() => {
@@ -62,6 +65,8 @@ function make(
   const assistantOverlay = {
     hasAssistantOverlay: vi.fn(() => assistantOverlayVisible),
     dismissAssistantOverlay: vi.fn(async () => true),
+    hasVisibleNotification: vi.fn(() => notificationVisible),
+    dismissVisibleNotification: vi.fn(async () => true),
   };
   const shutDownPageContainer = vi.fn(async (_mode: number) => true);
   const lifecycle: LifecycleHandler = {
@@ -276,6 +281,33 @@ describe('EventRouter — double press', () => {
     expect(sent).toEqual([]);
   });
 
+  it('uses a source-less compatible G2 double press for local Back, not OS exit', () => {
+    const { fire, menu, sent, shutDownPageContainer } = make();
+
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL,
+      },
+    });
+
+    expect(menu.toggle).toHaveBeenCalledTimes(1);
+    expect(shutDownPageContainer).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('lets a Home notification own a source-less tap before menu selection', () => {
+    const { fire, assistantOverlay, menu, sent } = make(
+      false, undefined, false, false, false, true,
+    );
+
+    fire(click(EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL));
+
+    expect(assistantOverlay.dismissVisibleNotification).toHaveBeenCalledTimes(1);
+    expect(menu.handleClick).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('left temple stops active navigation instead of opening a hidden-overlay sidebar', () => {
     const { fire, menu, navigation, sent } = make(false, undefined, true);
     fire({
@@ -322,10 +354,10 @@ describe('EventRouter — double press', () => {
   it.each([
     [EventSourceType.TOUCH_EVENT_FROM_GLASSES_R, 'right'],
     [EventSourceType.TOUCH_EVENT_FROM_RING, 'ring'],
-  ])('uses a deliberate %s double press to start the visible Brainstorm test', (source, sourceName) => {
+  ])('uses a deliberate %s double press to start an explicitly armed Brainstorm test', (source, sourceName) => {
     const events: unknown[] = [];
     const { fire, brainstorm, shutDownPageContainer } = make(
-      false, { record: (event) => events.push(event) }, false, true,
+      false, { record: (event) => events.push(event) }, false, true, false, false, true,
     );
     fire({
       sysEvent: {
@@ -340,6 +372,27 @@ describe('EventRouter — double press', () => {
       type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
       source: sourceName, gesture: 'double_press', delivery: 'sys',
     });
+  });
+
+  it('does not route a right double press into acceptance on ordinary Brainstorm', () => {
+    const events: unknown[] = [];
+    const { fire, brainstorm, shutDownPageContainer } = make(
+      false, { record: (event) => events.push(event) }, false, true,
+    );
+
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+      },
+    });
+
+    expect(brainstorm.isAcceptanceArmed).toHaveBeenCalledTimes(1);
+    expect(brainstorm.handleAcceptance).not.toHaveBeenCalled();
+    expect(shutDownPageContainer).toHaveBeenCalledWith(1);
+    expect(events).not.toContainEqual(expect.objectContaining({
+      type: 'brainstorm_action', action: 'begin_acceptance',
+    }));
   });
 });
 
@@ -484,6 +537,15 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
+  it('selects the custom menu row when a G2 sys click has no physical source', () => {
+    const { fire, sent, menu } = make(true);
+
+    fire(click(EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL));
+
+    expect(menu.handleClick).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
+  });
+
   it('left click selects an open menu row instead of leaving Calendar or Tasks inert', () => {
     const { fire, sent, menu, imu } = make(true);
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
@@ -588,7 +650,7 @@ describe('EventRouter — long-press mutes the mic', () => {
 });
 
 describe('EventRouter — production Messages menu composition', () => {
-  it('routes physical menu and list events into the bound Mac request, then returns Home', async () => {
+  it('routes physical menu and list events into the bound Mac request, then walks back to Home', async () => {
     let dispatch: (event: EvenHubEvent) => void = () => {};
     const sent: UplinkMessage[] = [];
     const sidebars: string[][] = [];
@@ -665,13 +727,36 @@ describe('EventRouter — production Messages menu composition', () => {
         requestId: request.event.requestId,
       },
     });
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION',
+      ['Dele · Are you coming?', 'Say reply saying …'],
+      request.event.requestId,
+      false,
+    )).toBe(true);
 
+    dispatch({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } } as EvenHubEvent);
+    await vi.waitFor(() => expect(hud.showList).toHaveBeenCalledTimes(4));
+    dispatch({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } } as EvenHubEvent);
+    await vi.waitFor(() => expect(sidebars).toHaveLength(2));
     dispatch({ sysEvent: {
       eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
     } } as EvenHubEvent);
     await vi.waitFor(() => expect(hud.showDefault).toHaveBeenCalledTimes(1));
     expect(sent[2]).toEqual({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'messages-list',
+      },
+    });
+    expect(sent[3]).toEqual({
       kind: 'input',
       event: {
         containerName: 'capability-lifecycle',

@@ -39,6 +39,18 @@ export class BrainstormController {
     return this.model !== undefined;
   }
 
+  /** The Mac must explicitly arm the isolated diagnostic route. Absence is
+   * deliberately false so an older or ordinary engine can never expose a
+   * hidden right/ring acceptance gesture. */
+  isAcceptanceArmed(): boolean {
+    const model = this.model;
+    return model?.acceptanceArmed === true
+      && model.screen === 'brainstorm'
+      && model.state === 'ready'
+      && model.terminalState === 'ready'
+      && model.noToolsChecked === true;
+  }
+
   /** Read once after the exact fixed action was handed to the live MacLink.
    * It intentionally carries neither a topic nor any model payload. */
   consumeAcceptedAction(): AcceptedBrainstormAction | undefined {
@@ -89,18 +101,13 @@ export class BrainstormController {
       : false;
   }
 
-  /** Visible right-temple/ring double press from the safe ready surface.
+  /** Isolated right-temple/ring double press from an explicitly armed surface.
    * The fixed metadata proves the initiating G2 input without carrying a
    * topic, prompt, endpoint, or any OpenClaw payload. */
   handleAcceptance(source: 'right' | 'ring'): boolean {
     const model = this.model;
     if (this.acceptancePending || model?.state === 'acceptance_ready') return true;
-    if (
-      model?.screen !== 'brainstorm'
-      || model.state !== 'ready'
-      || model.terminalState !== 'ready'
-      || model.noToolsChecked !== true
-    ) return false;
+    if (!this.isAcceptanceArmed()) return false;
     const action: BrainstormAction = 'begin_acceptance';
     const accepted = this.link.sendBrainstorm({
       kind: 'brainstorm.action',

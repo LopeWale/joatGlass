@@ -174,6 +174,29 @@ describe('MacLink diagnostic delivery', () => {
       JSON.stringify({ kind: 'input', event: { eventType: 0 } }),
     ]);
   });
+
+  it('sends the latest pending phone fix ahead of offline audio after authentication', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'], maxQueue: 2 });
+    link.send({ kind: 'audio', source: 'glasses', seq: 1, pcm: [1] });
+    link.sendLatestLocation({
+      kind: 'location', latitude: 41.9, longitude: -87.65, timestamp: 1_725_000_000_123,
+    });
+    link.send({ kind: 'audio', source: 'glasses', seq: 2, pcm: [2] });
+    link.send({ kind: 'audio', source: 'glasses', seq: 3, pcm: [3] });
+
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    expect(sockets[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: null }),
+      JSON.stringify({
+        kind: 'location', latitude: 41.9, longitude: -87.65, timestamp: 1_725_000_000_123,
+      }),
+      JSON.stringify({ kind: 'audio', source: 'glasses', seq: 2, pcm: [2] }),
+      JSON.stringify({ kind: 'audio', source: 'glasses', seq: 3, pcm: [3] }),
+    ]);
+  });
 });
 
 describe('MacLink navigation delivery', () => {
