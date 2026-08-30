@@ -655,6 +655,34 @@ class TestCapabilityViews:
 
         assert replies.cleared == ["home"]
 
+    async def test_reopening_messages_clears_a_previously_selected_recipient(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        """A fresh picker must never leave a reply target from an old visit armed."""
+        replies = FakeReplies()
+        router, transport, _ = make_router(
+            tmp_path,
+            rows=[("Dele", "On my way", time.time())],
+            replies=replies,
+        )
+        await router.open("Messages", request_id="messages-first")
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "] Dele ·"),
+            trace_id="hud-first-selection",
+            request_id="messages-first",
+        ))
+        await wait_until(lambda: bool(replies.selected))
+
+        await router.open("Messages", request_id="messages-second")
+
+        assert replies.cleared == ["messages-open"]
+        picker = [message for message in transport.sent if isinstance(message, HudList)][-1]
+        assert picker.title == "MESSAGES"
+        assert picker.request_id == "messages-second"
+        assert picker.selectable is True
+
     async def test_disconnect_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
         router, transport, _ = make_router(
