@@ -2,12 +2,14 @@
 
 ## 2026-08-30
 
-- Prepared a clean-source **JOAT v0.1.38** EHPK candidate containing the
+- Built a clean-source **JOAT v0.1.38** EHPK candidate containing the
   committed unified Planning/Reminder fixes that postdate v0.1.37: legacy
   Reminder-row selection now opens the live nested planner, and due-HUD
-  delivery uses its bounded acknowledgement path. Packaging and portal/device
-  acceptance remain distinct gates; this entry makes no installation or
-  physical-G2 claim.
+  delivery uses its bounded acknowledgement path. The artifact is 78,592
+  bytes with SHA-256 `01ca6a52479ec97b8375f357d1bf929ec70520d59a00dfe5adaa4ee2b635e143`;
+  492 Hub tests, typecheck, production build, and pack passed from the clean
+  archive. Portal/device acceptance remain distinct gates; this entry makes no
+  installation or physical-G2 claim.
 
 - Replaced the native Calendar/Reminder acceptance driver’s obsolete
   console-receipt dependency with a private official-simulator framebuffer
