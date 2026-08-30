@@ -902,8 +902,17 @@ class ProductivityActionController:
         # Terminal receipts are readable for five seconds, then the glasses
         # reload the unified live planner. Double-left remains an immediate
         # wearer-controlled return, rather than an alternative destination.
-        return_hint = "Planning in 5s · left x2 now"
+        # Every terminal state has a wearer-controlled escape in addition to
+        # its automatic return. Name both the destination and gesture plainly:
+        # a vague countdown made the working left-double route look absent.
+        return_hint = "Back to Planning: left x2 · auto in 5s"
         if phase == "verifying":
+            if kind == "reminders.complete":
+                return (
+                    "Completing reminder",
+                    "Checking native completion read-back",
+                    "Please wait",
+                )
             subject = "calendar event" if kind == "calendar.create" else "reminder"
             return (f"Saving {subject}", "Checking native read-back", "Please wait")
         if phase == "saved" and reminder_monitoring_armed:
@@ -911,7 +920,11 @@ class ProductivityActionController:
             # alarm and the post-save receipt were accepted.  This informs
             # the wearer that the unified due overlay is armed without
             # pretending it proves a future macOS notification banner.
-            return ("Saved and verified", "Native alarm set · JOAT monitoring armed.", "Monitoring next · left x2 Planning")
+            return (
+                "Saved and verified",
+                "Native alarm set · JOAT monitoring armed.",
+                "Back to Planning: left x2 · monitoring next",
+            )
         if phase == "monitoring":
             return ("Monitoring armed", "Native alarm is scheduled. JOAT will check at due time.", return_hint)
         if phase == "saved":

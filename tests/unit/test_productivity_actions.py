@@ -270,7 +270,7 @@ class TestCalendarCreation:
         assert result == "Created Calendar event: Design review."
         assert workflow_projection(updates) == [
             ("calendar", "verifying", "Design review", "Saving calendar event", "Checking native read-back", "Please wait"),
-            ("calendar", "saved", "Design review", "Saved and verified", "Calendar read-back matched", "Planning in 5s · left x2 now"),
+            ("calendar", "saved", "Design review", "Saved and verified", "Calendar read-back matched", "Back to Planning: left x2 · auto in 5s"),
         ]
         store.close()
 
@@ -296,7 +296,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         assert workflow_projection(updates)[-1] == (
             "calendar", "check", "Design review", "Check Calendar",
-            "It may have changed. Do not retry.", "Planning in 5s · left x2 now",
+            "It may have changed. Do not retry.", "Back to Planning: left x2 · auto in 5s",
         )
         store.close()
 
@@ -324,7 +324,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT count(*) FROM action_payloads").fetchone()[0] == 0
         assert workflow_projection(updates)[-1] == (
             "calendar", "saved", "Design review", "Saved and verified",
-            "Calendar read-back matched", "Planning in 5s · left x2 now",
+            "Calendar read-back matched", "Back to Planning: left x2 · auto in 5s",
         )
         store.close()
 
@@ -387,7 +387,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         assert workflow_projection(updates)[-1] == (
             "calendar", "check", "Design review", "Check Calendar",
-            "It may have changed. Do not retry.", "Planning in 5s · left x2 now",
+            "It may have changed. Do not retry.", "Back to Planning: left x2 · auto in 5s",
         )
         store.close()
 
@@ -411,7 +411,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "failed"
         assert workflow_projection(updates)[-1] == (
             "calendar", "failed", "Design review", "Not saved",
-            "No calendar item was changed.", "Planning in 5s · left x2 now",
+            "No calendar item was changed.", "Back to Planning: left x2 · auto in 5s",
         )
         store.close()
 
@@ -456,7 +456,7 @@ class TestCalendarCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "rejected"
         assert workflow_projection(updates) == [
             ("calendar", "cancelled", "Design review", "Cancelled",
-             "No calendar item was changed.", "Planning in 5s · left x2 now"),
+             "No calendar item was changed.", "Back to Planning: left x2 · auto in 5s"),
         ]
         store.close()
 
@@ -601,7 +601,7 @@ class TestReminderCreation:
         ).fetchone()[0] == 1
         assert workflow_projection(updates) == [
             ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
-            ("reminders", "saved", "Buy filters", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "Monitoring next · left x2 Planning"),
+            ("reminders", "saved", "Buy filters", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "Back to Planning: left x2 · monitoring next"),
         ]
         assert updates[-1].monitoring_armed is True
         store.close()
@@ -714,8 +714,8 @@ class TestReminderCreation:
         assert bridge.calls[-1][1]["calendar_item_identifier"] == "reminder-1"
         assert bridge.calls[-1][1]["calendar_identifier"] == "list-personal"
         assert workflow_projection(updates) == [
-            ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
-            ("reminders", "completed", "Buy filters", "Completed and verified", "Reminders read-back matched", "Planning in 5s · left x2 now"),
+            ("reminders", "verifying", "Buy filters", "Completing reminder", "Checking native completion read-back", "Please wait"),
+            ("reminders", "completed", "Buy filters", "Completed and verified", "Reminders read-back matched", "Back to Planning: left x2 · auto in 5s"),
         ]
         # Civil due components, even if a newer native payload happens to
         # attach an instant, are not enough to prove which DST-fold instant
@@ -976,7 +976,7 @@ class TestReminderCreation:
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "uncertain"
         assert workflow_projection(updates)[-1] == (
             "reminders", "check", "Buy filters", "Check Reminders",
-            "It may have changed. Do not retry.", "Planning in 5s · left x2 now",
+            "It may have changed. Do not retry.", "Back to Planning: left x2 · auto in 5s",
         )
         store.close()
 
