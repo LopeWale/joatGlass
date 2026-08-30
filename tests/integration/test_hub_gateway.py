@@ -17,7 +17,10 @@ import pytest
 import websockets
 
 from joat.ble.hub_gateway import HubGatewayTransport
+from joat.agents.location_tools import wearer_location_tools
+from joat.agents.tools import ToolBelt, ToolCall
 from joat.channels.imessage import MessageThread
+from joat.core.navigation import NavigationCandidate, NavigationPoint
 from joat.core.interfaces import AudioFrame, MessageSender
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
@@ -150,6 +153,58 @@ class TestConnection:
 
 
 class TestUplink:
+    async def test_nearby_toolbelt_uses_a_request_bound_phone_refresh(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        searches: list[tuple[str, NavigationPoint]] = []
+
+        async def search(query: str, point: NavigationPoint) -> list[NavigationCandidate]:
+            searches.append((query, point))
+            return [NavigationCandidate(
+                choice_id="nearby-cafe",
+                label="Lakeview Cafe",
+                address="2400 N Clark St",
+                point=NavigationPoint(41.92, -87.64),
+            )]
+
+        def current_coords() -> tuple[float, float] | None:
+            location = t.fresh_location()
+            return (location.latitude, location.longitude) if location is not None else None
+
+        async def refresh_coords() -> tuple[float, float] | None:
+            location = await t.request_location_refresh()
+            return (location.latitude, location.longitude) if location is not None else None
+
+        belt = ToolBelt(wearer_location_tools(
+            current_coords,
+            refresh_coords,
+            search,
+        ))
+        assert "find_nearby_places" in {
+            schema["function"]["name"] for schema in belt.schemas()
+        }
+
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            lookup = asyncio.create_task(
+                belt.execute(ToolCall("find_nearby_places", {"query": "coffee"})),
+            )
+            request = json.loads(await ws.recv())
+            assert request["kind"] == "location.refresh"
+            await ws.send(json.dumps({
+                "kind": "location", "latitude": 41.9, "longitude": -87.65,
+                "timestamp": int(time.time() * 1000),
+                "refreshId": request["requestId"],
+            }))
+            result = await lookup
+
+        assert searches == [("coffee", NavigationPoint(41.9, -87.65))]
+        assert "Lakeview Cafe" in result
+        assert "41.9" not in result
+        assert "-87.65" not in result
+
     async def test_location_refresh_is_request_bound_fresh_and_cleared_on_disconnect(
         self, transport,
     ) -> None:
