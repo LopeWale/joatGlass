@@ -15,6 +15,7 @@ import {
   parseHudListItem,
   parseMessagesConversationRow,
   MESSAGES_COMPOSE_GUIDANCE,
+  messagesListRows,
   messagesConversationTranscript,
   usesMessagesCompactLayout,
   canRenderPlanningMonthGrid,
@@ -436,11 +437,27 @@ describe('parseHudListItem', () => {
 });
 
 describe('parseMessagesConversationRow', () => {
-  it('uses the compact Messages layout for conversation and compose surfaces only', () => {
+  it('uses the compact Messages layout for every Messages surface', () => {
     expect(usesMessagesCompactLayout('MESSAGES · CONVERSATION')).toBe(true);
     expect(usesMessagesCompactLayout('MESSAGES · COMPOSE')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES')).toBe(false);
-    expect(usesMessagesCompactLayout('MESSAGES · ACCESS')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · ACCESS')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · SETUP')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · RETRY')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · EMPTY')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · READ ONLY')).toBe(true);
+    expect(usesMessagesCompactLayout('NOTIFICATIONS')).toBe(false);
+  });
+
+  it('uses dense message rows and a selection rail instead of card bounds', () => {
+    expect(messagesListRows(8)).toEqual([
+      { baselineY: 93, railTopY: 82, railHeight: 21, separatorY: 106 },
+      { baselineY: 117, railTopY: 106, railHeight: 21, separatorY: 130 },
+      { baselineY: 141, railTopY: 130, railHeight: 21, separatorY: 154 },
+      { baselineY: 165, railTopY: 154, railHeight: 21, separatorY: 178 },
+      { baselineY: 189, railTopY: 178, railHeight: 21, separatorY: 202 },
+      { baselineY: 213, railTopY: 202, railHeight: 21 },
+    ]);
   });
 
   it('separates incoming, outgoing, and voice-action rows', () => {
