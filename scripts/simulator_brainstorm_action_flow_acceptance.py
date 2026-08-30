@@ -3,8 +3,8 @@
 
 This is a causal product-path check, not a visual-fixture gallery. It runs the
 current Hub source in the official Even simulator, connects it to a real
-``HubGatewayTransport``, opens Brainstorm through ``CapabilityRouter``, and
-drives the production ``EventRouter`` with the simulator input API.
+``HubGatewayTransport``, opens Agent Terminal through ``CapabilityRouter``,
+and drives the production ``EventRouter`` with the simulator input API.
 
 The fixed acceptance controller retains only allowlisted gesture metadata and
 completed HUD-frame SHA-256 digests. A deterministic, content-free Hermes
@@ -115,9 +115,9 @@ class DeterministicHermes:
 T = TypeVar("T")
 
 _EXPECTED_FLOW = (
-    ("ready", None, None, "brainstorm", "ready"),
-    ("topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
-    ("topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
+    ("terminal-ready", None, None, "agent_terminal", "ready"),
+    ("terminal-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
+    ("terminal-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
     ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
     ("running", "click", "begin_topic_capture", "brainstorm", "running"),
     ("terminal", "click", "show_terminal", "agent_terminal", "running"),
@@ -635,21 +635,26 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         except asyncio.TimeoutError as exc:
             raise BrainstormActionFlowError("simulator authenticated but never sent Hello") from exc
 
-        # Open the real capability producer. The simulator cannot inject the
-        # left-temple menu gesture, so menu ingress remains a physical gate.
-        await capabilities.open("Brainstorm")
-        ready = await _wait_for(
-            lambda: _last_brainstorm(gateway, screen="brainstorm", state="ready"),
-            label="ready Brainstorm capability",
+        # Open the real Agent Terminal capability producer. The simulator
+        # cannot inject the left-temple sidebar gesture that selects this row,
+        # so sidebar ingress remains a physical G2 gate; the terminal's own
+        # rendered ready state and its right-temple action are exercised here.
+        await capabilities.open("Agent Terminal")
+        terminal_ready = await _wait_for(
+            lambda: _last_brainstorm(gateway, screen="agent_terminal", state="ready"),
+            label="ready Agent Terminal capability",
         )
-        digest, raw, optical = await _capture(automation_base, output, "01-ready", None)
-        receipts.append(ScreenReceipt("ready", None, None, ready.screen, ready.state, digest))
-        artifacts["ready"] = {"raw": raw, "optical": optical}
+        digest, raw, optical = await _capture(automation_base, output, "01-terminal-ready", None)
+        receipts.append(ScreenReceipt(
+            "terminal-ready", None, None,
+            terminal_ready.screen, terminal_ready.state, digest,
+        ))
+        artifacts["terminal-ready"] = {"raw": raw, "optical": optical}
 
-        # The ordinary Brainstorm entry flow is independent from the fixed
-        # acceptance run. Drive the production tap through EventRouter, then
-        # prove that the one-utterance state and its explicit cancellation
-        # are visibly distinct before beginning the content-free test.
+        # Agent Terminal deliberately starts an ordinary Brainstorm rather
+        # than a free-form remote console. Drive its production tap through
+        # EventRouter and prove the one-utterance capture plus explicit
+        # cancellation before beginning the content-free diagnostic run.
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
         topic_capture = await _wait_for(
@@ -658,7 +663,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                  if item.action == "begin_topic_capture"),
                 None,
             ),
-            label="ordinary topic-capture tap",
+            label="Agent Terminal topic-capture tap",
         )
         capture_view = await _wait_for(
             lambda: _last_brainstorm(
@@ -667,16 +672,16 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 screen="brainstorm",
                 state="topic_capture",
             ),
-            label="armed topic-capture Brainstorm frame",
+            label="Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "02-topic-capture", digest,
+            automation_base, output, "02-terminal-topic-capture", digest,
         )
         receipts.append(ScreenReceipt(
-            "topic-capture", "click", topic_capture.action,
+            "terminal-topic-capture", "click", topic_capture.action,
             capture_view.screen, capture_view.state, digest,
         ))
-        artifacts["topic-capture"] = {"raw": raw, "optical": optical}
+        artifacts["terminal-topic-capture"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "down")
@@ -685,7 +690,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 (item for item in actions[action_count:] if item.action == "cancel"),
                 None,
             ),
-            label="topic-capture cancellation",
+            label="Agent Terminal topic-capture cancellation",
         )
         cleared_view = await _wait_for(
             lambda: _last_brainstorm(
@@ -694,16 +699,16 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 screen="brainstorm",
                 state="ready",
             ),
-            label="cleared topic-capture Brainstorm frame",
+            label="cleared Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "03-topic-capture-cancelled", digest,
+            automation_base, output, "03-terminal-topic-capture-cancelled", digest,
         )
         receipts.append(ScreenReceipt(
-            "topic-capture-cancelled", "down", clear_capture.action,
+            "terminal-topic-capture-cancelled", "down", clear_capture.action,
             cleared_view.screen, cleared_view.state, digest,
         ))
-        artifacts["topic-capture-cancelled"] = {"raw": raw, "optical": optical}
+        artifacts["terminal-topic-capture-cancelled"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "double_click")
