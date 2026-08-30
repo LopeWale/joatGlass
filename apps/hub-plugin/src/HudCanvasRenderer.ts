@@ -213,6 +213,22 @@ export function brainstormActionHint(
     : 'tap: retry Hermes · left x2: menu';
 }
 
+/**
+ * The terminal card is a trust statement, not a generic error badge. Its
+ * label must distinguish a pending device approval or offline brain from an
+ * actual tool-policy failure, while the precise recovery copy stays below it.
+ */
+export function agentTerminalSafetyLabel(
+  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked'>,
+): string {
+  if (model.state === 'approval_required') return 'APPROVAL PENDING';
+  if (model.state === 'unavailable') return 'CONNECTION UNAVAILABLE';
+  if (model.state === 'blocked') return 'TERMINAL BLOCKED';
+  return model.noToolsChecked
+    ? 'NO TOOLS CHECKED BEFORE SEND'
+    : 'TOOL STATE NOT CLEARED';
+}
+
 export function brainstormStateLabel(state: BrainstormHudModel['state']): string {
   return state === 'topic_capture'
     ? 'SPEAK NOW'
@@ -1572,11 +1588,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.stroke();
       context.fillStyle = gray(SUPPORT);
       context.font = `11px ${HUD_FONT}`;
-      context.fillText(
-        model.noToolsChecked ? 'NO TOOLS CHECKED BEFORE SEND' : 'TOOL STATE NOT CLEARED',
-        54,
-        176,
-      );
+      context.fillText(agentTerminalSafetyLabel(model), 54, 176);
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
       this.fitText(context, model.terminalReason || 'Hermes participates as a Brainstorm seat.', 54, 195, 462);

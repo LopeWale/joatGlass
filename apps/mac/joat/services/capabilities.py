@@ -64,6 +64,54 @@ MESSAGES_RETRY_ITEMS = [
 NEW_MESSAGE_ROW = "New message · voice recipient + text"
 
 
+# These strings are the only explanation of a terminal health state that
+# leaves the Mac. The status model retains compact, allowlisted reason codes
+# for diagnostics; displaying those codes on the lenses forces a wearer away
+# from the home brain to translate a developer state.
+_AGENT_TERMINAL_RECOVERY_COPY: dict[tuple[str, str], str] = {
+    (
+        "approval_required",
+        "write_scope_required",
+    ): "Approve the JOAT device in OpenClaw, then tap retry.",
+    (
+        "unavailable",
+        "gateway_not_ready",
+    ): "Hermes is unavailable; retry when the Mac connection recovers.",
+    (
+        "blocked",
+        "tools_enabled",
+    ): "Hermes tools are enabled; this JOAT session remains blocked.",
+    (
+        "blocked",
+        "dedicated_session_not_proven",
+    ): "Hermes session isolation is not proven yet; tap retry.",
+    (
+        "blocked",
+        "history_recovery_required",
+    ): "Hermes needs recovery before it can continue; tap retry.",
+}
+
+
+def _agent_terminal_instruction(state: str, reason: str) -> str:
+    """Translate a safe terminal reason into a wearable next action.
+
+    This never forwards a gateway exception, URL, or pairing identifier. A
+    generic fallback still tells the wearer what their tap does when a newer
+    engine introduces another allowlisted safe reason.
+    """
+
+    fixed = _AGENT_TERMINAL_RECOVERY_COPY.get((state, reason))
+    if fixed is not None:
+        return fixed
+    if state == "approval_required":
+        return "Approve JOAT in OpenClaw, then tap retry."
+    if state == "unavailable":
+        return "Hermes is unavailable; retry when the Mac connection recovers."
+    if state == "blocked":
+        return "Hermes is not ready; correct it, then tap retry."
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class _PlanningRow:
     """One deliberate drill-down action in the native Planning projection."""
@@ -256,9 +304,10 @@ class CapabilityRouter:
         ))
 
     async def _show_agent_terminal(self) -> None:
-        """Expose Hermes readiness without leaking an endpoint credential or chat."""
+        """Expose Hermes readiness and recovery without leaking gateway detail."""
         terminal = self._status.agent_terminal_projection()
         state = str(terminal["state"])
+        reason = str(terminal["reason"])
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="agent_terminal",
             state=state,
@@ -267,7 +316,7 @@ class CapabilityRouter:
             activity="Hermes participates as a Brainstorm collaborator.",
             terminal_state=state,
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
+            terminal_reason=_agent_terminal_instruction(state, reason),
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 
