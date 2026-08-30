@@ -383,7 +383,7 @@ class NavigationSession(Session):
                 view="error",
                 primary="Destination not found",
                 secondary="Try the address again",
-                hint="say retry · swipe cancel",
+                hint="tap/say retry · swipe cancel",
                 interaction="stationary",
             ), "search-error")
             return
@@ -407,7 +407,7 @@ class NavigationSession(Session):
             secondary=(
                 f"Check {repair_hint}" if repair_hint else "Choose the canonical place"
             ),
-            hint="say first/second · swipe choose",
+            hint="tap choose · swipe select · say first/second",
             interaction="stationary",
             options=options,
             choice_ids=choice_ids,
@@ -419,7 +419,7 @@ class NavigationSession(Session):
             view="destination",
             primary=candidate.label,
             secondary=candidate.address,
-            hint="say confirm · swipe retry",
+            hint="tap/say confirm · swipe retry",
             interaction="stationary",
         ), "destination")
 
@@ -431,7 +431,7 @@ class NavigationSession(Session):
             view="mode",
             primary="Choose travel mode",
             secondary=destination.label,
-            hint="say walk/cycle · swipe choose",
+            hint="tap choose · swipe select · say walk/cycle",
             interaction="stationary",
             options=["Walk", "Cycle"],
             choice_ids=["walking", "cycling"],
@@ -582,7 +582,7 @@ class NavigationSession(Session):
             view="error",
             primary="Phone location unavailable",
             secondary="Allow Location for Even Hub, then retry",
-            hint="say retry · swipe cancel",
+            hint="tap/say retry · swipe cancel",
             interaction="stationary",
         ), "origin-error")
 
@@ -663,7 +663,7 @@ class NavigationSession(Session):
                 view="error",
                 primary="Route unavailable",
                 secondary="Try again or change destination",
-                hint="say retry · swipe cancel",
+                hint="tap/say retry · swipe cancel",
                 interaction="stationary",
             ), "route-error")
             return
@@ -681,7 +681,7 @@ class NavigationSession(Session):
             view="preview",
             primary=self._destination.label if self._destination else "Destination",
             secondary=f"{mode.title()} · {ready.route.eta_minutes:.0f} min",
-            hint="say start · up mode · down place",
+            hint="tap/say start · swipe up/down to edit",
             interaction="stationary",
             mode=mode,
             maneuver="depart",
@@ -780,7 +780,7 @@ class NavigationSession(Session):
             view="error",
             primary="Navigation could not start",
             secondary="The route was not installed on the phone",
-            hint="say retry · swipe cancel",
+            hint="tap/say retry · swipe cancel",
             interaction="stationary",
         ), "install-error")
 

@@ -416,6 +416,7 @@ class TestNavigationSession:
         assert isinstance(error, NavigationView)
         assert error.navigation.primary == "Phone location unavailable"
         assert error.navigation.secondary == "Allow Location for Even Hub, then retry"
+        assert error.navigation.hint == "tap/say retry · swipe cancel"
         session.accept_action(action(error, "retry"))
         retried_origin = await wait_for(transport, NavigationOriginRequest, count=2)
         assert isinstance(retried_origin, NavigationOriginRequest)
@@ -552,11 +553,13 @@ class TestNavigationSession:
         assert destination.navigation.view == "destination"
         assert destination.navigation.primary == "Cajun Corner"
         assert "2301 N Lincoln" in destination.navigation.secondary
+        assert destination.navigation.hint == "tap/say confirm · swipe retry"
 
         session.accept_action(action(destination, "confirm_destination"))
         mode = await wait_for(transport, NavigationView, count=2)
         assert isinstance(mode, NavigationView)
         assert mode.navigation.view == "mode"
+        assert mode.navigation.hint == "tap choose · swipe select · say walk/cycle"
         session.accept_action(action(mode, "select_mode", "walking"))
 
         origin_request = await wait_for(transport, NavigationOriginRequest)
@@ -577,6 +580,7 @@ class TestNavigationSession:
         assert isinstance(preview, NavigationView)
         assert preview.navigation.view == "preview"
         assert preview.navigation.mode == "walking"
+        assert preview.navigation.hint == "tap/say start · swipe up/down to edit"
 
         session.accept_action(action(preview, "start"))
         session.accept_action(action(preview, "start"))
@@ -675,6 +679,7 @@ class TestNavigationSession:
         assert isinstance(repair, NavigationView)
         assert repair.navigation.view == "repair"
         assert repair.navigation.choice_ids == ["west", "east", "retry"]
+        assert repair.navigation.hint == "tap choose · swipe select · say first/second"
         assert all(len(option) <= 64 for option in repair.navigation.options)
         repair.to_wire()
         session.accept_action(action(repair, "select_destination", "east"))
