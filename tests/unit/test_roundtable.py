@@ -121,12 +121,11 @@ class TestFailureNotices:
         assert not is_failure("")
 
 
-class TestNoLengthCap:
-    def test_prompts_ask_for_depth_not_brevity(self) -> None:
-        """The wearer: "why are we trying to limit the responses like I can
-        not scroll to read?" — swipe scrolls, so the cap was limiting the
-        ANSWER, not the screen. The gist line is presentation; the body is
-        as deep as the question deserves."""
+class TestLensFirstAnswerContract:
+    def test_prompts_keep_the_live_glasses_stream_concise(self) -> None:
+        """Brainstorm's production image surface has no scrollback, so its
+        prompt cannot claim that the wearer can read arbitrarily deep output
+        by swiping. The terminal remains the long-form companion surface."""
         from joat.services.roundtable import Participant, RoundTable, build_prompt
 
         async def noop(prompt: str):  # pragma: no cover - never driven
@@ -134,6 +133,6 @@ class TestNoLengthCap:
 
         seat = Participant(name="codex", role="proposer", stream=noop)
         prompt = build_prompt("heat pumps", seat, [])
-        assert "120 words" not in prompt          # the cap is gone
-        assert "GIST:" in prompt                  # the glass line is asked for
-        assert "as much depth" in prompt          # and depth is invited
+        assert "GIST:" in prompt
+        assert "Under 120 words" in prompt
+        assert "as much depth" not in prompt

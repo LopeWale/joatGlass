@@ -2,6 +2,14 @@
 
 ## 2026-08-30
 
+- Corrected an unsupported Brainstorm “scroll to read” assumption. The
+  production image HUD retains a bounded live activity window and reserves a
+  downward swipe for cancellation; it does not have pageable transcript
+  history. Brainstorm turns therefore again require a GIST-first, under-120-
+  word response so latency and first-glance readability stay bounded. A real
+  pageable transcript remains a separate interaction feature, not a claim
+  hidden in a prompt change.
+
 - Added an owner-only, explicitly opt-in voice-latency receipt
   (`--voice-latency-diagnostics`) for a controlled live run. It correlates a
   process-local turn ordinal with fixed voice stages and coarse buckets only;
