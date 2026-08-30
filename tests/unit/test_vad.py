@@ -9,10 +9,10 @@ from joat.audio.vad import RmsVad, rms
 BATCH_SAMPLES = 3200  # 200 ms at 16 kHz
 
 
-def batch(amplitude: int) -> bytes:
-    """A 200 ms square-ish batch at the given peak amplitude."""
-    samples = [amplitude if i % 2 == 0 else -amplitude for i in range(BATCH_SAMPLES)]
-    return struct.pack(f"<{BATCH_SAMPLES}h", *samples)
+def batch(amplitude: int, sample_count: int = BATCH_SAMPLES) -> bytes:
+    """A square-ish PCM batch at the given peak amplitude and sample count."""
+    samples = [amplitude if i % 2 == 0 else -amplitude for i in range(sample_count)]
+    return struct.pack(f"<{sample_count}h", *samples)
 
 
 LOUD = batch(8000)
@@ -70,11 +70,54 @@ class TestSegmentation:
         assert len(utterance) == 7 * len(LOUD)
         assert not vad.in_speech
 
+    def test_short_callbacks_do_not_shorten_the_hangover(self) -> None:
+        """Five 100 ms callbacks are only 500 ms of silence, not one second."""
+        vad = RmsVad(hangover_batches=5, adaptive=False, start_batches=1)
+        assert vad.feed(LOUD) is None
+
+        for _ in range(9):
+            assert vad.feed(batch(50, 1_600)) is None
+        utterance = vad.feed(batch(50, 1_600))
+
+        assert utterance is not None
+        assert len(utterance) == 38_400  # 200 ms speech + 1 s silence
+
+    def test_variable_chunks_close_after_one_second_of_quiet_pcm(self) -> None:
+        """Chunk boundaries must not delay an otherwise complete hangover."""
+        vad = RmsVad(hangover_batches=5, adaptive=False, start_batches=1)
+        assert vad.feed(LOUD) is None
+        for sample_count in (1_600, 5_600, 8_784):  # 999 ms total
+            assert vad.feed(batch(50, sample_count)) is None
+
+        utterance = vad.feed(batch(50, 16))
+
+        assert utterance is not None
+        assert len(utterance) == 38_400  # 200 ms speech + 1 s silence
+
     def test_max_length_forces_cut(self) -> None:
         vad = RmsVad(max_utterance_s=0.6, adaptive=False, start_batches=1)
         assert vad.feed(LOUD) is None
         assert vad.feed(LOUD) is None
         assert vad.feed(LOUD) is not None  # hard cut at the cap
+
+    def test_quiet_chunk_is_trimmed_at_the_max_sample_duration(self) -> None:
+        """A large closing chunk cannot overshoot the configured hard cap."""
+        vad = RmsVad(max_utterance_s=0.6, adaptive=False, start_batches=1)
+        assert vad.feed(LOUD) is None
+
+        utterance = vad.feed(batch(50, 8_000))  # crosses 0.6 s by 100 ms
+
+        assert utterance is not None
+        assert len(utterance) == 19_200
+
+    def test_trigger_chunk_is_trimmed_at_the_max_sample_duration(self) -> None:
+        """The first loud chunk is capped even when it arms and ends at once."""
+        vad = RmsVad(max_utterance_s=0.6, adaptive=False, start_batches=1)
+
+        utterance = vad.feed(batch(8_000, 12_800))
+
+        assert utterance is not None
+        assert len(utterance) == 19_200
 
     def test_reset_drops_partial_utterance(self) -> None:
         vad = RmsVad(hangover_batches=2, adaptive=False, start_batches=1)

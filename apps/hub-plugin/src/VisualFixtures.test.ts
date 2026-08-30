@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  ASSISTANT_OVERLAY_VISUAL_TEXT,
   VISUAL_CONFIRMATION_PROMPT,
   brainstormVisualFixture,
   isBrainstormVisualState,
@@ -11,6 +12,12 @@ import {
 } from './VisualFixtures';
 
 describe('visual fixtures', () => {
+  it('uses realistic content-free copy for the assistant overlay lens check', () => {
+    expect(ASSISTANT_OVERLAY_VISUAL_TEXT).toContain('calendar and reminders');
+    expect(ASSISTANT_OVERLAY_VISUAL_TEXT).toContain('monitoring is armed');
+    expect(ASSISTANT_OVERLAY_VISUAL_TEXT).not.toContain('Adele');
+  });
+
   it('stitches renderer tiles into one native-size green optical preview', () => {
     const pixels = (value: number) => new Uint8Array(288 * 144).fill(value);
     const rgba = stitchHudPreviewRgba([

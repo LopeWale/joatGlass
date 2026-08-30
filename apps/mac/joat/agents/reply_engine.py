@@ -23,6 +23,7 @@ from .tools import ToolBelt
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+FIRST_CHUNK_CHARS = 8
 
 # The HUD is 576x288 monochrome with a ~2000-char upgrade cap. A reply that
 # needs scrolling is a reply that failed.
@@ -51,13 +52,17 @@ class MlxReplyEngine(ReplyEngine):
     ever, the model download) — subsequent replies reuse the loaded weights."""
 
     def __init__(
-        self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150, chunk_chars: int = 32,
+        self, model_id: str = DEFAULT_MODEL, max_tokens: int = 150,
+        chunk_chars: int = 32, first_chunk_chars: int = FIRST_CHUNK_CHARS,
         grounding: Grounding | None = None, tools: ToolBelt | None = None,
         on_loaded: Callable[[], None] | None = None,
     ) -> None:
+        if chunk_chars <= 0 or first_chunk_chars <= 0:
+            raise ValueError("reply chunk sizes must be positive")
         self._model_id = model_id
         self._max_tokens = max_tokens
         self._chunk_chars = chunk_chars
+        self._first_chunk_chars = first_chunk_chars
         self._grounding = grounding
         self._tools = tools
         self._on_loaded = on_loaded
@@ -166,8 +171,8 @@ class MlxReplyEngine(ReplyEngine):
 
         Generation runs on the dedicated MLX thread (streams are
         thread-bound); chunks cross to the event loop via a queue. Tokens are
-        batched to ~chunk_chars per HUD append — every append is a BLE
-        textContainerUpgrade, so per-token updates would flood the link.
+        batched to a short first chunk and then ~chunk_chars per HUD append —
+        per-token updates would flood the visual transport.
         """
         if not text.strip():
             return
@@ -181,13 +186,21 @@ class MlxReplyEngine(ReplyEngine):
                 from mlx_lm import stream_generate  # lazy: optional dependency
 
                 buf = ""
+                first_chunk = True
+                first_threshold = min(self._first_chunk_chars, self._chunk_chars)
                 for response in stream_generate(
                     self._model, self._tokenizer,
                     prompt=self._chat_prompt(text, tool_note),
                     max_tokens=self._max_tokens,
                 ):
                     buf += str(response.text)
-                    if len(buf) >= self._chunk_chars:
+                    if first_chunk and len(buf) >= first_threshold:
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, buf[:first_threshold]
+                        )
+                        buf = buf[first_threshold:]
+                        first_chunk = False
+                    if not first_chunk and len(buf) >= self._chunk_chars:
                         loop.call_soon_threadsafe(queue.put_nowait, buf)
                         buf = ""
                 if buf:

@@ -110,7 +110,10 @@ export interface HudFramePainter {
 export type HudImageEncoder = (tile: HudImageTile) => Promise<Uint8Array>;
 
 /** A dev-only simulator receipt must name a fixed state, never its content. */
-export function visibleSurfaceReceipt(frame: HudVisualFrame): 'reminder_due' | undefined {
+export function visibleSurfaceReceipt(
+  frame: HudVisualFrame,
+): 'assistant_overlay' | 'reminder_due' | undefined {
+  if (frame.assistantOverlay) return 'assistant_overlay';
   if (
     frame.kind === 'productivity'
     && frame.productivity.domain === 'reminders'

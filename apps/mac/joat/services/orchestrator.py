@@ -18,6 +18,7 @@ import difflib
 import logging
 from collections.abc import Awaitable, Callable
 import re
+import time
 
 from ..audio.vad import RmsVad
 from ..core.interfaces import GlassesTransport, ReplyEngine, SttEngine
@@ -26,6 +27,23 @@ from .hud import HudWriter
 from .session import SessionManager
 
 log = logging.getLogger(__name__)
+
+LatencyObserver = Callable[[str, str], None]
+_LATENCY_BUCKETS = (
+    (0.25, "lte250ms"),
+    (0.5, "250_500ms"),
+    (1.0, "500ms_1s"),
+    (2.0, "1_2s"),
+    (5.0, "2_5s"),
+    (10.0, "5_10s"),
+)
+
+
+def _latency_bucket(elapsed_s: float) -> str:
+    for upper_bound, label in _LATENCY_BUCKETS:
+        if elapsed_s <= upper_bound:
+            return label
+    return "gt10s"
 
 
 class VoiceOrchestrator:
@@ -49,6 +67,7 @@ class VoiceOrchestrator:
         commands: Callable[[str], Awaitable[str | None]] | None = None,
         fuzzy_wake: tuple[str, ...] = ("joat",),
         fuzzy_threshold: float = 0.86,
+        latency_observer: LatencyObserver | None = None,
     ) -> None:
         self._transport = transport
         self._commands = commands
@@ -68,6 +87,9 @@ class VoiceOrchestrator:
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
         self._replier = replier
+        # Disabled by default. Acceptance may inject a local observer, which
+        # receives only fixed stage names and coarse duration buckets.
+        self._latency_observer = latency_observer
         self._last_seq: int | None = None
         self._busy = False
 
@@ -143,8 +165,10 @@ class VoiceOrchestrator:
         asyncio.get_running_loop().create_task(self._handle_utterance(utterance))
 
     async def _handle_utterance(self, utterance: bytes) -> None:
+        started_at = time.monotonic()
         seconds = len(utterance) / (16_000 * 2)
         log.info("utterance ended: %.1fs of audio", seconds)
+        self._observe_latency("utterance_ready", started_at)
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")
             return
@@ -156,8 +180,10 @@ class VoiceOrchestrator:
             # unchanged HUD for that long reads as "the assistant is dead" —
             # the wearer has no other signal that they were heard.
             await self._hud.status("JOAT · hearing you…")
+            self._observe_latency("ack_sent", started_at)
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
+            self._observe_latency("stt_complete", started_at)
             if transcript is None or not transcript.text:
                 log.info("STT produced no text")
                 return
@@ -213,10 +239,12 @@ class VoiceOrchestrator:
                     await self._hud.assistant(chunk, append=True)
                 else:
                     await self._hud.assistant(chunk)
+                    self._observe_latency("first_reply_sent", started_at)
                 parts.append(chunk)
             if parts:
                 reply_text = "".join(parts)
                 await self._hud.settle_assistant()
+                self._observe_latency("reply_complete", started_at)
                 log.info("reply emitted chars=%d", len(reply_text))
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
@@ -231,6 +259,17 @@ class VoiceOrchestrator:
                 else None
             )
             await self._hud.status(active_status or "JOAT · listening")
+
+    def _observe_latency(self, stage: str, started_at: float) -> None:
+        """Emit one opt-in, fixed-vocabulary, coarsely bucketed stage."""
+        if self._latency_observer is None:
+            return
+        try:
+            self._latency_observer(stage, _latency_bucket(time.monotonic() - started_at))
+        except Exception:
+            # Instrumentation is strictly observational and must not affect
+            # the voice path even when an acceptance sink fails.
+            pass
 
     async def watch_loop_lag(self, interval_s: float = 0.5,
                              warn_s: float = 0.75) -> None:

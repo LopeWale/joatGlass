@@ -135,6 +135,10 @@ export class HudPresenter {
   private confirmationStartedAt?: number;
   private confirmationTimer?: ReturnType<typeof setInterval>;
   private assistantOverlay?: AssistantOverlayState;
+  private assistantOverlayPaint?: Promise<boolean>;
+  private assistantOverlayPaintTimer?: ReturnType<typeof setTimeout>;
+  private assistantOverlayPaintDirty = false;
+  private assistantOverlayPaintStartedAt = 0;
   private micOn = false;
 
   constructor(
@@ -233,7 +237,11 @@ export class HudPresenter {
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
     this.assistantOverlay = { text: append ? `${current?.text ?? ''}${text}` : text };
     if (this.confirmation) return true;
-    return this.paintVisual();
+    if (append || this.assistantOverlayPaint) {
+      this.scheduleAssistantOverlayPaint();
+      return true;
+    }
+    return this.paintAssistantOverlayNow();
   }
 
   settleAssistantOverlay(dismissAfterMs: number): boolean {
@@ -254,7 +262,60 @@ export class HudPresenter {
     if (overlay.dismissTimer !== undefined) clearTimeout(overlay.dismissTimer);
     this.assistantOverlay = undefined;
     if (this.confirmation) return true;
-    return this.paintVisual();
+    this.cancelAssistantOverlayPaintTimer();
+    const active = this.assistantOverlayPaint;
+    if (active) await active;
+    // The active paint's completion may have queued the newest reply frame.
+    // Cancel it after the await so an old tail can never repaint over a local
+    // wearer dismissal.
+    this.assistantOverlayPaintDirty = false;
+    this.cancelAssistantOverlayPaintTimer();
+    return this.paintAssistantOverlayNow();
+  }
+
+  /** Full raster frames are slower than model chunks. Keep at most one frame
+   * active and one newest tail so streaming can never outrun the four-tile
+   * bridge, including when the underlying surface is Navigation. */
+  private paintAssistantOverlayNow(): Promise<boolean> {
+    if (!this.visual) return Promise.resolve(false);
+    if (this.assistantOverlayPaint) {
+      this.assistantOverlayPaintDirty = true;
+      return Promise.resolve(true);
+    }
+    this.assistantOverlayPaintStartedAt = Date.now();
+    const paint = this.paintVisual();
+    this.assistantOverlayPaint = paint;
+    const completed = (): void => {
+      if (this.assistantOverlayPaint !== paint) return;
+      this.assistantOverlayPaint = undefined;
+      if (!this.assistantOverlayPaintDirty) return;
+      this.assistantOverlayPaintDirty = false;
+      this.scheduleAssistantOverlayPaint();
+    };
+    void paint.then(completed, completed);
+    return paint;
+  }
+
+  private scheduleAssistantOverlayPaint(): void {
+    if (!this.visual || this.confirmation) return;
+    if (this.assistantOverlayPaint) {
+      this.assistantOverlayPaintDirty = true;
+      return;
+    }
+    if (this.assistantOverlayPaintTimer !== undefined) return;
+    const elapsed = Date.now() - this.assistantOverlayPaintStartedAt;
+    const delay = Math.max(0, PAINT_INTERVAL_MS - elapsed);
+    this.assistantOverlayPaintTimer = setTimeout(() => {
+      this.assistantOverlayPaintTimer = undefined;
+      void this.paintAssistantOverlayNow();
+    }, delay);
+  }
+
+  private cancelAssistantOverlayPaintTimer(): void {
+    if (this.assistantOverlayPaintTimer !== undefined) {
+      clearTimeout(this.assistantOverlayPaintTimer);
+    }
+    this.assistantOverlayPaintTimer = undefined;
   }
 
   /** The transient reply owns ordinary input while it is readable, so a

@@ -2,6 +2,50 @@
 
 ## 2026-08-30
 
+- Bounded streamed JOAT assistant rendering to one active four-tile paint and
+  one newest tail frame, so model chunks cannot build a stale optical backlog.
+  Wearer dismissal now waits for the active upload, cancels any completion-
+  scheduled tail, and restores the underlying Messages, Navigation,
+  Brainstorm, or productivity surface. Long assistant text is fitted and
+  tail-clamped within the existing green HUD rather than changing the visual
+  design. The official Even Hub simulator retained a complete 576x288 overlay
+  frame and the fixed content-free `assistant_overlay` receipt; the first run
+  also exposed and then verified the exact absent-type left-source startup
+  announcement regression. Full Hub verification passed 438 tests plus the
+  production typecheck/build, and a sealed security diff review closed all 27
+  changed review items with no reportable findings. The signed app was not
+  restarted, packaged, or uploaded; physical-G2 voice timing and optical proof
+  remain separate gates.
+
+- Added a direct **New message** row to the glasses Messages list, including
+  empty-inbox access, Mac-local contact search that fails closed on missing or
+  ambiguous recipients, exact recipient/body confirmation, and the existing
+  delivery-unverified Messages submission receipt. The compose surface gives
+  voice and microphone guidance and clears safely on Home or disconnect. The
+  official Even Hub simulator produced five visually inspected, distinct
+  576x288 frames for Sidebar → Conversations → Compose → Confirm → Result,
+  using one fixture contact and `RecordingSender`; it did not read the user's
+  Contacts database or send a real message. Combined verification passed 872
+  Python tests, strict mypy across 80 source files, 438 Hub tests, the Hub
+  typecheck/production build, and 48 XCTest plus 3 Swift Testing cases. No
+  package was created or uploaded; physical-G2 input/lens proof and an
+  explicitly authorized real Messages.app send remain separate gates.
+
+- Reduced structural voice latency without adding a response-dropping timeout:
+  the resident Whisper server now requests one text-only decode with zero
+  temperature fallbacks, delayed SDK audio flushes are split into exact 200 ms
+  sample messages without changing PCM order, VAD hangover uses PCM duration
+  instead of callback count, and the reply engine sends an eight-character
+  first chunk before returning to its normal 32-character batches. A local
+  acceptance observer is disabled by default and exposes only fixed stages and
+  coarse time buckets; no transcript, reply, frame, device identifier, or exact
+  timing is retained. Focused Python tests passed 64 cases, strict mypy passed,
+  and the full Hub suite passed 437 cases. A full Python snapshot passed 858
+  cases but had 11 failures in the concurrently owned, in-progress Brainstorm
+  acceptance/protocol lane. No package was built or uploaded, and no simulator
+  or physical-G2 latency result is claimed; a restarted app and synchronized
+  lens run remain required.
+
 - Completed the production Messages wearer flow from the first-level G2
   sidebar through stable conversation selection, bounded incoming/outgoing
   history, voice-reply guidance, bound confirmation, and truthful submitted,

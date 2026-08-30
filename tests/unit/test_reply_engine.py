@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -46,5 +48,56 @@ async def test_warm_failure_is_contained_and_can_be_retried() -> None:
         engine.fail_load = False
         assert await engine.reply("retry") == "ready:retry"
         assert engine.load_calls == 2
+    finally:
+        engine._mlx_thread.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_a_small_first_chunk_then_returns_to_steady_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mlx_lm = ModuleType("mlx_lm")
+
+    def stream_generate(*_args: Any, **_kwargs: Any) -> Any:
+        for text in ("abcdefgh" + "i" * 16 + "j" * 16, "tail"):
+            yield SimpleNamespace(text=text)
+
+    mlx_lm.stream_generate = stream_generate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_lm", mlx_lm)
+
+    engine = MlxReplyEngine(model_id="test-model", chunk_chars=32)
+    engine._model = object()
+    engine._tokenizer = SimpleNamespace(
+        apply_chat_template=lambda *_args, **_kwargs: "prompt",
+    )
+    try:
+        chunks = [chunk async for chunk in engine.stream("hello")]
+        assert chunks == ["abcdefgh", "i" * 16 + "j" * 16, "tail"]
+    finally:
+        engine._mlx_thread.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_first_chunk_threshold_is_configurable_for_latency_trials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mlx_lm = ModuleType("mlx_lm")
+
+    def stream_generate(*_args: Any, **_kwargs: Any) -> Any:
+        yield SimpleNamespace(text="a" * 48)
+
+    mlx_lm.stream_generate = stream_generate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_lm", mlx_lm)
+
+    engine = MlxReplyEngine(
+        model_id="test-model", chunk_chars=32, first_chunk_chars=16
+    )
+    engine._model = object()
+    engine._tokenizer = SimpleNamespace(
+        apply_chat_template=lambda *_args, **_kwargs: "prompt",
+    )
+    try:
+        chunks = [chunk async for chunk in engine.stream("hello")]
+        assert chunks == ["a" * 16, "a" * 32]
     finally:
         engine._mlx_thread.shutdown(wait=True)

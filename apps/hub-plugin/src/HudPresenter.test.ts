@@ -268,6 +268,69 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames[frames.length - 1]).not.toHaveProperty('assistantOverlay');
   });
 
+  it('bounds a streamed overlay burst to the active frame and one newest tail frame', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const frames: HudVisualFrame[] = [];
+    let first = true;
+    const visual = {
+      paint: vi.fn(async (frame: HudVisualFrame) => {
+        frames.push(frame);
+        if (first) {
+          first = false;
+          await firstGate;
+        }
+        return true;
+      }),
+    } as unknown as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    const initial = hud.showAssistantOverlay('one');
+    await Promise.resolve();
+    await hud.showAssistantOverlay(' two', true);
+    await hud.showAssistantOverlay(' three', true);
+
+    expect(visual.paint).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await initial;
+    await vi.runAllTimersAsync();
+
+    expect(visual.paint).toHaveBeenCalledTimes(2);
+    expect(frames[1]).toMatchObject({ assistantOverlay: { text: 'one two three' } });
+  });
+
+  it('cannot repaint a queued assistant tail after the wearer dismisses during an active frame', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const frames: HudVisualFrame[] = [];
+    let first = true;
+    const visual = {
+      paint: vi.fn(async (frame: HudVisualFrame) => {
+        frames.push(frame);
+        if (first) {
+          first = false;
+          await firstGate;
+        }
+        return true;
+      }),
+    } as unknown as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    const initial = hud.showAssistantOverlay('one');
+    await Promise.resolve();
+    await hud.showAssistantOverlay(' stale tail', true);
+    const dismissed = hud.dismissAssistantOverlay();
+
+    releaseFirst();
+    await initial;
+    expect(await dismissed).toBe(true);
+    await vi.runAllTimersAsync();
+
+    expect(visual.paint).toHaveBeenCalledTimes(2);
+    expect(frames[1]).not.toHaveProperty('assistantOverlay');
+  });
+
   it('restores the prior frame when a navigation paint and bounded heal both fail', async () => {
     const frames: HudVisualFrame[] = [];
     const results = [true, false, false, true];
