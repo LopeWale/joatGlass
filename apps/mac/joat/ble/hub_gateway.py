@@ -59,6 +59,7 @@ from ..core.protocol import (
     Imu,
     Input,
     Location,
+    LocationRefresh,
     LocationProbeControl,
     NavigationAction,
     NavigationOrigin,
@@ -102,6 +103,12 @@ class _PendingConfirm:
     preview_digest: str
     pairing_identity_digest: bytes
     expires_at_s: float
+
+
+@dataclass(slots=True)
+class _PendingLocationRefresh:
+    future: asyncio.Future[Location | None]
+    session_id: str
 
 
 class HubGatewayTransport(GlassesTransport, AudioFrameSource):
@@ -156,6 +163,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._disconnect_cbs: list[Callable[[], None]] = []
 
         self._pending_confirms: dict[str, _PendingConfirm] = {}
+        self._pending_location_refreshes: dict[str, _PendingLocationRefresh] = {}
         self._session_id: str | None = None
         self._session_pairing_identity_digest: bytes | None = None
         # Unlike ordinary JOAT, a field-acceptance receipt must not allow a
@@ -165,6 +173,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self.device: Device | None = None
         self.hello: Hello | None = None
         self.location: Location | None = None
+        self._location_received_at_s: float | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -212,6 +221,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             self._session_pairing_identity_digest = None
             self._current_peer_is_loopback = False
             self.hello = None
+        self._clear_location()
         server = self._server
         if server is not None:
             server.close()  # type: ignore[attr-defined]
@@ -349,6 +359,57 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             # fail-closed rather than explode inside the safety gate.
             log.info("dropping %s — plugin disconnected mid-send",
                      type(message).__name__)
+
+    def fresh_location(self, *, max_age_s: float = 120.0) -> Location | None:
+        """Return only a connected, recently received, plausibly fresh phone fix."""
+        received_at_s = self._location_received_at_s
+        if self._conn is None or self.location is None or received_at_s is None:
+            return None
+        if time.monotonic() - received_at_s > max_age_s:
+            return None
+        # The SDK timestamp is optional.  When it is a plausible Unix
+        # millisecond timestamp, reject a stale fix even if it was replayed to
+        # this process moments ago.  Unknown timestamp formats fall back to
+        # the authenticated delivery time rather than inventing a conversion.
+        timestamp_ms = self.location.timestamp_ms
+        now_ms = int(time.time() * 1000)
+        earliest_ms = now_ms - int(max_age_s * 1000)
+        if timestamp_ms is not None and 1_000_000_000_000 <= timestamp_ms < earliest_ms:
+            return None
+        return self.location
+
+    async def request_location_refresh(self, *, timeout_s: float = 5.0) -> Location | None:
+        """Ask the plugin for one medium-accuracy fix bound to this socket session."""
+        conn = self._conn
+        session_id = self._session_id
+        if conn is None or session_id is None:
+            return None
+        request_id = f"location-{secrets.token_urlsafe(12)}"
+        future: asyncio.Future[Location | None] = asyncio.get_running_loop().create_future()
+        self._pending_location_refreshes[request_id] = _PendingLocationRefresh(
+            future=future,
+            session_id=session_id,
+        )
+        try:
+            await self.send(LocationRefresh(request_id=request_id))
+            return await asyncio.wait_for(asyncio.shield(future), timeout=max(0.01, timeout_s))
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            pending = self._pending_location_refreshes.pop(request_id, None)
+            if pending is not None and not pending.future.done():
+                pending.future.cancel()
+
+    def _clear_location(self, session_id: str | None = None) -> None:
+        """Drop cached coordinates and release refresh waiters for one session."""
+        self.location = None
+        self._location_received_at_s = None
+        for request_id, pending in tuple(self._pending_location_refreshes.items()):
+            if session_id is not None and pending.session_id != session_id:
+                continue
+            self._pending_location_refreshes.pop(request_id, None)
+            if not pending.future.done():
+                pending.future.set_result(None)
 
     async def request_confirm(
         self,
@@ -682,6 +743,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             log.info("replacing existing plugin connection")
             if self._session_id is not None:
                 self._invalidate_confirms(self._session_id)
+                self._clear_location(self._session_id)
             await self._conn.close()
         self._conn = conn
         self._session_id = session_id
@@ -689,6 +751,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._current_peer_is_loopback = self._peer_is_loopback(conn)
         self._last_seq = None
         self.hello = None
+        self._clear_location()
         host = str(conn.remote_address[0]) if conn.remote_address else "?"
         self._refusals.pop(host, None)
         self._lockout_warned = False
@@ -712,6 +775,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 self._session_pairing_identity_digest = None
                 self._current_peer_is_loopback = False
                 self.hello = None
+                self._clear_location(session_id)
                 for cb in self._disconnect_cbs:
                     cb()
             log.info("plugin disconnected")
@@ -799,6 +863,15 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             case Location():
                 first = self.location is None
                 self.location = message
+                self._location_received_at_s = time.monotonic()
+                if message.refresh_id is not None:
+                    location_pending = self._pending_location_refreshes.get(message.refresh_id)
+                    if (
+                        location_pending is not None
+                        and location_pending.session_id == session_id
+                        and not location_pending.future.done()
+                    ):
+                        location_pending.future.set_result(message)
                 if first:
                     log.info("wearer location known (±%sm)",
                              int(message.accuracy) if message.accuracy else "?")

@@ -13,7 +13,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .tools import Tool
@@ -85,25 +85,41 @@ def _weather_sync(location: str) -> str:
 
 
 CoordsProvider = Callable[[], "tuple[float, float] | None"]
+RefreshCoordsProvider = Callable[[], Awaitable["tuple[float, float] | None"]]
+_WEARER_LOCATION_SENTINELS = frozenset({
+    "wearer",
+    "wearer location",
+    "my location",
+    "current location",
+    "here",
+})
 
 
-def weather_tool(coords: CoordsProvider | None = None) -> Tool:
+def weather_tool(
+    coords: CoordsProvider | None = None,
+    refresh_coords: RefreshCoordsProvider | None = None,
+) -> Tool:
     async def run(args: dict[str, Any]) -> str:
         location = str(args.get("location", "")).strip()
+        if " ".join(location.casefold().split()) in _WEARER_LOCATION_SENTINELS:
+            location = ""
         if location:
             return await asyncio.to_thread(_weather_sync, location)
         # No city named: use the wearer's reported position —
         # the forecast API takes lat/lon directly, no geocoding hop.
         here = coords() if coords is not None else None
+        if here is None and refresh_coords is not None:
+            here = await refresh_coords()
         if here is None:
-            return "error: a location is needed — ask the wearer where"
+            return "error: phone location is unavailable or stale"
         return await asyncio.to_thread(_forecast, here[0], here[1], "where you are")
 
     return Tool(
         name="get_weather",
         description=(
-            "Current weather for a named place. Call this whenever the "
-            "wearer asks about weather, rain, or temperature."
+            "Current weather for a named place, or where the wearer is when "
+            "location is omitted. Call this whenever the wearer asks about "
+            "weather, rain, or temperature."
         ),
         parameters={
             "type": "object",
@@ -111,7 +127,7 @@ def weather_tool(coords: CoordsProvider | None = None) -> Tool:
                 "type": "string",
                 "description": "City or place name, e.g. 'Norman, Oklahoma'",
             }},
-            "required": ["location"],
+            "required": [],
         },
         run=run,
     )

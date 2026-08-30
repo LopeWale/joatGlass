@@ -109,17 +109,18 @@ def location_facts(transport: Any) -> FactSource:
     """Whether the wearer's position is known — stated either way.
 
     The coordinates themselves stay OUT of the prompt (a model reciting raw
-    lat/lon at the wearer is noise); what the model needs to know is that
-    get_weather works without asking for a city.
+    lat/lon at the wearer is noise).  A cached fix must be explicitly fresh;
+    a disconnected or expired phone fix is not usable assistant context.
     """
 
     def source() -> str:
-        loc = getattr(transport, "location", None)
+        fresh_location = getattr(transport, "fresh_location", None)
+        loc = fresh_location() if callable(fresh_location) else None
         if loc is None:
-            return ("Wearer location: unknown (phone has not reported it — "
-                    "ask for a city if one is needed)")
-        return ("Wearer location: known. get_weather with no location uses "
-                "it automatically.")
+            return ("Wearer location: unknown or stale. Local tools may "
+                    "request a fresh phone fix; otherwise ask for a city.")
+        return ("Wearer location: fresh. get_weather with no location and "
+                "find_nearby_places use it privately.")
 
     return source
 

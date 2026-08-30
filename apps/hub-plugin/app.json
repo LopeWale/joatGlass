@@ -2,7 +2,7 @@
   "package_id": "com.akinwale.joat",
   "edition": "202601",
   "name": "JOAT",
-  "version": "0.1.27",
+  "version": "0.1.29",
   "min_sdk_version": "0.0.14",
   "entrypoint": "index.html",
   "permissions": [
@@ -30,7 +30,7 @@
     },
     {
       "name": "location",
-      "desc": "Your position is sent to your own Mac for local context and walking/cycling guidance. When you explicitly request navigation, destination searches and route endpoints may be sent by your Mac to its configured routing provider."
+      "desc": "Your position is sent to your own Mac for local context and walking/cycling guidance. When you ask for nearby places or explicitly request navigation, your Mac may send the search query and route endpoints to its configured routing provider."
     }
   ],
   "supported_languages": [

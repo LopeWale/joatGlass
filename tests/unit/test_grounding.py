@@ -13,6 +13,7 @@ from joat.agents.grounding import (
     Grounding,
     device_facts,
     local_clock,
+    location_facts,
     static_fact,
 )
 
@@ -76,6 +77,21 @@ class TestDeviceFacts:
     def test_absent_device_states_the_gap_rather_than_going_quiet(self) -> None:
         # Silence would let the model fill it in; a stated unknown will not.
         assert "unknown" in device_facts(self._T(None))()
+
+
+class TestLocationFacts:
+    class _T:
+        def __init__(self, location: object | None) -> None:
+            self._location = location
+
+        def fresh_location(self) -> object | None:
+            return self._location
+
+    def test_only_calls_a_phone_fix_known_when_it_is_fresh(self) -> None:
+        assert "fresh" in location_facts(self._T(object()))()
+
+    def test_never_calls_a_missing_or_expired_fix_known(self) -> None:
+        assert "unknown" in location_facts(self._T(None))()
 
 
 class TestUnknowns:

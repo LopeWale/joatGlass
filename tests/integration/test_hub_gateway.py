@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 import pytest
 import websockets
@@ -149,6 +150,53 @@ class TestConnection:
 
 
 class TestUplink:
+    async def test_location_refresh_is_request_bound_fresh_and_cleared_on_disconnect(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            awaiting_location = asyncio.create_task(t.request_location_refresh())
+            request = json.loads(await ws.recv())
+            assert request["kind"] == "location.refresh"
+            await ws.send(json.dumps({
+                "kind": "location", "latitude": 41.9, "longitude": -87.65,
+                "accuracy": 11, "timestamp": int(time.time() * 1000),
+                "refreshId": request["requestId"],
+            }))
+            received = await awaiting_location
+            assert received is not None
+            assert received.timestamp_ms is not None
+            assert t.fresh_location() == received
+        await _wait_for(lambda: not t.connected)
+        assert t.fresh_location() is None
+
+    async def test_location_refresh_does_not_accept_an_unbound_ambient_fix(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            awaiting_location = asyncio.create_task(t.request_location_refresh(timeout_s=0.05))
+            request = json.loads(await ws.recv())
+            await ws.send(json.dumps({
+                "kind": "location", "latitude": 41.9, "longitude": -87.65,
+                "refreshId": request["requestId"] + "-wrong",
+            }))
+            assert await awaiting_location is None
+
+    async def test_replayed_phone_timestamp_is_not_fresh_assistant_context(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": None}))
+            assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
+            await ws.send(json.dumps({
+                "kind": "location", "latitude": 41.9, "longitude": -87.65,
+                "timestamp": 1_725_000_000_123,
+            }))
+            await _wait_for(lambda: t.location is not None)
+            assert t.fresh_location() is None
+
     async def test_navigation_action_reaches_dedicated_generation_bound_subscriber(
         self, transport,
     ) -> None:

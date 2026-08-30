@@ -205,6 +205,11 @@ class Location:
     latitude: float
     longitude: float
     accuracy: float | None = None
+    # The optional phone fix time supplements the Mac's monotonic receive
+    # time, so an old location cannot become fresh merely by being replayed.
+    timestamp_ms: int | None = None
+    # Present only when answering a Mac-requested one-shot refresh.
+    refresh_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -618,6 +623,19 @@ class LocationProbeControl:
 
 
 @dataclass(frozen=True, slots=True)
+class LocationRefresh:
+    """Request one medium-accuracy phone fix for an assistant tool call."""
+
+    request_id: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "location.refresh",
+            "requestId": _navigation_identifier(self.request_id, "requestId", maximum=64),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NavigationHudView:
     view: Literal[
         "destination", "repair", "mode", "preview", "guidance", "uncertain",
@@ -823,6 +841,7 @@ DownlinkMessage = (
     | ImuTrace
     | G2DiagnosticControl
     | LocationProbeControl
+    | LocationRefresh
     | NavigationView
     | NavigationOriginRequest
     | NavigationRoute
@@ -903,6 +922,14 @@ def _navigation_number(value: Any, name: str, *, minimum: float, maximum: float)
     if not math.isfinite(resolved) or not minimum <= resolved <= maximum:
         raise ProtocolError(f"navigation {name} is invalid")
     return resolved
+
+
+def _location_timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 9_007_199_254_740_991:
+        raise ProtocolError("location timestamp is invalid")
+    return value
 
 
 def _navigation_hud_to_wire(view: NavigationHudView) -> dict[str, Any]:
@@ -1481,11 +1508,28 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 reason=reason,
             )
         case "location":
+            if not set(payload) <= {
+                "kind", "latitude", "longitude", "accuracy", "timestamp", "refreshId",
+            }:
+                raise ProtocolError("location has unsupported fields")
             acc = payload.get("accuracy")
+            refresh_id = payload.get("refreshId")
             return Location(
-                latitude=float(_require(payload, "latitude", kind)),
-                longitude=float(_require(payload, "longitude", kind)),
-                accuracy=float(acc) if acc is not None else None,
+                latitude=_navigation_number(
+                    _require(payload, "latitude", kind), "latitude", minimum=-90, maximum=90,
+                ),
+                longitude=_navigation_number(
+                    _require(payload, "longitude", kind), "longitude", minimum=-180, maximum=180,
+                ),
+                accuracy=(
+                    _navigation_number(acc, "accuracy", minimum=0, maximum=100_000)
+                    if acc is not None else None
+                ),
+                timestamp_ms=_location_timestamp(payload.get("timestamp")),
+                refresh_id=(
+                    _navigation_identifier(refresh_id, "refreshId", maximum=64)
+                    if refresh_id is not None else None
+                ),
             )
         case "device":
             return Device(

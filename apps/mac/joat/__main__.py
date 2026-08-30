@@ -21,6 +21,7 @@ from .agents.builtin_tools import (
     notifications_tool,
     weather_tool,
 )
+from .agents.nearby_places import nearby_places_tool
 from .agents.grounding import (
     Grounding,
     device_facts,
@@ -252,7 +253,18 @@ async def main() -> None:
     card_log = CardLog()
     imessage = IMessageStore()
 
+    def wearer_coords() -> tuple[float, float] | None:
+        """Return a connected phone's fresh fix without exposing it to the model."""
+        loc = transport.fresh_location()
+        return (loc.latitude, loc.longitude) if loc is not None else None
+
+    async def refresh_wearer_coords() -> tuple[float, float] | None:
+        """Ask the installed Hub plugin for one current iPhone fix."""
+        loc = await transport.request_location_refresh()
+        return (loc.latitude, loc.longitude) if loc is not None else None
+
     replier: ReplyEngine | None = None
+    belt: ToolBelt | None = None
     if args.no_llm:
         log.info("LLM disabled (--no-llm) — echoing transcripts")
     elif mlx_available():
@@ -274,11 +286,10 @@ async def main() -> None:
         # The belt: what the model can GO GET instead of declining. The
         # wearer's ruling — an assistant that stops at "I don't know" is as
         # fired as one that invents the answer.
-        def wearer_coords() -> tuple[float, float] | None:
-            loc = transport.location
-            return (loc.latitude, loc.longitude) if loc is not None else None
-
-        belt_tools = [weather_tool(wearer_coords), notifications_tool(card_log)]
+        belt_tools = [
+            weather_tool(wearer_coords, refresh_wearer_coords),
+            notifications_tool(card_log),
+        ]
         if imessage.available:
             belt_tools.append(messages_tool(imessage))
         belt = ToolBelt(belt_tools)
@@ -558,12 +569,22 @@ async def main() -> None:
     experimental_navigation = os.environ.get(
         "JOAT_EXPERIMENTAL_NAVIGATION", "",
     ).strip().lower() in {"1", "true", "yes"}
-    navigation_provider: NavigationProvider | None = None
-    if mapbox_token and experimental_navigation:
-        navigation_provider = MapboxNavigationProvider(
+    mapbox_provider: MapboxNavigationProvider | None = None
+    if mapbox_token:
+        mapbox_provider = MapboxNavigationProvider(
             mapbox_token,
             candidate_navigation_policies(),
         )
+        if belt is not None:
+            belt.register(nearby_places_tool(
+                wearer_coords,
+                refresh_wearer_coords,
+                mapbox_provider.search,
+            ))
+
+    navigation_provider: NavigationProvider | None = None
+    if mapbox_provider is not None and experimental_navigation:
+        navigation_provider = mapbox_provider
         log.info("experimental navigation ready (Mapbox; walking/cycling)")
     elif mapbox_token:
         log.info("experimental navigation disabled (set JOAT_EXPERIMENTAL_NAVIGATION=1)")

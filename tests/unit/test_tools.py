@@ -76,3 +76,9 @@ class TestExecute:
     def test_empty_belt_is_falsy(self) -> None:
         assert not ToolBelt()
         assert ToolBelt([make_tool()])
+
+    async def test_register_makes_a_late_bound_provider_available_to_the_same_reply_engine(self) -> None:
+        belt = ToolBelt()
+        belt.register(make_tool(name="find_nearby_places", result="one nearby café"))
+
+        assert await belt.execute(ToolCall("find_nearby_places", {})) == "one nearby café"
