@@ -345,9 +345,17 @@ def _view(surface: str, *, state: str = "running", activity: str) -> BrainstormH
     )
 
 
-def acceptance_rejection_view(reason: Literal["unavailable", "busy"]) -> BrainstormHudView:
+def acceptance_rejection_view(
+    reason: Literal["not_armed", "unavailable", "busy"],
+) -> BrainstormHudView:
     """Fixed wearer-visible response when a glasses-originating arm is refused."""
 
+    if reason == "not_armed":
+        return _view(
+            "brainstorm",
+            state="blocked",
+            activity="Acceptance support trace is off",
+        )
     if reason == "busy":
         return _view(
             "brainstorm",
@@ -852,15 +860,30 @@ def try_start_g2_gesture_acceptance(
     terminal: Callable[[], HermesStream | None],
     trigger: BrainstormAction,
     start_session: Callable[[Session], bool],
+    acceptance_armed: bool,
     output_directory: Path | None = None,
+    action_timeout_s: float = 45.0,
+    connect_timeout_s: float = 120.0,
+    simulator_override: bool = False,
 ) -> BrainstormHudView | None:
-    """Start once or return the exact fixed rejection frame for the G2."""
+    """Start an explicitly armed diagnostic run, or return a fixed G2 frame.
+
+    The ordinary wearable Brainstorm path must never enter an acceptance run.
+    Keeping the gate here, rather than only in the app callback, protects a
+    future caller from accidentally making a production gesture diagnostic.
+    """
+
+    if not acceptance_armed:
+        return acceptance_rejection_view("not_armed")
 
     candidate = make_g2_gesture_acceptance_session(
         transport=transport,
         terminal=terminal,
         trigger=trigger,
         output_directory=output_directory,
+        action_timeout_s=action_timeout_s,
+        connect_timeout_s=connect_timeout_s,
+        simulator_override=simulator_override,
     )
     if candidate is None:
         return acceptance_rejection_view("unavailable")

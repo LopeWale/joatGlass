@@ -2,6 +2,22 @@
 
 ## 2026-08-30
 
+- Made the real-G2 **Brainstorm / Agent Terminal acceptance route explicitly
+  diagnostic-only**. A production `begin_acceptance` gesture is now refused
+  before it can allocate a session unless the app-owned engine was deliberately
+  launched with `--g2-diagnostics`; ordinary glasses-first Brainstorm use
+  needs no Mac interaction. The isolated simulator harness remains a separate
+  explicit test path. Focused acceptance and engine-policy tests passed; this
+  is not physical-G2 evidence or a package release.
+
+  A fresh isolated official-simulator run exercised that same armed service
+  route and its nine visible states; the receipt contains only fixed gesture
+  metadata and frame hashes. Visual review confirms that each frame is legible
+  and the flow is causal. It also caught a separate Hub release issue: the
+  normal Ready frame still advertises `right/ring x2: test`. The engine now
+  rejects that unarmed action, but the Hub owner must remove that diagnostic
+  affordance before packaging; no physical G2 or package claim is made.
+
 - Added a one-time **Private Tailnet home brain** engine mode for an unattended
   JOAT Mac mini. The app persists the setting across Login Item launches and,
   after a normal engine restart, passes a narrow flag that binds the glasses

@@ -876,6 +876,7 @@ async def main() -> None:
                 terminal=lambda: openclaw_terminal,
                 trigger=action,
                 start_session=sessions.try_start_session,
+                acceptance_armed=args.g2_diagnostics,
             )
             if rejection is not None:
                 asyncio.get_running_loop().create_task(

@@ -313,9 +313,12 @@ async def test_unconfirmed_hermes_abort_never_renders_cancelled_success(
 
 
 def test_rejected_acceptance_has_a_fixed_wearer_visible_recovery_frame() -> None:
+    not_armed = acceptance_rejection_view("not_armed")
     unavailable = acceptance_rejection_view("unavailable")
     busy = acceptance_rejection_view("busy")
 
+    assert not_armed.state == "blocked"
+    assert not_armed.activity == "Acceptance support trace is off"
     assert unavailable.state == "failed"
     assert unavailable.activity == "Acceptance unavailable; reconnect G2 and retry"
     assert busy.state == "blocked"
@@ -341,6 +344,7 @@ def test_glasses_start_returns_an_explicit_rejection_for_unavailable_or_busy(
         terminal=lambda: FakeHermes(),
         trigger=acceptance_trigger(),
         start_session=reject_start,
+        acceptance_armed=True,
         output_directory=tmp_path,
     )
     assert unavailable is not None and unavailable.state == "failed"
@@ -354,6 +358,7 @@ def test_glasses_start_returns_an_explicit_rejection_for_unavailable_or_busy(
         terminal=lambda: FakeHermes(),
         trigger=acceptance_trigger(),
         start_session=reject_start,
+        acceptance_armed=True,
         output_directory=tmp_path,
     )
     assert busy is not None and busy.state == "blocked"
@@ -364,9 +369,39 @@ def test_glasses_start_returns_an_explicit_rejection_for_unavailable_or_busy(
         terminal=lambda: FakeHermes(),
         trigger=acceptance_trigger(),
         start_session=lambda _session: True,
+        acceptance_armed=True,
         output_directory=tmp_path,
     )
     assert accepted is None
+
+
+def test_glasses_start_refuses_an_unarmed_production_gesture(tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+    transport = FakeTransport(events)
+    transport.emit_hello()
+    starts: list[object] = []
+    terminal_called = False
+
+    def terminal() -> FakeHermes:
+        nonlocal terminal_called
+        terminal_called = True
+        return FakeHermes()
+
+    rejection = try_start_g2_gesture_acceptance(
+        transport=transport,
+        terminal=terminal,
+        trigger=acceptance_trigger(),
+        start_session=lambda session: starts.append(session) or True,
+        acceptance_armed=False,
+        output_directory=tmp_path,
+    )
+
+    assert rejection is not None
+    assert rejection.state == "blocked"
+    assert rejection.activity == "Acceptance support trace is off"
+    assert starts == []
+    assert terminal_called is False
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_glasses_start_rejects_a_stale_authenticated_generation(tmp_path: Path) -> None:
@@ -380,6 +415,7 @@ def test_glasses_start_rejects_a_stale_authenticated_generation(tmp_path: Path) 
         terminal=lambda: FakeHermes(),
         trigger=acceptance_trigger(generation=1),
         start_session=lambda _session: True,
+        acceptance_armed=True,
         output_directory=tmp_path,
     )
 
