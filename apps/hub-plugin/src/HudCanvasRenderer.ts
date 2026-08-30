@@ -314,6 +314,28 @@ export function resolveHudListKind(title: string): HudListKind {
   return 'generic';
 }
 
+/**
+ * A unified Planning day intentionally contains two native kinds. The source
+ * row already states which one it is, so preserve that distinction in the
+ * glyph rather than visually turning every agenda row into a Calendar event.
+ */
+export function hudListItemIconName(title: string, item: string): HudIconName {
+  const kind = resolveHudListKind(title);
+  if (kind === 'calendar' && /(?:^| · )REMINDER(?: · |$)/.test(item.toUpperCase())) {
+    return 'tasks';
+  }
+  const icons: Readonly<Record<HudListKind, HudIconName>> = {
+    messages: 'messages',
+    notifications: 'notifications',
+    calendar: 'calendar',
+    tasks: 'tasks',
+    quicknotes: 'quicknotes',
+    activity: 'activity',
+    generic: 'settings',
+  };
+  return icons[kind];
+}
+
 export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): string {
   const labels: Readonly<Record<ProductivityHudModel['phase'], string>> = {
     verifying: 'VERIFYING',
@@ -358,12 +380,32 @@ export function hudBrightnessGray(level: number): number {
 export function hudDisplayTitle(value: string): string {
   const normalized = value.replace(/\s*·\s*/g, ' · ').trim();
   if (!normalized || normalized !== normalized.toUpperCase()) return normalized;
+  const planning = normalized.match(/^(PLANNING|CALENDAR|TASKS) · PLAN · (.+)$/);
+  if (planning) {
+    const root = titleCaseHudWords(planning[1] ?? 'PLANNING');
+    const period = planning[2] ?? '';
+    const scope = planningScopeForDisplay(period);
+    const displayedPeriod = titleCaseHudWords(period);
+    return scope
+      ? `${root} · ${scope} · ${displayedPeriod}`
+      : `${root} · ${displayedPeriod}`;
+  }
   return normalized.split(' · ').map((part) => {
     if (part === 'JOAT' || /^\d+$/.test(part)) return part;
     if (part === 'QUICKNOTES') return 'QuickNotes';
-    const lower = part.toLowerCase();
-    return lower.charAt(0).toUpperCase() + lower.slice(1);
+    return titleCaseHudWords(part);
   }).join(' · ');
+}
+
+function planningScopeForDisplay(period: string): 'Month' | 'Week' | 'Day' | undefined {
+  if (/^[A-Z]+ \d{4}$/.test(period)) return 'Month';
+  if (/^[A-Z]{3} \d+–(?:[A-Z]{3} )?\d+$/.test(period)) return 'Week';
+  if (/^(?:MON|TUE|WED|THU|FRI|SAT|SUN) [A-Z]{3} \d+$/.test(period)) return 'Day';
+  return undefined;
+}
+
+function titleCaseHudWords(value: string): string {
+  return value.toLowerCase().replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }
 
 function parseStatus(status: string): StatusParts {
@@ -1096,7 +1138,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context.font = `14px ${HUD_FONT}`;
         context.fillText((name || item).charAt(0).toUpperCase(), 56, top + 16);
       } else {
-        this.drawIcon(context, icons[listKind], 47, top + 7, 18, SUPPORT);
+        this.drawIcon(context, icons[hudListItemIconName(frame.title, item)], 47, top + 7, 18, SUPPORT);
       }
 
       context.textAlign = 'left';

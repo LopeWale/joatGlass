@@ -7,6 +7,7 @@ import {
   brainstormStateLabel,
   hudBrightnessGray,
   hudDisplayTitle,
+  hudListItemIconName,
   hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
@@ -63,6 +64,10 @@ describe('selected visual geometry', () => {
     expect(hudDisplayTitle('JOAT')).toBe('JOAT');
     expect(hudDisplayTitle('NOTIFICATIONS')).toBe('Notifications');
     expect(hudDisplayTitle('QUICKNOTES')).toBe('QuickNotes');
+    expect(hudDisplayTitle('PLANNING · PLAN · SEPTEMBER 2026')).toBe('Planning · Month · September 2026');
+    expect(hudDisplayTitle('PLANNING · PLAN · AUG 31–SEP 6')).toBe('Planning · Week · Aug 31–Sep 6');
+    expect(hudDisplayTitle('PLANNING · PLAN · TUE SEP 1')).toBe('Planning · Day · Tue Sep 1');
+    expect(hudDisplayTitle('PLANNING · PLAN · SETUP')).toBe('Planning · Setup');
     expect(hudDisplayTitle('Already Mixed')).toBe('Already Mixed');
   });
 });
@@ -95,6 +100,17 @@ describe('semantic HUD chrome', () => {
     expect(resolveHudListKind('ACTIVITY')).toBe('activity');
     expect(resolveHudListKind('ACTION · VERIFYING')).toBe('activity');
     expect(resolveHudListKind('LISTENING RESUME')).toBe('generic');
+  });
+
+  it('keeps mixed Planning agenda sources visible in their row glyphs', () => {
+    expect(hudListItemIconName(
+      'PLANNING · PLAN · TUE SEP 1',
+      '10:30 · EVENT · Design review',
+    )).toBe('calendar');
+    expect(hudListItemIconName(
+      'PLANNING · PLAN · TUE SEP 1',
+      '19:00 · REMINDER · Buy filters',
+    )).toBe('tasks');
   });
 
 });
