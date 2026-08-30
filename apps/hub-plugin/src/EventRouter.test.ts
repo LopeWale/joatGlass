@@ -45,12 +45,17 @@ function make(
     handleScroll: vi.fn(async () => navigationActive),
     handleCancel: vi.fn(() => navigationActive),
   };
+  let acceptedBrainstormAction = 'show_terminal' as 'show_terminal' | 'begin_acceptance';
   const brainstorm = {
     isActive: vi.fn(() => brainstormActive),
     handleClick: vi.fn(() => brainstormActive),
     handleCancel: vi.fn(() => brainstormActive),
+    handleAcceptance: vi.fn(() => {
+      acceptedBrainstormAction = 'begin_acceptance';
+      return brainstormActive;
+    }),
     consumeAcceptedAction: vi.fn(() => brainstormActive ? {
-      action: 'show_terminal' as const,
+      action: acceptedBrainstormAction,
       surface: 'brainstorm' as const,
     } : undefined),
   };
@@ -109,6 +114,19 @@ function make(
 const click = (eventSource: number) => ({ sysEvent: { eventSource } });
 
 describe('EventRouter — audio and IMU', () => {
+  it('ignores the SDK startup source announcement instead of inventing a left tap', () => {
+    const events: unknown[] = [];
+    const { fire, assistantOverlay, sent } = make(
+      false, { record: (event) => events.push(event) }, false, false, true,
+    );
+
+    fire({ sysEvent: { eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L } });
+
+    expect(assistantOverlay.dismissAssistantOverlay).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
   it('audio frames go to the streamer', () => {
     const { fire, audio } = make();
     fire({ audioEvent: { audioPcm: [1, 2, 3] } });
@@ -299,6 +317,29 @@ describe('EventRouter — double press', () => {
     expect(shutDownPageContainer).toHaveBeenCalledWith(1);
     // Teardown waits for SYSTEM_EXIT — the wearer can still cancel.
     expect(lifecycle.onExit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [EventSourceType.TOUCH_EVENT_FROM_GLASSES_R, 'right'],
+    [EventSourceType.TOUCH_EVENT_FROM_RING, 'ring'],
+  ])('uses a deliberate %s double press to start the visible Brainstorm test', (source, sourceName) => {
+    const events: unknown[] = [];
+    const { fire, brainstorm, shutDownPageContainer } = make(
+      false, { record: (event) => events.push(event) }, false, true,
+    );
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: source,
+      },
+    });
+
+    expect(brainstorm.handleAcceptance).toHaveBeenCalledWith(sourceName);
+    expect(shutDownPageContainer).not.toHaveBeenCalled();
+    expect(events).toContainEqual({
+      type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
+      source: sourceName, gesture: 'double_press', delivery: 'sys',
+    });
   });
 });
 

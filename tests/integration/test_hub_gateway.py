@@ -144,8 +144,18 @@ class TestConnection:
         t, url = transport
         first = await websockets.connect(url)
         await _wait_for(lambda: t.connected)
+        first_generation = t.connection_generation
+        await first.send(json.dumps({
+            "kind": "hello", "sn": "G2", "model": "g2", "launchSource": "physical",
+        }))
+        await _wait_for(lambda: t.hello is not None)
+        await first.send(json.dumps({
+            "kind": "hello", "sn": "G2", "model": "g2", "launchSource": "physical",
+        }))
+        await asyncio.sleep(0.01)
+        assert t.connection_generation == first_generation
         async with websockets.connect(url) as second:
-            await _wait_for(lambda: t._conn is not None and t._conn is not None)
+            await _wait_for(lambda: t.connection_generation > first_generation)
             await second.send(json.dumps({"kind": "device", "connect": "connected"}))
             await _wait_for(lambda: t.device is not None)
         with pytest.raises(websockets.ConnectionClosed):

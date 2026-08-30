@@ -260,6 +260,25 @@ class TestDebateSession:
 
 
 class TestSessionManager:
+    async def test_typed_external_session_cannot_replace_the_active_wearer_session(self) -> None:
+        entered = asyncio.Event()
+
+        class HeldSession(Session):
+            async def run(self) -> None:
+                entered.set()
+                await asyncio.Event().wait()
+
+            def cancel(self) -> None:
+                return None
+
+        manager = SessionManager(HudWriter(SinkTransport()), lambda _topic: None)
+        first = HeldSession()
+        assert manager.try_start_session(first)
+        await entered.wait()
+        assert not manager.try_start_session(HeldSession())
+        assert manager.active_session is first
+        await manager.close(timeout_s=0.1)
+
     async def test_glasses_begin_action_keeps_a_typed_brainstorm_capture_frame_visible(self) -> None:
         transport = SinkTransport()
         capture = BrainstormHudView(
@@ -309,6 +328,44 @@ class TestSessionManager:
         await asyncio.sleep(0)
 
         assert not manager.active
+
+    async def test_glasses_cancel_is_offered_to_the_typed_session_before_fallback(
+        self,
+    ) -> None:
+        entered = asyncio.Event()
+        handled = asyncio.Event()
+        release = asyncio.Event()
+        fallback_cancel_calls = 0
+
+        class OwnedCancelSession(Session):
+            async def run(self) -> None:
+                entered.set()
+                await release.wait()
+
+            def cancel(self) -> None:
+                nonlocal fallback_cancel_calls
+                fallback_cancel_calls += 1
+
+            async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
+                if action.action != "cancel":
+                    return False
+                handled.set()
+                release.set()
+                return True
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda _topic: OwnedCancelSession(),
+        )
+        assert manager.handle_transcript("brainstorm a launch")
+        await entered.wait()
+
+        manager.handle_brainstorm_action(BrainstormAction("cancel"))
+        await asyncio.wait_for(handled.wait(), timeout=0.1)
+        while manager.active:
+            await asyncio.sleep(0)
+
+        assert fallback_cancel_calls == 0
 
     async def test_glasses_show_terminal_action_is_owned_by_the_active_session(self) -> None:
         handled: list[str] = []

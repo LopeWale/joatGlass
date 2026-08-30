@@ -4,6 +4,7 @@ import {
   assistantOverlayTextLayout,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
+  brainstormStateLabel,
   hudBrightnessGray,
   hudDisplayTitle,
   hudSidebarIconName,
@@ -215,6 +216,13 @@ describe('Brainstorm wearable actions', () => {
       terminalState: 'blocked',
       noToolsChecked: false,
     })).not.toContain('test');
+    expect(brainstormActionHint({
+      screen: 'brainstorm',
+      state: 'acceptance_ready',
+      terminalState: 'ready',
+      noToolsChecked: true,
+    })).toBe('tap: start test · left x2: menu');
+    expect(brainstormStateLabel('acceptance_ready')).toBe('TEST READY');
   });
 });
 

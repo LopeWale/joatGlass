@@ -240,6 +240,36 @@ async def test_terminal_abort_cleanup_is_bounded_when_gateway_never_answers(
 
 
 @pytest.mark.asyncio
+async def test_cancel_is_not_reported_until_gateway_confirms_the_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "joat.agents.openclaw_terminal.ABORT_CONFIRMATION_TIMEOUT_S",
+        0.01,
+    )
+
+    class BlockingConnection(FakeConnection):
+        async def next_event(self) -> dict[str, object]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    connection = BlockingConnection(hang_abort=True)
+    terminal = await OpenClawAgentTerminal.create(connection=connection, agent_id="hermes")
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in terminal.stream("question")]
+
+    task = asyncio.create_task(consume())
+    while not any(method == "sessions.send" for method, _ in connection.calls):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(OpenClawGatewayError, match="did not confirm"):
+        await task
+
+    assert any(method == "sessions.abort" for method, _ in connection.calls)
+
+
+@pytest.mark.asyncio
 async def test_terminal_rejects_created_session_with_telegram_delivery_route() -> None:
     connection = FakeConnection(
         session_route={

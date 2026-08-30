@@ -181,6 +181,9 @@ export function brainstormActionHint(
     if (model.state === 'running') {
       return 'tap: Hermes · swipe down or left x2: cancel';
     }
+    if (model.state === 'acceptance_ready') {
+      return 'tap: start test · left x2: menu';
+    }
     return model.state === 'ready'
       && model.terminalState === 'ready'
       && model.noToolsChecked
@@ -191,6 +194,12 @@ export function brainstormActionHint(
   return model.terminalState === 'ready'
     ? 'tap: begin Brainstorm · left x2: menu'
     : 'tap: retry Hermes · left x2: menu';
+}
+
+export function brainstormStateLabel(state: BrainstormHudModel['state']): string {
+  return state === 'acceptance_ready'
+    ? 'TEST READY'
+    : state.replace(/_/g, ' ').toUpperCase();
 }
 
 export interface PlanningMonthDay {
@@ -1374,7 +1383,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     model: BrainstormHudModel,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    const state = model.state.replace(/_/g, ' ').toUpperCase();
+    const state = brainstormStateLabel(model.state);
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     this.drawIcon(context, icons.brainstorm, 36, 49, 20, BRIGHT);

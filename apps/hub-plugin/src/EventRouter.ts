@@ -36,6 +36,8 @@ export interface BrainstormInputOwner {
   handleClick(): boolean;
   /** Left-temple double press cancels an active Brainstorm round. */
   handleCancel(): boolean;
+  /** Right-temple/ring double press starts the fixed content-free test. */
+  handleAcceptance(source: 'right' | 'ring'): boolean;
   /** Fixed receipt of a successfully handed-off action; never prompt content. */
   consumeAcceptedAction(): { action: BrainstormAction; surface: BrainstormHudScreen } | undefined;
 }
@@ -167,6 +169,18 @@ export class EventRouter {
     }
 
     if (event.sysEvent) {
+      // The host emits a left-source announcement at startup with no event
+      // type. CLICK is also protobuf zero, so keep absent right/ring events as
+      // real presses, and keep an absent left press while confirmation owns
+      // it. The startup announcement is ignored only when it would erase the
+      // just-painted assistant overlay; outside that exact state, the legacy
+      // protobuf-zero click contract remains intact.
+      if (
+        event.sysEvent.eventType === undefined
+        && event.sysEvent.eventSource === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+        && !this.imu.isPending()
+        && this.assistantOverlay?.hasAssistantOverlay()
+      ) return;
       this.recordGesture(this.classify(event.sysEvent.eventType), 'sys');
       // Confirmation owns long press too; it must not toggle the microphone
       // behind a decision or make the visible TAP/SWIPE contract incomplete.
@@ -355,6 +369,19 @@ export class EventRouter {
           return;
         }
         void this.menu.toggle();
+        return;
+      }
+      const acceptanceSource = source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
+        ? 'right'
+        : source === EventSourceType.TOUCH_EVENT_FROM_RING
+          ? 'ring'
+          : undefined;
+      if (
+        acceptanceSource !== undefined
+        && this.brainstorm?.isActive()
+        && this.brainstorm.handleAcceptance(acceptanceSource)
+      ) {
+        this.recordAcceptedBrainstormAction(source, 'double_press');
         return;
       }
       // Anything else: the SDK's own exit dialog. The platform expects every

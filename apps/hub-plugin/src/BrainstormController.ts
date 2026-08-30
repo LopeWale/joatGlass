@@ -16,15 +16,23 @@ export interface AcceptedBrainstormAction {
 export class BrainstormController {
   private model?: BrainstormHudModel;
   private acceptedAction?: AcceptedBrainstormAction;
+  private acceptancePending = false;
+  private acceptanceStartPending = false;
 
   constructor(private readonly link: BrainstormLink) {}
 
   present(model: BrainstormHudModel): void {
     this.model = { ...model, collaborators: [...model.collaborators] };
+    // acceptance_ready is an explicit Mac acknowledgement. Keep the trigger
+    // consumed while that phase is visible, and accept exactly one start tap.
+    this.acceptancePending = model.state === 'acceptance_ready';
+    this.acceptanceStartPending = false;
   }
 
   clear(): void {
     this.model = undefined;
+    this.acceptancePending = false;
+    this.acceptanceStartPending = false;
   }
 
   isActive(): boolean {
@@ -43,6 +51,14 @@ export class BrainstormController {
   handleClick(): boolean {
     const model = this.model;
     if (model === undefined) return false;
+    if (model.screen === 'brainstorm' && model.state === 'acceptance_ready') {
+      if (this.acceptanceStartPending) return true;
+      const accepted = this.send('begin_topic_capture');
+      if (accepted) this.acceptanceStartPending = true;
+      // Never let a disconnected acceptance tap leak into another surface.
+      return true;
+    }
+    if (this.acceptancePending) return true;
 
     if (model.screen === 'brainstorm') {
       if (model.state === 'ready') return this.send('begin_topic_capture');
@@ -70,7 +86,36 @@ export class BrainstormController {
       : false;
   }
 
-  private send(action: BrainstormAction): boolean {
+  /** Visible right-temple/ring double press from the safe ready surface.
+   * The fixed metadata proves the initiating G2 input without carrying a
+   * topic, prompt, endpoint, or any OpenClaw payload. */
+  handleAcceptance(source: 'right' | 'ring'): boolean {
+    const model = this.model;
+    if (this.acceptancePending || model?.state === 'acceptance_ready') return true;
+    if (
+      model?.screen !== 'brainstorm'
+      || model.state !== 'ready'
+      || model.terminalState !== 'ready'
+      || model.noToolsChecked !== true
+    ) return false;
+    const action: BrainstormAction = 'begin_acceptance';
+    const accepted = this.link.sendBrainstorm({
+      kind: 'brainstorm.action',
+      action,
+      surface: 'brainstorm',
+      source,
+      gesture: 'double_press',
+    });
+    if (accepted) {
+      this.acceptancePending = true;
+      this.acceptedAction = { action, surface: 'brainstorm' };
+    }
+    // An eligible deliberate test gesture is always consumed locally. A
+    // reconnect must never turn it into the platform exit dialog.
+    return true;
+  }
+
+  private send(action: Exclude<BrainstormAction, 'begin_acceptance'>): boolean {
     // Never queue a stale G2 control across a reconnect. The current Mac
     // session must authenticate and receive the action while it is current.
     const accepted = this.link.sendBrainstorm({ kind: 'brainstorm.action', action });

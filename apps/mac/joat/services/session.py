@@ -201,7 +201,7 @@ class SessionManager:
         for starter in self._starters:
             session = starter(text)
             if session is not None:
-                return self._start_session(session, publish_state=False)
+                return self.try_start_session(session, publish_state=False)
         # "brainstorm" is what the capability is called; "debate" stays a
         # synonym because it is one of the MOVES inside a brainstorm (relay
         # a turn to be torn apart rather than built on), it is what the
@@ -246,7 +246,20 @@ class SessionManager:
         if active is None:
             return
         if action.action == "cancel":
-            self._cancel_active()
+            # A typed acceptance session must confirm its remote abort and
+            # paint the final cancelled HUD before ownership is released.
+            # Ordinary sessions decline this action and retain the existing
+            # immediate cancellation fallback.
+            async def route_cancel() -> None:
+                try:
+                    claimed = await active.handle_brainstorm_action(action)
+                except Exception:
+                    claimed = False
+                    log.exception("brainstorm cancel action failed")
+                if not claimed and self._active is active:
+                    self._cancel_active()
+
+            asyncio.get_running_loop().create_task(route_cancel())
             return
 
         async def route() -> None:
@@ -277,7 +290,14 @@ class SessionManager:
         if session is None:
             log.warning("debate requested but agents unavailable")
             return False
-        return self._start_session(session, publish_state=True)
+        return self.try_start_session(session, publish_state=True)
+
+    def try_start_session(self, session: Session, *, publish_state: bool = False) -> bool:
+        """Atomically reserve the single wearer session for a typed trigger."""
+
+        if self._active is not None:
+            return False
+        return self._start_session(session, publish_state=publish_state)
 
     def _start_session(self, session: Session, *, publish_state: bool) -> bool:
         self._active = session
