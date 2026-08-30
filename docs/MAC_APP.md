@@ -113,15 +113,6 @@ binds the glasses gateway to `127.0.0.1:8787` and keeps its pairing check on.
 This matters because the secure Tailscale reverse proxy itself reaches JOAT
 from loopback; loopback is not an authority boundary for a remote G2 package.
 
-### Brainstorm acceptance diagnostics
-
-Brainstorm and Agent Terminal are everyday glasses-first features: use their
-G2 entries and gestures normally, with no Mac action. The separate physical-G2
-acceptance run is a support diagnostic, not a wearable control. It is refused
-unless the app-owned engine was deliberately launched with
-`--g2-diagnostics`; an unarmed or stale G2 action cannot start it. The
-dedicated simulator harness remains isolated and never changes normal use.
-
 Then, from the Mini's logged-in macOS user, configure private Serve—not public
 Funnel—and retain its status with the Tailnet:
 
@@ -129,6 +120,18 @@ Funnel—and retain its status with the Tailnet:
 tailscale serve --https=443 --bg http://127.0.0.1:8787
 tailscale serve status --json
 ```
+
+When producing the EHPK for that Mini, do not let the ignored development
+`.env` choose its raw `:8787` address. Build only with its approved TLS route:
+
+```sh
+cd apps/hub-plugin
+JOAT_RELEASE_WS_URLS=wss://home-mac.example-tailnet.ts.net/glasses npm run pack
+```
+
+The packer rejects an unlisted origin, non-TLS transport, non-`/glasses` path,
+or duplicate candidate before it creates `joat.ehpk`. This builds the artifact;
+it does not upload, install, configure Serve, or grant pairing.
 
 The wearer-facing candidate in the packaged plugin is the port-443 origin
 `wss://home-mac.example-tailnet.ts.net/glasses`; the accompanying manifest
@@ -148,6 +151,15 @@ migration: pending audio, confirmations, navigation, and a running Hermes turn
 are deliberately cleared rather than replayed on another mini. The Hub stores
 pairing tokens by approved origin and remembers the last healthy candidate, so
 a rejected token for one mini cannot erase a healthy pairing for another.
+
+### Brainstorm acceptance diagnostics
+
+Brainstorm and Agent Terminal are everyday glasses-first features: use their
+G2 entries and gestures normally, with no Mac action. The separate physical-G2
+acceptance run is a support diagnostic, not a wearable control. It is refused
+unless the app-owned engine was deliberately launched with
+`--g2-diagnostics`; an unarmed or stale G2 action cannot start it. The
+dedicated simulator harness remains isolated and never changes normal use.
 
 ## Runtime layout
 

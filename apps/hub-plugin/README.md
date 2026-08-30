@@ -24,8 +24,18 @@ See [../../docs/HUB_PLUGIN.md](../../docs/HUB_PLUGIN.md) for the SDK reference a
 - `app.json`'s `network` permission `whitelist` must carry the Mac's WebSocket
   origin exactly (scheme and port included). Direct development can use plain
   `ws://…:8787`; an unattended Tailnet home brain uses portless
-  `wss://<mini>.ts.net` behind Tailscale Serve. Keep that build-time candidate
-  in sync with `.env`; a mismatch fails silently.
+  `wss://<mini>.ts.net` behind Tailscale Serve. The ignored `.env` remains
+  development-only. A deployable EHPK must explicitly set
+  `JOAT_RELEASE_WS_URLS` to one or more allowlisted `wss://…/glasses` URLs;
+  `npm run pack` rejects raw, unlisted, duplicate, or wrong-path candidates.
+
+  ```sh
+  JOAT_RELEASE_WS_URLS=wss://home-mac.example-tailnet.ts.net/glasses npm run pack
+  ```
+
+  For several predeclared home brains, pass a comma-separated list. Each one
+  must already have its exact origin in `app.json`; this is intentional because
+  Even Hub does not treat the runtime candidate list as a network allowlist.
 - IMU nod thresholds in `ImuMonitor` are untuned guesses — calibrate with `scripts/imu_capture.py` (see [docs/TESTING.md](../../docs/TESTING.md)).
 
 ## Dev loop
