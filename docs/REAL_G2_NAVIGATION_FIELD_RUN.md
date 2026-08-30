@@ -18,13 +18,17 @@ Keep these independent:
 
 ## Before either run
 
-1. Install the exact packaged version named for this run, then reopen JOAT on
+1. In the iPhone Settings page for the Even Hub host app, allow Location.
+   “Phone location unavailable” is a phone-fix/permission result; a Mapbox
+   token cannot grant it. Correct that while stationary, then retry from the
+   glasses.
+2. Install the exact packaged version named for this run, then reopen JOAT on
    the phone. The phone must stay foregrounded and unlocked.
-2. Confirm the G2 is paired and the Mac bridge is connected.
-3. Start normal JOAT with `--g2-diagnostics` only. Do **not** enable
+3. Confirm the G2 is paired and the Mac bridge is connected.
+4. Start normal JOAT with `--g2-diagnostics` only. Do **not** enable
    `--location-probe` during navigation: it is a separate high-accuracy
    session and intentionally cannot preempt a route.
-4. Confirm a navigation provider is configured. The current experimental
+5. Confirm a navigation provider is configured. The current experimental
    provider is Mapbox. When JOAT starts from Finder, it deliberately reads only
    `MAPBOX_ACCESS_TOKEN` (or the legacy `MAPBOX_API_KEY`) from the selected
    repository's local `.env`, maps it to the engine contract, and treats that
@@ -33,7 +37,7 @@ Keep these independent:
    `JOAT_EXPERIMENTAL_NAVIGATION=false` still disables it explicitly. If no
    token is present, stop and record the visible provider-unavailable error;
    that is a failed provider gate, not a field run.
-5. Start one continuous video before speaking. Film the G2 optics closely
+6. Start one continuous video before speaking. Film the G2 optics closely
    enough to read each HUD transition. Mute the video before sharing if it
    includes the spoken address. Do not send an address screenshot or screen
    recording.
