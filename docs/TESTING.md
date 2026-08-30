@@ -196,11 +196,18 @@ evenhub-simulator 'http://127.0.0.1:5193/?joatTestOpenMenu=1' \
   --automation-port 9901
 ```
 
-The causal frame order is Sidebar → Conversations → Conversation → Confirm →
-Result. The first sidebar frame uses the development-only live-menu hook because
+The causal frame order is Sidebar → Conversations → Conversation/Compose →
+Confirm → Result → returned Conversation/Compose. The driver injects the
+documented official-simulator controls for each transition: sidebar **click**;
+**down + click** to choose a conversation or **click** for **New message**;
+**down + down + click** to select the history fixture; then the outcome's
+visible confirmation control. The history trace repeats **down** to the
+Mac-advertised older-page boundary (the fixture is `down × 11`) and **up** to
+return. The first sidebar frame uses the development-only live-menu hook because
 the official simulator cannot inject a left-temple double-click. Click/list
 selection and confirmation use the official simulator input endpoint and the
-production EventRouter/runtime path. Home return is covered by a
+production EventRouter/runtime path.
+Home return is covered by a
 production-composed Hub test but remains a physical-G2 acceptance gate, as do
 left-temple ingress, optical legibility, live voice transcription, and any real
 Messages.app submission.
@@ -232,9 +239,10 @@ PYTHONPATH=apps/mac uv run python -u scripts/simulator_messages_flow_acceptance.
   --evidence-dir /absolute/path/to/messages-cancel-evidence
 ```
 
-The driver retains the complete causal frame sequence as raw 576×288 PNGs and
-hashes in a privacy-minimized receipt: Sidebar → Conversations → selected
-Conversation/Compose → Confirmation → Result → returned Conversation/Compose.
+The driver retains the complete causal frame sequence as raw 576×288 RGBA PNGs,
+matching alpha-only review previews, and hashes in a privacy-minimized receipt:
+Sidebar → Conversations → selected Conversation/Compose → Confirmation → Result
+→ returned Conversation/Compose.
 It waits for the production Hub's content-free `confirmation-visible` receipt
 before injecting the documented control, then taps the visible result dismissal
 and requires the underlying selected frame to return. It checks the exact
