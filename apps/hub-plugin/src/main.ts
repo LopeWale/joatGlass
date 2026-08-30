@@ -42,6 +42,7 @@ import {
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
 import { BrainstormController } from './BrainstormController';
+import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
 import {
   replaySyntheticAudioFixture,
   syntheticAudioFixtureUrl,
@@ -474,16 +475,23 @@ async function boot(): Promise<void> {
       case 'confirm.request': {
         const rendered = hud.showConfirmation(msg.prompt, msg.actionId);
         imu.prepare(msg.actionId, (accepted) => {
-          void hud.dismissConfirmation(msg.actionId);
-          if (context.signal.aborted) return;
-          link.send({
-            kind: 'confirm',
-            actionId: msg.actionId,
+          void deliverAfterConfirmationDismissal({
             accepted,
-            challengeId: msg.challengeId,
-            sessionId: msg.sessionId,
-            payloadDigest: msg.payloadDigest,
-            previewDigest: msg.previewDigest,
+            dismiss: () => hud.dismissConfirmation(msg.actionId),
+            isAborted: () => context.signal.aborted,
+            deliver: () => link.send({
+              kind: 'confirm',
+              actionId: msg.actionId,
+              accepted,
+              challengeId: msg.challengeId,
+              sessionId: msg.sessionId,
+              payloadDigest: msg.payloadDigest,
+              previewDigest: msg.previewDigest,
+            }),
+          }).catch((err: unknown) => {
+            if (!context.signal.aborted) {
+              console.error('[joat] confirmation dismissal failed:', err);
+            }
           });
         }, context.signal);
         let visible = false;

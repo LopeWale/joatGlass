@@ -776,8 +776,11 @@ export class HudPresenter {
 
   private async performDismissConfirmation(id?: string): Promise<boolean> {
     const prior = this.confirmation;
-    if (!prior) return true;
-    if (id !== undefined && prior.id !== id) return true;
+    // A bound dismissal is also the write-authorization barrier. It must
+    // distinguish a real dismissal from an already-replaced or expired modal
+    // so an old gesture cannot authorize a different action in the background.
+    if (!prior) return id === undefined;
+    if (id !== undefined && prior.id !== id) return false;
 
     // Clear this synchronously before any awaited paint. A replacement
     // confirmation may be queued by a callback in the same event turn.
