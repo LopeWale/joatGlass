@@ -78,7 +78,8 @@ _EXPECTED_FLOW = (
     ("reminders-review", None, None, "review"),
     ("reminders-verifying", "click", True, "verifying"),
     ("reminders-saved", None, None, "saved"),
-    ("reminders-saved-return-planning", None, None, "day"),
+    ("reminders-monitoring", None, None, "monitoring"),
+    ("reminders-monitoring-return-planning", None, None, "day"),
     ("reminders-due", None, None, "due"),
     ("reminders-complete-review", None, None, "review"),
     ("reminders-completing", "click", True, "verifying"),
@@ -412,7 +413,16 @@ async def _input(automation_base: str, action: str) -> None:
         raise ProductivityHudFlowError(f"official simulator rejected input {action!r}") from exc
 
 
-def _view(domain: str, phase: str, *, title: str, primary: str, secondary: str, hint: str) -> ProductivityHudView:
+def _view(
+    domain: str,
+    phase: str,
+    *,
+    title: str,
+    primary: str,
+    secondary: str,
+    hint: str,
+    monitoring_armed: bool = False,
+) -> ProductivityHudView:
     return ProductivityHudView(
         domain=domain,
         phase=phase,
@@ -421,6 +431,7 @@ def _view(domain: str, phase: str, *, title: str, primary: str, secondary: str, 
         secondary=secondary,
         hint=hint,
         planning_anchor_unix_ms=1_788_274_200_000,
+        monitoring_armed=monitoring_armed,
     )
 
 
@@ -743,8 +754,6 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 
         reminder_states = (
             ("reminders-verifying", "verifying", "Saving reminder", "Checking native read-back", "Please wait", "click", True),
-            ("reminders-saved", "saved", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-due", "due", "Due now", "This reminder is still incomplete.", "say complete reminder title · left x2 Planning", None, None),
         )
         for name, phase, primary, secondary, hint, input_action, accepted in reminder_states:
             before = len(gateway.sent)
@@ -752,17 +761,51 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
-            if phase == "saved":
-                digest, artifact = await _wait_for_productivity_return(
-                    gateway,
-                    after=before,
-                    automation_base=automation_base,
-                    output=args.out,
-                    name=f"{len(receipts) + 2:02d}-reminders-saved-return-planning",
-                    prior_digest=digest,
-                )
-                receipts.append(ScreenReceipt("reminders-saved-return-planning", None, None, "day", digest))
-                artifacts["reminders-saved-return-planning"] = artifact
+
+        before = len(gateway.sent)
+        await gateway.send(_view(
+            "reminders",
+            "saved",
+            title="Buy filters",
+            primary="Saved and verified",
+            secondary="Native alarm set · JOAT monitoring armed.",
+            hint="Monitoring next · left x2 Planning",
+            monitoring_armed=True,
+        ))
+        digest, raw, alpha = await _capture(
+            automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-saved", digest,
+        )
+        receipts.append(ScreenReceipt("reminders-saved", None, None, "saved", digest))
+        artifacts["reminders-saved"] = {"raw": raw, "alpha": alpha}
+        digest, raw, alpha = await _capture(
+            automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-monitoring", digest,
+        )
+        receipts.append(ScreenReceipt("reminders-monitoring", None, None, "monitoring", digest))
+        artifacts["reminders-monitoring"] = {"raw": raw, "alpha": alpha}
+        digest, artifact = await _wait_for_productivity_return(
+            gateway,
+            after=before,
+            automation_base=automation_base,
+            output=args.out,
+            name=f"{len(receipts) + 2:02d}-reminders-monitoring-return-planning",
+            prior_digest=digest,
+        )
+        receipts.append(ScreenReceipt("reminders-monitoring-return-planning", None, None, "day", digest))
+        artifacts["reminders-monitoring-return-planning"] = artifact
+
+        await gateway.send(_view(
+            "reminders",
+            "due",
+            title="Buy filters",
+            primary="Due now",
+            secondary="This reminder is still incomplete.",
+            hint="say complete reminder title · left x2 Planning",
+        ))
+        digest, raw, alpha = await _capture(
+            automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
+        )
+        receipts.append(ScreenReceipt("reminders-due", None, None, "due", digest))
+        artifacts["reminders-due"] = {"raw": raw, "alpha": alpha}
 
         digest, artifact = await _confirm(
             gateway,

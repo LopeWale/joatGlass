@@ -601,8 +601,9 @@ class TestReminderCreation:
         ).fetchone()[0] == 1
         assert workflow_projection(updates) == [
             ("reminders", "verifying", "Buy filters", "Saving reminder", "Checking native read-back", "Please wait"),
-            ("reminders", "saved", "Buy filters", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "Planning in 5s · left x2 now"),
+            ("reminders", "saved", "Buy filters", "Saved and verified", "Native alarm set · JOAT monitoring armed.", "Monitoring next · left x2 Planning"),
         ]
+        assert updates[-1].monitoring_armed is True
         store.close()
 
     async def test_missing_native_alarm_is_uncertain_after_possible_commit(

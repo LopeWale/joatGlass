@@ -9,7 +9,9 @@ import {
   parseHudLabeledValue,
   parseHudListItem,
   parseMessagesConversationRow,
+  usesMessagesInstructionCards,
   canRenderPlanningMonthGrid,
+  fitHudWrappedText,
   planningGridMarker,
   planningGridMatchesMonth,
   parsePlanningMonthTitle,
@@ -94,6 +96,22 @@ describe('semantic HUD chrome', () => {
 
 });
 
+describe('assistant overlay text fitting', () => {
+  it('keeps only the newest four lines when the minimum font still overflows', () => {
+    const fitted = fitHudWrappedText(
+      'one two three four five six seven eight nine ten eleven twelve thirteen fourteen',
+      72,
+      4,
+      (value, fontSize) => value.length * fontSize * 0.5,
+    );
+
+    expect(fitted.fontSize).toBe(12);
+    expect(fitted.lines).toHaveLength(4);
+    expect(fitted.lines[0]).toMatch(/^…/);
+    expect(fitted.lines.join(' ')).toContain('fourteen');
+  });
+});
+
 describe('Planning month geometry', () => {
   it('recognizes the native Planning month title and creates a stable Monday-first grid', () => {
     const month = parsePlanningMonthTitle('PLANNING · PLAN · SEPTEMBER 2026');
@@ -146,11 +164,13 @@ describe('productivity HUD state labels', () => {
   it('keeps native verification, uncertainty, and due alarms visually distinct', () => {
     expect(productivityPhaseLabel('verifying')).toBe('VERIFYING');
     expect(productivityPhaseLabel('saved')).toBe('SAVED');
+    expect(productivityPhaseLabel('monitoring')).toBe('MONITORING');
     expect(productivityPhaseLabel('completed')).toBe('COMPLETED');
     expect(productivityPhaseLabel('failed')).toBe('FAILED');
     expect(productivityPhaseLabel('check')).toBe('UNCERTAIN');
     expect(productivityPhaseLabel('due')).toBe('DUE NOW');
     expect(productivityPhaseProgress('saved')).toBe(1);
+    expect(productivityPhaseProgress('monitoring')).toBe(1);
     expect(productivityPhaseProgress('completed')).toBe(1);
     expect(productivityPhaseProgress('due')).toBe(1);
     expect(productivityPhaseProgress('verifying')).toBe(0.45);
@@ -164,7 +184,23 @@ describe('Brainstorm wearable actions', () => {
       screen: 'brainstorm',
       state: 'running',
       terminalState: 'ready',
+      noToolsChecked: true,
     })).toBe('tap: Hermes · swipe down or left x2: cancel');
+  });
+
+  it('shows the content-free test gesture only when the dedicated Hermes seat is safe', () => {
+    expect(brainstormActionHint({
+      screen: 'brainstorm',
+      state: 'ready',
+      terminalState: 'ready',
+      noToolsChecked: true,
+    })).toBe('tap: speak · right/ring x2: test · left x2: menu');
+    expect(brainstormActionHint({
+      screen: 'brainstorm',
+      state: 'ready',
+      terminalState: 'blocked',
+      noToolsChecked: false,
+    })).not.toContain('test');
   });
 });
 
@@ -292,6 +328,13 @@ describe('parseHudListItem', () => {
 });
 
 describe('parseMessagesConversationRow', () => {
+  it('uses instruction cards for conversation and compose surfaces only', () => {
+    expect(usesMessagesInstructionCards('MESSAGES · CONVERSATION')).toBe(true);
+    expect(usesMessagesInstructionCards('MESSAGES · COMPOSE')).toBe(true);
+    expect(usesMessagesInstructionCards('MESSAGES')).toBe(false);
+    expect(usesMessagesInstructionCards('MESSAGES · ACCESS')).toBe(false);
+  });
+
   it('separates incoming, outgoing, and voice-action rows', () => {
     expect(parseMessagesConversationRow('Dele · Are you coming?')).toEqual({
       kind: 'incoming', label: 'Dele', body: 'Are you coming?',

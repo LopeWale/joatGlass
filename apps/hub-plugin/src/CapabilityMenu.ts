@@ -25,6 +25,7 @@ const PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS = 5_000;
 
 function isTerminalProductivityOutcome(phase: ProductivityHudModel['phase']): boolean {
   return phase === 'saved'
+    || phase === 'monitoring'
     || phase === 'completed'
     || phase === 'failed'
     || phase === 'check'
@@ -248,7 +249,15 @@ export class CapabilityMenu {
     this.pendingTitle = this.productivityReturn.toUpperCase();
     this.pendingRequestId = undefined;
     this.selectedIndex = 0;
-    this.scheduleProductivityReturn(productivity.phase);
+    if (
+      productivity.domain === 'reminders'
+      && productivity.phase === 'saved'
+      && productivity.monitoringArmed === true
+    ) {
+      this.scheduleReminderMonitoring(productivity);
+    } else {
+      this.scheduleProductivityReturn(productivity.phase);
+    }
     return true;
   }
 
@@ -559,6 +568,32 @@ export class CapabilityMenu {
         CAPABILITIES.indexOf('Planning'),
         this.productivityAnchorUnixMs,
       );
+    }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);
+  }
+
+  /** The native bridge has already verified the Reminder and the Mac has
+   * persisted its monitor occurrence. Show that fact as its own HUD state
+   * before returning to live Planning. The epoch guard means an immediate
+   * wearer return or a newer due frame cancels this local transition. */
+  private scheduleReminderMonitoring(saved: ProductivityHudModel): void {
+    if (!this.productivityReturn) return;
+    const epoch = ++this.productivityReturnEpoch;
+    this.productivityReturnTimer = setTimeout(() => {
+      this.productivityReturnTimer = undefined;
+      if (
+        this.productivityReturnEpoch !== epoch
+        || this.view !== 'productivity'
+        || this.productivityReturn !== 'Planning'
+      ) return;
+      void this.presentProductivity({
+        domain: 'reminders',
+        phase: 'monitoring',
+        title: saved.title,
+        primary: 'Monitoring armed',
+        secondary: 'Native alarm is scheduled. JOAT will check at due time.',
+        hint: 'Planning in 5s · left x2 now',
+        planningAnchorUnixMs: saved.planningAnchorUnixMs,
+      });
     }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);
   }
 

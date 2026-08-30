@@ -45,7 +45,7 @@ from .task_monitor import native_reminder_matches_persisted_due
 
 Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
 WorkflowPhase = Literal[
-    "verifying", "saved", "completed", "failed", "check", "cancelled", "not_saved",
+    "verifying", "saved", "monitoring", "completed", "failed", "check", "cancelled", "not_saved",
 ]
 ActionStatusPublisher = Callable[[ProductivityHudView], Awaitable[None]]
 
@@ -877,6 +877,7 @@ class ProductivityActionController:
                 secondary=secondary,
                 hint=hint,
                 planning_anchor_unix_ms=planning_anchor_unix_ms,
+                monitoring_armed=reminder_monitoring_armed,
             ))
         except Exception:
             # HUD feedback is evidence presentation, never write authority.
@@ -910,7 +911,9 @@ class ProductivityActionController:
             # alarm and the post-save receipt were accepted.  This informs
             # the wearer that the unified due overlay is armed without
             # pretending it proves a future macOS notification banner.
-            return ("Saved and verified", "Native alarm set · JOAT monitoring armed.", return_hint)
+            return ("Saved and verified", "Native alarm set · JOAT monitoring armed.", "Monitoring next · left x2 Planning")
+        if phase == "monitoring":
+            return ("Monitoring armed", "Native alarm is scheduled. JOAT will check at due time.", return_hint)
         if phase == "saved":
             return ("Saved and verified", f"{native_app} read-back matched", return_hint)
         if phase == "completed":

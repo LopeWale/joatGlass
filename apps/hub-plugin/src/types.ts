@@ -78,6 +78,7 @@ export interface BrainstormHudModel {
  * sole topic source, while gestures only control the local session lifecycle.
  */
 export type BrainstormAction =
+  | 'begin_acceptance'
   | 'begin_topic_capture'
   | 'show_terminal'
   | 'show_brainstorm'
@@ -100,6 +101,8 @@ export interface PlanningGridCell {
 export type ProductivityHudPhase =
   | 'verifying'
   | 'saved'
+  /** A persisted JOAT-created reminder is awaiting its native EventKit alarm. */
+  | 'monitoring'
   | 'completed'
   | 'failed'
   | 'check'
@@ -116,6 +119,10 @@ export interface ProductivityHudModel {
   hint: string;
   /** Content-free instant that returns an outcome to its native Planning day. */
   planningAnchorUnixMs?: number;
+  /** Set only after a Reminder saved independently and JOAT persisted its
+   * bounded monitor occurrence. The Hub uses this to present a truthful
+   * monitoring page after the readable Saved receipt. */
+  monitoringArmed?: boolean;
 }
 export type NavigationAction =
   | 'confirm_destination'
@@ -154,7 +161,14 @@ export type UplinkMessage =
   | { kind: 'g2.diagnostic'; event: G2DiagnosticEvent }
   | {
     kind: 'brainstorm.action';
-    action: BrainstormAction;
+    action: Exclude<BrainstormAction, 'begin_acceptance'>;
+  }
+  | {
+    kind: 'brainstorm.action';
+    action: 'begin_acceptance';
+    surface: 'brainstorm';
+    source: 'right' | 'ring';
+    gesture: 'double_press';
   }
   | {
     kind: 'navigation.action';
