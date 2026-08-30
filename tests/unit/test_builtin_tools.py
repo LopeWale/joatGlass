@@ -1,6 +1,42 @@
 from __future__ import annotations
 
+import pytest
+
 from joat.agents.builtin_tools import weather_tool
+from joat.agents.tools import ToolBelt
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "weather outside",
+        "What's the weather here?",
+        "is it raining?",
+        "Will it rain today?",
+        "temperature outside",
+    ],
+)
+def test_explicit_wearer_weather_bypasses_the_model_decision(utterance: str) -> None:
+    belt = ToolBelt([weather_tool()])
+
+    call = belt.explicit_call(utterance)
+
+    assert call is not None
+    assert call.name == "get_weather"
+    assert call.arguments == {}
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "weather in Paris",
+        "will it rain in Chicago tomorrow",
+        "tell me about weather models",
+        "is rain good for tomatoes",
+    ],
+)
+def test_named_or_ambiguous_weather_stays_with_the_model_decision(utterance: str) -> None:
+    assert ToolBelt([weather_tool()]).explicit_call(utterance) is None
 
 
 class TestWeatherToolLocationContract:
