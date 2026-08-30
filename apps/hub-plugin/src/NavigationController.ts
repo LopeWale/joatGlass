@@ -44,6 +44,12 @@ interface ActiveRoute {
   lastSignature?: string;
   rerouteRequested: boolean;
   pausedForReroute: boolean;
+  /**
+   * Awaiting visual cues. Consecutive ordinary guidance fixes are coalesced,
+   * but a warning or state transition always remains its own visible cue.
+   */
+  pendingProgress: Array<{ state: NavigationProgressState; fix: NavigationFix }>;
+  progressRendering: boolean;
 }
 
 /**
@@ -151,6 +157,8 @@ export class NavigationController {
       sequence: 0,
       rerouteRequested: false,
       pausedForReroute: false,
+      pendingProgress: [],
+      progressRendering: false,
     };
     let started = false;
     try {
@@ -165,10 +173,7 @@ export class NavigationController {
           ...(Number.isFinite(fix.timestamp) ? { timestamp: fix.timestamp } : {}),
         };
         const state = route.tracker.accept(safeFix, receivedAt);
-        this.progressQueue = this.progressQueue.then(
-          () => this.renderProgress(route, state, safeFix),
-          () => this.renderProgress(route, state, safeFix),
-        );
+        this.enqueueProgress(route, state, safeFix);
       });
     } catch {
       started = false;
@@ -255,12 +260,14 @@ export class NavigationController {
   }
 
   async stopRoute(sessionId: string): Promise<boolean> {
-    const ownsRoute = this.route?.message.sessionId === sessionId;
+    const route = this.route;
+    const ownsRoute = route?.message.sessionId === sessionId;
     const ownsView = this.current?.sessionId === sessionId;
     const ownsPendingView = this.pendingPresentation?.sessionId === sessionId;
     if (!ownsRoute && !ownsView && !ownsPendingView) return false;
     this.lifecycleEpoch += 1;
-    if (ownsRoute) {
+    if (ownsRoute && route) {
+      route.pendingProgress.length = 0;
       this.route = undefined;
       await this.location?.setNavigationConsumer(undefined).catch(() => false);
     }
@@ -282,6 +289,7 @@ export class NavigationController {
     const hadRoute = this.route !== undefined;
     this.lifecycleEpoch += 1;
     this.current = undefined;
+    if (this.route) this.route.pendingProgress.length = 0;
     this.route = undefined;
     if (hadRoute || this.location) {
       await this.location?.setNavigationConsumer(undefined).catch(() => false);
@@ -399,6 +407,42 @@ export class NavigationController {
     });
   }
 
+  /**
+   * The SDK can deliver a fresh phone fix each second while one four-tile G2
+   * frame is still crossing BLE. Queueing every intermediate position makes
+   * the wearer see where they were rather than where they are. Collapse only
+   * consecutive guidance-distance changes; safety warnings and every kind
+   * transition remain visible in their original order.
+   */
+  private enqueueProgress(
+    route: ActiveRoute,
+    state: NavigationProgressState,
+    fix: NavigationFix,
+  ): void {
+    const pending = route.pendingProgress;
+    const tail = pending[pending.length - 1];
+    if (state.kind === 'guidance' && tail?.state.kind === 'guidance') {
+      pending[pending.length - 1] = { state, fix };
+    } else {
+      pending.push({ state, fix });
+    }
+    if (route.progressRendering) return;
+    route.progressRendering = true;
+    this.progressQueue = this.drainProgress(route).catch(() => undefined);
+  }
+
+  private async drainProgress(route: ActiveRoute): Promise<void> {
+    try {
+      while (this.route === route && !route.pausedForReroute) {
+        const pending = route.pendingProgress.shift();
+        if (!pending) return;
+        await this.renderProgress(route, pending.state, pending.fix);
+      }
+    } finally {
+      route.progressRendering = false;
+    }
+  }
+
   private async renderProgress(
     route: ActiveRoute,
     state: NavigationProgressState,
@@ -437,6 +481,7 @@ export class NavigationController {
     if (state.kind === 'off_route' && !route.rerouteRequested) {
       route.rerouteRequested = true;
       route.pausedForReroute = true;
+      route.pendingProgress.length = 0;
       this.link.sendNavigation({
         kind: 'navigation.reroute.request',
         sessionId: route.message.sessionId,
