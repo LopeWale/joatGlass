@@ -566,7 +566,7 @@ def test_device_auth_payload_matches_openclaw_v3_contract() -> None:
     payload = gateway.build_device_auth_payload_v3(
         device_id="a" * 64,
         client_id="cli",
-        client_mode="cli",
+        client_mode="operator",
         role="operator",
         scopes=("operator.read",),
         signed_at_ms=1_777_777_777_000,
@@ -579,7 +579,7 @@ def test_device_auth_payload_matches_openclaw_v3_contract() -> None:
     assert payload == (
         "v3|"
         + "a" * 64
-        + "|cli|cli|operator|operator.read|1777777777000||"
+        + "|cli|operator|operator|operator.read|1777777777000||"
         + "nonce-123|darwin|macbookpro"
     )
 
@@ -601,7 +601,7 @@ async def test_remote_connect_uses_paired_operator_identity() -> None:
     assert identity.signed_payloads == [
         "v3|"
         + "b" * 64
-        + "|cli|cli|operator|operator.read|1777777777001||"
+        + "|cli|operator|operator|operator.read|1777777777001||"
         + "server-nonce|darwin|mac"
     ]
     assert params == {
@@ -613,7 +613,7 @@ async def test_remote_connect_uses_paired_operator_identity() -> None:
             "version": "0.1.0",
             "platform": "darwin",
             "deviceFamily": "mac",
-            "mode": "cli",
+            "mode": "operator",
         },
         "caps": [],
         "role": "operator",
@@ -716,7 +716,7 @@ async def test_connect_params_bind_device_token_without_exposing_it_elsewhere() 
     assert identity.signed_payloads == [
         "v3|"
         + "b" * 64
-        + "|cli|cli|operator|operator.read|1777777777002|"
+        + "|cli|operator|operator|operator.read|1777777777002|"
         + "paired-device-token|server-nonce|darwin|mac"
     ]
     assert params["auth"] == {

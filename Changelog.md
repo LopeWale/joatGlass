@@ -15,7 +15,7 @@
 - Corrected JOAT's remote OpenClaw handshake identity. The Tailnet-connected,
   signed device had incorrectly declared OpenClaw's reserved direct-loopback
   `gateway-client` / `backend` helper identity. It now uses the protocol's
-  canonical `cli` / `cli` operator identity while retaining the same paired
+  canonical `cli` / `operator` identity while retaining the same paired
   device key, bounded read/write scope request, and no-tool policy. Existing
   Mini pairings may request one visible metadata reapproval; this cannot grant
   more scopes or bypass pairing. Focused Gateway regressions cover the exact
