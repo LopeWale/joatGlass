@@ -2,6 +2,20 @@
 
 ## 2026-08-30
 
+- Extended the glasses **Messages → Conversation** surface from a three-row
+  snapshot to Mac-private, request-bound older/newer pages. Attachment-only
+  and unread conversation rows are now distinguished from notification cards,
+  and outgoing rows truthfully label sent, delivered, or read when that
+  Messages-store metadata exists. The Hub forwards a scroll only at the
+  Mac-authored **down for older** / **up for newer** boundary, suppresses
+  duplicates while a page is loading, and never puts a chat cursor or recipient
+  on the glasses. Full Hub verification passed 442 tests plus production
+  typecheck/build; focused Messages Python verification passed 39 tests and
+  strict mypy. Official-simulator evidence retained in
+  `messages-history-20260830/` shows Latest → Older → Latest returned using a
+  disposable store and no-send `RecordingSender`. Physical-G2 temple ingress,
+  lens legibility, and real Messages.app sending remain separate, unrun gates.
+
 - Bounded streamed JOAT assistant rendering to one active four-tile paint and
   one newest tail frame, so model chunks cannot build a stale optical backlog.
   Wearer dismissal now waits for the active upload, cancels any completion-

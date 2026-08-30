@@ -15,7 +15,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 from joat.channels.cards import CardLog
-from joat.channels.imessage import MessageEntry, MessageThread
+from joat.channels.imessage import MessageEntry, MessageHistoryPage, MessageThread
 from joat.core.protocol import (
     AssistantOverlay,
     BrainstormHudView,
@@ -58,6 +58,8 @@ class FakeMessages:
                 row[1],
                 row[2],
                 row[3] if len(row) > 3 else True,
+                unread=row[4] if len(row) > 4 else False,
+                attachment_count=row[5] if len(row) > 5 else 0,
             )
             for index, row in enumerate(self._rows[:limit])
         ]
@@ -67,6 +69,19 @@ class FakeMessages:
     ) -> list[MessageEntry]:
         del limit
         return [MessageEntry(thread.text, thread.at, False)]
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del limit, before_row_id
+        return MessageHistoryPage(
+            entries=(MessageEntry(thread.text, thread.at, False, row_id=1),),
+            has_older=False,
+        )
 
 
 class FakeReplies:
@@ -108,6 +123,19 @@ class BlockingMessages:
         del limit
         return [MessageEntry(thread.text, thread.at, False)]
 
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del limit, before_row_id
+        return MessageHistoryPage(
+            entries=(MessageEntry(thread.text, thread.at, False, row_id=1),),
+            has_older=False,
+        )
+
 
 class PermissionDeniedMessages:
     available = True
@@ -128,6 +156,20 @@ class HistoryMessages(FakeMessages):
             MessageEntry("Great", 3.0, False),
         ]
 
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del thread, limit, before_row_id
+        return MessageHistoryPage(entries=(
+            MessageEntry("Great", 3.0, False, row_id=3),
+            MessageEntry("On my way", 2.0, True, row_id=2),
+            MessageEntry("Are you coming?", 1.0, False, row_id=1),
+        ), has_older=False)
+
 
 class HistoryPermissionDeniedMessages(FakeMessages):
     def thread_messages(
@@ -135,6 +177,51 @@ class HistoryPermissionDeniedMessages(FakeMessages):
     ) -> list[MessageEntry]:
         del thread, limit
         raise PermissionError("Messages history read denied")
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del thread, limit, before_row_id
+        raise PermissionError("Messages history read denied")
+
+
+class PagedHistoryMessages(FakeMessages):
+    def __init__(self) -> None:
+        super().__init__([("Dele", "Attachment", time.time())])
+        self.page_calls: list[int | None] = []
+
+    def thread_messages(
+        self, thread: MessageThread, limit: int = 5,
+    ) -> list[MessageEntry]:
+        del thread, limit
+        return [MessageEntry("legacy three-row context", 1.0, False)]
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del thread, limit
+        self.page_calls.append(before_row_id)
+        if before_row_id is None:
+            return MessageHistoryPage(entries=(
+                MessageEntry(
+                    "", 12.0, False, row_id=12, unread=True, attachment_count=1,
+                ),
+                MessageEntry(
+                    "On my way", 11.0, True, row_id=11, delivery="read",
+                ),
+                MessageEntry("Are you coming?", 10.0, False, row_id=10),
+            ), has_older=True)
+        return MessageHistoryPage(entries=(
+            MessageEntry("Earlier", 9.0, False, row_id=9),
+        ), has_older=False)
 
 
 class FakePersonalData:
@@ -254,6 +341,22 @@ class TestCapabilityViews:
         assert lists[0].title == "MESSAGES"
         assert lists[0].items[0] == "New message · voice recipient + text"
         assert lists[0].hint == "tap select · left x2 overview"
+
+    async def test_messages_list_marks_unread_attachment_only_conversations(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        router._messages = FakeMessages([  # type: ignore[assignment]
+            ("Dele", "", time.time(), True, True, 1),
+        ])
+
+        await router.open("Messages")
+
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.items == [
+            "New message · voice recipient + text",
+            "[now] Dele (unread) · Attachment",
+        ]
 
     async def test_selecting_new_message_opens_voice_compose_without_sending(
         self, tmp_path,
@@ -385,7 +488,7 @@ class TestCapabilityViews:
         assert detail.title == "MESSAGES · CONVERSATION"
         assert any("JOAT, reply" in item for item in detail.items)
 
-    async def test_selecting_a_message_opens_bounded_conversation_context(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_selecting_a_message_opens_complete_conversation_context(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
         router._messages = HistoryMessages([  # type: ignore[assignment]
@@ -408,14 +511,98 @@ class TestCapabilityViews:
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · CONVERSATION"
         assert detail.items == [
-            "Dele · Are you coming?",
-            "You · On my way",
+            "Complete conversation on this Mac",
             "Dele · Great",
+            "You · On my way",
+            "Dele · Are you coming?",
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert detail.hint == "voice reply · left x2 overview"
+        assert detail.hint == "say reply · left x2 overview"
         assert detail.selectable is False
+
+    async def test_conversation_pages_are_request_bound_and_show_message_metadata(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        messages = PagedHistoryMessages()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="messages-history")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "] Dele ·"),
+            trace_id="hud-history",
+            request_id="messages-history",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
+            for item in transport.sent
+        ))
+
+        latest = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert latest.items == [
+            "Latest messages — down for older",
+            "Dele · Unread · Attachment",
+            "You · Read · On my way",
+            "Dele · Are you coming?",
+            'Say “JOAT, reply saying …”',
+            "Mic off? Long press to enable.",
+        ]
+        assert latest.hint == "down older · say reply · left x2 overview"
+
+        router.on_input(InputEvent(
+            container_name="cappage",
+            selected_name="MESSAGES",
+            event_type=2,
+            trace_id="hud-history-older",
+            request_id="messages-history",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList)
+            and item.items
+            and item.items[0] == "Older messages — up for newer"
+            for item in transport.sent
+        ))
+        older = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert messages.page_calls == [None, 10]
+        assert older.items == [
+            "Older messages — up for newer",
+            "Dele · Earlier",
+            'Say “JOAT, reply saying …”',
+            "Mic off? Long press to enable.",
+        ]
+        assert older.hint == "up newer · say reply · left x2 overview"
+        # The async page task clears its duplicate-input guard after its
+        # replacement frame is committed, as the production bridge does.
+        await asyncio.sleep(0)
+
+        router.on_input(InputEvent(
+            container_name="cappage",
+            selected_name="MESSAGES",
+            event_type=1,
+            trace_id="hud-history-newer",
+            request_id="messages-history",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList)
+            and item.items
+            and item.items[0] == "Latest messages — down for older"
+            for item in transport.sent[2:]
+        ))
+        assert messages.page_calls == [None, 10]
+
+        router.on_input(InputEvent(
+            container_name="cappage",
+            selected_name="MESSAGES",
+            event_type=1,
+            trace_id="stale-history-newer",
+            request_id="stale-request",
+        ))
+        await asyncio.sleep(0)
+        assert messages.page_calls == [None, 10]
 
     async def test_selection_time_permission_loss_replaces_the_list_with_retry(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()

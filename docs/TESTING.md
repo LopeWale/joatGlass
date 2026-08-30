@@ -216,6 +216,15 @@ or sending a real message. `tests/unit/test_contacts.py` separately exercises
 the real read-only Contacts SQLite adapter with a disposable schema and proves
 that missing or ambiguous names never reach confirmation.
 
+Run `--flow history` for the non-writing conversation proof. Select the
+fixture **Dele** conversation (it has more than one eight-message page), scroll
+down until the HUD says **Older messages — up for newer**, then scroll up until
+the latest page returns. The driver records only the paging stages and fails if
+the fixture `RecordingSender` is reached. This is official-simulator proof of
+the production sidebar → conversation → older/newer routing and visible
+labels; it remains separate from physical-G2 gestures, lens legibility, and
+any real Messages.app send.
+
 On the Mac, JOAT.app now shows **Messages → Conversation history** with
 **Open Full Disk Access…** and **Check Again**. The probe only attempts to open
 the database from JOAT's signed process; it does not query a table or read a

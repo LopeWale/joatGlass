@@ -24,8 +24,8 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..channels.cards import CardLog
-from ..channels.imessage import IMessageStore, MessageThread
-from ..core.protocol import BrainstormHudView, HudList, InputEvent, PlanningGridCell
+from ..channels.imessage import IMessageStore, MessageEntry, MessageHistoryPage, MessageThread
+from ..core.protocol import BrainstormHudView, EventType, HudList, InputEvent, PlanningGridCell
 from ..core.interfaces import GlassesTransport
 from ..native.bridge import (
     NativeBridgeClient,
@@ -71,6 +71,15 @@ class _PlanningRow:
     entry: PlanningEntry | None = None
 
 
+@dataclass(slots=True)
+class _MessageHistoryState:
+    """Mac-private page stack for the currently selected conversation."""
+
+    thread: MessageThread
+    pages: list[MessageHistoryPage]
+    index: int = 0
+
+
 def _age(unix: float) -> str:
     mins = max(0, int((time.time() - unix) / 60))
     if mins < 1:
@@ -106,6 +115,8 @@ class CapabilityRouter:
         self._notes = notes
         self._actions = actions
         self._message_rows: list[MessageThread] = []
+        self._message_history: _MessageHistoryState | None = None
+        self._message_page_pending = False
         self._notification_rows: list[tuple[float, str]] = []
         # Calendar and Reminders have different EventKit stores, but a wearer
         # navigates time, not stores. Keep one bounded read-only projection and
@@ -142,6 +153,16 @@ class CapabilityRouter:
                 event.trace_id or "hud",
                 event.request_id,
             ))
+        elif event.container_name == "cappage" and event.event_type is not None:
+            if self._message_page_pending:
+                return
+            self._message_page_pending = True
+            task = asyncio.get_running_loop().create_task(self._page_message_history(
+                event.event_type,
+                event.trace_id or "hud",
+                event.request_id,
+            ))
+            task.add_done_callback(lambda _task: self._clear_message_page_pending())
         elif event.container_name == "sysmenu" and event.selected_index == 1:
             asyncio.get_running_loop().create_task(self._repeat())
         elif (
@@ -156,6 +177,8 @@ class CapabilityRouter:
     def clear_message_selection(self, reason: str) -> None:
         """Disarm a private reply target when its wearer-visible context ends."""
         self._message_rows = []
+        self._message_history = None
+        self._message_page_pending = False
         if self._replies is not None:
             self._replies.clear_selection(reason)
 
@@ -258,11 +281,7 @@ class CapabilityRouter:
             return
         self._message_rows = rows
         items = [NEW_MESSAGE_ROW]
-        items.extend(
-            f"[{_age(row.at)}] {row.sender}"
-            f"{' (group · read only)' if not row.replyable else ''} · {row.text}"
-            for row in rows
-        )
+        items.extend(self._message_list_row(row) for row in rows)
         await self._send_list(HudList(
             items=items,
             title="MESSAGES",
@@ -301,8 +320,8 @@ class CapabilityRouter:
             ))
             return
         try:
-            history = await asyncio.to_thread(
-                self._messages.thread_messages, thread, 3,
+            page = await asyncio.to_thread(
+                self._messages.thread_message_page, thread, limit=8,
             )
         except (OSError, sqlite3.Error) as exc:
             log.warning("Messages history unavailable: %s", type(exc).__name__)
@@ -314,18 +333,149 @@ class CapabilityRouter:
         if not self._request_is_current():
             return
         self._replies.select(thread, trace_id)
-        context = [
-            f"{'You' if entry.from_me else thread.sender} · {entry.text}"
-            for entry in history
-        ] or [f"{thread.sender} · {thread.text}"]
+        self._message_history = _MessageHistoryState(thread=thread, pages=[page])
+        await self._show_message_history_page()
+
+    async def _page_message_history(
+        self,
+        event_type: int,
+        trace_id: str,
+        request_id: str | None,
+    ) -> None:
+        if (
+            request_id != self._active_request_id
+            or self._active_capability != "MESSAGES"
+            or self._messages is None
+            or self._message_history is None
+        ):
+            log.info("dropping stale Messages page request=%s", request_id)
+            return
+        state = self._message_history
+        next_index = state.index
+        if event_type == EventType.SCROLL_TOP:
+            if state.index == 0:
+                return
+            next_index -= 1
+        elif event_type == EventType.SCROLL_BOTTOM:
+            if state.index + 1 < len(state.pages):
+                next_index += 1
+            else:
+                current = state.pages[state.index]
+                if not current.has_older:
+                    return
+                row_ids = [entry.row_id for entry in current.entries if entry.row_id > 0]
+                if not row_ids:
+                    return
+                try:
+                    older = await asyncio.to_thread(
+                        self._messages.thread_message_page,
+                        state.thread,
+                        limit=8,
+                        before_row_id=min(row_ids),
+                    )
+                except (OSError, sqlite3.Error) as exc:
+                    log.warning("Messages history unavailable: %s", type(exc).__name__)
+                    self.clear_message_selection("access-denied")
+                    token = self._request_context.set(request_id)
+                    try:
+                        await self._show_focus("MESSAGES · ACCESS", MESSAGES_ACCESS_ITEMS)
+                    finally:
+                        self._request_context.reset(token)
+                    return
+                if not older.entries:
+                    return
+                state.pages.append(older)
+                next_index += 1
+        else:
+            return
+        if request_id != self._active_request_id or self._message_history is not state:
+            return
+        state.index = next_index
+        log.info(
+            "message history trace=%s stage=page-visible page=%d",
+            trace_id,
+            state.index,
+        )
+        token = self._request_context.set(request_id)
+        try:
+            await self._show_message_history_page()
+        finally:
+            self._request_context.reset(token)
+
+    async def _show_message_history_page(self) -> None:
+        state = self._message_history
+        if state is None:
+            return
+        page = state.pages[state.index]
+        if state.index == 0:
+            page_label = (
+                "Latest messages — down for older"
+                if page.has_older else "Complete conversation on this Mac"
+            )
+            hint = (
+                "down older · say reply · left x2 overview"
+                if page.has_older else "say reply · left x2 overview"
+            )
+        else:
+            page_label = (
+                "Older messages — up newer, down older"
+                if page.has_older else "Older messages — up for newer"
+            )
+            hint = (
+                "up newer · down older · say reply · left x2"
+                if page.has_older else "up newer · say reply · left x2 overview"
+            )
+        context = [self._message_history_row(state.thread, entry) for entry in page.entries]
         await self._send_list(HudList(
-            items=[*context,
+            items=[page_label, *context,
                 'Say “JOAT, reply saying …”',
                 "Mic off? Long press to enable.",
             ],
             title="MESSAGES · CONVERSATION",
-            hint="voice reply · left x2 overview",
+            hint=hint,
         ))
+
+    @staticmethod
+    def _message_list_row(thread: MessageThread) -> str:
+        """Keep the conversation picker distinct from the notification card.
+
+        A blank preview is an attachment-only message, not an absent message;
+        surface that and unread state without exposing attachment names or
+        filesystem paths to the glasses.
+        """
+        label = f"[{_age(thread.at)}] {thread.sender}"
+        if thread.unread:
+            label += " (unread)"
+        if not thread.replyable:
+            label += " (group · read only)"
+        preview = thread.text
+        if thread.attachment_count:
+            attachment = (
+                "Attachment" if thread.attachment_count == 1
+                else f"{thread.attachment_count} attachments"
+            )
+            preview = f"{preview} · {attachment}" if preview else attachment
+        return f"{label} · {preview or 'Message unavailable'}"
+
+    @staticmethod
+    def _message_history_row(thread: MessageThread, entry: MessageEntry) -> str:
+        label = "You" if entry.from_me else thread.sender
+        details: list[str] = []
+        if entry.unread:
+            details.append("Unread")
+        if entry.delivery is not None:
+            details.append(entry.delivery.title())
+        if entry.attachment_count:
+            details.append(
+                "Attachment" if entry.attachment_count == 1
+                else f"{entry.attachment_count} attachments"
+            )
+        if entry.text:
+            details.append(entry.text)
+        return f"{label} · {' · '.join(details) or 'Message unavailable'}"
+
+    def _clear_message_page_pending(self) -> None:
+        self._message_page_pending = False
 
     async def _select_capability_row(
         self,

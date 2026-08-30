@@ -177,3 +177,74 @@ def test_thread_messages_returns_incoming_and_outgoing_context_oldest_first(
         (True, "On my way"),
         (False, "Great"),
     ]
+
+
+def test_thread_message_pages_include_metadata_and_attachment_only_rows(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "chat.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE message (
+            handle_id INTEGER,
+            text TEXT,
+            date INTEGER,
+            is_from_me INTEGER,
+            is_read INTEGER,
+            is_sent INTEGER,
+            is_delivered INTEGER,
+            date_delivered INTEGER,
+            date_read INTEGER,
+            cache_has_attachments INTEGER
+        );
+        CREATE TABLE handle (id TEXT);
+        CREATE TABLE chat (display_name TEXT);
+        CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
+        CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+        INSERT INTO handle VALUES ('+14055550101');
+        INSERT INTO chat VALUES ('Dele');
+        INSERT INTO chat_handle_join VALUES (1, 1);
+        INSERT INTO message VALUES (1, 'First', 1, 0, 0, 0, 0, 0, 0, 0);
+        INSERT INTO chat_message_join VALUES (1, 1);
+        INSERT INTO message VALUES (1, 'Sent', 2, 1, 1, 1, 0, 0, 0, 0);
+        INSERT INTO chat_message_join VALUES (2, 1);
+        INSERT INTO message VALUES (1, 'Delivered', 3, 1, 1, 1, 1, 3, 0, 0);
+        INSERT INTO chat_message_join VALUES (3, 1);
+        INSERT INTO message VALUES (1, 'Read', 4, 1, 1, 1, 1, 3, 4, 0);
+        INSERT INTO chat_message_join VALUES (4, 1);
+        INSERT INTO message VALUES (1, NULL, 5, 0, 0, 0, 0, 0, 0, 1);
+        INSERT INTO chat_message_join VALUES (5, 1);
+    """)
+    conn.commit()
+    conn.close()
+    store = IMessageStore(db)
+    thread = MessageThread(
+        sender="Dele",
+        handle="+14055550101",
+        text="Attachment",
+        at=5.0,
+        chat_id=1,
+    )
+
+    recent = store.recent_threads()
+    latest = store.thread_message_page(thread, limit=3)
+    older = store.thread_message_page(
+        thread,
+        limit=3,
+        before_row_id=min(item.row_id for item in latest.entries),
+    )
+
+    assert recent[0].text == ""
+    assert recent[0].attachment_count == 1
+    assert recent[0].unread is True
+    assert latest.has_older is True
+    assert [item.text for item in latest.entries] == ["", "Read", "Delivered"]
+    assert latest.entries[0].attachment_count == 1
+    assert latest.entries[0].unread is True
+    assert latest.entries[1].delivery == "read"
+    assert latest.entries[2].delivery == "delivered"
+    assert older.has_older is False
+    assert [(item.text, item.delivery, item.unread) for item in older.entries] == [
+        ("Sent", "sent", False),
+        ("First", None, True),
+    ]

@@ -260,11 +260,11 @@ Overview, Sidebar, or focus page.
 +----------------------------------------------+  status spine
 |09:47 JOAT ready                     bat 86%  |
 +----------------------------------------------+
-|MESSAGES · 3                                  |
++|MESSAGES                                      |
 +----------------------------------------------+
-|> Adele · Can you send the latest mockups?    |
-|  Marcus · Heading to the lab in 10.          |
-|  Team Ops · Standup notes are ready.         |
++|> New message · voice recipient + text        |
++|  Adele (unread) · Attachment                 |
++|  Marcus · Heading to the lab in 10.          |
 +----------------------------------------------+
 |tap select · left x2 overview                 |
 +----------------------------------------------+  y=288
@@ -272,8 +272,14 @@ Overview, Sidebar, or focus page.
 
 The shared transparent layer owns capture; the Sidebar and dimmed Overview are
 gone, so the destination owns the whole canvas. Scroll moves the custom-selected
-row and a tap/click selects it. Selecting a one-to-one Messages row arms a
-voice draft (`JOAT, reply saying ...`); it does not send. The full draft and
+row and a tap/click selects it. Selecting a one-to-one Messages row opens the
+full conversation page and arms a voice draft (`JOAT, reply saying ...`); it
+does not send. Attachment-only rows say **Attachment** and unread incoming rows
+say **unread** rather than copying a notification card. A page with older
+history truthfully says **down for older**; at the bottom edge, the Hub forwards
+that scroll through the production route and the Mac returns **Older messages —
+up for newer**. The reverse top-edge scroll returns the latest cached page. A
+complete local thread never advertises an older-page action. The full draft and
 recipient must then fit on the exclusive Confirmation screen before the guarded
 Messages.app boundary can run. Group rows remain explicitly read-only rather
 than silently routing a group reply to one participant. Overview paints are

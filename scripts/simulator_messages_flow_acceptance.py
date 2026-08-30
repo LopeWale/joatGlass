@@ -59,6 +59,14 @@ _EXPECTED_COMPOSE_FLOW = (
     ("messages-result", "click"),
 )
 
+_EXPECTED_HISTORY_FLOW = (
+    ("messages-sidebar", "test-hook-open"),
+    ("messages-conversations", "click"),
+    ("messages-latest", "list-select"),
+    ("messages-older", "scroll-down"),
+    ("messages-latest-returned", "scroll-up"),
+)
+
 
 def _validate_receipts(
     receipts: list[ScreenReceipt],
@@ -91,13 +99,20 @@ def validate_compose_flow(receipts: list[ScreenReceipt]) -> None:
     _validate_receipts(receipts, _EXPECTED_COMPOSE_FLOW)
 
 
+def validate_history_flow(receipts: list[ScreenReceipt]) -> None:
+    _validate_receipts(receipts, _EXPECTED_HISTORY_FLOW)
+
+
 def build_fixture_store(path: Path) -> IMessageStore:
-    """Create two disposable, text-only conversations for simulator proof."""
+    """Create disposable conversations with a scrollable, metadata-rich thread."""
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.executescript("""
         CREATE TABLE message (
-            handle_id INTEGER, text TEXT, date INTEGER, is_from_me INTEGER
+            handle_id INTEGER, text TEXT, date INTEGER, is_from_me INTEGER,
+            is_read INTEGER, is_sent INTEGER, is_delivered INTEGER,
+            date_delivered INTEGER, date_read INTEGER,
+            cache_has_attachments INTEGER
         );
         CREATE TABLE handle (id TEXT);
         CREATE TABLE chat (display_name TEXT);
@@ -113,18 +128,24 @@ def build_fixture_store(path: Path) -> IMessageStore:
 
     """)
     apple_now = int(time.time() - 978_307_200)
+    dele_history = [
+        (1, f"Earlier fixture message {index}", apple_now - (660 - index * 60),
+         0, 1, 0, 0, 0, 0, 0)
+        for index in range(1, 9)
+    ]
     connection.executemany(
-        "INSERT INTO message VALUES (?, ?, ?, ?)",
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            (1, "Are you coming?", apple_now - 180, 0),
-            (1, "On my way", apple_now - 120, 1),
-            (1, "Great, see you soon.", apple_now - 60, 0),
-            (2, "Call me when you arrive.", apple_now, 0),
+            *dele_history,
+            (1, "Read reply", apple_now - 60, 1, 1, 1, 1,
+             apple_now - 60, apple_now - 30, 0),
+            (1, None, apple_now, 0, 0, 0, 0, 0, 0, 1),
+            (2, "Call me when you arrive.", apple_now + 1, 0, 1, 0, 0, 0, 0, 0),
         ],
     )
     connection.executemany(
         "INSERT INTO chat_message_join VALUES (?, ?)",
-        [(1, 1), (2, 1), (3, 1), (4, 2)],
+        [*( (row_id, 1) for row_id in range(1, 11) ), (11, 2)],
     )
     connection.commit()
     connection.close()
@@ -202,6 +223,20 @@ async def run(port: int, flow: str = "reply") -> None:
             selected = replies.composing if flow == "compose" else replies.selected
             log.info("stage=connected flow=%s action=select-Messages-row", flow)
             await asyncio.wait_for(selected.wait(), timeout=90)
+            if flow == "history":
+                # Select the fixture Dele conversation, then use official
+                # simulator scroll input. No voice command or confirmation is
+                # injected: this trace is deliberately a no-send page-routing
+                # proof, not a Messages.app submission test.
+                await asyncio.sleep(2)
+                await asyncio.wait_for(_wait_for_history_page(router, 1), timeout=90)
+                log.info("stage=older-page-visible action=scroll-down")
+                await asyncio.wait_for(_wait_for_history_page(router, 0), timeout=90)
+                if sender.sent.is_set():
+                    raise MessagesFlowError("history-only trace reached sender")
+                log.info("stage=latest-page-returned action=scroll-up no_send=true")
+                await asyncio.sleep(5)
+                return
             # Retain the dedicated conversation frame before the confirmation
             # replaces it. This delay changes no routing or reply semantics.
             await asyncio.sleep(2)
@@ -227,10 +262,15 @@ async def run(port: int, flow: str = "reply") -> None:
             await gateway.stop()
 
 
+async def _wait_for_history_page(router: CapabilityRouter, index: int) -> None:
+    while router._message_history is None or router._message_history.index != index:
+        await asyncio.sleep(0.05)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18791)
-    parser.add_argument("--flow", choices=("reply", "compose"), default="reply")
+    parser.add_argument("--flow", choices=("reply", "compose", "history"), default="reply")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     asyncio.run(run(args.port, args.flow))
