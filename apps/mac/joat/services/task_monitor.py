@@ -103,7 +103,11 @@ def reminder_due_hud_view(
         # native-backed Calendar + Reminders schedule.  Calling this a
         # separate Reminders page would send the wearer toward a destination
         # that the HUD router intentionally no longer exposes.
-        hint="left x2 Planning",
+        # A due card is deliberately read-only: completing the Reminder still
+        # requires the existing spoken intent and exact confirmation preview.
+        # Tell the wearer how to enter that safe path instead of presenting a
+        # dead-end alarm that only offers navigation away.
+        hint="say complete reminder title · left x2 Planning",
         planning_anchor_unix_ms=anchor,
     )
 

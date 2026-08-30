@@ -796,7 +796,8 @@ function productivityLifecycleFixture(
     case 'reminders-due':
       return {
         domain, phase: 'due', title,
-        primary: 'Due now', secondary: 'This reminder is still incomplete.', hint: returnHint,
+        primary: 'Due now', secondary: 'This reminder is still incomplete.',
+        hint: 'say complete reminder title · left x2 Planning',
       };
   }
 }
