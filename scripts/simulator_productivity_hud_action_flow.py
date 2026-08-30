@@ -82,16 +82,24 @@ class ScreenReceipt:
 class VisualLatency:
     """Content-free timing of one causal simulator-to-HUD transition.
 
-    ``completed_frame_ms`` ends when the driver first observes the production
-    four-tile acknowledgement.  ``settled_frame_ms`` includes the driver's
-    deliberate 600 ms screenshot-stability window, so it is evidence quality
-    timing, not a claim about physical G2 lens latency.
+    Both timestamps come only from the acceptance driver's official-simulator
+    screenshots: first changed framebuffer and the same framebuffer after the
+    deliberate 600 ms stability window.  They are evidence-quality timing,
+    not a claim about physical G2 lens latency or a renderer acknowledgement.
     """
 
     screen: str
     trigger: VisualTrigger
-    completed_frame_ms: int
-    settled_frame_ms: int
+    first_changed_framebuffer_ms: int
+    settled_framebuffer_ms: int
+
+
+@dataclass(slots=True)
+class CaptureObservation:
+    """Local, ephemeral timestamps for one screenshot-only observation."""
+
+    first_changed_at_ns: int | None = None
+    settled_at_ns: int | None = None
 
 
 _EXPECTED_FLOW = (
@@ -451,179 +459,30 @@ async def _wait_http(url: str, process: ManagedProcess) -> None:
     raise ProductivityHudFlowError(f"timed out waiting for {url}")
 
 
-async def _wait_console_marker(
-    automation_base: str,
-    marker: str,
-    *,
-    timeout_s: float = 15.0,
-) -> None:
-    """Do not inject a menu gesture before the product says it owns a page."""
-
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
-        except (OSError, urllib.error.URLError):
-            await asyncio.sleep(0.1)
-            continue
-        if marker.encode("utf-8") in console:
-            return
-        await asyncio.sleep(0.1)
-    raise ProductivityHudFlowError(f"timed out waiting for simulator console marker {marker!r}")
-
-
-_VISUAL_FRAME_ACK = b"[HudVisualSurface] frame "
-_SIMULATOR_BRIDGE_MESSAGE = b"[Simulator] Flutter Bridge intercepted: evenAppMessage"
-_PRODUCTIVITY_VERIFYING_RECEIPT = b"[HudVisualSurface] receipt productivity_verifying bridge-ack"
-
-
-@dataclass(frozen=True, slots=True)
-class VisualFrameCheckpoint:
-    """Content-free counters observed before one renderer-causing action."""
-
-    completed_frames: int
-    simulator_messages: int
-    productivity_verifying_receipts: int
-    # Monotonic time is local to this driver.  It deliberately measures only
-    # the simulator pipeline, never a physical G2's clock or a person's input
-    # time.  Unit fakes may omit it, in which case no latency claim is made.
-    observed_at_ns: int | None = None
-
-
-def visual_frame_ack_count(console: bytes) -> int:
-    """Return completed four-tile frame receipts, never arbitrary console lines.
-
-    The official simulator applies its four image updates independently.  A
-    screenshot can therefore observe a visually torn intermediate state even
-    when its pixels have stopped changing briefly.  The production visual
-    surface emits this development-only receipt only after every tile upload
-    for a frame has succeeded; acceptance waits for a new receipt before it
-    retains a framebuffer for the action that caused it.
-    """
-
-    return sum(
-        line.startswith(_VISUAL_FRAME_ACK) and line.endswith(b" bridge-ack")
-        for line in console.splitlines()
-    )
-
-
-def simulator_bridge_message_count(console: bytes) -> int:
-    """Count the simulator's one-message-per-native-bridge-call trace."""
-
-    return console.count(_SIMULATOR_BRIDGE_MESSAGE)
-
-
-def productivity_verifying_receipt_count(console: bytes) -> int:
-    """Count the fixed receipt for a Calendar or Reminders verifying frame.
-
-    A generic four-tile acknowledgement proves only that *some* frame
-    completed. It cannot release a pending native-shaped write because that
-    frame could be a confirmation dismissal or unrelated update. The receipt
-    is deliberately fixed and contains no action, title, preview, or native
-    identity.
-    """
-
-    return sum(line == _PRODUCTIVITY_VERIFYING_RECEIPT for line in console.splitlines())
-
-
-async def _visual_frame_checkpoint(automation_base: str) -> VisualFrameCheckpoint:
-    """Capture the current completed-frame counter for one causal action."""
-
-    try:
-        console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
-    except (OSError, urllib.error.URLError) as exc:
-        raise ProductivityHudFlowError("could not read simulator visual-frame receipts") from exc
-    return VisualFrameCheckpoint(
-        completed_frames=visual_frame_ack_count(console),
-        simulator_messages=simulator_bridge_message_count(console),
-        productivity_verifying_receipts=productivity_verifying_receipt_count(console),
-        observed_at_ns=time.monotonic_ns(),
-    )
-
-
-async def _wait_for_visual_frame(
-    automation_base: str,
-    *,
-    after: VisualFrameCheckpoint,
-    label: str,
-    required_receipt: str | None = None,
-    timeout_s: float = 15.0,
-) -> VisualFrameCheckpoint:
-    """Wait for the full production canvas frame caused after ``after``.
-
-    This remains content-free: it validates only the renderer's completed
-    four-tile boundary. A held write can require the fixed verifying receipt
-    rather than accepting an arbitrary newer frame. The caller separately
-    retains the visible framebuffer, so a console acknowledgement alone never
-    becomes UI proof.
-    """
-
-    deadline = time.monotonic() + timeout_s
-    last = after
-    while time.monotonic() < deadline:
-        try:
-            console = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
-        except (OSError, urllib.error.URLError):
-            await asyncio.sleep(0.1)
-            continue
-        current = VisualFrameCheckpoint(
-            completed_frames=visual_frame_ack_count(console),
-            simulator_messages=simulator_bridge_message_count(console),
-            productivity_verifying_receipts=productivity_verifying_receipt_count(console),
-            observed_at_ns=time.monotonic_ns(),
-        )
-        last = current
-        if required_receipt == "productivity_verifying":
-            if current.productivity_verifying_receipts > after.productivity_verifying_receipts:
-                return current
-            await asyncio.sleep(0.1)
-            continue
-        if required_receipt is not None:
-            raise ProductivityHudFlowError(f"{label}: unsupported visual receipt {required_receipt!r}")
-        if current.completed_frames > after.completed_frames:
-            return current
-        # Official simulator console logs do not expose the app-level console
-        # in every live-menu route. Four new Flutter bridge messages are the
-        # SDK's four image-container uploads for one complete visual frame.
-        # The caller still requires a distinct, settled framebuffer afterward.
-        if current.simulator_messages >= after.simulator_messages + 4:
-            return current
-        await asyncio.sleep(0.1)
-    raise ProductivityHudFlowError(
-        f"{label}: no completed four-tile HUD frame "
-        f"(frames {after.completed_frames}->{last.completed_frames}, "
-        f"bridge messages {after.simulator_messages}->{last.simulator_messages}, "
-        f"productivity verifying {after.productivity_verifying_receipts}"
-        f"->{last.productivity_verifying_receipts})"
-    )
-
-
 def visual_latency(
     *,
     screen: str,
     trigger: VisualTrigger,
     started_at_ns: int,
-    completed: VisualFrameCheckpoint,
-    settled_at_ns: int,
+    observation: CaptureObservation,
 ) -> VisualLatency | None:
-    """Build a bounded simulator latency receipt, or omit fake-clock data.
+    """Build a screenshot-only simulator latency receipt, or omit fake data."""
 
-    The source timestamp comes from the driver immediately before an actual
-    input/downlink.  The completion timestamp is sampled only after the
-    official simulator has exposed the full visual receipt.  We intentionally
-    do not infer a device time from either value.
-    """
-
-    completed_at_ns = completed.observed_at_ns
-    if completed_at_ns is None:
+    first_changed_at_ns = observation.first_changed_at_ns
+    settled_at_ns = observation.settled_at_ns
+    if first_changed_at_ns is None or settled_at_ns is None:
         return None
-    if started_at_ns <= 0 or completed_at_ns < started_at_ns or settled_at_ns < completed_at_ns:
+    if (
+        started_at_ns <= 0
+        or first_changed_at_ns < started_at_ns
+        or settled_at_ns < first_changed_at_ns
+    ):
         raise ProductivityHudFlowError("visual latency timestamps were out of order")
     return VisualLatency(
         screen=screen,
         trigger=trigger,
-        completed_frame_ms=(completed_at_ns - started_at_ns) // 1_000_000,
-        settled_frame_ms=(settled_at_ns - started_at_ns) // 1_000_000,
+        first_changed_framebuffer_ms=(first_changed_at_ns - started_at_ns) // 1_000_000,
+        settled_framebuffer_ms=(settled_at_ns - started_at_ns) // 1_000_000,
     )
 
 
@@ -633,16 +492,15 @@ def record_visual_latency(
     screen: str,
     trigger: VisualTrigger,
     started_at_ns: int,
-    completed: VisualFrameCheckpoint,
+    observation: CaptureObservation,
 ) -> None:
-    """Record the settled screenshot timing after one observed frame receipt."""
+    """Record the bounded screenshot observation for one causal action."""
 
     sample = visual_latency(
         screen=screen,
         trigger=trigger,
         started_at_ns=started_at_ns,
-        completed=completed,
-        settled_at_ns=time.monotonic_ns(),
+        observation=observation,
     )
     if sample is not None:
         latencies.append(sample)
@@ -655,29 +513,24 @@ def visual_latency_summary(latencies: list[VisualLatency]) -> dict[str, int]:
         return {"sample_count": 0}
     return {
         "sample_count": len(latencies),
-        "max_completed_frame_ms": max(sample.completed_frame_ms for sample in latencies),
-        "max_settled_frame_ms": max(sample.settled_frame_ms for sample in latencies),
+        "max_first_changed_framebuffer_ms": max(
+            sample.first_changed_framebuffer_ms for sample in latencies
+        ),
+        "max_settled_framebuffer_ms": max(
+            sample.settled_framebuffer_ms for sample in latencies
+        ),
     }
 
 
-async def _send_after_full_visual_frame(
+async def _send_downlink(
     gateway: RecordingGateway,
     message: DownlinkMessage,
-    *,
-    automation_base: str,
-    label: str,
-) -> tuple[int, VisualFrameCheckpoint]:
-    """Deliver a production downlink and wait for its complete canvas frame."""
+) -> int:
+    """Deliver a production downlink and return the local trigger timestamp."""
 
-    checkpoint = await _visual_frame_checkpoint(automation_base)
     started_at_ns = time.monotonic_ns()
     await gateway.send(message)
-    completed = await _wait_for_visual_frame(
-        automation_base,
-        after=checkpoint,
-        label=label,
-    )
-    return started_at_ns, completed
+    return started_at_ns
 
 
 def _start_process(
@@ -762,8 +615,14 @@ async def _capture(
     output: Path,
     name: str,
     prior_digest: str | None,
+    *,
+    observation: CaptureObservation | None = None,
 ) -> tuple[str, str, str]:
-    """Wait for a distinct, settled framebuffer and retain reviewable pixels."""
+    """Wait for a distinct, settled framebuffer and retain reviewable pixels.
+
+    Completion is intentionally screenshot-only. The runner never consumes
+    app-console text, bridge-transfer logs, or renderer acknowledgements.
+    """
 
     previous: str | None = None
     stable_since = 0.0
@@ -781,11 +640,15 @@ async def _capture(
         now = time.monotonic()
         if digest != previous:
             previous, stable_since = digest, now
+            if observation is not None and observation.first_changed_at_ns is None:
+                observation.first_changed_at_ns = time.monotonic_ns()
         elif now - stable_since >= 0.6:
             raw_path = output / f"{name}.rgba.png"
             raw_path.write_bytes(raw)
             raw_path.chmod(0o600)
             preview = _alpha_preview(raw_path)
+            if observation is not None:
+                observation.settled_at_ns = time.monotonic_ns()
             return digest, raw_path.name, preview.name
         await asyncio.sleep(0.1)
     raise ProductivityHudFlowError(f"{name}: framebuffer did not settle")
@@ -877,7 +740,6 @@ async def _drive_controller_write(
     bridge.hold_next_write()
     task: asyncio.Task[str | None] | None = None
     try:
-        review_checkpoint = await _visual_frame_checkpoint(automation_base)
         review_started_at_ns = time.monotonic_ns()
         task = asyncio.create_task(controller.handle_command(command))
         action_id = await _wait_for(
@@ -888,25 +750,21 @@ async def _drive_controller_write(
             ),
             label=f"{review_name} controller confirmation downlink",
         )
-        review_completed = await _wait_for_visual_frame(
-            automation_base,
-            after=review_checkpoint,
-            label=f"{review_name} controller confirmation",
-        )
+        review_observation = CaptureObservation()
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{review_name}", prior_digest,
+            observation=review_observation,
         )
         record_visual_latency(
             latencies,
             screen=review_name,
             trigger="command_dispatch",
             started_at_ns=review_started_at_ns,
-            completed=review_completed,
+            observation=review_observation,
         )
         receipts.append(ScreenReceipt(review_name, None, None, "review", digest))
         artifacts[review_name] = {"raw": raw, "alpha": alpha}
 
-        verifying_checkpoint = await _visual_frame_checkpoint(automation_base)
         verifying_started_at_ns = time.monotonic_ns()
         await _input(automation_base, "click")
         verifying = await _wait_for(
@@ -919,27 +777,22 @@ async def _drive_controller_write(
             raise ProductivityHudFlowError(
                 f"{verifying_name}: controller emitted unexpected title {verifying.title!r}"
             )
-        verifying_completed = await _wait_for_visual_frame(
-            automation_base,
-            after=verifying_checkpoint,
-            label=verifying_name,
-            required_receipt="productivity_verifying",
-        )
+        verifying_observation = CaptureObservation()
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{verifying_name}", digest,
+            observation=verifying_observation,
         )
         record_visual_latency(
             latencies,
             screen=verifying_name,
             trigger="confirmed_tap",
             started_at_ns=verifying_started_at_ns,
-            completed=verifying_completed,
+            observation=verifying_observation,
         )
         receipts.append(ScreenReceipt(verifying_name, "click", True, "verifying", digest))
         artifacts[verifying_name] = {"raw": raw, "alpha": alpha}
 
         await bridge.wait_for_write()
-        terminal_checkpoint = await _visual_frame_checkpoint(automation_base)
         terminal_started_at_ns = time.monotonic_ns()
         bridge.release_next_write()
         terminal = await _wait_for(
@@ -952,20 +805,17 @@ async def _drive_controller_write(
             raise ProductivityHudFlowError(
                 f"{terminal_name}: controller emitted unexpected title {terminal.title!r}"
             )
-        terminal_completed = await _wait_for_visual_frame(
-            automation_base,
-            after=terminal_checkpoint,
-            label=terminal_name,
-        )
+        terminal_observation = CaptureObservation()
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{terminal_name}", digest,
+            observation=terminal_observation,
         )
         record_visual_latency(
             latencies,
             screen=terminal_name,
             trigger="native_readback",
             started_at_ns=terminal_started_at_ns,
-            completed=terminal_completed,
+            observation=terminal_observation,
         )
         receipts.append(ScreenReceipt(terminal_name, None, None, terminal_phase, digest))
         artifacts[terminal_name] = {"raw": raw, "alpha": alpha}
@@ -1054,25 +904,22 @@ async def _planning_click(
     """Drive one actual menu selection and wait for the authoritative list."""
 
     before = len(gateway.sent)
-    frame_checkpoint = await _visual_frame_checkpoint(automation_base)
     started_at_ns = time.monotonic_ns()
     await _input(automation_base, "click")
     rendered = await _wait_for(
         lambda: _planning_list_after(gateway, after=before),
         label=f"{name} Mac Planning response",
     )
-    completed = await _wait_for_visual_frame(
-        automation_base,
-        after=frame_checkpoint,
-        label=name,
+    observation = CaptureObservation()
+    digest, raw, alpha = await _capture(
+        automation_base, output, name, prior_digest, observation=observation,
     )
-    digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
     record_visual_latency(
         latencies,
         screen=name,
         trigger="menu_click",
         started_at_ns=started_at_ns,
-        completed=completed,
+        observation=observation,
     )
     validate_planning_screen(phase, rendered)
     return digest, {"raw": raw, "alpha": alpha}
@@ -1096,16 +943,10 @@ async def _wait_for_productivity_return(
     answer with the native-shaped day projection before a framebuffer is kept.
     """
 
-    frame_checkpoint = await _visual_frame_checkpoint(automation_base)
     rendered = await _wait_for(
         lambda: _planning_list_after(gateway, after=after),
         label=f"{name} automatic Planning response",
         timeout_s=8.0,
-    )
-    await _wait_for_visual_frame(
-        automation_base,
-        after=frame_checkpoint,
-        label=name,
     )
     digest, raw, alpha = await _capture(automation_base, output, name, prior_digest)
     validate_planning_screen(
@@ -1294,11 +1135,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             raise ProductivityHudFlowError(
                 "official simulator did not connect to the isolated Hub gateway"
             ) from exc
-        await _wait_console_marker(
-            automation_base,
-            "[joat] live menu acceptance opened=true",
-        )
-
+        # The gateway handshake intentionally completes before all local HUD
+        # startup paints. This bounded launch grace is not a visual receipt;
+        # each following action must still cause a changed, settled screenshot
+        # and an authoritative Mac-side state transition.
+        await asyncio.sleep(1.0)
         planning_receipts, planning_artifacts, digest = await _drive_planning_hierarchy(
             gateway,
             automation_base=automation_base,
@@ -1354,22 +1195,24 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, draft_title, primary, secondary, hint, input_action, accepted in calendar_states:
             before = len(gateway.sent)
-            started_at_ns, completed = await _send_after_full_visual_frame(
+            started_at_ns = await _send_downlink(
                 gateway,
                 _view(
                     "calendar", phase, title=draft_title, primary=primary,
                     secondary=secondary, hint=hint,
                 ),
-                automation_base=automation_base,
-                label=name,
             )
-            digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
+            observation = CaptureObservation()
+            digest, raw, alpha = await _capture(
+                automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest,
+                observation=observation,
+            )
             record_visual_latency(
                 latencies,
                 screen=name,
                 trigger="typed_downlink",
                 started_at_ns=started_at_ns,
-                completed=completed,
+                observation=observation,
             )
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
@@ -1408,12 +1251,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             artifacts=artifacts,
             latencies=latencies,
         )
-        monitoring_checkpoint = await _visual_frame_checkpoint(automation_base)
-        await _wait_for_visual_frame(
-            automation_base,
-            after=monitoring_checkpoint,
-            label="reminders-monitoring",
-        )
+        # The monitoring state is an intentional local Hub transition five
+        # seconds after the Mac's saved+armed downlink. It has no Mac uplink,
+        # so only a changed, settled simulator screenshot may prove it here.
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-monitoring", digest,
         )
@@ -1434,26 +1274,26 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         due_occurrences = occurrences.due(now_unix_ms=32_503_680_000_000)
         if len(due_occurrences) != 1:
             raise ProductivityHudFlowError("controller did not persist exactly one monitoring occurrence")
-        due_checkpoint = await _visual_frame_checkpoint(automation_base)
         due_started_at_ns = time.monotonic_ns()
         due_delivery = asyncio.create_task(task_monitor.run_due_once(
             now_unix_ms=due_occurrences[0].due_unix_ms,
             now_us=1_800_000_000_000_000,
         ))
-        due_completed = await _wait_for_visual_frame(
-            automation_base,
-            after=due_checkpoint,
-            label="reminders-due",
+        await _wait_for(
+            lambda: bool(gateway.reminder_due_requests),
+            label="reminders-due Hub delivery request",
         )
+        due_observation = CaptureObservation()
         digest, raw, alpha = await _capture(
             automation_base, args.out, f"{len(receipts) + 2:02d}-reminders-due", digest,
+            observation=due_observation,
         )
         record_visual_latency(
             latencies,
             screen="reminders-due",
             trigger="due_dispatch",
             started_at_ns=due_started_at_ns,
-            completed=due_completed,
+            observation=due_observation,
         )
         if await asyncio.wait_for(due_delivery, timeout=5) != 1:
             raise ProductivityHudFlowError(
@@ -1503,22 +1343,24 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         for name, phase, draft_title, primary, secondary, hint, input_action, accepted in completion_states:
             before = len(gateway.sent)
-            started_at_ns, completed = await _send_after_full_visual_frame(
+            started_at_ns = await _send_downlink(
                 gateway,
                 _view(
                     "reminders", phase, title=draft_title, primary=primary,
                     secondary=secondary, hint=hint,
                 ),
-                automation_base=automation_base,
-                label=name,
             )
-            digest, raw, alpha = await _capture(automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest)
+            observation = CaptureObservation()
+            digest, raw, alpha = await _capture(
+                automation_base, args.out, f"{len(receipts) + 2:02d}-{name}", digest,
+                observation=observation,
+            )
             record_visual_latency(
                 latencies,
                 screen=name,
                 trigger="typed_downlink",
                 started_at_ns=started_at_ns,
-                completed=completed,
+                observation=observation,
             )
             receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
             artifacts[name] = {"raw": raw, "alpha": alpha}
@@ -1547,7 +1389,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "result": "simulator-productivity-hud-action-flow-pass",
             "receipts": [asdict(receipt) for receipt in receipts],
             "latency": {
-                "scope": "official simulator only; driver-observed image-frame and settled-frame timing, not physical G2 lens latency",
+                "scope": "official simulator only; driver-observed first-changed and 600ms-settled framebuffer timing, not physical G2 lens latency",
                 "samples": [asdict(sample) for sample in latencies],
                 "summary": visual_latency_summary(latencies),
             },
@@ -1562,7 +1404,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
                 "hubClientAcceptance": "generation-bound reminder_due acknowledgement from the current production Hub client; not a macOS banner or physical-G2 visual proof",
-                "frameCompleteness": "each retained framebuffer follows either a completed production visual-frame receipt or four new simulator native-bridge image transfers, then a distinct settled screenshot; simulator-only evidence",
+                "frameCompleteness": "each retained framebuffer must differ from its causal predecessor and remain unchanged for 600ms in the official simulator; completion never consumes console output, renderer telemetry, or bridge-transfer logs",
                 "terminalOutcomeReturn": "every terminal Calendar and Reminders outcome waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",
                 "physicalG2": "not run",

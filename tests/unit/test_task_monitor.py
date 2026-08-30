@@ -113,8 +113,14 @@ def test_reminder_due_hud_view_is_the_single_read_only_projection() -> None:
     assert (view.primary, view.secondary, view.hint) == (
         "Due now",
         "This reminder is still incomplete.",
-        "Say complete reminder title · Back: left x2 Planning",
+        "Say complete reminder · Back: left x2",
     )
+    # The production gateway serializes this exact view before it can wait
+    # for the current-client acknowledgement. A visual-only test would miss
+    # a copy change that exceeds the fixed protocol bound and silently leaves
+    # the due occurrence retryable.
+    assert len(view.hint) <= 46
+    assert view.to_wire()["productivity"]["hint"] == view.hint
     assert view.planning_anchor_unix_ms == 1_788_274_200_000
     assert reminder_due_hud_view(
         "!! Take medicine · Reminder\nDue now",

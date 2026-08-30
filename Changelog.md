@@ -2,6 +2,19 @@
 
 ## 2026-08-30
 
+- Repaired the Reminder-due HUD delivery boundary exposed by the official
+  simulator. Its escaped-action hint had exceeded the protocol's fixed
+  46-character limit, so the generation-bound client acknowledgement was
+  never sent and the durable occurrence correctly remained pending. The hint
+  is now within the wire bound and its exact serializer path is tested. The
+  isolated Calendar/Reminders run completed all 34 causal HUD states,
+  including the monitoring and due surfaces. Its retained latency evidence
+  now uses only an official-simulator framebuffer change followed by a 600 ms
+  stability window—no renderer console, bridge-transfer trace, or packaged
+  telemetry. Every RGBA frame was converted to an optical preview and visually
+  reviewed. This is simulator/fixture proof only; it is not an EventKit write,
+  macOS notification banner, physical-G2, or wearer-attention claim.
+
 - Corrected an unsupported Brainstorm “scroll to read” assumption. The
   production image HUD retains a bounded live activity window and reserves a
   downward swipe for cancellation; it does not have pageable transcript
