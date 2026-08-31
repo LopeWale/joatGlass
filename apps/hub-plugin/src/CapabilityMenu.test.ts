@@ -372,6 +372,114 @@ describe('CapabilityMenu', () => {
     }
   });
 
+  it('replaces a missing response with retry guidance for every capability, not just Planning and Messages', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, listOptions } = rig();
+      await menu.toggle();
+      for (let index = 0; index < 4; index += 1) {
+        menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Notifications
+      }
+      menu.handleClick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listOptions[0]?.title).toBe('NOTIFICATIONS');
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(lists[1]).toEqual([
+        'No response from the Mac yet.',
+        'Return to Overview, then open Notifications to retry.',
+      ]);
+      expect(listOptions[1]).toMatchObject({
+        title: 'NOTIFICATIONS · RETRY', hint: 'left x2: back',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recovers a dropped Planning drill-down tap instead of leaving the month tap-dead', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, listOptions, sent } = rig();
+      await menu.toggle();
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
+      menu.handleClick();
+      await vi.advanceTimersByTimeAsync(0);
+      const requestId = latestRequestId(sent);
+      expect(await menu.presentList(
+        'PLANNING · PLAN · AUGUST 2026', rows(3), requestId, true,
+      )).toBe(true);
+
+      // Week-row tap: the selection is sent, then the Mac response is lost.
+      expect(menu.handleList(click(1))).toBe(true);
+      expect(sent[sent.length - 1]).toMatchObject({
+        kind: 'input',
+        event: { containerName: 'capdata', selectedName: 'PLANNING', requestId },
+      });
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(listOptions[listOptions.length - 1]).toMatchObject({
+        title: 'PLANNING · RETRY', hint: 'left x2: back',
+      });
+
+      // A late matching week frame still lands, and — because the timeout
+      // cleared the pending-selection latch — its rows accept a new tap.
+      expect(await menu.presentList(
+        'PLANNING · PLAN · AUG 3–9', rows(2), requestId, true,
+      )).toBe(true);
+      expect(lists[lists.length - 1]).toEqual(rows(2));
+      const before = sent.length;
+      expect(menu.handleList(click(0))).toBe(true);
+      expect(sent.length).toBe(before + 1);
+      expect(sent[sent.length - 1]).toMatchObject({
+        kind: 'input',
+        event: { containerName: 'capdata', selectedName: 'PLANNING' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releaseToLiveSession clears the menu and its retry timer without painting over the live surface', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, sent, defaultsCount } = rig();
+      await menu.toggle();
+      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
+      menu.handleClick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lists).toHaveLength(1);
+      expect(menu.isOpen()).toBe(true);
+      const paintedBefore = defaultsCount();
+
+      menu.releaseToLiveSession();
+      expect(menu.isOpen()).toBe(false);
+      // No Overview or retry frame may race the live session's own paint.
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(lists).toHaveLength(1);
+      expect(defaultsCount()).toBe(paintedBefore);
+      // A stale response for the released request can no longer paint either.
+      expect(await menu.presentList(
+        'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
+      )).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releaseToLiveSession away from Messages retires the Mac-side reply consent', async () => {
+    const { menu, sent } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
+
+    menu.releaseToLiveSession();
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
+    });
+  });
+
   it('keeps Navigation visible in the first-level wearable sidebar and opens its destination handoff', async () => {
     const { menu, sidebars, selections, lists, listOptions, sent } = rig();
     await menu.toggle();

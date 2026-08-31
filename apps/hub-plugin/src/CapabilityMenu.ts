@@ -164,6 +164,44 @@ export class CapabilityMenu {
     await this.hud.showDefault();
   }
 
+  /** An external live surface (Navigation) is taking the lenses. Clear menu
+   * input ownership, timers, and any pending capability request WITHOUT
+   * painting: the session's own frame is the replacement, and an extra
+   * Overview paint would race it on the serialized BLE lane. Also prevents a
+   * response timeout armed for the menu request from later repainting a
+   * retry list over the live session's frame. */
+  releaseToLiveSession(): void {
+    const leavingMessages = this.pendingTitle === 'MESSAGES';
+    this.clearResponseTimeout();
+    this.clearProductivityReturn();
+    this.transitionId += 1;
+    this.view = 'closed';
+    this.selectedIndex = 0;
+    this.pendingTitle = undefined;
+    this.pendingRequestId = undefined;
+    this.productivityReturn = undefined;
+    this.productivityAnchorUnixMs = undefined;
+    this.planningDrillDown = false;
+    this.dataItemCount = 0;
+    this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.messagesRetry = false;
+    this.messagesScreen = undefined;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
+    if (leavingMessages) {
+      // The Mac clears its private reply-target consent on this lifecycle
+      // signal, exactly as a close() away from Messages does.
+      this.link.send({
+        kind: 'input',
+        event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
+      });
+    }
+  }
+
   /** Contextual-menu entry: settings remains reachable without consuming one
    * of the five 576x288 sidebar rows. */
   async openSettings(): Promise<void> {
@@ -545,13 +583,14 @@ export class CapabilityMenu {
         requestId: this.pendingRequestId,
       },
     });
-    // A conversation, compose, or transcript tap has left the currently
-    // rendered frame visible while the Mac loads the replacement. Do not
-    // leave that frame permanently locked if the production bridge drops the
-    // response: reuse the same truthful Messages retry state as an initial
-    // menu request and an explicit page turn.
-    if (this.pendingTitle === 'MESSAGES' && this.pendingRequestId) {
-      this.armResponseTimeout('MESSAGES', this.pendingRequestId);
+    // A row tap has left the currently rendered frame visible while the Mac
+    // loads the replacement, and `dataSelectionPending` blocks further taps
+    // meanwhile. Do not leave that frame permanently tap-dead if the bridge
+    // drops the response: every selectable data surface (Messages,
+    // Planning drill-downs, Notifications, Activity, QuickNotes) reuses the
+    // same truthful retry state as an initial menu request.
+    if (this.pendingTitle && this.pendingRequestId) {
+      this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
     }
     return true;
   }
@@ -635,12 +674,17 @@ export class CapabilityMenu {
       kind: 'input',
       event,
     });
-    if (picked === 'Planning' || picked === 'Messages') {
-      this.armResponseTimeout(title, requestId);
-    }
+    // Every capability answers over the same lossy path (hud.list,
+    // brainstorm.view, or navigation.view). Arm the honest retry state for
+    // all of them: a dropped response must never strand the wearer on a
+    // "Loading…" frame with only Back as an undocumented escape.
+    this.armResponseTimeout(title, requestId);
   }
 
   private armResponseTimeout(title: string, requestId: string): void {
+    // One live timer: re-arming replaces rather than orphaning the previous
+    // timeout, so a stale timer can never fire behind a newer request.
+    this.clearResponseTimeout();
     this.responseTimeout = setTimeout(() => {
       void this.showResponseTimeout(title, requestId);
     }, CAPABILITY_RESPONSE_TIMEOUT_MS);
@@ -661,13 +705,14 @@ export class CapabilityMenu {
     ) return;
 
     const isMessagesRetry = title === 'MESSAGES';
+    const readable = title.charAt(0) + title.slice(1).toLowerCase();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
     const shown = await this.hud.showList(isMessagesRetry
       ? ['Mac did not answer. Tap to retry Messages.']
       : [
         'No response from the Mac yet.',
-        'Return to Overview, then open Planning to retry.',
+        `Return to Overview, then open ${readable} to retry.`,
       ], {
       title: `${title} · RETRY`,
       hint: isMessagesRetry ? 'tap: retry · left x2: back' : 'left x2: back',
@@ -688,6 +733,9 @@ export class CapabilityMenu {
     this.messagesScreen = isMessagesRetry ? 'retry' : undefined;
     this.dataHint = isMessagesRetry ? 'tap: retry · left x2: back' : undefined;
     this.dataPagePending = false;
+    // A tap whose response was lost must not keep swallowing later taps on
+    // the replacement retry surface.
+    this.dataSelectionPending = false;
     this.selectedIndex = 0;
   }
 

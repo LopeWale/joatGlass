@@ -66,9 +66,17 @@ turn by turn — visible as it happens, one exchange at a time — not a backgro
 that surfaces only a verdict. Visibility is the proof it was debated.
 `HudPresenter.appendText` is the streaming primitive for this.
 
-## 5. Calibrate the nod thresholds
+## 5. Calibrate motion before any IMU gesture can decide anything
 
-`ImuMonitor`'s `threshold = 0.35` and `windowMs = 1200` are guesses. Record real IMU traces at P100 for nod / head-shake / walking / nothing, then set the threshold from the data. Until that's done, treat the R1 ring tap as the only trustworthy confirm — RULES.md #6 depends on this being reliable.
+The old `threshold = 0.35` / `windowMs = 1200` nod detector was removed:
+`ImuMonitor` now treats motion as observational only, and confirmation is an
+explicit temple/ring TAP (swipe or timeout refuses). That is the deliberate
+fail-safe until real data exists. The calibration path is already wired —
+`imu.trace` relays every raw sample uplink (~10/s at P100), and the
+`imu.control` downlink accepts a `paceMs` in the SDK's closed 100…1000 set.
+Record labelled traces (nod / head-shake / walking / nothing), derive
+thresholds from the data, and only then consider promoting a motion gesture
+back into the confirm gate (RULES.md #6).
 
 ## Deferred deliberately
 

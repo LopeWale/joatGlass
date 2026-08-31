@@ -51,4 +51,68 @@ describe('Settings', () => {
     b.load();
     expect(b.resumePolicy).toBe('confirm');
   });
+
+  it('adopts the Even host storage value over a stale local mirror', async () => {
+    const data = stubStorage({ 'joat.settings.v1': JSON.stringify({ resume: 'confirm' }) });
+    const s = new Settings();
+    s.load();
+    const seen: string[] = [];
+    s.onChange((policy) => seen.push(policy));
+    await s.attachHostStorage({
+      get: async () => JSON.stringify({ resume: 'auto' }),
+      set: async () => true,
+    });
+    expect(s.resumePolicy).toBe('auto');
+    expect(seen).toEqual(['auto']);
+    // The local mirror converges on the durable hosted value.
+    expect(data['joat.settings.v1']).toContain('auto');
+  });
+
+  it('never lets a hosted echo override a policy chosen this session', async () => {
+    stubStorage();
+    const s = new Settings();
+    s.setResumePolicy('mac');
+    await s.attachHostStorage({
+      get: async () => JSON.stringify({ resume: 'auto' }),
+      set: async () => true,
+    });
+    expect(s.resumePolicy).toBe('mac');
+  });
+
+  it('write-throughs every change to the host store, and survives host failures', async () => {
+    stubStorage();
+    const hosted: Record<string, string> = {};
+    const s = new Settings();
+    await s.attachHostStorage({
+      get: async () => '',
+      set: async (key, value) => {
+        hosted[key] = value;
+        return true;
+      },
+    });
+    s.setResumePolicy('auto');
+    await Promise.resolve();
+    expect(hosted['joat.settings.v1']).toContain('auto');
+
+    const failing = new Settings();
+    await failing.attachHostStorage({
+      get: async () => { throw new Error('host offline'); },
+      set: async () => { throw new Error('host offline'); },
+    });
+    failing.setResumePolicy('mac'); // must not throw or reject unhandled
+    expect(failing.resumePolicy).toBe('mac');
+  });
+
+  it('ignores malformed or invalid hosted values', async () => {
+    stubStorage();
+    const s = new Settings();
+    await s.attachHostStorage({ get: async () => 'not json{{', set: async () => true });
+    expect(s.resumePolicy).toBe('confirm');
+    const t = new Settings();
+    await t.attachHostStorage({
+      get: async () => JSON.stringify({ resume: 'yolo' }),
+      set: async () => true,
+    });
+    expect(t.resumePolicy).toBe('confirm');
+  });
 });

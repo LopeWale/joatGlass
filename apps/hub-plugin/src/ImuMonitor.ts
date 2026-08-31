@@ -6,6 +6,18 @@ import type { IMU_Report_Data } from '@evenrealities/even_hub_sdk';
 export type ConfirmationOutcome = 'accepted' | 'declined' | 'timed_out';
 
 /**
+ * Map the wire's optional `paceMs` onto the SDK's closed `ImuReportPace`
+ * enum. Anything outside {100, 200, …, 1000} falls back to the P100 default
+ * rather than handing the native bridge an invalid pacing code.
+ */
+export function imuReportPaceFromMs(paceMs?: number): ImuReportPace | undefined {
+  if (paceMs === undefined) return undefined;
+  return Number.isInteger(paceMs) && paceMs >= 100 && paceMs <= 1000 && paceMs % 100 === 0
+    ? paceMs as ImuReportPace
+    : undefined;
+}
+
+/**
  * Exclusive confirmation gate for consequential actions (RULES.md #6).
  *
  * IMU samples are available only for opt-in diagnostics. Uncalibrated motion

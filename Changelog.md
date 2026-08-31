@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-31
+
+- Prepared JOAT `0.1.40` as the uniquely versioned phone-installable
+  navigation release. The prior upload replaced an existing `0.1.39` build
+  under the same version, which did not give an already-cached phone a new
+  version to fetch. This release retains the Even SDK phone-location source,
+  walking/cycling route flow, and private tailnet `/glasses` bridge while
+  giving the Even app an unambiguous upgrade target.
+
 ## 2026-08-30
 
 - Repaired and causally verified the first-level Planning entry that could
