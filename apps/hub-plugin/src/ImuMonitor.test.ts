@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { IMU_Report_Data } from '@evenrealities/even_hub_sdk';
-import { ImuMonitor } from './ImuMonitor';
+import { ImuReportPace, type IMU_Report_Data } from '@evenrealities/even_hub_sdk';
+import { ImuMonitor, imuReportPaceFromMs } from './ImuMonitor';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { UplinkMessage } from './types';
@@ -15,6 +15,20 @@ function make() {
   const imu = new ImuMonitor(client, link);
   return { imu, sent };
 }
+
+describe('imuReportPaceFromMs', () => {
+  it('maps only the closed 100…1000-step wire values onto the SDK enum', () => {
+    expect(imuReportPaceFromMs(undefined)).toBeUndefined(); // caller default
+    expect(imuReportPaceFromMs(100)).toBe(ImuReportPace.P100);
+    expect(imuReportPaceFromMs(500)).toBe(ImuReportPace.P500);
+    expect(imuReportPaceFromMs(1000)).toBe(ImuReportPace.P1000);
+    // Anything else must fall back to the default, never reach native raw.
+    expect(imuReportPaceFromMs(0)).toBeUndefined();
+    expect(imuReportPaceFromMs(150)).toBeUndefined();
+    expect(imuReportPaceFromMs(1100)).toBeUndefined();
+    expect(imuReportPaceFromMs(99.9)).toBeUndefined();
+  });
+});
 
 describe('ImuMonitor confirms', () => {
   it('traces prompt visibility and verdict without logging the prompt', () => {

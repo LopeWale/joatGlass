@@ -393,11 +393,19 @@ The engine log fork does most of the work: `rejected unpaired connection` = it r
   all, and how permission prompts surface to the wearer.
 - Whether the phone resolves `.local` mDNS from inside the WebView; the
   Tailscale candidates need the Tailscale app installed on the phone.
-- SDK upgraded to 0.0.14 (2026-08-26; typecheck + 53 tests green). New
-  surface not yet wired: contextual menus, `textColor`, `zOrderIndex`,
-  Gray8/Gray4 raw images via `updateImageRawData`, audio
-  `direction`/`speakerRole` (speaker attribution — useful for wearer-only
-  filtering). Long-press (eventType 9/10) needs no wiring: EventRouter's fall-through already relays unmatched sysEvents to the Mac as `input`.
+- SDK 0.0.14 surface is now fully wired (2026-08-31): contextual menus
+  (`HudPageBuilder.systemMenu` on create + every rebuild, clicks via
+  `EventRouter.handleMenu`), `textColor` brightness on every layout and
+  per-update, unique `zOrderIndex` on every page, four-tile image frames via
+  `updateImageRawData` (PNG-encoded Gray8, host converts to Gray4), audio
+  `speakerRole` batch attribution in `AudioStreamer`, and long-press
+  (eventType 9/10) as the local mic mute/unmute in `EventRouter`. The SDK's
+  `setBackgroundState`/`onBackgroundRestore` helpers documented by the Even
+  Hub background-state guide do **not exist in the installed 0.0.14 bundle**
+  (verified in `dist/index.js`) — durable state rides `setLocalStorage`
+  (pairing tokens, preferred brain, resume policy) instead, and everything
+  else is deliberately Mac-owned and re-established by the reconnect
+  handshake, so a killed Android WebView cold-restarts into the same state.
 
 ## Host push formats (for simulator/tests)
 

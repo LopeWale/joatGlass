@@ -28,7 +28,7 @@ import {
 import { LocationSessionManager } from './LocationSessionManager';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
-import { ImuMonitor } from './ImuMonitor';
+import { ImuMonitor, imuReportPaceFromMs } from './ImuMonitor';
 import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
@@ -361,6 +361,13 @@ async function boot(): Promise<void> {
   settings.load();
   setPanel('p-policy', settings.resumePolicy);
   settings.onChange((policy) => setPanel('p-policy', policy));
+  // Durable resume policy: the Even host's storage survives Android WebView
+  // kills and is shared across the dev/packed origins, unlike the browser
+  // localStorage mirror. Best-effort and async — boot never waits on it.
+  void settings.attachHostStorage({
+    get: (key) => client.require().getLocalStorage(key),
+    set: (key, value) => client.require().setLocalStorage(key, value),
+  });
   const menu = new CapabilityMenu(hud, settings, link);
   const navigation = new NavigationController(hud, link, location, g2Diagnostics);
   const brainstorm = new BrainstormController(link);
@@ -450,6 +457,10 @@ async function boot(): Promise<void> {
         break;
       case 'navigation.view':
         brainstorm.clear();
+        // Navigation owns the lenses as one live session. Release any open
+        // menu/capability state (and its armed response timeout) without an
+        // extra Overview paint racing this frame on the BLE lane.
+        menu.releaseToLiveSession();
         await awaitCurrent(navigation.present(msg, undefined, context.signal));
         break;
       case 'brainstorm.view':
@@ -553,7 +564,7 @@ async function boot(): Promise<void> {
         break;
       case 'imu.control':
         msg.open
-          ? await awaitCurrent(imu.start(undefined, context.signal))
+          ? await awaitCurrent(imu.start(imuReportPaceFromMs(msg.paceMs), context.signal))
           : await awaitCurrent(imu.stop());
         break;
       case 'imu.trace':
