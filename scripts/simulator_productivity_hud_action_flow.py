@@ -47,6 +47,7 @@ from joat.core.confirmation import ConfirmationResult
 from joat.core.protocol import (
     DownlinkMessage,
     HudList,
+    InputEvent,
     ProductivityHudView,
     ProductivityViewAck,
 )
@@ -67,6 +68,7 @@ class ProductivityHudFlowError(RuntimeError):
 
 VisualTrigger = Literal[
     "menu_click",
+    "menu_move",
     "command_dispatch",
     "confirmed_tap",
     "native_readback",
@@ -117,6 +119,9 @@ class CaptureObservation:
 
 
 _EXPECTED_FLOW = (
+    ("capability-menu", None, None, "menu"),
+    ("capability-planning-selected", "down", None, "menu-selection"),
+    ("planning-menu-month", "click", None, "month"),
     ("planning-context-menu", "context_menu", None, "context_menu"),
     ("planning-month", "click", None, "month"),
     ("planning-week", "click", None, "week"),
@@ -167,14 +172,17 @@ _EXPECTED_FLOW = (
 )
 
 
-def validate_flow(receipts: list[ScreenReceipt]) -> None:
-    """Reject a pretty screenshot sequence without causal confirm boundaries."""
+def _validate_receipts(
+    receipts: list[ScreenReceipt],
+    expected_flow: tuple[tuple[str, str | None, bool | None, str], ...],
+) -> None:
+    """Reject a pretty screenshot sequence without its causal action order."""
 
-    if len(receipts) != len(_EXPECTED_FLOW):
+    if len(receipts) != len(expected_flow):
         raise ProductivityHudFlowError(
-            f"expected {len(_EXPECTED_FLOW)} screen receipts, got {len(receipts)}"
+            f"expected {len(expected_flow)} screen receipts, got {len(receipts)}"
         )
-    for index, (receipt, expected) in enumerate(zip(receipts, _EXPECTED_FLOW), start=1):
+    for index, (receipt, expected) in enumerate(zip(receipts, expected_flow), start=1):
         name, input_action, accepted, phase = expected
         if receipt.name != name:
             raise ProductivityHudFlowError(f"step {index}: expected {name}, got {receipt.name}")
@@ -194,6 +202,18 @@ def validate_flow(receipts: list[ScreenReceipt]) -> None:
             )
         if len(receipt.framebuffer_sha256) != 64:
             raise ProductivityHudFlowError(f"step {index} {name}: invalid framebuffer digest")
+
+
+def validate_planning_flow(receipts: list[ScreenReceipt]) -> None:
+    """Require first-level entry plus the complete month-to-item drill-down."""
+
+    _validate_receipts(receipts, _EXPECTED_FLOW[:8])
+
+
+def validate_flow(receipts: list[ScreenReceipt]) -> None:
+    """Require Planning entry and every causal safe-write outcome boundary."""
+
+    _validate_receipts(receipts, _EXPECTED_FLOW)
 
 
 @dataclass(slots=True)
@@ -227,6 +247,8 @@ class RecordingGateway(HubGatewayTransport):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.sent: list[DownlinkMessage] = []
+        self.received_inputs: list[InputEvent] = []
+        self.causal_events: list[tuple[Literal["input", "output"], object]] = []
         self.confirmation_requests: list[str] = []
         self.reminder_due_requests: list[ProductivityHudView] = []
         self._presentation_receipts: dict[str, int] = {}
@@ -244,6 +266,12 @@ class RecordingGateway(HubGatewayTransport):
         ):
             self._accepted_presentation_receipts.add(acknowledgement.presentation_receipt_id)
 
+    def record_input(self, event: InputEvent) -> None:
+        """Retain content-free action ordering for this isolated driver."""
+
+        self.received_inputs.append(event)
+        self.causal_events.append(("input", event))
+
     async def send(self, message: DownlinkMessage) -> None:
         if isinstance(message, ProductivityHudView) and message.phase == "verifying":
             if self.connection_generation < 1:
@@ -256,6 +284,7 @@ class RecordingGateway(HubGatewayTransport):
                 presentation_receipt_generation=self.connection_generation,
             )
         self.sent.append(message)
+        self.causal_events.append(("output", message))
         await super().send(message)
 
     async def wait_for_presentation_ack(self, view: ProductivityHudView) -> None:
@@ -1121,6 +1150,111 @@ def _planning_list_after(
     return None
 
 
+def _causal_planning_response(
+    gateway: RecordingGateway,
+    *,
+    after: int,
+    phase: str,
+    input_container: Literal["capmenu", "capdata"],
+) -> HudList | None:
+    """Return a Planning response only when the expected action preceded it."""
+
+    action_request_id: str | None = None
+    for direction, payload in gateway.causal_events[after:]:
+        if direction == "input" and isinstance(payload, InputEvent):
+            matches = (
+                payload.container_name == input_container
+                and (
+                    payload.selected_name == "Planning"
+                    if input_container == "capmenu"
+                    else payload.selected_name == "PLANNING"
+                )
+            )
+            action_request_id = payload.request_id if matches else None
+            continue
+        if (
+            direction != "output"
+            or action_request_id is None
+            or not isinstance(payload, HudList)
+            or payload.request_id != action_request_id
+        ):
+            continue
+        expected = {
+            "month": "SEPTEMBER 2026",
+            "week": "AUG 31–SEP 6",
+            "day": "TUE SEP 1",
+            "detail": "PLANNING · EVENT",
+        }[phase]
+        if isinstance(payload.title, str) and expected in payload.title:
+            return payload
+    return None
+
+
+def _decode_simulator_rgba(raw_path: Path) -> bytes:
+    """Decode the official simulator's fixed 576x288 framebuffer."""
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ProductivityHudFlowError("ffmpeg is required to inspect simulator framebuffers")
+    decoded = subprocess.run(
+        [ffmpeg, "-loglevel", "error", "-i", str(raw_path), "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    if decoded.returncode != 0 or len(decoded.stdout) != 576 * 288 * 4:
+        raise ProductivityHudFlowError("could not decode official simulator framebuffer")
+    return decoded.stdout
+
+
+def validate_capability_menu_cursor(raw_path: Path, *, selected_index: int) -> None:
+    """Prove the custom menu cursor is on the intended visible row."""
+
+    if selected_index not in (0, 1):
+        raise ProductivityHudFlowError("capability menu cursor index is outside acceptance scope")
+    rgba = _decode_simulator_rgba(raw_path)
+
+    def occupancy(start_y: int, end_y: int) -> float:
+        alphas = [
+            rgba[(y * 576 + x) * 4 + 3]
+            for x in range(10, 17)
+            for y in range(start_y, end_y)
+        ]
+        return sum(alpha > 128 for alpha in alphas) / len(alphas)
+
+    bands = (occupancy(53, 87), occupancy(92, 126))
+    if bands[selected_index] < 0.35 or bands[1 - selected_index] > 0.05:
+        raise ProductivityHudFlowError(
+            f"capability menu cursor did not render on row {selected_index}; "
+            f"content-free occupancy={bands!r}"
+        )
+
+
+def validate_planning_frame(raw_path: Path, *, phase: str) -> None:
+    """Reject the loader or an unrelated repaint as a Planning page receipt."""
+
+    required_separators = {"month": 7, "week": 6, "day": 4, "detail": 3}.get(phase)
+    if required_separators is None:
+        raise ProductivityHudFlowError(f"unknown Planning framebuffer phase {phase!r}")
+    rgba = _decode_simulator_rgba(raw_path)
+    strong_rows = 0
+    previous_was_strong = False
+    for y in range(35, 225):
+        visible = sum(
+            rgba[(y * 576 + x) * 4 + 3] > 128
+            for x in range(20, 556)
+        )
+        is_strong = visible > 400
+        if is_strong and not previous_was_strong:
+            strong_rows += 1
+        previous_was_strong = is_strong
+    if strong_rows < required_separators:
+        raise ProductivityHudFlowError(
+            f"Planning {phase} framebuffer retained a loader or incomplete page; "
+            f"content-free separators={strong_rows}"
+        )
+
+
 def validate_planning_screen(
     phase: str,
     rendered: HudList,
@@ -1177,20 +1311,42 @@ async def _planning_click(
     phase: str,
     prior_digest: str | None,
     latencies: list[VisualLatency],
+    input_container: Literal["capmenu", "capdata"],
 ) -> tuple[str, dict[str, str]]:
     """Drive one actual menu selection and wait for the authoritative list."""
 
-    before = len(gateway.sent)
+    causal_before = len(gateway.causal_events)
+    input_before = len(gateway.received_inputs)
     started_at_ns = time.monotonic_ns()
     await _input(automation_base, "click")
-    rendered = await _wait_for(
-        lambda: _planning_list_after(gateway, after=before, phase=phase),
-        label=f"{name} Mac Planning response",
-    )
+    try:
+        rendered = await _wait_for(
+            lambda: _causal_planning_response(
+                gateway,
+                after=causal_before,
+                phase=phase,
+                input_container=input_container,
+            ),
+            label=f"{name} causal input then Mac Planning response",
+        )
+    except ProductivityHudFlowError as exc:
+        observed = [
+            (
+                event.container_name,
+                event.selected_index,
+                event.event_type,
+                event.selected_name == "Planning",
+            )
+            for event in gateway.received_inputs[input_before:]
+        ]
+        raise ProductivityHudFlowError(
+            f"{name}: no Mac Planning response; bounded inputs={observed!r}"
+        ) from exc
     observation = CaptureObservation()
     digest, raw, alpha = await _capture(
         automation_base, output, name, prior_digest, observation=observation,
     )
+    validate_planning_frame(output / raw, phase=phase)
     record_visual_latency(
         latencies,
         screen=name,
@@ -1250,6 +1406,52 @@ async def _drive_planning_hierarchy(
     separately unit-tested physical G2 contract.
     """
 
+    # Start with the actual first-level wearer path that exposed the original
+    # dead loader: open the capability menu, move its custom cursor to
+    # Planning, and activate it.  This must reach the authoritative Mac
+    # projection before the broader contextual-menu and hierarchy checks run.
+    menu_observation = CaptureObservation()
+    digest, raw, alpha = await _capture(
+        automation_base, output, "01-capability-menu", None,
+        observation=menu_observation,
+    )
+    validate_capability_menu_cursor(output / raw, selected_index=0)
+    receipts = [ScreenReceipt("capability-menu", None, None, "menu", digest)]
+    artifacts = {"capability-menu": {"raw": raw, "alpha": alpha}}
+
+    planning_selection_started_at_ns = time.monotonic_ns()
+    await _input(automation_base, "down")
+    selection_observation = CaptureObservation()
+    digest, raw, alpha = await _capture(
+        automation_base, output, "02-capability-planning-selected", digest,
+        observation=selection_observation,
+    )
+    validate_capability_menu_cursor(output / raw, selected_index=1)
+    record_visual_latency(
+        latencies,
+        screen="capability-planning-selected",
+        trigger="menu_move",
+        started_at_ns=planning_selection_started_at_ns,
+        observation=selection_observation,
+    )
+    receipts.append(ScreenReceipt(
+        "capability-planning-selected", "down", None, "menu-selection", digest,
+    ))
+    artifacts["capability-planning-selected"] = {"raw": raw, "alpha": alpha}
+
+    digest, artifact = await _planning_click(
+        gateway,
+        automation_base=automation_base,
+        output=output,
+        name="03-planning-menu-month",
+        phase="month",
+        prior_digest=digest,
+        latencies=latencies,
+        input_container="capmenu",
+    )
+    receipts.append(ScreenReceipt("planning-menu-month", "click", None, "month", digest))
+    artifacts["planning-menu-month"] = artifact
+
     # The visual HUD's first app-owned contextual action is Open Planning.
     # Retain the overlay itself before selecting it: this proves the SDK did
     # not silently clear `menuObject` when the image page was rebuilt.
@@ -1257,7 +1459,7 @@ async def _drive_planning_hierarchy(
     await _input(automation_base, "context_menu")
     context_observation = CaptureObservation()
     digest, raw, alpha = await _capture(
-        automation_base, output, "01-planning-context-menu", None,
+        automation_base, output, "04-planning-context-menu", digest,
         observation=context_observation,
     )
     record_visual_latency(
@@ -1267,17 +1469,20 @@ async def _drive_planning_hierarchy(
         started_at_ns=context_started_at_ns,
         observation=context_observation,
     )
-    receipts = [ScreenReceipt("planning-context-menu", "context_menu", None, "context_menu", digest)]
-    artifacts = {"planning-context-menu": {"raw": raw, "alpha": alpha}}
+    receipts.append(ScreenReceipt(
+        "planning-context-menu", "context_menu", None, "context_menu", digest,
+    ))
+    artifacts["planning-context-menu"] = {"raw": raw, "alpha": alpha}
 
     digest, artifact = await _planning_click(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="02-planning-month",
+        name="05-planning-month",
         phase="month",
         prior_digest=digest,
         latencies=latencies,
+        input_container="capmenu",
     )
     receipts.append(ScreenReceipt("planning-month", "click", None, "month", digest))
     artifacts["planning-month"] = artifact
@@ -1286,10 +1491,11 @@ async def _drive_planning_hierarchy(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="03-planning-week",
+        name="06-planning-week",
         phase="week",
         prior_digest=digest,
         latencies=latencies,
+        input_container="capdata",
     )
     receipts.append(ScreenReceipt("planning-week", "click", None, "week", digest))
     artifacts["planning-week"] = artifact
@@ -1302,10 +1508,11 @@ async def _drive_planning_hierarchy(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="04-planning-day",
+        name="07-planning-day",
         phase="day",
         prior_digest=digest,
         latencies=latencies,
+        input_container="capdata",
     )
     receipts.append(ScreenReceipt("planning-day", "click", None, "day", digest))
     artifacts["planning-day"] = artifact
@@ -1314,10 +1521,11 @@ async def _drive_planning_hierarchy(
         gateway,
         automation_base=automation_base,
         output=output,
-        name="05-planning-item-detail",
+        name="08-planning-item-detail",
         phase="detail",
         prior_digest=digest,
         latencies=latencies,
+        input_container="capdata",
     )
     receipts.append(ScreenReceipt("planning-item-detail", "click", None, "detail", digest))
     artifacts["planning-item-detail"] = artifact
@@ -1385,6 +1593,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     # Fix the synthetic read model to a month containing both fixture items.
     # The normal Mac's selected day remains its own live local state.
     planning_router._planning_selected_day = date(2026, 9, 1)
+    gateway.on_input(gateway.record_input)
     gateway.on_input(planning_router.on_input)
     managed: list[ManagedProcess] = []
     receipts: list[ScreenReceipt] = []
@@ -1412,7 +1621,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "official-evenhub-simulator",
             [
                 str(args.simulator),
-                f"{plugin_url}/",
+                f"{plugin_url}/?joatTestOpenMenu=1",
                 "--automation-port", str(args.automation_port),
             ],
             cwd=args.repo,
@@ -1441,6 +1650,26 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.extend(planning_receipts)
         artifacts.update(planning_artifacts)
+        if getattr(args, "planning_only", False):
+            validate_planning_flow(receipts)
+            return {
+                "schemaVersion": 1,
+                "result": "simulator-planning-entry-action-flow-pass",
+                "receipts": [asdict(receipt) for receipt in receipts],
+                "latency": {
+                    "scope": "official simulator only; driver-observed first-changed and 600ms-settled framebuffer timing, not physical G2 lens latency",
+                    "samples": [asdict(sample) for sample in latencies],
+                    "summary": visual_latency_summary(latencies),
+                },
+                "artifacts": artifacts,
+                "evidenceBoundary": {
+                    "hud": "official Even Hub simulator framebuffer",
+                    "input": "official simulator Down and Click through the production first-level capability menu",
+                    "mac": "real local HubGatewayTransport; production CapabilityRouter drives the native-shaped Planning fixture",
+                    "eventkit": "not run; fixture native bridge prevents access to live personal data",
+                    "physicalG2": "not run",
+                },
+            }
 
         digest, calendar_before = await _drive_controller_write(
             controller,
@@ -1800,6 +2029,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ws-port", type=int, default=18860)
     parser.add_argument("--vite-port", type=int, default=5198)
     parser.add_argument("--automation-port", type=int, default=9908)
+    parser.add_argument(
+        "--planning-only",
+        action="store_true",
+        help="stop after the first-level Planning month/week/day/item action flow",
+    )
     return parser
 
 

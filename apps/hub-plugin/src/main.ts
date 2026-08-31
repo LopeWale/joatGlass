@@ -716,9 +716,12 @@ async function boot(): Promise<void> {
 
   // The simulator cannot generate the physical left-double gesture. Open the
   // exact same menu only after the page, chrome, and Mac handshake have all
-  // settled; opening beside `link.connect()` races startup paints and gives a
-  // false negative for the capability flow. Vite strips this from a package.
+  // settled. The simulator also emits one late protobuf-zero startup press;
+  // let that announcement drain before exposing a selectable row, otherwise
+  // it can immediately activate Messages without any wearer input. Vite
+  // strips this bounded acceptance-only delay from a package.
   if (LIVE_MENU_ACCEPTANCE) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 750));
     await menu.toggle();
     console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
   }

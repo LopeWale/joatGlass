@@ -37,6 +37,11 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
 
     assert driver is not None, "productivity HUD action-flow driver is missing"
     receipts = [
+        driver.ScreenReceipt("capability-menu", None, None, "menu", "c" * 64),
+        driver.ScreenReceipt(
+            "capability-planning-selected", "down", None, "menu-selection", "d" * 64,
+        ),
+        driver.ScreenReceipt("planning-menu-month", "click", None, "month", "e" * 64),
         driver.ScreenReceipt("planning-context-menu", "context_menu", None, "context_menu", "f" * 64),
         driver.ScreenReceipt("planning-month", "click", None, "month", "0" * 64),
         driver.ScreenReceipt("planning-week", "click", None, "week", "1" * 64),
@@ -135,6 +140,115 @@ def test_productivity_flow_rejects_a_month_capture_without_the_contextual_escape
 
     with pytest.raises(driver.ProductivityHudFlowError, match="expected"):
         driver.validate_flow(receipts)
+
+
+def test_productivity_flow_rejects_contextual_only_planning_without_first_level_entry() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt(
+            "planning-context-menu", "context_menu", None, "context_menu", "f" * 64,
+        ),
+        driver.ScreenReceipt("planning-month", "click", None, "month", "0" * 64),
+    ]
+
+    with pytest.raises(driver.ProductivityHudFlowError, match="expected"):
+        driver.validate_flow(receipts)
+
+
+def test_planning_only_validation_requires_the_first_level_entry_and_full_drilldown() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt(name, action, accepted, phase, f"{index:x}" * 64)
+        for index, (name, action, accepted, phase) in enumerate(driver._EXPECTED_FLOW[:8])
+    ]
+
+    driver.validate_planning_flow(receipts)
+    with pytest.raises(driver.ProductivityHudFlowError, match="expected"):
+        driver.validate_planning_flow(receipts[1:])
+
+
+async def test_planning_entry_failure_reports_only_content_free_input_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _driver()
+
+    assert driver is not None
+    gateway = SimpleNamespace(sent=[], received_inputs=[], causal_events=[])
+
+    async def inject_private_input(_base: str, _action: str) -> None:
+        gateway.received_inputs.append(driver.InputEvent(
+            container_name="capdata",
+            selected_name="Private reminder title",
+            selected_index=1,
+            event_type=0,
+        ))
+        gateway.causal_events.append(("input", gateway.received_inputs[-1]))
+
+    async def fail_wait(*_args: object, **_kwargs: object) -> object:
+        raise driver.ProductivityHudFlowError("timeout")
+
+    monkeypatch.setattr(driver, "_input", inject_private_input)
+    monkeypatch.setattr(driver, "_wait_for", fail_wait)
+
+    with pytest.raises(driver.ProductivityHudFlowError) as captured:
+        await driver._planning_click(
+            gateway,
+            automation_base="http://127.0.0.1:1",
+            output=tmp_path,
+            name="planning-entry",
+            phase="month",
+            prior_digest=None,
+            latencies=[],
+            input_container="capdata",
+        )
+
+    assert "Private reminder title" not in str(captured.value)
+    assert "('capdata', 1, 0, False)" in str(captured.value)
+
+
+def test_planning_response_requires_expected_input_before_output() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    output = driver.HudList(
+        items=[],
+        title="PLANNING · PLAN · SEPTEMBER 2026",
+        request_id="request-current",
+        planning_grid=[SimpleNamespace(day=index) for index in range(42)],
+    )
+    expected_input = driver.InputEvent(
+        container_name="capmenu", selected_name="Planning", selected_index=1,
+        request_id="request-current",
+    )
+    wrong_input = driver.InputEvent(
+        container_name="capmenu", selected_name="Messages", selected_index=0,
+        request_id="request-current",
+    )
+    stale_input = driver.InputEvent(
+        container_name="capmenu", selected_name="Planning", selected_index=1,
+        request_id="request-new",
+    )
+
+    assert driver._causal_planning_response(
+        SimpleNamespace(causal_events=[("output", output), ("input", expected_input)]),
+        after=0, phase="month", input_container="capmenu",
+    ) is None
+    assert driver._causal_planning_response(
+        SimpleNamespace(causal_events=[("input", wrong_input), ("output", output)]),
+        after=0, phase="month", input_container="capmenu",
+    ) is None
+    assert driver._causal_planning_response(
+        SimpleNamespace(causal_events=[("input", stale_input), ("output", output)]),
+        after=0, phase="month", input_container="capmenu",
+    ) is None
+    assert driver._causal_planning_response(
+        SimpleNamespace(causal_events=[("input", expected_input), ("output", output)]),
+        after=0, phase="month", input_container="capmenu",
+    ) is output
 
 
 def test_planning_day_receipt_requires_both_native_kinds() -> None:

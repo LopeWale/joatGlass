@@ -2,6 +2,20 @@
 
 ## 2026-08-30
 
+- Repaired and causally verified the first-level Planning entry that could
+  remain on `Loading recent planning…`. The custom sidebar now retains its
+  visible Planning cursor when the simulator/firmware reports a stale
+  protobuf-zero List index, and the development-only live-menu arm waits for
+  the simulator's late startup press before exposing a selectable row. The
+  official simulator acceptance now requires menu → Planning selection →
+  authoritative Mac month → week → mixed day → native item detail. Three
+  isolated Planning-only runs produced identical frame digests; the driver
+  first observed a differing framebuffer 117–123 ms after Planning selection
+  and 59 ms after the click that requested the Mac-backed month. These are
+  screenshot polling observations, not renderer or physical-lens onset. This
+  is source and official-simulator evidence only; no package,
+  upload, installation, live EventKit read, or physical-G2 claim was made.
+
 - Prepared JOAT `0.1.39` as a coherent walking/cycling navigation release.
   A configured `MAPBOX_ACCESS_TOKEN` or legacy `MAPBOX_API_KEY` now enables
   the local route provider without a second hidden experimental flag. The
