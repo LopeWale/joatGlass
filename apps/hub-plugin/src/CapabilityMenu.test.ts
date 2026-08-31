@@ -257,6 +257,62 @@ describe('CapabilityMenu', () => {
     expect(latestRequestId(sent)).not.toBe(firstRequestId);
   });
 
+  it.each([
+    ['conversation', async (menu: CapabilityMenu, requestId: string) => {
+      expect(menu.handleList(click(1))).toBe(true);
+      return requestId;
+    }],
+    ['full message', async (menu: CapabilityMenu, requestId: string) => {
+      expect(menu.handleList(click(1))).toBe(true);
+      expect(await menu.presentList(
+        'MESSAGES · CONVERSATION',
+        ['Latest messages', 'Dele · Opening words', 'Say reply'],
+        requestId,
+        true,
+        'tap read · say reply · left x2: back',
+      )).toBe(true);
+      expect(menu.handleList(click(1))).toBe(true);
+      return requestId;
+    }],
+  ])('turns a dropped Messages %s selection response into a tap-to-retry frame', async (
+    _kind,
+    select,
+  ) => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, listOptions, sent } = rig();
+      await menu.toggle();
+      menu.handleList(clickRow0());
+      await vi.advanceTimersByTimeAsync(0);
+      const firstRequestId = latestRequestId(sent);
+      expect(await menu.presentList('MESSAGES', rows(2), firstRequestId, true)).toBe(true);
+
+      await select(menu, firstRequestId);
+      expect(sent[sent.length - 1]).toMatchObject({
+        kind: 'input',
+        event: { requestId: firstRequestId },
+      });
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(lists[lists.length - 1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
+      expect(listOptions[listOptions.length - 1]).toMatchObject({
+        title: 'MESSAGES · RETRY',
+        hint: 'tap: retry · left x2: back',
+        selectable: true,
+      });
+
+      expect(menu.handleClick()).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent[sent.length - 1]).toMatchObject({
+        kind: 'input',
+        event: { containerName: 'capmenu', selectedName: 'Messages' },
+      });
+      expect(latestRequestId(sent)).not.toBe(firstRequestId);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not discard a matching Planning response while the retry frame is still painting', async () => {
     vi.useFakeTimers();
     try {
