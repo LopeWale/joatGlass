@@ -205,3 +205,41 @@ class TestApprovals:
         agent2_report = await c.handle_command("terminal reject")
         assert agent.resolved[-1][2] == "deny"
         assert agent2_report is not None
+
+
+class ListingAgent(FakeAgent):
+    def __init__(self, rows: list[dict[str, str]] | None = None,
+                 fail: str | None = None) -> None:
+        super().__init__()
+        self._rows = rows if rows is not None else []
+        self._list_fail = fail
+
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]:
+        if self._list_fail:
+            raise RuntimeError(self._list_fail)
+        return self._rows
+
+
+class TestDiscovery:
+    async def test_lists_the_wearers_gateway_sessions(self) -> None:
+        r = roster(work=ListingAgent([
+            {"key": "agent:hermes:x1", "label": "deploy pipeline", "sessionId": "s1"},
+            {"key": "agent:hermes:x2", "label": "", "sessionId": "s2"},
+        ]), hermes=FakeAgent())
+        view = await r.discover()
+        assert "deploy pipeline" in view
+        assert "agent:hermes:x2" in view   # unlabeled rows show their key
+
+    async def test_no_enumeration_lane_is_a_plain_answer(self) -> None:
+        r = roster(hermes=FakeAgent())     # brainstorm-style lane only
+        assert "No terminal lane" in await r.discover()
+
+    async def test_listing_failure_names_the_reason(self) -> None:
+        r = roster(work=ListingAgent(fail="scope missing"))
+        assert "scope missing" in await r.discover()
+
+    async def test_grammar_routes_discovery(self) -> None:
+        c = AgentTerminalCommands(roster(work=ListingAgent(
+            [{"key": "agent:hermes:x1", "label": "nightly build", "sessionId": "s"}])))
+        view = await c.handle_command("terminal discover")
+        assert view is not None and "nightly build" in view

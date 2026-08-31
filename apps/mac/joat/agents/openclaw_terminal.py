@@ -534,6 +534,41 @@ class OpenClawAgentTerminal:
                 "OpenClaw Agent Terminal session is not isolated from delivery routes"
             )
 
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]:
+        """Enumerate the wearer's OWN gateway sessions — roster lanes only.
+
+        The policy layer admits sessions.list in this shape only for a
+        roster lane (agentId pinned, limit 1..20, involvingMe required), so
+        on any other lane this raises before a byte leaves the Mac. Rows
+        are sanitized to the three fields the roster shows; anything
+        malformed is skipped rather than guessed at.
+        """
+        listed = _record(await self.connection.request(
+            "sessions.list",
+            {"agentId": self.agent_id, "limit": limit, "involvingMe": True},
+        ))
+        raw_sessions = listed.get("sessions") if listed else None
+        if not isinstance(raw_sessions, list):
+            raise OpenClawGatewayError(
+                "OpenClaw returned an invalid session listing"
+            )
+        rows: list[dict[str, str]] = []
+        for raw in raw_sessions:
+            record = _record(raw)
+            if record is None:
+                continue
+            key = record.get("key")
+            label = record.get("label")
+            session_id = record.get("sessionId")
+            if not isinstance(key, str) or not key:
+                continue
+            rows.append({
+                "key": key,
+                "label": label if isinstance(label, str) else "",
+                "sessionId": session_id if isinstance(session_id, str) else "",
+            })
+        return rows
+
     async def resolve_approval(
         self, approval_id: str, kind: str, decision: str
     ) -> str | None:
