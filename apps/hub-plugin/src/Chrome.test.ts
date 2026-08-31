@@ -75,6 +75,21 @@ describe('Chrome', () => {
     }
   });
 
+  it('reserves the battery slot before truncating a long Mac status', () => {
+    const hud = realPresenter();
+    const chrome = new Chrome(hud);
+    chrome.setBattery(100, false);
+    chrome.setLink('connected');
+    chrome.setMacState('brainstorm connection test preparing reconnect');
+    chrome.start();
+    chrome.stop();
+
+    const content = wrote(ContainerId.StatusBar).pop()!.content!;
+    expect(content).toContain('JOAT brainstorm');
+    expect(content).toMatch(/\sbat 100%$/);
+    expect(content.length).toBeLessThanOrEqual(46);
+  });
+
   it('reports the LINK before the mic — a wearer whose brain is gone needs that first', () => {
     const hud = realPresenter();
     const chrome = new Chrome(hud);

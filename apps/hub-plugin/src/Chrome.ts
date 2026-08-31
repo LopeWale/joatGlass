@@ -16,6 +16,11 @@ import type { LinkState } from './MacLink';
  * updating through a Mac outage — which is the whole point.
  */
 const HINT = 'left x2: menu · long-press: mic · \u201cJOAT \u2026\u201d';
+// The visual renderer centers this text between a fixed clock and microphone
+// region.  Thirty source characters become at most a 32-character rendered
+// state after its JOAT separator, which leaves the microphone/battery chrome
+// clear on the 576px optics.
+const STATUS_STATE_MAX_CHARS = 30;
 
 export class Chrome {
   private timer?: ReturnType<typeof setInterval>;
@@ -97,13 +102,24 @@ export class Chrome {
     const right = this.battery !== undefined
       ? `bat ${this.battery}%${this.charging ? '+' : ''}`
       : '';
-    // ~46 chars at the status font: pad the middle so the three slots sit
-    // left / centre / right without depending on flexbox we do not have.
-    const middle = this.state();
-    const pad = Math.max(1, 46 - left.length - middle.length - right.length);
-    const half = Math.floor(pad / 2);
-    const line = left + ' '.repeat(half) + middle + ' '.repeat(pad - half) + right;
-    await this.hud.showText(line.slice(0, 46), ContainerId.StatusBar);
+    // The status wire format is limited to 46 characters, but `slice()` at
+    // the end used to cut the battery suffix off first. The visual renderer
+    // then mistook the partial `bat 10` as state text and centered it through
+    // the microphone icon. Reserve stable chrome first; truncate only the
+    // semantic state that can safely be shortened.
+    const middleBudget = Math.max(
+      0,
+      Math.min(
+        STATUS_STATE_MAX_CHARS,
+        46 - left.length - 1 - (right ? right.length + 1 : 0),
+      ),
+    );
+    const state = this.state();
+    const middle = state.length <= middleBudget
+      ? state
+      : `${state.slice(0, Math.max(0, middleBudget - 1)).trimEnd()}…`;
+    const line = right ? `${left} ${middle} ${right}` : `${left} ${middle}`;
+    await this.hud.showText(line, ContainerId.StatusBar);
     await this.hud.showText(HINT, ContainerId.Hint);
   }
 }
