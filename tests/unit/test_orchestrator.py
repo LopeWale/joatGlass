@@ -288,6 +288,37 @@ class HeldTopicSession(Session):
 
 
 class TestGlassesFirstTopicCapture:
+    async def test_addressed_glasses_voice_starts_brainstorm_without_opening_a_menu(self) -> None:
+        """The everyday path is voice on the glasses, not Mac-side setup."""
+        transport = FrameTransport()
+        engine = FakeEngine("JOAT, brainstorm compare home Mini options")
+        entered = asyncio.Event()
+        topics: list[str] = []
+        sessions = SessionManager(
+            HudWriter(transport),
+            lambda topic: topics.append(topic) or HeldTopicSession(entered),
+            brainstorm_available=lambda: True,
+        )
+        replier = FakeReplier()
+        orchestrator = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            sessions=sessions,
+            replier=replier,
+            wake_words=("joat",),
+        )
+        orchestrator.attach()
+        assert transport.frame_cb is not None
+
+        for sequence, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.emit_frame(pcm, sequence, "glasses")
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        assert topics == ["compare home Mini options"]
+        assert replier.asked == []
+        await sessions.close(timeout_s=0.1)
+
     async def test_tapped_capture_consumes_glasses_speech_before_the_wake_word_gate(self) -> None:
         transport = FrameTransport()
         engine = FakeEngine("compare a home mini with this laptop")
