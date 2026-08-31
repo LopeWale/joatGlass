@@ -127,15 +127,19 @@ class MessageReplyController:
         command = text.strip()
         match = _REPLY.match(command)
         compose_match = _NEW_MESSAGE.match(command) if match is None else None
-        if self._compose is not None:
-            if compose_match is not None:
-                return await self._handle_new_message(compose_match)
-            return await self._handle_compose_turn(command)
-        if match is None and compose_match is None:
-            return None
         if self._draft_lock.locked():
             return "A message reply is already awaiting confirmation."
         async with self._draft_lock:
+            # A compose selection accepts natural recipient/body turns, so it
+            # must use the same single-flight boundary as a selected-thread
+            # reply. Otherwise a duplicate speech event can race through a
+            # selected recipient and open a second confirmation/send.
+            if self._compose is not None:
+                if compose_match is not None:
+                    return await self._handle_new_message(compose_match)
+                return await self._handle_compose_turn(command)
+            if match is None and compose_match is None:
+                return None
             if match is not None:
                 return await self._handle_reply(match)
             assert compose_match is not None
