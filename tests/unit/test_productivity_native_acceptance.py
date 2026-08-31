@@ -375,6 +375,9 @@ def test_engine_stub_is_private_pid_bound_bridge_proxy(
     assert "JOAT_NATIVE_BRIDGE" in source
     assert "AUTHORIZED_CLIENT_PID = 4242" in source
     assert "LOCAL_PEERPID = 0x002" in source
+    assert "prior_umask = os.umask(0o177)" in source
+    assert "listener.bind(PROXY_PATH)" in source
+    assert "asyncio.start_unix_server(handle, sock=listener)" in source
     assert stub.bridge_path == stub.repo / "acceptance-native-bridge.sock"
 
 
