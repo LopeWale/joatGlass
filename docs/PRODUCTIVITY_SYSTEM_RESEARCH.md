@@ -87,10 +87,12 @@ press to return earlier). Reminder `SAVED` passes through a separate
 `MONITORING` surface; `DUE` and `COMPLETED` are also explicit, content-safe HUD
 states.
 
-The official simulator has driven this full 34-transition fixture-backed path:
+The official simulator has driven this full 47-screen fixture-backed path:
 month/week/day/detail; Calendar review, verifying, saved, failed, check,
-cancelled and not-saved; and Reminder review, verifying, saved, monitoring,
-due, completion review, completed, failed, check, cancelled and not-saved. It
+cancelled and not-saved, with the anchored Planning return after every terminal
+outcome; and Reminder review, verifying, saved, monitoring, due, completion
+review, completed, failed, check, cancelled and not-saved, again with every
+safe anchored return. It
 exercises the actual Hub renderer, Mac-to-Hub transport and action routing, but
 does **not** read a person's EventKit data, prove a native OS banner, or prove a
 physical G2 gesture. Those remain separate acceptance levels.

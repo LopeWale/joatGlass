@@ -240,23 +240,28 @@ generation first, complete four-tile paint second, row activation last.
 +----------------------------------------------+  status spine
 |09:47 JOAT ready                     bat 86%  |
 +----------------------------------------------+
-|CONFIRM ACTION                                |
+|Calendar review                               |
++----------------------------------------------+
+|Create event “Design review”? Work · Sep 1    |
+|at 09:30 · 45m · America/Chicago              |
 |                                              |
-|Send the prepared message to Dele?            |
-+----------------------------------------------+
-|   [ TAP · Confirm ]   [ SWIPE · Cancel ]     |
-+----------------------------------------------+
-|8 seconds · timeout cancels                   |
+|        TAP · Confirm       SWIPE · Cancel    |
+|                                              |
+|==============================================|
+|                                 8s remaining |
 +----------------------------------------------+  y=288
 ```
 
 `RULES.md:15` makes this the highest-stakes surface on the device. The question
 is the only full-intensity content; outcomes are explicit but visually
-secondary. Ordinary content is deferred. A single press on either built-in G2
-temple confirms, while a swipe in either direction cancels. An optional R1
-press remains compatible but is deliberately not advertised or required;
-eight seconds without input refuses. The gate then restores the interrupted
-Overview, Sidebar, or focus page.
+secondary. The review uses the same flat, left-aligned reading axis as
+Planning, Navigation, and Messages. It has no outer rounded card, no action
+box, and no faux button divider; the header divider and countdown line are
+semantic orientation marks. Ordinary content is deferred. A single press on
+either built-in G2 temple confirms, while a swipe in either direction cancels.
+An optional R1 press remains compatible but is deliberately not advertised or
+required; eight seconds without input refuses. The gate then restores the
+interrupted Overview, Sidebar, or focus page.
 
 ### FULL-FOCUS PAGE — destination after Sidebar selection
 
@@ -291,6 +296,32 @@ buffered until return. Notifications, Calendar, Tasks, QuickNotes, and Activity
 rows now open deterministic read-only detail states. Setup, empty, detail, and
 write-lifecycle pages do not draw a selected outline or advertise a nonexistent
 tap action.
+
+### PLANNING — one nested Calendar and Reminders hierarchy
+
+`Planning` is the only first-level productivity destination. It re-queries
+both EventKit stores at every scope and never presents stale independent
+Calendar and Tasks silos:
+
+```text
+Planning month — Monday-first 6 × 7 grid with E#/R# counts
+  swipe: move selected week · tap: open selected week
+Planning week — seven day rows with event/reminder counts
+  swipe: move selected day · tap: open selected day
+Planning day — one time-ordered mix of EVENT and REMINDER rows
+  swipe: move selected item · tap: open read-only detail
+Planning detail
+  left x2: return to Planning
+```
+
+Terminal Calendar and Reminder receipts return to the confirmed or native-
+read-back day after five readable seconds. A verified Reminder create first
+shows `SAVED` for five seconds and `MONITORING` for five seconds, then returns.
+A left-temple double press returns immediately from either state. Successful
+creates appear in that mixed day, definite failures and refusals do not, and a
+successfully completed Reminder disappears. When a Reminder completion is
+uncertain or its native due instant cannot be proven, JOAT returns to generic
+Planning rather than displaying a possibly wrong day.
 
 ### Gesture map — original exploration
 
