@@ -14,6 +14,10 @@ then restores the exact prior repo preference and relaunches normal operation.
 EventKit permission prompts remain UI only: if Calendar or Reminders is not at
 full access, this exits before any native write and tells the operator to use
 the app's Connect buttons.
+
+``--preflight-only`` performs no EventKit mutation, but it is not a passive
+live-runtime probe: it briefly restarts JOAT.app under the same PID-bound relay
+and restores the exact prior engine preference before reporting readiness.
 """
 
 from __future__ import annotations
@@ -61,6 +65,7 @@ from joat.services.task_monitor import (
 log = logging.getLogger("joat.simulator_productivity_native_acceptance")
 
 RECEIPT_SCHEMA = "joat.native-productivity-acceptance.v5"
+PREFLIGHT_RECEIPT_SCHEMA = "joat.native-productivity-preflight.v1"
 TITLE_PREFIX = "JOAT ACCEPTANCE"
 EVENT_TITLE_SUFFIX = "EVENT"
 REMINDER_TITLE_SUFFIX = "REMINDER"
@@ -184,12 +189,12 @@ class AlarmDeliveryEvidence:
 class WatcherSweepStatus:
     """Content-free counters from the Mac Accessibility watcher.
 
-    The companion Swift writer emits a strict fixed schema.  This model
-    intentionally omits its timestamp and every notification field, so the
-    retained acceptance receipt can explain the health of the observer without
-    becoming another notification-text store.
+    The companion Swift writer emits a strict fixed schema. The timestamp is
+    content-free and retained so readiness cannot be inferred from stale
+    counters; every notification field remains intentionally excluded.
     """
 
+    observed_at_unix_ms: int
     state: str
     sweep_count: int
     banner_elements_seen: int
@@ -298,16 +303,64 @@ def _read_repo_preference(bundle_id: str) -> DefaultsPreference:
     )
 
 
+def _process_start_identity(pid: int) -> str:
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AcceptanceSafetyError("acceptance client identity could not be read") from exc
+    identity = completed.stdout.strip()
+    if completed.returncode != 0 or not identity or "\n" in identity or "\r" in identity:
+        raise AcceptanceSafetyError("acceptance client identity was unavailable")
+    return identity
+
+
+def _self_audit_token() -> bytes:
+    """Read this process's kernel audit token through a private socketpair."""
+
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        token = left.getsockopt(0, 0x006, 32)  # SOL_LOCAL / LOCAL_PEERTOKEN
+    except OSError as exc:
+        raise AcceptanceSafetyError("acceptance client audit token was unavailable") from exc
+    finally:
+        left.close()
+        right.close()
+    if len(token) != 32:
+        raise AcceptanceSafetyError("acceptance client audit token had an invalid size")
+    return token
+
+
 def create_engine_stub_repo(
     parent: Path,
     *,
     authorized_client_pid: int,
+    authorized_client_start: str | None = None,
+    authorized_client_token: bytes | None = None,
     proxy_root: Path | None = None,
 ) -> EngineStubSpec:
     """Create a PID-bound relay owned by the exact app-authorized engine child."""
 
     if authorized_client_pid <= 0:
         raise AcceptanceSafetyError("acceptance bridge client PID must be positive")
+    client_start = authorized_client_start or _process_start_identity(authorized_client_pid)
+    if not client_start or "\n" in client_start or "\r" in client_start:
+        raise AcceptanceSafetyError("acceptance client start identity was invalid")
+    if authorized_client_token is None:
+        if authorized_client_pid != os.getpid():
+            raise AcceptanceSafetyError(
+                "a non-self acceptance client requires an explicit kernel audit token"
+            )
+        client_token = _self_audit_token()
+    else:
+        client_token = authorized_client_token
+    if len(client_token) != 32:
+        raise AcceptanceSafetyError("acceptance client audit token had an invalid size")
     repo = parent / "native-bridge-only-repo"
     bridge_path = (proxy_root or repo) / ACCEPTANCE_BRIDGE_NAME
     executable = repo / ".venv/bin/python"
@@ -320,10 +373,14 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 
 SOL_LOCAL = 0
 LOCAL_PEERPID = 0x002
+LOCAL_PEERTOKEN = 0x006
 AUTHORIZED_CLIENT_PID = {authorized_client_pid}
+AUTHORIZED_CLIENT_START = {client_start!r}
+AUTHORIZED_CLIENT_TOKEN = bytes.fromhex({client_token.hex()!r})
 PROXY_PATH = {str(bridge_path)!r}
 
 
@@ -333,6 +390,13 @@ def peer_pid(writer):
         return None
     raw = sock.getsockopt(SOL_LOCAL, LOCAL_PEERPID, struct.calcsize("i"))
     return struct.unpack("i", raw)[0]
+
+
+def peer_token(writer):
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return None
+    return sock.getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN, len(AUTHORIZED_CLIENT_TOKEN))
 
 
 async def relay(reader, writer):
@@ -353,9 +417,28 @@ async def relay(reader, writer):
             pass
 
 
+def process_identity_matches(pid):
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == AUTHORIZED_CLIENT_START
+
+
 async def handle(client_reader, client_writer):
     try:
-        if peer_pid(client_writer) != AUTHORIZED_CLIENT_PID:
+        pid = peer_pid(client_writer)
+        if (
+            pid != AUTHORIZED_CLIENT_PID
+            or peer_token(client_writer) != AUTHORIZED_CLIENT_TOKEN
+            or not process_identity_matches(pid)
+        ):
             client_writer.close()
             await client_writer.wait_closed()
             return
@@ -377,6 +460,12 @@ async def handle(client_reader, client_writer):
             pass
 
 
+async def watch_authorized_client(stopped):
+    while process_identity_matches(AUTHORIZED_CLIENT_PID):
+        await asyncio.sleep(0.2)
+    stopped.set()
+
+
 async def main():
     try:
         info = os.lstat(PROXY_PATH)
@@ -386,34 +475,48 @@ async def main():
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
             raise SystemExit(65)
         os.unlink(PROXY_PATH)
-    # asyncio's path= form binds with the process umask and only then returns,
-    # leaving a brief world-readable pathname before a follow-up chmod. Bind
-    # the listener ourselves under a restrictive umask so the first observable
-    # directory entry is already owner-only.
+    # Bind a private pending pathname, set its final mode, and only then publish
+    # it atomically. Some Darwin versions expose a newly bound AF_UNIX path as
+    # 0755 regardless of umask, so bind-then-chmod on the public pathname has a
+    # small observable race even inside the owner-only parent directory.
+    pending_path = f"{{PROXY_PATH}}.pending-{{os.getpid()}}"
+    try:
+        pending_info = os.lstat(pending_path)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(pending_info.st_mode) or pending_info.st_uid != os.geteuid():
+            raise SystemExit(65)
+        os.unlink(pending_path)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     prior_umask = os.umask(0o177)
     try:
-        listener.bind(PROXY_PATH)
+        listener.bind(pending_path)
     finally:
         os.umask(prior_umask)
+    os.chmod(pending_path, 0o600)
+    os.replace(pending_path, PROXY_PATH)
     listener.listen()
     listener.setblocking(False)
     server = await asyncio.start_unix_server(handle, sock=listener)
-    os.chmod(PROXY_PATH, 0o600)
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stopped.set)
+    watchdog = asyncio.create_task(watch_authorized_client(stopped))
     try:
         async with server:
             await stopped.wait()
     finally:
+        watchdog.cancel()
+        await asyncio.gather(watchdog, return_exceptions=True)
         server.close()
         await server.wait_closed()
-        try:
-            os.unlink(PROXY_PATH)
-        except FileNotFoundError:
-            pass
+        for path in (PROXY_PATH, pending_path):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
 
 asyncio.run(main())
@@ -477,6 +580,19 @@ def _owned_private_socket(path: Path) -> bool:
     return (
         not path.is_symlink()
         and stat.S_ISSOCK(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and info.st_mode & 0o077 == 0
+    )
+
+
+def _owned_private_regular_file(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        not path.is_symlink()
+        and stat.S_ISREG(info.st_mode)
         and info.st_uid == os.geteuid()
         and info.st_mode & 0o077 == 0
     )
@@ -1101,6 +1217,7 @@ def read_watcher_sweep_status(path: Path) -> WatcherSweepStatus | None:
     ):
         return None
     return WatcherSweepStatus(
+        observed_at_unix_ms=int(value["observed_at_unix_ms"]),
         state=state,
         sweep_count=int(value["sweep_count"]),
         banner_elements_seen=int(value["banner_elements_seen"]),
@@ -1990,7 +2107,183 @@ async def _run_due_monitor_at_native_due(
     )
 
 
+async def run_native_preflight(args: argparse.Namespace) -> tuple[int, Path]:
+    """Verify the app-owned native acceptance boundary without EventKit writes."""
+
+    include_reminder = not args.calendar_only
+    run_ref = uuid.uuid4().hex[:12]
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    evidence_dir = args.evidence_root / f"{stamp}-preflight-{run_ref}"
+    evidence_dir.mkdir(parents=True, mode=0o700)
+    os.chmod(evidence_dir, 0o700)
+    receipt_path = evidence_dir / "preflight-receipt.json"
+    receipt: dict[str, Any] = {
+        "schema": PREFLIGHT_RECEIPT_SCHEMA,
+        "run_ref": _digest(run_ref)[:12],
+        "started_at_unix_ms": int(time.time() * 1_000),
+        "result": "running",
+        "scenario": "calendar_and_reminder" if include_reminder else "calendar_only",
+        "eventkit_mutations_attempted": False,
+        "permissions": {},
+        "notification_watcher": {
+            "required": include_reminder,
+            "mutated_settings": False,
+        },
+        "mac_app_isolation": {
+            "pid_bound_bridge_proxy": True,
+            "temporary_engine_transition_required": True,
+            "repo_preference_restored": False,
+        },
+        "blockers": [],
+    }
+    write_private_receipt(receipt_path, receipt)
+
+    temp_context = tempfile.TemporaryDirectory(prefix="joat-preflight-", dir="/tmp")
+    temp_dir = Path(temp_context.name)
+    stub = create_engine_stub_repo(
+        evidence_dir,
+        authorized_client_pid=os.getpid(),
+        proxy_root=temp_dir,
+    )
+    app_lease = MacAppNativeBridgeLease(
+        app_path=args.app,
+        bundle_id=args.app_bundle_id,
+        bridge_path=args.bridge,
+        gateway_port=args.ws_port,
+        stub=stub,
+        recovery_guard=args.recovery_guard,
+    )
+    exit_code = 1
+    try:
+        if include_reminder:
+            notification_condition = evaluate_notification_preflight(
+                args.notification_mode,
+                diagnostic_focus_active=_read_focus_diagnostic(),
+            )
+            receipt["notification_watcher"].update({
+                "operator_condition": asdict(notification_condition),
+            })
+
+        await app_lease.enter()
+        async with NativeBridgeClient(stub.bridge_path) as bridge:
+            authorization = await bridge.call("authorization.status")
+        receipt["permissions"] = {
+            "calendar": authorization.authorization.calendar,
+            "reminders": authorization.authorization.reminders,
+            "request_surface": "JOAT.app UI only",
+            "request_performed_this_run": False,
+        }
+        if authorization.authorization.calendar != "fullAccess" or (
+            include_reminder
+            and authorization.authorization.reminders != "fullAccess"
+        ):
+            raise AcceptanceBlocked(
+                "tcc_full_access_required",
+                "required EventKit full access is not available to JOAT.app",
+            )
+
+        if include_reminder:
+            if not _owned_private_regular_file(args.notification_feed):
+                raise AcceptanceBlocked(
+                    "notification_feed_unavailable",
+                    "the owner-only JOAT notification feed is unavailable",
+                )
+            if not _owned_private_regular_file(args.notification_heartbeat):
+                raise AcceptanceBlocked(
+                    "notification_watcher_unavailable",
+                    "the owner-only JOAT notification watcher heartbeat is unavailable",
+                )
+            heartbeat_age = time.time() - args.notification_heartbeat.stat().st_mtime
+            if heartbeat_age < 0 or heartbeat_age > 5:
+                raise AcceptanceBlocked(
+                    "notification_watcher_stale",
+                    "the JOAT notification watcher heartbeat is stale",
+                )
+            watcher_status = read_watcher_sweep_status(args.notification_status)
+            if watcher_status is None:
+                raise AcceptanceBlocked(
+                    "notification_watcher_status_unavailable",
+                    "the content-free JOAT notification watcher status is unavailable",
+                )
+            now_unix_ms = int(time.time() * 1_000)
+            status_age_ms = now_unix_ms - watcher_status.observed_at_unix_ms
+            heartbeat_status_skew_ms = abs(
+                int(args.notification_heartbeat.stat().st_mtime * 1_000)
+                - watcher_status.observed_at_unix_ms
+            )
+            if status_age_ms < 0 or status_age_ms > 5_000 or heartbeat_status_skew_ms > 2_000:
+                raise AcceptanceBlocked(
+                    "notification_watcher_status_stale",
+                    "the content-free watcher status is stale or does not match the heartbeat",
+                )
+            receipt["notification_watcher"].update({
+                "heartbeat_fresh": True,
+                "status_fresh": True,
+                "heartbeat_status_correlated": True,
+                "status": asdict(watcher_status),
+            })
+            if watcher_status.state != "swept":
+                raise AcceptanceBlocked(
+                    f"notification_watcher_{watcher_status.state}",
+                    "the notification watcher is not ready to observe a banner",
+                )
+        else:
+            receipt["notification_watcher"].update({"not_applicable": True})
+
+        receipt["result"] = "ready"
+        exit_code = 0
+    except AcceptanceBlocked as exc:
+        receipt["result"] = "blocked"
+        receipt["blockers"].append({"code": exc.code, "message": str(exc)})
+        exit_code = 2
+    except (AcceptanceFailed, AcceptanceSafetyError) as exc:
+        receipt["result"] = "failed"
+        receipt["blockers"].append(
+            {"code": getattr(exc, "code", "safety_failure"), "message": str(exc)}
+        )
+        exit_code = 1
+    except asyncio.CancelledError:
+        mark_interrupted(receipt)
+        exit_code = 2
+    except Exception as exc:
+        receipt["result"] = "failed"
+        receipt["blockers"].append(
+            {"code": "unexpected_failure", "message": type(exc).__name__}
+        )
+        log.exception("native productivity preflight failed unexpectedly")
+        exit_code = 1
+    finally:
+        restore_error: str | None = None
+        try:
+            await app_lease.restore()
+            receipt["mac_app_isolation"]["repo_preference_restored"] = app_lease.restored
+        except Exception as exc:
+            restore_error = f"mac_app_restore_{type(exc).__name__}"
+            log.exception("failed to restore normal JOAT.app engine operation")
+        if app_lease.restored or not app_lease.preference_changed:
+            if (
+                app_lease.stub_repo.name == "native-bridge-only-repo"
+                and app_lease.stub_repo.parent == evidence_dir
+            ):
+                shutil.rmtree(app_lease.stub_repo, ignore_errors=True)
+            else:
+                restore_error = "mac_app_stub_cleanup_scope_invalid"
+        temp_context.cleanup()
+        if restore_error is not None:
+            receipt["blockers"].append({
+                "code": restore_error,
+                "message": "normal JOAT.app operation was not restored",
+            })
+            receipt["result"] = "blocked"
+            exit_code = 2
+        receipt["completed_at_unix_ms"] = int(time.time() * 1_000)
+        write_private_receipt(receipt_path, receipt)
+    return exit_code, receipt_path
+
+
 async def run(args: argparse.Namespace) -> tuple[int, Path]:
+    if getattr(args, "preflight_only", False):
+        return await run_native_preflight(args)
     try:
         zone = ZoneInfo(args.zone)
     except ZoneInfoNotFoundError as exc:
@@ -2753,6 +3046,15 @@ def _parser() -> argparse.ArgumentParser:
         "--calendar-only",
         action="store_true",
         help="exercise Calendar create/read-back/cleanup without creating a Reminder",
+    )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help=(
+            "verify app-owned EventKit authorization and content-free notification "
+            "watcher readiness without creating, changing, or deleting native items; "
+            "temporarily restarts JOAT.app and restores its prior engine"
+        ),
     )
     return parser
 
