@@ -23,8 +23,11 @@ from .openclaw_gateway import (
     AGENT_TERMINAL_AGENT_ID,
     AgentTerminalPolicy,
     BRAINSTORM_TERMINAL_POLICY,
+    DeviceIdentity,
+    DeviceTokenStore,
     GatewayProfile,
     OpenClawConnectionClosed,
+    OpenClawGatewayClient,
     OpenClawGatewayError,
 )
 from .openclaw_terminal import (
@@ -103,6 +106,42 @@ class OpenClawRuntimeConfig:
 
 class OpenClawConnectionFactory(Protocol):
     async def connect(self) -> AgentTerminalConnection: ...
+
+
+class OpenClawCredentials(DeviceIdentity, DeviceTokenStore, Protocol):
+    """The paired device identity and its Keychain-backed token boundary."""
+
+
+def make_brainstorm_terminal_agent(
+    *,
+    profile: GatewayProfile,
+    credentials: OpenClawCredentials,
+    agent_id: str,
+    state_changed: Callable[[str, str], None] | None = None,
+) -> OpenClawTerminalAgent:
+    """Build the write terminal plus its separately scoped proof client."""
+    terminal_client = OpenClawGatewayClient(
+        profile=profile,
+        identity=credentials,
+        token_store=credentials,
+        scopes=("operator.read", "operator.write"),
+        capabilities=("tool-events",),
+        policy=BRAINSTORM_TERMINAL_POLICY,
+    )
+    attestation_client = OpenClawGatewayClient(
+        profile=profile,
+        identity=credentials,
+        token_store=credentials,
+        scopes=("operator.read",),
+        policy=BRAINSTORM_TERMINAL_POLICY,
+    )
+    return OpenClawTerminalAgent(
+        client=terminal_client,
+        attestation_client=attestation_client,
+        agent_id=agent_id,
+        policy=BRAINSTORM_TERMINAL_POLICY,
+        state_changed=state_changed,
+    )
 
 
 @dataclass(slots=True)

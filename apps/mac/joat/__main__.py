@@ -37,6 +37,7 @@ from .agents.openclaw_gateway import (
 )
 from .agents.openclaw_native import NativeOpenClawCredentials
 from .agents.openclaw_runtime import (
+    make_brainstorm_terminal_agent,
     OpenClawRuntimeConfig,
     OpenClawTerminalAgent,
     terminal_ready_activity,
@@ -481,26 +482,10 @@ async def main() -> None:
                     bridge=personal_data,
                     profile=openclaw_config.profile,
                 )
-                gateway_client = OpenClawGatewayClient(
+                candidate = make_brainstorm_terminal_agent(
                     profile=openclaw_config.profile,
-                    identity=credentials,
-                    token_store=credentials,
-                    scopes=requested_scopes,
-                    capabilities=("tool-events",),
-                    policy=BRAINSTORM_TERMINAL_POLICY,
-                )
-                attestation_client = OpenClawGatewayClient(
-                    profile=openclaw_config.profile,
-                    identity=credentials,
-                    token_store=credentials,
-                    scopes=("operator.read",),
-                    policy=BRAINSTORM_TERMINAL_POLICY,
-                )
-                candidate = OpenClawTerminalAgent(
-                    client=gateway_client,
+                    credentials=credentials,
                     agent_id=openclaw_config.agent_id,
-                    attestation_client=attestation_client,
-                    policy=BRAINSTORM_TERMINAL_POLICY,
                     state_changed=publish_terminal_state,
                 )
                 openclaw_retry_candidate = candidate

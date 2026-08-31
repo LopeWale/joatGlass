@@ -12,6 +12,7 @@ from joat.agents.openclaw_gateway import (
     OpenClawGatewayError,
 )
 from joat.agents.openclaw_runtime import (
+    make_brainstorm_terminal_agent,
     OpenClawHistoryRecovery,
     OpenClawRuntimeConfig,
     OpenClawTerminalAgent,
@@ -104,6 +105,54 @@ def test_terminal_ready_activity_distinguishes_first_setup_from_re_attestation()
     assert terminal_ready_activity(reverified=True) == (
         "Dedicated no-tool session re-verified. Tap to begin a Brainstorm."
     )
+
+
+def test_brainstorm_terminal_builds_distinct_write_and_read_only_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import joat.agents.openclaw_runtime as runtime
+    from joat.agents.openclaw_gateway import GatewayProfile
+
+    captured: list[dict[str, object]] = []
+
+    class RecordingGatewayClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    class Credentials:
+        device_id = "device-1"
+        public_key = "public-key"
+
+        async def sign(self, _payload: str) -> str:
+            return "signature"
+
+        async def load(self, *, device_id: str, role: str) -> object:
+            return None
+
+        async def store(
+            self,
+            *,
+            device_id: str,
+            role: str,
+            token: str,
+            scopes: tuple[str, ...],
+        ) -> None:
+            return None
+
+    monkeypatch.setattr(runtime, "OpenClawGatewayClient", RecordingGatewayClient)
+
+    agent = make_brainstorm_terminal_agent(
+        profile=GatewayProfile("wss://example.ts.net"),
+        credentials=Credentials(),
+        agent_id="hermes",
+    )
+
+    assert len(captured) == 2
+    assert captured[0]["scopes"] == ("operator.read", "operator.write")
+    assert captured[0]["capabilities"] == ("tool-events",)
+    assert captured[1]["scopes"] == ("operator.read",)
+    assert "capabilities" not in captured[1]
+    assert agent.attestation_client is not None
 
 
 class RuntimeConnection:
