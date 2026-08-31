@@ -141,7 +141,7 @@ function scrollDown() {
 
 async function openAndScrollTo(
   harness: ReturnType<typeof rig>,
-  label: 'Repeat' | 'Reconnect' | 'Settings',
+  label: 'Settings',
 ): Promise<void> {
   harness.fire(leftDoublePress());
   await vi.waitFor(() => expect(harness.sidebars).toHaveLength(1));
@@ -150,15 +150,14 @@ async function openAndScrollTo(
   for (let current = 0; current < index; current += 1) harness.fire(scrollDown());
 }
 
-describe('first-level G2 sidebar actions', () => {
-  it('routes Repeat through the existing Mac-held last-reply contract', async () => {
+describe('wearer G2 actions outside the capability list', () => {
+  it('keeps Repeat contextual and routes it through the Mac-held last-reply contract', async () => {
     const harness = rig();
     harness.link.connect();
     sockets[0]?.open();
     sockets[0]?.receive({ kind: 'auth.accepted' });
 
-    await openAndScrollTo(harness, 'Repeat');
-    harness.fire(rightPress());
+    harness.fire({ menuItemClickEvent: { itemID: 1 } } as EvenHubEvent);
 
     await vi.waitFor(() => expect(sockets[0]?.sent).toEqual([
       JSON.stringify({ kind: 'auth', token: null }),
@@ -167,17 +166,16 @@ describe('first-level G2 sidebar actions', () => {
         event: { containerName: 'sysmenu', selectedIndex: 1 },
       }),
     ]));
-    expect(harness.hud.showDefault).toHaveBeenCalledTimes(1);
+    expect(harness.sidebars).toEqual([]);
   });
 
-  it('routes Reconnect through the real link recovery entry point', async () => {
+  it('keeps Reconnect contextual and routes it through the real link recovery entry point', async () => {
     const harness = rig();
     harness.link.connect();
     sockets[0]?.open();
     sockets[0]?.receive({ kind: 'auth.accepted' });
 
-    await openAndScrollTo(harness, 'Reconnect');
-    harness.fire(rightPress());
+    harness.fire({ menuItemClickEvent: { itemID: 3 } } as EvenHubEvent);
 
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     expect(sockets[0]?.closed).toBe(true);
@@ -186,7 +184,7 @@ describe('first-level G2 sidebar actions', () => {
     expect(harness.link.linkState).toBe('connecting');
     sockets[1]?.receive({ kind: 'auth.accepted' });
     expect(harness.link.linkState).toBe('connected');
-    expect(harness.hud.showDefault).toHaveBeenCalledTimes(1);
+    expect(harness.sidebars).toEqual([]);
   });
 
   it('opens the persisted listening Settings surface and returns to the sidebar on left-double', async () => {
