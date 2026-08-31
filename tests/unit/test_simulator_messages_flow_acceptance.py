@@ -159,6 +159,21 @@ def test_messages_recovery_flow_requires_a_visible_retry_then_a_real_list() -> N
     driver.validate_recovery_flow(receipts)
 
 
+def test_messages_selection_recovery_requires_a_real_retry_after_a_dropped_detail_response() -> None:
+    driver = _driver()
+    assert driver is not None
+
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
+        driver.ScreenReceipt("messages-selection-pending", "down + click", "2" * 64),
+        driver.ScreenReceipt("messages-selection-retry", None, "3" * 64),
+        driver.ScreenReceipt("messages-conversations-recovered", "click", "1" * 64),
+    ]
+
+    driver.validate_selection_recovery_flow(receipts)
+
+
 def test_recovery_store_fails_once_then_delegates_to_the_real_fixture(tmp_path: Path) -> None:
     driver = _driver()
     assert driver is not None
@@ -229,6 +244,16 @@ def test_recovery_store_fails_once_then_delegates_to_the_real_fixture(tmp_path: 
                 "messages-conversations",
             ),
         ),
+        (
+            "selection_recovery",
+            (
+                "messages-sidebar",
+                "messages-conversations",
+                "messages-selection-pending",
+                "messages-selection-retry",
+                "messages-conversations-recovered",
+            ),
+        ),
     ],
 )
 def test_official_simulator_evidence_retains_every_required_rendered_frame(
@@ -249,6 +274,7 @@ def test_official_simulator_evidence_retains_every_required_rendered_frame(
         ("history", ("click", "down", "down", "click"), "down + down + click"),
         ("reader", ("click", "down", "down", "click"), "down + down + click"),
         ("recovery", ("click", "click"), "click"),
+        ("selection_recovery", ("click", "down", "click"), "down + click"),
     ],
 )
 def test_official_simulator_drives_each_visible_messages_selection_control(
