@@ -281,6 +281,30 @@ class TestMessageReplyController:
         assert second == "A message reply is already awaiting confirmation."
         assert sender.sent == [("+14055550123", "First")]
 
+    async def test_second_compose_body_cannot_open_while_confirmation_is_visible(self) -> None:
+        sender, confirm = FakeSender(), BlockingConfirm()
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            contact_search=FakeContacts([("Adele Vance", "+14055550177")]).search,
+        )
+        replies.begin_compose(trace_id="hud-compose-confirming")
+        assert await replies.handle_command("Adele") == (
+            "Recipient Adele Vance selected. Say the message."
+        )
+
+        first = asyncio.create_task(replies.handle_command("First"))
+        await confirm.started.wait()
+        second: str | None = None
+        try:
+            second = await asyncio.wait_for(replies.handle_command("Second"), timeout=0.05)
+        finally:
+            confirm.release.set()
+            await first
+
+        assert second == "A message reply is already awaiting confirmation."
+        assert sender.sent == [("+14055550177", "First")]
+
     async def test_sender_failure_is_visible_and_never_claims_sent(self) -> None:
         sender = FakeSender(MessageSendError(
             "Messages unavailable", possible_external_commit=False,
