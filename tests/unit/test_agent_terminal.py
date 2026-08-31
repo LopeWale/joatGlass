@@ -133,3 +133,75 @@ class TestSpokenGrammar:
         assert "cancelled" in (await c.handle_command("terminal cancel") or "")
         tail = await c.handle_command("terminal tail")
         assert tail is not None and "> do something slow" in tail
+
+
+class ApprovingAgent(FakeAgent):
+    """A work-lane fake: carries resolve_approval with a scripted receipt."""
+
+    def __init__(self, recorded: str | None = "deny") -> None:
+        super().__init__()
+        self.resolved: list[tuple[str, str, str]] = []
+        self._recorded = recorded
+
+    async def resolve_approval(self, approval_id: str, kind: str,
+                               decision: str) -> str | None:
+        self.resolved.append((approval_id, kind, decision))
+        return self._recorded if self._recorded is not None else None
+
+
+class TestApprovals:
+    async def test_an_approval_lands_in_the_roster_and_the_tail(self) -> None:
+        r = roster(work=ApprovingAgent())
+        r.note_approval("work", "appr-1", "exec", "rm -rf build/")
+        assert "1 approval(s) waiting" in r.overview()
+        assert "rm -rf build/" in r.tail()
+        assert "terminal approve" in r.tail()   # the tail tells you how to act
+
+    async def test_deny_reports_the_recorded_decision(self) -> None:
+        agent = ApprovingAgent(recorded="deny")
+        r = roster(work=agent)
+        r.note_approval("work", "appr-1", "exec", "rm -rf build/")
+        report = await r.decide("deny")
+        assert agent.resolved == [("appr-1", "exec", "deny")]
+        assert "recorded deny" in report
+        assert "0" not in r.overview() and "waiting" not in r.overview()
+
+    async def test_first_answer_wins_is_reported_honestly(self) -> None:
+        # The gateway records the FIRST answer; if another controller beat
+        # us, the wearer hears what was recorded, not what we sent.
+        r = roster(work=ApprovingAgent(recorded="approve"))
+        r.note_approval("work", "appr-1", "exec", "push to main")
+        report = await r.decide("deny")
+        assert "another controller answered first" in report
+        assert "recorded approve" in report
+
+    async def test_two_pending_approvals_require_a_number(self) -> None:
+        agent = ApprovingAgent()
+        r = roster(work=agent)
+        r.note_approval("work", "a1", "exec", "first")
+        r.note_approval("work", "a2", "web", "second")
+        report = await r.decide("approve")
+        assert "terminal approve 1" in report and agent.resolved == []
+        numbered = await r.decide("approve", 2)
+        assert agent.resolved == [("a2", "web", "approve")]
+        assert "second" in numbered
+
+    async def test_a_lane_without_the_approvals_surface_says_so(self) -> None:
+        r = roster(hermes=FakeAgent())   # brainstorm-style lane: no resolver
+        r.note_approval("hermes", "a1", "exec", "anything")
+        assert "cannot answer approvals" in await r.decide("approve")
+
+    async def test_grammar_routes_decisions_and_the_pending_list(self) -> None:
+        agent = ApprovingAgent(recorded="approve")
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r)
+        r.note_approval("work", "a1", "exec", "compile the kernel")
+        pending = await c.handle_command("terminal approvals")
+        assert pending is not None and "compile the kernel" in pending
+        report = await c.handle_command("terminal approve")
+        assert report is not None and "recorded approve" in report
+        # 'reject' is spoken language for deny
+        r.note_approval("work", "a2", "exec", "second thing")
+        agent2_report = await c.handle_command("terminal reject")
+        assert agent.resolved[-1][2] == "deny"
+        assert agent2_report is not None

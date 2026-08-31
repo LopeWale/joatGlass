@@ -34,6 +34,14 @@ class TerminalAgentLike(Protocol):
     def stream(self, prompt: str) -> AsyncIterator[str]: ...
 
 
+class ApprovalResolverLike(Protocol):
+    """The optional approvals surface (work lane only)."""
+
+    async def resolve_approval(
+        self, approval_id: str, kind: str, decision: str
+    ) -> str | None: ...
+
+
 @dataclass
 class TerminalLane:
     """One Hermes/OpenClaw session the wearer can address by name."""
@@ -47,6 +55,8 @@ class TerminalLane:
     store (the runtime, not JOAT, owns full history)."""
     task: asyncio.Task[None] | None = None
     last_error: str = ""
+    approvals: list[tuple[str, str, str]] = field(default_factory=list)
+    """Pending (id, kind, summary) — tool calls waiting on the wearer."""
 
     @property
     def busy(self) -> bool:
@@ -99,7 +109,9 @@ class AgentTerminalRoster:
         for lane in self._lanes.values():
             mark = "▸" if lane.name == self._focus else " "
             last = lane.tail[-1] if lane.tail else "—"
-            rows.append(f"{mark} {lane.name}: {lane.state} · {last}")
+            waiting = f" · {len(lane.approvals)} approval(s) waiting" \
+                if lane.approvals else ""
+            rows.append(f"{mark} {lane.name}: {lane.state}{waiting} · {last}")
         return "\n".join(rows)
 
     def focus(self, name: str) -> bool:
@@ -175,6 +187,76 @@ class AgentTerminalRoster:
             except Exception:  # a dead surface must not kill the work
                 pass
 
+    # ── approvals (T5) ───────────────────────────────────────────────────
+
+    def note_approval(self, lane_name: str, approval_id: str,
+                      kind: str, summary: str) -> None:
+        """A work session wants to run a tool; the wearer decides.
+
+        Called from the lane's on_approval callback (sync, event-loop
+        thread). Lands in the lane's list AND its tail, so 'terminal tail'
+        shows the request in context.
+        """
+        lane = self._lanes.get(lane_name)
+        if lane is None:
+            return
+        lane.approvals.append((approval_id, kind, summary))
+        line = f"[approval] {kind}: {summary or approval_id} — say 'terminal approve' or 'terminal deny'"
+        lane.tail.append(line)
+        if self._announce is not None and lane.name == self._focus:
+            asyncio.get_running_loop().create_task(self._narrate(lane, line))
+
+    def approvals_view(self) -> str:
+        lane = self._lanes.get(self._focus or "")
+        if lane is None:
+            return "No terminal session is focused."
+        if not lane.approvals:
+            return f"{lane.name}: nothing waiting for approval."
+        return "\n".join(
+            f"{i + 1}. [{kind}] {summary or approval_id}"
+            for i, (approval_id, kind, summary) in enumerate(lane.approvals)
+        )
+
+    async def decide(self, decision: str, index: int | None = None) -> str:
+        """Approve or deny a pending tool call — with the RECORDED receipt.
+
+        The gateway is first-answer-wins, so the report is what was
+        recorded, never merely what we sent. Denying and then speaking a
+        'terminal <instruction>' IS the documented alternative flow: deny
+        the original, steer the same session with the replacement.
+        """
+        lane = self._lanes.get(self._focus or "")
+        if lane is None:
+            return "No terminal session is focused."
+        if not lane.approvals:
+            return f"{lane.name}: nothing waiting for approval."
+        if index is None and len(lane.approvals) > 1:
+            return (f"{lane.name} has {len(lane.approvals)} waiting — say "
+                    f"'terminal {decision} 1' through "
+                    f"'terminal {decision} {len(lane.approvals)}'.")
+        position = (index or 1) - 1
+        if not 0 <= position < len(lane.approvals):
+            return f"{lane.name}: no approval number {index}."
+        resolver = getattr(lane.agent, "resolve_approval", None)
+        if resolver is None:
+            return f"{lane.name} cannot answer approvals."
+        approval_id, kind, summary = lane.approvals[position]
+        try:
+            recorded = await resolver(approval_id, kind, decision)
+        except Exception as exc:
+            lane.last_error = str(exc) or exc.__class__.__name__
+            return f"{lane.name}: approval failed — {lane.last_error}"
+        lane.approvals.pop(position)
+        label = summary or approval_id
+        if recorded is None:
+            return (f"{lane.name}: sent {decision} for '{label}' but the "
+                    "gateway gave no legible receipt.")
+        if recorded != decision:
+            return (f"{lane.name}: another controller answered first — "
+                    f"recorded {recorded} for '{label}'.")
+        lane.tail.append(f"[approval] {recorded}: {label}")
+        return f"{lane.name}: recorded {recorded} for '{label}'."
+
     async def cancel(self, name: str | None = None) -> str:
         """Cancel the (focused) lane's in-flight turn — T4's honest half.
 
@@ -201,6 +283,7 @@ class AgentTerminalRoster:
 # The word "terminal" is REQUIRED in every phrasing: an optional prefix
 # here once let plain "switch to decaf" get claimed by this grammar —
 # hijacked from the assistant and answered with a terminal error.
+_DECIDE = re.compile(r"^terminal (?P<decision>approve|deny|reject)(?: (?P<index>\d{1,2}))?$")
 _SWITCH = re.compile(
     r"^(?:terminal switch to|switch terminal to|switch the terminal to)"
     r" (?P<name>[a-z0-9 ]+)$"
@@ -234,6 +317,16 @@ class AgentTerminalCommands:
             return f"No terminal session called {name}. " + self._roster.overview()
         if said in ("terminal cancel", "terminal stop", "cancel the terminal"):
             return await self._roster.cancel()
+        if said in ("terminal approvals", "terminal pending"):
+            return self._roster.approvals_view()
+        decision_match = _DECIDE.match(said)
+        if decision_match is not None:
+            spoken = decision_match.group("decision")
+            index = decision_match.group("index")
+            return await self._roster.decide(
+                "approve" if spoken == "approve" else "deny",  # 'reject' → deny
+                int(index) if index else None,
+            )
         if said in ("terminal tail", "terminal output", "terminal history"):
             return self._roster.tail()
         if said.startswith("terminal "):

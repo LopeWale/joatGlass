@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import uuid4
@@ -37,6 +37,20 @@ REQUIRED_METHODS = frozenset(
     }
 )
 REQUIRED_EVENTS = frozenset({"agent", "chat", "session.message"})
+# The work lane additionally requires the documented approval surface
+# (docs.openclaw.ai/gateway/protocol): the session.approval event and the
+# approval.resolve RPC. Only a policy with allows_approvals asks for them.
+APPROVAL_EVENT = "session.approval"
+APPROVAL_METHODS = frozenset({"approval.resolve"})
+
+
+@dataclass(frozen=True, slots=True)
+class PendingApproval:
+    """One tool call a work session is waiting on the wearer to answer."""
+
+    approval_id: str
+    kind: str
+    summary: str
 AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SESSION_ROUTE_FIELDS = frozenset(
     {
@@ -112,6 +126,7 @@ class OpenClawAgentTerminal:
     session_id: str
     policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY
     recovery: AgentTerminalRecovery | None = None
+    on_approval: Callable[[PendingApproval], None] | None = None
 
     @classmethod
     async def create(
@@ -121,12 +136,15 @@ class OpenClawAgentTerminal:
         agent_id: str,
         policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY,
         recovery: AgentTerminalRecovery | None = None,
+        on_approval: Callable[[PendingApproval], None] | None = None,
     ) -> OpenClawAgentTerminal:
         if not AGENT_ID_PATTERN.fullmatch(agent_id):
             raise ValueError("OpenClaw Agent Terminal requires a valid dedicated agent ID")
         if agent_id != policy.agent_id:
             raise ValueError("OpenClaw Agent Terminal agent does not match its policy")
-        _assert_connection_contract(connection, require_write=True)
+        _assert_connection_contract(
+            connection, require_write=True, approvals=policy.allows_approvals
+        )
         listed = _record(await connection.request(
             "sessions.list",
             {
@@ -198,12 +216,18 @@ class OpenClawAgentTerminal:
             session_id=session_id,
             policy=policy,
             recovery=recovery,
+            on_approval=on_approval,
         )
         await terminal._assert_isolated_session()
         await terminal._assert_tools_disabled()
+        subscribe_params: dict[str, object] = {"key": session_key, "agentId": agent_id}
+        if policy.allows_approvals:
+            # The documented per-call opt-in; re-subscribing without the
+            # flag would silently drop approval delivery.
+            subscribe_params["includeApprovals"] = True
         subscribed = _record(await connection.request(
             "sessions.messages.subscribe",
-            {"key": session_key, "agentId": agent_id},
+            subscribe_params,
         ))
         if (
             subscribed is None
@@ -331,9 +355,18 @@ class OpenClawAgentTerminal:
                         or "tool" in event_name.lower()
                     )
                 ):
-                    raise OpenClawGatewayError(
-                        "OpenClaw attempted a blocked Agent Terminal capability"
-                    )
+                    if not self.policy.allows_approvals:
+                        raise OpenClawGatewayError(
+                            "OpenClaw attempted a blocked Agent Terminal capability"
+                        )
+                    # Work lane: tool traffic is the session doing its job.
+                    # An approval request is routed to the wearer; other
+                    # tool chatter is tolerated, never a violation.
+                    if event_name == APPROVAL_EVENT:
+                        approval = _parse_approval(payload)
+                        if approval is not None and self.on_approval is not None:
+                            self.on_approval(approval)
+                    continue
                 if event_name != "chat":
                     continue
                 if (
@@ -501,7 +534,28 @@ class OpenClawAgentTerminal:
                 "OpenClaw Agent Terminal session is not isolated from delivery routes"
             )
 
+    async def resolve_approval(
+        self, approval_id: str, kind: str, decision: str
+    ) -> str | None:
+        """Answer a pending approval; returns the RECORDED decision.
+
+        The gateway is first-answer-wins, so the canonical result may not
+        be ours — the caller reports what was recorded, never what it
+        merely sent. None means the gateway gave no legible receipt.
+        """
+        result = _record(await self.connection.request(
+            "approval.resolve",
+            {"id": approval_id, "kind": kind, "decision": decision},
+        ))
+        recorded = result.get("decision") if result else None
+        return recorded if isinstance(recorded, str) else None
+
     async def _assert_tools_disabled(self) -> None:
+        if self.policy.allows_approvals:
+            # A work session exists to run tools; what protects the wearer
+            # there is the approval gate, not tool absence. The Brainstorm
+            # and calendar lanes keep this preflight untouched.
+            return
         inventory = _record(await self.connection.request(
             "tools.effective",
             {"sessionKey": self.session_key, "agentId": self.agent_id},
@@ -532,6 +586,27 @@ class OpenClawAgentTerminal:
                 raise OpenClawToolsEnabled(
                     "OpenClaw Agent Terminal tools are enabled"
                 )
+
+
+def _parse_approval(payload: dict[str, object]) -> PendingApproval | None:
+    """A sanitized session.approval event → the wearer-facing record.
+
+    Tolerant on the summary (naming fields vary by tool kind); strict on
+    the id and kind, because those two are what approval.resolve replays.
+    """
+    approval_id = payload.get("id") or payload.get("approvalId")
+    kind = payload.get("kind")
+    if not isinstance(approval_id, str) or not approval_id:
+        return None
+    if not isinstance(kind, str) or not kind:
+        return None
+    summary = ""
+    for field_name in ("summary", "title", "description", "command"):
+        candidate = payload.get(field_name)
+        if isinstance(candidate, str) and candidate.strip():
+            summary = candidate.strip()[:200]
+            break
+    return PendingApproval(approval_id=approval_id, kind=kind, summary=summary)
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -572,6 +647,7 @@ def _assert_connection_contract(
     connection: AgentTerminalConnection,
     *,
     require_write: bool,
+    approvals: bool = False,
 ) -> None:
     """Require only the protocol surface and authority this operation uses."""
     required_methods = (
@@ -579,16 +655,23 @@ def _assert_connection_contract(
         if require_write
         else frozenset({"sessions.list", "sessions.describe", "tools.effective"})
     )
+    if approvals and require_write:
+        required_methods = required_methods | APPROVAL_METHODS
     if not required_methods.issubset(connection.advertised_methods):
         raise OpenClawGatewayError(
             "OpenClaw is missing required Agent Terminal methods"
         )
-    if require_write and not REQUIRED_EVENTS.issubset(connection.advertised_events):
+    required_events = REQUIRED_EVENTS
+    if approvals and require_write:
+        required_events = required_events | {APPROVAL_EVENT}
+    if require_write and not required_events.issubset(connection.advertised_events):
         raise OpenClawGatewayError(
             "OpenClaw is missing required Agent Terminal events"
         )
     expected_scopes = (
-        {"operator.read", "operator.write"}
+        {"operator.read", "operator.write", "operator.approvals"}
+        if require_write and approvals
+        else {"operator.read", "operator.write"}
         if require_write
         else {"operator.read"}
     )

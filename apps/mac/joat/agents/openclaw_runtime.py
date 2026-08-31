@@ -29,12 +29,14 @@ from .openclaw_gateway import (
     OpenClawConnectionClosed,
     OpenClawGatewayClient,
     OpenClawGatewayError,
+    WORK_TERMINAL_POLICY,
 )
 from .openclaw_terminal import (
     AgentTerminalConnection,
     OpenClawAgentTerminal,
     OpenClawToolInventoryUnsettled,
     OpenClawToolsEnabled,
+    PendingApproval,
     RecoveredRun,
 )
 
@@ -141,6 +143,47 @@ def make_brainstorm_terminal_agent(
         agent_id=agent_id,
         policy=BRAINSTORM_TERMINAL_POLICY,
         state_changed=state_changed,
+    )
+
+
+def make_work_terminal_agent(
+    *,
+    profile: GatewayProfile,
+    credentials: OpenClawCredentials,
+    agent_id: str,
+    state_changed: Callable[[str, str], None] | None = None,
+    on_approval: Callable[[PendingApproval], None] | None = None,
+) -> OpenClawTerminalAgent:
+    """The Agent Terminal work lane: approvals in, roster reads allowed.
+
+    Same shape as the Brainstorm factory — dedicated write client plus a
+    read-only proof client — with two differences that are the whole
+    point: WORK_TERMINAL_POLICY (allows_approvals, roster) and the
+    operator.approvals scope, which the validator only accepts riding on
+    read+write.
+    """
+    terminal_client = OpenClawGatewayClient(
+        profile=profile,
+        identity=credentials,
+        token_store=credentials,
+        scopes=("operator.read", "operator.write", "operator.approvals"),
+        capabilities=("tool-events",),
+        policy=WORK_TERMINAL_POLICY,
+    )
+    attestation_client = OpenClawGatewayClient(
+        profile=profile,
+        identity=credentials,
+        token_store=credentials,
+        scopes=("operator.read",),
+        policy=WORK_TERMINAL_POLICY,
+    )
+    return OpenClawTerminalAgent(
+        client=terminal_client,
+        attestation_client=attestation_client,
+        agent_id=agent_id,
+        policy=WORK_TERMINAL_POLICY,
+        state_changed=state_changed,
+        on_approval=on_approval,
     )
 
 
@@ -257,6 +300,7 @@ class OpenClawTerminalAgent:
     attestation_client: OpenClawConnectionFactory | None = None
     policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY
     state_changed: Callable[[str, str], None] | None = None
+    on_approval: Callable[[PendingApproval], None] | None = None
     _terminal: OpenClawAgentTerminal | None = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _closed: bool = field(default=False, init=False)
@@ -283,6 +327,7 @@ class OpenClawTerminalAgent:
                 agent_id=self.agent_id,
                 policy=self.policy,
                 recovery=recovery,
+                on_approval=self.on_approval,
             )
         except BaseException:
             await _safe_close(connection)
@@ -364,6 +409,24 @@ class OpenClawTerminalAgent:
             finally:
                 if self._stream_task is current_task:
                     self._stream_task = None
+
+    async def resolve_approval(
+        self, approval_id: str, kind: str, decision: str
+    ) -> str | None:
+        """Answer a pending approval; returns the RECORDED decision.
+
+        First answer wins on the gateway, so the receipt may differ from
+        what we sent — the caller reports what was recorded, never what it
+        merely asked for.
+        """
+        async with self._lock:
+            if self._closed:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            await self.initialize()
+            terminal = self._terminal
+            if terminal is None:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
+            return await terminal.resolve_approval(approval_id, kind, decision)
 
     async def close(self) -> None:
         self._closed = True
