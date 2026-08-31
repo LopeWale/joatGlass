@@ -34,6 +34,12 @@ class TerminalAgentLike(Protocol):
     def stream(self, prompt: str) -> AsyncIterator[str]: ...
 
 
+class SessionListerLike(Protocol):
+    """The optional enumeration surface (roster lanes only)."""
+
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]: ...
+
+
 class ApprovalResolverLike(Protocol):
     """The optional approvals surface (work lane only)."""
 
@@ -187,6 +193,39 @@ class AgentTerminalRoster:
             except Exception:  # a dead surface must not kill the work
                 pass
 
+    # ── discovery (T1) ───────────────────────────────────────────────────
+
+    async def discover(self) -> str:
+        """List the wearer's existing gateway sessions — 'choose' made real.
+
+        Uses the first lane that carries the enumeration surface (the work
+        lane's policy is the only one whose sessions.list is allowed in
+        the involvingMe shape). Rows that are also addressable lanes are
+        marked; the rest are visible but watch-only until the send policy
+        learns resumable keys — shown honestly rather than pretended at.
+        """
+        lister = next(
+            (lane for lane in self._lanes.values()
+             if hasattr(lane.agent, "list_sessions")),
+            None,
+        )
+        if lister is None:
+            return "No terminal lane on this Mac can enumerate sessions."
+        try:
+            lister_agent = lister.agent
+            rows = await lister_agent.list_sessions()  # type: ignore[attr-defined]
+        except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
+            return f"Session listing failed — {reason}"
+        if not rows:
+            return "The gateway lists no sessions involving you."
+        lines = []
+        for row in rows[:12]:
+            label = row.get("label") or row.get("key") or "?"
+            lines.append(f"• {label}")
+        suffix = f"\n(+{len(rows) - 12} more)" if len(rows) > 12 else ""
+        return "Your sessions on the gateway:\n" + "\n".join(lines) + suffix
+
     # ── approvals (T5) ───────────────────────────────────────────────────
 
     def note_approval(self, lane_name: str, approval_id: str,
@@ -319,6 +358,9 @@ class AgentTerminalCommands:
             return await self._roster.cancel()
         if said in ("terminal approvals", "terminal pending"):
             return self._roster.approvals_view()
+        if said in ("terminal discover", "terminal refresh",
+                    "terminal all sessions"):
+            return await self._roster.discover()
         decision_match = _DECIDE.match(said)
         if decision_match is not None:
             spoken = decision_match.group("decision")

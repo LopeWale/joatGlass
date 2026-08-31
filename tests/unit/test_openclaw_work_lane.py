@@ -166,3 +166,61 @@ class TestScopeCoherence:
             _validated_operator_scopes(["operator.approvals"])
         with pytest.raises(ValueError):
             _validated_operator_scopes(["operator.read", "operator.approvals"])
+
+
+class FakeConnection:
+    """Just enough of AgentTerminalConnection for a direct terminal call."""
+
+    advertised_methods = frozenset()
+    advertised_events = frozenset()
+    granted_scopes: tuple[str, ...] = ()
+
+    def __init__(self, payload: object) -> None:
+        self.requests: list[tuple[str, dict[str, object]]] = []
+        self._payload = payload
+
+    async def request(self, method: str, params: dict[str, object]) -> object:
+        self.requests.append((method, params))
+        return self._payload
+
+    async def next_event(self) -> dict[str, object]:  # pragma: no cover
+        raise AssertionError("unused")
+
+    async def close(self) -> None:  # pragma: no cover
+        ...
+
+
+class TestListSessions:
+    async def test_issues_the_roster_shape_and_sanitizes_rows(self) -> None:
+        from joat.agents.openclaw_terminal import OpenClawAgentTerminal
+
+        connection = FakeConnection({"sessions": [
+            {"key": "agent:hermes:joat-work-aa", "label": "deploys", "sessionId": "s1"},
+            {"key": 42, "label": "corrupt row"},               # skipped, not guessed
+            {"key": "agent:hermes:joat-work-bb"},              # missing fields tolerated
+            "not even a record",
+        ]})
+        terminal = OpenClawAgentTerminal(
+            connection=connection, agent_id="hermes",
+            session_key=WORK_TERMINAL_POLICY.new_session_key("ab12"),
+            session_id="sess", policy=WORK_TERMINAL_POLICY,
+        )
+        rows = await terminal.list_sessions(limit=20)
+        assert connection.requests == [
+            ("sessions.list", {"agentId": "hermes", "limit": 20, "involvingMe": True}),
+        ]
+        assert rows == [
+            {"key": "agent:hermes:joat-work-aa", "label": "deploys", "sessionId": "s1"},
+            {"key": "agent:hermes:joat-work-bb", "label": "", "sessionId": ""},
+        ]
+
+    async def test_a_non_list_payload_is_an_error_not_an_empty_roster(self) -> None:
+        from joat.agents.openclaw_terminal import OpenClawAgentTerminal
+
+        terminal = OpenClawAgentTerminal(
+            connection=FakeConnection({"sessions": "nope"}), agent_id="hermes",
+            session_key=WORK_TERMINAL_POLICY.new_session_key("ab12"),
+            session_id="sess", policy=WORK_TERMINAL_POLICY,
+        )
+        with pytest.raises(OpenClawGatewayError):
+            await terminal.list_sessions()

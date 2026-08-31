@@ -410,6 +410,17 @@ class OpenClawTerminalAgent:
                 if self._stream_task is current_task:
                     self._stream_task = None
 
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]:
+        """Enumerate the wearer's own sessions (roster lanes only)."""
+        async with self._lock:
+            if self._closed:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            await self.initialize()
+            terminal = self._terminal
+            if terminal is None:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
+            return await terminal.list_sessions(limit)
+
     async def resolve_approval(
         self, approval_id: str, kind: str, decision: str
     ) -> str | None:
