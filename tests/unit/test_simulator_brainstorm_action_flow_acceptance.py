@@ -53,16 +53,17 @@ def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:
 
 def _frames() -> list[ScreenReceipt]:
     rows = [
-        ("terminal-approval-required", None, None, "agent_terminal", "approval_required"),
-        ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready"),
-        ("terminal-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
-        ("terminal-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
-        ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
-        ("running", "click", "begin_topic_capture", "brainstorm", "running"),
-        ("terminal", "click", "show_terminal", "agent_terminal", "running"),
-        ("returned", "click", "show_brainstorm", "brainstorm", "running"),
-        ("reconnected", None, "authenticated_replay", "brainstorm", "running"),
-        ("cancelled", "down", "cancel", "brainstorm", "cancelled"),
+        ("terminal-approval-required", None, None, "agent_terminal", "approval_required", False),
+        ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready", False),
+        ("daily-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture", False),
+        ("daily-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready", False),
+        ("diagnostic-ready", None, None, "brainstorm", "ready", True),
+        ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready", False),
+        ("running", "click", "begin_topic_capture", "brainstorm", "running", False),
+        ("terminal", "click", "show_terminal", "agent_terminal", "running", False),
+        ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
+        ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
+        ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
     ]
     return [
         ScreenReceipt(*row, framebuffer_sha256=f"{index:064x}")
@@ -136,6 +137,7 @@ def test_flow_rejects_duplicate_visible_frames_and_content_fields() -> None:
         frames[-1].semantic_action,
         frames[-1].screen,
         frames[-1].state,
+        frames[-1].diagnostic_armed,
         frames[-2].framebuffer_sha256,
     )
     with pytest.raises(BrainstormActionFlowError, match="distinct visible"):
@@ -145,6 +147,23 @@ def test_flow_rejects_duplicate_visible_frames_and_content_fields() -> None:
     leaked["payload"] = "forbidden"
     with pytest.raises(BrainstormActionFlowError, match="forbidden content"):
         validate_flow(_frames(), leaked)
+
+
+def test_flow_rejects_a_diagnostic_arm_on_the_daily_glasses_path() -> None:
+    frames = _frames()
+    daily_capture = frames[2]
+    frames[2] = ScreenReceipt(
+        daily_capture.name,
+        daily_capture.simulator_input,
+        daily_capture.semantic_action,
+        daily_capture.screen,
+        daily_capture.state,
+        True,
+        daily_capture.framebuffer_sha256,
+    )
+
+    with pytest.raises(BrainstormActionFlowError, match="unexpected rendered"):
+        validate_flow(frames, _acceptance())
 
 
 def test_flow_requires_the_fixed_simulator_gesture_source() -> None:

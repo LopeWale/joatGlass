@@ -62,6 +62,7 @@ class ScreenReceipt:
     semantic_action: str | None
     screen: str
     state: str
+    diagnostic_armed: bool
     framebuffer_sha256: str
 
 
@@ -115,16 +116,20 @@ class DeterministicHermes:
 T = TypeVar("T")
 
 _EXPECTED_FLOW = (
-    ("terminal-approval-required", None, None, "agent_terminal", "approval_required"),
-    ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready"),
-    ("terminal-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture"),
-    ("terminal-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready"),
-    ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready"),
-    ("running", "click", "begin_topic_capture", "brainstorm", "running"),
-    ("terminal", "click", "show_terminal", "agent_terminal", "running"),
-    ("returned", "click", "show_brainstorm", "brainstorm", "running"),
-    ("reconnected", None, "authenticated_replay", "brainstorm", "running"),
-    ("cancelled", "down", "cancel", "brainstorm", "cancelled"),
+    ("terminal-approval-required", None, None, "agent_terminal", "approval_required", False),
+    ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready", False),
+    ("daily-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture", False),
+    ("daily-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready", False),
+    ("diagnostic-ready", None, None, "brainstorm", "ready", True),
+    # The arm exists only on the safe ready surface.  The accepted action
+    # moves the controller into a distinct state, so it must no longer expose
+    # the diagnostic gesture while the fixed acceptance run is in progress.
+    ("acceptance-ready", "double_click", "begin_acceptance", "brainstorm", "acceptance_ready", False),
+    ("running", "click", "begin_topic_capture", "brainstorm", "running", False),
+    ("terminal", "click", "show_terminal", "agent_terminal", "running", False),
+    ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
+    ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
+    ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
 )
 
 _SAFE_ARTIFACT_NAME = re.compile(r"^[0-9]{2}-[a-z-]+\.(?:rgba|optical)\.png$")
@@ -177,6 +182,7 @@ def validate_flow(
             item.semantic_action,
             item.screen,
             item.state,
+            item.diagnostic_armed,
         )
         for item in receipts
     ]
@@ -519,6 +525,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     actions: list[BrainstormAction] = []
     terminal = DeterministicHermes()
     hud = HudWriter(gateway)
+    diagnostic_armed = False
     status = StatusPublisher(path=output / "status.json")
     status.set_openclaw(
         state="approval_required",
@@ -527,19 +534,19 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         reason="device_approval_required",
     )
     status.set_agent_terminal(state="approval_required", reason="write_scope_required")
-    def topic_capture_view(armed: bool) -> BrainstormHudView:
+    def topic_capture_view(capturing: bool) -> BrainstormHudView:
         return BrainstormHudView(
             screen="brainstorm",
-            state="topic_capture" if armed else "ready",
-            topic="Speak your question" if armed else "Ready for a question",
+            state="topic_capture" if capturing else "ready",
+            topic="Speak your question" if capturing else "Ready for a question",
             collaborators=["Codex", "Claude", "Hermes"],
             activity=(
                 "Your next spoken phrase starts this Brainstorm."
-                if armed else "Tap to choose a question, then speak."
+                if capturing else "Tap to choose a question, then speak."
             ),
             terminal_state="ready",
             no_tools_checked=True,
-            acceptance_armed=True,
+            acceptance_armed=diagnostic_armed,
         )
 
     async def retry_terminal() -> None:
@@ -572,7 +579,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         status=status,
         messages=None,
         cards=CardLog(),
-        acceptance_armed=True,
+        acceptance_armed=False,
     )
     receipt_directory = output / "receipts"
 
@@ -677,7 +684,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "terminal-approval-required", None, None,
-            terminal_approval.screen, terminal_approval.state, digest,
+            terminal_approval.screen, terminal_approval.state,
+            terminal_approval.acceptance_armed, digest,
         ))
         artifacts["terminal-approval-required"] = {"raw": raw, "optical": optical}
 
@@ -707,7 +715,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "terminal-retry-ready", "click", retry_action.action,
-            terminal_ready.screen, terminal_ready.state, digest,
+            terminal_ready.screen, terminal_ready.state,
+            terminal_ready.acceptance_armed, digest,
         ))
         artifacts["terminal-retry-ready"] = {"raw": raw, "optical": optical}
 
@@ -735,13 +744,14 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "03-terminal-topic-capture", digest,
+            automation_base, output, "03-daily-topic-capture", digest,
         )
         receipts.append(ScreenReceipt(
-            "terminal-topic-capture", "click", topic_capture.action,
-            capture_view.screen, capture_view.state, digest,
+            "daily-topic-capture", "click", topic_capture.action,
+            capture_view.screen, capture_view.state,
+            capture_view.acceptance_armed, digest,
         ))
-        artifacts["terminal-topic-capture"] = {"raw": raw, "optical": optical}
+        artifacts["daily-topic-capture"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "down")
@@ -762,13 +772,47 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="cleared Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "04-terminal-topic-capture-cancelled", digest,
+            automation_base, output, "04-daily-topic-capture-cancelled", digest,
         )
         receipts.append(ScreenReceipt(
-            "terminal-topic-capture-cancelled", "down", clear_capture.action,
-            cleared_view.screen, cleared_view.state, digest,
+            "daily-topic-capture-cancelled", "down", clear_capture.action,
+            cleared_view.screen, cleared_view.state,
+            cleared_view.acceptance_armed, digest,
         ))
-        artifacts["terminal-topic-capture-cancelled"] = {"raw": raw, "optical": optical}
+        artifacts["daily-topic-capture-cancelled"] = {"raw": raw, "optical": optical}
+
+        # The wearer-controlled daily path finishes above. Diagnostic mode is
+        # an explicit source-side arm: repaint the capability through that
+        # distinct route before accepting the simulator's fixed double press.
+        diagnostic_armed = True
+        capabilities = CapabilityRouter(
+            hud=hud,
+            transport=gateway,
+            status=status,
+            messages=None,
+            cards=CardLog(),
+            acceptance_armed=True,
+        )
+        sent_before = len(gateway.sent)
+        await capabilities.open("Brainstorm")
+        diagnostic_ready = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="brainstorm",
+                state="ready",
+            ),
+            label="explicitly armed diagnostic Brainstorm frame",
+        )
+        digest, raw, optical = await _capture(
+            automation_base, output, "05-diagnostic-ready", digest,
+        )
+        receipts.append(ScreenReceipt(
+            "diagnostic-ready", None, None,
+            diagnostic_ready.screen, diagnostic_ready.state,
+            diagnostic_ready.acceptance_armed, digest,
+        ))
+        artifacts["diagnostic-ready"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "double_click")
@@ -791,7 +835,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "05-acceptance-ready",
+            "06-acceptance-ready",
             digest,
         )
         receipts.append(ScreenReceipt(
@@ -800,6 +844,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             trigger.action,
             acceptance_ready.screen,
             acceptance_ready.state,
+            acceptance_ready.acceptance_armed,
             digest,
         ))
         artifacts["acceptance-ready"] = {"raw": raw, "optical": optical}
@@ -823,9 +868,10 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="streaming Brainstorm frame",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "06-running", digest)
+        digest, raw, optical = await _capture(automation_base, output, "07-running", digest)
         receipts.append(ScreenReceipt(
-            "running", "click", begin.action, running.screen, running.state, digest,
+            "running", "click", begin.action, running.screen, running.state,
+            running.acceptance_armed, digest,
         ))
         artifacts["running"] = {"raw": raw, "optical": optical}
 
@@ -847,13 +893,14 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="Agent Terminal frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "07-terminal", digest)
+        digest, raw, optical = await _capture(automation_base, output, "08-terminal", digest)
         receipts.append(ScreenReceipt(
             "terminal",
             "click",
             show_terminal.action,
             terminal_view.screen,
             terminal_view.state,
+            terminal_view.acceptance_armed,
             digest,
         ))
         artifacts["terminal"] = {"raw": raw, "optical": optical}
@@ -876,13 +923,14 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="returned Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "08-returned", digest)
+        digest, raw, optical = await _capture(automation_base, output, "09-returned", digest)
         receipts.append(ScreenReceipt(
             "returned",
             "click",
             show_brainstorm.action,
             returned.screen,
             returned.state,
+            returned.acceptance_armed,
             digest,
         ))
         artifacts["returned"] = {"raw": raw, "optical": optical}
@@ -920,13 +968,14 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="restored Brainstorm frame after reconnect",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "09-reconnected", digest)
+        digest, raw, optical = await _capture(automation_base, output, "10-reconnected", digest)
         receipts.append(ScreenReceipt(
             "reconnected",
             None,
             "authenticated_replay",
             replayed.screen,
             replayed.state,
+            replayed.acceptance_armed,
             digest,
         ))
         artifacts["reconnected"] = {"raw": raw, "optical": optical}
@@ -951,13 +1000,14 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="cancelled Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "10-cancelled", digest)
+        digest, raw, optical = await _capture(automation_base, output, "11-cancelled", digest)
         receipts.append(ScreenReceipt(
             "cancelled",
             "down",
             cancel.action,
             cancelled.screen,
             cancelled.state,
+            cancelled.acceptance_armed,
             digest,
         ))
         artifacts["cancelled"] = {"raw": raw, "optical": optical}
