@@ -12,7 +12,6 @@ import {
   brainstormStateLabel,
   hudBrightnessGray,
   hudDisplayTitle,
-  hudListItemIconName,
   hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
@@ -20,9 +19,7 @@ import {
   messagesConversationFooterFontSize,
   messagesReaderBodyLines,
   messagesFullTextContent,
-  MESSAGES_COMPOSE_GUIDANCE,
   MESSAGES_READER_BODY_LINE_CAPACITY,
-  messagesListRows,
   messagesConversationTranscript,
   navigationDecisionRows,
   usesNavigationSetupLayout,
@@ -37,7 +34,6 @@ import {
   productivityPhaseLabel,
   productivityPhaseProgress,
   resolveHudOverview,
-  resolveHudListKind,
   showNavigationSecondaryInHeader,
   visibleHudSidebarItems,
   visibleHudListItems,
@@ -132,11 +128,14 @@ describe('flat productivity chrome', () => {
     });
   });
 
-  it('removes the outer rounded frame only from Planning and productivity flow pages', () => {
+  it('removes the outer rounded card from every list and flow page', () => {
     expect(HudCanvas.usesFlatHudShell('confirmation')).toBe(true);
     expect(HudCanvas.usesFlatHudShell('productivity')).toBe(true);
     expect(HudCanvas.usesFlatHudShell('list', 'PLANNING · PLAN · TUE SEP 1')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('list', 'MESSAGES')).toBe(false);
+    // The wearer's ruling: the card was the waste, not its border. Every
+    // list page is flat now — Messages, QuickNotes, and all the rest.
+    expect(HudCanvas.usesFlatHudShell('list', 'MESSAGES')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('list', 'QUICKNOTES')).toBe(true);
     expect(HudCanvas.usesFlatHudShell('brainstorm')).toBe(false);
   });
 });
@@ -189,29 +188,6 @@ describe('semantic HUD chrome', () => {
     expect(hudSidebarIconName('Activity')).toBe('activity');
   });
 
-  it('resolves list treatment from the Mac-owned capability title', () => {
-    expect(resolveHudListKind('MESSAGES')).toBe('messages');
-    expect(resolveHudListKind('NOTIFICATIONS')).toBe('notifications');
-    expect(resolveHudListKind('PLANNING · PLAN · SEP 1–7')).toBe('calendar');
-    expect(resolveHudListKind('CALENDAR · 7 DAYS')).toBe('calendar');
-    expect(resolveHudListKind('TASKS')).toBe('tasks');
-    expect(resolveHudListKind('QUICKNOTES')).toBe('quicknotes');
-    expect(resolveHudListKind('ACTIVITY')).toBe('activity');
-    expect(resolveHudListKind('ACTION · VERIFYING')).toBe('activity');
-    expect(resolveHudListKind('LISTENING RESUME')).toBe('generic');
-  });
-
-  it('keeps mixed Planning agenda sources visible in their row glyphs', () => {
-    expect(hudListItemIconName(
-      'PLANNING · PLAN · TUE SEP 1',
-      '10:30 · EVENT · Design review',
-    )).toBe('calendar');
-    expect(hudListItemIconName(
-      'PLANNING · PLAN · TUE SEP 1',
-      '19:00 · REMINDER · Buy filters',
-    )).toBe('tasks');
-  });
-
 });
 
 describe('navigation error hierarchy', () => {
@@ -244,29 +220,74 @@ describe('flat navigation entry', () => {
   });
 });
 
-describe('compact Planning focus rows', () => {
-  it('fits a mixed Planning day into four flat agenda rows with selection rails', () => {
+describe('compact focus list rows', () => {
+  it('gives a mixed Planning day six two-line agenda rows, no separators', () => {
     expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 4)).toEqual([
-      { primaryBaselineY: 93, secondaryBaselineY: 108, railTopY: 81, railHeight: 29, separatorY: 117 },
-      { primaryBaselineY: 125, secondaryBaselineY: 140, railTopY: 113, railHeight: 29, separatorY: 149 },
-      { primaryBaselineY: 157, secondaryBaselineY: 172, railTopY: 145, railHeight: 29, separatorY: 181 },
-      { primaryBaselineY: 189, secondaryBaselineY: 204, railTopY: 177, railHeight: 29 },
+      { primaryBaselineY: 88, secondaryBaselineY: 101, railTopY: 77, railHeight: 27 },
+      { primaryBaselineY: 118, secondaryBaselineY: 131, railTopY: 107, railHeight: 27 },
+      { primaryBaselineY: 148, secondaryBaselineY: 161, railTopY: 137, railHeight: 27 },
+      { primaryBaselineY: 178, secondaryBaselineY: 191, railTopY: 167, railHeight: 27 },
     ]);
+    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 12)).toHaveLength(6);
   });
 
-  it('uses six one-line rows for Planning week controls without calendar cards', () => {
+  it('uses the full vertical budget: nine one-line rows per glance', () => {
+    // Pitch divides rows; separator lines and dead bands are gone. The
+    // wearer's ruling: unused canvas on a content page is waste, not calm.
     expect(HudCanvas.planningFocusRows('PLANNING · PLAN · AUG 31–SEP 6', 7)).toEqual([
-      { primaryBaselineY: 93, railTopY: 82, railHeight: 21, separatorY: 106 },
-      { primaryBaselineY: 117, railTopY: 106, railHeight: 21, separatorY: 130 },
-      { primaryBaselineY: 141, railTopY: 130, railHeight: 21, separatorY: 154 },
-      { primaryBaselineY: 165, railTopY: 154, railHeight: 21, separatorY: 178 },
-      { primaryBaselineY: 189, railTopY: 178, railHeight: 21, separatorY: 202 },
-      { primaryBaselineY: 213, railTopY: 202, railHeight: 21 },
+      { primaryBaselineY: 84, railTopY: 74, railHeight: 19 },
+      { primaryBaselineY: 104, railTopY: 94, railHeight: 19 },
+      { primaryBaselineY: 124, railTopY: 114, railHeight: 19 },
+      { primaryBaselineY: 144, railTopY: 134, railHeight: 19 },
+      { primaryBaselineY: 164, railTopY: 154, railHeight: 19 },
+      { primaryBaselineY: 184, railTopY: 174, railHeight: 19 },
+      { primaryBaselineY: 204, railTopY: 194, railHeight: 19 },
     ]);
   });
 
-  it('does not apply the Planning treatment to Messages', () => {
-    expect(HudCanvas.planningFocusRows('MESSAGES', 4)).toEqual([]);
+  it('recognizes only the small semantic marker vocabulary', () => {
+    // Markers indicate a row's KIND (● recording, □ todo, – key point) from
+    // the design-guidelines firmware-safe set; anything else is content.
+    expect(HudCanvas.focusListMarker('● Client standup')).toEqual({
+      glyph: '●', emphasis: 'content',
+    });
+    expect(HudCanvas.focusListMarker('□ Email release notes')).toEqual({
+      glyph: '□', emphasis: 'annotation',
+    });
+    expect(HudCanvas.focusListMarker('– Ship Friday')).toEqual({
+      glyph: '–', emphasis: 'annotation',
+    });
+    expect(HudCanvas.focusListMarker('Plain row')).toBeUndefined();
+    expect(HudCanvas.focusListMarker('★ Unknown glyph')).toBeUndefined();
+    expect(HudCanvas.focusListMarker('●NoSpace')).toBeUndefined();
+  });
+
+  it('reserves one shared title edge only for lists that mix marked rows', () => {
+    // The QuickNotes list mixes recordings and text notes; unmarked rows
+    // must indent so every title starts at the same x (no ragged edge).
+    expect(HudCanvas.listReservesMarkerColumn([
+      '[4m] ● Client standup',
+      '[2h] Ask Adaeze about the design review',
+    ])).toBe(true);
+    // TASKS/MESSAGES never carry markers — they lose no width.
+    expect(HudCanvas.listReservesMarkerColumn([
+      '[2m] Adele · Can you send the latest mockups?',
+      'Buy filters · Due today 18:00',
+    ])).toBe(false);
+    expect(HudCanvas.listReservesMarkerColumn([])).toBe(false);
+  });
+
+  it('applies the one dense list language to every title', () => {
+    expect(HudCanvas.planningFocusRows('MESSAGES', 4)).toHaveLength(4);
+    // An eleven-row note now fits nine rows on the first glance; the rest is
+    // one swipe away, not three.
+    expect(HudCanvas.planningFocusRows('QUICKNOTES · NOTE', 11)).toHaveLength(9);
+    expect(HudCanvas.planningFocusRows('QUICKNOTES', 4)).toHaveLength(4);
+    expect(HudCanvas.planningFocusRows('QUICKNOTES · RECORDING', 3)).toHaveLength(3);
+    expect(
+      HudCanvas.planningFocusRows('MESSAGES', 4)[0]?.secondaryBaselineY,
+    ).toBeUndefined();
+    expect(HudCanvas.usesFlatHudShell('list', 'QUICKNOTES · NOTE')).toBe(true);
   });
 });
 
@@ -609,27 +630,19 @@ describe('parseHudListItem', () => {
 });
 
 describe('parseMessagesConversationRow', () => {
-  it('uses the compact Messages layout for every Messages surface', () => {
+  it('keeps bespoke layouts only for the transcript and the reader', () => {
+    // Every other Messages page — thread picker, compose, access, retry —
+    // speaks the one dense focus-list language like the rest of the HUD.
     expect(usesMessagesCompactLayout('MESSAGES · CONVERSATION')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES · COMPOSE')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES · ACCESS')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES · SETUP')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES · RETRY')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES · EMPTY')).toBe(true);
-    expect(usesMessagesCompactLayout('MESSAGES · READ ONLY')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES · MESSAGE')).toBe(true);
+    expect(usesMessagesCompactLayout('MESSAGES')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · COMPOSE')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · ACCESS')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · SETUP')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · RETRY')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · EMPTY')).toBe(false);
+    expect(usesMessagesCompactLayout('MESSAGES · READ ONLY')).toBe(false);
     expect(usesMessagesCompactLayout('NOTIFICATIONS')).toBe(false);
-  });
-
-  it('uses dense message rows and a selection rail instead of card bounds', () => {
-    expect(messagesListRows(8)).toEqual([
-      { baselineY: 93, railTopY: 82, railHeight: 21, separatorY: 106 },
-      { baselineY: 117, railTopY: 106, railHeight: 21, separatorY: 130 },
-      { baselineY: 141, railTopY: 130, railHeight: 21, separatorY: 154 },
-      { baselineY: 165, railTopY: 154, railHeight: 21, separatorY: 178 },
-      { baselineY: 189, railTopY: 178, railHeight: 21, separatorY: 202 },
-      { baselineY: 213, railTopY: 202, railHeight: 21 },
-    ]);
   });
 
   it('separates incoming, outgoing, and voice-action rows', () => {
@@ -644,11 +657,7 @@ describe('parseMessagesConversationRow', () => {
     });
   });
 
-  it('keeps Compose guidance to one voice line instead of a card stack', () => {
-    expect(MESSAGES_COMPOSE_GUIDANCE).toBe('Say: recipient, then message');
-  });
-
-  it('keeps a compact six-line transcript free of header and action-card rows', () => {
+  it('keeps a compact seven-line transcript free of header and action-card rows', () => {
     const transcript = messagesConversationTranscript([
       'Latest messages — down for older',
       'Dele · newest incoming',
@@ -670,6 +679,7 @@ describe('parseMessagesConversationRow', () => {
       { kind: 'incoming', label: 'Dele', body: 'fourth message' },
       { kind: 'outgoing', label: 'You', body: 'fifth message' },
       { kind: 'incoming', label: 'Dele', body: 'sixth message' },
+      { kind: 'incoming', label: 'Dele', body: 'seventh message' },
     ]);
   });
 
@@ -689,7 +699,7 @@ describe('parseMessagesConversationRow', () => {
     ], 8);
 
     expect(transcript.rows.map(({ body }) => body)).toEqual([
-      'three', 'four', 'five', 'six', 'seven', 'eight',
+      'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
     ]);
   });
 });

@@ -1387,8 +1387,9 @@ class TestCapabilityViews:
         await router.open("QuickNotes")
         note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_list.title == "QUICKNOTES"
-        # Recordings first, then exact dictated text notes.
-        assert "Standup notes · recorded" in note_list.items[0]
+        # Recordings first (marked with the ● record glyph), then exact
+        # dictated text notes.
+        assert "● Standup notes" in note_list.items[0]
         assert "Ask Adaeze" in note_list.items[1]
         assert note_list.selectable is True
 
@@ -1452,7 +1453,7 @@ class TestCapabilityViews:
         # transcription, then the unified list returns.
         assert titles[-2:] == ["QUICKNOTES · SAVING", "QUICKNOTES"]
         after = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert "recorded" in after.items[0]
+        assert "● Standup notes" in after.items[0]
 
     async def test_discard_needs_its_own_confirm_row(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(

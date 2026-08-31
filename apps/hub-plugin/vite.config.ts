@@ -16,6 +16,18 @@ export default defineConfig({
     // of silently drifting to another port.
     port: 5190,
     strictPort: true,
+    proxy: {
+      // Design-QA capture hook: the browser preview (?joatPreview=browser)
+      // POSTs its rendered 576x288 frame here, same-origin, and a throwaway
+      // local receiver on 5191 writes the PNG. Dev-server only — the packed
+      // plugin never sees this config, and with no receiver running the
+      // proxy simply 502s.
+      '/__joat-hud-save': {
+        target: 'http://localhost:5191',
+        changeOrigin: true,
+        rewrite: (path) => path.replace('/__joat-hud-save', '/'),
+      },
+    },
   },
 
   build: {

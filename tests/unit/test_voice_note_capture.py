@@ -371,6 +371,33 @@ async def test_export_collision_preserves_existing_directory_and_uses_suffix(
         assert (export_root / (occupied.name + "-2") / "note.md").is_file()
 
 
+async def test_host_audio_suspension_is_journaled_as_a_stall_gap(tmp_path: Path) -> None:
+    """iOS suspends audio delivery while the WebView (and its seq counter)
+    keep running. Contiguous sequence numbers across a long wall-clock hole
+    must still record a gap — the transcript must never silently claim
+    completeness across a suspension (device-features lifecycle contract)."""
+    durable, notes, source, capture = controller(tmp_path / "joat.sqlite3")
+    with durable:
+        await capture.handle_command("start a voice note Suspension")
+        assert source.callback is not None
+        source.callback(AudioFrame(
+            pcm=b"\x01\x00" * 40, connection_generation="socket-a", seq=0,
+            source="glasses", speaker="wearer", received_at_us=1_000_000,
+        ))
+        # 12 seconds later, seq is still contiguous: the phone was suspended.
+        source.callback(AudioFrame(
+            pcm=b"\x01\x00" * 40, connection_generation="socket-a", seq=1,
+            source="glasses", speaker="wearer", received_at_us=13_000_000,
+        ))
+        note = notes.get("capture-1")
+        assert note.gap_count == 1
+        gap = [s for s in notes.segments("capture-1") if s.kind == "gap"][0]
+        assert gap.text == "[capture_stalled] ~12s without audio while recording"
+        receipt = await capture.handle_command("stop voice note")
+        # A stalled recording is honest: saved WITH gaps, raw retained.
+        assert receipt is not None and receipt.startswith("Saved Voice Note with gaps")
+
+
 async def test_quicknote_aliases_drive_the_same_recorder(tmp_path: Path) -> None:
     durable, notes, source, capture = controller(tmp_path / "joat.sqlite3")
     with durable:

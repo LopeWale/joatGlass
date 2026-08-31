@@ -902,3 +902,33 @@ class TestInterposedFrameSource:
         assert frames.callback is not None
         assert transport.frame_cb is None
         assert transport.audio_cb is None
+
+
+class TestQuickNoteVoicePath:
+    async def test_glasses_quicknote_command_arrives_wake_stripped(self) -> None:
+        """The glasses chain's orchestrator half: "JOAT, start a quicknote…"
+        from the G2 mic reaches the command router with the wake word
+        stripped, and the router's receipt is what lands on the HUD."""
+        transport = FakeTransport()
+        engine = FakeEngine("JOAT, start a quicknote called Standup.")
+        commands_seen: list[str] = []
+
+        async def commands(text: str) -> str | None:
+            commands_seen.append(text)
+            return "Recording Voice Note: Standup."
+
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            wake_words=("joat",),
+            commands=commands,
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        assert commands_seen == ["start a quicknote called Standup."]
+        assert assistant_text(transport) == ["Recording Voice Note: Standup."]

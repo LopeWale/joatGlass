@@ -87,8 +87,11 @@ sits above them as the sole event-capture owner. This is the SDK-compatible
 way to get custom layout and keep touch/ring events: image containers cannot
 capture input and the SDK permits no image larger than 288×144.
 
-Every state shares a 20px rounded shell and a 36px status spine with a centered
-notch. Overview is sparse and icon-led. A left-temple double-click opens the
+Overview, Sidebar, and live-session states share the 20px rounded shell; every
+list, confirmation, and productivity page renders FLAT under the 36px status
+spine (wearer's ruling, 2026-08-31: the card was the waste — its border,
+margins, and per-row chrome, not any single line). Overview is sparse and
+icon-led. A left-temple double-click opens the
 transient 160px Sidebar while the current Overview stays visible at 24% intensity
 to preserve place. Selecting a row removes the rail and gives the destination
 the full frame. Presenter updates are serialized across all four image tiles,
@@ -113,11 +116,21 @@ one bright question the wearer's full attention.
 
 ## Shapes
 
-One continuous 20px rounded rule makes all four image tiles read as one HUD.
-Rows use only the minimum structure needed for scanning: a selected outline on
-collection rows that actually accept a tap, light separators on read-only
-detail/receipt rows, and a single vertical divider at the Sidebar boundary.
-There are no floating modal cards.
+The 20px rounded rule survives only where four tiles must read as one HUD
+(Overview, Sidebar, live sessions). List rows use ONE language everywhere:
+dense reading rows — a bright three-pixel selection rail on rows that accept a
+tap, hairline separators, six rows per screen (four on two-line Planning day
+agendas). The former per-row card (icon badge, 56px pitch, rounded selection
+outline) is retired; it fit three rows where six belong. There are no
+floating modal cards. Row KIND is indicated by a tiny aligned marker from
+the firmware-safe glyph set — ● a recording, □ an open todo, – a key point —
+never by an icon badge or a spelled-out word; markers indicate, they do not
+decorate. A selectable list that mixes marked and unmarked rows reserves the
+marker column on every row so all titles share one left edge; non-selectable
+detail pages keep hanging-indent bullets under their section labels. When a
+page holds more rows than one window, a 2px hairline scrollbar at x=556
+shows position and proportion — words never announce overflow, and healthy
+metadata stays quiet ("2 transcript sections", not "… · 0 gaps").
 
 ## Components
 

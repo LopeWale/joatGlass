@@ -55,7 +55,21 @@ describe('visual fixtures', () => {
     expect(visualListFixture('notification-detail').selectable).toBe(false);
     expect(visualListFixture('calendar-detail').title).toBe('CALENDAR · DETAIL');
     expect(visualListFixture('task-detail').title).toBe('TASKS · DETAIL');
-    expect(visualListFixture('quicknote-detail').title).toBe('QUICKNOTES · DETAIL');
+    expect(visualListFixture('quicknote-detail').title).toBe('QUICKNOTES · NOTE');
+    // A recording's summary page carries the distilled sections in order.
+    expect(visualListFixture('quicknote-detail').items).toContain('SUMMARY');
+    expect(visualListFixture('quicknote-detail').items).toContain('KEY POINTS');
+    expect(visualListFixture('quicknote-detail').items).toContain('TODOS');
+    // The live recorder owns the QuickNotes page with tap-only controls.
+    expect(visualListFixture('quicknote-recording')).toMatchObject({
+      title: 'QUICKNOTES · RECORDING',
+      selectable: true,
+      items: ['Save and finish', 'Pause recording', 'Discard recording'],
+    });
+    expect(visualListFixture('quicknote-discard').items).toEqual(
+      ['Confirm discard', 'Keep recording'],
+    );
+    expect(visualListFixture('quicknote-saving').selectable).toBe(false);
     expect(visualListFixture('activity-detail').title).toBe('ACTIVITY · DETAIL');
     expect(isProductivityVisualState('notification-detail')).toBe(true);
     expect(isProductivityVisualState('overview')).toBe(false);

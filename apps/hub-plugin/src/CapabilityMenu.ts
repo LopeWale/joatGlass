@@ -3,11 +3,12 @@ import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
-import type {
-  InputEventPayload,
-  PlanningGridCell,
-  ProductivityHudModel,
-  ResumePolicy,
+import {
+  VOICE_REQUEST_PREFIX,
+  type InputEventPayload,
+  type PlanningGridCell,
+  type ProductivityHudModel,
+  type ResumePolicy,
 } from './types';
 
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
@@ -240,6 +241,17 @@ export class CapabilityMenu {
     hint?: string,
     planningGrid?: PlanningGridCell[],
   ): Promise<boolean> {
+    // A voice-prefixed generation is the Mac acting on the wearer's spoken
+    // request ("show my messages", "start a quicknote"). Adopt it instead of
+    // dropping it as stale — voice must not require a preceding menu tap.
+    if (
+      title
+      && requestId !== undefined
+      && requestId.startsWith(VOICE_REQUEST_PREFIX)
+      && requestId !== this.pendingRequestId
+    ) {
+      this.adoptVoiceGeneration(title, requestId);
+    }
     if (this.view !== 'data' || !this.pendingTitle || !title) return false;
     if (!this.pendingRequestId || requestId !== this.pendingRequestId) return false;
     const normalized = title.trim().toUpperCase();
@@ -679,6 +691,34 @@ export class CapabilityMenu {
     // all of them: a dropped response must never strand the wearer on a
     // "Loading…" frame with only Back as an undocumented escape.
     this.armResponseTimeout(title, requestId);
+  }
+
+  /** Take ownership of a Mac-initiated (voice) generation. Mirrors the state
+   * openCapability establishes, minus the request we never sent; the normal
+   * presentList path then paints and activates it. An unknown title family
+   * leaves state untouched so the ordinary guards drop the frame. */
+  private adoptVoiceGeneration(title: string, requestId: string): void {
+    const family = (title.split('·')[0] ?? '').trim().toUpperCase();
+    const known = CAPABILITIES.some((name) => name.toUpperCase() === family);
+    if (!known) return;
+    this.clearResponseTimeout();
+    this.clearProductivityReturn();
+    this.view = 'data';
+    this.selectedIndex = 0;
+    this.pendingTitle = family;
+    this.pendingRequestId = requestId;
+    this.messagesRetry = false;
+    this.messagesScreen = undefined;
+    this.dataItemCount = 0;
+    this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.dataSelectionUsesStaleNativeIndex = false;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
+    this.planningDrillDown = false;
   }
 
   private armResponseTimeout(title: string, requestId: string): void {
