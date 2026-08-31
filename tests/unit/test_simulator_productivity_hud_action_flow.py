@@ -304,6 +304,15 @@ async def test_driver_retains_verifying_frame_before_releasing_controller_write(
         publish_status=publish,
     )
     gateway = SimpleNamespace(sent=published, confirmation_requests=confirmation_requests)
+    presentation_acknowledged = False
+
+    async def wait_for_presentation_ack(view):  # type: ignore[no-untyped-def]
+        nonlocal presentation_acknowledged
+        assert view.phase == "verifying"
+        assert bridge.write_methods == ["reminders.create"]
+        presentation_acknowledged = True
+
+    gateway.wait_for_presentation_ack = wait_for_presentation_ack
     captures = iter([
         ("a" * 64, "review.rgba.png", "review.alpha.png"),
         ("b" * 64, "verifying.rgba.png", "verifying.alpha.png"),
@@ -326,7 +335,7 @@ async def test_driver_retains_verifying_frame_before_releasing_controller_write(
         captured_names.append(name)
         if name.endswith("-verifying"):
             assert [view.phase for view in published] == ["verifying"]
-            assert bridge.write_methods == ["reminders.create"]
+            assert presentation_acknowledged is True
         assert observation.first_changed_at_ns is None
         assert observation.settled_at_ns is None
         return next(captures)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -32,6 +32,7 @@ import signal
 import socket
 import subprocess
 import time
+import uuid
 from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any, Literal, TypeVar, cast
@@ -42,7 +43,12 @@ from urllib.parse import urlsplit
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.channels.cards import CardLog
-from joat.core.protocol import DownlinkMessage, HudList, ProductivityHudView
+from joat.core.protocol import (
+    DownlinkMessage,
+    HudList,
+    ProductivityHudView,
+    ProductivityViewAck,
+)
 from joat.persistence.actions import ActionJournal
 from joat.persistence.store import DurableStore
 from joat.persistence.tasks import TaskOccurrenceStore
@@ -191,17 +197,64 @@ class ManagedProcess:
 
 
 class RecordingGateway(HubGatewayTransport):
-    """The actual gateway, with content-free local confirmation bookkeeping."""
+    """The actual gateway, with bounded content-free acceptance bookkeeping.
+
+    Only this simulator driver binds a verifying view to an acknowledgement.
+    The normal product transport sends ordinary views unchanged, and no native
+    write waits for this local proof aid.
+    """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.sent: list[DownlinkMessage] = []
         self.confirmation_requests: list[str] = []
         self.reminder_due_requests: list[ProductivityHudView] = []
+        self._presentation_receipts: dict[str, int] = {}
+        self._accepted_presentation_receipts: set[str] = set()
+        self.on_productivity_view_ack(self._record_presentation_ack)
+
+    def _record_presentation_ack(self, acknowledgement: ProductivityViewAck) -> None:
+        """Record only a matching opaque receipt from the admitted client."""
+
+        if self._presentation_receipts.get(acknowledgement.presentation_receipt_id) == (
+            acknowledgement.generation
+        ):
+            self._accepted_presentation_receipts.add(acknowledgement.presentation_receipt_id)
 
     async def send(self, message: DownlinkMessage) -> None:
+        if isinstance(message, ProductivityHudView) and message.phase == "verifying":
+            if self.connection_generation < 1:
+                raise ProductivityHudFlowError("verifying view has no admitted simulator client")
+            presentation_receipt_id = str(uuid.uuid4())
+            self._presentation_receipts[presentation_receipt_id] = self.connection_generation
+            message = replace(
+                message,
+                presentation_receipt_id=presentation_receipt_id,
+                presentation_receipt_generation=self.connection_generation,
+            )
         self.sent.append(message)
         await super().send(message)
+
+    async def wait_for_presentation_ack(self, view: ProductivityHudView) -> None:
+        """Wait for the active plugin to retain this exact verifying surface.
+
+        This proves current-client UI presentation semantics, not an OS banner,
+        a physical-G2 framebuffer, or wearer attention.
+        """
+
+        receipt_id = view.presentation_receipt_id
+        generation = view.presentation_receipt_generation
+        if (
+            view.phase != "verifying"
+            or receipt_id is None
+            or generation is None
+            or self._presentation_receipts.get(receipt_id) != generation
+        ):
+            raise ProductivityHudFlowError("verifying status has no bound presentation receipt")
+        await _wait_for(
+            lambda: receipt_id if receipt_id in self._accepted_presentation_receipts else None,
+            label="current plugin accepted verifying productivity surface",
+        )
 
     async def request_confirmation(self, action_id: str, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
         self.confirmation_requests.append(action_id)
@@ -783,6 +836,7 @@ async def _drive_controller_write(
             raise ProductivityHudFlowError(
                 f"{verifying_name}: controller emitted unexpected title {verifying.title!r}"
             )
+        await gateway.wait_for_presentation_ack(verifying)
         verifying_observation = CaptureObservation()
         digest, raw, alpha = await _capture(
             automation_base, output, f"{len(receipts) + 1:02d}-{verifying_name}", digest,
@@ -1420,12 +1474,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "hud": "official Even Hub simulator framebuffer",
                 "input": "official simulator click through production menu, Planning, and confirmation routers",
                 "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
-                "controllerWrites": "calendar.create, reminders.create, and reminders.complete are emitted by the production ProductivityActionController after a real bound confirmation; a fixture blocks each native-shaped write until its verifying HUD frame is retained",
+                "controllerWrites": "calendar.create, reminders.create, and reminders.complete are emitted by the production ProductivityActionController after a real bound confirmation; the fixture releases each native-shaped write only after the current Hub client accepts its generation-bound, opaque verifying surface",
                 "reminderMonitoring": "production TaskMonitor reconciles the fixture Reminder and obtains a generation-bound current Hub-client due acknowledgement before alert_enqueued",
                 "fallbackStates": "failed, uncertain, cancelled, and not-saved frames are typed production-downlink rendering and timed-return checks only; they do not claim an EventKit write",
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
-                "hubClientAcceptance": "generation-bound reminder_due acknowledgement from the current production Hub client; not a macOS banner or physical-G2 visual proof",
+                "hubClientAcceptance": "generation-bound reminder_due acknowledgement and simulator-only generation-bound verifying presentation receipt from the current production Hub client; neither is a macOS banner or physical-G2 visual proof",
                 "frameCompleteness": "each retained framebuffer must differ from its causal predecessor and remain unchanged for 600ms in the official simulator; completion never consumes console output, renderer telemetry, or bridge-transfer logs",
                 "terminalOutcomeReturn": "every terminal Calendar and Reminders outcome waits for the real Hub timeout, then the production CapabilityRouter returns the anchored mixed Planning day",
                 "planningReturnGesture": "not run; simulator cannot inject left-temple double press",

@@ -211,6 +211,24 @@ class TestConnection:
 
 
 class TestUplink:
+    async def test_productivity_view_ack_reaches_its_dedicated_subscribers(
+        self, transport,
+    ) -> None:
+        t, url = transport
+        received = []
+        t.on_productivity_view_ack(received.append)
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            await ws.send(json.dumps({
+                "kind": "productivity.view.ack",
+                "presentationReceiptId": "a76b12f1-45e4-41fd-aed8-086f6b6b1954",
+                "generation": t.connection_generation,
+                "outcome": "accepted",
+            }))
+            await _wait_for(lambda: bool(received))
+        assert received[0].presentation_receipt_id == "a76b12f1-45e4-41fd-aed8-086f6b6b1954"
+        assert received[0].generation == t.connection_generation
+
     def test_phone_refresh_keeps_relay_time_after_the_even_sdk_deadline(self) -> None:
         """The Mac must outwait the documented phone-side SDK request."""
         timeout = inspect.signature(

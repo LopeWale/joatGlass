@@ -55,6 +55,7 @@ import {
 import { NavigationController } from './NavigationController';
 import { BrainstormController } from './BrainstormController';
 import { reminderDueAckFor } from './ReminderDueReceipt';
+import { productivityViewAckFor } from './ProductivityViewReceipt';
 import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
 import {
   replaySyntheticAudioFixture,
@@ -459,7 +460,8 @@ async function boot(): Promise<void> {
       case 'productivity.view':
         brainstorm.clear();
         {
-          const receipt = reminderDueAckFor(msg.productivity);
+          const receipt = productivityViewAckFor(msg.productivity)
+            ?? reminderDueAckFor(msg.productivity);
           await awaitCurrent(menu.presentProductivity(
             msg.productivity,
             receipt

@@ -136,6 +136,11 @@ export interface ProductivityHudModel {
   reminderDueAttemptId?: string;
   /** Mac gateway connection generation paired with reminderDueId. */
   reminderDueGeneration?: number;
+  /** Simulator-only presentation receipt binding. It is supplied only for a
+   * verifying write surface and contains no Calendar or Reminder content. */
+  presentationReceiptId?: string;
+  /** Current gateway generation paired with presentationReceiptId. */
+  presentationReceiptGeneration?: number;
 }
 export type NavigationAction =
   | 'confirm_destination'
@@ -243,6 +248,14 @@ export type UplinkMessage =
     kind: 'reminder_due.ack';
     reminderDueId: string;
     reminderDueAttemptId: string;
+    generation: number;
+    outcome: 'accepted';
+  }
+  /** Current-client acceptance of a typed verifying surface. This is not
+   * native EventKit delivery, physical G2 pixels, or wearer attention. */
+  | {
+    kind: 'productivity.view.ack';
+    presentationReceiptId: string;
     generation: number;
     outcome: 'accepted';
   };

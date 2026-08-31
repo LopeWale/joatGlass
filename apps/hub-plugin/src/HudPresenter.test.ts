@@ -462,6 +462,32 @@ describe('HudPresenter modal surfaces', () => {
     expect(visibleCallbacks).toBe(1);
   });
 
+  it('does not confuse a distinct verifying presentation receipt with the retained surface', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const verifying = {
+      domain: 'calendar' as const,
+      phase: 'verifying' as const,
+      title: 'Private event',
+      primary: 'Saving calendar event',
+      secondary: 'Checking native read-back',
+      hint: 'Please wait',
+      presentationReceiptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      presentationReceiptGeneration: 7,
+    };
+
+    await hud.showProductivity(verifying);
+
+    expect(hud.isProductivityVisible(verifying)).toBe(true);
+    expect(hud.isProductivityVisible({
+      ...verifying,
+      presentationReceiptId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+    })).toBe(false);
+  });
+
   it('keeps Mac-owned Overview regions blank during status-only boot', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
