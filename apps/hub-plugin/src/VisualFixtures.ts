@@ -21,6 +21,9 @@ const VISUAL_CONFIRMATION_ID = 'visual-confirmation';
 
 export const PRODUCTIVITY_VISUAL_STATES = [
   'messages',
+  'messages-conversation',
+  'message-reader',
+  'messages-compose',
   'notifications',
   'notification-detail',
   'calendar',
@@ -173,14 +176,58 @@ export class BrowserHudPreview implements HudFramePainter {
  * canvas renderer. No fixture can call the Mac or mutate a native store. */
 export function visualListFixture(state: ProductivityVisualState): VisualListFixture {
   const fixtures: Record<ProductivityVisualState, VisualListFixture> = {
+    // The thread picker speaks the dense focus-list language: dim age chip,
+    // ● only on unread threads, sender bright-ish, preview as quiet detail.
     messages: {
-      title: 'MESSAGES · 3',
-      hint: 'tap select · left x2 overview',
+      title: 'MESSAGES',
+      hint: 'tap: select · left x2: back',
       selectable: true,
       items: [
-        '[2m] Adele · Can you send the latest mockups?',
+        'New message · voice recipient + text',
+        '[2m] ● Adele · Can you send the latest mockups?',
         '[18m] Marcus · Heading to the lab in 10.',
-        '[1h] Team Ops · Standup notes are ready.',
+        '[1h] ● Team Ops (group) · Standup notes are ready.',
+        '[3h] Dele · Attachment',
+      ],
+    },
+    // Two-column transcript: incoming carries the weight, the wearer's own
+    // words recede. Mirrors capabilities._show_message_history_page.
+    'messages-conversation': {
+      title: 'MESSAGES · CONVERSATION',
+      hint: 'tap read · say reply · left x2: back',
+      selectable: true,
+      items: [
+        'Latest messages — down for older',
+        'Adele · Can you send the latest mockups before the review?',
+        'You · Exporting them now, give me ten minutes.',
+        'Adele · Perfect. Dele wants the dark variants too.',
+        'You · Both palettes are in the file.',
+        'Adele · You are a lifesaver. See you at 4:30.',
+        'Say “JOAT, reply saying …”',
+        'Mic off? Long press to enable.',
+      ],
+    },
+    // Full-text reader: quiet metadata, bright body, Mac-paged.
+    'message-reader': {
+      title: 'MESSAGES · MESSAGE',
+      hint: 'down more · say reply · left x2: back',
+      selectable: false,
+      items: [
+        'Adele · Unread · page 1 of 2',
+        'Can you send the latest mockups before the review?',
+        'Dele wants to compare the dark variants against the',
+        'brand palette before we commit, and the print vendor',
+        'needs final art by Thursday morning at the latest.',
+      ],
+    },
+    'messages-compose': {
+      title: 'MESSAGES · COMPOSE',
+      hint: 'speak: recipient · left x2: back',
+      selectable: false,
+      items: [
+        'Say the recipient name first.',
+        'Then say the message.',
+        'One matching Mac contact is required.',
       ],
     },
     notifications: {

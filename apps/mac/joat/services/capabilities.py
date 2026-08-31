@@ -834,7 +834,9 @@ class CapabilityRouter:
         marker = "● " if thread.unread else ""
         label = f"[{_age(thread.at)}] {marker}{thread.sender}"
         if not thread.replyable:
-            label += " (group · read only)"
+            # No " · " inside the label: that token is the primary/secondary
+            # split on the lens. The READ ONLY page explains the constraint.
+            label += " (group)"
         preview = thread.text
         if thread.attachment_count:
             attachment = (

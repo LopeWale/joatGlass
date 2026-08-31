@@ -138,6 +138,24 @@ describe('flat productivity chrome', () => {
     expect(HudCanvas.usesFlatHudShell('list', 'QUICKNOTES')).toBe(true);
     expect(HudCanvas.usesFlatHudShell('brainstorm')).toBe(false);
   });
+
+  it('renders stationary navigation pages flat; only moving states keep the shell', () => {
+    // Text pages a wearer reads while stopped carried the rounded card too
+    // (the wearer's ruling: remove it). The moving live-session states stay
+    // in the shell family with Brainstorm.
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'destination')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'repair')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'mode')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'preview')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'arrived')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'error')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'guidance')).toBe(false);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'uncertain')).toBe(false);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'wrong_way')).toBe(false);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'off_route')).toBe(false);
+    expect(HudCanvas.usesFlatHudShell('navigation', '', 'rerouting')).toBe(false);
+    expect(HudCanvas.usesFlatHudShell('navigation')).toBe(false);
+  });
 });
 
 describe('selected visual geometry', () => {
@@ -200,14 +218,15 @@ describe('navigation error hierarchy', () => {
 
 describe('compact navigation decisions', () => {
   it('uses dense optical rows with a selection rail instead of option cards', () => {
+    // Flat ruling: uniform dense rows, a slim rail, no separator lines.
     expect(navigationDecisionRows(2)).toEqual([
-      { baselineY: 137, railTopY: 125, railHeight: 24, separatorY: 153, fontSize: 14 },
-      { baselineY: 171, railTopY: 159, railHeight: 24, fontSize: 14 },
+      { baselineY: 132, railTopY: 122, railHeight: 19, fontSize: 12 },
+      { baselineY: 152, railTopY: 142, railHeight: 19, fontSize: 12 },
     ]);
     expect(navigationDecisionRows(3)).toEqual([
-      { baselineY: 134, railTopY: 123, railHeight: 21, separatorY: 148, fontSize: 11 },
-      { baselineY: 162, railTopY: 151, railHeight: 21, separatorY: 176, fontSize: 11 },
-      { baselineY: 190, railTopY: 179, railHeight: 21, fontSize: 11 },
+      { baselineY: 132, railTopY: 122, railHeight: 19, fontSize: 12 },
+      { baselineY: 152, railTopY: 142, railHeight: 19, fontSize: 12 },
+      { baselineY: 172, railTopY: 162, railHeight: 19, fontSize: 12 },
     ]);
   });
 });

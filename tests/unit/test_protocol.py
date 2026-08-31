@@ -1127,3 +1127,12 @@ class TestLocationAndIdentity:
         assert bare.mic is None
     def test_auth_accepted_wire_shape(self) -> None:
         assert AuthAccepted().to_wire() == {"kind": "auth.accepted"}
+
+
+class TestVoiceGenerationConvention:
+    def test_voice_request_prefix_matches_the_plugin_constant(self) -> None:
+        # apps/hub-plugin/src/types.ts VOICE_REQUEST_PREFIX must equal this;
+        # the plugin adopts Mac-initiated lists strictly by this prefix.
+        from joat.core.protocol import VOICE_REQUEST_PREFIX
+
+        assert VOICE_REQUEST_PREFIX == "voice-"

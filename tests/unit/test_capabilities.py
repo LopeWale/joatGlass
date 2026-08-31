@@ -20,6 +20,7 @@ import pytest
 from joat.channels.cards import CardLog
 from joat.channels.imessage import MessageEntry, MessageHistoryPage, MessageThread
 from joat.core.protocol import (
+    VOICE_REQUEST_PREFIX,
     AssistantOverlay,
     BrainstormHudView,
     ContainerId,
@@ -33,7 +34,7 @@ from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
 from joat.persistence.voice_notes import VoiceNoteStore
-from joat.services.capabilities import CapabilityRouter
+from joat.services.capabilities import CapabilityOpenController, CapabilityRouter
 from joat.services.voice_note_capture import VoiceNoteCaptureSnapshot
 from joat.services.hud import HudWriter
 from joat.services.planning import PlanningScope
@@ -542,7 +543,7 @@ class TestCapabilityViews:
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.items == [
             "New message · voice recipient + text",
-            "[now] Dele (unread) · Attachment",
+            "[now] ● Dele · Attachment",
         ]
 
     async def test_selecting_new_message_opens_voice_compose_without_sending(
@@ -1491,3 +1492,53 @@ class TestGestureReflexes:
             ("Nothing to repeat yet.", "replace", None),
             ("", "settle", 6_000),
         ]
+
+
+class TestCapabilityOpenController:
+    """'JOAT, show my messages' — surfaces open from speech alone."""
+
+    async def test_voice_open_paints_messages_under_a_voice_generation(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(
+            tmp_path, rows=[("Adele", "Send the mockups?", time.time())],
+        )
+        opener = CapabilityOpenController(lambda: router)
+        assert await opener.handle_command("show my messages") == "Opening Messages."
+        note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert note_list.title == "MESSAGES"
+        assert note_list.request_id is not None
+        assert note_list.request_id.startswith(VOICE_REQUEST_PREFIX)
+
+    async def test_spoken_aliases_reach_their_surfaces(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        opener = CapabilityOpenController(lambda: router)
+        assert await opener.handle_command("read my texts") == "Opening Messages."
+        assert await opener.handle_command("open the calendar") == "Opening Planning."
+        assert await opener.handle_command("Show notifications") == "Opening Notifications."
+        assert await opener.handle_command("how is the weather") is None
+        assert await opener.handle_command("open the pod bay doors") is None
+
+    async def test_reflect_quicknotes_shows_the_live_recording_controls(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(
+            tmp_path, voice_capture=FakeVoiceCapture(state="recording", title="Standup"),
+        )
+        opener = CapabilityOpenController(lambda: router)
+        await opener.reflect_quicknotes()
+        control_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert control_list.title == "QUICKNOTES · RECORDING"
+        assert control_list.request_id is not None
+        assert control_list.request_id.startswith(VOICE_REQUEST_PREFIX)
+
+
+class TestMessageListRow:
+    def test_unread_thread_carries_the_attention_marker(self) -> None:
+        row = CapabilityRouter._message_list_row(MessageThread(
+            "Adele", "handle-1", "Send the mockups?", time.time(), True, unread=True,
+        ))
+        assert " ● Adele" in row
+        assert "(unread)" not in row
+
+    def test_read_thread_stays_unmarked(self) -> None:
+        row = CapabilityRouter._message_list_row(MessageThread(
+            "Adele", "handle-1", "Send the mockups?", time.time(), True,
+        ))
+        assert "●" not in row
