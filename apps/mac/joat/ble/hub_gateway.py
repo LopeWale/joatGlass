@@ -546,7 +546,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         *,
         timeout_s: float = DEFAULT_LOCATION_REFRESH_TIMEOUT_S,
     ) -> Location | None:
-        """Ask the plugin for one medium-accuracy fix bound to this socket session.
+        """Ask the plugin for one high-accuracy fix bound to this socket session.
 
         ``timeout_s`` includes both the phone SDK call and relay delivery.  It
         is deliberately longer than the plugin's five-second SDK request.
