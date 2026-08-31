@@ -66,7 +66,16 @@ export class Settings {
     } catch {
       return;
     }
-    if (this.chosenThisSession || !raw) return;
+    if (this.chosenThisSession) {
+      // A live choice outranks the hosted echo — and the host must converge
+      // on it now, not at the next change: a choice made before this attach
+      // (or whose write-through failed) would otherwise resurrect the stale
+      // hosted policy at the next boot.
+      void host.set(STORAGE_KEY, JSON.stringify({ resume: this.resume }))
+        .then(() => undefined, () => undefined);
+      return;
+    }
+    if (!raw) return;
     try {
       const parsed: unknown = JSON.parse(raw);
       const candidate = (parsed as { resume?: unknown }).resume;

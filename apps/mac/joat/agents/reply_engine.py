@@ -122,6 +122,38 @@ class MlxReplyEngine(ReplyEngine):
             self.remember(text, answer)
         return answer
 
+    async def complete(
+        self, *, system: str, text: str, max_tokens: int = 700
+    ) -> str | None:
+        """One task completion on the resident model — no persona, no history.
+
+        The conversational ``reply`` path caps answers at HUD size, remembers
+        turns, and may call tools; none of that belongs to summarization-class
+        work over a private transcript. This shares the loaded weights and the
+        one MLX thread, and touches neither grounding nor working memory.
+        """
+        if not text.strip() or not system.strip():
+            return None
+        await self._ensure_loaded()
+
+        def run() -> str:
+            from mlx_lm import generate  # lazy: optional dependency
+
+            out: str = generate(
+                self._model, self._tokenizer,
+                prompt=self._tokenizer.apply_chat_template(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": text},
+                    ],
+                    add_generation_prompt=True,
+                ),
+                max_tokens=max_tokens, verbose=False,
+            )
+            return out.strip()
+
+        return await asyncio.get_running_loop().run_in_executor(self._mlx_thread, run)
+
     async def _maybe_use_tools(self, text: str) -> str | None:
         """DECIDE pass: offer the tools; execute whatever the model calls.
 

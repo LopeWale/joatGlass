@@ -80,3 +80,27 @@ def test_capture_has_one_explicit_owner() -> None:
 
     router.end_capture(first)
     assert router.capturing is False
+
+
+def test_router_is_a_frame_source_for_conversation_consumers() -> None:
+    """The orchestrator subscribes to the router exactly like a transport."""
+    source = FakeFrameSource()
+    router = AudioRouter(source)
+    frames: list[AudioFrame] = []
+    router.on_audio_frame(frames.append)
+
+    source.emit(frame(1))
+    assert [f.seq for f in frames] == [1]
+
+    # An exclusive capture owns the microphone: conversation frame consumers
+    # hear nothing until the capture lane closes.
+    def capture(_frame: AudioFrame) -> None:
+        pass
+
+    router.begin_capture(capture)
+    source.emit(frame(2))
+    assert [f.seq for f in frames] == [1]
+
+    router.end_capture(capture)
+    source.emit(frame(3))
+    assert [f.seq for f in frames] == [1, 3]

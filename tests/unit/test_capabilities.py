@@ -32,7 +32,9 @@ from joat.native.bridge import NativeBridgeProtocolError, NativeBridgeUnavailabl
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
+from joat.persistence.voice_notes import VoiceNoteStore
 from joat.services.capabilities import CapabilityRouter
+from joat.services.voice_note_capture import VoiceNoteCaptureSnapshot
 from joat.services.hud import HudWriter
 from joat.services.planning import PlanningScope
 from joat.services.status import StatusPublisher
@@ -313,6 +315,109 @@ def message_row_index(transport: FakeTransport, label: str) -> int:
     return next(index for index, item in enumerate(frame.items) if label in item)
 
 
+def _retained_voice_note(notes, capture_id, *, base_us):  # type: ignore[no-untyped-def]
+    notes.create(
+        capture_id=capture_id,
+        idempotency_key=f"voice-note:{capture_id}",
+        title="Standup notes",
+        source_kind="g2.microphone",
+        now_us=base_us,
+    )
+    notes.transition(capture_id, "recording", now_us=base_us + 1)
+    notes.append_frame(
+        capture_id,
+        connection_generation="socket-a",
+        seq=1,
+        source="glasses",
+        speaker="wearer",
+        pcm=b"\x01\x00",
+        received_at_us=base_us + 2,
+    )
+    notes.transition(capture_id, "finalizing", now_us=base_us + 3)
+    notes.append_transcript(
+        capture_id,
+        text="We agreed to ship Friday.",
+        first_frame_ordinal=0,
+        last_frame_ordinal=0,
+        now_us=base_us + 4,
+    )
+    notes.finalize(
+        capture_id,
+        complete=True,
+        completion_code="transcript_checkpointed_raw_purged",
+        now_us=base_us + 5,
+    )
+
+
+class FakeVoiceCapture:
+    """Duck-typed VoiceCaptureControls with scriptable live state."""
+
+    def __init__(
+        self,
+        *,
+        state: str = "recording",
+        title: str = "Untitled",
+        discard_pending: bool = False,
+        active: bool = True,
+    ) -> None:
+        self._state = state
+        self._title = title
+        self._discard = discard_pending
+        self._active = active
+        self.calls: list[str] = []
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def discard_pending(self) -> bool:
+        return self._discard
+
+    @property
+    def snapshot(self) -> VoiceNoteCaptureSnapshot:
+        return VoiceNoteCaptureSnapshot(
+            capture_id="capture-live",
+            title=self._title,
+            state=self._state,
+            received_frames=0,
+            journaled_frames=0,
+            gap_count=0,
+            failure_code=None,
+        )
+
+    def control_pause(self) -> str:
+        self.calls.append("pause")
+        self._state = "paused"
+        return "Paused Voice Note."
+
+    def control_resume(self) -> str:
+        self.calls.append("resume")
+        self._state = "recording"
+        return "Resumed Voice Note."
+
+    def control_request_discard(self) -> str:
+        self.calls.append("discard")
+        self._discard = True
+        return "Discard Voice Note?"
+
+    def control_confirm_discard(self) -> str:
+        self.calls.append("confirm_discard")
+        self._discard = False
+        self._active = False
+        return "Discarded Voice Note."
+
+    def control_keep(self) -> str:
+        self.calls.append("keep")
+        self._discard = False
+        return "Kept Voice Note."
+
+    async def control_stop(self) -> str:
+        self.calls.append("stop")
+        self._active = False
+        return "Saved Voice Note: fixture."
+
+
 def make_router(
     tmp_path,
     rows=None,
@@ -320,6 +425,8 @@ def make_router(
     replies=None,
     personal_data=None,
     notes=None,
+    voice_notes=None,
+    voice_capture=None,
     actions=None,
     acceptance_armed=False,
 ):  # type: ignore[no-untyped-def]
@@ -337,6 +444,8 @@ def make_router(
         replies=replies,  # type: ignore[arg-type]
         personal_data=personal_data,  # type: ignore[arg-type]
         notes=notes,
+        voice_notes=voice_notes,
+        voice_capture=voice_capture,
         actions=actions,
         acceptance_armed=acceptance_armed,
     )
@@ -1250,6 +1359,111 @@ class TestCapabilityViews:
         assert action_detail.items[1] == "State · Drafted"
         assert action_detail.items[2].startswith("Action ref · ")
         store.close()
+
+    async def test_quicknotes_unifies_recordings_and_text_notes(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        store = DurableStore(tmp_path / "durable.sqlite3")
+        notes = NoteStore(store)
+        notes.create(
+            note_id="note-1",
+            idempotency_key="voice-1",
+            text="Ask Adaeze about the design review",
+            source=NoteSource(kind="voice.command"),
+            now_us=10,
+        )
+        voice_notes = VoiceNoteStore(store)
+        _retained_voice_note(voice_notes, "capture-1", base_us=20)
+        voice_notes.replace_insights(
+            "capture-1",
+            engine="mlx-local",
+            summary="The team agreed to ship Friday.",
+            key_points=("Ship Friday", "QA Thursday"),
+            todos=("Email release notes",),
+            now_us=99,
+        )
+        router, transport, _ = make_router(
+            tmp_path, notes=notes, voice_notes=voice_notes,
+        )
+
+        await router.open("QuickNotes")
+        note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert note_list.title == "QUICKNOTES"
+        # Recordings first, then exact dictated text notes.
+        assert "Standup notes · recorded" in note_list.items[0]
+        assert "Ask Adaeze" in note_list.items[1]
+        assert note_list.selectable is True
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="QUICKNOTES",
+            selected_index=0,
+        ))
+        await asyncio.sleep(0)
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.title == "QUICKNOTES · NOTE"
+        assert detail.items[0] == "Standup notes"
+        assert "SUMMARY" in detail.items
+        assert any("ship Friday" in item for item in detail.items)
+        assert "KEY POINTS" in detail.items
+        assert "TODOS" in detail.items
+        # The newest recording advertises the transcript Q&A grammar.
+        assert detail.hint is not None and "ask the last note" in detail.hint
+
+        # Text rows keep their exact-text detail behaviour.
+        await router.open("QuickNotes")
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="QUICKNOTES",
+            selected_index=1,
+        ))
+        await asyncio.sleep(0)
+        text_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert text_detail.title == "QUICKNOTES · DETAIL"
+        assert text_detail.items == ["Ask Adaeze about the design review"]
+
+    async def test_live_recording_owns_the_quicknotes_page_with_tap_controls(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        store = DurableStore(tmp_path / "durable.sqlite3")
+        voice_notes = VoiceNoteStore(store)
+        _retained_voice_note(voice_notes, "capture-0", base_us=5)
+        capture = FakeVoiceCapture(state="recording", title="Client call")
+        router, transport, _ = make_router(
+            tmp_path, voice_notes=voice_notes, voice_capture=capture,
+        )
+
+        await router.open("QuickNotes")
+        controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert controls.title == "QUICKNOTES · RECORDING"
+        assert controls.items == [
+            "Save and finish", "Pause recording", "Discard recording",
+        ]
+        assert controls.selectable is True
+        assert controls.hint is not None and "Client call" in controls.hint
+
+        # Tapping Save drives the typed control, then re-renders truth: the
+        # capture is no longer active, so the unified list returns.
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="QUICKNOTES",
+            selected_index=0,
+        ))
+        await asyncio.sleep(0)
+        assert capture.calls == ["stop"]
+        titles = [m.title for m in transport.sent if isinstance(m, HudList)]
+        # An honest progress frame lands before the potentially long
+        # transcription, then the unified list returns.
+        assert titles[-2:] == ["QUICKNOTES · SAVING", "QUICKNOTES"]
+        after = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert "recorded" in after.items[0]
+
+    async def test_discard_needs_its_own_confirm_row(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(
+            state="paused", title="Risky", discard_pending=True,
+        )
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+
+        await router.open("QuickNotes")
+        controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert controls.title == "QUICKNOTES · DISCARD?"
+        assert controls.items == ["Confirm discard", "Keep recording"]
 
 
 class TestGestureReflexes:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 import stat
 
@@ -62,6 +63,7 @@ def controller(
     stt_available: bool = True,
     max_raw_bytes: int = 30 * 60 * 16_000 * 2,
     export_directory: Path | None = None,
+    on_saved: Callable[[str], None] | None = None,
 ) -> tuple[
     DurableStore,
     VoiceNoteStore,
@@ -80,6 +82,7 @@ def controller(
         id_factory=lambda: "capture-1",
         max_raw_bytes=max_raw_bytes,
         export_directory=export_directory,
+        on_saved=on_saved,
     )
     return durable, notes, source, capture
 
@@ -366,3 +369,66 @@ async def test_export_collision_preserves_existing_directory_and_uses_suffix(
         assert result is not None and result.endswith("-2.")
         assert sentinel.read_text(encoding="utf-8") == "mine"
         assert (export_root / (occupied.name + "-2") / "note.md").is_file()
+
+
+async def test_quicknote_aliases_drive_the_same_recorder(tmp_path: Path) -> None:
+    durable, notes, source, capture = controller(tmp_path / "joat.sqlite3")
+    with durable:
+        started = await capture.handle_command("start a quicknote about Standup")
+        assert started is not None and started.startswith(
+            "Recording Voice Note: Standup."
+        )
+        source.emit(0)
+        assert await capture.handle_command("pause quicknote") == (
+            "Paused Voice Note: Standup."
+        )
+        assert await capture.handle_command("resume quick note") == (
+            "Resumed Voice Note: Standup."
+        )
+        source.emit(1, generation="socket-b")
+        receipt = await capture.handle_command("save quicknote")
+        assert receipt is not None and receipt.startswith("Saved Voice Note")
+        shown = await capture.handle_command("show last quicknote")
+        assert shown is not None and shown.startswith("Last Voice Note: Standup")
+
+
+async def test_on_saved_hook_fires_only_for_retained_saves(tmp_path: Path) -> None:
+    saved_ids: list[str] = []
+    durable, notes, source, capture = controller(
+        tmp_path / "joat.sqlite3", on_saved=saved_ids.append,
+    )
+    with durable:
+        await capture.handle_command("start a voice note Hook check")
+        source.emit(0)
+        await capture.handle_command("stop voice note")
+        assert saved_ids == ["capture-1"]
+
+    # A discard must never fire the summarization hook.
+    discard_ids: list[str] = []
+    durable2, _, _, capture2 = controller(
+        tmp_path / "joat-discard.sqlite3", on_saved=discard_ids.append,
+    )
+    with durable2:
+        await capture2.handle_command("start a voice note Hook discard")
+        await capture2.handle_command("discard voice note")
+        await capture2.handle_command("confirm discard voice note")
+        assert discard_ids == []
+
+
+async def test_typed_controls_mirror_the_voice_grammar(tmp_path: Path) -> None:
+    durable, notes, source, capture = controller(tmp_path / "joat.sqlite3")
+    with durable:
+        await capture.handle_command("start a voice note Controls")
+        source.emit(0)
+        assert capture.discard_pending is False
+        assert capture.control_pause() == "Paused Voice Note: Controls."
+        assert capture.control_resume() == "Resumed Voice Note: Controls."
+        request = capture.control_request_discard()
+        assert request.startswith("Discard Voice Note Controls?")
+        assert capture.discard_pending is True
+        assert capture.control_keep() == "Kept and resumed Voice Note: Controls."
+        assert capture.discard_pending is False
+        source.emit(1, generation="socket-b")
+        receipt = await capture.control_stop()
+        assert receipt.startswith("Saved Voice Note")
+        assert capture.active is False

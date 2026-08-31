@@ -46,7 +46,9 @@ from .agents.openclaw_terminal import (
     OpenClawToolInventoryUnsettled,
     OpenClawToolsEnabled,
 )
-from .agents.subprocess_agent import critic, proposer
+from .agents.claude_completer import ClaudeCompleter
+from .agents.subprocess_agent import critic, find_claude_binary, proposer
+from .audio.router import AudioRouter
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
@@ -88,6 +90,7 @@ from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.store import DurableStore
 from .persistence.tasks import TaskOccurrenceStore
+from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
 from .services.brainstorm_acceptance import (
@@ -105,6 +108,12 @@ from .services.hermes_productivity import (
 from .services.planning import personal_data_bridge_state
 from .services.message_reply import MessageReplyController
 from .services.note_commands import NoteCommandController
+from .services.note_insights import (
+    NoteInsightCommandController,
+    NoteInsightsService,
+)
+from .services.notes_export import AppleNotesExporter
+from .services.voice_note_capture import VoiceNoteCaptureController
 from .services.navigation import (
     NavigationSession,
     NavigationUnavailableSession,
@@ -337,6 +346,9 @@ async def main() -> None:
         )
 
     replier: ReplyEngine | None = None
+    # The same resident MLX weights serve QuickNote summarization through a
+    # separate persona-free completion path; None degrades those commands.
+    local_completer: MlxReplyEngine | None = None
     belt: ToolBelt | None = None
     llm_warm_task: asyncio.Task[bool] | None = None
     if args.no_llm:
@@ -375,6 +387,7 @@ async def main() -> None:
                                      tools=belt,
                                      on_loaded=lambda: status.set(llm="ready"))
         replier = mlx_replier
+        local_completer = mlx_replier
         llm_warm_task = asyncio.create_task(mlx_replier.warm(), name="mlx-warm")
         log.info("reply engine: %s (+%d tools; warming in background)",
                  args.llm_model, len(belt_tools))
@@ -982,11 +995,45 @@ async def main() -> None:
     )
     note_store = NoteStore(durable_store)
     note_commands = NoteCommandController(note_store)
+    # QuickNote recorder: journal-first meeting/speech capture. The router
+    # interposes on the transport's frame stream so an exclusive recording
+    # owns the microphone (nothing said mid-meeting reaches the assistant);
+    # the orchestrator subscribes through it below.
+    voice_note_store = VoiceNoteStore(durable_store)
+    recovered_notes = voice_note_store.recover_after_restart(
+        now_us=time.time_ns() // 1_000,
+    )
+    if recovered_notes:
+        log.info(
+            "recovered %d interrupted QuickNote recordings", len(recovered_notes)
+        )
+    audio_router = AudioRouter(transport)
+    claude_binary = find_claude_binary()
+    note_insights = NoteInsightsService(
+        voice_note_store,
+        local_completer,
+        claude=ClaudeCompleter(claude_binary) if claude_binary else None,
+    )
+    voice_capture = VoiceNoteCaptureController(
+        voice_note_store,
+        audio_router,
+        stt,
+        stt_available=stt_available,
+        on_saved=note_insights.schedule_summarize,
+    )
+    note_insight_commands = NoteInsightCommandController(
+        note_insights,
+        productivity=productivity_actions,
+        exporter=AppleNotesExporter(),
+        local_time_zone=system_local_time_zone,
+    )
     voice_commands = VoiceCommandRouter(
         message_replies,
         models,
         productivity=productivity_actions,
         notes=note_commands,
+        voice_notes=voice_capture,
+        note_insights=note_insight_commands,
         hermes=hermes_productivity,
     )
     # The assistant's name is JOAT — plus mishearings observed LIVE from
@@ -1003,6 +1050,7 @@ async def main() -> None:
         sessions=sessions, wake_words=wake_words, status=status,
         commands=voice_commands,
         latency_observer=voice_latency.record if voice_latency is not None else None,
+        frames=audio_router,
     )
     orchestrator.attach()
 
@@ -1070,6 +1118,8 @@ async def main() -> None:
         replies=message_replies,
         personal_data=personal_data,
         notes=note_store,
+        voice_notes=voice_note_store,
+        voice_capture=voice_capture,
         actions=action_journal,
         acceptance_armed=args.g2_diagnostics,
     )
@@ -1136,6 +1186,9 @@ async def main() -> None:
         await shutdown.wait()
     finally:
         remove_shutdown_handlers(shutdown_signals)
+        # Close the capture lane first: an in-flight recording is journaled
+        # as interrupted (raw retained) rather than silently truncated.
+        voice_capture.interrupt_for_shutdown()
         watchdog.cancel()
         lag_task.cancel()
         beat_task.cancel()

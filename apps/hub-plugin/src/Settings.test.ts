@@ -70,13 +70,23 @@ describe('Settings', () => {
 
   it('never lets a hosted echo override a policy chosen this session', async () => {
     stubStorage();
+    const hosted: Record<string, string> = {
+      'joat.settings.v1': JSON.stringify({ resume: 'auto' }),
+    };
     const s = new Settings();
     s.setResumePolicy('mac');
     await s.attachHostStorage({
-      get: async () => JSON.stringify({ resume: 'auto' }),
-      set: async () => true,
+      get: async () => hosted['joat.settings.v1'] ?? '',
+      set: async (key, value) => {
+        hosted[key] = value;
+        return true;
+      },
     });
     expect(s.resumePolicy).toBe('mac');
+    // The host converges on the live choice, so the next boot cannot
+    // resurrect the stale hosted policy over the fresher mirror.
+    await Promise.resolve();
+    expect(hosted['joat.settings.v1']).toContain('mac');
   });
 
   it('write-throughs every change to the host store, and survives host failures', async () => {

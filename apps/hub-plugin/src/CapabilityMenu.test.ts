@@ -377,20 +377,22 @@ describe('CapabilityMenu', () => {
     try {
       const { menu, lists, listOptions } = rig();
       await menu.toggle();
-      for (let index = 0; index < 4; index += 1) {
-        menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Notifications
+      for (let index = 0; index < 5; index += 1) {
+        menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // QuickNotes
       }
       menu.handleClick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(listOptions[0]?.title).toBe('NOTIFICATIONS');
+      expect(listOptions[0]?.title).toBe('QUICKNOTES');
 
       await vi.advanceTimersByTimeAsync(12_000);
+      // The guidance names the row exactly as the sidebar prints it —
+      // 'QuickNotes', not a case-folded 'Quicknotes'.
       expect(lists[1]).toEqual([
         'No response from the Mac yet.',
-        'Return to Overview, then open Notifications to retry.',
+        'Return to Overview, then open QuickNotes to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
-        title: 'NOTIFICATIONS · RETRY', hint: 'left x2: back',
+        title: 'QUICKNOTES · RETRY', hint: 'left x2: back',
       });
     } finally {
       vi.useRealTimers();

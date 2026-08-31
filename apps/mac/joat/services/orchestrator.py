@@ -69,8 +69,13 @@ class VoiceOrchestrator:
         fuzzy_wake: tuple[str, ...] = ("joat",),
         fuzzy_threshold: float = 0.86,
         latency_observer: LatencyObserver | None = None,
+        frames: AudioFrameSource | None = None,
     ) -> None:
         self._transport = transport
+        # An interposed source (the AudioRouter) lets an exclusive Voice Note
+        # capture own the microphone; the orchestrator hears nothing while a
+        # meeting is being recorded and resumes when the capture lane closes.
+        self._frames = frames
         self._commands = commands
         self._hud = HudWriter(transport)
         self._sessions = sessions
@@ -117,7 +122,9 @@ class VoiceOrchestrator:
         self._utterance_worker: asyncio.Task[None] | None = None
 
     def attach(self) -> None:
-        if isinstance(self._transport, AudioFrameSource):
+        if self._frames is not None:
+            self._frames.on_audio_frame(self.on_audio_frame)
+        elif isinstance(self._transport, AudioFrameSource):
             self._transport.on_audio_frame(self.on_audio_frame)
         else:
             # Older/direct transports retain ordinary voice support, but cannot

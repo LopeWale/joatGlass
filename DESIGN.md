@@ -172,10 +172,38 @@ navigation state becomes interactive only after its visual paint succeeds; a
 failed paint restores Overview instead of exposing invisible controls.
 
 Brainstorm is the wearer-facing capability name; `debate` remains a legacy
-voice alias. Agent Terminal is a visible, glasses-first status-and-control
-surface for the dedicated Hermes seat: it makes the no-tool preflight and
-return-to-Brainstorm action visible without exposing a raw OpenClaw console.
-OpenClaw itself remains the backend gateway.
+voice alias. Brainstorm is a wearer-initiated, steerable, potentially
+multi-round analysis session around a topic, task, claim, problem, or evolving
+discussion. Codex CLI and Claude Code challenge and expand each other's work,
+repair unsupported claims, and converge on a verified JOAT synthesis while the
+process remains visible on the glasses. Hermes and OpenClaw are not Brainstorm
+participants and their availability never gates Brainstorm.
+
+JOAT is the glasses brain and the only wearer-facing Brainstorm controller. It
+receives voice from the glasses, owns the selected durable session and its
+lineage, routes each move to the wearer-directed or session-selected
+collaborator, streams the actual work back to the HUD, runs verification and
+bounded repair, produces the synthesis, and handles resume, branch, stop, and
+reconnect restoration. Codex and Claude are collaborators inside JOAT's
+Brainstorm; neither one replaces JOAT or owns the glasses interaction.
+
+Opening Brainstorm while a conversation is active restores that conversation.
+Opening it while idle shows a compact recent-session list plus `NEW`. Ordinary
+speech continues the selected context; explicit `new Brainstorm`, `branch
+this`, and `continue <title>` change session lineage. If a second Brainstorm
+request could replace a clearly unrelated selected context, JOAT asks before
+replacing it rather than silently resetting or guessing.
+
+The Brainstorm focus page is a flat optical transcript, not a dashboard: one
+compact title/state line, 10–12 speaker-prefixed transcript lines, one
+voice-composer line, and one truthful gesture footer. It has no cards, boxed
+panels, permanent seat row, oversized topic type, decorative empty space, or
+fake waveform. A recording mark appears only while capture is actually active.
+
+Agent Terminal is a separate future capability: a dense CLI/chat interface for
+existing Hermes and OpenClaw sessions on configured Tailscale Macs. It is not a
+Brainstorm seat and never uses Codex or Claude. See
+[`docs/AGENT_TERMINAL_ROADMAP.md`](docs/AGENT_TERMINAL_ROADMAP.md).
 
 ### Forms and overlays
 
@@ -194,7 +222,7 @@ and does not restyle, replace, or pre-empt that platform surface.
 
 All interface icons come from `@phosphor-icons/core` regular assets.
 Calendar/Planning, Messages, Notifications, Tasks, Navigation, QuickNotes,
-Brainstorm (also the dedicated Agent Terminal seat), Activity, Settings,
+Brainstorm, Agent Terminal, Activity, Settings,
 microphone, and battery use one stroke family and are rasterized with the
 surrounding frame. Short text labels remain mandatory; icons never carry
 meaning alone.

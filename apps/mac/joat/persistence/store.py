@@ -485,6 +485,28 @@ _MIGRATION_6 = (
     """,
 )
 
+_MIGRATION_7 = (
+    # Generated distillations of a retained Voice Note. Kept OUT of
+    # voice_note_segments deliberately: segments are capture-time truth and
+    # freeze at completion, while insights are derived, engine-attributed,
+    # and replaceable (re-summarize with a different engine later).
+    """
+    CREATE TABLE voice_note_insights (
+        capture_id TEXT NOT NULL REFERENCES voice_notes(capture_id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('summary','key_point','todo')),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        text TEXT NOT NULL CHECK (
+            typeof(text) = 'text' AND length(text) > 0
+        ),
+        engine TEXT NOT NULL CHECK (
+            typeof(engine) = 'text' AND length(engine) > 0
+        ),
+        generated_at_us INTEGER NOT NULL CHECK (generated_at_us >= 0),
+        PRIMARY KEY (capture_id, kind, ordinal)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -492,6 +514,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (4, "durable_notification_observations", _MIGRATION_4),
     (5, "retain_task_alert_history", _MIGRATION_5),
     (6, "durable_local_voice_notes", _MIGRATION_6),
+    (7, "voice_note_insights", _MIGRATION_7),
 )
 
 

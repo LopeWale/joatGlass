@@ -877,3 +877,28 @@ class TestWakeWordGate:
         started = self._session_orch("JOAT, debate tabs or spaces")
         await drain()
         assert started == ["ran"]
+
+
+class TestInterposedFrameSource:
+    async def test_attach_prefers_the_injected_frame_source(self) -> None:
+        """With an AudioRouter interposed, the orchestrator must subscribe to
+        the router — never directly to the transport — or an exclusive
+        QuickNote capture could not silence conversation."""
+        transport = FrameTransport()
+
+        class Frames(AudioFrameSource):
+            def __init__(self) -> None:
+                self.callback: AudioFrameCallback | None = None
+
+            def on_audio_frame(self, callback: AudioFrameCallback) -> None:
+                self.callback = callback
+
+        frames = Frames()
+        orch = VoiceOrchestrator(
+            transport, stt=FakeEngine(), stt_available=False, frames=frames,
+        )
+        orch.attach()
+
+        assert frames.callback is not None
+        assert transport.frame_cb is None
+        assert transport.audio_cb is None
