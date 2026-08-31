@@ -136,3 +136,53 @@ class TestLensFirstAnswerContract:
         assert "GIST:" in prompt
         assert "Under 120 words" in prompt
         assert "as much depth" not in prompt
+
+
+class TestRoundInvariant:
+    """'A round contains one turn from every seated collaborator.'
+
+    Before the round snapshot existed this was only a default: direct()
+    moved the rotation cursor, so a mid-round redirect made one seat speak
+    twice and another zero times in that round.
+    """
+
+    def _table(self):
+        from joat.services.roundtable import Participant, RoundTable
+
+        async def noop(prompt):  # pragma: no cover - never driven
+            yield ""
+
+        return RoundTable([
+            Participant(name=n, role="seat", stream=noop)
+            for n in ("codex", "claude", "joat")
+        ])
+
+    def test_mid_round_redirect_reorders_but_everyone_speaks_once(self) -> None:
+        t = self._table()
+        t.start_round()
+        spoke = [t.next_speaker().name]          # codex spoke
+        assert t.direct("joat") is not None      # wearer: "joat, your turn"
+        spoke += [t.next_speaker().name, t.next_speaker().name]
+        assert spoke == ["codex", "joat", "claude"]   # reordered…
+        assert sorted(spoke) == ["claude", "codex", "joat"]  # …never recounted
+
+    def test_redirect_to_a_seat_that_already_spoke_opens_the_next_round(self) -> None:
+        t = self._table()
+        t.start_round()
+        assert t.next_speaker().name == "codex"
+        assert t.direct("codex") is not None     # a beat too late
+        # codex does NOT get a second turn this round…
+        rest = [t.next_speaker().name, t.next_speaker().name]
+        assert "codex" not in rest
+        # …but opens the next one, which is what the wearer meant.
+        t.start_round()
+        assert t.next_speaker().name == "codex"
+
+    def test_between_rounds_a_redirect_picks_the_next_opener(self) -> None:
+        t = self._table()
+        t.start_round()
+        for _ in range(3):
+            t.next_speaker()
+        assert t.direct("claude") is not None
+        t.start_round()
+        assert t.next_speaker().name == "claude"

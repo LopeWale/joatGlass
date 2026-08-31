@@ -543,6 +543,10 @@ class DebateSession(Session):
         outcome = "no judge — one round"
         for round_no in range(1, self._max_rounds + 1):
             self._set_phase("independent" if round_no == 1 else "cross_review")
+            # One turn from every seated collaborator — the wearer's round
+            # invariant. The snapshot makes mid-round redirects reorder the
+            # seats still owing a turn instead of recounting them.
+            self._table.start_round()
             for _ in range(len(self._table)):
                 speaker = self._table.next_speaker()
                 said = await self._verified_turn(speaker, round_no)

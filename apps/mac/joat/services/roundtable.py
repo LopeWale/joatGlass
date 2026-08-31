@@ -84,6 +84,7 @@ class RoundTable:
             raise ValueError("a round table needs at least one participant")
         self._participants = list(participants)
         self._index = 0
+        self._pending: list[Participant] = []
 
     def __len__(self) -> int:
         return len(self._participants)
@@ -110,21 +111,50 @@ class RoundTable:
                 return p
         return None
 
+    def start_round(self) -> None:
+        """Snapshot who owes a turn: everyone, exactly once.
+
+        "A round contains one turn from every seated collaborator" is the
+        wearer's invariant, and before this snapshot existed it was only a
+        default: `direct()` moved the rotation cursor, so a mid-round
+        redirect made one seat speak twice and another zero times in that
+        round. Now a redirect can only REORDER the seats still owing a
+        turn — the count is structural.
+        """
+        ordered = self._participants[self._index:] + self._participants[:self._index]
+        self._pending = list(ordered)
+
     def direct(self, name: str) -> Participant | None:
-        """Make `name` the next speaker. Returns the seat, or None if unknown."""
+        """Give `name` the floor. Returns the seat, or None if unknown.
+
+        Mid-round, a seat that still owes a turn jumps to the front of the
+        pending order. A seat that has ALREADY spoken this round is not
+        given a second turn — it opens the next round instead, which is
+        what the wearer meant a beat too late.
+        """
         seat = self.find(name)
         if seat is None:
             return None
-        self._index = self._participants.index(seat)
+        if seat in self._pending:
+            self._pending.remove(seat)
+            self._pending.insert(0, seat)
+        else:
+            self._index = self._participants.index(seat)
         return seat
 
     def next_speaker(self) -> Participant:
-        """The seat whose turn it is; advances the rotation."""
-        seat = self._participants[self._index % len(self._participants)]
-        self._index = (self._index + 1) % len(self._participants)
+        """The seat whose turn it is; consumes it from the current round."""
+        if not self._pending:
+            self.start_round()
+        seat = self._pending.pop(0)
+        # The cursor trails the speaker so the NEXT round opens with the
+        # seat after the last one heard — rotation survives the snapshot.
+        self._index = (self._participants.index(seat) + 1) % len(self._participants)
         return seat
 
     def peek(self) -> Participant:
+        if self._pending:
+            return self._pending[0]
         return self._participants[self._index % len(self._participants)]
 
 
