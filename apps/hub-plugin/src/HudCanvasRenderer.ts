@@ -173,15 +173,15 @@ export function confirmationReviewLayout(): {
   };
 }
 
-/** Dense Planning and safe-write pages use the status spine without wrapping
- * the entire optical field in a second rounded container. */
+/** Content pages use the status spine alone. The second rounded container
+ * ("the card") spent border and margin pixels on decoration; every list,
+ * confirmation, and productivity page now renders flat. */
 export function usesFlatHudShell(
   kind: HudVisualFrame['kind'],
   title = '',
 ): boolean {
-  return kind === 'confirmation'
-    || kind === 'productivity'
-    || (kind === 'list' && /^(PLANNING|CALENDAR|TASKS)(?: ·|$)/i.test(title.trim()));
+  void title;
+  return kind === 'confirmation' || kind === 'productivity' || kind === 'list';
 }
 
 export type HudIconName =
@@ -212,15 +212,6 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   microphone: microphoneSvg,
   battery: batteryHighSvg,
 };
-
-export type HudListKind =
-  | 'messages'
-  | 'notifications'
-  | 'calendar'
-  | 'tasks'
-  | 'quicknotes'
-  | 'activity'
-  | 'generic';
 
 /** A month is intentionally a real six-row grid on the lens, rather than a
  * web-calendar imitation. The Mac still owns the selected week/action row;
@@ -447,40 +438,6 @@ export function hudSidebarIconName(item: string): HudIconName {
     activity: 'activity',
   };
   return icons[normalized] ?? 'settings';
-}
-
-export function resolveHudListKind(title: string): HudListKind {
-  const normalized = title.trim().toUpperCase();
-  if (normalized.startsWith('MESSAGES')) return 'messages';
-  if (normalized.startsWith('NOTIFICATIONS')) return 'notifications';
-  if (normalized.startsWith('PLANNING')) return 'calendar';
-  if (normalized.startsWith('CALENDAR')) return 'calendar';
-  if (normalized.startsWith('TASKS')) return 'tasks';
-  if (normalized.startsWith('QUICKNOTES')) return 'quicknotes';
-  if (normalized.startsWith('ACTIVITY') || normalized.startsWith('ACTION ·')) return 'activity';
-  return 'generic';
-}
-
-/**
- * A unified Planning day intentionally contains two native kinds. The source
- * row already states which one it is, so preserve that distinction in the
- * glyph rather than visually turning every agenda row into a Calendar event.
- */
-export function hudListItemIconName(title: string, item: string): HudIconName {
-  const kind = resolveHudListKind(title);
-  if (kind === 'calendar' && /(?:^| · )REMINDER(?: · |$)/.test(item.toUpperCase())) {
-    return 'tasks';
-  }
-  const icons: Readonly<Record<HudListKind, HudIconName>> = {
-    messages: 'messages',
-    notifications: 'notifications',
-    calendar: 'calendar',
-    tasks: 'tasks',
-    quicknotes: 'quicknotes',
-    activity: 'activity',
-    generic: 'settings',
-  };
-  return icons[kind];
 }
 
 export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): string {
@@ -775,8 +732,9 @@ export interface MessagesConversationTranscript {
   rows: MessagesConversationRow[];
 }
 
-/** One compact instruction is enough for the voice-first Compose surface. */
-export const MESSAGES_COMPOSE_GUIDANCE = 'Say: recipient, then message';
+/** Seven transcript rows use the vertical budget between the Mac-owned
+ * heading (y87) and the footer hint: 113 + 22·6 = 245. */
+export const MESSAGES_CONVERSATION_ROW_CAPACITY = 7;
 
 /** Conversation frames are deliberately not rendered as notification rows.
  * The Mac owns the text; this parser only distinguishes the already-labeled
@@ -801,7 +759,7 @@ export function parseMessagesConversationRow(value: string): MessagesConversatio
 export function messagesConversationTranscript(
   items: readonly string[],
   selectedIndex: number,
-  capacity = 6,
+  capacity = MESSAGES_CONVERSATION_ROW_CAPACITY,
 ): MessagesConversationTranscript {
   const parsed = items.map((item, index) => ({ index, row: parseMessagesConversationRow(item) }));
   const heading = parsed.find(({ row }) => row.kind === 'instruction')?.row.body ?? 'Conversation';
@@ -864,7 +822,7 @@ export function messagesReaderBodyLines(text: string): string[] {
 export function selectedMessagesConversationRow(
   items: readonly string[],
   selectedIndex: number,
-  capacity = 6,
+  capacity = MESSAGES_CONVERSATION_ROW_CAPACITY,
 ): number | undefined {
   const speakerRows = items
     .map((item, index) => ({ index, row: parseMessagesConversationRow(item) }))
@@ -881,9 +839,13 @@ export function selectedMessagesConversationRow(
 
 /** Every Mac-authored Messages screen is dense lens text, never a generic
  * browser-like list card. */
+/** Only the two genuinely bespoke Messages screens keep a dedicated layout:
+ * the two-column conversation transcript and the full-text reader. Every
+ * other Messages page — the thread picker, compose, access/retry states —
+ * speaks the one dense focus-list language like the rest of the HUD. */
 export function usesMessagesCompactLayout(title: string): boolean {
   const normalized = title.trim().toUpperCase();
-  return normalized === 'MESSAGES' || normalized.startsWith('MESSAGES ·');
+  return normalized === 'MESSAGES · CONVERSATION' || normalized === 'MESSAGES · MESSAGE';
 }
 
 /** Navigation starts by voice, so its non-selectable capability entry is a
@@ -892,76 +854,84 @@ export function usesNavigationSetupLayout(title: string, selectable: boolean): b
   return title.trim().toUpperCase() === 'NAVIGATION' && !selectable;
 }
 
-export interface MessagesListRow {
-  baselineY: number;
-  railTopY: number;
-  railHeight: number;
-  separatorY?: number;
-}
-
-/** Six text rows fit between the Messages heading and the persistent gesture
- * hint. A selected row gets only a slim rail: neither recovery guidance nor
- * conversation selection consumes the lens with a rounded container. */
-export function messagesListRows(
-  itemCount: number,
-  capacity = 6,
-): readonly MessagesListRow[] {
-  const count = Math.min(Math.max(0, Math.floor(capacity)), Math.max(0, Math.floor(itemCount)));
-  return Array.from({ length: count }, (_, index) => {
-    const baselineY = 93 + index * 24;
-    return {
-      baselineY,
-      railTopY: baselineY - 11,
-      railHeight: 21,
-      ...(index < count - 1 ? { separatorY: baselineY + 13 } : {}),
-    };
-  });
-}
-
 export interface PlanningFocusRow {
   primaryBaselineY: number;
   secondaryBaselineY?: number;
   railTopY: number;
   railHeight: number;
-  separatorY?: number;
 }
 
-/** Planning is a time-oriented lens view, not a browser list. Day agendas
- * need room for a time and kind/title line; all other Planning scopes use six
- * single-line rows. Both variants reserve space for the persistent footer and
- * expose selection with a rail rather than a card outline. */
+export interface FocusListMarker {
+  glyph: string;
+  /** 'content' markers brighten with the row (● record); 'annotation'
+   * markers stay quiet chrome (□ todo box, – key point). */
+  emphasis: 'content' | 'annotation';
+}
+
+/** The semantic marker vocabulary for dense rows. Deliberately tiny and
+ * firmware-font-safe (design-guidelines Unicode set) so the same strings
+ * mean the same thing on the text-fallback surface: a marker indicates the
+ * KIND of row, it never decorates. */
+const FOCUS_LIST_MARKERS: Readonly<Record<string, FocusListMarker>> = {
+  '●': { glyph: '●', emphasis: 'content' },     // a recording
+  '□': { glyph: '□', emphasis: 'annotation' },  // an open todo
+  '–': { glyph: '–', emphasis: 'annotation' },  // a key point
+};
+
+export function focusListMarker(text: string): FocusListMarker | undefined {
+  return text.length > 2 && text[1] === ' '
+    ? FOCUS_LIST_MARKERS[text[0] ?? '']
+    : undefined;
+}
+
+/** A selectable list that mixes marked and unmarked rows reserves the marker
+ * column for every row, so all titles share one left edge instead of a
+ * ragged one. Non-selectable detail pages keep their hanging-indent bullets
+ * under section labels, where the indent IS the structure. */
+export function listReservesMarkerColumn(items: readonly string[]): boolean {
+  return items.some((item) => {
+    const { primary } = parseHudListItem(item);
+    return focusListMarker(primary || item) !== undefined;
+  });
+}
+
+/** THE list language for every focus page: dense reading rows with a
+ * selection rail and hairline separators — never a card per row. The old
+ * roomy layout spent 56 optical pixels, an icon badge, and a rounded outline
+ * on each line; on a 288-pixel-tall lens that left three rows per glance
+ * (wearer's ruling: wasteful). Planning day agendas keep a second line for
+ * their time/kind pair; everything else shows six rows per screen. */
 export function planningFocusRows(
   title: string,
   itemCount: number,
 ): readonly PlanningFocusRow[] {
   const normalized = title.trim().toUpperCase();
-  if (!/^(?:PLANNING|CALENDAR|TASKS)(?:\s*·|$)/.test(normalized)) return [];
 
   const agenda = /^(?:PLANNING|CALENDAR|TASKS) · PLAN · (?:MON|TUE|WED|THU|FRI|SAT|SUN)\b/
     .test(normalized);
-  const capacity = agenda ? 4 : 6;
+  // Use the vertical budget: the content column runs from under the title to
+  // just above the footer. Nine single-line rows (or six two-line agenda
+  // rows) per glance, no separator lines — pitch alone divides rows, and
+  // every reclaimed pixel is another visible row of the wearer's content.
+  const firstBaselineY = agenda ? 88 : 84;
+  const pitch = agenda ? 30 : 20;
+  const lastBaselineY = 246;
+  const capacity = Math.floor((lastBaselineY - firstBaselineY) / pitch) + 1;
   const count = Math.min(capacity, Math.max(0, Math.floor(itemCount)));
-  if (agenda) {
-    return Array.from({ length: count }, (_, index) => {
-      const primaryBaselineY = 93 + index * 32;
-      return {
-        primaryBaselineY,
-        secondaryBaselineY: primaryBaselineY + 15,
-        railTopY: primaryBaselineY - 12,
-        railHeight: 29,
-        ...(index < count - 1 ? { separatorY: primaryBaselineY + 24 } : {}),
-      };
-    });
-  }
-
   return Array.from({ length: count }, (_, index) => {
-    const primaryBaselineY = 93 + index * 24;
-    return {
-      primaryBaselineY,
-      railTopY: primaryBaselineY - 11,
-      railHeight: 21,
-      ...(index < count - 1 ? { separatorY: primaryBaselineY + 13 } : {}),
-    };
+    const primaryBaselineY = firstBaselineY + index * pitch;
+    return agenda
+      ? {
+        primaryBaselineY,
+        secondaryBaselineY: primaryBaselineY + 13,
+        railTopY: primaryBaselineY - 11,
+        railHeight: 27,
+      }
+      : {
+        primaryBaselineY,
+        railTopY: primaryBaselineY - 10,
+        railHeight: 19,
+      };
   });
 }
 
@@ -1165,7 +1135,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawSidebar(context, frame, icons);
         break;
       case 'list':
-        this.drawList(context, frame, icons);
+        this.drawList(context, frame);
         break;
       case 'confirmation':
         this.drawConfirmation(context, frame, icons);
@@ -1353,11 +1323,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(SUPPORT);
       context.font = `10px ${HUD_FONT}`;
       context.fillText(main.label.toUpperCase(), 110, 76);
+      // The icon states the KIND of the main content — calendar for what's
+      // next, a chat glyph only for an actual message/notification. Plain
+      // assistant text gets no icon at all: JOAT's resting screen is JOAT,
+      // not a Messages app wearing a chat bubble.
       const mainIcon = main.structured && /NEXT|CALENDAR/i.test(main.label)
         ? icons.calendar
-        : icons.messages;
+        : frame.mainKind === 'notification'
+          ? icons.notifications
+          : undefined;
       const mainLevel = hudBrightnessGray(frame.mainBrightness);
-      this.drawIcon(context, mainIcon, 111, 91, 32, mainLevel);
+      if (mainIcon) this.drawIcon(context, mainIcon, 111, 91, 32, mainLevel);
+      // Without an icon the text owns the icon column too — no dead gutter.
+      const mainX = mainIcon ? HUD_VISUAL_GEOMETRY.overviewMainX : 110;
+      const mainWidth = 359 + (HUD_VISUAL_GEOMETRY.overviewMainX - mainX);
       context.fillStyle = gray(mainLevel);
       const mainSize = opacity < 1 ? 19 : main.structured ? 25 : 18;
       context.font = `${mainSize}px ${HUD_FONT}`;
@@ -1365,17 +1344,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.fitText(
           context,
           main.value,
-          HUD_VISUAL_GEOMETRY.overviewMainX,
+          mainX,
           112,
-          opacity < 1 ? 330 : 359,
+          opacity < 1 ? 330 : mainWidth,
         );
       } else {
         this.drawWrappedText(
           context,
           main.value,
-          HUD_VISUAL_GEOMETRY.overviewMainX,
+          mainX,
           103,
-          359,
+          mainWidth,
           22,
           2,
           frame.mainKind === 'notification' ? 'leading' : 'tail',
@@ -1494,7 +1473,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawList(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
-    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
     const planningMonth = parsePlanningMonthTitle(frame.title);
     const planningGrid = planningMonth && planningGridMatchesMonth(
@@ -1528,69 +1506,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    if (planningFocusRows(frame.title, frame.items.length).length > 0) {
-      this.drawPlanningFocusList(context, frame);
-      return;
-    }
-
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(BRIGHT);
-    context.font = `20px ${HUD_FONT}`;
-    context.fillText(hudDisplayTitle(frame.title), 36, 64);
-
-    const listKind = resolveHudListKind(frame.title);
-    visibleHudListItems(frame.items, frame.selectedIndex).forEach((visible, row) => {
-      const { item, index } = visible;
-      const { primary: name, secondary: message, age } = parseHudListItem(item);
-      const top = 82 + row * 56;
-      if (frame.selectable && index === frame.selectedIndex) {
-        context.strokeStyle = gray(BRIGHT);
-        context.lineWidth = 1.2;
-        roundedRect(context, 23, top - 8, 527, 48, 5);
-        context.stroke();
-      } else {
-        context.strokeStyle = gray(70);
-        context.lineWidth = 0.7;
-        context.beginPath();
-        context.moveTo(26, top + 40);
-        context.lineTo(550, top + 40);
-        context.stroke();
-      }
-
-      context.strokeStyle = gray(SUPPORT);
-      context.lineWidth = 1;
-      context.beginPath();
-      context.arc(56, top + 16, 14, 0, Math.PI * 2);
-      context.stroke();
-      if (listKind === 'messages' || listKind === 'generic') {
-        context.fillStyle = gray(SUPPORT);
-        context.textAlign = 'center';
-        context.font = `14px ${HUD_FONT}`;
-        context.fillText((name || item).charAt(0).toUpperCase(), 56, top + 16);
-      } else {
-        this.drawIcon(context, icons[hudListItemIconName(frame.title, item)], 47, top + 7, 18, SUPPORT);
-      }
-
-      context.textAlign = 'left';
-      context.fillStyle = gray(index === frame.selectedIndex ? BRIGHT : SUPPORT);
-      context.font = `16px ${HUD_FONT}`;
-      context.fillText(name || item, HUD_VISUAL_GEOMETRY.listContentX, top + 8);
-      if (message) {
-        context.fillStyle = gray(SUPPORT);
-        context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, message, HUD_VISUAL_GEOMETRY.listContentX, top + 28, 360);
-      }
-      context.textAlign = 'right';
-      context.fillStyle = gray(CHROME);
-      context.font = `9px ${HUD_FONT}`;
-      context.fillText(age, 520, top + 8);
-    });
-
-    context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
-    context.textAlign = 'center';
-    context.fillText(frame.hint, 288, 267);
+    // Every remaining list renders in the one dense row language. The old
+    // roomy per-row card (icon badge, 56px pitch, rounded selection outline)
+    // is deliberately gone — it fit three rows where six belong.
+    this.drawPlanningFocusList(context, frame);
   }
 
   private drawPlanningFocusList(
@@ -1598,45 +1517,116 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
   ): void {
     const rows = planningFocusRows(frame.title, frame.items.length);
-    const agenda = rows.some((row) => row.secondaryBaselineY !== undefined);
+    const reserveMarker = frame.selectable && listReservesMarkerColumn(frame.items);
 
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(BRIGHT);
     context.font = `20px ${HUD_FONT}`;
-    context.fillText(hudDisplayTitle(frame.title), 36, 64);
+    context.fillText(hudDisplayTitle(frame.title), 36, 60);
 
-    visibleHudListItems(frame.items, frame.selectedIndex, rows.length).forEach((visible, index) => {
+    const visible = visibleHudListItems(frame.items, frame.selectedIndex, rows.length);
+    visible.forEach((entry, index) => {
       const row = rows[index];
       if (!row) return;
-      const selected = frame.selectable && visible.index === frame.selectedIndex;
+      const selected = frame.selectable && entry.index === frame.selectedIndex;
       if (selected) {
         context.fillStyle = gray(BRIGHT);
         context.fillRect(36, row.railTopY, 3, row.railHeight);
       }
-      if (row.separatorY !== undefined) {
-        context.fillStyle = gray(HAIRLINE);
-        context.fillRect(52, row.separatorY, 488, 1);
-      }
-
-      context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-      if (agenda && row.secondaryBaselineY !== undefined) {
-        const { primary, secondary } = parseHudListItem(visible.item);
+      if (row.secondaryBaselineY !== undefined) {
+        const { primary, secondary } = parseHudListItem(entry.item);
+        context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
         context.font = `14px ${HUD_FONT}`;
-        this.fitText(context, primary || visible.item, 52, row.primaryBaselineY, 488);
+        this.fitText(context, primary || entry.item, 52, row.primaryBaselineY, 488);
         context.fillStyle = gray(selected ? SUPPORT : CHROME);
         context.font = `10px ${HUD_FONT}`;
         this.fitText(context, secondary, 52, row.secondaryBaselineY, 488);
-      } else {
-        context.font = `12px ${HUD_FONT}`;
-        this.fitText(context, visible.item, 52, row.primaryBaselineY, 488);
+        return;
       }
+      this.drawFocusListLine(context, entry.item, row.primaryBaselineY, selected, reserveMarker);
     });
+
+    // Content longer than one window gets a hairline scrollbar at the right
+    // edge — position and proportion, no words. Without it a section label
+    // stranded on the last row reads as an amputated page, not "scroll on".
+    if (frame.items.length > rows.length && visible.length > 0) {
+      const trackTop = 74;
+      const trackHeight = 178;
+      const start = visible[0]?.index ?? 0;
+      const thumbHeight = Math.max(
+        12,
+        Math.round((rows.length / frame.items.length) * trackHeight),
+      );
+      const travel = trackHeight - thumbHeight;
+      const range = Math.max(1, frame.items.length - rows.length);
+      const thumbTop = trackTop + Math.round((start / range) * travel);
+      context.fillStyle = gray(QUIET);
+      context.fillRect(556, trackTop, 2, trackHeight);
+      context.fillStyle = gray(CHROME);
+      context.fillRect(556, thumbTop, 2, thumbHeight);
+    }
 
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
     context.fillText(frame.hint, 288, 267);
+    context.textAlign = 'left';
+  }
+
+  /** One dense line with real internal hierarchy, so weight means something:
+   * a small dim age chip, an aligned semantic marker column (● recording,
+   * □ todo, – key point — firmware-safe glyphs that INDICATE, never badge
+   * chrome), normal-weight primary, dimmer trailing detail, and quiet 10px
+   * label treatment for ALL-CAPS section markers (SUMMARY, KEY POINTS, …).
+   * Uniform 12px SUPPORT across whole rows read as "everything bold" — the
+   * wearer's exact complaint. */
+  private drawFocusListLine(
+    context: CanvasRenderingContext2D,
+    item: string,
+    baselineY: number,
+    selected: boolean,
+    reserveMarker = false,
+  ): void {
+    const trimmed = item.trim();
+    if (/^[A-Z][A-Z ]{1,18}$/.test(trimmed)) {
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      context.fillText(trimmed, 52, baselineY);
+      return;
+    }
+    const { age, primary, secondary } = parseHudListItem(item);
+    let x = 52;
+    if (age) {
+      context.fillStyle = gray(selected ? SUPPORT : CHROME);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText(age, x, baselineY);
+      x += 34;
+    }
+    let text = primary || item;
+    const marker = focusListMarker(text);
+    if (marker) {
+      text = text.slice(2);
+      context.fillStyle = gray(
+        marker.emphasis === 'content' ? (selected ? BRIGHT : SUPPORT) : CHROME,
+      );
+      context.font = `11px ${HUD_FONT}`;
+      context.fillText(marker.glyph, x, baselineY);
+      x += 18;
+    } else if (reserveMarker) {
+      x += 18; // keep one shared title edge in lists that mix marked rows
+    }
+    context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
+    context.font = `12px ${HUD_FONT}`;
+    if (!secondary) {
+      this.fitText(context, text, x, baselineY, 540 - x);
+      return;
+    }
+    const primaryWidth = Math.min(context.measureText(text).width, 320);
+    this.fitText(context, text, x, baselineY, 320);
+    context.fillStyle = gray(selected ? SUPPORT : CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    this.fitText(context, secondary, x + primaryWidth + 12, baselineY, 540 - x - primaryWidth - 12);
   }
 
   private drawNavigationSetup(
@@ -1673,19 +1663,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillText(hudDisplayTitle(frame.title), 36, 64);
 
     if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
-      const transcript = messagesConversationTranscript(frame.items, frame.selectedIndex);
+      const transcript = messagesConversationTranscript(
+        frame.items,
+        frame.selectedIndex,
+        MESSAGES_CONVERSATION_ROW_CAPACITY,
+      );
       const selectedRow = frame.selectable
-        ? selectedMessagesConversationRow(frame.items, frame.selectedIndex)
+        ? selectedMessagesConversationRow(
+          frame.items,
+          frame.selectedIndex,
+          MESSAGES_CONVERSATION_ROW_CAPACITY,
+        )
         : undefined;
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
       this.fitText(context, transcript.heading, 36, 87, 504);
-      context.strokeStyle = gray(HAIRLINE);
-      context.lineWidth = 0.7;
-      context.beginPath();
-      context.moveTo(36, 98);
-      context.lineTo(540, 98);
-      context.stroke();
 
       transcript.rows.forEach((parsed, row) => {
         const y = 113 + row * 22;
@@ -1695,12 +1687,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
           context.fillStyle = gray(BRIGHT);
           context.fillRect(36, y - 10, 3, 18);
         }
-        context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
+        // The wearer reads what the OTHER person wrote; their own words are
+        // context. Incoming carries the weight, outgoing recedes — never one
+        // uniform brightness across the transcript.
+        context.fillStyle = gray(outgoing ? CHROME : SUPPORT);
         context.font = `9px ${HUD_FONT}`;
         this.fitText(context, parsed.label, selected ? 48 : 36, y, selected ? 42 : 54);
-        context.fillStyle = gray(CHROME);
-        context.fillText('·', 92, y);
-        context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
+        context.fillStyle = gray(outgoing ? SUPPORT : selected ? BRIGHT : SUPPORT);
         context.font = `12px ${HUD_FONT}`;
         this.fitText(context, parsed.body, 104, y, 436);
       });
@@ -1712,67 +1705,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    if (frame.title.trim().toUpperCase() === 'MESSAGES · MESSAGE') {
-      const detail = messagesFullTextContent(frame.items);
-      context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, detail.metadata, 36, 87, 504);
-      context.strokeStyle = gray(HAIRLINE);
-      context.lineWidth = 0.7;
-      context.beginPath();
-      context.moveTo(36, 98);
-      context.lineTo(540, 98);
-      context.stroke();
-      context.fillStyle = gray(BRIGHT);
-      context.font = `14px ${HUD_FONT}`;
-      visibleHudLeadingLines(
-        messagesReaderBodyLines(detail.body),
-        MESSAGES_READER_BODY_LINE_CAPACITY,
-      ).forEach((line, index) => {
-        this.fitText(context, line, 36, 119 + index * 17, 504);
-      });
-      context.fillStyle = gray(QUIET);
-      context.font = `9px ${HUD_FONT}`;
-      context.textAlign = 'center';
-      context.fillText(frame.hint, 288, 267);
-      return;
-    }
-
-    if (frame.title.trim().toUpperCase() === 'MESSAGES · COMPOSE') {
-      context.fillStyle = gray(SUPPORT);
-      context.font = `13px ${HUD_FONT}`;
-      this.fitText(context, MESSAGES_COMPOSE_GUIDANCE, 36, 103, 504);
-
-      context.fillStyle = gray(QUIET);
-      context.font = `9px ${HUD_FONT}`;
-      context.textAlign = 'center';
-      context.fillText(frame.hint, 288, 267);
-      return;
-    }
-
-    const rows = messagesListRows(frame.items.length);
-    visibleHudListItems(frame.items, frame.selectedIndex, rows.length).forEach((visible, index) => {
-      const row = rows[index];
-      if (!row) return;
-      const { primary, secondary, age } = parseHudListItem(visible.item);
-      const leading = [age ? `[${age}]` : '', primary || visible.item]
-        .filter(Boolean)
-        .join(' ');
-      const line = secondary ? `${leading} · ${secondary}` : leading;
-      const selected = frame.selectable && visible.index === frame.selectedIndex;
-      if (selected) {
-        context.fillStyle = gray(BRIGHT);
-        context.fillRect(36, row.railTopY, 3, row.railHeight);
-      }
-      if (row.separatorY !== undefined) {
-        context.fillStyle = gray(HAIRLINE);
-        context.fillRect(52, row.separatorY, 488, 1);
-      }
-      context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-      context.font = `12px ${HUD_FONT}`;
-      this.fitText(context, line, 52, row.baselineY, 488);
+    // MESSAGES · MESSAGE — the full-text reader. Metadata is quiet chrome;
+    // the message body is the one bright thing on the page.
+    const detail = messagesFullTextContent(frame.items);
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    this.fitText(context, detail.metadata, 36, 87, 504);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `14px ${HUD_FONT}`;
+    visibleHudLeadingLines(
+      messagesReaderBodyLines(detail.body),
+      MESSAGES_READER_BODY_LINE_CAPACITY,
+    ).forEach((line, index) => {
+      this.fitText(context, line, 36, 119 + index * 17, 504);
     });
-
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';

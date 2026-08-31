@@ -29,6 +29,9 @@ export const PRODUCTIVITY_VISUAL_STATES = [
   'task-detail',
   'quicknotes',
   'quicknote-detail',
+  'quicknote-recording',
+  'quicknote-discard',
+  'quicknote-saving',
   'activity',
   'activity-detail',
   'action',
@@ -228,21 +231,57 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
       selectable: false,
       items: ['Buy filters', 'Due today · 18:00', 'Complete by voice · exact title'],
     },
+    // One unified surface: recordings (transcribed + summarized) first,
+    // exact dictated text notes after — mirroring capabilities._show_notes.
     quicknotes: {
       title: 'QUICKNOTES',
-      hint: 'tap detail · left x2 overview',
+      hint: 'tap: detail · left x2: back',
       selectable: true,
       items: [
-        '[4m] Ask Adaeze about the design review',
-        '[2h] Verify the west entrance sensor',
+        '[4m] ● Client standup',
+        '[2h] ● Field walkthrough · gaps',
+        '[2h] Ask Adaeze about the design review',
         '[1d] Idea: quiet morning briefing mode',
       ],
     },
+    // A recording's summary page (capabilities._show_voice_note_detail).
     'quicknote-detail': {
-      title: 'QUICKNOTES · DETAIL',
+      title: 'QUICKNOTES · NOTE',
+      hint: 'say: ask the last note … · left x2: back',
+      selectable: false,
+      items: [
+        'Client standup',
+        '2 transcript sections',
+        'SUMMARY',
+        'The team agreed to ship the beta on Friday. QA owns',
+        'the final pass; Dele drafts the release notes tonight.',
+        'KEY POINTS',
+        '– Ship the beta on Friday',
+        '– QA signs off Thursday',
+        'TODOS',
+        '□ Email release notes to the team',
+        '□ Book the retro room',
+      ],
+    },
+    // Live capture owns the page; the exclusive microphone belongs to the
+    // recording, so these tappable rows are the wearer's only controls.
+    'quicknote-recording': {
+      title: 'QUICKNOTES · RECORDING',
+      hint: 'Client standup · tap: choose',
+      selectable: true,
+      items: ['Save and finish', 'Pause recording', 'Discard recording'],
+    },
+    'quicknote-discard': {
+      title: 'QUICKNOTES · DISCARD?',
+      hint: 'Client standup · tap: choose',
+      selectable: true,
+      items: ['Confirm discard', 'Keep recording'],
+    },
+    'quicknote-saving': {
+      title: 'QUICKNOTES · SAVING',
       hint: 'left x2 overview',
       selectable: false,
-      items: ['Ask Adaeze about the design review'],
+      items: ['Finishing the recording…', 'Transcribing on this Mac.'],
     },
     activity: {
       title: 'ACTIVITY',

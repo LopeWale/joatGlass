@@ -45,6 +45,12 @@ _SHOW_LAST = _phrases("show last {noun}")
 _EXPORT_LAST = _phrases("export last {noun}")
 _MAX_TRANSCRIBE_BYTES = 20 * 16_000 * 2
 _DEFAULT_RAW_QUOTA_BYTES = 30 * 60 * 16_000 * 2
+# Audio batches arrive every ~200ms while capture is healthy. A much longer
+# silence with CONTIGUOUS sequence numbers is the phone suspending audio
+# delivery (the Even app backgrounded, the phone locked) — the seq-gap check
+# cannot see it, so it must be journaled from wall-clock discontinuity or the
+# transcript would silently claim completeness across a hole.
+_STALL_GAP_US = 5_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +103,7 @@ class VoiceNoteCaptureController:
         self._capture_id: str | None = None
         self._last_generation: str | None = None
         self._last_seq: int | None = None
+        self._last_received_at_us: int | None = None
         self._capture_error: str | None = None
         self._discard_pending: str | None = None
         # Bound method identity is otherwise recreated on every attribute read;
@@ -229,6 +236,7 @@ class VoiceNoteCaptureController:
         self._capture_id = note.capture_id
         self._last_generation = None
         self._last_seq = None
+        self._last_received_at_us = None
         self._capture_error = None
         return (
             f"Recording Voice Note: {title}. Use the Voice Note screen to pause, "
@@ -291,6 +299,7 @@ class VoiceNoteCaptureController:
         )
         self._last_generation = None
         self._last_seq = None
+        self._last_received_at_us = None
         return f"Resumed Voice Note: {note.title}."
 
     def _request_discard(self) -> str:
@@ -362,6 +371,7 @@ class VoiceNoteCaptureController:
         )
         self._last_generation = None
         self._last_seq = None
+        self._last_received_at_us = None
         return f"Kept and resumed Voice Note: {note.title}."
 
     async def _stop(self) -> str:
@@ -449,6 +459,19 @@ class VoiceNoteCaptureController:
                         detail=f"expected {self._last_seq + 1}, received {frame.seq}",
                         now_us=frame.received_at_us,
                     )
+                elif (
+                    self._last_received_at_us is not None
+                    and frame.received_at_us - self._last_received_at_us > _STALL_GAP_US
+                ):
+                    # Contiguous sequence, discontinuous wall clock: the host
+                    # paused audio delivery (suspension/lock) mid-recording.
+                    stalled_s = (frame.received_at_us - self._last_received_at_us) // 1_000_000
+                    self._notes.append_gap(
+                        capture_id,
+                        code="capture_stalled",
+                        detail=f"~{stalled_s}s without audio while recording",
+                        now_us=frame.received_at_us,
+                    )
             self._notes.append_frame(
                 capture_id,
                 connection_generation=frame.connection_generation,
@@ -460,6 +483,7 @@ class VoiceNoteCaptureController:
             )
             self._last_generation = frame.connection_generation
             self._last_seq = frame.seq
+            self._last_received_at_us = frame.received_at_us
         except Exception:
             # Stop receiving immediately. The active durable row and any raw
             # frames already committed remain available for explicit recovery.
@@ -544,6 +568,7 @@ class VoiceNoteCaptureController:
         self._capture_id = None
         self._last_generation = None
         self._last_seq = None
+        self._last_received_at_us = None
         self._capture_error = None
         self._discard_pending = None
 

@@ -10,8 +10,10 @@ struct MainWindowView: View {
     @State private var showLog = false
     @State private var logTail = ""
     @State private var messagesAccess: MessagesAccessState = .blocked
+    @State private var notesAutomation: NotesAutomationState = .notDetermined
 
     private let messagesAccessProbe = MessagesAccessProbe()
+    private let notesAutomationProbe = NotesAutomationProbe()
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -69,67 +71,58 @@ struct MainWindowView: View {
                     }
                 }
 
-                GroupBox("Calendar & Reminders") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            LabeledContent("Calendar", value: engine.calendarAccess)
-                            if engine.calendarAccess == "full access" {
-                                Label("Granted", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            } else {
-                                Button("Grant access…") { engine.requestCalendarAccess() }
-                            }
+                // One dense access panel, not a card per permission: each grant
+                // is a single row with its action inline, and explanatory copy
+                // appears only while the corresponding row actually needs help.
+                GroupBox("Access") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        AccessRow(
+                            label: "Calendar",
+                            value: engine.calendarAccess,
+                            granted: engine.calendarAccess == "full access"
+                        ) {
+                            Button("Grant…") { engine.requestCalendarAccess() }
                         }
-                        HStack {
-                            LabeledContent("Reminders", value: engine.remindersAccess)
-                            if engine.remindersAccess == "full access" {
-                                Label("Granted", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            } else {
-                                Button("Grant access…") { engine.requestRemindersAccess() }
-                            }
+                        AccessRow(
+                            label: "Reminders",
+                            value: engine.remindersAccess,
+                            granted: engine.remindersAccess == "full access"
+                        ) {
+                            Button("Grant…") { engine.requestRemindersAccess() }
                         }
-                        StatusLine(
+                        AccessRow(
                             label: "Engine bridge",
                             value: personalDataBridgeValue,
-                            healthy: live && status.personalData.state == "ready"
-                        )
-                        if live && status.personalData.state == "unavailable" {
-                            Text("Access is granted; restart JOAT to reconnect its engine to EventKit.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            granted: live && status.personalData.state == "ready"
+                        ) { EmptyView() }
+                        AccessRow(
+                            label: "Messages history",
+                            value: messagesAccess.label,
+                            granted: messagesAccess == .granted
+                        ) {
+                            Button("Full Disk Access…") { openMessagesPrivacySettings() }
+                            Button("Check") { messagesAccess = messagesAccessProbe.state() }
                         }
-                        Text("Access is requested only from these buttons. You can revoke it in System Settings.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(4)
-                }
-
-                GroupBox("Messages") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            LabeledContent("Conversation history", value: messagesAccess.label)
-                            if messagesAccess == .granted {
-                                Label("Granted", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            } else {
-                                Button("Open Full Disk Access…") {
-                                    openMessagesPrivacySettings()
-                                }
-                                Button("Check Again") {
-                                    messagesAccess = messagesAccessProbe.state()
+                        AccessRow(
+                            label: "Notes (QuickNote export)",
+                            value: notesAutomation.label,
+                            granted: notesAutomation == .granted
+                        ) {
+                            Button("Grant…") {
+                                Task {
+                                    notesAutomation = await NotesAutomationProbe.requestAccess(
+                                        probe: notesAutomationProbe
+                                    )
                                 }
                             }
+                            Button("Check") { notesAutomation = notesAutomationProbe.state() }
                         }
-                        Text("JOAT checks only whether its signed app can open the Messages database; this status check does not read a conversation.")
+                        if let help = accessHelp {
+                            Text(help).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("Access is requested only from these buttons; revoke any of it in System Settings. Status checks read no content.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if messagesAccess != .granted {
-                            Text("Grant JOAT in Privacy & Security → Full Disk Access, then check again. If access still shows blocked, restart JOAT before retrying Messages on the glasses.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                     }
                     .padding(4)
                 }
@@ -185,6 +178,7 @@ struct MainWindowView: View {
             refresh()
             engine.refreshPersonalDataAccess()
             messagesAccess = messagesAccessProbe.state()
+            notesAutomation = notesAutomationProbe.state()
         }
         .onReceive(tick) { _ in refresh() }
     }
@@ -337,6 +331,24 @@ struct MainWindowView: View {
         if showLog { logTail = engine.logTail(lines: 30) }
     }
 
+    /// The one contextual help line for the Access panel: only the first
+    /// problem speaks, so the panel never grows a paragraph per permission.
+    private var accessHelp: String? {
+        if live && status.personalData.state == "unavailable" {
+            return "EventKit access is granted; restart JOAT to reconnect its engine."
+        }
+        if messagesAccess != .granted {
+            return "Messages: grant JOAT under Privacy & Security → Full Disk Access, then Check; restart JOAT if it still shows blocked."
+        }
+        if notesAutomation == .denied {
+            return "Notes: re-enable JOAT → Notes under Privacy & Security → Automation, then Check. “Send the last note to my notes” lands in the JOAT folder; iCloud syncs it to your phone."
+        }
+        if notesAutomation != .granted {
+            return "Notes powers “send the last note to my notes” — Apple Notes on this Mac, synced to your phone by iCloud."
+        }
+        return nil
+    }
+
     private func openMessagesPrivacySettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
@@ -362,6 +374,33 @@ private struct Pill: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(value)
+    }
+}
+
+/// One permission as one row: label, current value, and either the green
+/// check or its inline actions — no per-permission card chrome.
+private struct AccessRow<Actions: View>: View {
+    let label: String
+    let value: String
+    let granted: Bool
+    @ViewBuilder let actions: () -> Actions
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label).frame(width: 170, alignment: .leading)
+            Text(value)
+                .foregroundStyle(granted ? Color.green : .secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if granted {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .accessibilityLabel("Granted")
+            } else {
+                actions().controlSize(.small)
+            }
+        }
+        .font(.callout)
+        .accessibilityElement(children: .combine)
     }
 }
 

@@ -46,6 +46,12 @@ targets:
         # Hardened Runtime resource access still requires this entitlement;
         # it does not replace the separate Calendar/Reminders TCC decisions.
         com.apple.security.personal-information.calendars: true
+        # Hardened Runtime blocks outgoing Apple events without this. It
+        # covers the shell's Notes-automation preflight AND the engine's
+        # osascript QuickNote export (a child process, attributed to this
+        # app); the separate per-target Automation TCC decision still
+        # applies on top.
+        com.apple.security.automation.apple-events: true
     settings:
       base:
         # Let Xcode synthesize Info.plist from INFOPLIST_KEY_* settings —

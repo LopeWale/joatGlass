@@ -32,6 +32,12 @@ export const VisualContainerName: Readonly<Record<number, string>> = {
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
+
+/** Request ids the Mac mints for voice-initiated surfaces. A list arriving
+ * with this prefix is adopted as a fresh Mac-initiated generation instead of
+ * being dropped as stale. Mac counterpart: VOICE_REQUEST_PREFIX in
+ * apps/mac/joat/core/protocol.py. */
+export const VOICE_REQUEST_PREFIX = 'voice-';
 /** JavaScript UTF-16 code units. Longer previews must fail, never truncate. */
 export const CONFIRM_PROMPT_MAX_UNITS = 120;
 

@@ -23,6 +23,12 @@ from uuid import UUID
 CANVAS_WIDTH = 576
 CANVAS_HEIGHT = 288
 CANVAS_GREY_LEVELS = 16
+
+# Request ids the MAC mints for voice-initiated surfaces. The plugin adopts a
+# list whose request id carries this prefix instead of dropping it as stale,
+# so "JOAT, show my messages" can paint without a preceding menu tap. Plugin
+# counterpart: VOICE_REQUEST_PREFIX in apps/hub-plugin/src/types.ts.
+VOICE_REQUEST_PREFIX = "voice-"
 CONFIRM_PROMPT_MAX_UTF16_UNITS = 120
 
 

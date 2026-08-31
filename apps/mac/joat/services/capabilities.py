@@ -15,17 +15,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import secrets
 import sqlite3
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone, tzinfo
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..channels.cards import CardLog
 from ..channels.imessage import IMessageStore, MessageEntry, MessageHistoryPage, MessageThread
-from ..core.protocol import BrainstormHudView, EventType, HudList, InputEvent, PlanningGridCell
+from ..core.protocol import (
+    VOICE_REQUEST_PREFIX,
+    BrainstormHudView,
+    EventType,
+    HudList,
+    InputEvent,
+    PlanningGridCell,
+)
 from ..core.interfaces import GlassesTransport
 from ..native.bridge import (
     NativeBridgeClient,
@@ -536,7 +545,9 @@ class CapabilityRouter:
             return
         try:
             page = await asyncio.to_thread(
-                self._messages.thread_message_page, thread, limit=8,
+                # 7 entries = exactly one conversation window on the lens, so
+                # a page turn is a screen turn — nothing half-hidden.
+                self._messages.thread_message_page, thread, limit=7,
             )
         except (OSError, sqlite3.Error) as exc:
             log.warning("Messages history unavailable: %s", type(exc).__name__)
@@ -630,7 +641,7 @@ class CapabilityRouter:
                     older = await asyncio.to_thread(
                         self._messages.thread_message_page,
                         state.thread,
-                        limit=8,
+                        limit=7,
                         before_row_id=min(row_ids),
                     )
                 except (OSError, sqlite3.Error) as exc:
@@ -818,9 +829,10 @@ class CapabilityRouter:
         surface that and unread state without exposing attachment names or
         filesystem paths to the glasses.
         """
-        label = f"[{_age(thread.at)}] {thread.sender}"
-        if thread.unread:
-            label += " (unread)"
+        # ● marks an unread thread — the one scannable state in the picker —
+        # instead of a wordy "(unread)" that reads like body text.
+        marker = "● " if thread.unread else ""
+        label = f"[{_age(thread.at)}] {marker}{thread.sender}"
         if not thread.replyable:
             label += " (group · read only)"
         preview = thread.text
@@ -1241,7 +1253,9 @@ class CapabilityRouter:
                 suffix = "" if note.state == "saved" else " · gaps"
                 title = note.title or "Untitled"
                 rows.append(_NoteRow(
-                    label=f"[{age}] {title} · recorded{suffix}",
+                    # ● is the record mark: one glyph distinguishes a
+                    # recording from dictated text, where a word cost width.
+                    label=f"[{age}] ● {title}{suffix}",
                     kind="voice",
                     voice_note=note,
                 ))
@@ -1347,11 +1361,12 @@ class CapabilityRouter:
             return
         title = note.title or "Untitled"
         sections = note.transcribed_segments
-        rows: list[str] = [
-            f"{title[:60]}",
-            f"{sections} transcript section{'s' if sections != 1 else ''}"
-            f" · {note.gap_count} gap{'s' if note.gap_count != 1 else ''}",
-        ]
+        # A healthy note stays quiet about gaps; "0 gaps" is noise. Only a
+        # real integrity problem earns a dim trailing annotation.
+        meta = f"{sections} transcript section{'s' if sections != 1 else ''}"
+        if note.gap_count:
+            meta += f" · {note.gap_count} gap{'s' if note.gap_count != 1 else ''}"
+        rows: list[str] = [f"{title[:60]}", meta]
         insights = store.insights(note.capture_id)
         latest = store.recent_retained(1)
         is_latest = bool(latest) and latest[0].capture_id == note.capture_id
@@ -1364,10 +1379,12 @@ class CapabilityRouter:
             rows.extend(_wrap_note_text(insights.summary)[:5])
             if insights.key_points:
                 rows.append("KEY POINTS")
-                rows.extend(point[:60] for point in insights.key_points[:6])
+                rows.extend(f"– {point[:58]}" for point in insights.key_points[:6])
             if insights.todos:
                 rows.append("TODOS")
-                rows.extend(todo[:60] for todo in insights.todos[:4])
+                # □ reads as an unchecked box: these are the actionable rows,
+                # and "create reminders from the last note" consumes them.
+                rows.extend(f"□ {todo[:58]}" for todo in insights.todos[:4])
         hint = (
             "say: ask the last note … · left x2: back"
             if is_latest
@@ -1481,3 +1498,62 @@ class CapabilityRouter:
         last_heard = self._status.get("last_transcript")
         if last_heard:
             await self._hud.context(f"you  {last_heard}")
+
+
+def voice_request_id() -> str:
+    """Mint one Mac-initiated generation id the plugin will adopt."""
+    return f"{VOICE_REQUEST_PREFIX}{secrets.token_hex(6)}"
+
+
+_OPEN_CAPABILITY = re.compile(
+    r"^(?:open|show|read)(?:\s+(?:my|the))?\s+(?P<name>"
+    r"messages|texts|conversations|quick\s?notes|notes|planning|calendar|"
+    r"tasks|reminders|notifications|activity)$",
+    re.IGNORECASE,
+)
+
+_SPOKEN_CAPABILITY = {
+    "messages": "Messages",
+    "texts": "Messages",
+    "conversations": "Messages",
+    "quicknotes": "QuickNotes",
+    "quick notes": "QuickNotes",
+    "notes": "QuickNotes",
+    "planning": "Planning",
+    "calendar": "Calendar",
+    "tasks": "Tasks",
+    "reminders": "Reminders",
+    "notifications": "Notifications",
+    "activity": "Activity",
+}
+
+
+class CapabilityOpenController:
+    """Open a capability surface from speech alone.
+
+    "JOAT, show my messages" must land the wearer on the same page a menu tap
+    reaches. The router runs the identical open path under a fresh
+    voice-prefixed generation id, which the plugin adopts on arrival. The
+    router reference is a provider because composition builds the voice
+    command chain before the capability router exists.
+    """
+
+    def __init__(self, capabilities: Callable[[], CapabilityRouter]) -> None:
+        self._capabilities = capabilities
+
+    async def handle_command(self, text: str) -> str | None:
+        match = _OPEN_CAPABILITY.fullmatch(" ".join(text.strip().split()))
+        if match is None:
+            return None
+        name = _SPOKEN_CAPABILITY[" ".join(match.group("name").lower().split())]
+        await self._capabilities().open(name, request_id=voice_request_id())
+        shown = "Planning" if name in {"Calendar", "Tasks", "Reminders"} else name
+        return f"Opening {shown}."
+
+    async def reflect_quicknotes(self) -> None:
+        """Repaint the QuickNotes surface after a voice capture command.
+
+        A voice-started recording must show its control page even when no
+        menu is open; after a stop, the refreshed list is the receipt.
+        """
+        await self._capabilities().open("QuickNotes", request_id=voice_request_id())

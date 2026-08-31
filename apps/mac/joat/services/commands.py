@@ -23,6 +23,12 @@ class ComposeCommandController(CommandController, Protocol):
     def is_compose_armed(self) -> bool: ...
 
 
+class CapabilityOpenCommandController(CommandController, Protocol):
+    """Opens capability surfaces by voice and reflects capture state."""
+
+    async def reflect_quicknotes(self) -> None: ...
+
+
 class VoiceCommandRouter:
     """Claim exact commands in safe precedence order.
 
@@ -42,6 +48,7 @@ class VoiceCommandRouter:
         note_insights: CommandController | None = None,
         hermes: CommandController | None = None,
         terminal: CommandController | None = None,
+        capability_opens: CapabilityOpenCommandController | None = None,
     ) -> None:
         self._message_replies = message_replies
         self._models = models
@@ -51,6 +58,7 @@ class VoiceCommandRouter:
         self._note_insights = note_insights
         self._hermes = hermes
         self._terminal = terminal
+        self._capability_opens = capability_opens
 
     async def __call__(self, text: str) -> str | None:
         # New Message is an explicit, short-lived wearer flow. It gets first
@@ -66,9 +74,21 @@ class VoiceCommandRouter:
         reply_result = await self._message_replies.handle_command(text)
         if reply_result is not None:
             return reply_result
+        # "Show my messages" / "open quicknotes" — deterministic surface
+        # opens must never fall through to the general reply engine.
+        if self._capability_opens is not None:
+            open_result = await self._capability_opens.handle_command(text)
+            if open_result is not None:
+                return open_result
         if self._voice_notes is not None:
             voice_note_result = await self._voice_notes.handle_command(text)
             if voice_note_result is not None:
+                # Every capture command earns a visible receipt: the live
+                # control page while recording, the refreshed list after a
+                # stop — even when no menu was open (the plugin adopts the
+                # voice-prefixed generation this repaint arrives under).
+                if self._capability_opens is not None:
+                    await self._capability_opens.reflect_quicknotes()
                 return voice_note_result
         # Derived-note commands (summarize / ask / reminders / notes export)
         # sit between the recorder's exact lifecycle grammar and the broad
