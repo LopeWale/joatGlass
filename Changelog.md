@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- Aligned the authoritative HUD contract with the shipped unified Planning
+  implementation. Calendar and Reminder reviews now document the compact,
+  flat, left-aligned renderer rather than the obsolete boxed card, and the
+  wearer flow explicitly records month → week → mixed day → read-only detail,
+  including anchored restoration after safe-write outcomes. The current
+  official-simulator acceptance is documented as 47 causal screens rather
+  than the stale 34-transition count. This is documentation of verified
+  source/simulator behavior; it does not claim a native alarm, package install,
+  or physical-G2 acceptance.
+
 - Added a Mac-app Settings surface for the remote Hermes Agent Terminal
   Gateway. It accepts only a canonical WebSocket origin, keeps the agent fixed
   to `hermes`, and writes the exact owner-only, secret-free `openclaw.json`
