@@ -326,12 +326,9 @@ async def main() -> None:
         return (loc.latitude, loc.longitude) if loc is not None else None
 
     # Nearby places must be in the reply engine's initial tool schemas.  The
-    # provider is also later reused by the separately opt-in navigation flow;
-    # configuring it here does not enable route guidance.
+    # provider is also later reused by the explicit navigation flow;
+    # configuring it here does not start a route by itself.
     mapbox_token = os.environ.get("MAPBOX_ACCESS_TOKEN", "").strip()
-    experimental_navigation = os.environ.get(
-        "JOAT_EXPERIMENTAL_NAVIGATION", "",
-    ).strip().lower() in {"1", "true", "yes"}
     mapbox_provider: MapboxNavigationProvider | None = None
     if mapbox_token:
         mapbox_provider = MapboxNavigationProvider(
@@ -652,12 +649,9 @@ async def main() -> None:
     # panel after the fact and must still see what was said.
     debate_state = DebateStateSink()
 
-    navigation_provider: NavigationProvider | None = None
-    if mapbox_provider is not None and experimental_navigation:
-        navigation_provider = mapbox_provider
-        log.info("experimental navigation ready (Mapbox; walking/cycling)")
-    elif mapbox_token:
-        log.info("experimental navigation disabled (set JOAT_EXPERIMENTAL_NAVIGATION=1)")
+    navigation_provider: NavigationProvider | None = mapbox_provider
+    if navigation_provider is not None:
+        log.info("navigation ready (Mapbox; walking/cycling)")
     else:
         log.info("navigation provider unavailable (MAPBOX_ACCESS_TOKEN not configured)")
 
@@ -690,11 +684,7 @@ async def main() -> None:
             return NavigationUnavailableSession(
                 transport,
                 session_id=session_id,
-                reason=(
-                    "Experimental navigation is disabled on this Mac"
-                    if mapbox_token
-                    else "Mapbox is not configured on this Mac"
-                ),
+                reason="Mapbox is not configured on this Mac",
             )
         location = transport.location
         proximity = (

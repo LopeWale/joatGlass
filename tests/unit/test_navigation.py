@@ -355,6 +355,18 @@ class TestNavigationSession:
         await task
         assert isinstance(transport.sent[-1], NavigationStop)
 
+    async def test_missing_provider_does_not_consume_an_unrelated_voice_request(self) -> None:
+        transport = SinkTransport()
+        session = NavigationUnavailableSession(transport, session_id="nav-offline-unrelated")
+        task = asyncio.create_task(session.run())
+        await wait_for(transport, NavigationView)
+
+        assert session.consume_transcript("what is on my calendar") is False
+        assert not task.done()
+
+        session.cancel()
+        await task
+
     async def test_rejected_unavailable_view_closes_without_waiting_for_a_gesture(self) -> None:
         transport = SinkTransport()
         session = NavigationUnavailableSession(transport, session_id="nav-offline")

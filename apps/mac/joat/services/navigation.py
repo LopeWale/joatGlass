@@ -922,8 +922,9 @@ class NavigationUnavailableSession(Session):
         self._settled.set()
 
     def consume_transcript(self, text: str) -> bool:
-        if _normalise_navigation_voice(text) in _VOICE_CANCEL:
-            self.cancel()
+        if _normalise_navigation_voice(text) not in _VOICE_CANCEL:
+            return False
+        self.cancel()
         return True
 
     def accept_action(self, action: NavigationAction) -> None:

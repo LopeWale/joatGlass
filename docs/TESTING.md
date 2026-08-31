@@ -108,10 +108,10 @@ threshold calibration. The simulator matrix remains a static renderer matrix;
 it does not claim that Mapbox, phone GPS, or physical lens latency participated
 in the run.
 
-Live provider testing is opt-in on the Mac:
+Live provider testing on the Mac requires a configured Mapbox token:
 
 ```bash
-JOAT_EXPERIMENTAL_NAVIGATION=1 MAPBOX_ACCESS_TOKEN=... \
+MAPBOX_ACCESS_TOKEN=... \
   PYTHONPATH=apps/mac .venv/bin/python -m joat
 ```
 
