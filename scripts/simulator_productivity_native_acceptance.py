@@ -386,7 +386,19 @@ async def main():
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
             raise SystemExit(65)
         os.unlink(PROXY_PATH)
-    server = await asyncio.start_unix_server(handle, path=PROXY_PATH)
+    # asyncio's path= form binds with the process umask and only then returns,
+    # leaving a brief world-readable pathname before a follow-up chmod. Bind
+    # the listener ourselves under a restrictive umask so the first observable
+    # directory entry is already owner-only.
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    prior_umask = os.umask(0o177)
+    try:
+        listener.bind(PROXY_PATH)
+    finally:
+        os.umask(prior_umask)
+    listener.listen()
+    listener.setblocking(False)
+    server = await asyncio.start_unix_server(handle, sock=listener)
     os.chmod(PROXY_PATH, 0o600)
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
