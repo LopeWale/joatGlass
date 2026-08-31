@@ -36,8 +36,10 @@ from .agents.openclaw_gateway import (
     OpenClawPairingRequired,
 )
 from .agents.openclaw_native import NativeOpenClawCredentials
+from .agents.openclaw_terminal import PendingApproval
 from .agents.openclaw_runtime import (
     make_brainstorm_terminal_agent,
+    make_work_terminal_agent,
     OpenClawRuntimeConfig,
     OpenClawTerminalAgent,
     terminal_ready_activity,
@@ -99,7 +101,7 @@ from .services.brainstorm_acceptance import (
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
-from .services.capabilities import CapabilityRouter
+from .services.capabilities import CapabilityOpenController, CapabilityRouter
 from .services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster
 from .services.commands import VoiceCommandRouter
 from .services.hermes_productivity import (
@@ -430,6 +432,18 @@ async def main() -> None:
     # dedicated session; it never falls back to main/Telegram credentials.
     openclaw_retry_candidate: OpenClawTerminalAgent | None = None
     openclaw_calendar_terminal: OpenClawTerminalAgent | None = None
+    # The Agent Terminal WORK lane: approvals in, roster reads allowed.
+    # Constructed (never initialized) at boot — the adapter connects lazily
+    # on the first 'terminal …' send, so a missing operator.approvals grant
+    # surfaces as that lane needing recovery, not as a boot failure.
+    openclaw_work_terminal: OpenClawTerminalAgent | None = None
+
+    def on_work_approval(approval: PendingApproval) -> None:
+        # Late-bound on purpose: approvals can only arrive after a send,
+        # and a send requires the roster to exist.
+        agent_terminal.note_approval(
+            "work", approval.approval_id, approval.kind, approval.summary
+        )
     endpoint_host = ""
     requested_scopes: tuple[str, ...] = ()
     try:
@@ -492,6 +506,16 @@ async def main() -> None:
                 credentials = await NativeOpenClawCredentials.open(
                     bridge=personal_data,
                     profile=openclaw_config.profile,
+                )
+                openclaw_work_terminal = make_work_terminal_agent(
+                    profile=openclaw_config.profile,
+                    credentials=credentials,
+                    agent_id=openclaw_config.agent_id,
+                    # The agent-terminal status projection belongs to the
+                    # Brainstorm-era hermes terminal; the work lane reports
+                    # through the roster instead of clobbering it.
+                    state_changed=None,
+                    on_approval=on_work_approval,
                 )
                 candidate = make_brainstorm_terminal_agent(
                     profile=openclaw_config.profile,
@@ -1021,14 +1045,26 @@ async def main() -> None:
     # round table, and a missing daemon just means an empty roster.
     terminal_lanes: list[tuple[str, object]] = [
         (name, agent) for name, agent in (
+            ("work", openclaw_work_terminal),
             ("hermes", openclaw_terminal),
             ("calendar", openclaw_calendar_terminal),
         ) if agent is not None
     ]
+
+    async def terminal_announce(line: str) -> None:
+        # The SessionManager owns the HUD while a session runs; terminal
+        # narration must never fight a live Brainstorm for the lenses. The
+        # line still lands in the lane's tail either way.
+        if not sessions.active:
+            await hud.show(line)
+
     agent_terminal = AgentTerminalRoster(
         terminal_lanes,  # type: ignore[arg-type]
-        announce=hud.show,
+        announce=terminal_announce,
     )
+    # The capability router is composed later; the provider defers the
+    # lookup to call time, when it is guaranteed to exist.
+    capability_opens = CapabilityOpenController(lambda: capabilities)
     voice_commands = VoiceCommandRouter(
         message_replies,
         models,
@@ -1038,6 +1074,7 @@ async def main() -> None:
         note_insights=note_insight_commands,
         hermes=hermes_productivity,
         terminal=AgentTerminalCommands(agent_terminal),
+        capability_opens=capability_opens,
     )
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no
