@@ -2,6 +2,21 @@
 
 ## 2026-08-30
 
+- Replaced the remaining Calendar/Reminder safe-write poster treatment with
+  the same compact flat language as Planning and Messages. Reviews now use one
+  left reading axis and one static gesture footer; lifecycle results retain
+  only the evidence hierarchy and Back/automatic-return copy. The wide action
+  band, countdown bar, lifecycle progress strip, and visual-only one-second
+  confirmation repaint loop were removed. The actual eight-second decision
+  timeout remains in the input gate, while unchanged confirmation pixels no
+  longer trigger four complete image-tile retransfers. Left-temple double
+  press now provides the footer's truthful Back/refusal path in addition to
+  both swipe directions. A fresh official-simulator run causally passed all
+  47 Calendar/Reminder states with a 172 ms
+  maximum first framebuffer change, and the retained 576×288 frames were
+  visually compared with the approved compact reference. No package, upload,
+  installation, native EventKit write, or physical-G2 claim was made.
+
 - Aligned the authoritative HUD contract with the shipped unified Planning
   implementation. Calendar and Reminder reviews now document the compact,
   flat, left-aligned renderer rather than the obsolete boxed card, and the

@@ -199,6 +199,22 @@ describe('EventRouter — confirm gestures', () => {
     expect(sent).toEqual([]);
   });
 
+  it('left-temple double press backs out of an active confirmation', () => {
+    const { fire, imu, sent } = make();
+    imu.isPending.mockReturnValue(true);
+
+    fire({
+      sysEvent: {
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      },
+    });
+
+    expect(imu.declineByTap).toHaveBeenCalledTimes(1);
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('accepts the capturing text container click shape while a confirmation is active', () => {
     const { fire, imu, sent } = make();
     imu.isPending.mockReturnValue(true);

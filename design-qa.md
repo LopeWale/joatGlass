@@ -115,3 +115,67 @@ capture.
   source discrimination.
 
 final result: passed
+
+## 2026-08-30 compact Calendar and Reminder safe-write QA
+
+### Visual target and implementation
+
+- Style reference: `/var/folders/wq/tn_lgcmn5c9132zpfj4x8b900000gn/T/codex-clipboard-e95a8cd3-e3fe-4f2c-9f9a-2ede447386d2.png`
+  (the user-selected flat Messages pattern).
+- Rejected pre-change captures:
+  `/var/folders/wq/tn_lgcmn5c9132zpfj4x8b900000gn/T/codex-clipboard-9bec688b-b5e0-4fcd-9681-a8e8303a753c.png`
+  and
+  `/var/folders/wq/tn_lgcmn5c9132zpfj4x8b900000gn/T/codex-clipboard-f48f65a6-dcc9-4968-85f8-8a7d1ba6a28e.png`.
+- Final Calendar review:
+  `/private/tmp/joat-productivity-flat-back.dWHZiN/review/06-calendar-review.png`.
+- Final eight-state flow contact sheet:
+  `/private/tmp/joat-productivity-flat-back.dWHZiN/compact-flow-contact-sheet.png`.
+- Same-size style comparison:
+  `/private/tmp/joat-productivity-flat-back.dWHZiN/reference-vs-calendar-review.png`.
+- Viewport and density: source and implementation content are both exact
+  576×288 opaque review images at 1×. The source is a different product state,
+  so the comparison establishes the approved density, reading axis, typography,
+  separators, and footer language rather than pretending to be a pixel clone.
+
+### Comparison history
+
+1. **P1 — card-style decision composition:** Calendar review centered a large
+   poster sentence over a two-choice action band and full-width countdown bar.
+   It consumed most of the vertical field and did not share the flat
+   Planning/Messages reading axis.
+2. **P1 — needless confirmation traffic:** the changing seconds label caused
+   the visual presenter to repaint the exclusive confirmation frame every
+   second. Because confirmation deliberately requires a complete four-tile
+   transfer, each tick resent all four tiles even when the decision itself had
+   not changed.
+3. **Fix:** moved the full prompt to a compact left-aligned four-line region,
+   collapsed every gesture into one static footer, removed the countdown and
+   lifecycle progress strips, and removed the visual-only one-second repaint
+   loop. The separate input gate still owns the real eight-second timeout;
+   left-temple double press now truthfully backs out through the refusal path.
+4. **Post-fix evidence:** the official simulator causally reached all 47
+   Planning, Calendar, and Reminder states. Click accepted each authorized
+   safe write; downward swipe declined it; failure and uncertainty remained
+   distinct; Reminder due and completion rendered; every terminal path returned
+   to the nested Planning day. Maximum first framebuffer change was 172 ms.
+
+### Required fidelity surfaces
+
+| Surface | Result | Evidence |
+|---|---|---|
+| Typography | Pass | The revised review uses the same compact monospaced hierarchy as Planning/Messages; no prompt is clipped in the retained Calendar or Reminder frames. |
+| Spacing and layout rhythm | Pass | One 36px left axis, one header divider, dense content rows, and one 267px footer replace the centered poster/action band. No card, button enclosure, progress strip, or footer collision remains. |
+| Colors and visual tokens | Pass | The renderer retains the established G2 monochrome focal/support/quiet levels; the change adds no new color or decorative surface. |
+| Image and icon fidelity | Pass | Existing real calendar/task icon assets remain; no placeholder or fabricated graphic was introduced. |
+| Copy and content | Pass | The complete Calendar/Reminder review remains visible, with explicit confirm, downward-cancel, Back, and auto-cancel affordances. Outcome copy remains truthful for saved, failed, uncertain, cancelled, not-saved, due, and completed states. |
+| Interaction states | Pass in official simulator | The retained 47-screen receipt is causal rather than a static fixture gallery. Native EventKit notification and physical-G2 optical proof remain separate acceptance gates. |
+
+### Remaining severity audit
+
+- P0: none in the official-simulator flow.
+- P1: none.
+- P2: none.
+- P3: confirm optical comfort and gesture latency on the physical G2 when the
+  user starts that acceptance session.
+
+final result: passed
