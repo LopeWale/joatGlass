@@ -33,12 +33,18 @@ CLIENT_VERSION = "0.1.0"
 CLIENT_PLATFORM = "darwin"
 CLIENT_DEVICE_FAMILY = "mac"
 CLIENT_ROLE = "operator"
-ALLOWED_OPERATOR_SCOPES = frozenset({"operator.read", "operator.write"})
+# operator.approvals is requested ONLY by the work lane (allows_approvals);
+# the Brainstorm/calendar lanes keep their exact read+write equality check,
+# so listing it here grants them nothing.
+ALLOWED_OPERATOR_SCOPES = frozenset(
+    {"operator.read", "operator.write", "operator.approvals"}
+)
 ALLOWED_CLIENT_CAPABILITIES = frozenset({"tool-events"})
 PAIRING_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 AGENT_TERMINAL_AGENT_ID = "hermes"
 AGENT_TERMINAL_SESSION_LABEL = "JOAT Agent Terminal"
 CALENDAR_PROPOSAL_SESSION_LABEL = "JOAT Calendar Proposals"
+WORK_SESSION_LABEL = "JOAT Work Sessions"
 AGENT_TERMINAL_METHODS = frozenset(
     {
         "tools.effective",
@@ -50,6 +56,9 @@ AGENT_TERMINAL_METHODS = frozenset(
         "sessions.send",
         "sessions.abort",
         "chat.history",
+        # Work lane only (allows_approvals) — docs.openclaw.ai/gateway/protocol:
+        # answer a session.approval event; first answer wins.
+        "approval.resolve",
     }
 )
 AGENT_TERMINAL_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -63,6 +72,15 @@ class AgentTerminalPolicy:
     session_label: str
     session_key_namespace: str
     client_display_name: str
+    allows_approvals: bool = False
+    """Only the work lane may receive and answer tool approvals. The
+    Brainstorm lane treats any approval/tool event as a violation — that
+    tripwire is load-bearing safety, so approvals arrive via a NEW lane
+    with its own scopes, never by loosening an existing one."""
+    roster: bool = False
+    """Only the work lane may enumerate the wearer's sessions
+    (sessions.list with involvingMe); the other lanes stay pinned to their
+    single labelled session."""
 
     def __post_init__(self) -> None:
         identity = (
@@ -70,6 +88,8 @@ class AgentTerminalPolicy:
             self.session_label,
             self.session_key_namespace,
             self.client_display_name,
+            self.allows_approvals,
+            self.roster,
         )
         if identity not in {
             (
@@ -77,12 +97,24 @@ class AgentTerminalPolicy:
                 AGENT_TERMINAL_SESSION_LABEL,
                 "joat-",
                 "JOAT Brainstorm",
+                False,
+                False,
             ),
             (
                 AGENT_TERMINAL_AGENT_ID,
                 CALENDAR_PROPOSAL_SESSION_LABEL,
                 "joat-calendar-",
                 "JOAT Calendar Proposer",
+                False,
+                False,
+            ),
+            (
+                AGENT_TERMINAL_AGENT_ID,
+                WORK_SESSION_LABEL,
+                "joat-work-",
+                "JOAT Agent Terminal",
+                True,
+                True,
             ),
         }:
             raise ValueError("JOAT Agent Terminal policy is not a known complete lane")
@@ -116,6 +148,16 @@ CALENDAR_PROPOSAL_TERMINAL_POLICY = AgentTerminalPolicy(
     session_key_namespace="joat-calendar-",
     client_display_name="JOAT Calendar Proposer",
 )
+WORK_TERMINAL_POLICY = AgentTerminalPolicy(
+    agent_id=AGENT_TERMINAL_AGENT_ID,
+    session_label=WORK_SESSION_LABEL,
+    session_key_namespace="joat-work-",
+    client_display_name="JOAT Agent Terminal",
+    allows_approvals=True,
+    roster=True,
+)
+APPROVAL_DECISIONS = frozenset({"approve", "deny"})
+_APPROVAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 class DeviceIdentity(Protocol):
@@ -193,13 +235,27 @@ def _enforce_agent_terminal_request_policy(
             and not isinstance(params.get("limit"), bool)
         )
     elif method == "sessions.list":
-        permitted = (
+        pinned = (
             set(params) == {"label", "agentId", "limit"}
             and params.get("label") == policy.session_label
             and params.get("agentId") == policy.agent_id
             and params.get("limit") == 2
             and not isinstance(params.get("limit"), bool)
         )
+        # Roster lanes may enumerate the wearer's OWN sessions — bounded,
+        # involvingMe only (docs.openclaw.ai/gateway/protocol), never an
+        # arbitrary filter surface.
+        limit = params.get("limit")
+        roster = (
+            policy.roster
+            and set(params) == {"agentId", "limit", "involvingMe"}
+            and params.get("agentId") == policy.agent_id
+            and params.get("involvingMe") is True
+            and isinstance(limit, int)
+            and not isinstance(limit, bool)
+            and 1 <= limit <= 20
+        )
+        permitted = pinned or roster
     elif method == "sessions.create":
         permitted = (
             set(params) == {"key", "agentId", "label"}
@@ -213,11 +269,21 @@ def _enforce_agent_terminal_request_policy(
             and policy.owns_session_key(params.get("key"))
         )
     elif method == "sessions.messages.subscribe":
-        permitted = (
+        plain = (
             set(params) == {"key", "agentId"}
             and policy.owns_session_key(params.get("key"))
             and params.get("agentId") == policy.agent_id
         )
+        # includeApprovals is the documented opt-in for session.approval
+        # events; only an approvals lane may ask for it.
+        with_approvals = (
+            policy.allows_approvals
+            and set(params) == {"key", "agentId", "includeApprovals"}
+            and policy.owns_session_key(params.get("key"))
+            and params.get("agentId") == policy.agent_id
+            and params.get("includeApprovals") is True
+        )
+        permitted = plain or with_approvals
     elif method == "sessions.send":
         message = params.get("message")
         permitted = (
@@ -250,6 +316,17 @@ def _enforce_agent_terminal_request_policy(
         permitted = (
             set(params) == {"sessionKey"}
             and policy.owns_session_key(params.get("sessionKey"))
+        )
+    elif method == "approval.resolve":
+        decision = params.get("decision")
+        kind = params.get("kind")
+        permitted = (
+            policy.allows_approvals
+            and set(params) == {"id", "kind", "decision"}
+            and _matches(_APPROVAL_ID_PATTERN, params.get("id"))
+            and isinstance(kind, str)
+            and 0 < len(kind) <= 64
+            and decision in APPROVAL_DECISIONS
         )
 
     if method not in AGENT_TERMINAL_METHODS or not permitted:
@@ -479,9 +556,18 @@ def _validated_operator_scopes(scopes: Sequence[str]) -> list[str]:
         not requested
         or len(set(requested)) != len(requested)
         or any(scope not in ALLOWED_OPERATOR_SCOPES for scope in requested)
+        # Approvals authority is only coherent riding on a full read+write
+        # session — a bare operator.approvals request is a config typo (or
+        # something worse), and it was rejected before the work lane
+        # existed. Keep rejecting it.
+        or (
+            "operator.approvals" in requested
+            and not {"operator.read", "operator.write"}.issubset(requested)
+        )
     ):
         raise ValueError(
-            "OpenClaw operator scopes must be unique operator.read or operator.write values"
+            "OpenClaw operator scopes must be unique operator.read/operator.write "
+            "values, with operator.approvals only alongside both"
         )
     return requested
 
