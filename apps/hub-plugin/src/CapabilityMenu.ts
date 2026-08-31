@@ -515,6 +515,14 @@ export class CapabilityMenu {
         requestId: this.pendingRequestId,
       },
     });
+    // A conversation, compose, or transcript tap has left the currently
+    // rendered frame visible while the Mac loads the replacement. Do not
+    // leave that frame permanently locked if the production bridge drops the
+    // response: reuse the same truthful Messages retry state as an initial
+    // menu request and an explicit page turn.
+    if (this.pendingTitle === 'MESSAGES' && this.pendingRequestId) {
+      this.armResponseTimeout('MESSAGES', this.pendingRequestId);
+    }
     return true;
   }
 
