@@ -88,9 +88,12 @@ way to get custom layout and keep touch/ring events: image containers cannot
 capture input and the SDK permits no image larger than 288×144.
 
 Overview, Sidebar, and live-session states share the 20px rounded shell; every
-list, confirmation, and productivity page renders FLAT under the 36px status
-spine (wearer's ruling, 2026-08-31: the card was the waste — its border,
-margins, and per-row chrome, not any single line). Overview is sparse and
+list, confirmation, productivity, and stationary navigation page (confirm
+destination, repair, travel mode, route preview, arrival, error) renders FLAT
+under the 36px status spine (wearer's ruling, 2026-08-31: the card was the
+waste — its border, margins, and per-row chrome, not any single line). Only
+the moving navigation states (guidance, GPS-uncertain, wrong-way, off-route,
+rerouting) keep the live-session shell, alongside Brainstorm. Overview is sparse and
 icon-led. A left-temple double-click opens the
 transient 160px Sidebar while the current Overview stays visible at 24% intensity
 to preserve place. Selecting a row removes the rail and gives the destination
@@ -119,13 +122,20 @@ one bright question the wearer's full attention.
 The 20px rounded rule survives only where four tiles must read as one HUD
 (Overview, Sidebar, live sessions). List rows use ONE language everywhere:
 dense reading rows — a bright three-pixel selection rail on rows that accept a
-tap, hairline separators, six rows per screen (four on two-line Planning day
-agendas). The former per-row card (icon badge, 56px pitch, rounded selection
-outline) is retired; it fit three rows where six belong. There are no
-floating modal cards. Row KIND is indicated by a tiny aligned marker from
-the firmware-safe glyph set — ● a recording, □ an open todo, – a key point —
-never by an icon badge or a spelled-out word; markers indicate, they do not
-decorate. A selectable list that mixes marked and unmarked rows reserves the
+tap, NO separator lines, nine single-line rows per screen (six on two-line
+Planning day agendas). The former per-row card (icon badge, 56px pitch,
+rounded selection outline) is retired; it fit three rows where nine belong.
+There are no floating modal cards. Row KIND is indicated by a tiny aligned
+marker from the firmware-safe glyph set — ● the row demanding attention now
+(a live recording, an unread thread), □ an open todo, – a key point — never
+by an icon badge or a spelled-out word; markers indicate, they do not
+decorate. Only two Messages screens keep bespoke layouts: the two-column
+conversation transcript (seven rows; INCOMING text carries the weight, the
+wearer's own words recede to support) and the full-text reader (quiet
+metadata line, bright 14px body). The resting Overview wears an icon only
+when its main content has a KIND (calendar for what's next, bell for a
+notification); plain assistant text carries no icon — JOAT's home screen is
+JOAT, not a Messages app. A selectable list that mixes marked and unmarked rows reserves the
 marker column on every row so all titles share one left edge; non-selectable
 detail pages keep hanging-indent bullets under their section labels. When a
 page holds more rows than one window, a 2px hairline scrollbar at x=556
@@ -170,6 +180,16 @@ either built-in temple tap confirms, either swipe refuses, and eight seconds
 without action also refuses. Nod is not an approval path.
 
 ### Navigation and data display
+
+Navigation's stationary pages speak the same dense reading language as every
+focus page: a 10px uppercase kicker, one 16px primary fact, 11px support, and
+12px choice rows on a 20px pitch behind the 3px selection rail. The decorative
+route sketch, the canonical-place pin restating the header, the duplicated
+DISTANCE/ETA tiles, and the centered 24–25px poster arrival are retired
+(wearer's ruling, 2026-08-31: text-only navigation pages carried card chrome,
+oversized type, and duplicated data). Small semantic marks survive where they
+aid recognition — the error triangle, a compact arrival check — because a mark
+indicates; it never decorates.
 
 Navigation grammar is `Overview -> Sidebar -> full-focus destination -> detail
 -> Overview`. The Sidebar is one continuous, native-scrollable first-level

@@ -239,3 +239,50 @@ class TestVoiceCommandRouter:
             )
             answered = await commands("ask the last note who owns the final pass")
             assert answered == "QA owns the final pass."
+
+
+class RecordingOpens:
+    """Duck-typed CapabilityOpenCommandController."""
+
+    def __init__(self, result: str | None = None) -> None:
+        self.seen: list[str] = []
+        self.reflected = 0
+        self._result = result
+
+    async def handle_command(self, text: str) -> str | None:
+        self.seen.append(text)
+        return self._result
+
+    async def reflect_quicknotes(self) -> None:
+        self.reflected += 1
+
+
+class TestCapabilityOpenRouting:
+    async def test_open_claims_before_the_general_reply_engine(self) -> None:
+        replies = RecordingReplies()
+        opens = RecordingOpens("Opening Messages.")
+        commands = VoiceCommandRouter(
+            replies, ModelRegistry([]), capability_opens=opens,
+        )
+        assert await commands("show my messages") == "Opening Messages."
+        assert opens.seen == ["show my messages"]
+
+    async def test_capture_commands_repaint_the_quicknotes_surface(self) -> None:
+        replies = RecordingReplies()
+        opens = RecordingOpens(None)
+        voice_notes = RecordingProductivity("Recording paused.")
+        commands = VoiceCommandRouter(
+            replies, ModelRegistry([]),
+            voice_notes=voice_notes, capability_opens=opens,
+        )
+        assert await commands("pause recording") == "Recording paused."
+        assert opens.reflected == 1
+
+    async def test_unmatched_speech_never_reflects(self) -> None:
+        replies = RecordingReplies()
+        opens = RecordingOpens(None)
+        commands = VoiceCommandRouter(
+            replies, ModelRegistry([]), capability_opens=opens,
+        )
+        assert await commands("what is the weather") is None
+        assert opens.reflected == 0

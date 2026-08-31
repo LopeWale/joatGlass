@@ -46,38 +46,22 @@ export function showNavigationSecondaryInHeader(
   return view !== 'error';
 }
 
-/** Geometry for choice rows on the G2 lens. Decisions use an intensity rail
- * and a separator—not a browser-like button outline—so the wearer can scan
- * several choices without losing the content area to chrome. */
+/** Geometry for choice rows on the G2 lens. Decisions speak the one dense
+ * flat-list language: 12px rows on a 20px pitch with the 3px selection rail.
+ * No separators, no per-count roomy variant — pitch divides rows (the
+ * wearer's ruling: the chrome was the waste, not any single line). */
 export interface NavigationDecisionRow {
   baselineY: number;
   railTopY: number;
   railHeight: number;
-  separatorY?: number;
   fontSize: number;
 }
 
 export function navigationDecisionRows(optionCount: number): readonly NavigationDecisionRow[] {
   const count = Math.min(3, Math.max(0, Math.floor(optionCount)));
-  if (count === 0) return [];
-
-  const compact = count > 2;
-  const firstBaselineY = compact ? 134 : 137;
-  const rowGap = compact ? 28 : 34;
-  const railHeight = compact ? 21 : 24;
-  const railOffset = compact ? 11 : 12;
-  const fontSize = compact ? 11 : 14;
-  const separatorOffset = compact ? 14 : 16;
-
   return Array.from({ length: count }, (_, index) => {
-    const baselineY = firstBaselineY + index * rowGap;
-    return {
-      baselineY,
-      railTopY: baselineY - railOffset,
-      railHeight,
-      ...(index < count - 1 ? { separatorY: baselineY + separatorOffset } : {}),
-      fontSize,
-    };
+    const baselineY = 132 + index * 20;
+    return { baselineY, railTopY: baselineY - 10, railHeight: 19, fontSize: 12 };
   });
 }
 
@@ -173,14 +157,24 @@ export function confirmationReviewLayout(): {
   };
 }
 
+/** The navigation views a wearer reads while stopped. They are content
+ * pages, not the moving live session, so they render flat like every list. */
+const FLAT_NAVIGATION_VIEWS: ReadonlySet<string> = new Set([
+  'destination', 'repair', 'mode', 'preview', 'arrived', 'error',
+]);
+
 /** Content pages use the status spine alone. The second rounded container
  * ("the card") spent border and margin pixels on decoration; every list,
- * confirmation, and productivity page now renders flat. */
+ * confirmation, productivity, and stationary navigation page now renders
+ * flat. Only the moving states (guidance, warnings, rerouting) keep the
+ * live-session shell, like Brainstorm. */
 export function usesFlatHudShell(
   kind: HudVisualFrame['kind'],
   title = '',
+  navigationView?: NavigationHudModel['view'],
 ): boolean {
   void title;
+  if (kind === 'navigation') return FLAT_NAVIGATION_VIEWS.has(navigationView ?? '');
   return kind === 'confirmation' || kind === 'productivity' || kind === 'list';
 }
 
@@ -1161,6 +1155,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       usesFlatHudShell(
         frame.kind,
         frame.kind === 'list' ? frame.title : '',
+        frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
     );
     // The assistant is not a page. It is painted last into the same four G2
@@ -1693,7 +1688,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context.fillStyle = gray(outgoing ? CHROME : SUPPORT);
         context.font = `9px ${HUD_FONT}`;
         this.fitText(context, parsed.label, selected ? 48 : 36, y, selected ? 42 : 54);
-        context.fillStyle = gray(outgoing ? SUPPORT : selected ? BRIGHT : SUPPORT);
+        context.fillStyle = gray(outgoing ? CHROME : selected ? BRIGHT : SUPPORT);
         context.font = `12px ${HUD_FONT}`;
         this.fitText(context, parsed.body, 104, y, 436);
       });
@@ -2065,14 +2060,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    context.fillText(labels[navigation.view] ?? 'Navigation', 36, 59);
+    context.fillText((labels[navigation.view] ?? 'Navigation').toUpperCase(), 36, 59);
     context.fillStyle = gray(BRIGHT);
-    context.font = `21px ${HUD_FONT}`;
+    context.font = `16px ${HUD_FONT}`;
     this.fitText(context, navigation.primary, 36, 84, 504);
     if (showNavigationSecondaryInHeader(navigation.view)) {
       context.fillStyle = gray(SUPPORT);
       context.font = `11px ${HUD_FONT}`;
-      this.fitText(context, navigation.secondary, 36, 108, 504);
+      this.fitText(context, navigation.secondary, 36, 106, 504);
     }
 
     if (navigation.options.length > 0) {
@@ -2084,29 +2079,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
           context.fillStyle = gray(BRIGHT);
           context.fillRect(36, row.railTopY, 3, row.railHeight);
         }
-        if (row.separatorY !== undefined) {
-          context.fillStyle = gray(HAIRLINE);
-          context.fillRect(52, row.separatorY, 452, 1);
-        }
         context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
         context.font = `${row.fontSize}px ${HUD_FONT}`;
-        this.fitText(context, option, 52, row.baselineY, 470);
+        this.fitText(context, option, 52, row.baselineY, 488);
       });
-    } else if (navigation.view === 'destination') {
-      // The title and address above already are the canonical place. A second
-      // outlined copy makes a two-line decision feel like a web dialog.
-      this.drawMapPin(context, 51, 151, BRIGHT);
-      context.fillStyle = gray(CHROME);
-      context.font = `9px ${HUD_FONT}`;
-      context.fillText('CANONICAL PLACE', 80, 151);
-    } else {
-      // A recovery state needs an unmistakable marker and plain instruction,
-      // not a container that competes with the error's primary wording.
-      this.drawWarningMark(context, 61, 155, SUPPORT);
+    } else if (navigation.view === 'error') {
+      // A recovery state keeps a small unmistakable mark and its plain
+      // instruction. The mark indicates; it is not a poster centerpiece.
+      this.drawWarningMark(context, 54, 130, SUPPORT);
       context.fillStyle = gray(SUPPORT);
-      context.font = `13px ${HUD_FONT}`;
-      this.drawWrappedText(context, navigation.secondary, 99, 144, 420, 18, 2);
+      context.font = `12px ${HUD_FONT}`;
+      this.drawWrappedText(context, navigation.secondary, 94, 122, 446, 16, 2);
     }
+    // 'destination' with no options ends at the header: the primary and
+    // address ARE the page. The former pin + "CANONICAL PLACE" block only
+    // restated them (wearer's ruling: decoration on a text page is waste).
     this.drawNavigationFooter(context, navigation.hint);
   }
 
@@ -2120,38 +2107,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `10px ${HUD_FONT}`;
     context.fillText(`${navigation.mode === 'cycling' ? 'CYCLE' : 'WALK'} · ROUTE PREVIEW`, 36, 59);
     context.fillStyle = gray(BRIGHT);
-    context.font = `21px ${HUD_FONT}`;
-    this.fitText(context, navigation.primary, 36, 85, 504);
+    context.font = `16px ${HUD_FONT}`;
+    this.fitText(context, navigation.primary, 36, 84, 504);
+    // The Mac-authored secondary already carries distance · time · via. The
+    // former fake route sketch and DISTANCE/ETA tiles drew the same numbers
+    // again around a decorative polyline that never matched the real route.
     context.fillStyle = gray(SUPPORT);
     context.font = `11px ${HUD_FONT}`;
-    this.fitText(context, navigation.secondary, 36, 108, 504);
-
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 7;
-    context.lineCap = 'round';
-    context.lineJoin = 'round';
-    context.beginPath();
-    context.moveTo(71, 202);
-    context.lineTo(71, 153);
-    context.lineTo(156, 153);
-    context.lineTo(156, 187);
-    context.lineTo(251, 187);
-    context.stroke();
-    context.strokeStyle = gray(BRIGHT);
-    context.lineWidth = 3;
-    context.setLineDash([7, 7]);
-    context.stroke();
-    context.setLineDash([]);
-    this.drawMapPin(context, 251, 177, BRIGHT);
-
-    context.fillStyle = gray(CHROME);
-    context.font = `9px ${HUD_FONT}`;
-    context.fillText('DISTANCE', 322, 148);
-    context.fillText('ETA', 322, 190);
-    context.fillStyle = gray(BRIGHT);
-    context.font = `18px ${HUD_FONT}`;
-    context.fillText(formatNavigationDistance(navigation.remainingDistanceM ?? 0), 409, 148);
-    context.fillText(`${navigation.etaMinutes ?? 0} min`, 409, 190);
+    this.fitText(context, navigation.secondary, 36, 106, 504);
     this.drawNavigationFooter(context, navigation.hint);
   }
 
@@ -2229,15 +2192,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
-    this.drawArrivalMark(context, 288, 97, BRIGHT);
-    context.textAlign = 'center';
+    context.textAlign = 'left';
     context.textBaseline = 'middle';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText('ARRIVED', 36, 59);
+    // A small check aids recognition; the former 25px poster centerpiece
+    // spent the page on it.
+    this.drawArrivalMark(context, 47, 84, BRIGHT, 11);
     context.fillStyle = gray(BRIGHT);
-    context.font = `25px ${HUD_FONT}`;
-    context.fillText(navigation.primary, 288, 151);
+    context.font = `16px ${HUD_FONT}`;
+    this.fitText(context, navigation.primary, 68, 84, 472);
     context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
-    this.drawFittedWrappedText(context, navigation.secondary, 288, 183, 470, 2);
+    context.font = `11px ${HUD_FONT}`;
+    this.fitText(context, navigation.secondary, 36, 108, 504);
     this.drawNavigationFooter(context, navigation.hint);
   }
 
@@ -2255,24 +2223,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillRect(36, 228, 504, 3);
     context.fillStyle = gray(SUPPORT);
     context.fillRect(36, 228, Math.round(504 * normalized), 3);
-  }
-
-  private drawMapPin(
-    context: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    level: number,
-  ): void {
-    context.strokeStyle = gray(level);
-    context.lineWidth = 2;
-    context.beginPath();
-    context.arc(x, y - 5, 10, Math.PI * 0.15, Math.PI * 0.85, true);
-    context.lineTo(x, y + 16);
-    context.closePath();
-    context.stroke();
-    context.beginPath();
-    context.arc(x, y - 5, 3, 0, Math.PI * 2);
-    context.stroke();
   }
 
   private drawWarningMark(
@@ -2321,16 +2271,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     x: number,
     y: number,
     level: number,
+    radius = 25,
   ): void {
     context.strokeStyle = gray(level);
     context.lineWidth = 2;
     context.beginPath();
-    context.arc(x, y, 25, 0, Math.PI * 2);
+    context.arc(x, y, radius, 0, Math.PI * 2);
     context.stroke();
     context.beginPath();
-    context.moveTo(x - 12, y);
-    context.lineTo(x - 3, y + 9);
-    context.lineTo(x + 14, y - 11);
+    context.moveTo(x - radius * 0.48, y);
+    context.lineTo(x - radius * 0.12, y + radius * 0.36);
+    context.lineTo(x + radius * 0.56, y - radius * 0.44);
     context.stroke();
   }
 
@@ -2451,30 +2402,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     lines.forEach((line, index) => {
       this.fitText(context, line, x, y + index * 14, 504);
     });
-  }
-
-  private drawFittedWrappedText(
-    context: CanvasRenderingContext2D,
-    text: string,
-    x: number,
-    y: number,
-    maxWidth: number,
-    maximumLines: number,
-    textAlign: CanvasTextAlign = 'center',
-  ): void {
-    const previous = context.textAlign;
-    context.textAlign = textAlign;
-    const fitted = fitHudWrappedText(text, maxWidth, maximumLines, (value, fontSize) => {
-      context.font = `${fontSize}px ${HUD_FONT}`;
-      return context.measureText(value).width;
-    });
-    context.font = `${fitted.fontSize}px ${HUD_FONT}`;
-    const { lines } = fitted;
-    const fontSize = fitted.fontSize;
-    const lineHeight = Math.max(16, fontSize + 2);
-    const firstY = y - ((lines.length - 1) * lineHeight) / 2;
-    lines.forEach((line, index) => context.fillText(line, x, firstY + index * lineHeight));
-    context.textAlign = previous;
   }
 
   private drawAssistantOverlayText(

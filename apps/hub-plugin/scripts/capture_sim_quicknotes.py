@@ -30,6 +30,10 @@ STATES = [
     ("3-quicknote-recording", "quicknote-recording"),
     ("4-quicknote-discard", "quicknote-discard"),
     ("5-quicknote-saving", "quicknote-saving"),
+    ("m1-messages-list", "messages"),
+    ("m2-messages-conversation", "messages-conversation"),
+    ("m3-message-reader", "message-reader"),
+    ("m4-messages-compose", "messages-compose"),
 ]
 
 

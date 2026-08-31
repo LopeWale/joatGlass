@@ -1388,6 +1388,30 @@ describe('CapabilityMenu', () => {
     expect(menu.isOpen()).toBe(false); // applied and closed home
   });
 
+  it('adopts a Mac voice generation so speech paints without a menu tap', async () => {
+    const { menu, lists, listOptions } = rig();
+    // Menu fully closed — the Mac answers "JOAT, show my messages".
+    const painted = await menu.presentList(
+      'MESSAGES', ['[2m] \u25cf Adele \u00b7 Send the mockups?'], 'voice-abc123', true, 'tap: select',
+    );
+    expect(painted).toBe(true);
+    expect(lists[lists.length - 1]).toEqual(['[2m] \u25cf Adele \u00b7 Send the mockups?']);
+    expect(listOptions[listOptions.length - 1]?.title).toBe('MESSAGES');
+    // The adopted generation answers follow-up pages too (same voice id).
+    const detail = await menu.presentList(
+      'MESSAGES \u00b7 CONVERSATION', ['Latest messages \u2014 down for older', 'Adele \u00b7 hi'],
+      'voice-abc123', true,
+    );
+    expect(detail).toBe(true);
+  });
+
+  it('still drops an unsolicited list without the voice prefix', async () => {
+    const { menu, lists } = rig();
+    const painted = await menu.presentList('MESSAGES', ['row'], 'hud-request-999', true);
+    expect(painted).toBe(false);
+    expect(lists).toHaveLength(0);
+  });
+
   it('double-tap from the capability list is back, not deeper', async () => {
     const { menu, defaultsCount } = rig();
     await menu.toggle();
