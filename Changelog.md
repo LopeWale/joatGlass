@@ -2,6 +2,17 @@
 
 ## 2026-08-30
 
+- Added a Mac-app Settings surface for the remote Hermes Agent Terminal
+  Gateway. It accepts only a canonical WebSocket origin, keeps the agent fixed
+  to `hermes`, and writes the exact owner-only, secret-free `openclaw.json`
+  schema the Python runtime admits. The form rejects a remote `ws://` URL,
+  URL credentials/paths/queries, and Hermes’s port-9443 control dashboard;
+  save is atomic and never follows a symbolic link. It stores no pairing token
+  and explains that restart plus an endpoint-specific visible pairing approval
+  may be needed. SwiftPM and generated-Xcode native regressions passed, along
+  with the Python OpenClaw runtime/Gateway/native suite. No Mac-mini
+  connection, package, upload, install, or release action occurred.
+
 - Explicit nearby-place questions now prefer a fresh, request-bound
   high-accuracy phone fix from Even Hub before safely falling back to the
   already-fresh location cache. Ambient tracking remains medium-accuracy and

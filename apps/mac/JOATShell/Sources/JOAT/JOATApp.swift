@@ -92,6 +92,8 @@ struct MenuContent: View {
 
 struct SettingsView: View {
     @ObservedObject var engine: EngineController
+    @State private var hermesGatewayURL = ""
+    @State private var hermesConfigurationMessage: String?
 
     var body: some View {
         Form {
@@ -110,6 +112,42 @@ struct SettingsView: View {
             )
             .font(.footnote)
             .foregroundStyle(.secondary)
+
+            Section("Hermes on your Mac mini") {
+                TextField("Gateway URL", text: $hermesGatewayURL)
+                    .textFieldStyle(.roundedBorder)
+                    .fontDesign(.monospaced)
+                    .accessibilityLabel("Hermes Gateway URL")
+                LabeledContent("Agent Terminal agent", value: "Hermes (fixed)")
+                Text(
+                    "Use the authenticated Tailscale Gateway origin, for example "
+                    + "wss://your-mac-mini.tailnet.ts.net. Port 9443 is the Hermes "
+                    + "control dashboard, not this Gateway."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                HStack {
+                    Button("Save Hermes Connection") {
+                        saveHermesConnection()
+                    }
+                    .disabled(!hermesGatewayCanSave)
+                    Button("Reload") {
+                        loadHermesConnection()
+                    }
+                }
+                if let hermesConfigurationMessage {
+                    Text(hermesConfigurationMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text(
+                    "Saving stores no token. Restart the engine to connect; a new "
+                    + "Gateway endpoint uses its own signed device identity and may "
+                    + "need a visible pairing approval."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
             LabeledContent("Engine repo") {
                 Text(engine.repoURL()?.path ?? "not found")
                     .truncationMode(.middle)
@@ -118,7 +156,39 @@ struct SettingsView: View {
             Button("Change Repo Folder…") { engine.chooseRepo() }
         }
         .padding(20)
-        .frame(width: 420)
-        .onAppear { engine.refreshLaunchAtLogin() }
+        .frame(width: 520)
+        .onAppear {
+            engine.refreshLaunchAtLogin()
+            loadHermesConnection()
+        }
+    }
+
+    private var hermesGatewayCanSave: Bool {
+        (try? OpenClawRuntimeConfiguration(gatewayURL: hermesGatewayURL)) != nil
+    }
+
+    private func loadHermesConnection() {
+        do {
+            guard let configuration = try OpenClawRuntimeConfiguration.load() else {
+                hermesGatewayURL = ""
+                hermesConfigurationMessage = "No Hermes Gateway is configured yet."
+                return
+            }
+            hermesGatewayURL = configuration.gatewayURL
+            hermesConfigurationMessage = "Saved Gateway loaded."
+        } catch {
+            hermesConfigurationMessage = error.localizedDescription
+        }
+    }
+
+    private func saveHermesConnection() {
+        do {
+            let configuration = try OpenClawRuntimeConfiguration(gatewayURL: hermesGatewayURL)
+            try configuration.save()
+            hermesGatewayURL = configuration.gatewayURL
+            hermesConfigurationMessage = "Gateway saved. Restart Engine to connect."
+        } catch {
+            hermesConfigurationMessage = error.localizedDescription
+        }
     }
 }

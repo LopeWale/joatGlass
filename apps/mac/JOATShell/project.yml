@@ -96,6 +96,7 @@ targets:
       - path: Tests/JOATTests/EngineControllerIdentityTests.swift
       - path: Tests/JOATTests/OpenClawCredentialServiceTests.swift
       - path: Tests/JOATTests/EngineStatusOpenClawTests.swift
+      - path: Tests/JOATTests/OpenClawRuntimeConfigurationTests.swift
     dependencies:
       - target: JOAT
     settings:
