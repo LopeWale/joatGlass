@@ -204,9 +204,11 @@ class MlxReplyEngine(ReplyEngine):
                         )
                         buf = buf[first_threshold:]
                         first_chunk = False
-                    if not first_chunk and len(buf) >= self._chunk_chars:
-                        loop.call_soon_threadsafe(queue.put_nowait, buf)
-                        buf = ""
+                    while not first_chunk and len(buf) >= self._chunk_chars:
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, buf[:self._chunk_chars]
+                        )
+                        buf = buf[self._chunk_chars:]
                 if buf:
                     loop.call_soon_threadsafe(queue.put_nowait, buf)
             except Exception:
