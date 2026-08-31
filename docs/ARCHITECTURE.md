@@ -56,13 +56,12 @@ Domain models (dataclasses): `HudPage`, `Transcript`, `DebateTask`, `Plan`, `Cla
 
 `HandoffManager` (in `services/`) owns the switch: disconnect current central → rescan both lens addresses → reconnect → replay 7-packet auth + init (time-sync, pipe-role, heartbeat) → resend current page state. Only one central per lens, ever.
 
-## Experimental walking/cycling navigation
+## Walking/cycling navigation
 
-Navigation is an explicit, foreground-only experimental lane. It is enabled
-only when the Mac has both `JOAT_EXPERIMENTAL_NAVIGATION=1` and a
-`MAPBOX_ACCESS_TOKEN`; otherwise an explicit navigation request produces a
-wearer-visible unavailable screen instead of falling through to the general
-assistant.
+Navigation is an explicit, foreground-only walking/cycling capability. It is
+enabled when the Mac has a `MAPBOX_ACCESS_TOKEN` (or legacy `MAPBOX_API_KEY`);
+otherwise an explicit navigation request produces a wearer-visible unavailable
+screen instead of falling through to the general assistant.
 
 ```text
 spoken destination

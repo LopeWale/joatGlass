@@ -2,6 +2,17 @@
 
 ## 2026-08-30
 
+- Prepared JOAT `0.1.39` as a coherent walking/cycling navigation release.
+  A configured `MAPBOX_ACCESS_TOKEN` or legacy `MAPBOX_API_KEY` now enables
+  the local route provider without a second hidden experimental flag. The
+  unavailable-provider voice state consumes only explicit navigation cancel
+  commands, so unrelated JOAT requests continue to their owning capability.
+  The Hub plugin uses Even's phone-location stream as the wearer-position
+  source, starts the continuous SDK subscription before attaching the listener,
+  and does not block live fixes behind the optional one-shot initial read.
+  Mapbox remains the route/search provider; it is not used as a replacement
+  for the Even SDK location source.
+
 - Replaced the remaining Calendar/Reminder safe-write poster treatment with
   the same compact flat language as Planning and Messages. Reviews now use one
   left reading axis and one static gesture footer; lifecycle results retain
