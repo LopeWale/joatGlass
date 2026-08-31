@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Legacy lower-level contract harness for Brainstorm / Agent Terminal.
 
-The in-process :mod:`joat.services.brainstorm_acceptance` controller is the
-only supported physical-Hermes acceptance path.  The signed macOS app admits
-only its exact Python child PID to the native OpenClaw bridge; an external
-script must not and cannot borrow that identity.  This module remains as a
-loopback/lower-level contract harness for focused tests only.
+The in-process :mod:`joat.services.brainstorm_acceptance` controller remains
+the supported app-owned physical-Hermes path. The signed macOS app admits only
+its exact Python child PID to the native OpenClaw bridge; an external script
+must not and cannot borrow that identity. This lower-level runner remains for
+focused contracts, but uses the same production HUD sink for streamed output.
 
 The recorded receipt contains only these bounded facts:
 
@@ -58,11 +58,15 @@ from joat.agents.openclaw_native import NativeOpenClawCredentials
 from joat.agents.openclaw_runtime import OpenClawRuntimeConfig, OpenClawTerminalAgent
 from joat.native.bridge import NativeBridgeClient
 from joat.services.g2_diagnostics import G2DiagnosticStore, TRACE_SCHEMA
+from joat.services.hud import HudWriter
+from joat.services.sinks import HudSink
 
 
-RUN_SCHEMA = "joat.g2-brainstorm-acceptance.v1"
-MAX_RETAINED_EVENTS = 12
+RUN_SCHEMA = "joat.g2-brainstorm-acceptance.v2"
+MAX_RETAINED_EVENTS = 16
 HEX_SHA256_LENGTH = 64
+_STREAM_FRAME_TARGET = 2
+_MAX_STREAM_FRAME_ATTEMPTS = 4
 _PHYSICAL_SOURCES = frozenset({"left", "right", "ring"})
 _TERMINAL_TOGGLE_SOURCES = frozenset({"right", "ring"})
 _BRAINSTORM_ACTIONS = frozenset({
@@ -75,9 +79,9 @@ _HUD_SURFACES = frozenset({"brainstorm", "agent_terminal"})
 _HERMES_RUN_STATES = frozenset({"not_exercised", "cancelled", "completed", "failed"})
 _G2_RECONNECT_STATES = frozenset({"not_exercised", "restored"})
 # This deliberately uninteresting fixed text is sent only after the wearer
-# starts the opt-in physical acceptance.  It is never written to the receipt,
-# console, trace, or HUD.  The longer response gives the wearer time to invoke
-# the left-double cancel gesture while a real no-tool Gateway run is active.
+# starts the opt-in physical acceptance. It is never written to the receipt,
+# console, or trace. The response is shown through the normal bounded HUD sink
+# so the runner can prove the streamed Hermes turn reached the G2 bridge.
 _HERMES_ACCEPTANCE_PROMPT = (
     "JOAT physical acceptance run. Emit a long sequence of neutral status "
     "markers only. Do not use tools or call any external service."
@@ -205,6 +209,8 @@ def summarize_receipt(
     g2_reconnect: str = "not_exercised",
     require_cancel: bool = False,
     require_reconnect: bool = False,
+    stream_frame_sha256: tuple[str, ...] = (),
+    require_stream: bool = False,
 ) -> dict[str, object]:
     """Verify the physical Brainstorm → Terminal → Brainstorm contract.
 
@@ -221,7 +227,26 @@ def summarize_receipt(
         raise ValueError("hermes run state is invalid")
     if g2_reconnect not in _G2_RECONNECT_STATES:
         raise ValueError("G2 reconnect state is invalid")
+    stream_frame_sha256 = tuple(
+        _sha256(digest, "stream frame SHA-256") for digest in stream_frame_sha256
+    )
+    if len(stream_frame_sha256) > _STREAM_FRAME_TARGET:
+        raise ValueError("stream frame evidence exceeds bounded pair")
     retained = _retained_events(_require_events(receipt))
+    stream_verified = False
+
+    def finish(result: str) -> dict[str, object]:
+        if result == "pass" and require_stream and not stream_verified:
+            result = "inconclusive"
+        return _summary(
+            result,
+            retained,
+            lens_video_sha256,
+            hermes_run,
+            g2_reconnect,
+            stream_frame_sha256,
+            stream_verified,
+        )
     initial = next(
         (
             (index, event)
@@ -234,7 +259,7 @@ def summarize_receipt(
         None,
     )
     if initial is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
 
     terminal_action = _find_after(
         retained,
@@ -247,7 +272,10 @@ def summarize_receipt(
         and event.get("source") in _TERMINAL_TOGGLE_SOURCES,
     )
     if terminal_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
+    stream_verified = _ordered_stream_frames(
+        retained[:terminal_action[0]], stream_frame_sha256,
+    )
     terminal_frame = _find_after(
         retained,
         terminal_action[0],
@@ -257,9 +285,9 @@ def summarize_receipt(
         and event.get("state") == "running"
     )
     if terminal_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
     if terminal_frame[1]["sha256"] == initial[1]["sha256"]:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
 
     return_action = _find_after(
         retained,
@@ -272,7 +300,7 @@ def summarize_receipt(
         and event.get("source") in _TERMINAL_TOGGLE_SOURCES,
     )
     if return_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     returned_frame = _find_after(
         retained,
         return_action[0],
@@ -282,14 +310,14 @@ def summarize_receipt(
         and event.get("state") == "running"
     )
     if returned_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
     if returned_frame[1]["sha256"] == terminal_frame[1]["sha256"]:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
 
     if require_reconnect and g2_reconnect != "restored":
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     if not require_cancel:
-        return _summary("pass", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("pass")
     cancel_action = _find_after(
         retained,
         returned_frame[0],
@@ -301,7 +329,7 @@ def summarize_receipt(
         and event.get("source") == "left",
     )
     if cancel_action is None:
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
     cancelled_frame = _find_after(
         retained,
         cancel_action[0],
@@ -311,10 +339,10 @@ def summarize_receipt(
         and event.get("state") == "cancelled",
     )
     if cancelled_frame is None:
-        return _summary("fail", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("fail")
     if hermes_run != "cancelled":
-        return _summary("inconclusive", retained, lens_video_sha256, hermes_run, g2_reconnect)
-    return _summary("pass", retained, lens_video_sha256, hermes_run, g2_reconnect)
+        return finish("inconclusive")
+    return finish("pass")
 
 
 def _summary(
@@ -323,6 +351,8 @@ def _summary(
     lens_video_sha256: str | None,
     hermes_run: str,
     g2_reconnect: str,
+    stream_frame_sha256: tuple[str, ...] = (),
+    stream_verified: bool = False,
 ) -> dict[str, object]:
     return {
         "schema": RUN_SCHEMA,
@@ -339,8 +369,34 @@ def _summary(
         },
         "lensVideoSha256": lens_video_sha256,
         "hermesRun": hermes_run,
+        "hermesStream": {
+            "hud": "verified" if stream_verified else "not_verified",
+            "frameSha256": list(stream_frame_sha256),
+        },
         "g2Reconnect": g2_reconnect,
     }
+
+
+def _ordered_stream_frames(
+    retained: list[dict[str, str]], frame_sha256: tuple[str, ...],
+) -> bool:
+    if (
+        len(frame_sha256) != _STREAM_FRAME_TARGET
+        or len(set(frame_sha256)) != len(frame_sha256)
+    ):
+        return False
+    cursor = -1
+    for digest in frame_sha256:
+        found = _find_after(retained, cursor, lambda event: (
+            event.get("type") == "visual_frame"
+            and event.get("surface") == "brainstorm"
+            and event.get("state") == "running"
+            and event.get("sha256") == digest
+        ))
+        if found is None:
+            return False
+        cursor = found[0]
+    return True
 
 
 def _write_owner_only_json(path: Path, payload: dict[str, object]) -> None:
@@ -419,14 +475,80 @@ async def _without_hermes() -> AsyncIterator[HermesStream | None]:
     yield None
 
 
-async def _consume_hermes(agent: HermesStream, first_chunk: asyncio.Event) -> None:
-    """Exercise a real stream while deliberately retaining none of its text."""
+async def _next_running_frame_sha256(
+    events: list[dict[str, object]],
+    *,
+    after: int,
+    timeout_s: float,
+) -> str:
+    def next_frame() -> dict[str, object] | None:
+        return next((event for event in events[after:] if (
+            event.get("type") == "visual_frame"
+            and event.get("kind") == "brainstorm"
+            and event.get("surface") == "brainstorm"
+            and event.get("state") == "running"
+        )), None)
 
-    async for _ignored_chunk in agent.stream(_HERMES_ACCEPTANCE_PROMPT):
-        # Do not aggregate, display, log, hash, or otherwise retain remote
-        # content.  Cancellation propagates into OpenClawTerminalAgent, which
-        # performs its bounded `sessions.abort` confirmation before closing.
-        first_chunk.set()
+    await _wait_for(
+        lambda: next_frame() is not None,
+        timeout_s,
+        "streamed Brainstorm visual frame was not acknowledged",
+    )
+    frame = next_frame()
+    assert frame is not None
+    return _sha256(frame.get("sha256"), "stream frame SHA-256")
+
+
+async def _consume_hermes(
+    agent: HermesStream,
+    gateway: HubGatewayTransport,
+    events: list[dict[str, object]],
+    stream_proven: asyncio.Event,
+    stream_frame_sha256: list[str],
+    *,
+    action_timeout_s: float,
+) -> None:
+    """Send a bounded stream prefix through the production HUD sink.
+
+    The receipt receives only two visual-frame hashes. Remote chunks stay
+    in-memory inside ``HudSink`` long enough to be rendered, and are never
+    logged, hashed, or written to the evidence file.
+    """
+
+    def terminal_projection() -> dict[str, str | bool]:
+        return {
+            "state": "running",
+            "reason": "",
+            "endpoint_host": "",
+            "no_tools_checked": True,
+        }
+
+    sink = HudSink(HudWriter(gateway), terminal_projection)
+    before = len(events)
+    await sink.open("Acceptance run", ["Hermes"])
+    await _next_running_frame_sha256(events, after=before, timeout_s=action_timeout_s)
+    before = len(events)
+    await sink.turn("Hermes")
+    await _next_running_frame_sha256(events, after=before, timeout_s=action_timeout_s)
+
+    attempts = 0
+    async for chunk in agent.stream(_HERMES_ACCEPTANCE_PROMPT):
+        if not chunk or len(stream_frame_sha256) >= _STREAM_FRAME_TARGET:
+            continue
+        if attempts >= _MAX_STREAM_FRAME_ATTEMPTS:
+            continue
+        attempts += 1
+        before = len(events)
+        await sink.chunk(chunk)
+        digest = await _next_running_frame_sha256(
+            events,
+            after=before,
+            timeout_s=action_timeout_s,
+        )
+        if digest not in stream_frame_sha256:
+            stream_frame_sha256.append(digest)
+        if len(stream_frame_sha256) >= _STREAM_FRAME_TARGET:
+            stream_proven.set()
 
 
 def _view(
@@ -539,7 +661,9 @@ async def capture(
         hermes_run = "not_exercised"
         g2_reconnect = "not_exercised"
         hermes_task: asyncio.Task[None] | None = None
-        hermes_first_chunk = asyncio.Event()
+        hermes_stream_proven = asyncio.Event()
+        hermes_stream_frame_sha256: list[str] = []
+        require_stream = False
         await gateway.start()
         try:
             await _wait_for(
@@ -562,6 +686,7 @@ async def capture(
                         "Brainstorm visual frame was not acknowledged",
                     )
                 else:
+                    require_stream = True
                     # Connecting the glasses never starts a remote run. The
                     # wearer must first accept the visible ready state.
                     await gateway.send(_view(
@@ -582,20 +707,18 @@ async def capture(
                         action_timeout_s,
                         "begin action did not retain its physical G2 receipt",
                     )
-                    hermes_task = asyncio.create_task(_consume_hermes(hermes, hermes_first_chunk))
-                    await _wait_for(
-                        hermes_first_chunk.is_set,
-                        action_timeout_s,
-                        "Hermes did not produce a bounded acceptance stream",
-                    )
-                    await gateway.send(_view(
-                        "brainstorm",
-                        activity="Hermes acceptance run active",
+                    hermes_task = asyncio.create_task(_consume_hermes(
+                        hermes,
+                        gateway,
+                        observed_events,
+                        hermes_stream_proven,
+                        hermes_stream_frame_sha256,
+                        action_timeout_s=action_timeout_s,
                     ))
                     await _wait_for(
-                        lambda: _frame_count(observed_events, "brainstorm") >= 1,
+                        hermes_stream_proven.is_set,
                         action_timeout_s,
-                        "running Brainstorm visual frame was not acknowledged",
+                        "Hermes did not produce two rendered acceptance chunks",
                     )
 
                 first_action = await asyncio.wait_for(actions.get(), action_timeout_s)
@@ -722,6 +845,8 @@ async def capture(
             g2_reconnect=g2_reconnect,
             require_cancel=_require_cancel,
             require_reconnect=_require_reconnect,
+            stream_frame_sha256=tuple(hermes_stream_frame_sha256),
+            require_stream=require_stream,
         )
 
     _write_owner_only_json(out, summary)

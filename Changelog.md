@@ -2,6 +2,16 @@
 
 ## 2026-08-30
 
+- Corrected the lower-level physical Brainstorm acceptance runner so its
+  no-tool Hermes stream uses the same production `HudSink` as the app instead
+  of discarding chunks and painting a fixed status. A live-Hermes receipt now
+  fails closed unless it has exactly two distinct, ordered Brainstorm-running
+  frame SHA-256 digests before the Terminal transition; it stores no remote
+  text, prompt, pixels, or lens video. The official simulator visually
+  exercises the same production HUD path, while physical optics remain a
+  separate video-backed acceptance gate. No package, upload, install, or
+  release action occurred.
+
 - Added a read-only, content-free home-Mini Tailscale Serve preflight. It
   verifies only the persisted private topology required for a glasses-first
   JOAT brain: the preserved OpenClaw/Hermes root handler, `/glasses` proxied
