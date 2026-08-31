@@ -75,6 +75,7 @@ from ..core.protocol import (
     Policy,
     ProtocolError,
     ProductivityHudView,
+    ProductivityViewAck,
     ReminderDueAck,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     parse_uplink,
@@ -103,6 +104,7 @@ NavigationStateCallback = Callable[[NavigationState], None]
 NavigationRerouteCallback = Callable[[NavigationRerouteRequest], None]
 NavigationOriginCallback = Callable[[NavigationOrigin], None]
 NavigationOriginFailureCallback = Callable[[NavigationOriginFailure], None]
+ProductivityViewAckCallback = Callable[[ProductivityViewAck], None]
 
 
 @dataclass(slots=True)
@@ -180,6 +182,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._navigation_reroute_cbs: list[NavigationRerouteCallback] = []
         self._navigation_origin_cbs: list[NavigationOriginCallback] = []
         self._navigation_origin_failure_cbs: list[NavigationOriginFailureCallback] = []
+        self._productivity_view_ack_cbs: list[ProductivityViewAckCallback] = []
         self._disconnect_cbs: list[Callable[[], None]] = []
 
         self._pending_confirms: dict[str, _PendingConfirm] = {}
@@ -388,6 +391,14 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self, callback: NavigationOriginFailureCallback,
     ) -> None:
         self._navigation_origin_failure_cbs.append(callback)
+
+    def on_productivity_view_ack(self, callback: ProductivityViewAckCallback) -> None:
+        """Observe a content-free verifying-view acknowledgement.
+
+        Callers must still distinguish this current-plugin receipt from native
+        delivery, physical G2 pixels, and wearer attention.
+        """
+        self._productivity_view_ack_cbs.append(callback)
 
     # ── sending ──────────────────────────────────────────────────────────────
 
@@ -1114,6 +1125,10 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     and not reminder_pending.future.done()
                 ):
                     reminder_pending.future.set_result(True)
+            case ProductivityViewAck():
+                if message.generation == self._connection_generation:
+                    for productivity_view_ack_cb in self._productivity_view_ack_cbs:
+                        productivity_view_ack_cb(message)
 
     def _handle_audio(self, message: Audio, session_id: str) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:

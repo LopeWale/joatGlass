@@ -52,6 +52,7 @@ from joat.core.protocol import (
     PairingAck,
     PairingSet,
     ProductivityHudView,
+    ProductivityViewAck,
     ReminderDueAck,
     Input,
     Policy,
@@ -62,6 +63,20 @@ from joat.core.protocol import (
 
 
 class TestParseUplink:
+    def test_productivity_view_ack_is_content_free_and_verifying_only(self) -> None:
+        acknowledgement = {
+            "kind": "productivity.view.ack",
+            "presentationReceiptId": "a76b12f1-45e4-41fd-aed8-086f6b6b1954",
+            "generation": 7,
+            "outcome": "accepted",
+        }
+        assert "Private calendar title" not in acknowledgement.values()
+        assert parse_uplink(acknowledgement) == ProductivityViewAck(
+            presentation_receipt_id="a76b12f1-45e4-41fd-aed8-086f6b6b1954",
+            generation=7,
+            outcome="accepted",
+        )
+
     def test_navigation_action_is_bound_to_exact_visible_generation(self) -> None:
         assert parse_uplink({
             "kind": "navigation.action",
@@ -732,6 +747,32 @@ class TestDownlinkWire:
             generation=7,
             outcome="accepted",
         )
+
+    def test_verifying_view_receipt_is_content_free_and_phase_bound(self) -> None:
+        receipt_id = "a76b12f1-45e4-41fd-aed8-086f6b6b1954"
+        wire = ProductivityHudView(
+            domain="calendar",
+            phase="verifying",
+            title="Private calendar title",
+            primary="Saving calendar event",
+            secondary="Checking native read-back",
+            hint="Please wait",
+            presentation_receipt_id=receipt_id,
+            presentation_receipt_generation=7,
+        ).to_wire()
+        assert wire["productivity"]["presentationReceiptId"] == receipt_id
+        assert wire["productivity"]["presentationReceiptGeneration"] == 7
+        with pytest.raises(ProtocolError, match="presentation receipt requires a verifying view"):
+            ProductivityHudView(
+                domain="calendar",
+                phase="saved",
+                title="Private calendar title",
+                primary="Saved and verified",
+                secondary="Calendar read-back matched",
+                hint="Back to Planning",
+                presentation_receipt_id=receipt_id,
+                presentation_receipt_generation=7,
+            ).to_wire()
 
     @pytest.mark.parametrize("payload", [
         {"kind": "reminder_due.ack", "reminderDueId": "private title", "reminderDueAttemptId": "a76b12f1-45e4-41fd-aed8-086f6b6b1954", "generation": 7, "outcome": "accepted"},

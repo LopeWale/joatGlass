@@ -567,7 +567,9 @@ export class HudPresenter {
       && visible.monitoringArmed === productivity.monitoringArmed
       && visible.reminderDueId === productivity.reminderDueId
       && visible.reminderDueAttemptId === productivity.reminderDueAttemptId
-      && visible.reminderDueGeneration === productivity.reminderDueGeneration;
+      && visible.reminderDueGeneration === productivity.reminderDueGeneration
+      && visible.presentationReceiptId === productivity.presentationReceiptId
+      && visible.presentationReceiptGeneration === productivity.presentationReceiptGeneration;
   }
 
   async setSelection(index: number): Promise<boolean> {

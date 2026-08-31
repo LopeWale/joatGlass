@@ -328,11 +328,25 @@ class ReminderDueAck:
     outcome: Literal["accepted"]
 
 
+@dataclass(frozen=True, slots=True)
+class ProductivityViewAck:
+    """Current-client receipt for an opaque verifying HUD operation.
+
+    It is intentionally a presentation acknowledgement only. It cannot prove
+    native Calendar/Reminders delivery, a physical G2 framebuffer, or wearer
+    attention, and contains no Calendar/Reminder text or native identifier.
+    """
+
+    presentation_receipt_id: str
+    generation: int
+    outcome: Literal["accepted"]
+
+
 UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
-    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck
+    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ProductivityViewAck
 )
 
 
@@ -582,6 +596,10 @@ class ProductivityHudView:
     reminder_due_id: str | None = None
     reminder_due_attempt_id: str | None = None
     reminder_due_generation: int | None = None
+    # Simulator-only, opaque presentation receipt. Unlike the Reminder due
+    # receipt it is valid exclusively for an in-progress native write view.
+    presentation_receipt_id: str | None = None
+    presentation_receipt_generation: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.domain not in _PRODUCTIVITY_HUD_DOMAINS:
@@ -605,6 +623,16 @@ class ProductivityHudView:
             self.domain != "reminders" or self.phase != "due"
         ):
             raise ProtocolError("Productivity reminder due receipt requires a reminder due view")
+        presentation_receipt_fields = (
+            self.presentation_receipt_id,
+            self.presentation_receipt_generation,
+        )
+        if any(value is None for value in presentation_receipt_fields) and any(
+            value is not None for value in presentation_receipt_fields
+        ):
+            raise ProtocolError("Productivity presentation receipt fields must be paired")
+        if self.presentation_receipt_id is not None and self.phase != "verifying":
+            raise ProtocolError("Productivity presentation receipt requires a verifying view")
         productivity: dict[str, Any] = {
             "domain": self.domain,
             "phase": self.phase,
@@ -629,6 +657,13 @@ class ProductivityHudView:
             )
             productivity["reminderDueGeneration"] = _reminder_due_generation(
                 self.reminder_due_generation,
+            )
+        if self.presentation_receipt_id is not None:
+            productivity["presentationReceiptId"] = _productivity_presentation_identifier(
+                self.presentation_receipt_id,
+            )
+            productivity["presentationReceiptGeneration"] = _reminder_due_generation(
+                self.presentation_receipt_generation,
             )
         return {
             "kind": "productivity.view",
@@ -992,6 +1027,20 @@ def _reminder_due_identifier(value: Any) -> str:
         raise ProtocolError("reminder due identifier is invalid") from exc
     if str(parsed) != value:
         raise ProtocolError("reminder due identifier is invalid")
+    return value
+
+
+def _productivity_presentation_identifier(value: Any) -> str:
+    """Accept only an opaque UUID—never productivity text or a native ID."""
+
+    if not isinstance(value, str):
+        raise ProtocolError("productivity presentation identifier is invalid")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ProtocolError("productivity presentation identifier is invalid") from exc
+    if str(parsed) != value:
+        raise ProtocolError("productivity presentation identifier is invalid")
     return value
 
 
@@ -1656,6 +1705,19 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 ),
                 reminder_due_attempt_id=_reminder_due_identifier(
                     _require(payload, "reminderDueAttemptId", kind),
+                ),
+                generation=_reminder_due_generation(_require(payload, "generation", kind)),
+                outcome="accepted",
+            )
+        case "productivity.view.ack":
+            if set(payload) != {"kind", "presentationReceiptId", "generation", "outcome"}:
+                raise ProtocolError("productivity presentation acknowledgement has unsupported fields")
+            outcome = _require(payload, "outcome", kind)
+            if outcome != "accepted":
+                raise ProtocolError("productivity presentation acknowledgement outcome is invalid")
+            return ProductivityViewAck(
+                presentation_receipt_id=_productivity_presentation_identifier(
+                    _require(payload, "presentationReceiptId", kind),
                 ),
                 generation=_reminder_due_generation(_require(payload, "generation", kind)),
                 outcome="accepted",
