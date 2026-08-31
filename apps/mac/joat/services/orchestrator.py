@@ -263,8 +263,6 @@ class VoiceOrchestrator:
         started_at = time.monotonic()
         self._voice_turn += 1
         latency_turn = self._voice_turn
-        seconds = len(utterance) / (16_000 * 2)
-        log.info("utterance ended: %.1fs of audio", seconds)
         self._observe_latency(latency_turn, "utterance_ready", started_at)
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")

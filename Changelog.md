@@ -2,6 +2,14 @@
 
 ## 2026-08-30
 
+- Removed always-on exact voice timing from normal logs. Successful STT no
+  longer emits queue, POST, or audio-duration measurements, and the voice
+  orchestrator no longer logs an utterance duration. The existing
+  disabled-by-default voice-latency receipt remains the sole persisted timing
+  evidence: fixed stages, coarse buckets, and no audio, transcript, response,
+  timestamp, or identifier. This preserves the non-dropping resident-STT
+  request behavior; no package, upload, install, or release action occurred.
+
 - Corrected the lower-level physical Brainstorm acceptance runner so its
   no-tool Hermes stream uses the same production `HudSink` as the app instead
   of discarding chunks and painting a fixed status. A live-Hermes receipt now
