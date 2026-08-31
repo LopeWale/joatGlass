@@ -434,11 +434,11 @@ class DebateSession(Session):
     background debate that only reported a verdict would violate the stated
     requirement, where visibility IS the proof it was debated.
 
-    N participants rather than a hardcoded proposer/critic pair lets the
-    required Hermes seat join the same round-table implementation without a
-    second Brainstorm path drifting out of sync. Legacy embeddings may still
-    host two seats, but the wearable host opts into the Hermes admission
-    policy before it creates this session.
+    N participants rather than a hardcoded proposer/critic pair keeps one
+    round-table implementation for however many CLI seats are installed.
+    Per docs/BRAINSTORM.md the seats are the Codex and Claude CLIs only:
+    Hermes/OpenClaw are Agent Terminal workers, and neither participates in
+    a Brainstorm nor gates its availability.
     """
 
     SOURCES_CONTRACT = (
