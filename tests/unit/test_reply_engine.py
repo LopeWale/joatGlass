@@ -175,3 +175,27 @@ async def test_first_chunk_threshold_is_configurable_for_latency_trials(
         assert chunks == ["a" * 16, "a" * 32]
     finally:
         engine._mlx_thread.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_stream_splits_an_oversized_single_model_delta_after_the_first_paint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mlx_lm = ModuleType("mlx_lm")
+
+    def stream_generate(*_args: Any, **_kwargs: Any) -> Any:
+        yield SimpleNamespace(text="a" * 88)
+
+    mlx_lm.stream_generate = stream_generate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_lm", mlx_lm)
+
+    engine = MlxReplyEngine(model_id="test-model", chunk_chars=32)
+    engine._model = object()
+    engine._tokenizer = SimpleNamespace(
+        apply_chat_template=lambda *_args, **_kwargs: "prompt",
+    )
+    try:
+        chunks = [chunk async for chunk in engine.stream("hello")]
+        assert chunks == ["a" * 8, "a" * 32, "a" * 32, "a" * 16]
+    finally:
+        engine._mlx_thread.shutdown(wait=True)
