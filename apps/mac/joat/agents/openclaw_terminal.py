@@ -126,7 +126,7 @@ class OpenClawAgentTerminal:
             raise ValueError("OpenClaw Agent Terminal requires a valid dedicated agent ID")
         if agent_id != policy.agent_id:
             raise ValueError("OpenClaw Agent Terminal agent does not match its policy")
-        _assert_connection_contract(connection)
+        _assert_connection_contract(connection, require_write=True)
         listed = _record(await connection.request(
             "sessions.list",
             {
@@ -214,6 +214,63 @@ class OpenClawAgentTerminal:
                 "OpenClaw did not confirm the Agent Terminal subscription"
             )
         return terminal
+
+    @classmethod
+    async def attest_existing(
+        cls,
+        *,
+        connection: AgentTerminalConnection,
+        agent_id: str,
+        policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY,
+    ) -> None:
+        """Freshly prove one existing terminal without reading or changing it.
+
+        This deliberately stops before subscription: a wearer-triggered retry
+        must establish that the already-created Hermes seat is still isolated
+        and tool-free, but it must never create a session, subscribe to its
+        messages, read history, or send a prompt.
+        """
+        if not AGENT_ID_PATTERN.fullmatch(agent_id):
+            raise ValueError("OpenClaw Agent Terminal requires a valid dedicated agent ID")
+        if agent_id != policy.agent_id:
+            raise ValueError("OpenClaw Agent Terminal agent does not match its policy")
+        _assert_connection_contract(connection, require_write=False)
+        listed = _record(await connection.request(
+            "sessions.list",
+            {
+                "label": policy.session_label,
+                "agentId": agent_id,
+                "limit": 2,
+            },
+        ))
+        raw_sessions = listed.get("sessions") if listed else None
+        if not isinstance(raw_sessions, list) or len(raw_sessions) != 1:
+            raise OpenClawGatewayError(
+                "OpenClaw did not identify one dedicated Agent Terminal session"
+            )
+        existing = _record(raw_sessions[0])
+        session_key = existing.get("key") if existing else None
+        session_id = existing.get("sessionId") if existing else None
+        if (
+            existing is None
+            or not isinstance(session_key, str)
+            or not policy.owns_session_key(session_key)
+            or not isinstance(session_id, str)
+            or not session_id
+            or existing.get("label") != policy.session_label
+        ):
+            raise OpenClawGatewayError(
+                "OpenClaw returned an invalid Agent Terminal session"
+            )
+        terminal = cls(
+            connection=connection,
+            agent_id=agent_id,
+            session_key=session_key,
+            session_id=session_id,
+            policy=policy,
+        )
+        await terminal._assert_isolated_session()
+        await terminal._assert_tools_disabled()
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         if not prompt or len(prompt) > 100_000:
@@ -383,7 +440,7 @@ class OpenClawAgentTerminal:
             run_id=run_id,
             prompt=prompt,
         )
-        _assert_connection_contract(recovered.connection)
+        _assert_connection_contract(recovered.connection, require_write=True)
         if recovered.active == recovered.complete:
             raise OpenClawGatewayError(
                 "OpenClaw returned an invalid recovered run state"
@@ -511,18 +568,34 @@ def _is_empty_route_value(value: object) -> bool:
     return value is None or value == ""
 
 
-def _assert_connection_contract(connection: AgentTerminalConnection) -> None:
-    if not REQUIRED_METHODS.issubset(connection.advertised_methods):
+def _assert_connection_contract(
+    connection: AgentTerminalConnection,
+    *,
+    require_write: bool,
+) -> None:
+    """Require only the protocol surface and authority this operation uses."""
+    required_methods = (
+        REQUIRED_METHODS
+        if require_write
+        else frozenset({"sessions.list", "sessions.describe", "tools.effective"})
+    )
+    if not required_methods.issubset(connection.advertised_methods):
         raise OpenClawGatewayError(
             "OpenClaw is missing required Agent Terminal methods"
         )
-    if not REQUIRED_EVENTS.issubset(connection.advertised_events):
+    if require_write and not REQUIRED_EVENTS.issubset(connection.advertised_events):
         raise OpenClawGatewayError(
             "OpenClaw is missing required Agent Terminal events"
         )
-    if set(connection.granted_scopes) != {"operator.read", "operator.write"}:
+    expected_scopes = (
+        {"operator.read", "operator.write"}
+        if require_write
+        else {"operator.read"}
+    )
+    if set(connection.granted_scopes) != expected_scopes:
         raise OpenClawGatewayError(
-            "OpenClaw Agent Terminal requires exact read and write scopes"
+            "OpenClaw Agent Terminal requires exact "
+            f"{'read and write' if require_write else 'read-only'} scopes"
         )
 
 

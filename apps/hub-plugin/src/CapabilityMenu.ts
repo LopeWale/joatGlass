@@ -304,7 +304,36 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
-    const shown = await this.hud.showProductivity(productivity, undefined, onVisible);
+    let stateReady = false;
+    let visibilityArrivedEarly = false;
+    let activated = false;
+    const afterProductivityVisible = (): void => {
+      if (!stateReady) {
+        visibilityArrivedEarly = true;
+        return;
+      }
+      if (
+        activated
+        || this.transitionId !== transition
+        || this.view !== 'productivity'
+      ) return;
+      activated = true;
+      onVisible?.();
+      if (
+        productivity.domain === 'reminders'
+        && productivity.phase === 'saved'
+        && productivity.monitoringArmed === true
+      ) {
+        this.scheduleReminderMonitoring(productivity);
+      } else {
+        this.scheduleProductivityReturn(productivity.phase);
+      }
+    };
+    const shown = await this.hud.showProductivity(
+      productivity,
+      undefined,
+      afterProductivityVisible,
+    );
     if (!this.isCurrentTransition(transition)) return false;
     if (!shown) {
       await this.close();
@@ -318,20 +347,12 @@ export class CapabilityMenu {
     this.pendingTitle = this.productivityReturn.toUpperCase();
     this.pendingRequestId = undefined;
     this.selectedIndex = 0;
-    if (
-      productivity.domain === 'reminders'
-      && productivity.phase === 'saved'
-      && productivity.monitoringArmed === true
-    ) {
-      this.scheduleReminderMonitoring(productivity);
-    } else {
-      this.scheduleProductivityReturn(productivity.phase);
-    }
+    stateReady = true;
     // A deferred confirmation, failed paint, or newer transition can be
     // handled without a current visual page. Only a retained exact surface is
     // eligible for the due-HUD acknowledgement.
     const visible = this.hud.isProductivityVisible(productivity);
-    if (visible) onVisible?.();
+    if (visible || visibilityArrivedEarly) afterProductivityVisible();
     return visible;
   }
 

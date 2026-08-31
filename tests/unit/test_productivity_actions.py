@@ -410,7 +410,7 @@ class TestCalendarCreation:
         assert result == "Calendar did not create the event. Check JOAT on the Mac."
         assert store.execute("SELECT state FROM actions").fetchone()[0] == "failed"
         assert workflow_projection(updates)[-1] == (
-            "calendar", "failed", "Design review", "Not saved",
+            "calendar", "failed", "Design review", "Save failed",
             "No calendar item was changed.", "Back to Planning: left x2 · auto in 5s",
         )
         store.close()
@@ -458,6 +458,41 @@ class TestCalendarCreation:
             ("calendar", "cancelled", "Design review", "Cancelled",
              "No calendar item was changed.", "Back to Planning: left x2 · auto in 5s"),
         ]
+        store.close()
+
+    async def test_missing_confirmation_evidence_is_not_reported_as_wearer_cancellation(
+        self, tmp_path: Path,
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[calendar_container("Work", "cal-work", default=True)]
+        )
+        store = DurableStore(tmp_path / "joat.sqlite3")
+        updates: list[ProductivityHudView] = []
+
+        async def no_evidence(*_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        async def publish(view: ProductivityHudView) -> None:
+            updates.append(view)
+
+        controller = ProductivityActionController(
+            bridge,
+            no_evidence,
+            ActionJournal(store),
+            TaskOccurrenceStore(store),
+            publish_status=publish,
+        )  # type: ignore[arg-type]
+
+        result = await controller.handle_command(
+            "schedule Design review on 2026-09-01 at 09:30 for 45 minutes "
+            "in America/Chicago"
+        )
+
+        assert result == "Calendar event was not saved because confirmation could not be verified."
+        assert workflow_projection(updates)[-1][1:4] == (
+            "not_saved", "Design review", "Not saved",
+        )
+        assert all(method != "calendar.create" for method, *_ in bridge.calls)
         store.close()
 
     async def test_confirmation_task_cancellation_purges_uncommitted_payload(
@@ -721,6 +756,36 @@ class TestReminderCreation:
         # attach an instant, are not enough to prove which DST-fold instant
         # this external reminder meant. Generic Planning is the safe return.
         assert [view.planning_anchor_unix_ms for view in updates] == [None, None]
+        store.close()
+
+    async def test_definite_reminder_completion_failure_uses_completion_copy(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+            reminder_query=[{
+                "calendar_item_identifier": "reminder-1",
+                "calendar_identifier": "list-personal",
+                "title": "Buy filters",
+                "due": None,
+                "is_completed": False,
+                "has_recurrence_rules": False,
+            }],
+        )
+        bridge.write_error = NativeBridgeUnavailable(
+            "not dispatched",
+            possible_external_commit=False,
+        )
+        updates: list[ProductivityHudView] = []
+        controller, _, _, store = rig(tmp_path, bridge, updates=updates)
+
+        result = await controller.handle_command("complete reminder Buy filters")
+
+        assert result == "Reminders did not complete the reminder. Check JOAT on the Mac."
+        assert workflow_projection(updates)[-1] == (
+            "reminders", "failed", "Buy filters", "Completion failed",
+            "Reminder was not completed.", "Back to Planning: left x2 · auto in 5s",
+        )
         store.close()
 
     async def test_completion_of_a_joat_created_reminder_keeps_its_durable_due_anchor(

@@ -181,10 +181,10 @@ async def test_in_app_controller_streams_hermes_to_hud_but_retains_only_frame_ha
     await _wait_for(lambda: len(transport.sent) == 5)
     streamed = transport.sent[1:5]
     assert [view.activity for view in streamed] == [
-        "Preparing collaborators…",
-        "Thinking…",
-        "Thinking… private remote output one ",
-        "Thinking… private remote output one private remote output two",
+        "JOAT > Preparing collaborators…",
+        "HERMES > Thinking…",
+        "HERMES > Thinking… private remote output one ",
+        "HERMES > Thinking… private remote output one private remote output two",
     ]
     assert all(view.state == "running" for view in streamed)
     transport.action("show_terminal", "brainstorm", "right")

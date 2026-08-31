@@ -318,17 +318,44 @@ class CapabilityRouter:
             self._request_context.reset(token)
 
     async def _show_brainstorm(self) -> None:
-        """Open the actual visual round-table surface from the glasses menu."""
+        """Open Brainstorm only when its required Hermes seat is ready."""
         terminal = self._status.agent_terminal_projection()
+        state = str(terminal["state"])
+        reason = str(terminal["reason"])
+        if state != "ready":
+            activity = (
+                "Hermes must be set up on this home brain."
+                if state == "unavailable" and reason == "endpoint_missing"
+                else "Hermes is finishing the current response. Wait for ready."
+                if state == "running"
+                else "Hermes is required for Brainstorm. Tap to retry."
+            )
+            # The glasses are the control surface: a wearer selecting
+            # Brainstorm must land on the actionable recovery state instead
+            # of a deceptive local-only ready room. Once Hermes is ready,
+            # the same menu row opens the normal round-table surface.
+            await self._hud.show_brainstorm(BrainstormHudView(
+                screen="agent_terminal",
+                state=state,
+                topic="Hermes Agent Terminal",
+                collaborators=[],
+                activity=activity,
+                terminal_state=state,
+                endpoint_host=str(terminal["endpoint_host"]),
+                terminal_reason=_agent_terminal_instruction(state, reason),
+                no_tools_checked=bool(terminal["no_tools_checked"]),
+                acceptance_armed=False,
+            ))
+            return
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="brainstorm",
             state="ready",
             topic="Ready for a question",
             collaborators=["Codex", "Claude", "Hermes"],
             activity='Say “JOAT, brainstorm …” to begin.',
-            terminal_state=str(terminal["state"]),
+            terminal_state=state,
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
+            terminal_reason=reason,
             no_tools_checked=bool(terminal["no_tools_checked"]),
             acceptance_armed=self._acceptance_armed,
         ))
@@ -1137,7 +1164,7 @@ class CapabilityRouter:
             "NAVIGATION",
             [
                 'Say “JOAT, navigate to …”',
-                "I’ll confirm the exact place before starting.",
+                "I’ll confirm the place. Then choose Walk or Cycle.",
             ],
             hint="say destination · left x2: back",
         )

@@ -252,6 +252,9 @@ class ProductivityActionController:
             prompt=prompt,
             success=f"Created Calendar event: {title}.",
             cancelled="Calendar event cancelled.",
+            not_saved=(
+                "Calendar event was not saved because confirmation could not be verified."
+            ),
             uncertain="Calendar may have created the event. Check Calendar before retrying.",
             failed="Calendar did not create the event. Check JOAT on the Mac.",
             monitor_due_unix_ms=None,
@@ -301,6 +304,9 @@ class ProductivityActionController:
             prompt=prompt,
             success=f"Created Reminder: {title}.",
             cancelled="Reminder cancelled.",
+            not_saved=(
+                "Reminder was not saved because confirmation could not be verified."
+            ),
             uncertain="The reminder may have been created. Check Reminders before retrying.",
             failed="Reminders did not create the reminder. Check JOAT on the Mac.",
             monitor_due_unix_ms=chosen_ms,
@@ -388,6 +394,9 @@ class ProductivityActionController:
             prompt=f"Complete reminder “{title}”? {container.title}",
             success=f"Completed Reminder: {title}.",
             cancelled="Reminder completion cancelled.",
+            not_saved=(
+                "Reminder completion was not saved because confirmation could not be verified."
+            ),
             uncertain="The reminder may have been completed. Check Reminders before retrying.",
             failed="Reminders did not complete the reminder. Check JOAT on the Mac.",
             monitor_due_unix_ms=None,
@@ -523,6 +532,7 @@ class ProductivityActionController:
         prompt: str,
         success: str,
         cancelled: str,
+        not_saved: str,
         uncertain: str,
         failed: str,
         monitor_due_unix_ms: int | None,
@@ -587,7 +597,7 @@ class ProductivityActionController:
                 display_title,
                 planning_anchor_unix_ms,
             )
-            return cancelled
+            return not_saved
         if not isinstance(decision, ConfirmationResult):
             self._journal.cancel_unconfirmed(
                 record.action_id,
@@ -601,7 +611,7 @@ class ProductivityActionController:
                 display_title,
                 planning_anchor_unix_ms,
             )
-            return cancelled
+            return not_saved
         self._journal.record_confirmation(
             record.action_id,
             ConfirmationEvidence(
@@ -937,7 +947,15 @@ class ProductivityActionController:
             return ("Cancelled", f"No {native_app.lower()} item was changed.", return_hint)
         if phase == "not_saved":
             return ("Not saved", f"No {native_app.lower()} item was changed.", return_hint)
-        return ("Not saved", f"No {native_app.lower()} item was changed.", return_hint)
+        if phase == "failed":
+            if kind == "reminders.complete":
+                return (
+                    "Completion failed",
+                    "Reminder was not completed.",
+                    return_hint,
+                )
+            return ("Save failed", f"No {native_app.lower()} item was changed.", return_hint)
+        raise ValueError(f"unsupported productivity workflow phase: {phase}")
 
     def _record_write_failure(
         self,

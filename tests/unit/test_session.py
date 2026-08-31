@@ -12,10 +12,13 @@ from collections.abc import AsyncIterator
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
 from joat.core.protocol import BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
+from joat.channels.cards import CardLog
+from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
 from joat.services.roundtable import Participant, RoundTable
 from joat.services.session import DebateSession, Session, SessionManager
 from joat.services.sinks import HudSink
+from joat.services.status import StatusPublisher
 
 
 class SinkTransport(GlassesTransport):
@@ -329,6 +332,71 @@ class TestSessionManager:
         await entered.wait()
         assert started == ["compare a hosted Mac brain with a local one"]
         await manager.close(timeout_s=0.1)
+
+    async def test_brainstorm_requires_hermes_and_recovers_on_the_terminal_surface(self) -> None:
+        """Neither a spoken command nor a tap may silently use local seats."""
+        transport = SinkTransport()
+        terminal_recovery = BrainstormHudView(
+            screen="agent_terminal",
+            state="approval_required",
+            topic="Hermes Agent Terminal",
+            collaborators=[],
+            activity="Hermes is required for Brainstorm. Tap to retry.",
+            terminal_state="approval_required",
+            terminal_reason="Approve the JOAT device in OpenClaw, then tap retry.",
+            no_tools_checked=False,
+        )
+        factory_topics: list[str] = []
+        manager = SessionManager(
+            HudWriter(transport),
+            lambda topic: factory_topics.append(topic) or None,
+            topic_capture_view=lambda _armed: terminal_recovery,
+            brainstorm_available=lambda: False,
+        )
+
+        assert manager.handle_transcript(
+            "brainstorm compare home brain options",
+            capture_source="glasses",
+        )
+        await asyncio.sleep(0)
+        assert factory_topics == []
+        assert not manager.topic_capture_armed
+        assert brainstorm_frames(transport) == [terminal_recovery]
+
+        manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        await asyncio.sleep(0)
+        assert factory_topics == []
+        assert not manager.topic_capture_armed
+        assert brainstorm_frames(transport) == [terminal_recovery, terminal_recovery]
+
+    async def test_brainstorm_menu_projects_terminal_recovery_until_hermes_is_ready(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """The first menu frame must not advertise a local-only Brainstorm."""
+        transport = SinkTransport()
+        status = StatusPublisher(path=tmp_path / "status.json")
+        status.set_agent_terminal(state="approval_required", reason="write_scope_required")
+        router = CapabilityRouter(
+            hud=HudWriter(transport),
+            transport=transport,
+            status=status,
+            messages=None,
+            cards=CardLog(),
+        )
+
+        await router.open("Brainstorm")
+
+        [frame] = brainstorm_frames(transport)
+        assert frame.screen == "agent_terminal"
+        assert frame.state == "approval_required"
+        assert frame.activity == "Hermes is required for Brainstorm. Tap to retry."
+        assert frame.terminal_reason == "Approve the JOAT device in OpenClaw, then tap retry."
+
+        status.set_agent_terminal(state="running", reason="")
+        await router.open("Brainstorm")
+
+        running = brainstorm_frames(transport)[-1]
+        assert running.screen == "agent_terminal"
+        assert running.state == "running"
+        assert running.activity == "Hermes is finishing the current response. Wait for ready."
 
     async def test_topic_capture_deduplicates_taps_and_clears_on_cancel_or_reconnect(self) -> None:
         transport = SinkTransport()
@@ -815,8 +883,12 @@ class TestVerifiedDebate:
         )
         await session.run()
         assert gate.calls == 0  # nothing to verify
-        joined = "".join(t for t, _a, _c in hud_texts(transport))
-        assert joined.count("no sources cited") == 2
+        # Every G2 paint is a complete rolling terminal tail, so combining
+        # all historical frames would count an earlier verifier row again on
+        # later paints. One live tail must still retain the two distinct
+        # verifier outcomes.
+        visible_frames = [text for text, _a, _c in hud_texts(transport)]
+        assert max(frame.count("no sources cited") for frame in visible_frames) == 2
 
 
 class ScriptedJudge(ReplyEngine):

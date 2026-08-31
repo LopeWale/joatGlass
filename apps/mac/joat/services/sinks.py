@@ -48,6 +48,21 @@ class HudSink:
         self._activity = ""
         self._state = "ready"
 
+    @staticmethod
+    def _bounded_transcript(value: str) -> str:
+        """Keep recent complete terminal rows within the wire contract."""
+
+        if len(value) <= 180:
+            return value
+        tail = value[-180:]
+        boundary = tail.find("\n")
+        return tail[boundary + 1:] if boundary >= 0 else tail
+
+    def _append_transcript(self, row: str) -> None:
+        self._activity = self._bounded_transcript(
+            f"{self._activity}\n{row}" if self._activity else row
+        )
+
     def _terminal_status(self) -> dict[str, str | bool]:
         if self._terminal_projection is not None:
             return self._terminal_projection()
@@ -79,7 +94,7 @@ class HudSink:
             topic=self._topic,
             collaborators=[speaker.split(" (")[0][:48] for speaker in self._speakers[:3]],
             active_speaker=self._display_speaker(self._speaker),
-            activity=self._activity[:180],
+            activity=self._activity,
             terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=str(terminal["reason"]),
@@ -90,12 +105,14 @@ class HudSink:
         self._topic = topic[:96]
         self._speakers = list(speakers)
         self._speaker = ""
-        self._activity = "Preparing collaborators…"
+        self._activity = "JOAT > Preparing collaborators…"
         await self._paint("running")
 
     async def turn(self, label: str) -> None:
         self._speaker = label
-        self._activity = "Thinking…"
+        if self._activity == "JOAT > Preparing collaborators…":
+            self._activity = ""
+        self._append_transcript(f"{self._display_speaker(label).upper()} > Thinking…")
         await self._paint("running")
 
     async def chunk(self, text: str) -> None:
@@ -104,15 +121,15 @@ class HudSink:
         # so concatenate it as readable prose once; later chunks must retain
         # their exact boundaries because a streaming model may split a word.
         needs_prefix_separator = (
-            self._activity == "Thinking…" and text and not text[0].isspace()
+            self._activity.endswith("Thinking…") and text and not text[0].isspace()
         )
         separator = " " if needs_prefix_separator else ""
-        self._activity = (self._activity + separator + text)[-180:]
+        self._activity = self._bounded_transcript(self._activity + separator + text)
         await self._paint("running")
 
     async def close(self, verdict: str) -> None:
         self._speaker = ""
-        self._activity = verdict[:180]
+        self._activity = f"JOAT > {verdict}"[:180]
         if verdict == "cancelled":
             await self._paint("cancelled")
         elif verdict.startswith("blocked"):
@@ -128,7 +145,7 @@ class HudSink:
             state="running",
             topic="Hermes Agent Terminal",
             collaborators=[],
-            activity="Brainstorm remains active. Tap to return to the room.",
+            activity=self._activity or "JOAT > Brainstorm remains active. Tap to return to the room.",
             terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=str(terminal["reason"]),

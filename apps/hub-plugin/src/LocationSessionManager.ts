@@ -228,26 +228,46 @@ export class LocationSessionManager {
     let bridge: LocationBridge;
     try {
       bridge = this.bridge();
-      // Register first: a fast host push must not land between start and listen.
-      this.unsubscribe = bridge.onAppLocationChanged((location) => this.onLocation(location));
     } catch {
       this.recordProfileState(this.desiredProfile, false);
       return false;
     }
 
+    // Match the Even SDK contract: request the continuous phone service first,
+    // then subscribe to its pushes.  The initial one-shot remains useful to
+    // seed the Mac immediately, but it must never postpone starting the one
+    // subscription that keeps the glasses usable after boot.
+    const profile = this.desiredProfile;
+    const started = await this.applyDesiredProfile(profileEpoch);
+    if (!started || this.appliedProfile === undefined) return false;
+
     try {
-      const first = await this.readInitialLocation(bridge);
-      if (first) this.onLocation(first);
+      this.unsubscribe = bridge.onAppLocationChanged((location) => this.onLocation(location));
     } catch {
-      // A failed one-shot does not prove continuous updates are unavailable.
+      await this.forceStopStream();
+      this.appliedProfile = undefined;
+      this.recordProfileState(profile, false);
+      return false;
     }
 
-    const started = await this.applyDesiredProfile(profileEpoch);
-    if (!started && this.appliedProfile === undefined) {
-      this.unsubscribe?.();
-      this.unsubscribe = undefined;
-    }
-    return started;
+    // The one-shot call is an optional immediate seed.  Do not serialize the
+    // SDK stream behind a five-second permission/fix wait; later continuous
+    // updates remain the authoritative fallback.  Epoch/lifecycle checks keep
+    // a late response from reviving a stopped or superseded session.
+    void this.readInitialLocation(bridge, profile).then(
+      (first) => {
+        if (
+          first !== null
+          && this.shouldRun
+          && this.unsubscribe !== undefined
+          && profileEpoch === this.profileEpoch
+        ) this.onLocation(first);
+      },
+      () => {
+        // A failed one-shot does not prove continuous updates are unavailable.
+      },
+    );
+    return true;
   }
 
   private async applyDesiredProfile(profileEpoch = this.profileEpoch): Promise<boolean> {
@@ -324,10 +344,13 @@ export class LocationSessionManager {
     return this.client.require();
   }
 
-  private async readInitialLocation(bridge: LocationBridge): Promise<AppLocation | null> {
+  private async readInitialLocation(
+    bridge: LocationBridge,
+    profile: LocationProfile,
+  ): Promise<AppLocation | null> {
     return this.readOneShotLocation(
       bridge,
-      this.desiredProfile === 'ambient' ? AppLocationAccuracy.Medium : AppLocationAccuracy.High,
+      profile === 'ambient' ? AppLocationAccuracy.Medium : AppLocationAccuracy.High,
     );
   }
 

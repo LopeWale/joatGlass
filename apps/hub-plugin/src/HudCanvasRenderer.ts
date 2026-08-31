@@ -154,6 +154,53 @@ export function confirmationActionLabels(): readonly {
   ];
 }
 
+/** Confirmation gestures are inline instructions, never button/card chrome. */
+export function confirmationActionLayout(): {
+  boxed: false;
+  verticalDivider: false;
+  baselineY: number;
+} {
+  return { boxed: false, verticalDivider: false, baselineY: 197 };
+}
+
+/** Calendar/Reminder review follows the same compact reading axis as
+ * Planning, Messages, and Navigation: one left-aligned content column with
+ * no centered poster treatment. */
+export function confirmationReviewLayout(): {
+  headerIconX: number;
+  headerTextX: number;
+  headerBaselineY: number;
+  dividerY: number;
+  contentX: number;
+  contentWidth: number;
+  promptCenterY: number;
+  progressY: number;
+  timerBaselineY: number;
+} {
+  return {
+    headerIconX: 36,
+    headerTextX: 62,
+    headerBaselineY: 60,
+    dividerY: 78.5,
+    contentX: 36,
+    contentWidth: 504,
+    promptCenterY: 126,
+    progressY: 246,
+    timerBaselineY: 267,
+  };
+}
+
+/** Dense Planning and safe-write pages use the status spine without wrapping
+ * the entire optical field in a second rounded container. */
+export function usesFlatHudShell(
+  kind: HudVisualFrame['kind'],
+  title = '',
+): boolean {
+  return kind === 'confirmation'
+    || kind === 'productivity'
+    || (kind === 'list' && /^(PLANNING|CALENDAR|TASKS)(?: ·|$)/i.test(title.trim()));
+}
+
 export type HudIconName =
   | 'messages'
   | 'notifications'
@@ -260,11 +307,9 @@ export function brainstormActionHint(
     : 'tap: retry Hermes · left x2: menu';
 }
 
-/**
- * The terminal card is a trust statement, not a generic error badge. Its
- * label must distinguish a pending device approval or offline brain from an
- * actual tool-policy failure, while the precise recovery copy stays below it.
- */
+/** The terminal's policy row must distinguish a pending device approval or
+ * offline brain from an actual tool-policy failure. It is a status row, not
+ * a decorative card: the transcript needs the space. */
 export function agentTerminalSafetyLabel(
   model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked'>,
 ): string {
@@ -824,6 +869,12 @@ export function usesMessagesCompactLayout(title: string): boolean {
   return normalized === 'MESSAGES' || normalized.startsWith('MESSAGES ·');
 }
 
+/** Navigation starts by voice, so its non-selectable capability entry is a
+ * compact instruction—not a generic list of card-like rows. */
+export function usesNavigationSetupLayout(title: string, selectable: boolean): boolean {
+  return title.trim().toUpperCase() === 'NAVIGATION' && !selectable;
+}
+
 export interface MessagesListRow {
   baselineY: number;
   railTopY: number;
@@ -963,6 +1014,23 @@ export function wrapHudText(
   return lines;
 }
 
+/**
+ * Preserve explicit speaker-line boundaries inside the small wearable
+ * transcript, then retain the newest complete visual lines. The producer
+ * caps the transcript too; this is only the final optical fit, never storage.
+ */
+export function brainstormTranscriptLines(
+  transcript: string,
+  maxWidth: number,
+  maximumLines: number,
+  measure: (value: string) => number,
+): string[] {
+  const lines = transcript
+    .split(/\r?\n/)
+    .flatMap((entry) => wrapHudText(entry, maxWidth, measure));
+  return visibleHudTailLines(lines, maximumLines);
+}
+
 /** Streaming replies show the newest complete lines. The opening words have
  * already been read; pinning them would make every later token invisible. */
 export function visibleHudTailLines(
@@ -1100,7 +1168,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Chrome is the final compositing layer. Besides making ownership
     // explicit, this prevents state-specific paths from ever obscuring the
     // clock/privacy/battery spine on host canvas implementations.
-    this.drawShell(context, frame.status, frame.micOn, icons);
+    this.drawShell(
+      context,
+      frame.status,
+      frame.micOn,
+      icons,
+      usesFlatHudShell(
+        frame.kind,
+        frame.kind === 'list' ? frame.title : '',
+      ),
+    );
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
     // impossible fifth image container or replacing the feature underneath.
@@ -1121,11 +1198,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     statusText: string,
     micOn: boolean,
     icons: Record<HudIconName, HTMLImageElement>,
+    flat: boolean,
   ): void {
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 1;
-    roundedRect(context, 1.5, 1.5, 573, 285, 20);
-    context.stroke();
+    if (!flat) {
+      context.strokeStyle = gray(HAIRLINE);
+      context.lineWidth = 1;
+      roundedRect(context, 1.5, 1.5, 573, 285, 20);
+      context.stroke();
+    }
 
     const status = parseStatus(statusText);
     context.textBaseline = 'middle';
@@ -1428,6 +1508,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
+    if (usesNavigationSetupLayout(frame.title, frame.selectable)) {
+      this.drawNavigationSetup(context, frame);
+      return;
+    }
+
     if (planningFocusRows(frame.title, frame.items.length).length > 0) {
       this.drawPlanningFocusList(context, frame);
       return;
@@ -1537,6 +1622,29 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
     context.fillText(frame.hint, 288, 267);
+  }
+
+  private drawNavigationSetup(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+  ): void {
+    const [spokenStart = 'Say “JOAT, navigate to …”', expectation = 'I’ll confirm the place.'] = frame.items;
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `20px ${HUD_FONT}`;
+    context.fillText('Navigation', 36, 64);
+
+    context.font = `15px ${HUD_FONT}`;
+    this.fitText(context, spokenStart, 36, 104, 504);
+    context.fillStyle = gray(SUPPORT);
+    context.font = `11px ${HUD_FONT}`;
+    this.fitText(context, expectation, 36, 130, 504);
+
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    this.fitText(context, frame.hint, 288, 267, 500);
   }
 
   private drawMessagesConversation(
@@ -1756,56 +1864,84 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     frame: Extract<HudVisualFrame, { kind: 'confirmation' }>,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    context.textAlign = 'center';
+    const reviewLayout = confirmationReviewLayout();
+    context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
     context.font = `13px ${HUD_FONT}`;
     if (frame.reviewDomain) {
       const isCalendar = frame.reviewDomain === 'calendar';
-      this.drawIcon(context, icons[isCalendar ? 'calendar' : 'tasks'], 220, 51, 18, SUPPORT);
-      context.fillText(isCalendar ? 'Calendar review' : 'Reminder review', 302, 60);
+      this.drawIcon(
+        context,
+        icons[isCalendar ? 'calendar' : 'tasks'],
+        reviewLayout.headerIconX,
+        51,
+        18,
+        SUPPORT,
+      );
+      context.fillText(
+        isCalendar ? 'Calendar review' : 'Reminder review',
+        reviewLayout.headerTextX,
+        reviewLayout.headerBaselineY,
+      );
     } else {
-      context.fillText('Confirm action', 288, 79);
+      context.fillText(
+        'Confirm action',
+        reviewLayout.contentX,
+        reviewLayout.headerBaselineY,
+      );
     }
     context.strokeStyle = gray(CHROME);
     context.beginPath();
-    context.moveTo(274, 96.5);
-    context.lineTo(302, 96.5);
+    context.moveTo(reviewLayout.contentX, reviewLayout.dividerY);
+    context.lineTo(
+      reviewLayout.contentX + reviewLayout.contentWidth,
+      reviewLayout.dividerY,
+    );
     context.stroke();
 
     context.fillStyle = gray(BRIGHT);
-    this.drawFittedWrappedText(context, frame.prompt, 288, 127, 470, 3);
+    this.drawFittedWrappedText(
+      context,
+      frame.prompt,
+      reviewLayout.contentX,
+      reviewLayout.promptCenterY,
+      reviewLayout.contentWidth,
+      3,
+      'left',
+    );
 
-    context.fillStyle = gray(HAIRLINE);
-    context.fillRect(112, 181, 352, 1);
-    context.fillRect(288, 188, 1, 18);
-    context.fillRect(112, 212, 352, 1);
+    const actionLayout = confirmationActionLayout();
     context.textAlign = 'center';
     context.font = `10px ${HUD_FONT}`;
     confirmationActionLabels().forEach(({ label, x, level }) => {
       context.fillStyle = gray(level);
-      context.fillText(label, x, 197);
+      context.fillText(label, x, actionLayout.baselineY);
     });
 
     const progress = Math.max(0, Math.min(1, frame.secondsRemaining / 8));
     context.fillStyle = gray(38);
     context.fillRect(
-      HUD_VISUAL_GEOMETRY.confirmationProgressX,
-      246,
-      HUD_VISUAL_GEOMETRY.confirmationProgressWidth,
+      reviewLayout.contentX,
+      reviewLayout.progressY,
+      reviewLayout.contentWidth,
       3,
     );
     context.fillStyle = gray(SUPPORT);
     context.fillRect(
-      HUD_VISUAL_GEOMETRY.confirmationProgressX,
-      246,
-      Math.round(HUD_VISUAL_GEOMETRY.confirmationProgressWidth * progress),
+      reviewLayout.contentX,
+      reviewLayout.progressY,
+      Math.round(reviewLayout.contentWidth * progress),
       3,
     );
     context.fillStyle = gray(CHROME);
     context.font = `9px ${HUD_FONT}`;
-    context.textAlign = 'center';
-    context.fillText(`${frame.secondsRemaining}s remaining`, 288, 267);
+    context.textAlign = 'right';
+    context.fillText(
+      `${frame.secondsRemaining}s remaining`,
+      reviewLayout.contentX + reviewLayout.contentWidth,
+      reviewLayout.timerBaselineY,
+    );
   }
 
   private drawProductivity(
@@ -1886,43 +2022,60 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     if (model.screen === 'agent_terminal') {
       context.textAlign = 'left';
       context.fillStyle = gray(BRIGHT);
-      context.font = `21px ${HUD_FONT}`;
-      this.fitText(context, `HERMES · ${state}`, 36, 108, 500);
+      context.font = `13px ${HUD_FONT}`;
+      this.fitText(context, `HERMES > ${state}`, 36, 98, 504);
       context.fillStyle = gray(SUPPORT);
-      context.font = `11px ${HUD_FONT}`;
-      this.fitText(context, model.endpointHost || 'Dedicated JOAT session', 36, 135, 500);
-      context.strokeStyle = gray(CHROME);
-      roundedRect(context, 36, 154, 504, 53, 6);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 117, 504);
+      context.strokeStyle = gray(HAIRLINE);
+      context.beginPath();
+      context.moveTo(36, 130.5);
+      context.lineTo(540, 130.5);
       context.stroke();
       context.fillStyle = gray(SUPPORT);
-      context.font = `11px ${HUD_FONT}`;
-      context.fillText(agentTerminalSafetyLabel(model), 54, 176);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 148, 504);
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, model.terminalReason || 'Hermes participates as a Brainstorm seat.', 54, 195, 462);
+      this.fitText(context, `SESSION > ${model.terminalReason || 'Hermes participates as a Brainstorm seat.'}`, 36, 165, 504);
+      context.strokeStyle = gray(HAIRLINE);
+      context.beginPath();
+      context.moveTo(36, 177.5);
+      context.lineTo(540, 177.5);
+      context.stroke();
+      context.fillStyle = gray(BRIGHT);
+      context.font = `11px ${HUD_FONT}`;
+      this.drawBrainstormTranscript(
+        context,
+        model.activity || 'JOAT > Terminal is ready for a Brainstorm.',
+        36,
+        199,
+        4,
+      );
     } else {
       context.textAlign = 'left';
       context.fillStyle = gray(BRIGHT);
-      context.font = `18px ${HUD_FONT}`;
-      this.fitText(context, model.topic || 'Choose a question to explore', 36, 106, 504);
-      context.fillStyle = gray(CHROME);
-      context.font = `9px ${HUD_FONT}`;
-      context.fillText('TABLE', 36, 129);
-      model.collaborators.slice(0, 3).forEach((collaborator, index) => {
-        const x = 36 + index * 168;
-        context.strokeStyle = gray(index === 0 ? SUPPORT : CHROME);
-        roundedRect(context, x, 139, 156, 27, 5);
-        context.stroke();
-        context.fillStyle = gray(SUPPORT);
-        context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, collaborator, x + 12, 156, 132);
-      });
+      context.font = `13px ${HUD_FONT}`;
+      this.fitText(context, `TOPIC > ${model.topic || 'Choose a question to explore'}`, 36, 98, 504);
       context.fillStyle = gray(SUPPORT);
-      context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, model.activeSpeaker ? `NOW · ${model.activeSpeaker}` : 'NOW · waiting for a collaborator', 36, 187, 504);
+      context.font = `9px ${HUD_FONT}`;
+      this.fitText(context, `SEATS > ${model.collaborators.join(' · ') || 'waiting for collaborators'}`, 36, 117, 504);
       context.fillStyle = gray(CHROME);
+      this.fitText(context, model.activeSpeaker ? `LIVE > ${model.activeSpeaker}` : 'LIVE > waiting for a collaborator', 36, 133, 504);
+      context.strokeStyle = gray(HAIRLINE);
+      context.beginPath();
+      context.moveTo(36, 144.5);
+      context.lineTo(540, 144.5);
+      context.stroke();
+      context.fillStyle = gray(BRIGHT);
       context.font = `11px ${HUD_FONT}`;
-      this.drawWrappedText(context, model.activity || 'Say “JOAT, brainstorm …” to begin.', 36, 207, 504, 16, 2);
+      this.drawBrainstormTranscript(
+        context,
+        model.activity || 'JOAT > Say “JOAT, brainstorm …” to begin.',
+        36,
+        165,
+        6,
+      );
     }
     const actionHint = brainstormActionHint(model);
     context.fillStyle = gray(QUIET);
@@ -2341,6 +2494,26 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     });
   }
 
+  /** A dense terminal tail is the primary content surface for Brainstorm.
+   * There are no message cards: only bounded, speaker-prefixed text. */
+  private drawBrainstormTranscript(
+    context: CanvasRenderingContext2D,
+    transcript: string,
+    x: number,
+    y: number,
+    maximumLines: number,
+  ): void {
+    const lines = brainstormTranscriptLines(
+      transcript,
+      504,
+      maximumLines,
+      (value) => context.measureText(value).width,
+    );
+    lines.forEach((line, index) => {
+      this.fitText(context, line, x, y + index * 14, 504);
+    });
+  }
+
   private drawFittedWrappedText(
     context: CanvasRenderingContext2D,
     text: string,
@@ -2348,9 +2521,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     y: number,
     maxWidth: number,
     maximumLines: number,
+    textAlign: CanvasTextAlign = 'center',
   ): void {
     const previous = context.textAlign;
-    context.textAlign = 'center';
+    context.textAlign = textAlign;
     const fitted = fitHudWrappedText(text, maxWidth, maximumLines, (value, fontSize) => {
       context.font = `${fontSize}px ${HUD_FONT}`;
       return context.measureText(value).width;

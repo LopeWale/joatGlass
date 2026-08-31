@@ -5,6 +5,7 @@ import {
   NOTIFICATION_DISMISS_HINT,
   agentTerminalSafetyLabel,
   assistantOverlayTextLayout,
+  brainstormTranscriptLines,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
   brainstormStateLabel,
@@ -23,6 +24,7 @@ import {
   messagesListRows,
   messagesConversationTranscript,
   navigationDecisionRows,
+  usesNavigationSetupLayout,
   usesMessagesCompactLayout,
   canRenderPlanningMonthGrid,
   fitHudWrappedText,
@@ -103,6 +105,38 @@ describe('productivity escape copy', () => {
     [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: left x2 to Planning'],
   ] as const)('keeps %o visibly escapable', (model, hint) => {
     expect(productivityActionHint(model)).toBe(hint);
+  });
+});
+
+describe('flat productivity chrome', () => {
+  it('does not wrap Calendar or Reminders actions in a faux card', () => {
+    expect(HudCanvas.confirmationActionLayout()).toEqual({
+      boxed: false,
+      verticalDivider: false,
+      baselineY: 197,
+    });
+  });
+
+  it('uses the same compact left reading axis as the other first-level HUDs', () => {
+    expect(HudCanvas.confirmationReviewLayout()).toEqual({
+      headerIconX: 36,
+      headerTextX: 62,
+      headerBaselineY: 60,
+      dividerY: 78.5,
+      contentX: 36,
+      contentWidth: 504,
+      promptCenterY: 126,
+      progressY: 246,
+      timerBaselineY: 267,
+    });
+  });
+
+  it('removes the outer rounded frame only from Planning and productivity flow pages', () => {
+    expect(HudCanvas.usesFlatHudShell('confirmation')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('productivity')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('list', 'PLANNING · PLAN · TUE SEP 1')).toBe(true);
+    expect(HudCanvas.usesFlatHudShell('list', 'MESSAGES')).toBe(false);
+    expect(HudCanvas.usesFlatHudShell('brainstorm')).toBe(false);
   });
 });
 
@@ -205,6 +239,14 @@ describe('compact navigation decisions', () => {
       { baselineY: 162, railTopY: 151, railHeight: 21, separatorY: 176, fontSize: 11 },
       { baselineY: 190, railTopY: 179, railHeight: 21, fontSize: 11 },
     ]);
+  });
+});
+
+describe('flat navigation entry', () => {
+  it('reserves the compact instruction treatment for the non-selectable Navigation entry', () => {
+    expect(usesNavigationSetupLayout('NAVIGATION', false)).toBe(true);
+    expect(usesNavigationSetupLayout('NAVIGATION', true)).toBe(false);
+    expect(usesNavigationSetupLayout('MESSAGES', false)).toBe(false);
   });
 });
 
@@ -361,6 +403,15 @@ describe('productivity HUD state labels', () => {
 });
 
 describe('Brainstorm wearable actions', () => {
+  it('keeps a dense terminal tail on complete speaker lines', () => {
+    expect(brainstormTranscriptLines(
+      'CODEX > first idea\nCLAUDE > constraint\nHERMES > practical next step',
+      42,
+      2,
+      (value) => value.length,
+    )).toEqual(['…CLAUDE > constraint', 'HERMES > practical next step']);
+  });
+
   it('labels terminal recovery states without implying an unrelated tool failure', () => {
     expect(agentTerminalSafetyLabel({ state: 'approval_required', noToolsChecked: false }))
       .toBe('APPROVAL PENDING');
