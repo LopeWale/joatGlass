@@ -90,9 +90,13 @@ def nearby_places_tool(
         if len(query) > _MAX_QUERY_CHARS:
             return "error: nearby-place query is too long"
 
-        here = coords()
+        # A nearby search is an explicit current-place request. Prefer the
+        # request-bound phone fix so an ambient, coarse location does not
+        # silently decide what counts as "near me"; a fresh cached fix is a
+        # safe availability fallback when the one-shot request cannot return.
+        here = await refresh_coords()
         if here is None:
-            here = await refresh_coords()
+            here = coords()
         if here is None:
             return "error: phone location is unavailable or stale"
 

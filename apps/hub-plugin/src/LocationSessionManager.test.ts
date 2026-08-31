@@ -279,7 +279,7 @@ describe('LocationSessionManager', () => {
     await expect(h.manager.requestAssistantLocation('location-refresh-1')).resolves.toBe(true);
 
     expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
-      accuracy: AppLocationAccuracy.Medium,
+      accuracy: AppLocationAccuracy.High,
       timeoutMs: 5000,
     });
     expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
