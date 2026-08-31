@@ -366,7 +366,12 @@ def test_repo_preference_read_distinguishes_missing_key_from_defaults_failure() 
 def test_engine_stub_is_private_pid_bound_bridge_proxy(
     tmp_path: Path,
 ) -> None:
-    stub = create_engine_stub_repo(tmp_path, authorized_client_pid=4242)
+    stub = create_engine_stub_repo(
+        tmp_path,
+        authorized_client_pid=4242,
+        authorized_client_start="test process start",
+        authorized_client_token=b"x" * 32,
+    )
     executable = stub.repo / ".venv/bin/python"
 
     assert executable.is_file()
@@ -374,9 +379,15 @@ def test_engine_stub_is_private_pid_bound_bridge_proxy(
     source = executable.read_text(encoding="utf-8")
     assert "JOAT_NATIVE_BRIDGE" in source
     assert "AUTHORIZED_CLIENT_PID = 4242" in source
+    assert "AUTHORIZED_CLIENT_START = 'test process start'" in source
+    assert "LOCAL_PEERTOKEN = 0x006" in source
+    assert "peer_token(client_writer) != AUTHORIZED_CLIENT_TOKEN" in source
     assert "LOCAL_PEERPID = 0x002" in source
     assert "prior_umask = os.umask(0o177)" in source
-    assert "listener.bind(PROXY_PATH)" in source
+    assert "listener.bind(pending_path)" in source
+    assert "os.chmod(pending_path, 0o600)" in source
+    assert "os.replace(pending_path, PROXY_PATH)" in source
+    assert "watch_authorized_client" in source
     assert "asyncio.start_unix_server(handle, sock=listener)" in source
     assert stub.bridge_path == stub.repo / "acceptance-native-bridge.sock"
 
@@ -411,9 +422,9 @@ async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path
     )
     try:
         deadline = time.monotonic() + 5
-        while not stub.bridge_path.exists() and time.monotonic() < deadline:
+        while not acceptance._owned_private_socket(stub.bridge_path) and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
-        assert stub.bridge_path.exists()
+        assert acceptance._owned_private_socket(stub.bridge_path)
         assert stat.S_IMODE(stub.bridge_path.stat().st_mode) == 0o600
 
         reader, writer = await asyncio.open_unix_connection(stub.bridge_path)
@@ -442,6 +453,278 @@ async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path
         server.close()
         await server.wait_closed()
         socket_context.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_engine_stub_exits_when_authorized_process_identity_dies(tmp_path: Path) -> None:
+    socket_context = tempfile.TemporaryDirectory(prefix="joat-watchdog-test-", dir="/tmp")
+    socket_root = Path(socket_context.name)
+    owner = subprocess.Popen(["/bin/sleep", "30"])
+    stub = create_engine_stub_repo(
+        tmp_path,
+        authorized_client_pid=owner.pid,
+        authorized_client_token=b"x" * 32,
+        proxy_root=socket_root,
+    )
+    process = subprocess.Popen(  # noqa: S603 - private generated executable
+        [str(stub.repo / ".venv/bin/python"), "-u", "-m", "joat"],
+        cwd=stub.repo,
+        env={**os.environ, "JOAT_NATIVE_BRIDGE": str(socket_root / "unused.sock")},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not acceptance._owned_private_socket(stub.bridge_path) and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert acceptance._owned_private_socket(stub.bridge_path)
+
+        owner.terminate()
+        await asyncio.to_thread(owner.wait, 5)
+        await asyncio.to_thread(process.wait, 5)
+
+        assert process.returncode == 0
+        assert not stub.bridge_path.exists()
+    finally:
+        if owner.poll() is None:
+            owner.terminate()
+            owner.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+        socket_context.cleanup()
+
+
+class _PreflightLease:
+    def __init__(self, *, stub: object, **_: object) -> None:
+        self.stub_repo = stub.repo  # type: ignore[attr-defined]
+        self.preference_changed = False
+        self.restored = False
+        self.entered = False
+
+    async def enter(self) -> None:
+        self.entered = True
+
+    async def restore(self) -> None:
+        self.restored = self.entered
+
+
+class _PreflightBridge:
+    calls: list[str] = []
+
+    def __init__(self, _: Path) -> None:
+        pass
+
+    async def __aenter__(self) -> _PreflightBridge:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def call(self, method: str) -> SimpleNamespace:
+        self.calls.append(method)
+        return SimpleNamespace(
+            authorization=SimpleNamespace(
+                calendar="fullAccess",
+                reminders="fullAccess",
+            )
+        )
+
+
+class _RestoreFailingPreflightLease(_PreflightLease):
+    async def restore(self) -> None:
+        raise RuntimeError("restore failed")
+
+
+def _preflight_args(tmp_path: Path, *extra: str) -> object:
+    return acceptance._parser().parse_args([
+        "--evidence-root",
+        str(tmp_path / "evidence"),
+        "--recovery-guard",
+        str(tmp_path / "recovery.json"),
+        *extra,
+    ])
+
+
+@pytest.mark.asyncio
+async def test_calendar_preflight_uses_only_authorization_and_skips_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _PreflightBridge.calls = []
+    monkeypatch.setattr(acceptance, "MacAppNativeBridgeLease", _PreflightLease)
+    monkeypatch.setattr(acceptance, "NativeBridgeClient", _PreflightBridge)
+
+    exit_code, receipt_path = await acceptance.run_native_preflight(
+        _preflight_args(tmp_path, "--calendar-only")  # type: ignore[arg-type]
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert receipt["result"] == "ready"
+    assert receipt["eventkit_mutations_attempted"] is False
+    assert receipt["mac_app_isolation"]["repo_preference_restored"] is True
+    assert receipt["notification_watcher"] == {
+        "mutated_settings": False,
+        "not_applicable": True,
+        "required": False,
+    }
+    assert _PreflightBridge.calls == ["authorization.status"]
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_reminder_preflight_retains_only_content_free_watcher_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feed = tmp_path / "notifications.jsonl"
+    heartbeat = tmp_path / "notifications.heartbeat"
+    status = tmp_path / "notifications.watcher-status.json"
+    feed.write_text("", encoding="utf-8")
+    heartbeat.write_text("alive\n", encoding="utf-8")
+    status.write_text(
+        json.dumps({
+            "schema": acceptance.WATCHER_STATUS_SCHEMA,
+            "observed_at_unix_ms": int(time.time() * 1_000),
+            "state": "swept",
+            "sweep_count": 9,
+            "banner_elements_seen": 2,
+            "readable_banners_seen": 2,
+            "emitted_banners": 1,
+        }),
+        encoding="utf-8",
+    )
+    for path in (feed, heartbeat, status):
+        path.chmod(0o600)
+
+    _PreflightBridge.calls = []
+    monkeypatch.setattr(acceptance, "MacAppNativeBridgeLease", _PreflightLease)
+    monkeypatch.setattr(acceptance, "NativeBridgeClient", _PreflightBridge)
+    monkeypatch.setattr(acceptance, "_read_focus_diagnostic", lambda: False)
+    args = _preflight_args(
+        tmp_path,
+        "--notification-mode",
+        "focus-off",
+        "--notification-feed",
+        str(feed),
+        "--notification-heartbeat",
+        str(heartbeat),
+        "--notification-status",
+        str(status),
+    )
+
+    exit_code, receipt_path = await acceptance.run_native_preflight(args)  # type: ignore[arg-type]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(receipt, sort_keys=True)
+
+    assert exit_code == 0
+    assert receipt["result"] == "ready"
+    assert receipt["eventkit_mutations_attempted"] is False
+    assert receipt["notification_watcher"]["heartbeat_fresh"] is True
+    assert receipt["notification_watcher"]["status_fresh"] is True
+    assert receipt["notification_watcher"]["heartbeat_status_correlated"] is True
+    assert receipt["notification_watcher"]["status"]["state"] == "swept"
+    assert _PreflightBridge.calls == ["authorization.status"]
+    assert "title" not in serialized
+    assert "body" not in serialized
+    assert "native_identifier" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_reminder_preflight_rejects_status_not_correlated_with_fresh_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feed = tmp_path / "notifications.jsonl"
+    heartbeat = tmp_path / "notifications.heartbeat"
+    status = tmp_path / "notifications.watcher-status.json"
+    feed.write_text("", encoding="utf-8")
+    heartbeat.write_text("alive\n", encoding="utf-8")
+    status.write_text(
+        json.dumps({
+            "schema": acceptance.WATCHER_STATUS_SCHEMA,
+            "observed_at_unix_ms": int((time.time() - 30) * 1_000),
+            "state": "swept",
+            "sweep_count": 9,
+            "banner_elements_seen": 0,
+            "readable_banners_seen": 0,
+            "emitted_banners": 0,
+        }),
+        encoding="utf-8",
+    )
+    for path in (feed, heartbeat, status):
+        path.chmod(0o600)
+    monkeypatch.setattr(acceptance, "MacAppNativeBridgeLease", _PreflightLease)
+    monkeypatch.setattr(acceptance, "NativeBridgeClient", _PreflightBridge)
+    monkeypatch.setattr(acceptance, "_read_focus_diagnostic", lambda: False)
+    args = _preflight_args(
+        tmp_path,
+        "--notification-mode",
+        "focus-off",
+        "--notification-feed",
+        str(feed),
+        "--notification-heartbeat",
+        str(heartbeat),
+        "--notification-status",
+        str(status),
+    )
+
+    exit_code, receipt_path = await acceptance.run_native_preflight(args)  # type: ignore[arg-type]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert receipt["result"] == "blocked"
+    assert receipt["blockers"][-1]["code"] == "notification_watcher_status_stale"
+    assert receipt["eventkit_mutations_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_preflight_restore_failure_cannot_be_reported_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _PreflightBridge.calls = []
+    monkeypatch.setattr(
+        acceptance,
+        "MacAppNativeBridgeLease",
+        _RestoreFailingPreflightLease,
+    )
+    monkeypatch.setattr(acceptance, "NativeBridgeClient", _PreflightBridge)
+
+    exit_code, receipt_path = await acceptance.run_native_preflight(
+        _preflight_args(tmp_path, "--calendar-only")  # type: ignore[arg-type]
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert receipt["result"] == "blocked"
+    assert receipt["blockers"][-1]["code"] == "mac_app_restore_RuntimeError"
+    assert receipt["eventkit_mutations_attempted"] is False
+    assert _PreflightBridge.calls == ["authorization.status"]
+
+
+def test_parser_exposes_explicit_read_only_preflight_mode() -> None:
+    args = acceptance._parser().parse_args(["--preflight-only", "--calendar-only"])
+
+    assert args.preflight_only is True
+    assert args.calendar_only is True
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_preflight_before_write_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    expected = (0, tmp_path / "preflight-receipt.json")
+
+    async def fake_preflight(_: object) -> tuple[int, Path]:
+        return expected
+
+    monkeypatch.setattr(acceptance, "run_native_preflight", fake_preflight)
+    args = acceptance._parser().parse_args(["--preflight-only"])
+
+    assert await acceptance.run(args) == expected
 
 
 class _CleanupBridge:
@@ -744,6 +1027,7 @@ def test_alarm_failure_classification_distinguishes_native_delivery_boundaries()
 
 def test_watcher_observation_delta_is_content_free_and_detects_counter_resets() -> None:
     before = WatcherSweepStatus(
+        observed_at_unix_ms=1_788_117_600_000,
         state="swept",
         sweep_count=10,
         banner_elements_seen=3,
@@ -751,6 +1035,7 @@ def test_watcher_observation_delta_is_content_free_and_detects_counter_resets() 
         emitted_banners=1,
     )
     after = WatcherSweepStatus(
+        observed_at_unix_ms=1_788_117_601_000,
         state="swept",
         sweep_count=15,
         banner_elements_seen=3,
@@ -775,6 +1060,7 @@ def test_watcher_observation_delta_is_content_free_and_detects_counter_resets() 
     reset = watcher_observation_delta(
         after,
         WatcherSweepStatus(
+            observed_at_unix_ms=1_788_117_602_000,
             state="swept",
             sweep_count=1,
             banner_elements_seen=0,
@@ -801,6 +1087,7 @@ def test_watcher_status_rejects_notification_fields_and_insecure_files(tmp_path:
     status.chmod(0o600)
 
     assert read_watcher_sweep_status(status) == WatcherSweepStatus(
+        observed_at_unix_ms=1_788_117_600_000,
         state="swept",
         sweep_count=9,
         banner_elements_seen=2,
