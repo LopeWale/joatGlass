@@ -224,3 +224,59 @@ class TestListSessions:
         )
         with pytest.raises(OpenClawGatewayError):
             await terminal.list_sessions()
+
+
+class TestResumableTargets:
+    """A roster lane may address a key ONLY after the gateway listed it.
+
+    Provenance is the whole design: the allowed target set is what the
+    gateway itself named for this wearer on this connection — never a key
+    the Mac invented, and never anything on the Brainstorm lane.
+    """
+
+    LISTED = frozenset({"agent:hermes:someone-elses-namespace-1"})
+
+    def _send(self, key: str) -> dict[str, object]:
+        return {"key": key, "agentId": "hermes", "message": "continue",
+                "idempotencyKey": "a" * 32}
+
+    def test_a_listed_key_becomes_sendable_on_the_roster_lane(self) -> None:
+        enforce("sessions.send",
+                self._send("agent:hermes:someone-elses-namespace-1"),
+                policy=WORK_TERMINAL_POLICY, listed_keys=self.LISTED)
+
+    def test_an_unlisted_key_stays_blocked(self) -> None:
+        with pytest.raises(OpenClawGatewayError):
+            enforce("sessions.send",
+                    self._send("agent:hermes:invented-by-the-mac"),
+                    policy=WORK_TERMINAL_POLICY, listed_keys=self.LISTED)
+
+    def test_the_brainstorm_lane_gains_nothing_from_listings(self) -> None:
+        with pytest.raises(OpenClawGatewayError):
+            enforce("sessions.send",
+                    self._send("agent:hermes:someone-elses-namespace-1"),
+                    policy=BRAINSTORM_TERMINAL_POLICY, listed_keys=self.LISTED)
+
+    def test_abort_follows_the_same_provenance(self) -> None:
+        params = {"key": "agent:hermes:someone-elses-namespace-1",
+                  "runId": "run-1", "agentId": "hermes"}
+        enforce("sessions.abort", params,
+                policy=WORK_TERMINAL_POLICY, listed_keys=self.LISTED)
+        with pytest.raises(OpenClawGatewayError):
+            enforce("sessions.abort", params, policy=WORK_TERMINAL_POLICY)
+
+    def test_owned_keys_still_work_without_any_listing(self) -> None:
+        enforce("sessions.send", self._send(work_key()),
+                policy=WORK_TERMINAL_POLICY)
+
+
+class TestHarvest:
+    def test_only_string_keys_survive(self) -> None:
+        from joat.agents.openclaw_gateway import _harvest_listed_keys
+
+        assert _harvest_listed_keys({"sessions": [
+            {"key": "agent:hermes:a"},
+            {"key": 42}, {"nokey": True}, "junk",
+            {"key": "x" * 300},              # oversized: refused
+        ]}) == {"agent:hermes:a"}
+        assert _harvest_listed_keys("garbage") == set()

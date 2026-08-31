@@ -218,10 +218,26 @@ class OpenClawPairingRequired(OpenClawGatewayError):
         self.reason = reason
 
 
+def _harvest_listed_keys(result: object) -> set[str]:
+    """Keys from a sessions.list payload — strings only, nothing inferred."""
+    record = result if isinstance(result, dict) else None
+    raw_sessions = record.get("sessions") if record else None
+    keys: set[str] = set()
+    if isinstance(raw_sessions, list):
+        for raw in raw_sessions:
+            if isinstance(raw, dict):
+                key = raw.get("key")
+                if isinstance(key, str) and 0 < len(key) <= 256:
+                    keys.add(key)
+    return keys
+
+
 def _enforce_agent_terminal_request_policy(
     method: str,
     params: dict[str, object],
     policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY,
+    *,
+    listed_keys: frozenset[str] = frozenset(),
 ) -> None:
     """Reject any post-auth RPC outside JOAT's isolated Hermes terminal."""
 
@@ -286,9 +302,17 @@ def _enforce_agent_terminal_request_policy(
         permitted = plain or with_approvals
     elif method == "sessions.send":
         message = params.get("message")
+        key = params.get("key")
+        # A roster lane may also address a key the GATEWAY listed for this
+        # wearer on this connection — resume, with the gateway itself as
+        # the authority. Every other pin (agent, bounds, idempotency) holds
+        # identically; only the key's provenance widens.
+        addressable = policy.owns_session_key(key) or (
+            policy.roster and isinstance(key, str) and key in listed_keys
+        )
         permitted = (
             set(params) == {"key", "agentId", "message", "idempotencyKey"}
-            and policy.owns_session_key(params.get("key"))
+            and addressable
             and params.get("agentId") == policy.agent_id
             and isinstance(message, str)
             and 0 < len(message) <= 100_000
@@ -299,9 +323,13 @@ def _enforce_agent_terminal_request_policy(
         )
     elif method == "sessions.abort":
         run_id = params.get("runId")
+        abort_key = params.get("key")
+        abort_addressable = policy.owns_session_key(abort_key) or (
+            policy.roster and isinstance(abort_key, str) and abort_key in listed_keys
+        )
         permitted = (
             set(params) == {"key", "runId", "agentId"}
-            and policy.owns_session_key(params.get("key"))
+            and abort_addressable
             and isinstance(run_id, str)
             and 0 < len(run_id) <= 1_048_576
             and params.get("agentId") == policy.agent_id
@@ -358,6 +386,14 @@ class OpenClawGatewayConnection:
     _advertised_events: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
     _granted_scopes: tuple[str, ...] = field(default=(), init=False, repr=False)
     _last_event_seq: int | None = field(default=None, init=False, repr=False)
+    _listed_keys: set[str] = field(default_factory=set, init=False, repr=False)
+    """Session keys THIS connection saw the gateway list for this wearer.
+
+    The authority basis for resumable sends: a roster lane may address a
+    key only after the gateway itself named it in an involvingMe listing on
+    this same authenticated connection — never a key the Mac merely
+    invented. Bounded; reconnecting starts empty by construction, which is
+    exactly the reconnect-without-replay discipline (roadmap T6)."""
 
     def __post_init__(self) -> None:
         features = _record(self.hello.get("features"))
@@ -394,7 +430,10 @@ class OpenClawGatewayConnection:
         return self._granted_scopes
 
     async def request(self, method: str, params: dict[str, object]) -> object:
-        _enforce_agent_terminal_request_policy(method, params, self.policy)
+        _enforce_agent_terminal_request_policy(
+            method, params, self.policy,
+            listed_keys=frozenset(self._listed_keys),
+        )
         if method not in self._methods:
             raise OpenClawGatewayError(
                 "OpenClaw does not advertise a required Agent Terminal method"
@@ -418,7 +457,16 @@ class OpenClawGatewayConnection:
                             separators=(",", ":"),
                         )
                     )
-                return await future
+                result = await future
+                if (
+                    method == "sessions.list"
+                    and self.policy.roster
+                    and params.get("involvingMe") is True
+                ):
+                    self._listed_keys |= _harvest_listed_keys(result)
+                    while len(self._listed_keys) > 64:
+                        self._listed_keys.pop()
+                return result
         except TimeoutError as exc:
             raise OpenClawGatewayError("OpenClaw request timed out") from exc
         finally:
