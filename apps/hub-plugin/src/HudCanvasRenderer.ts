@@ -321,6 +321,40 @@ export function agentTerminalSafetyLabel(
     : 'TOOL STATE NOT CLEARED';
 }
 
+/** A live terminal is a transcript, not a connection-status dashboard.
+ * Preserve the recovery detail only when the wearer needs it to act; once
+ * Hermes is running, collapse it into one truthful status spine and give the
+ * conversation the remaining lens area. */
+export interface AgentTerminalTranscriptLayout {
+  summary: string;
+  dividerY: number;
+  transcriptBaselineY: number;
+  transcriptLineCapacity: number;
+  showRecoveryDetails: boolean;
+}
+
+export function agentTerminalTranscriptLayout(
+  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked'>,
+): AgentTerminalTranscriptLayout {
+  const state = brainstormStateLabel(model.state);
+  if (model.state === 'running') {
+    return {
+      summary: `HERMES > ${state} · ${agentTerminalSafetyLabel(model)}`,
+      dividerY: 111.5,
+      transcriptBaselineY: 132,
+      transcriptLineCapacity: 7,
+      showRecoveryDetails: false,
+    };
+  }
+  return {
+    summary: `HERMES > ${state}`,
+    dividerY: 177.5,
+    transcriptBaselineY: 199,
+    transcriptLineCapacity: 4,
+    showRecoveryDetails: true,
+  };
+}
+
 export function brainstormStateLabel(state: BrainstormHudModel['state']): string {
   return state === 'topic_capture'
     ? 'SPEAK NOW'
@@ -2020,28 +2054,31 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.stroke();
 
     if (model.screen === 'agent_terminal') {
+      const layout = agentTerminalTranscriptLayout(model);
       context.textAlign = 'left';
       context.fillStyle = gray(BRIGHT);
       context.font = `13px ${HUD_FONT}`;
-      this.fitText(context, `HERMES > ${state}`, 36, 98, 504);
-      context.fillStyle = gray(SUPPORT);
-      context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 117, 504);
+      this.fitText(context, layout.summary, 36, 98, 504);
+      if (layout.showRecoveryDetails) {
+        context.fillStyle = gray(SUPPORT);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 117, 504);
+        context.strokeStyle = gray(HAIRLINE);
+        context.beginPath();
+        context.moveTo(36, 130.5);
+        context.lineTo(540, 130.5);
+        context.stroke();
+        context.fillStyle = gray(SUPPORT);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 148, 504);
+        context.fillStyle = gray(CHROME);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(context, `SESSION > ${model.terminalReason || 'Hermes participates as a Brainstorm seat.'}`, 36, 165, 504);
+      }
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();
-      context.moveTo(36, 130.5);
-      context.lineTo(540, 130.5);
-      context.stroke();
-      context.fillStyle = gray(SUPPORT);
-      context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 148, 504);
-      context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, `SESSION > ${model.terminalReason || 'Hermes participates as a Brainstorm seat.'}`, 36, 165, 504);
-      context.strokeStyle = gray(HAIRLINE);
-      context.beginPath();
-      context.moveTo(36, 177.5);
-      context.lineTo(540, 177.5);
+      context.moveTo(36, layout.dividerY);
+      context.lineTo(540, layout.dividerY);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
       context.font = `11px ${HUD_FONT}`;
@@ -2049,8 +2086,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context,
         model.activity || 'JOAT > Terminal is ready for a Brainstorm.',
         36,
-        199,
-        4,
+        layout.transcriptBaselineY,
+        layout.transcriptLineCapacity,
       );
     } else {
       context.textAlign = 'left';

@@ -239,3 +239,12 @@ def test_visual_artifacts_require_an_opaque_optical_preview_for_every_hud_state(
     del missing_busy["hermes-busy"]
     with pytest.raises(BrainstormActionFlowError, match="HUD flow"):
         validate_visual_artifacts(missing_busy)
+
+
+def test_visual_previews_include_the_running_agent_terminal_transcript() -> None:
+    """The terminal density change needs an optical proof, not just geometry tests."""
+    assert _VISUAL_ONLY_ARTIFACTS == (
+        "dense-transcript-preview",
+        "terminal-transcript-preview",
+        "hermes-busy",
+    )
