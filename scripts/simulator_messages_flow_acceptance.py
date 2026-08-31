@@ -22,6 +22,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Literal, cast
 import urllib.error
@@ -52,7 +53,14 @@ class ScreenReceipt:
 
 
 ReplyOutcome = Literal["accepted", "cancelled", "timed_out", "uncertain", "failed"]
-MessagesFlow = Literal["reply", "compose", "history", "reader", "recovery"]
+MessagesFlow = Literal[
+    "reply",
+    "compose",
+    "history",
+    "reader",
+    "recovery",
+    "selection_recovery",
+]
 SimulatorControl = Literal["click", "down", "up"]
 MenuSelectionControl = Literal["click", "down"]
 
@@ -326,6 +334,14 @@ _EXPECTED_RECOVERY_FLOW = (
     ("messages-conversations", "click"),
 )
 
+_EXPECTED_SELECTION_RECOVERY_FLOW = (
+    ("messages-sidebar", "test-hook-open"),
+    ("messages-conversations", "click"),
+    ("messages-selection-pending", "down + click"),
+    ("messages-selection-retry", None),
+    ("messages-conversations-recovered", "click"),
+)
+
 
 def menu_selection_controls(flow: str) -> tuple[MenuSelectionControl, ...]:
     """Return the exact simulator gestures that enter and select a Messages row.
@@ -340,6 +356,7 @@ def menu_selection_controls(flow: str) -> tuple[MenuSelectionControl, ...]:
         "history": ("click", "down", "down", "click"),
         "reader": ("click", "down", "down", "click"),
         "recovery": ("click", "click"),
+        "selection_recovery": ("click", "down", "click"),
     }
     controls = controls_by_flow.get(flow)
     if controls is None:
@@ -369,7 +386,7 @@ def history_page_receipt_input(entry_count: int) -> str:
 
 async def _drive_initial_messages_selection(
     automation_base: str,
-    flow: Literal["reply", "compose", "history", "reader"],
+    flow: Literal["reply", "compose", "history", "reader", "selection_recovery"],
 ) -> None:
     """Drive the documented sidebar and picker controls through Even Hub.
 
@@ -391,6 +408,7 @@ def required_evidence_frames(flow: str) -> tuple[str, ...]:
         "history": _EXPECTED_HISTORY_FLOW,
         "reader": _EXPECTED_READER_FLOW,
         "recovery": _EXPECTED_RECOVERY_FLOW,
+        "selection_recovery": _EXPECTED_SELECTION_RECOVERY_FLOW,
     }.get(flow)
     if expected is None:
         raise ValueError(f"unsupported Messages evidence flow: {flow}")
@@ -471,6 +489,9 @@ def _validate_receipts(
         elif name == "messages-message-returned":
             if digest == receipts[4].framebuffer_sha256:
                 raise MessagesFlowError(f"{name}: still shows the later Messages page")
+        elif name == "messages-conversations-recovered":
+            if digest == receipts[3].framebuffer_sha256:
+                raise MessagesFlowError(f"{name}: still shows the Messages retry state")
         elif digest in seen:
             raise MessagesFlowError(f"{name}: frame is not visually distinct")
         seen.add(digest)
@@ -504,6 +525,10 @@ def validate_reader_flow(receipts: list[ScreenReceipt]) -> None:
 
 def validate_recovery_flow(receipts: list[ScreenReceipt]) -> None:
     _validate_receipts(receipts, _EXPECTED_RECOVERY_FLOW)
+
+
+def validate_selection_recovery_flow(receipts: list[ScreenReceipt]) -> None:
+    _validate_receipts(receipts, _EXPECTED_SELECTION_RECOVERY_FLOW)
 
 
 def build_fixture_store(path: Path) -> IMessageStore:
@@ -582,6 +607,54 @@ class RecoverOnceMessagesStore:
         return self._delegate.recent_threads(limit)
 
 
+class BlockFirstMessagePageStore:
+    """Drop one selected-conversation response without replacing production code.
+
+    The first real ``capdata`` selection blocks at the IMessageStore boundary.
+    The Hub must make its existing timeout/retry surface visible, and the
+    second real ``capmenu`` request must restore the picker before the delayed
+    first request is released. This exercises the production request-id guard
+    that prevents a stale page from replacing the recovered list.
+    """
+
+    def __init__(self, delegate: IMessageStore) -> None:
+        self._delegate = delegate
+        self.page_attempts = 0
+        self.first_page_started = threading.Event()
+        self.release_first_page = threading.Event()
+        self.first_page_finished = threading.Event()
+
+    @property
+    def available(self) -> bool:
+        return self._delegate.available
+
+    def recent_threads(self, limit: int = 5) -> list[MessageThread]:
+        return self._delegate.recent_threads(limit)
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ):
+        self.page_attempts += 1
+        first_page = self.page_attempts == 1
+        try:
+            if first_page:
+                self.first_page_started.set()
+                if not self.release_first_page.wait(timeout=30):
+                    raise sqlite3.DatabaseError("simulated dropped Messages selection response")
+            return self._delegate.thread_message_page(
+                thread,
+                limit=limit,
+                before_row_id=before_row_id,
+            )
+        finally:
+            if first_page:
+                self.first_page_finished.set()
+
+
 class RecordingSender(MessageSender):
     """The deliberate no-send boundary used only by this isolated trace."""
 
@@ -634,6 +707,19 @@ async def _wait_for_messages_picker(router: CapabilityRouter) -> None:
         await asyncio.sleep(0.05)
 
 
+async def _wait_for_recovered_messages_picker(
+    router: CapabilityRouter,
+    previous_request_id: str | None,
+) -> None:
+    """Wait for a new Mac list generation, not the retained pre-retry picker."""
+    while (
+        router._active_request_id == previous_request_id
+        or router._active_capability != "MESSAGES"
+        or not router._message_rows
+    ):
+        await asyncio.sleep(0.05)
+
+
 async def _wait_for_messages_retry(store: RecoverOnceMessagesStore) -> None:
     """Wait until the real Mac router has consumed the injected read failure."""
     while not store.retry_visible:
@@ -650,7 +736,7 @@ async def run(
 ) -> None:
     if flow != "reply" and outcome != "accepted":
         raise MessagesFlowError(
-            "only reply flow accepts a non-success outcome; compose/history/reader/recovery stay no-send fixtures"
+            "only reply flow accepts a non-success outcome; all other Messages flows stay no-send fixtures"
         )
     if (automation_base is None) != (evidence_dir is None):
         raise MessagesFlowError(
@@ -662,7 +748,12 @@ async def run(
         evidence_root = Path(root)
         store = build_fixture_store(evidence_root / "chat.db")
         recovery_store = RecoverOnceMessagesStore(store) if flow == "recovery" else None
-        messages = recovery_store or store
+        selection_recovery_store = (
+            BlockFirstMessagePageStore(store)
+            if flow == "selection_recovery"
+            else None
+        )
+        messages = recovery_store or selection_recovery_store or store
         gateway = HubGatewayTransport(host="127.0.0.1", port=port)
         gateway.on_hello(lambda _hello: connected.set())
         hud = HudWriter(gateway)
@@ -740,6 +831,86 @@ async def run(
                         frames=frames,
                     )
                 log.info("stage=messages-recovered read_attempts=%d no_send=true", recovery_store.read_attempts)
+                await asyncio.sleep(1)
+                return
+            if flow == "selection_recovery":
+                if selection_recovery_store is None:
+                    raise MessagesFlowError("selection recovery did not configure its delayed page store")
+                if automation_base is None:
+                    raise MessagesFlowError(
+                        "selection recovery requires the official simulator controls"
+                    )
+                assert evidence_dir is not None
+                await asyncio.wait_for(_wait_for_messages_picker(router), timeout=90)
+                first_request_id = router._active_request_id
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    "messages-conversations",
+                    "click",
+                ))
+                await _drive_initial_messages_selection(automation_base, flow)
+                await asyncio.wait_for(
+                    asyncio.to_thread(selection_recovery_store.first_page_started.wait),
+                    timeout=20,
+                )
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    "messages-selection-pending",
+                    initial_selection_receipt_input(flow),
+                ))
+                # This must wait for the production Hub's real twelve-second
+                # response timer, not a test-specific shortcut.
+                await asyncio.sleep(12.5)
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    "messages-selection-retry",
+                    None,
+                ))
+                await _send_simulator_input(automation_base, "click")
+                await asyncio.wait_for(
+                    _wait_for_recovered_messages_picker(router, first_request_id),
+                    timeout=20,
+                )
+                if selection_recovery_store.page_attempts != 1:
+                    raise MessagesFlowError("Messages retry unexpectedly retried the stale detail read")
+                selection_recovery_store.release_first_page.set()
+                await asyncio.wait_for(
+                    asyncio.to_thread(selection_recovery_store.first_page_finished.wait),
+                    timeout=20,
+                )
+                await asyncio.sleep(0.25)
+                if replies.selected.is_set() or sender.called.is_set() or sender.sent.is_set():
+                    raise MessagesFlowError(
+                        "late Messages selection response escaped its recovered no-send route"
+                    )
+                frames.append(await _capture_frame(
+                    automation_base,
+                    evidence_dir,
+                    "messages-conversations-recovered",
+                    "click",
+                ))
+                validate_selection_recovery_flow(frames)
+                _write_evidence_receipt(
+                    evidence_dir,
+                    flow=flow,
+                    outcome=outcome,
+                    expectation=ReplyOutcomeExpectation(
+                        simulator_gesture=None,
+                        simulator_control=None,
+                        wearer_label=None,
+                        sender_called=False,
+                        result_template="",
+                    ),
+                    sender_called=False,
+                    frames=frames,
+                )
+                log.info(
+                    "stage=selection-recovered page_attempts=%d no_send=true",
+                    selection_recovery_store.page_attempts,
+                )
                 await asyncio.sleep(1)
                 return
             selected = replies.composing if flow == "compose" else replies.selected
@@ -978,7 +1149,11 @@ async def _wait_for_message_detail(router: CapabilityRouter, index: int) -> None
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18791)
-    parser.add_argument("--flow", choices=("reply", "compose", "history", "reader", "recovery"), default="reply")
+    parser.add_argument(
+        "--flow",
+        choices=("reply", "compose", "history", "reader", "recovery", "selection_recovery"),
+        default="reply",
+    )
     parser.add_argument(
         "--outcome",
         choices=("accepted", "cancelled", "timed_out", "uncertain", "failed"),
