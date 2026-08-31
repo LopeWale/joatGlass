@@ -645,6 +645,7 @@ class TestStreamedReply:
         await orch._handle_utterance(LOUD)
 
         assert "voice latency" not in caplog.text
+        assert "utterance ended:" not in caplog.text
 
     async def test_latency_observer_failure_cannot_break_the_voice_path(self) -> None:
         def fail_observer(_turn: int, _stage: str, _bucket: str) -> None:

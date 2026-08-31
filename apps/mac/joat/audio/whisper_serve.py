@@ -22,7 +22,6 @@ import io
 import json
 import logging
 import shutil
-import time
 import urllib.error
 import urllib.request
 import uuid
@@ -232,24 +231,8 @@ class WhisperServeEngine(SttEngine):
             return None
         payload = wav_bytes(bytes(self._buffer))
         self._buffer.clear()
-        # Split the wall clock into QUEUED (waiting for a worker thread) and
-        # POST (the request itself). On device these diverged by 20x, and
-        # without the split there is no way to tell a slow model from a
-        # starved event loop.
-        queued_at = time.monotonic()
-        started: list[float] = []
-
-        def _timed(data: bytes) -> str:
-            started.append(time.monotonic())
-            return self._post(data)
-
         try:
-            text = await asyncio.to_thread(_timed, payload)
-            if started:
-                log.info("stt timing: queued %.2fs, post %.2fs, audio %.1fs",
-                         started[0] - queued_at,
-                         time.monotonic() - started[0],
-                         len(payload) / (16_000 * 2))
+            text = await asyncio.to_thread(self._post, payload)
         except Exception as exc:
             log.warning(
                 "whisper serve request failed error=%s — respawning once",

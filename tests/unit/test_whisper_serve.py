@@ -73,6 +73,19 @@ class TestFlush:
         assert b'name="response_format"' in body
         assert b"RIFF" in body  # the WAV actually made it into the multipart
 
+    async def test_successful_stt_never_emits_exact_request_timing(
+        self,
+        stub_server,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="joat.audio.whisper_serve")
+        engine = WhisperServeEngine(base_url=stub_server)
+
+        await engine.feed(SPEECH)
+
+        assert await engine.flush() is not None
+        assert "stt timing:" not in caplog.text
+
     async def test_below_min_length_is_dropped_without_http(self, stub_server) -> None:
         engine = WhisperServeEngine(base_url=stub_server)
         await engine.feed(b"\x01\x02" * 10)
