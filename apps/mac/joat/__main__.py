@@ -399,11 +399,11 @@ async def main() -> None:
     # weights. The pill said ready before the model had ever loaded (27).
     status.set(llm="available" if replier is not None else "off")
     hud = HudWriter(transport)
-    # Who is at the table is a RUNTIME fact: each collaborator is a binary or
-    # a daemon that may simply not be installed. For the wearable Brainstorm,
-    # Hermes is a required isolated OpenClaw seat—not an optional third voice.
-    # If it is unavailable, the lenses stay on the recoverable Agent Terminal
-    # surface rather than quietly starting a local-only conversation.
+    # Who is at the table is a RUNTIME fact: each collaborator is a binary
+    # that may simply not be installed. Per docs/BRAINSTORM.md and the
+    # wearer's ruling, Brainstorm seats the Codex and Claude CLIs ONLY;
+    # Hermes/OpenClaw are Agent Terminal workers and neither participate in
+    # a Brainstorm nor gate its availability.
     # Models the wearer can change by voice while this is running. Slots are
     # read PER TURN, so a switch lands on the next turn instead of the next
     # launch. Whisper is the one that needs work to apply: it holds weights
@@ -621,35 +621,27 @@ async def main() -> None:
         ("claude", "critic", critic(models.provider("claude"))),
     ]
 
-    def ready_hermes_terminal() -> OpenClawTerminalAgent | None:
-        terminal = status.agent_terminal_projection()
-        # ``running`` means this one serialized terminal is already streaming
-        # a turn. It is healthy, but it is not available to start a second
-        # Brainstorm. Only the quiescent, preflight-verified state is an
-        # admission to a new wearer session.
-        if terminal["state"] != "ready":
-            return None
-        return openclaw_terminal
-
     def current_seated() -> list[tuple[str, str, object]]:
-        remote = ready_hermes_terminal()
-        current = [(name, role, agent) for name, role, agent in seats if agent]
-        if remote is not None:
-            current.append(("openclaw", "agent terminal", remote))
-        return current
+        return [(name, role, agent) for name, role, agent in seats if agent]
+
+    def missing_seats() -> list[str]:
+        return [name for name, _role, agent in seats if not agent]
 
     def brainstorm_available() -> bool:
-        return ready_hermes_terminal() is not None
+        # A Brainstorm needs someone to disagree with — two CLI seats. It
+        # must NOT count any Agent Terminal runtime: an earlier build gated
+        # this on the Hermes terminal being ready, which made the wearer's
+        # local Codex/Claude conversation hostage to a remote daemon it
+        # never speaks to.
+        return len(current_seated()) >= 2
 
     initial_seated = current_seated()
-    absent = ["openclaw"] if openclaw_terminal is None else []
-    if brainstorm_available() and len(initial_seated) >= 3:
-        log.info("round table: %s%s",
-                 ", ".join(f"{n} ({r})" for n, r, _ in initial_seated),
-                 f" — absent: {', '.join(absent)}" if absent else "")
+    if brainstorm_available():
+        log.info("round table: %s",
+                 ", ".join(f"{n} ({r})" for n, r, _ in initial_seated))
     else:
-        log.warning("brainstorm unavailable — Hermes is required; have %d seats (absent: %s)",
-                    len(initial_seated), ", ".join(absent))
+        log.warning("brainstorm unavailable — need the codex and claude CLIs; "
+                    "missing: %s", ", ".join(missing_seats()) or "none")
 
     claim_judge = MiniCheckJudge() if minicheck_available() else None
     if claim_judge:
@@ -669,14 +661,13 @@ async def main() -> None:
         log.info("navigation provider unavailable (MAPBOX_ACCESS_TOKEN not configured)")
 
     def make_debate(topic: str) -> Session | None:
-        # Hermes is a required collaborator for wearable Brainstorm. The
-        # SessionManager has already painted its recovery frame if this
-        # condition is false; retain the guard for direct/internal callers.
+        # The SessionManager has already painted the unavailable frame if
+        # this is false; retain the guard for direct/internal callers.
         if not brainstorm_available():
             return None
         # A Brainstorm needs someone to disagree with; one seat is a monologue.
         seated = current_seated()
-        if len(seated) < 3:
+        if len(seated) < 2:
             return None
         return DebateSession(
             topic,
@@ -755,28 +746,24 @@ async def main() -> None:
         """Show the explicit one-utterance capture or its cleared recovery."""
         terminal = status.agent_terminal_projection()
         if not brainstorm_available():
-            state = str(terminal["state"])
-            activity = (
-                "Hermes is finishing the current response. Wait for ready."
-                if state == "running"
-                else "Hermes is required for Brainstorm. Tap to retry."
-            )
+            # A missing CLI seat is a Mac-side install problem — name the
+            # seat so the wearer knows which binary is gone, and never
+            # route them to the Agent Terminal, which has nothing to do
+            # with a Brainstorm's availability.
+            gone = ", ".join(missing_seats()) or "collaborators"
             return BrainstormHudView(
-                screen="agent_terminal",
-                state=state,
-                topic="Hermes Agent Terminal",
-                collaborators=[],
-                activity=activity,
-                terminal_state=state,
+                screen="brainstorm",
+                state="unavailable",
+                topic="Brainstorm",
+                collaborators=[n.capitalize() for n, _r, _a in current_seated()],
+                activity=f"{gone} CLI missing on the Mac — install to enable.",
+                terminal_state=str(terminal["state"]),
                 endpoint_host=str(terminal["endpoint_host"]),
-                terminal_reason=wearer_terminal_reason(terminal),
+                terminal_reason=str(terminal["reason"]),
                 no_tools_checked=bool(terminal["no_tools_checked"]),
                 acceptance_armed=False,
             )
-        labels = [
-            "Hermes" if name == "openclaw" else name.capitalize()
-            for name, _role, _agent in current_seated()
-        ]
+        labels = [name.capitalize() for name, _role, _agent in current_seated()]
         return BrainstormHudView(
             screen="brainstorm",
             state="topic_capture" if armed else "ready",
@@ -886,8 +873,9 @@ async def main() -> None:
             await show_terminal_retry_view(terminal_ready_activity(reverified=was_initialized))
 
     initial_count = len(current_seated())
-    initial_brainstorm_ready = brainstorm_available() and initial_count >= 3
-    status.set(debate=f"{initial_count} seats" if initial_brainstorm_ready else "Hermes unavailable")
+    initial_brainstorm_ready = brainstorm_available()
+    status.set(debate=f"{initial_count} seats" if initial_brainstorm_ready
+               else f"missing: {', '.join(missing_seats()) or 'seats'}")
     status.set_brainstorm(
         state="ready" if initial_brainstorm_ready else "unavailable",
         seat_count=initial_count,
