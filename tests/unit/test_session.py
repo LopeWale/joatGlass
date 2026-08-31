@@ -117,7 +117,7 @@ class TestDebateSession:
             on_phase=phases.append,
         ).run()
 
-        assert phases == ["opening", "turn", "closing"]
+        assert phases == ["opening", "independent", "closing"]
 
     async def test_remote_collaborator_exception_becomes_a_visible_blocked_frame(self) -> None:
         transport = SinkTransport()
@@ -169,9 +169,12 @@ class TestDebateSession:
         assert joined.index("one") < joined.index("two") < joined.index("three")
         assert "OPENCLAW" in joined
 
-    async def test_each_speaker_sees_every_prior_turn(self) -> None:
-        """Sequencing is structural: turn N+1's prompt CONTAINS turn N, so a
-        parallel debate could not produce this transcript at all."""
+    async def test_round_one_is_blind_and_round_two_sees_everything(self) -> None:
+        """The starter design's first property: independent reviews. Round 1
+        withholds the transcript, so two seats give uncontaminated views —
+        an earlier build let seat 2 read seat 1's answer in round 1, which
+        is one view plus an echo. From round 2, cross-review: everyone sees
+        everything."""
         transport = SinkTransport()
         seen: list[str] = []
 
@@ -181,15 +184,57 @@ class TestDebateSession:
                 yield reply
             return stream
 
-        seats = table(
-            ("codex", "proposer", recorder("gas is cheaper")),
-            ("claude", "critic", recorder("only near a pipeline")),
-            ("openclaw", "third opinion", recorder("both ignore permitting")),
-        )
-        await debate(transport, seats, None, topic="heat pumps").run()
-        assert "gas is cheaper" not in seen[0]          # opener sees no room
-        assert "gas is cheaper" in seen[1]              # critic sees the proposal
+        seats = pair(recorder("gas is cheaper"), recorder("only near a pipeline"))
+        judge = ScriptedJudge([
+            "Not aligned.\nAGREEMENT: 0.20\nBLOCKING: yes",
+            "Aligned now.\nAGREEMENT: 0.95\nBLOCKING: no",
+        ])
+        await debate(transport, seats, judge, topic="heat pumps",
+                     max_rounds=2).run()
+        # Round 1 (seen[0], seen[1]): both blind.
+        assert "gas is cheaper" not in seen[0]
+        assert "gas is cheaper" not in seen[1]          # THE independence claim
+        assert "only near a pipeline" not in seen[1]
+        # Round 2 (seen[2], seen[3]): cross-review sees both round-1 turns.
         assert "gas is cheaper" in seen[2] and "only near a pipeline" in seen[2]
+        assert "gas is cheaper" in seen[3] and "only near a pipeline" in seen[3]
+
+    async def test_synthesis_streams_after_convergence_and_lands_in_transcript(self) -> None:
+        """B8: JOAT produces a VISIBLE verified synthesis — the product the
+        wearer walks away with, not just a one-line outcome status."""
+        transport = SinkTransport()
+        judge = ScriptedJudge(["Fine.\nAGREEMENT: 0.95\nBLOCKING: no"])
+        session = debate(transport, pair(agent(["view A"]), agent(["view B"])),
+                         judge)
+        await session.run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "AGREED: scripted accord." in joined
+        assert "OPEN: nothing." in joined
+        # The synthesis is a transcript turn, so the reopenable panel holds
+        # the product, not only the path to it.
+        assert ("JOAT (synthesis)", "AGREED: scripted accord.\nOPEN: nothing.") \
+            in session._transcript
+
+    async def test_no_judge_means_no_synthesis_is_faked(self) -> None:
+        transport = SinkTransport()
+        await debate(transport, pair(agent(["a"]), agent(["b"])), None).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "synthesis" not in joined.lower()
+
+    async def test_phases_follow_the_starter_design(self) -> None:
+        """independent → meta-review (per round, judge) → cross-review →
+        … → synthesis. The status projection is how the HUD will later show
+        which stage the room is in."""
+        transport = SinkTransport()
+        phases: list[str] = []
+        judge = ScriptedJudge([
+            "No.\nAGREEMENT: 0.10\nBLOCKING: yes",
+            "Yes.\nAGREEMENT: 0.95\nBLOCKING: no",
+        ])
+        await debate(transport, pair(agent(["a1"]), agent(["b1"])), judge,
+                     max_rounds=2, on_phase=phases.append).run()
+        assert phases == ["opening", "independent", "meta_review",
+                          "cross_review", "meta_review", "synthesis", "closing"]
 
     async def test_the_wearer_can_hand_the_floor_to_a_named_seat(self) -> None:
         transport = SinkTransport()
@@ -228,11 +273,16 @@ class TestDebateSession:
                       "[!] claude could not answer: exited 1 — see the log")),
             ("openclaw", "third opinion", recorder("Thermals decide it.")),
         )
-        await debate(transport, seats, None).run()
+        judge = ScriptedJudge(["No.\nAGREEMENT: 0.10\nBLOCKING: yes"])
+        await debate(transport, seats, judge, max_rounds=2).run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
-        assert "out of usage credits" in joined      # the wearer SEES it
-        assert "Cache the model in RAM." in seen[2]  # openclaw got the real turn
-        assert "usage credits" not in seen[2]        # and not the failure
+        assert "out of usage credits" in joined       # the wearer SEES it
+        # Round 2 is cross-review (round 1 is blind for everyone), so the
+        # exclusion is visible there: real turns circulate, failures don't.
+        round_two = seen[3:]
+        assert round_two, "expected a second round"
+        assert all("Cache the model in RAM." in p for p in round_two)
+        assert all("usage credits" not in p for p in round_two)
 
     async def test_one_voice_and_a_failure_is_not_a_debate(self) -> None:
         transport = SinkTransport()
@@ -892,13 +942,20 @@ class TestVerifiedDebate:
 
 
 class ScriptedJudge(ReplyEngine):
-    """Emit scripted judgments per round."""
+    """Emit scripted judgments per round; a canned synthesis after that.
+
+    The synthesis turn reuses the same local model, so a judge scripted
+    for exactly N rounds gets one more call than it used to.
+    """
 
     def __init__(self, judgments: list[str]) -> None:
         self._judgments = iter(judgments)
 
     async def reply(self, text: str) -> str | None:
-        return next(self._judgments)
+        try:
+            return next(self._judgments)
+        except StopIteration:
+            return "AGREED: scripted accord.\nOPEN: nothing."
 
 
 class TestConvergence:

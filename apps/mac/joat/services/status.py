@@ -48,7 +48,13 @@ _AGENT_TERMINAL_STATES = frozenset({
 _BRAINSTORM_STATES = frozenset({
     "unavailable", "ready", "running", "settled", "cancelled", "failed",
 })
-_BRAINSTORM_PHASES = frozenset({"idle", "opening", "turn", "closing"})
+_BRAINSTORM_PHASES = frozenset({
+    "idle", "opening", "closing",
+    # The starter design, per phase: blind first round, cross-review
+    # rounds, the judge's meta-review, JOAT's verified synthesis.
+    "independent", "cross_review", "meta_review", "synthesis",
+    "turn",  # legacy single-phase label; kept so old callers stay valid
+})
 _PERSONAL_DATA_STATES = frozenset({
     "checking",
     "not_configured",

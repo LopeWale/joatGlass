@@ -527,17 +527,22 @@ class DebateSession(Session):
             await self._finish("blocked · collaborator disconnected; open Hermes to retry")
 
     async def _run(self) -> None:
-        """The DebateLoop state machine (ARCHITECTURE §5), fully visible.
+        """The starter design, fully visible: independent reviews →
+        cross-review → meta-review → synthesis.
 
-        A ROUND is one turn for every seat. After each round the judge scores
-        agreement, and the loop CONVERGES at ≥ threshold with no blocking
-        issues — otherwise the room goes around again, capped at max_rounds.
+        A ROUND is one turn for every seat. Round 1 is INDEPENDENT — each
+        seat answers blind, because two views with no cross-contamination
+        are worth more than one view plus an echo. From round 2 the seats
+        cross-review each other. After each round the judge's meta-review
+        scores agreement, and the loop CONVERGES at ≥ threshold with no
+        blocking issues — otherwise the room goes around again, capped at
+        max_rounds — after which JOAT streams the verified synthesis.
         """
         self._set_phase("opening")
         await self._sink.open(self._topic, self._table.names)
-        self._set_phase("turn")
         outcome = "no judge — one round"
         for round_no in range(1, self._max_rounds + 1):
+            self._set_phase("independent" if round_no == 1 else "cross_review")
             for _ in range(len(self._table)):
                 speaker = self._table.next_speaker()
                 said = await self._verified_turn(speaker, round_no)
@@ -564,6 +569,7 @@ class DebateSession(Session):
                 return
             if self._judge is None:
                 break
+            self._set_phase("meta_review")
             judged = await self._judge_turn(round_no)
             if self._cancelled:
                 await self._finish("cancelled")
@@ -580,7 +586,49 @@ class DebateSession(Session):
             if round_no == self._max_rounds:
                 outcome = f"no convergence after {round_no} round(s) (last {agreement:.2f})"
                 break
+        if (self._judge is not None and not self._cancelled
+                and len(self._transcript) >= 2):
+            self._set_phase("synthesis")
+            await self._synthesis_turn(outcome)
         await self._finish(f"done — {outcome}")
+
+    async def _synthesis_turn(self, outcome: str) -> None:
+        """JOAT's visible verified synthesis — the product of the session.
+
+        BRAINSTORM.md: JOAT "produces the visible synthesis" and "never
+        turns a missing citation or provider failure into a verified
+        synthesis". So the prompt hands the local model the verifier's
+        per-turn verdicts and forbids asserting anything unverified —
+        an open disagreement is a finding to list, not something to
+        paper over. Runs even when the judge could not score: an
+        illegible meta-review blocks CONVERGENCE, not the summary the
+        wearer walks away with.
+        """
+        assert self._judge is not None
+        await self._sink.turn("JOAT (synthesis)")
+        verification = "; ".join(self._verify_summary) or "no citations offered"
+        collected: list[str] = []
+        async for chunk in self._judge.stream(
+            "Write the verified synthesis of this discussion. Under 120 "
+            "words, plain text. Exactly two sections with these headers:\n"
+            "AGREED: what the collaborators now agree on — assert ONLY "
+            "claims the verifier passed or that need no citation.\n"
+            "OPEN: unresolved disagreements and any claim that stayed "
+            "unverified — name who holds what.\n\n"
+            f"Topic: {self._topic}\n\n{self._transcript_text()}\n\n"
+            f"Judge outcome: {outcome}\n"
+            f"Citation verification: {verification}"
+        ):
+            if self._cancelled:
+                break
+            collected.append(chunk)
+            await self._sink.chunk(chunk)
+        text = "".join(collected).strip()
+        if text:
+            # The synthesis is a turn like any other: it lands in the
+            # transcript so the reopenable panel holds the product, not
+            # just the path to it.
+            self._transcript.append(("JOAT (synthesis)", text))
 
     async def _judge_turn(self, round_no: int) -> str:
         assert self._judge is not None
@@ -614,7 +662,11 @@ class DebateSession(Session):
         never silently rewritten: every repair streams under its own header.
         """
         label = speaker.label if round_no == 1 else f"{speaker.label} — round {round_no}"
-        prompt = build_prompt(self._topic, speaker, self._transcript,
+        # Round 1 is independent by construction: the transcript is
+        # WITHHELD, so a first-round speaker cannot echo a colleague even
+        # though the turns still execute one at a time on the HUD.
+        prior = [] if round_no == 1 else self._transcript
+        prompt = build_prompt(self._topic, speaker, prior,
                               self.SOURCES_CONTRACT)
         text = await self._stream_turn(label, speaker.stream(prompt))
         if self._gate is None or self._cancelled or is_failure(text):
