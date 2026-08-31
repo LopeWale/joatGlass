@@ -15,6 +15,7 @@ from joat.agents.openclaw_runtime import (
     OpenClawHistoryRecovery,
     OpenClawRuntimeConfig,
     OpenClawTerminalAgent,
+    terminal_ready_activity,
 )
 from joat.agents.openclaw_terminal import OpenClawToolsEnabled
 
@@ -96,11 +97,25 @@ def test_runtime_config_rejects_group_readable_file(tmp_path) -> None:
         OpenClawRuntimeConfig.load(path)
 
 
+def test_terminal_ready_activity_distinguishes_first_setup_from_re_attestation() -> None:
+    assert terminal_ready_activity(reverified=False) == (
+        "Dedicated no-tool session ready. Tap to begin a Brainstorm."
+    )
+    assert terminal_ready_activity(reverified=True) == (
+        "Dedicated no-tool session re-verified. Tap to begin a Brainstorm."
+    )
+
+
 class RuntimeConnection:
-    def __init__(self, responses: dict[str, object]) -> None:
+    def __init__(
+        self,
+        responses: dict[str, object],
+        *,
+        granted_scopes: tuple[str, ...] = ("operator.read", "operator.write"),
+    ) -> None:
         self.advertised_methods = METHODS
         self.advertised_events = EVENTS
-        self.granted_scopes = ("operator.read", "operator.write")
+        self.granted_scopes = granted_scopes
         self.responses = responses
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.closed = False
@@ -405,6 +420,126 @@ async def test_terminal_agent_initializes_one_dedicated_session_and_closes_it() 
 
     assert factory.calls == 1
     assert connection.closed
+
+
+@pytest.mark.asyncio
+async def test_terminal_agent_re_attests_over_a_fresh_read_only_connection() -> None:
+    initialized = RuntimeConnection(
+        {
+            "sessions.list": {
+                "sessions": [{
+                    "key": "agent:hermes:joat-123",
+                    "sessionId": "session-1",
+                    "label": "JOAT Agent Terminal",
+                }],
+            },
+            "sessions.describe": {
+                "session": {
+                    "key": "agent:hermes:joat-123",
+                    "sessionId": "session-1",
+                    "label": "JOAT Agent Terminal",
+                    "agentId": "hermes",
+                },
+            },
+            "tools.effective": {
+                "agentId": "hermes",
+                "groups": [{"id": "core", "tools": []}],
+                "notices": [],
+            },
+            "sessions.messages.subscribe": {
+                "subscribed": True,
+                "key": "agent:hermes:joat-123",
+            },
+        }
+    )
+    attestation = RuntimeConnection(
+        {
+            "sessions.list": {
+                "sessions": [{
+                    "key": "agent:hermes:joat-123",
+                    "sessionId": "session-1",
+                    "label": "JOAT Agent Terminal",
+                }],
+            },
+            "sessions.describe": {
+                "session": {
+                    "key": "agent:hermes:joat-123",
+                    "sessionId": "session-1",
+                    "label": "JOAT Agent Terminal",
+                    "agentId": "hermes",
+                },
+            },
+            "tools.effective": {
+                "agentId": "hermes",
+                "groups": [{"id": "core", "tools": []}],
+                "notices": [],
+            },
+        },
+        granted_scopes=("operator.read",),
+    )
+    terminal_factory = RuntimeFactory([initialized])
+    attestation_factory = RuntimeFactory([attestation])
+    agent = OpenClawTerminalAgent(
+        client=terminal_factory,
+        agent_id="hermes",
+        attestation_client=attestation_factory,
+    )
+
+    await agent.initialize()
+    await agent.attest_existing()
+
+    assert terminal_factory.calls == 1
+    assert attestation_factory.calls == 1
+    assert attestation.closed
+    assert [method for method, _ in attestation.calls] == [
+        "sessions.list",
+        "sessions.describe",
+        "tools.effective",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_agent_never_falls_back_to_write_client_for_re_attestation() -> None:
+    initialized = RuntimeConnection(
+        {
+            "sessions.list": {"sessions": []},
+            "sessions.create": {
+                "ok": True,
+                "key": "agent:hermes:joat-123",
+                "sessionId": "session-1",
+                "entry": {
+                    "sessionId": "session-1",
+                    "label": "JOAT Agent Terminal",
+                },
+                "runStarted": False,
+            },
+            "sessions.describe": {
+                "session": {
+                    "key": "agent:hermes:joat-123",
+                    "sessionId": "session-1",
+                    "label": "JOAT Agent Terminal",
+                    "agentId": "hermes",
+                },
+            },
+            "tools.effective": {
+                "agentId": "hermes",
+                "groups": [{"id": "core", "tools": []}],
+                "notices": [],
+            },
+            "sessions.messages.subscribe": {
+                "subscribed": True,
+                "key": "agent:hermes:joat-123",
+            },
+        }
+    )
+    terminal_factory = RuntimeFactory([initialized])
+    agent = OpenClawTerminalAgent(client=terminal_factory, agent_id="hermes")
+
+    await agent.initialize()
+    with pytest.raises(OpenClawGatewayError, match="read-only attestation client"):
+        await agent.attest_existing()
+
+    assert terminal_factory.calls == 1
 
 
 @pytest.mark.asyncio

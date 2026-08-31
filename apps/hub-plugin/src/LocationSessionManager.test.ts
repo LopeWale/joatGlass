@@ -39,13 +39,20 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+async function flushInitialLocationSeed(): Promise<void> {
+  // The continuous stream is live before this optional one-shot response.
+  // Drain its bounded promise chain without turning startup back into a wait.
+  for (let step = 0; step < 5; step += 1) await Promise.resolve();
+}
+
 describe('LocationSessionManager', () => {
   it('owns one ambient host stream and preserves the coarse Mac uplink', async () => {
     const h = harness({ latitude: 35.2, longitude: -97.4, accuracy: 12 });
 
     expect(await h.manager.start()).toBe(true);
+    await flushInitialLocationSeed();
 
-    expect(h.order).toEqual(['listen', 'start']);
+    expect(h.order).toEqual(['start', 'listen']);
     expect(h.bridge.getAppLocation).toHaveBeenCalledWith({
       accuracy: AppLocationAccuracy.Medium,
       timeoutMs: 5000,
@@ -67,6 +74,7 @@ describe('LocationSessionManager', () => {
     const h = harness({ latitude: 35.2, longitude: -97.4, accuracy: 12 });
 
     await h.manager.start();
+    await flushInitialLocationSeed();
 
     expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
       kind: 'location',
@@ -75,6 +83,31 @@ describe('LocationSessionManager', () => {
       accuracy: 12,
       timestamp: Date.now(),
     });
+  });
+
+  it('starts Even continuous location without waiting on the optional initial read', async () => {
+    let resolveInitial: ((location: AppLocation | null) => void) | undefined;
+    const h = harness();
+    h.bridge.getAppLocation.mockImplementationOnce(() => new Promise<AppLocation | null>((resolve) => {
+      resolveInitial = resolve;
+    }));
+
+    await expect(h.manager.start()).resolves.toBe(true);
+
+    expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledWith({
+      accuracy: AppLocationAccuracy.Medium,
+      distanceFilter: 250,
+      intervalMs: 60_000,
+    });
+    expect(h.bridge.onAppLocationChanged).toHaveBeenCalledTimes(1);
+
+    h.emit({ latitude: 41.9, longitude: -87.65, accuracy: 6 });
+    expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
+      kind: 'location', latitude: 41.9, longitude: -87.65, accuracy: 6,
+      timestamp: expect.any(Number),
+    });
+
+    resolveInitial?.(null);
   });
 
   it('switches the one host stream to probe accuracy and back without adding listeners', async () => {
@@ -413,14 +446,15 @@ describe('LocationSessionManager', () => {
     expect(h.bridge.stopAppLocationUpdates).toHaveBeenCalled();
   });
 
-  it('degrades to unavailable when an older host cannot register the location listener', async () => {
+  it('stops the started phone-location stream when an older host cannot register its listener', async () => {
     const h = harness();
     h.bridge.onAppLocationChanged.mockImplementationOnce(() => {
       throw new Error('listener unavailable');
     });
 
     await expect(h.manager.start()).resolves.toBe(false);
-    expect(h.bridge.startAppLocationUpdates).not.toHaveBeenCalled();
+    expect(h.bridge.startAppLocationUpdates).toHaveBeenCalledTimes(1);
+    expect(h.bridge.stopAppLocationUpdates).toHaveBeenCalledTimes(1);
   });
 
   it('stops the host stream and listener during shutdown', async () => {

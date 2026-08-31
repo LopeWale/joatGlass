@@ -831,6 +831,43 @@ describe('CapabilityMenu', () => {
     expect(acknowledged).toBe(1);
   });
 
+  it('starts a deferred terminal return only after the outcome is actually visible', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, deferredProductivityVisibleCallbacks, sent } = rig(
+        true, true, true, false,
+      );
+      expect(await menu.presentProductivity({
+        domain: 'calendar',
+        phase: 'not_saved',
+        title: 'Unsaved Calendar probe',
+        primary: 'Not saved',
+        secondary: 'No calendar item was changed.',
+        hint: 'Back to Planning: left x2 · auto in 5s',
+        planningAnchorUnixMs: 1_788_274_200_000,
+      })).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sent).toEqual([]);
+
+      deferredProductivityVisibleCallbacks[0]?.();
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(sent).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        kind: 'input',
+        event: {
+          containerName: 'capmenu',
+          selectedName: 'Planning',
+          planningAnchorUnixMs: 1_788_274_200_000,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     { domain: 'calendar', phase: 'saved' },
     { domain: 'calendar', phase: 'failed' },

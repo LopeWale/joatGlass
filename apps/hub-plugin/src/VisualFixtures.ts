@@ -74,7 +74,11 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
         screen: 'brainstorm', state: 'running', topic: 'How should JOAT plan today?',
         collaborators: ['Codex · proposer', 'Claude · critic', 'Hermes · terminal'],
         activeSpeaker: 'Hermes · terminal',
-        activity: 'Comparing the proposal against constraints and next actions.',
+        activity: [
+          'CODEX > Keep the next step explicit.',
+          'CLAUDE > Verify the calendar before committing.',
+          'HERMES > I can turn that into a bounded action.',
+        ].join('\n'),
         endpointHost: terminalReady.endpointHost,
         terminalState: 'running', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
       };

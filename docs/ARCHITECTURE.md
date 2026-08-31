@@ -15,7 +15,7 @@
 | Audio pipeline | `joat/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
 | HUD renderer | `joat/display` | 576×288 canvas, text containers, cards, differential page updates |
 | Reasoning | `joat/services` | Orchestrator: route utterances to MLX (fast path) or Brainstorm (planning path; `debate` remains a compatibility trigger) |
-| Brainstorm agents | `joat/agents` | `SubprocessAgent` (Codex + Claude CLIs), paired private-WSS `OpenClawTerminalAgent` (optional third seat), local MLX judge; `RoundTable` seats them |
+| Brainstorm agents | `joat/agents` | `SubprocessAgent` (Codex + Claude CLIs), paired private-WSS `OpenClawTerminalAgent` (required Hermes seat for wearable Brainstorm), local MLX judge; `RoundTable` seats them |
 | Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
 | Channels | `joat/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |
 | Computer use | `joat/computeruse` | cua driver in Lume sandbox (Mac), iPhone Mirroring + OCR + Karabiner (iOS) |
@@ -125,10 +125,12 @@ quietly drop them:
   `stream(prompt) -> AsyncIterator[str]`, which the codex CLI, the claude
   CLI, and the OpenClaw terminal all already satisfy. Who is actually seated
   is a runtime fact: absent binaries and an unavailable or unsafe Agent
-  Terminal are simply not at the table, and Brainstorm needs two. The OpenClaw
-  seat is admitted only after exact operator scopes, dedicated session
-  identity, route isolation, and an empty `tools.effective` inventory have all
-  been verified. It never adopts `main` or Telegram sessions.
+  Terminal are not admitted. Wearable Brainstorm needs its three idle-ready seats—Codex,
+  Claude, and Hermes—so a missing Hermes session renders the retryable Agent
+  Terminal state rather than a local-only round. The OpenClaw seat is admitted
+  only after exact operator scopes, dedicated session identity, route
+  isolation, and an empty `tools.effective` inventory have all been verified.
+  It never adopts `main` or Telegram sessions.
 - **A failure is visible but never quotable.** A failing CLI prints its
   complaint on *stdout* (`claude -p` exits 1 and says "You're out of usage
   credits"), so only the exit code separates an answer from an error. A

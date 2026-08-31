@@ -36,7 +36,11 @@ from .agents.openclaw_gateway import (
     OpenClawPairingRequired,
 )
 from .agents.openclaw_native import NativeOpenClawCredentials
-from .agents.openclaw_runtime import OpenClawRuntimeConfig, OpenClawTerminalAgent
+from .agents.openclaw_runtime import (
+    OpenClawRuntimeConfig,
+    OpenClawTerminalAgent,
+    terminal_ready_activity,
+)
 from .agents.openclaw_terminal import (
     OpenClawToolInventoryUnsettled,
     OpenClawToolsEnabled,
@@ -385,10 +389,10 @@ async def main() -> None:
     status.set(llm="available" if replier is not None else "off")
     hud = HudWriter(transport)
     # Who is at the table is a RUNTIME fact: each collaborator is a binary or
-    # a daemon that may simply not be installed. For the Brainstorm table,
-    # OpenClaw is the optional third seat, so it is probed rather than assumed
-    # — an unreachable gateway costs Brainstorm a voice, never the local
-    # productivity boundary.
+    # a daemon that may simply not be installed. For the wearable Brainstorm,
+    # Hermes is a required isolated OpenClaw seat—not an optional third voice.
+    # If it is unavailable, the lenses stay on the recoverable Agent Terminal
+    # surface rather than quietly starting a local-only conversation.
     # Models the wearer can change by voice while this is running. Slots are
     # read PER TURN, so a switch lands on the next turn instead of the next
     # launch. Whisper is the one that needs work to apply: it holds weights
@@ -485,9 +489,17 @@ async def main() -> None:
                     capabilities=("tool-events",),
                     policy=BRAINSTORM_TERMINAL_POLICY,
                 )
+                attestation_client = OpenClawGatewayClient(
+                    profile=openclaw_config.profile,
+                    identity=credentials,
+                    token_store=credentials,
+                    scopes=("operator.read",),
+                    policy=BRAINSTORM_TERMINAL_POLICY,
+                )
                 candidate = OpenClawTerminalAgent(
                     client=gateway_client,
                     agent_id=openclaw_config.agent_id,
+                    attestation_client=attestation_client,
                     policy=BRAINSTORM_TERMINAL_POLICY,
                     state_changed=publish_terminal_state,
                 )
@@ -614,22 +626,34 @@ async def main() -> None:
         ("claude", "critic", critic(models.provider("claude"))),
     ]
 
-    def current_seated() -> list[tuple[str, str, object]]:
+    def ready_hermes_terminal() -> OpenClawTerminalAgent | None:
         terminal = status.agent_terminal_projection()
-        remote = openclaw_terminal if terminal["state"] in {"ready", "running"} else None
+        # ``running`` means this one serialized terminal is already streaming
+        # a turn. It is healthy, but it is not available to start a second
+        # Brainstorm. Only the quiescent, preflight-verified state is an
+        # admission to a new wearer session.
+        if terminal["state"] != "ready":
+            return None
+        return openclaw_terminal
+
+    def current_seated() -> list[tuple[str, str, object]]:
+        remote = ready_hermes_terminal()
         current = [(name, role, agent) for name, role, agent in seats if agent]
         if remote is not None:
             current.append(("openclaw", "agent terminal", remote))
         return current
 
+    def brainstorm_available() -> bool:
+        return ready_hermes_terminal() is not None
+
     initial_seated = current_seated()
     absent = ["openclaw"] if openclaw_terminal is None else []
-    if len(initial_seated) >= 2:
+    if brainstorm_available() and len(initial_seated) >= 3:
         log.info("round table: %s%s",
                  ", ".join(f"{n} ({r})" for n, r, _ in initial_seated),
                  f" — absent: {', '.join(absent)}" if absent else "")
     else:
-        log.warning("debate unavailable — need 2 collaborators, have %d (absent: %s)",
+        log.warning("brainstorm unavailable — Hermes is required; have %d seats (absent: %s)",
                     len(initial_seated), ", ".join(absent))
 
     claim_judge = MiniCheckJudge() if minicheck_available() else None
@@ -653,9 +677,14 @@ async def main() -> None:
         log.info("navigation provider unavailable (MAPBOX_ACCESS_TOKEN not configured)")
 
     def make_debate(topic: str) -> Session | None:
-        # A debate needs someone to disagree with; one seat is a monologue.
+        # Hermes is a required collaborator for wearable Brainstorm. The
+        # SessionManager has already painted its recovery frame if this
+        # condition is false; retain the guard for direct/internal callers.
+        if not brainstorm_available():
+            return None
+        # A Brainstorm needs someone to disagree with; one seat is a monologue.
         seated = current_seated()
-        if len(seated) < 2:
+        if len(seated) < 3:
             return None
         return DebateSession(
             topic,
@@ -710,9 +739,52 @@ async def main() -> None:
             phase="opening" if state == "running" else "closing",
         )
 
+    def wearer_terminal_reason(terminal: dict[str, str | bool]) -> str:
+        """Translate compact engine state into the exact G2 recovery copy.
+
+        The status projection deliberately stores fixed reason codes. Those
+        are useful to the engine but are not an instruction a wearer should
+        have to decode on the lenses.
+        """
+
+        state = str(terminal["state"])
+        reason = str(terminal["reason"])
+        if state == "approval_required":
+            return "Approve the JOAT device in OpenClaw, then tap retry."
+        if state == "unavailable" and reason == "endpoint_missing":
+            return "Hermes is not configured on this home brain."
+        if state == "unavailable":
+            return "Hermes is unavailable; retry when the Mac connection recovers."
+        if state == "blocked" and reason == "tools_enabled":
+            return "Hermes tools are enabled; this JOAT session remains blocked."
+        if state == "blocked" and reason == "dedicated_session_not_proven":
+            return "Hermes session isolation is not proven yet; tap retry."
+        if state == "running":
+            return "Hermes is finishing its current response; wait for ready."
+        return "Hermes needs recovery before it can begin a Brainstorm."
+
     def topic_capture_view(armed: bool) -> BrainstormHudView:
         """Show the explicit one-utterance capture or its cleared recovery."""
         terminal = status.agent_terminal_projection()
+        if not brainstorm_available():
+            state = str(terminal["state"])
+            activity = (
+                "Hermes is finishing the current response. Wait for ready."
+                if state == "running"
+                else "Hermes is required for Brainstorm. Tap to retry."
+            )
+            return BrainstormHudView(
+                screen="agent_terminal",
+                state=state,
+                topic="Hermes Agent Terminal",
+                collaborators=[],
+                activity=activity,
+                terminal_state=state,
+                endpoint_host=str(terminal["endpoint_host"]),
+                terminal_reason=wearer_terminal_reason(terminal),
+                no_tools_checked=bool(terminal["no_tools_checked"]),
+                acceptance_armed=False,
+            )
         labels = [
             "Hermes" if name == "openclaw" else name.capitalize()
             for name, _role, _agent in current_seated()
@@ -728,7 +800,7 @@ async def main() -> None:
             ),
             terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
+            terminal_reason=wearer_terminal_reason(terminal),
             no_tools_checked=bool(terminal["no_tools_checked"]),
             acceptance_armed=args.g2_diagnostics,
         )
@@ -763,8 +835,12 @@ async def main() -> None:
         )
         status.set_agent_terminal(state="running", reason="")
         await show_terminal_retry_view("Checking the dedicated Hermes session…")
+        was_initialized = candidate.initialized
         try:
-            await candidate.initialize()
+            if was_initialized:
+                await candidate.attest_existing()
+            else:
+                await candidate.initialize()
         except OpenClawPairingRequired:
             status.set_openclaw(
                 state="approval_required",
@@ -819,12 +895,13 @@ async def main() -> None:
                 reason="",
             )
             status.set_agent_terminal(state="ready", reason="")
-            await show_terminal_retry_view("Dedicated no-tool session ready. Tap to begin a Brainstorm.")
+            await show_terminal_retry_view(terminal_ready_activity(reverified=was_initialized))
 
     initial_count = len(current_seated())
-    status.set(debate=f"{initial_count} seats" if initial_count >= 2 else "unavailable")
+    initial_brainstorm_ready = brainstorm_available() and initial_count >= 3
+    status.set(debate=f"{initial_count} seats" if initial_brainstorm_ready else "Hermes unavailable")
     status.set_brainstorm(
-        state="ready" if initial_count >= 2 else "unavailable",
+        state="ready" if initial_brainstorm_ready else "unavailable",
         seat_count=initial_count,
         phase="idle",
     )
@@ -836,6 +913,7 @@ async def main() -> None:
         starters=[make_navigation],
         terminal_retry=retry_openclaw_terminal,
         topic_capture_view=topic_capture_view,
+        brainstorm_available=brainstorm_available,
     )
 
     def active_navigation() -> NavigationSession | NavigationUnavailableSession | None:

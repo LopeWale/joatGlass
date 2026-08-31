@@ -3,8 +3,9 @@
 
 This is a causal product-path check, not a visual-fixture gallery. It runs the
 current Hub source in the official Even simulator, connects it to a real
-``HubGatewayTransport``, opens Agent Terminal through ``CapabilityRouter``,
-and drives the production ``EventRouter`` with the simulator input API.
+``HubGatewayTransport``, opens the actual Brainstorm capability through
+``CapabilityRouter`` (including its Hermes-required recovery state), and
+drives the production ``EventRouter`` with the simulator input API.
 
 The fixed acceptance controller retains only allowlisted gesture metadata and
 completed HUD-frame SHA-256 digests. A deterministic, content-free Hermes
@@ -35,6 +36,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from joat.ble.hub_gateway import HubGatewayTransport
+from joat.agents.openclaw_runtime import terminal_ready_activity
 from joat.channels.cards import CardLog
 from joat.core.protocol import BrainstormAction, BrainstormHudView, DownlinkMessage
 from joat.services.brainstorm_acceptance import (
@@ -46,6 +48,7 @@ from joat.services.brainstorm_acceptance import (
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
 from joat.services.session import SessionManager
+from joat.services.sinks import HudSink
 from joat.services.status import StatusPublisher
 
 
@@ -116,7 +119,7 @@ class DeterministicHermes:
 T = TypeVar("T")
 
 _EXPECTED_FLOW = (
-    ("terminal-approval-required", None, None, "agent_terminal", "approval_required", False),
+    ("brainstorm-hermes-required", None, None, "agent_terminal", "approval_required", False),
     ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready", False),
     ("daily-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture", False),
     ("daily-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready", False),
@@ -130,6 +133,10 @@ _EXPECTED_FLOW = (
     ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
     ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
     ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
+)
+_VISUAL_ONLY_ARTIFACTS = (
+    "dense-transcript-preview",
+    "hermes-busy",
 )
 
 _SAFE_ARTIFACT_NAME = re.compile(r"^[0-9]{2}-[a-z-]+\.(?:rgba|optical)\.png$")
@@ -264,7 +271,7 @@ def validate_visual_artifacts(artifacts: dict[str, dict[str, str]]) -> None:
     screenshot pixels stay out of the JSON receipt.
     """
 
-    expected = [item[0] for item in _EXPECTED_FLOW]
+    expected = [item[0] for item in _EXPECTED_FLOW] + list(_VISUAL_ONLY_ARTIFACTS)
     if list(artifacts) != expected:
         raise BrainstormActionFlowError("simulator optical artifacts do not match the driven HUD flow")
     for index, state in enumerate(expected, start=1):
@@ -535,6 +542,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     )
     status.set_agent_terminal(state="approval_required", reason="write_scope_required")
     def topic_capture_view(capturing: bool) -> BrainstormHudView:
+        terminal_state = str(status.agent_terminal_projection()["state"])
+        if terminal_state != "ready":
+            return BrainstormHudView(
+                screen="agent_terminal",
+                state=terminal_state,
+                topic="Hermes Agent Terminal",
+                collaborators=[],
+                activity="Hermes is required for Brainstorm. Tap to retry.",
+                terminal_state=terminal_state,
+                no_tools_checked=False,
+            )
         return BrainstormHudView(
             screen="brainstorm",
             state="topic_capture" if capturing else "ready",
@@ -565,13 +583,26 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             reason="",
         )
         status.set_agent_terminal(state="ready", reason="")
-        await capabilities.open("Agent Terminal")
+        await hud.show_brainstorm(BrainstormHudView(
+            screen="agent_terminal",
+            state="ready",
+            topic="Hermes Agent Terminal",
+            collaborators=[],
+            activity=terminal_ready_activity(reverified=True),
+            terminal_state="ready",
+            endpoint_host="simulator-only",
+            terminal_reason="",
+            no_tools_checked=True,
+        ))
 
     sessions = SessionManager(
         hud,
         lambda _topic: None,
         topic_capture_view=topic_capture_view,
         terminal_retry=retry_terminal,
+        brainstorm_available=lambda: (
+            str(status.agent_terminal_projection()["state"]) == "ready"
+        ),
     )
     capabilities = CapabilityRouter(
         hud=hud,
@@ -662,32 +693,33 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         except asyncio.TimeoutError as exc:
             raise BrainstormActionFlowError("simulator authenticated but never sent Hello") from exc
 
-        # Open the real Agent Terminal capability producer. The simulator
-        # cannot inject the left-temple sidebar gesture that selects this row,
-        # so sidebar ingress remains a physical G2 gate. It can drive the
-        # terminal's own retry gesture, which must recover from a truthful
-        # approval-required frame without displaying a raw internal code.
-        await capabilities.open("Agent Terminal")
+        # Open the real Brainstorm capability producer while Hermes is not
+        # ready. The simulator cannot inject the left-temple sidebar gesture
+        # that selects this row, so sidebar ingress remains a physical G2
+        # gate. It *does* prove that the production Brainstorm row exposes a
+        # truthful terminal recovery surface and that its tap retries Hermes
+        # instead of silently opening a local-only session.
+        await capabilities.open("Brainstorm")
         terminal_approval = await _wait_for(
             lambda: _last_brainstorm(
                 gateway,
                 screen="agent_terminal",
                 state="approval_required",
             ),
-            label="approval-required Agent Terminal capability",
+            label="Hermes-required Brainstorm capability",
         )
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "01-terminal-approval-required",
+            "01-brainstorm-hermes-required",
             None,
         )
         receipts.append(ScreenReceipt(
-            "terminal-approval-required", None, None,
+            "brainstorm-hermes-required", None, None,
             terminal_approval.screen, terminal_approval.state,
             terminal_approval.acceptance_armed, digest,
         ))
-        artifacts["terminal-approval-required"] = {"raw": raw, "optical": optical}
+        artifacts["brainstorm-hermes-required"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
@@ -707,6 +739,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="ready Agent Terminal after retry",
         )
+        if terminal_ready.activity != terminal_ready_activity(reverified=True):
+            raise BrainstormActionFlowError("terminal retry did not render fresh attestation copy")
         digest, raw, optical = await _capture(
             automation_base,
             output,
@@ -1027,6 +1061,59 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         if not isinstance(acceptance, dict):
             raise BrainstormActionFlowError("acceptance receipt must be an object")
         validate_flow(receipts, acceptance)
+
+        # This is deliberately separate from the causal receipt above. It
+        # exercises the production Mac HUD producer with a fixed, content-free
+        # three-speaker tail so visual review can judge the dense transcript
+        # geometry without retaining any user or OpenClaw text as evidence.
+        density_sink = HudSink(
+            hud,
+            lambda: {
+                "state": "ready",
+                "reason": "",
+                "endpoint_host": "simulator-only",
+                "no_tools_checked": True,
+            },
+        )
+        await density_sink.open("Terminal density check", ["codex", "claude", "hermes"])
+        await density_sink.turn("codex (proposer)")
+        await density_sink.chunk("Keep the next step reversible.")
+        await density_sink.turn("claude (critic)")
+        await density_sink.chunk("Verify the calendar state first.")
+        await density_sink.turn("hermes (agent terminal)")
+        await density_sink.chunk("Stage one safe action after confirmation.")
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "12-dense-transcript-preview",
+            digest,
+        )
+        artifacts["dense-transcript-preview"] = {"raw": raw, "optical": optical}
+
+        # A healthy terminal that is currently streaming is deliberately not
+        # an admission to a second Brainstorm. Exercise the real capability
+        # route and retain only its optical frame—not a transcript or payload.
+        status.set_agent_terminal(state="running", reason="")
+        sent_before = len(gateway.sent)
+        await capabilities.open("Brainstorm")
+        busy = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before,
+                screen="agent_terminal",
+                state="running",
+            ),
+            label="busy Hermes Brainstorm recovery",
+        )
+        if busy.activity != "Hermes is finishing the current response. Wait for ready.":
+            raise BrainstormActionFlowError("busy Hermes recovery copy is not truthful")
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "13-hermes-busy",
+            digest,
+        )
+        artifacts["hermes-busy"] = {"raw": raw, "optical": optical}
         validate_visual_artifacts(artifacts)
 
         return {
@@ -1044,6 +1131,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             },
             "receipts": [asdict(item) for item in receipts],
             "artifacts": artifacts,
+            "visualDensityPreview": {
+                "kind": "fixed_content_free_producer_sample",
+                "framebufferSha256": digest,
+                "retainedInReceipt": False,
+            },
             "acceptanceReceipt": {
                 "file": str(receipt_path.relative_to(output)),
                 "sha256": file_sha256(receipt_path),

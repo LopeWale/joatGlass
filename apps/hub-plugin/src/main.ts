@@ -218,9 +218,10 @@ async function boot(): Promise<void> {
   // arrives. It has no screen, location, device, or wearer data.
   const firstLightReceipt: G2TraceEvent[] = [];
   let firstLightReceiptDelivered = false;
-  // The Even host exposes one unkeyed location stream. Keep one owner that
-  // switches between the existing ambient contract and an explicit Gate-0
-  // high-accuracy probe instead of racing independent start/stop callers.
+  // The Even host exposes one unkeyed iPhone-location stream. Keep one owner
+  // that switches between ambient context, an explicit diagnostic probe, and
+  // an active high-accuracy route instead of racing independent start/stop
+  // callers.
   const location = new LocationSessionManager(client, link, g2Diagnostics);
   let navigationRef: NavigationController | undefined;
   let hudRef: HudPresenter | undefined;

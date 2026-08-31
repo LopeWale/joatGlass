@@ -45,6 +45,13 @@ CONNECTION_CLOSE_TIMEOUT_S = 1.0
 HERMES_CONTROL_DASHBOARD_PORT = 9443
 
 
+def terminal_ready_activity(*, reverified: bool) -> str:
+    """Return the short wearable confirmation for terminal readiness."""
+    if reverified:
+        return "Dedicated no-tool session re-verified. Tap to begin a Brainstorm."
+    return "Dedicated no-tool session ready. Tap to begin a Brainstorm."
+
+
 class OpenClawHistoryRecoveryRequired(OpenClawGatewayError):
     """The exact run outcome cannot be attributed after transport loss."""
 
@@ -205,12 +212,21 @@ class OpenClawTerminalAgent:
 
     client: OpenClawConnectionFactory
     agent_id: str
+    # The persistent terminal needs write authority to send a Brainstorm turn.
+    # A wearer-selected re-attestation must never reuse that client: it proves
+    # the existing terminal through a fresh operator.read-only connection.
+    attestation_client: OpenClawConnectionFactory | None = None
     policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY
     state_changed: Callable[[str, str], None] | None = None
     _terminal: OpenClawAgentTerminal | None = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _closed: bool = field(default=False, init=False)
     _stream_task: asyncio.Task[object] | None = field(default=None, init=False)
+
+    @property
+    def initialized(self) -> bool:
+        """Whether normal setup already owns a subscribed terminal connection."""
+        return self._terminal is not None
 
     async def initialize(self) -> None:
         if self._closed:
@@ -232,6 +248,37 @@ class OpenClawTerminalAgent:
         except BaseException:
             await _safe_close(connection)
             raise
+
+    async def attest_existing(self) -> None:
+        """Use a fresh, read-only Gateway connection to re-prove the terminal.
+
+        The persistent connection remains untouched.  This operation is used
+        only after the wearer asks to retry an already-ready Agent Terminal.
+        """
+        async with self._lock:
+            if self._closed:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            if self._terminal is None:
+                raise OpenClawGatewayError(
+                    "OpenClaw Agent Terminal must be initialized before attestation"
+                )
+            attestation_client = self.attestation_client
+            if attestation_client is None:
+                raise OpenClawGatewayError(
+                    "OpenClaw Agent Terminal has no read-only attestation client"
+                )
+            connection = await attestation_client.connect()
+            if self._closed:
+                await _safe_close(connection)
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            try:
+                await OpenClawAgentTerminal.attest_existing(
+                    connection=connection,
+                    agent_id=self.agent_id,
+                    policy=self.policy,
+                )
+            finally:
+                await _safe_close(connection)
 
     async def stream(self, prompt: str) -> AsyncGenerator[str, None]:
         async with self._lock:

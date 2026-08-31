@@ -74,6 +74,8 @@ SessionFactory = Callable[[str], Session | None]
 SessionStarter = Callable[[str], Session | None]
 TopicCaptureView = Callable[[bool], BrainstormHudView]
 """Build the Brainstorm frame for an armed capture or its cleared recovery."""
+BrainstormAvailable = Callable[[], bool]
+"""Whether the required remote Brainstorm collaborator is ready right now."""
 
 
 class SessionManager:
@@ -88,6 +90,7 @@ class SessionManager:
         starters: Sequence[SessionStarter] = (),
         terminal_retry: Callable[[], Awaitable[None]] | None = None,
         topic_capture_view: TopicCaptureView | None = None,
+        brainstorm_available: BrainstormAvailable | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
@@ -99,6 +102,7 @@ class SessionManager:
         self._starters = list(starters)
         self._terminal_retry = terminal_retry
         self._topic_capture_view = topic_capture_view
+        self._brainstorm_available = brainstorm_available
         # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
         # not decoration. Keep it explicit so the next wearer phrase starts
         # the round without requiring them to repeat the capability name.
@@ -277,6 +281,13 @@ class SessionManager:
         if action.action == "begin_topic_capture" and active is None:
             if self._topic_capture_armed:
                 return
+            if not self._brainstorm_is_available():
+                # A glasses tap must never promise an ordinary local
+                # Brainstorm when the required Hermes seat is unavailable.
+                # The cleared view is supplied by the host and renders the
+                # current Agent Terminal recovery state on the lenses.
+                self._show_topic_capture(armed=False)
+                return
             self._topic_capture_armed = True
             self._show_topic_capture(armed=True)
             return
@@ -345,11 +356,25 @@ class SessionManager:
             task.cancel()
 
     def _start(self, topic: str) -> bool:
+        if not self._brainstorm_is_available():
+            # Consume an explicit "brainstorm" request rather than falling
+            # through to the unrelated assistant. The wearer receives the
+            # same terminal recovery frame as a glasses tap, and can retry
+            # it from the glasses when the dedicated Hermes seat recovers.
+            self._topic_capture_armed = False
+            self._show_topic_capture(armed=False)
+            log.info("brainstorm requested while required terminal is unavailable")
+            return True
         session = self._factory(topic)
         if session is None:
             log.warning("debate requested but agents unavailable")
             return False
         return self.try_start_session(session, publish_state=True)
+
+    def _brainstorm_is_available(self) -> bool:
+        """Keep legacy embeddings permissive until they opt into the policy."""
+        available = self._brainstorm_available
+        return available is None or available()
 
     def try_start_session(self, session: Session, *, publish_state: bool = False) -> bool:
         """Atomically reserve the single wearer session for a typed trigger."""
@@ -409,10 +434,11 @@ class DebateSession(Session):
     background debate that only reported a verdict would violate the stated
     requirement, where visibility IS the proof it was debated.
 
-    N participants rather than a hardcoded proposer/critic pair is what lets
-    OpenClaw take a third seat without a second debate implementation to
-    drift out of sync — and at two seats this reduces exactly to the
-    propose → critique → judge loop it replaced.
+    N participants rather than a hardcoded proposer/critic pair lets the
+    required Hermes seat join the same round-table implementation without a
+    second Brainstorm path drifting out of sync. Legacy embeddings may still
+    host two seats, but the wearable host opts into the Hermes admission
+    policy before it creates this session.
     """
 
     SOURCES_CONTRACT = (

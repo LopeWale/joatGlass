@@ -7,12 +7,12 @@ and the ordinary confirmation protocol.  It deliberately binds an isolated
 loopback port and creates a disposable simulator-only manifest, so it cannot
 replace the user's app-launched engine or a connected G2 on port 8787.
 
-This is renderer-and-gesture evidence only.  Successful Calendar creation,
-Reminder creation, monitoring, and Reminder completion are produced by the
-production ``ProductivityActionController`` against a disposable native-shaped
-fixture; it never writes EventKit and must not be used as native write or
-physical-G2 proof.  Fallback outcome frames remain typed downlink rendering
-checks.  A due view additionally checks the live Hub-plugin acceptance
+This is renderer-and-gesture evidence only. Calendar creation, Reminder
+creation, monitoring, Reminder completion, and their adverse confirmation or
+write outcomes are produced by the production ``ProductivityActionController``
+against a disposable native-shaped fixture; it never writes EventKit and must
+not be used as native write or physical-G2 proof. A due view additionally
+checks the live Hub-plugin acceptance
 receipt, which is still distinct from pixels on a physical G2 or OS
 notification delivery.
 """
@@ -43,12 +43,14 @@ from urllib.parse import urlsplit
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.channels.cards import CardLog
+from joat.core.confirmation import ConfirmationResult
 from joat.core.protocol import (
     DownlinkMessage,
     HudList,
     ProductivityHudView,
     ProductivityViewAck,
 )
+from joat.native.bridge import NativeBridgeError
 from joat.persistence.actions import ActionJournal
 from joat.persistence.store import DurableStore
 from joat.persistence.tasks import TaskOccurrenceStore
@@ -68,9 +70,15 @@ VisualTrigger = Literal[
     "command_dispatch",
     "confirmed_tap",
     "native_readback",
-    "typed_downlink",
+    "native_outcome",
+    "declined_swipe",
+    "confirmation_channel_failure",
     "due_dispatch",
 ]
+WriteOutcome = Literal["success", "failed", "uncertain"]
+AdverseWriteOutcome = Literal["failed", "uncertain"]
+AdverseTerminalPhase = Literal["failed", "check"]
+NoWritePhase = Literal["cancelled", "not_saved"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,13 +126,19 @@ _EXPECTED_FLOW = (
     ("calendar-verifying", "click", True, "verifying"),
     ("calendar-saved", None, None, "saved"),
     ("calendar-return-planning", None, None, "day"),
+    ("calendar-failed-review", None, None, "review"),
+    ("calendar-failed-verifying", "click", True, "verifying"),
     ("calendar-failed", None, None, "failed"),
     ("calendar-failed-return-planning", None, None, "day"),
+    ("calendar-uncertain-review", None, None, "review"),
+    ("calendar-uncertain-verifying", "click", True, "verifying"),
     ("calendar-uncertain", None, None, "check"),
     ("calendar-uncertain-return-planning", None, None, "day"),
-    ("calendar-cancelled", None, None, "cancelled"),
+    ("calendar-cancelled-review", None, None, "review"),
+    ("calendar-cancelled", "down", False, "cancelled"),
     ("calendar-cancelled-return-planning", None, None, "day"),
-    ("calendar-not-saved", None, None, "not_saved"),
+    ("calendar-not-saved-review", None, None, "review"),
+    ("calendar-not-saved", "down after channel failure", None, "not_saved"),
     ("calendar-not-saved-return-planning", None, None, "day"),
     ("reminders-review", None, None, "review"),
     ("reminders-verifying", "click", True, "verifying"),
@@ -136,13 +150,19 @@ _EXPECTED_FLOW = (
     ("reminders-completing", "click", True, "verifying"),
     ("reminders-completed", None, None, "completed"),
     ("reminders-completed-return-planning", None, None, "day"),
+    ("reminders-failed-review", None, None, "review"),
+    ("reminders-failed-verifying", "click", True, "verifying"),
     ("reminders-failed", None, None, "failed"),
     ("reminders-failed-return-planning", None, None, "day"),
+    ("reminders-uncertain-review", None, None, "review"),
+    ("reminders-uncertain-verifying", "click", True, "verifying"),
     ("reminders-uncertain", None, None, "check"),
     ("reminders-uncertain-return-planning", None, None, "day"),
-    ("reminders-cancelled", None, None, "cancelled"),
+    ("reminders-cancelled-review", None, None, "review"),
+    ("reminders-cancelled", "down", False, "cancelled"),
     ("reminders-cancelled-return-planning", None, None, "day"),
-    ("reminders-not-saved", None, None, "not_saved"),
+    ("reminders-not-saved-review", None, None, "review"),
+    ("reminders-not-saved", "down after channel failure", None, "not_saved"),
     ("reminders-not-saved-return-planning", None, None, "day"),
 )
 
@@ -211,6 +231,9 @@ class RecordingGateway(HubGatewayTransport):
         self.reminder_due_requests: list[ProductivityHudView] = []
         self._presentation_receipts: dict[str, int] = {}
         self._accepted_presentation_receipts: set[str] = set()
+        self._fail_next_confirmation = False
+        self._confirmation_failure_ready = asyncio.Event()
+        self._release_confirmation_failure = asyncio.Event()
         self.on_productivity_view_ack(self._record_presentation_ack)
 
     def _record_presentation_ack(self, acknowledgement: ProductivityViewAck) -> None:
@@ -258,7 +281,34 @@ class RecordingGateway(HubGatewayTransport):
 
     async def request_confirmation(self, action_id: str, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
         self.confirmation_requests.append(action_id)
-        return await super().request_confirmation(action_id, *args, **kwargs)
+        if not self._fail_next_confirmation:
+            return await super().request_confirmation(action_id, *args, **kwargs)
+        self._fail_next_confirmation = False
+        pending = asyncio.create_task(
+            super().request_confirmation(action_id, *args, **kwargs)
+        )
+        await _wait_for(
+            lambda: action_id if action_id in self._pending_confirms else None,
+            label="simulated confirmation channel reached the admitted client",
+        )
+        self._confirmation_failure_ready.set()
+        await self._release_confirmation_failure.wait()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        raise RuntimeError("simulator forced confirmation channel failure")
+
+    def hold_next_confirmation_failure(self) -> None:
+        """Show the real preview, then let the driver sever its evidence path."""
+
+        self._fail_next_confirmation = True
+        self._confirmation_failure_ready.clear()
+        self._release_confirmation_failure.clear()
+
+    async def wait_for_confirmation_failure_boundary(self) -> None:
+        await asyncio.wait_for(self._confirmation_failure_ready.wait(), timeout=5)
+
+    def release_confirmation_failure(self) -> None:
+        self._release_confirmation_failure.set()
 
     async def request_reminder_due_ack(
         self,
@@ -303,6 +353,7 @@ class FixtureEventKitBridge:
         self._write_entered = asyncio.Event()
         self._release_write = asyncio.Event()
         self._release_write.set()
+        self._write_outcome: WriteOutcome = "success"
         self.write_methods: list[str] = []
 
     @staticmethod
@@ -326,11 +377,16 @@ class FixtureEventKitBridge:
             store_generation=1,
         )
 
-    def hold_next_write(self) -> None:
+    def hold_next_write(
+        self,
+        *,
+        outcome: WriteOutcome = "success",
+    ) -> None:
         """Stop a synthetic native write after the real verifying publication."""
 
         self._write_entered.clear()
         self._release_write.clear()
+        self._write_outcome = outcome
 
     async def wait_for_write(self) -> None:
         try:
@@ -345,6 +401,21 @@ class FixtureEventKitBridge:
         self.write_methods.append(method)
         self._write_entered.set()
         await self._release_write.wait()
+        outcome, self._write_outcome = self._write_outcome, "success"
+        if outcome == "failed":
+            raise NativeBridgeError(
+                "simulator_precommit_failure",
+                "simulator forced a definite pre-commit failure",
+                retryable=False,
+                commit_phase="not_committed",
+            )
+        if outcome == "uncertain":
+            raise NativeBridgeError(
+                "simulator_ambiguous_commit",
+                "simulator forced an ambiguous post-send failure",
+                retryable=False,
+                commit_phase="committed_unknown",
+            )
 
     @staticmethod
     def _resolved_time(civil: object) -> tuple[int, int]:
@@ -403,6 +474,9 @@ class FixtureEventKitBridge:
             ])
         if method == "calendar.create":
             await self._write_boundary(method)
+            offsets = params.get("alarm_offsets_seconds", [])
+            if not isinstance(offsets, list):
+                raise ProductivityHudFlowError("fixture calendar alarms were malformed")
             result = {
                 "calendar_item_identifier": "fixture-event-submit-proposal",
                 "calendar_identifier": params.get("calendar_identifier"),
@@ -413,7 +487,7 @@ class FixtureEventKitBridge:
                 "time_zone_id": params.get("time_zone_id"),
                 "alarms": [
                     {"relative_offset_seconds": -int(offset), "absolute_unix_ms": None}
-                    for offset in params.get("alarm_offsets_seconds", [])
+                    for offset in offsets
                 ],
             }
             self._events.append({key: value for key, value in result.items() if key != "alarms"})
@@ -426,6 +500,9 @@ class FixtureEventKitBridge:
             due_unix_ms = params.get("resolved_due_unix_ms")
             if not isinstance(due, dict) or isinstance(due_unix_ms, bool) or not isinstance(due_unix_ms, int):
                 raise ProductivityHudFlowError("fixture reminder create request was malformed")
+            offsets = params.get("alarm_offsets_seconds", [])
+            if not isinstance(offsets, list):
+                raise ProductivityHudFlowError("fixture reminder alarms were malformed")
             result = {
                 "calendar_item_identifier": "fixture-reminder-prepare-report",
                 "calendar_identifier": params.get("calendar_identifier"),
@@ -434,7 +511,7 @@ class FixtureEventKitBridge:
                 "is_completed": False,
                 "alarms": [
                     {"relative_offset_seconds": None, "absolute_unix_ms": due_unix_ms - int(offset) * 1_000}
-                    for offset in params.get("alarm_offsets_seconds", [])
+                    for offset in offsets
                 ],
             }
             self._reminders.append({
@@ -726,8 +803,11 @@ async def _input(automation_base: str, action: str) -> None:
 
 
 def _view(
-    domain: str,
-    phase: str,
+    domain: Literal["calendar", "reminders"],
+    phase: Literal[
+        "verifying", "saved", "monitoring", "completed", "failed",
+        "check", "cancelled", "not_saved", "due",
+    ],
     *,
     title: str,
     primary: str,
@@ -785,6 +865,7 @@ async def _drive_controller_write(
     receipts: list[ScreenReceipt],
     artifacts: dict[str, dict[str, str]],
     latencies: list[VisualLatency],
+    write_outcome: WriteOutcome = "success",
 ) -> tuple[str, int]:
     """Drive one confirmed controller write through the official simulator.
 
@@ -796,7 +877,7 @@ async def _drive_controller_write(
 
     before = len(gateway.sent)
     confirmation_after = len(gateway.confirmation_requests)
-    bridge.hold_next_write()
+    bridge.hold_next_write(outcome=write_outcome)
     task: asyncio.Task[str | None] | None = None
     try:
         review_started_at_ns = time.monotonic_ns()
@@ -873,7 +954,7 @@ async def _drive_controller_write(
         record_visual_latency(
             latencies,
             screen=terminal_name,
-            trigger="native_readback",
+            trigger="native_readback" if write_outcome == "success" else "native_outcome",
             started_at_ns=terminal_started_at_ns,
             observation=terminal_observation,
         )
@@ -893,13 +974,149 @@ async def _drive_controller_write(
         raise
 
 
+async def _drive_controller_no_write(
+    controller: ProductivityActionController,
+    bridge: FixtureEventKitBridge,
+    gateway: RecordingGateway,
+    *,
+    command: str,
+    domain: str,
+    title: str,
+    terminal_phase: NoWritePhase,
+    terminal_result: str,
+    review_name: str,
+    terminal_name: str,
+    simulator_action: Literal["down"] | None,
+    automation_base: str,
+    output: Path,
+    prior_digest: str,
+    receipts: list[ScreenReceipt],
+    artifacts: dict[str, dict[str, str]],
+    latencies: list[VisualLatency],
+) -> tuple[str, int]:
+    """Drive refusal or silence through the real confirmation boundary.
+
+    A downward simulator swipe produces an explicit rejected confirmation.
+    The ``not_saved`` path shows the same real preview, then severs the
+    evidence channel before dismissing the orphaned preview with a downward
+    swipe. Neither path may reach the fixture's write boundary.
+    """
+
+    before = len(gateway.sent)
+    confirmation_after = len(gateway.confirmation_requests)
+    write_count = len(bridge.write_methods)
+    task: asyncio.Task[str | None] | None = None
+    try:
+        if terminal_phase == "not_saved":
+            gateway.hold_next_confirmation_failure()
+        review_started_at_ns = time.monotonic_ns()
+        task = asyncio.create_task(controller.handle_command(command))
+        action_id = await _wait_for(
+            lambda: (
+                gateway.confirmation_requests[confirmation_after]
+                if len(gateway.confirmation_requests) > confirmation_after
+                else None
+            ),
+            label=f"{review_name} controller confirmation downlink",
+        )
+        review_observation = CaptureObservation()
+        digest, raw, alpha = await _capture(
+            automation_base, output, f"{len(receipts) + 1:02d}-{review_name}", prior_digest,
+            observation=review_observation,
+        )
+        record_visual_latency(
+            latencies,
+            screen=review_name,
+            trigger="command_dispatch",
+            started_at_ns=review_started_at_ns,
+            observation=review_observation,
+        )
+        receipts.append(ScreenReceipt(review_name, None, None, "review", digest))
+        artifacts[review_name] = {"raw": raw, "alpha": alpha}
+
+        terminal_started_at_ns = time.monotonic_ns()
+        if terminal_phase == "not_saved":
+            await gateway.wait_for_confirmation_failure_boundary()
+            gateway.release_confirmation_failure()
+        elif simulator_action is not None:
+            await _input(automation_base, simulator_action)
+        terminal = await _wait_for(
+            lambda: _productivity_view_after(
+                gateway, after=before, domain=domain, phase=terminal_phase,
+            ),
+            label=f"{action_id} controller {terminal_phase} status",
+            timeout_s=15.0,
+        )
+        if terminal_phase == "not_saved":
+            # The channel failure leaves the already-painted prompt locally
+            # visible. Dismiss it without creating evidence so the queued,
+            # real controller outcome becomes the captured surface.
+            await _input(automation_base, "down")
+        if terminal.title != title:
+            raise ProductivityHudFlowError(
+                f"{terminal_name}: controller emitted unexpected title {terminal.title!r}"
+            )
+        terminal_observation = CaptureObservation()
+        digest, raw, alpha = await _capture(
+            automation_base, output, f"{len(receipts) + 1:02d}-{terminal_name}", digest,
+            observation=terminal_observation,
+        )
+        record_visual_latency(
+            latencies,
+            screen=terminal_name,
+            trigger=(
+                "declined_swipe"
+                if simulator_action
+                else "confirmation_channel_failure"
+            ),
+            started_at_ns=terminal_started_at_ns,
+            observation=terminal_observation,
+        )
+        receipts.append(ScreenReceipt(
+            terminal_name,
+            simulator_action if simulator_action is not None else "down after channel failure",
+            False if simulator_action is not None else None,
+            terminal_phase,
+            digest,
+        ))
+        artifacts[terminal_name] = {"raw": raw, "alpha": alpha}
+        result = await asyncio.wait_for(task, timeout=5)
+        if result != terminal_result:
+            raise ProductivityHudFlowError(
+                f"{terminal_name}: controller returned {result!r}, expected {terminal_result!r}"
+            )
+        if len(bridge.write_methods) != write_count:
+            raise ProductivityHudFlowError(
+                f"{terminal_name}: unapproved action reached the native-shaped write boundary"
+            )
+        return digest, before
+    except BaseException:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
 def _planning_list_after(
     gateway: RecordingGateway,
     *,
     after: int,
+    phase: str | None = None,
 ) -> HudList | None:
+    expected_by_phase = {
+        "month": "SEPTEMBER 2026",
+        "week": "AUG 31–SEP 6",
+        "day": "TUE SEP 1",
+        "detail": "PLANNING · EVENT",
+    }
+    expected = expected_by_phase.get(phase) if phase is not None else None
     for message in reversed(gateway.sent[after:]):
-        if isinstance(message, HudList) and message.title.startswith("PLANNING"):
+        if (
+            isinstance(message, HudList)
+            and isinstance(message.title, str)
+            and message.title.startswith("PLANNING")
+            and (expected is None or expected in message.title)
+        ):
             return message
     return None
 
@@ -921,7 +1138,7 @@ def validate_planning_screen(
     }.get(phase)
     if expected is None:
         raise ProductivityHudFlowError(f"unknown Planning phase {phase!r}")
-    if expected not in rendered.title:
+    if not isinstance(rendered.title, str) or expected not in rendered.title:
         raise ProductivityHudFlowError(
             f"Planning {phase}: expected title containing {expected!r}, got {rendered.title!r}"
         )
@@ -967,7 +1184,7 @@ async def _planning_click(
     started_at_ns = time.monotonic_ns()
     await _input(automation_base, "click")
     rendered = await _wait_for(
-        lambda: _planning_list_after(gateway, after=before),
+        lambda: _planning_list_after(gateway, after=before, phase=phase),
         label=f"{name} Mac Planning response",
     )
     observation = CaptureObservation()
@@ -1004,7 +1221,7 @@ async def _wait_for_productivity_return(
     """
 
     rendered = await _wait_for(
-        lambda: _planning_list_after(gateway, after=after),
+        lambda: _planning_list_after(gateway, after=after, phase="day"),
         label=f"{name} automatic Planning response",
         timeout_s=8.0,
     )
@@ -1130,13 +1347,13 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         timeout_s: float,
         *,
         payload_digest: str,
-    ) -> object:
-        return await gateway.request_confirmation(
+    ) -> ConfirmationResult | None:
+        return cast(ConfirmationResult | None, await gateway.request_confirmation(
             action_id,
             prompt,
             timeout_s,
             payload_digest=payload_digest,
-        )
+        ))
 
     async def publish_controller_status(view: ProductivityHudView) -> None:
         await gateway.send(view)
@@ -1259,51 +1476,90 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(ScreenReceipt("calendar-return-planning", None, None, "day", digest))
         artifacts["calendar-return-planning"] = artifact
 
-        # These adverse terminal models deliberately remain typed downlink
-        # render checks. The controller-backed success above proves the
-        # consequence path; the failure screens are isolated so a fixture
-        # cannot claim it changed EventKit while exercising a no-write state.
-        calendar_states = (
-            ("calendar-failed", "failed", "Failed Calendar draft", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("calendar-uncertain", "check", "Uncertain Calendar draft", "Check Calendar", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
-            ("calendar-cancelled", "cancelled", "Cancelled Calendar draft", "Cancelled", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("calendar-not-saved", "not_saved", "Unsaved Calendar draft", "Not saved", "No calendar item was changed.", "Planning in 5s · left x2 now", None, None),
+        calendar_write_outcomes: tuple[
+            tuple[AdverseWriteOutcome, AdverseTerminalPhase, str, str], ...
+        ] = (
+            (
+                "failed", "failed", "Failed Calendar probe",
+                "Calendar did not create the event. Check JOAT on the Mac.",
+            ),
+            (
+                "uncertain", "check", "Uncertain Calendar probe",
+                "Calendar may have created the event. Check Calendar before retrying.",
+            ),
         )
-        for name, phase, draft_title, primary, secondary, hint, input_action, accepted in calendar_states:
-            before = len(gateway.sent)
-            started_at_ns = await _send_downlink(
-                gateway,
-                _view(
-                    "calendar", phase, title=draft_title, primary=primary,
-                    secondary=secondary, hint=hint,
+        for write_outcome, phase, title, terminal_result in calendar_write_outcomes:
+            digest, before = await _drive_controller_write(
+                controller, fixture_bridge, gateway,
+                command=(
+                    f"schedule {title} on 2026-09-01 at 14:00 for 30 minutes "
+                    "in America/Chicago"
                 ),
+                domain="calendar",
+                title=title,
+                terminal_phase=phase,
+                terminal_result=terminal_result,
+                review_name=f"calendar-{write_outcome}-review",
+                verifying_name=f"calendar-{write_outcome}-verifying",
+                terminal_name=f"calendar-{write_outcome}",
+                automation_base=automation_base,
+                output=args.out,
+                prior_digest=digest,
+                receipts=receipts,
+                artifacts=artifacts,
+                latencies=latencies,
+                write_outcome=write_outcome,
             )
-            observation = CaptureObservation()
-            digest, raw, alpha = await _capture(
-                automation_base, args.out, f"{len(receipts) + 1:02d}-{name}", digest,
-                observation=observation,
+            return_name = f"calendar-{write_outcome}-return-planning"
+            digest, artifact = await _wait_for_productivity_return(
+                gateway, after=before, automation_base=automation_base,
+                output=args.out, name=f"{len(receipts) + 1:02d}-{return_name}",
+                prior_digest=digest,
+                absent_item=(f"EVENT · {title}" if write_outcome == "failed" else None),
             )
-            record_visual_latency(
-                latencies,
-                screen=name,
-                trigger="typed_downlink",
-                started_at_ns=started_at_ns,
-                observation=observation,
+            receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
+            artifacts[return_name] = artifact
+
+        calendar_no_write_outcomes: tuple[
+            tuple[str, str, Literal["down"] | None, str], ...
+        ] = (
+            ("cancelled", "Cancelled Calendar probe", "down", "Calendar event cancelled."),
+            (
+                "not-saved", "Unsaved Calendar probe", None,
+                "Calendar event was not saved because confirmation could not be verified.",
+            ),
+        )
+        for no_write_outcome, title, action, terminal_result in calendar_no_write_outcomes:
+            calendar_phase: NoWritePhase = (
+                "not_saved" if no_write_outcome == "not-saved" else "cancelled"
             )
-            receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
-            artifacts[name] = {"raw": raw, "alpha": alpha}
-            if phase in {"saved", "failed", "check", "cancelled", "not_saved"}:
-                return_name = f"{name}-return-planning"
-                digest, artifact = await _wait_for_productivity_return(
-                    gateway,
-                    after=before,
-                    automation_base=automation_base,
-                    output=args.out,
-                    name=f"{len(receipts) + 1:02d}-{return_name}",
-                    prior_digest=digest,
-                )
-                receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
-                artifacts[return_name] = artifact
+            screen = (
+                "calendar-not-saved"
+                if no_write_outcome == "not-saved"
+                else "calendar-cancelled"
+            )
+            digest, before = await _drive_controller_no_write(
+                controller, fixture_bridge, gateway,
+                command=(
+                    f"schedule {title} on 2026-09-01 at 15:00 for 30 minutes "
+                    "in America/Chicago"
+                ),
+                domain="calendar", title=title, terminal_phase=calendar_phase,
+                terminal_result=terminal_result, review_name=f"{screen}-review",
+                terminal_name=screen, simulator_action=action,
+                automation_base=automation_base, output=args.out,
+                prior_digest=digest, receipts=receipts, artifacts=artifacts,
+                latencies=latencies,
+            )
+            return_name = f"{screen}-return-planning"
+            digest, artifact = await _wait_for_productivity_return(
+                gateway, after=before, automation_base=automation_base,
+                output=args.out, name=f"{len(receipts) + 1:02d}-{return_name}",
+                prior_digest=digest,
+                absent_item=f"EVENT · {title}",
+            )
+            receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
+            artifacts[return_name] = artifact
 
         digest, reminder_before = await _drive_controller_write(
             controller,
@@ -1411,49 +1667,92 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(ScreenReceipt("reminders-completed-return-planning", None, None, "day", digest))
         artifacts["reminders-completed-return-planning"] = artifact
 
-        completion_states = (
-            ("reminders-failed", "failed", "Failed Reminder draft", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-uncertain", "check", "Uncertain Reminder draft", "Check Reminders", "It may have changed. Do not retry.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-cancelled", "cancelled", "Cancelled Reminder draft", "Cancelled", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
-            ("reminders-not-saved", "not_saved", "Unsaved Reminder draft", "Not saved", "No reminders item was changed.", "Planning in 5s · left x2 now", None, None),
+        reminder_write_outcomes: tuple[
+            tuple[AdverseWriteOutcome, AdverseTerminalPhase, str, str], ...
+        ] = (
+            (
+                "failed", "failed", "Failed Reminder probe",
+                "Reminders did not create the reminder. Check JOAT on the Mac.",
+            ),
+            (
+                "uncertain", "check", "Uncertain Reminder probe",
+                "The reminder may have been created. Check Reminders before retrying.",
+            ),
         )
-        for name, phase, draft_title, primary, secondary, hint, input_action, accepted in completion_states:
-            before = len(gateway.sent)
-            started_at_ns = await _send_downlink(
-                gateway,
-                _view(
-                    "reminders", phase, title=draft_title, primary=primary,
-                    secondary=secondary, hint=hint,
+        for write_outcome, phase, title, terminal_result in reminder_write_outcomes:
+            digest, before = await _drive_controller_write(
+                controller, fixture_bridge, gateway,
+                command=(
+                    f"remind me to {title} on 2026-09-01 at 20:00 "
+                    "in America/Chicago"
+                ),
+                domain="reminders", title=title, terminal_phase=phase,
+                terminal_result=terminal_result,
+                review_name=f"reminders-{write_outcome}-review",
+                verifying_name=f"reminders-{write_outcome}-verifying",
+                terminal_name=f"reminders-{write_outcome}",
+                automation_base=automation_base, output=args.out,
+                prior_digest=digest, receipts=receipts, artifacts=artifacts,
+                latencies=latencies, write_outcome=write_outcome,
+            )
+            return_name = f"reminders-{write_outcome}-return-planning"
+            digest, artifact = await _wait_for_productivity_return(
+                gateway, after=before, automation_base=automation_base,
+                output=args.out, name=f"{len(receipts) + 1:02d}-{return_name}",
+                prior_digest=digest,
+                absent_item=(
+                    f"REMINDER · {title}" if write_outcome == "failed" else None
                 ),
             )
-            observation = CaptureObservation()
-            digest, raw, alpha = await _capture(
-                automation_base, args.out, f"{len(receipts) + 1:02d}-{name}", digest,
-                observation=observation,
-            )
-            record_visual_latency(
-                latencies,
-                screen=name,
-                trigger="typed_downlink",
-                started_at_ns=started_at_ns,
-                observation=observation,
-            )
-            receipts.append(ScreenReceipt(name, input_action, accepted, phase, digest))
-            artifacts[name] = {"raw": raw, "alpha": alpha}
-            if phase in {"completed", "failed", "check", "cancelled", "not_saved"}:
-                return_name = f"{name}-return-planning"
-                digest, artifact = await _wait_for_productivity_return(
-                    gateway,
-                    after=before,
-                    automation_base=automation_base,
-                    output=args.out,
-                    name=f"{len(receipts) + 1:02d}-{return_name}",
-                    prior_digest=digest,
-                )
-                receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
-                artifacts[return_name] = artifact
+            receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
+            artifacts[return_name] = artifact
 
-        expected_writes = ["calendar.create", "reminders.create", "reminders.complete"]
+        reminder_no_write_outcomes: tuple[
+            tuple[str, str, Literal["down"] | None, str], ...
+        ] = (
+            ("cancelled", "Cancelled Reminder probe", "down", "Reminder cancelled."),
+            (
+                "not-saved", "Unsaved Reminder probe", None,
+                "Reminder was not saved because confirmation could not be verified.",
+            ),
+        )
+        for no_write_outcome, title, action, terminal_result in reminder_no_write_outcomes:
+            reminder_phase: NoWritePhase = (
+                "not_saved" if no_write_outcome == "not-saved" else "cancelled"
+            )
+            screen = (
+                "reminders-not-saved"
+                if no_write_outcome == "not-saved"
+                else "reminders-cancelled"
+            )
+            digest, before = await _drive_controller_no_write(
+                controller, fixture_bridge, gateway,
+                command=(
+                    f"remind me to {title} on 2026-09-01 at 21:00 "
+                    "in America/Chicago"
+                ),
+                domain="reminders", title=title, terminal_phase=reminder_phase,
+                terminal_result=terminal_result, review_name=f"{screen}-review",
+                terminal_name=screen, simulator_action=action,
+                automation_base=automation_base, output=args.out,
+                prior_digest=digest, receipts=receipts, artifacts=artifacts,
+                latencies=latencies,
+            )
+            return_name = f"{screen}-return-planning"
+            digest, artifact = await _wait_for_productivity_return(
+                gateway, after=before, automation_base=automation_base,
+                output=args.out, name=f"{len(receipts) + 1:02d}-{return_name}",
+                prior_digest=digest,
+                absent_item=f"REMINDER · {title}",
+            )
+            receipts.append(ScreenReceipt(return_name, None, None, "day", digest))
+            artifacts[return_name] = artifact
+
+        expected_writes = [
+            "calendar.create", "calendar.create", "calendar.create",
+            "reminders.create", "reminders.complete",
+            "reminders.create", "reminders.create",
+        ]
         if fixture_bridge.write_methods != expected_writes:
             raise ProductivityHudFlowError(
                 f"controller did not exercise the expected native-shaped writes: "
@@ -1476,7 +1775,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "mac": "real local HubGatewayTransport; CapabilityRouter drives the native-shaped Planning fixture",
                 "controllerWrites": "calendar.create, reminders.create, and reminders.complete are emitted by the production ProductivityActionController after a real bound confirmation; the fixture releases each native-shaped write only after the current Hub client accepts its generation-bound, opaque verifying surface",
                 "reminderMonitoring": "production TaskMonitor reconciles the fixture Reminder and obtains a generation-bound current Hub-client due acknowledgement before alert_enqueued",
-                "fallbackStates": "failed, uncertain, cancelled, and not-saved frames are typed production-downlink rendering and timed-return checks only; they do not claim an EventKit write",
+                "adverseStates": "failed and uncertain are accepted controller attempts with explicit fixture commit phases; cancelled is an official-simulator downward swipe; not-saved is a deliberately severed confirmation-evidence channel followed by a downward dismissal that cannot authorize the action; every path uses production status copy and no live EventKit data",
                 "eventkit": "not run; fixture native bridge prevents access to live personal data",
                 "nativeAlarm": "not run",
                 "hubClientAcceptance": "generation-bound reminder_due acknowledgement and simulator-only generation-bound verifying presentation receipt from the current production Hub client; neither is a macOS banner or physical-G2 visual proof",

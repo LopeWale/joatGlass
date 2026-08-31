@@ -14,7 +14,11 @@ from joat.agents.openclaw_gateway import (
     OpenClawEventSequenceGap,
     OpenClawGatewayError,
 )
-from joat.agents.openclaw_terminal import OpenClawAgentTerminal, RecoveredRun
+from joat.agents.openclaw_terminal import (
+    OpenClawAgentTerminal,
+    OpenClawToolsEnabled,
+    RecoveredRun,
+)
 
 
 REQUIRED_METHODS = frozenset(
@@ -49,10 +53,11 @@ class FakeConnection:
         policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY,
         hang_abort: bool = False,
         inventory_agent_id: str | None = None,
+        granted_scopes: tuple[str, ...] = ("operator.read", "operator.write"),
     ) -> None:
         self.advertised_methods = REQUIRED_METHODS
         self.advertised_events = frozenset({"agent", "chat", "session.message"})
-        self.granted_scopes: tuple[str, ...] = ("operator.read", "operator.write")
+        self.granted_scopes = granted_scopes
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.events: deque[dict[str, object] | BaseException] = deque(events or [])
         self.tools = tools or []
@@ -303,6 +308,101 @@ async def test_terminal_adopts_one_existing_owned_session_after_restart() -> Non
         "sessions.describe",
         "tools.effective",
         "sessions.messages.subscribe",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_only_attestation_rechecks_existing_dedicated_session() -> None:
+    connection = FakeConnection(
+        existing_session=True,
+        granted_scopes=("operator.read",),
+    )
+
+    await OpenClawAgentTerminal.attest_existing(
+        connection=connection,
+        agent_id="hermes",
+    )
+
+    assert [method for method, _ in connection.calls] == [
+        "sessions.list",
+        "sessions.describe",
+        "tools.effective",
+    ]
+    assert not {
+        "sessions.create",
+        "sessions.messages.subscribe",
+        "sessions.send",
+        "chat.history",
+    } & {method for method, _ in connection.calls}
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_only_attestation_rejects_write_capable_connection() -> None:
+    connection = FakeConnection(existing_session=True)
+
+    with pytest.raises(OpenClawGatewayError, match="exact read-only scopes"):
+        await OpenClawAgentTerminal.attest_existing(
+            connection=connection,
+            agent_id="hermes",
+        )
+
+    assert connection.calls == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_only_attestation_requires_one_existing_session() -> None:
+    connection = FakeConnection(granted_scopes=("operator.read",))
+
+    with pytest.raises(OpenClawGatewayError, match="one dedicated Agent Terminal session"):
+        await OpenClawAgentTerminal.attest_existing(
+            connection=connection,
+            agent_id="hermes",
+        )
+
+    assert [method for method, _ in connection.calls] == ["sessions.list"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_only_attestation_rejects_delivery_route() -> None:
+    connection = FakeConnection(
+        existing_session=True,
+        granted_scopes=("operator.read",),
+        session_route={
+            "channel": "telegram",
+            "deliveryContext": {"channel": "telegram", "to": "8245150068"},
+        },
+    )
+
+    with pytest.raises(OpenClawGatewayError, match="isolated from delivery routes"):
+        await OpenClawAgentTerminal.attest_existing(
+            connection=connection,
+            agent_id="hermes",
+        )
+
+    assert [method for method, _ in connection.calls] == [
+        "sessions.list",
+        "sessions.describe",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_only_attestation_rejects_enabled_tools_without_subscribing() -> None:
+    connection = FakeConnection(
+        existing_session=True,
+        granted_scopes=("operator.read",),
+        tools=[{"name": "calendar.write"}],
+    )
+
+    with pytest.raises(OpenClawToolsEnabled, match="tools are enabled"):
+        await OpenClawAgentTerminal.attest_existing(
+            connection=connection,
+            agent_id="hermes",
+        )
+
+    assert [method for method, _ in connection.calls] == [
+        "sessions.list",
+        "sessions.describe",
+        "tools.effective",
     ]
 
 

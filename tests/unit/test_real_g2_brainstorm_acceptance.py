@@ -396,12 +396,12 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         }))
 
         opening = json.loads(await socket.recv())
-        assert opening["brainstorm"]["activity"] == "Preparing collaborators…"
+        assert opening["brainstorm"]["activity"] == "JOAT > Preparing collaborators…"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("b")),
         }))
         turn = json.loads(await socket.recv())
-        assert turn["brainstorm"]["activity"] == "Thinking…"
+        assert turn["brainstorm"]["activity"] == "HERMES > Thinking…"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("c")),
         }))

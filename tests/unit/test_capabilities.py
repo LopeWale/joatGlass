@@ -493,10 +493,37 @@ class TestCapabilityViews:
         assert lists[0].title == "NAVIGATION"
         assert lists[0].items == [
             'Say “JOAT, navigate to …”',
-            "I’ll confirm the exact place before starting.",
+            "I’ll confirm the place. Then choose Walk or Cycle.",
         ]
         assert lists[0].hint == "say destination · left x2: back"
         assert lists[0].request_id == "navigation-entry"
+
+    async def test_navigation_entry_opens_from_the_real_capability_menu_input(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+
+        router.on_input(InputEvent(
+            container_name="capmenu",
+            selected_name="Navigation",
+            selected_index=2,
+            request_id="navigation-menu-entry",
+        ))
+        await wait_until(lambda: any(
+            isinstance(message, HudList) and message.title == "NAVIGATION"
+            for message in transport.sent
+        ))
+
+        frame = [
+            message for message in transport.sent
+            if isinstance(message, HudList) and message.title == "NAVIGATION"
+        ][-1]
+        assert frame.items == [
+            'Say “JOAT, navigate to …”',
+            "I’ll confirm the place. Then choose Walk or Cycle.",
+        ]
+        assert frame.selectable is False
+        assert frame.request_id == "navigation-menu-entry"
 
     async def test_newest_same_capability_generation_owns_render_and_selection(
         self, tmp_path

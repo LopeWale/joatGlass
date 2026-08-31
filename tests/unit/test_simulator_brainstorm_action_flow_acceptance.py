@@ -8,6 +8,7 @@ from joat.services.brainstorm_acceptance import RUN_SCHEMA
 from scripts.simulator_brainstorm_action_flow_acceptance import (
     BrainstormActionFlowError,
     ScreenReceipt,
+    _VISUAL_ONLY_ARTIFACTS,
     _prepare_simulator_plugin_root,
     default_ws_url,
     validate_visual_artifacts,
@@ -53,7 +54,7 @@ def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:
 
 def _frames() -> list[ScreenReceipt]:
     rows = [
-        ("terminal-approval-required", None, None, "agent_terminal", "approval_required", False),
+        ("brainstorm-hermes-required", None, None, "agent_terminal", "approval_required", False),
         ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready", False),
         ("daily-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture", False),
         ("daily-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready", False),
@@ -110,12 +111,13 @@ def _acceptance() -> dict[str, object]:
 
 
 def _artifacts() -> dict[str, dict[str, str]]:
+    names = [frame.name for frame in _frames()] + list(_VISUAL_ONLY_ARTIFACTS)
     return {
-        frame.name: {
-            "raw": f"{index:02d}-{frame.name}.rgba.png",
-            "optical": f"{index:02d}-{frame.name}.optical.png",
+        name: {
+            "raw": f"{index:02d}-{name}.rgba.png",
+            "optical": f"{index:02d}-{name}.optical.png",
         }
-        for index, frame in enumerate(_frames(), start=1)
+        for index, name in enumerate(names, start=1)
     }
 
 
@@ -232,3 +234,8 @@ def test_visual_artifacts_require_an_opaque_optical_preview_for_every_hud_state(
     alpha_only["returned"]["optical"] = "05-returned.rgba.alpha.png"
     with pytest.raises(BrainstormActionFlowError, match="opaque green-on-black"):
         validate_visual_artifacts(alpha_only)
+
+    missing_busy = _artifacts()
+    del missing_busy["hermes-busy"]
+    with pytest.raises(BrainstormActionFlowError, match="HUD flow"):
+        validate_visual_artifacts(missing_busy)

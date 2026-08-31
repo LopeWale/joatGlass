@@ -235,10 +235,14 @@ include:
 - `ProposerAgent`: `codex exec --json --output-schema plan.schema.json` (web_search=live, sandbox read-only).
 - `CriticAgent`: `claude -p --output-format json --allowedTools "WebSearch,WebFetch" --max-turns N`. Constructor takes an `AuthStrategy` (subscription binary | metered API key + `--max-budget-usd`) so the ToS fallback is a config change.
 - `JudgeAgent`: local MLX model; emits agreement score + blocking issues.
-- `OpenClawTerminalAgent`: optional paired private-WSS adapter. Brainstorm and
-  Calendar proposals address the same configured Mac-mini `hermes` agent but
-  use distinct route-isolated session labels, key namespaces, connections,
-  locks, and persistent transcript histories.
+- `OpenClawTerminalAgent`: paired private-WSS adapter. A **wearable
+  Brainstorm requires** its idle `ready`, isolated `hermes` seat; a terminal
+  that is already streaming is shown as busy, and when the seat is otherwise
+  unavailable, JOAT keeps the wearer on the retryable Agent Terminal surface
+  instead of starting a local-only round. Calendar proposals use the same
+  configured Mac-mini `hermes` agent through separate route-isolated session
+  labels, key namespaces, connections, locks, and persistent transcript
+  histories.
 
 **`VerifierGate` (verifier/)** — pipeline objects, each a small class: `Fetcher` (httpx, retries, headless/reader fallback), `WaybackClient` (availability + Save-Page-Now), `QuoteMatcher` (normalized fuzzy match), `NliJudge` (MiniCheck or MLX), composed by `VerifierGate.verify()` → `Verdict`. Denials build `RepairRequest`s listing each failed citation and reason.
 
@@ -258,8 +262,8 @@ include:
 - JOAT.app owns and shuts down the local Python engine child; the healthcheck
   remains loopback-only, with structured logs that retain hashes rather than
   content where practical.
-- The optional OpenClaw Brainstorm seat uses paired protocol-v4 WSS over managed
-  Tailscale Serve to the private Mac mini. A second JOAT connection uses the
+- The required wearable-Brainstorm Hermes seat uses paired protocol-v4 WSS over
+  managed Tailscale Serve to the private Mac mini. A second JOAT connection uses the
   same installed/configured `hermes` agent for Calendar proposals, without
   installing another Hermes. Each connection adopts only its own exact
   route-isolated session, requires an empty effective tool inventory at

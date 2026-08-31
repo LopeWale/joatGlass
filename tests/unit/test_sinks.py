@@ -89,7 +89,7 @@ class TestHudSink:
         assert frame.active_speaker == "openclaw"
         assert frame.terminal_state == "ready"
         assert frame.no_tools_checked is True
-        assert frame.activity == "Thinking… Use tabs with a formatter."
+        assert frame.activity == "OPENCLAW > Thinking… Use tabs with a formatter."
 
     async def test_keeps_the_thinking_marker_readable_without_changing_later_chunk_joining(self) -> None:
         transport = HudTransport()
@@ -100,18 +100,37 @@ class TestHudSink:
         await sink.chunk("first")
         first = transport.sent[-1]
         assert isinstance(first, BrainstormHudView)
-        assert first.activity == "Thinking… first"
+        assert first.activity == "HERMES > Thinking… first"
 
         await sink.chunk("-chunk")
         second = transport.sent[-1]
         assert isinstance(second, BrainstormHudView)
-        assert second.activity == "Thinking… first-chunk"
+        assert second.activity == "HERMES > Thinking… first-chunk"
 
         await sink.turn("hermes")
         await sink.chunk(" already spaced")
         naturally_spaced = transport.sent[-1]
         assert isinstance(naturally_spaced, BrainstormHudView)
-        assert naturally_spaced.activity == "Thinking… already spaced"
+        assert naturally_spaced.activity == "HERMES > Thinking… first-chunk\nHERMES > Thinking… already spaced"
+
+    async def test_retains_recent_speaker_rows_for_the_wearable_terminal_tail(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex", "claude", "hermes"])
+        await sink.turn("codex (proposer)")
+        await sink.chunk("Keep the decision reversible.")
+        await sink.turn("claude (critic)")
+        await sink.chunk("Check the calendar first.")
+        await sink.turn("hermes (agent terminal)")
+        await sink.chunk("I can stage a safe next action.")
+
+        frame = transport.sent[-1]
+        assert isinstance(frame, BrainstormHudView)
+        assert frame.activity == (
+            "CODEX > Thinking… Keep the decision reversible.\n"
+            "CLAUDE > Thinking… Check the calendar first.\n"
+            "HERMES > Thinking… I can stage a safe next action."
+        )
 
     async def test_terminal_overlay_and_replay_keep_the_real_brainstorm_state(self) -> None:
         transport = HudTransport()
@@ -132,7 +151,7 @@ class TestHudSink:
         assert isinstance(terminal, BrainstormHudView)
         assert terminal.screen == "agent_terminal"
         assert terminal.state == "running"
-        assert terminal.activity.startswith("Brainstorm remains active")
+        assert terminal.activity == "HERMES > Thinking…"
 
         await sink.replay()
         restored = transport.sent[-1]

@@ -13,6 +13,7 @@ import pytest
 
 from joat.core.confirmation import ConfirmationResult
 from joat.core.protocol import ProductivityHudView
+from joat.native.bridge import NativeBridgeError
 from joat.persistence.actions import ActionJournal
 from joat.persistence.store import DurableStore
 from joat.persistence.tasks import TaskOccurrenceStore
@@ -45,13 +46,19 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
         driver.ScreenReceipt("calendar-verifying", "click", True, "verifying", "b" * 64),
         driver.ScreenReceipt("calendar-saved", None, None, "saved", "c" * 64),
         driver.ScreenReceipt("calendar-return-planning", None, None, "day", "d" * 64),
-        driver.ScreenReceipt("calendar-failed", None, None, "failed", "e" * 64),
+        driver.ScreenReceipt("calendar-failed-review", None, None, "review", "e" * 64),
+        driver.ScreenReceipt("calendar-failed-verifying", "click", True, "verifying", "6" * 64),
+        driver.ScreenReceipt("calendar-failed", None, None, "failed", "7" * 64),
         driver.ScreenReceipt("calendar-failed-return-planning", None, None, "day", "f" * 64),
+        driver.ScreenReceipt("calendar-uncertain-review", None, None, "review", "0" * 64),
+        driver.ScreenReceipt("calendar-uncertain-verifying", "click", True, "verifying", "1" * 64),
         driver.ScreenReceipt("calendar-uncertain", None, None, "check", "7" * 64),
         driver.ScreenReceipt("calendar-uncertain-return-planning", None, None, "day", "8" * 64),
-        driver.ScreenReceipt("calendar-cancelled", None, None, "cancelled", "9" * 64),
+        driver.ScreenReceipt("calendar-cancelled-review", None, None, "review", "2" * 64),
+        driver.ScreenReceipt("calendar-cancelled", "down", False, "cancelled", "9" * 64),
         driver.ScreenReceipt("calendar-cancelled-return-planning", None, None, "day", "a" * 64),
-        driver.ScreenReceipt("calendar-not-saved", None, None, "not_saved", "b" * 64),
+        driver.ScreenReceipt("calendar-not-saved-review", None, None, "review", "3" * 64),
+        driver.ScreenReceipt("calendar-not-saved", "down after channel failure", None, "not_saved", "b" * 64),
         driver.ScreenReceipt("calendar-not-saved-return-planning", None, None, "day", "c" * 64),
         driver.ScreenReceipt("reminders-review", None, None, "review", "0" * 64),
         driver.ScreenReceipt("reminders-verifying", "click", True, "verifying", "1" * 64),
@@ -63,17 +70,59 @@ def test_productivity_flow_requires_real_confirmation_before_each_safe_write() -
         driver.ScreenReceipt("reminders-completing", "click", True, "verifying", "5" * 64),
         driver.ScreenReceipt("reminders-completed", None, None, "completed", "6" * 64),
         driver.ScreenReceipt("reminders-completed-return-planning", None, None, "day", "7" * 64),
-        driver.ScreenReceipt("reminders-failed", None, None, "failed", "8" * 64),
+        driver.ScreenReceipt("reminders-failed-review", None, None, "review", "8" * 64),
+        driver.ScreenReceipt("reminders-failed-verifying", "click", True, "verifying", "e" * 64),
+        driver.ScreenReceipt("reminders-failed", None, None, "failed", "0" * 64),
         driver.ScreenReceipt("reminders-failed-return-planning", None, None, "day", "9" * 64),
+        driver.ScreenReceipt("reminders-uncertain-review", None, None, "review", "1" * 64),
+        driver.ScreenReceipt("reminders-uncertain-verifying", "click", True, "verifying", "2" * 64),
         driver.ScreenReceipt("reminders-uncertain", None, None, "check", "a" * 64),
         driver.ScreenReceipt("reminders-uncertain-return-planning", None, None, "day", "b" * 64),
-        driver.ScreenReceipt("reminders-cancelled", None, None, "cancelled", "c" * 64),
+        driver.ScreenReceipt("reminders-cancelled-review", None, None, "review", "3" * 64),
+        driver.ScreenReceipt("reminders-cancelled", "down", False, "cancelled", "c" * 64),
         driver.ScreenReceipt("reminders-cancelled-return-planning", None, None, "day", "d" * 64),
-        driver.ScreenReceipt("reminders-not-saved", None, None, "not_saved", "e" * 64),
+        driver.ScreenReceipt("reminders-not-saved-review", None, None, "review", "4" * 64),
+        driver.ScreenReceipt("reminders-not-saved", "down after channel failure", None, "not_saved", "e" * 64),
         driver.ScreenReceipt("reminders-not-saved-return-planning", None, None, "day", "f" * 64),
     ]
 
     driver.validate_flow(receipts)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "commit_phase"),
+    [
+        ("failed", "not_committed"),
+        ("uncertain", "committed_unknown"),
+    ],
+)
+async def test_fixture_bridge_can_causally_fail_an_attempted_write(
+    outcome: str,
+    commit_phase: str,
+) -> None:
+    driver = _driver()
+
+    assert driver is not None
+    bridge = driver.FixtureEventKitBridge()
+    bridge.hold_next_write(outcome=outcome)
+    pending = asyncio.create_task(bridge.call("calendar.create", {
+        "calendar_identifier": "work",
+        "title": "Failure probe",
+        "is_all_day": False,
+        "start_unix_ms": 1_788_274_200_000,
+        "end_unix_ms": 1_788_276_900_000,
+        "time_zone_id": "America/Chicago",
+        "alarm_offsets_seconds": [],
+    }))
+
+    await bridge.wait_for_write()
+    bridge.release_next_write()
+    with pytest.raises(NativeBridgeError) as captured:
+        await pending
+
+    assert captured.value.commit_phase == commit_phase
+    assert bridge.write_methods == ["calendar.create"]
+    assert all(item["title"] != "Failure probe" for item in bridge._events)
 
 
 def test_productivity_flow_rejects_a_month_capture_without_the_contextual_escape() -> None:
@@ -106,6 +155,23 @@ def test_planning_day_receipt_requires_both_native_kinds() -> None:
             items=["10:30 · EVENT · Design review"],
             planning_grid=None,
         ))
+
+
+def test_planning_wait_ignores_a_delayed_response_from_the_wrong_scope() -> None:
+    driver = _driver()
+
+    assert driver is not None
+    gateway = SimpleNamespace(sent=[
+        driver.HudList(items=["Design review"], title="PLANNING · EVENT"),
+        driver.HudList(
+            items=["10:30 · EVENT · Design review", "19:00 · REMINDER · Buy filters"],
+            title="PLANNING · PLAN · TUE SEP 1",
+        ),
+    ])
+
+    rendered = driver._planning_list_after(gateway, after=0, phase="day")
+
+    assert rendered is gateway.sent[1]
 
 
 async def test_screenshot_completion_never_reads_console_output(
