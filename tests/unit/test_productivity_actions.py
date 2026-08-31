@@ -16,7 +16,11 @@ from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.store import DurableStore
 from joat.persistence.tasks import TaskOccurrenceStore
 from joat.services.productivity_actions import ProductivityActionController
-from joat.services.productivity_actions import ActionOrigin, CalendarEventIntent
+from joat.services.productivity_actions import (
+    ActionOrigin,
+    CalendarEventIntent,
+    ReminderIntent,
+)
 
 
 class FakeBridge:
@@ -1065,4 +1069,74 @@ class TestReminderCreation:
         assert "Recurring reminder completion is not enabled" in str(result)
         assert confirms.prompts == []
         assert all(call[0] != "reminders.complete" for call in bridge.calls)
+        store.close()
+
+
+class TestTypedReminderIntent:
+    async def test_typed_intent_uses_the_same_confirmed_native_path(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+            write_result={
+                "calendar_item_identifier": "reminder-1",
+                "calendar_identifier": "list-personal",
+                "title": "Email the release notes",
+                "due": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 1,
+                    "hour": 9,
+                    "minute": 0,
+                    "second": 0,
+                    "time_zone_id": "America/Chicago",
+                    "repeated_time_choice": None,
+                },
+                "alarms": [{
+                    "relative_offset_seconds": None,
+                    "absolute_unix_ms": 1_788_274_200_000,
+                }],
+                "is_completed": False,
+            },
+        )
+        controller, confirms, _, store = rig(tmp_path, bridge)
+
+        result = await controller.create_reminder(
+            ReminderIntent(
+                title="Email the release notes",
+                date="2026-09-01",
+                time="09:00",
+                time_zone="America/Chicago",
+            ),
+            origin=ActionOrigin(
+                kind="voice_note.todo", identifier="capture-1", ordinal=0,
+            ),
+        )
+
+        assert result == "Created Reminder: Email the release notes."
+        assert confirms.prompts and "Email the release notes" in confirms.prompts[0]
+        assert any(call[0] == "reminders.create" for call in bridge.calls)
+        store.close()
+
+    async def test_typed_intent_rejects_invalid_provenance_before_any_bridge_call(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = FakeBridge(
+            containers=[reminder_container("Personal", "list-personal", default=True)],
+        )
+        controller, confirms, _, store = rig(tmp_path, bridge)
+
+        result = await controller.create_reminder(
+            ReminderIntent(
+                title="Email the release notes",
+                date="2026-09-01",
+                time="09:00",
+                time_zone="America/Chicago",
+            ),
+            origin=ActionOrigin(kind="", identifier="capture-1", ordinal=0),
+        )
+
+        assert result == "Reminder proposal provenance was invalid. Nothing was created."
+        assert confirms.prompts == []
+        assert bridge.calls == []
         store.close()

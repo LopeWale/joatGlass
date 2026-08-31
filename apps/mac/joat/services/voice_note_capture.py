@@ -16,17 +16,33 @@ from ..core.interfaces import AudioFrame, SttEngine
 from ..persistence.voice_notes import VoiceNote, VoiceNoteFrame, VoiceNoteStore
 
 
+# The wearer calls this feature both "voice note" and "quicknote"; whisper
+# also splits or joins the compound unpredictably. Every control phrase
+# accepts all three spellings so the recorder never looks deaf to its own
+# name.
+_NOTE_NOUNS = ("voice note", "quick note", "quicknote")
+
+
+def _phrases(*templates: str) -> frozenset[str]:
+    return frozenset(
+        template.format(noun=noun) for template in templates for noun in _NOTE_NOUNS
+    )
+
+
 _START = re.compile(
-    r"^(?:start|begin)(?: recording)? (?:a )?voice note(?: (?:called|titled|about))?"
+    r"^(?:start|begin)(?: recording)? (?:a )?(?:voice note|quick ?note)"
+    r"(?: (?:called|titled|about))?"
     r"(?: (?P<title>.+))?$",
     re.IGNORECASE,
 )
-_STOP = frozenset({"stop voice note", "save voice note", "finish voice note"})
-_PAUSE = frozenset({"pause voice note"})
-_RESUME = frozenset({"resume voice note", "continue voice note"})
-_DISCARD = frozenset({"discard voice note", "cancel voice note"})
-_CONFIRM_DISCARD = frozenset({"confirm discard voice note"})
-_KEEP = frozenset({"keep voice note", "cancel discard voice note"})
+_STOP = _phrases("stop {noun}", "save {noun}", "finish {noun}")
+_PAUSE = _phrases("pause {noun}")
+_RESUME = _phrases("resume {noun}", "continue {noun}")
+_DISCARD = _phrases("discard {noun}", "cancel {noun}")
+_CONFIRM_DISCARD = _phrases("confirm discard {noun}")
+_KEEP = _phrases("keep {noun}", "cancel discard {noun}")
+_SHOW_LAST = _phrases("show last {noun}")
+_EXPORT_LAST = _phrases("export last {noun}")
 _MAX_TRANSCRIBE_BYTES = 20 * 16_000 * 2
 _DEFAULT_RAW_QUOTA_BYTES = 30 * 60 * 16_000 * 2
 
@@ -56,6 +72,7 @@ class VoiceNoteCaptureController:
         id_factory: Callable[[], str] | None = None,
         max_raw_bytes: int = _DEFAULT_RAW_QUOTA_BYTES,
         export_directory: Path | None = None,
+        on_saved: Callable[[str], None] | None = None,
     ) -> None:
         if (
             isinstance(max_raw_bytes, bool)
@@ -73,6 +90,10 @@ class VoiceNoteCaptureController:
         self._export_directory = export_directory or (
             Path.home() / "Library/Application Support/JOAT/Exports/Voice Notes"
         )
+        # Fired with the capture_id after a retained save (saved or
+        # saved_degraded). The receipt returns immediately; whatever the hook
+        # starts (summarization) reports through its own surfaces.
+        self._on_saved = on_saved
         self._capture_id: str | None = None
         self._last_generation: str | None = None
         self._last_seq: int | None = None
@@ -120,11 +141,41 @@ class VoiceNoteCaptureController:
             return self._keep()
         if lowered in _STOP:
             return await self._stop()
-        if lowered == "show last voice note":
+        if lowered in _SHOW_LAST:
             return self._show_last()
-        if lowered == "export last voice note":
+        if lowered in _EXPORT_LAST:
             return self._export_last()
         return None
+
+    @property
+    def discard_pending(self) -> bool:
+        """True while a destructive discard awaits explicit confirmation."""
+        return (
+            self._capture_id is not None
+            and self._discard_pending == self._capture_id
+        )
+
+    # Typed control surface for the on-glasses QuickNotes screen. During an
+    # exclusive capture the microphone belongs to the recording, so HUD row
+    # taps are the wearer's only controls; the receipts are the same visible
+    # strings the voice grammar produces.
+    def control_pause(self) -> str:
+        return self._pause()
+
+    def control_resume(self) -> str:
+        return self._resume()
+
+    def control_request_discard(self) -> str:
+        return self._request_discard()
+
+    def control_confirm_discard(self) -> str:
+        return self._confirm_discard()
+
+    def control_keep(self) -> str:
+        return self._keep()
+
+    async def control_stop(self) -> str:
+        return await self._stop()
 
     def interrupt_for_shutdown(self) -> bool:
         """Close an active lane and retain raw data without claiming a save."""
@@ -350,6 +401,12 @@ class VoiceNoteCaptureController:
             now_us=self._now(self._notes.get(finalizing.capture_id)),
         )
         self._clear_active()
+        if saved.state in ("saved", "saved_degraded") and self._on_saved is not None:
+            try:
+                self._on_saved(saved.capture_id)
+            except Exception:
+                # A post-save hook must never cost the wearer their receipt.
+                pass
         return self._saved_receipt(saved)
 
     def _record_frame(self, frame: AudioFrame) -> None:

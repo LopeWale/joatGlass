@@ -15,7 +15,7 @@
 | Audio pipeline | `joat/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
 | HUD renderer | `joat/display` | 576×288 canvas, text containers, cards, differential page updates |
 | Reasoning | `joat/services` | Orchestrator: route utterances to MLX (fast path) or Brainstorm (planning path; `debate` remains a compatibility trigger) |
-| Brainstorm agents | `joat/agents` | `SubprocessAgent` (Codex + Claude CLIs), paired private-WSS `OpenClawTerminalAgent` (required Hermes seat for wearable Brainstorm), local MLX judge; `RoundTable` seats them |
+| Brainstorm agents | `joat/agents` | Subscription-authenticated `SubprocessAgent` adapters for `codex exec -s read-only` and `claude -p`, plus the Verifier Gate and JOAT synthesis; Hermes/OpenClaw are a separate future Agent Terminal boundary |
 | Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
 | Channels | `joat/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |
 | Computer use | `joat/computeruse` | cua driver in Lume sandbox (Mac), iPhone Mirroring + OCR + Karabiner (iOS) |
@@ -97,45 +97,57 @@ warnings, missed deviations, detection distance, reroute latency, and
 fix-to-visible-lens cue time. The supported baseline is phone foreground and
 unlocked; background continuation is not promised.
 
-## 5. Brainstorm relay with Verifier Gate
+## 5. Durable Brainstorm conversation with Verifier Gate
 
-A **round table** of N collaborators, not a fixed proposer/critic pair
-(`services/roundtable.py`, driven by the internally named `DebateSession`).
-`debate` remains a legacy voice alias; Brainstorm is the wearer-facing name.
-One round = every
-seat speaks once, in an order the wearer can redirect by voice; then the
-local judge scores how far apart the room still is.
+Brainstorm is a wearer-initiated, steerable, potentially multi-round analysis
+session around a topic, task, claim, problem, or evolving discussion. `debate`
+remains a legacy voice alias, not the product or storage model. A durable local
+Brainstorm record owns its session ID, title, branch lineage, ordered turns,
+verification state, JOAT synthesis, and `active` / `settled` / `cancelled`
+status. Opening Brainstorm restores the active conversation or presents recent
+sessions plus `NEW`; it does not manufacture a new room every time.
+
+JOAT is the glasses brain and session authority. The glasses speak to JOAT,
+not directly to either CLI. JOAT interprets explicit session controls, owns
+context and turn order, invokes the chosen collaborator, streams the result to
+the wearer, applies verification/repair, records the synthesis, and restores
+the semantic HUD after reconnect. Codex and Claude are bounded collaborators
+inside that JOAT-owned loop.
+
+Only the user's existing CLI subscriptions participate. Neither provider owns
+a permanent opening slot: an explicit wearer direction chooses the next
+speaker, and otherwise the session's recorded turn policy chooses without
+changing the durable conversation identity.
 
 ```
-seat 1  codex     (proposer)      ──▶ Verifier Gate ──▶ deny? → repair request → same seat (capped)
-seat 2  claude    (critic)        ──▶ Verifier Gate ──▶ deny? → repair request → same seat
-seat 3  openclaw  (third opinion) ──▶ Verifier Gate ──▶ …          [paired, isolated Hermes terminal only]
-                                                        │ pass
-Judge (local MLX) ── agreement ≥ 0.85 & no blocking issues? ──▶ CONVERGE, else next round (max rounds capped)
+G2 voice -> JOAT session/controller -> next collaborator selected from:
+       - codex exec -s read-only  (subscription auth; OPENAI_API_KEY stripped)
+       - claude -p                (subscription auth; ANTHROPIC_API_KEY stripped)
+     -> wearer-directed or continued collaborator turns
+     -> JOAT VERIFY / bounded repair -> JOAT synthesis -> G2 HUD
 ```
 
-Three properties are structural rather than policy, so a refactor cannot
+Four properties are structural rather than policy, so a refactor cannot
 quietly drop them:
 
 - **One at a time.** Each speaker's prompt CONTAINS the transcript so far, so
   turn N+1 has no input until turn N exists. Nothing enforces sequencing —
   it is the only thing the data allows.
-- **A seat costs a file, not a redesign.** A participant is anything with
-  `stream(prompt) -> AsyncIterator[str]`, which the codex CLI, the claude
-  CLI, and the OpenClaw terminal all already satisfy. Who is actually seated
-  is a runtime fact: absent binaries and an unavailable or unsafe Agent
-  Terminal are not admitted. Wearable Brainstorm needs its three idle-ready seats—Codex,
-  Claude, and Hermes—so a missing Hermes session renders the retryable Agent
-  Terminal state rather than a local-only round. The OpenClaw seat is admitted
-  only after exact operator scopes, dedicated session identity, route
-  isolation, and an empty `tools.effective` inventory have all been verified.
-  It never adopts `main` or Telegram sessions.
+- **Two subscription CLIs, no remote-agent admission.** Codex CLI and Claude
+  Code are the only collaborators. Missing either binary produces a visible
+  unavailable/failed turn; Hermes, OpenClaw, endpoint health, tool policy, and
+  Agent Terminal state never appear in the Brainstorm wire contract and never
+  decide whether Brainstorm may start.
 - **A failure is visible but never quotable.** A failing CLI prints its
   complaint on *stdout* (`claude -p` exits 1 and says "You're out of usage
   credits"), so only the exit code separates an answer from an error. A
   turn carrying a `[!]` failure notice streams to the wearer and is then
   excluded from the transcript — otherwise the next speaker rebuts a
   billing notice and the judge scores it.
+- **Context changes are explicit.** Ordinary speech is the next user move in
+  the selected conversation. `new Brainstorm`, `branch this`, and `continue
+  <title>` are explicit lineage operations. A clearly unrelated replacement
+  request requires confirmation; silence never resets a session.
 
 **Models are a setting, not a launch flag** (`services/models.py`). Each
 switchable model is a slot the agents read PER TURN, so a change lands on the
@@ -158,37 +170,18 @@ menu, so a Settings → Models submenu is a view over existing verbs whenever
 the plugin wants one.
 
 Brainstorm streams to every `TranscriptSink` at once (`services/sinks.py`):
-the glasses, the local console terminal, and a `DebateStateSink` snapshot. The
-snapshot is currently write-only in production; More → Brainstorm renders the
-setup/invocation page and does not yet reopen history.
+the dense glasses transcript and the local console. The durable Brainstorm
+store is the restart-safe source of truth for recent sessions, continuation,
+branching, verification, and synthesis. G2 acceptance evidence contains only
+synthetic content, bounded state transitions, gesture metadata, and frame
+hashes; it never includes Brainstorm transcript text.
 
-Each paired OpenClaw connection enforces its own local, deny-by-default RPC
-firewall before socket transmission. Brainstorm and Calendar proposals use
-the same configured `hermes` agent on the Mac mini, but distinct WSS
-connections, session labels, key namespaces, locks, and persistent transcript
-histories. Each permits only the nine exact method-and-parameter shapes used by
-its isolated terminal and recovery path, and rejects the other JOAT lane's
-session keys. Server-advertised channel,
-configuration, agent-management, tool, delivery, `main`, and Telegram
-authority cannot widen that local allowlist. OpenClaw-triggered consequential
-work must remain behind JOAT's preview, confirmation, native execution,
-read-back, and receipt boundary; tools are not enabled on the Brainstorm
-session.
-
-The empty `tools.effective` check is an admission and pre-send snapshot, not an
-atomic guarantee that a remote administrator cannot change policy between that
-check and execution. JOAT detects tool/approval activity and aborts, but that
-does not prove a side effect could not already have started. Tools therefore
-remain disabled on both JOAT sessions. The first separate productivity lane is
-a strict `JOAT_CALENDAR_V1` text proposal: Hermes returns one candidate inside
-a total local deadline with separately bounded generation and cleanup, JOAT
-validates an exact six-field schema, generates opaque local provenance, and
-enters the existing confirmed EventKit path. This is transcript separation,
-not a claim of an ephemeral remote session: archive/delete support must be
-verified against the live Mac-mini Gateway before JOAT depends on it. A future OpenClaw
-automation lane must bind each run to an immutable scoped-tool policy revision,
-or equivalent server-side proof, before it can enter the same JOAT action
-boundary. Channels/MCP/cron/skills integration is not yet wired.
+OpenClaw and Hermes remain separate from this section. Their future glasses
+surface is Agent Terminal, with its own wire types, controller, session roster,
+runtime authority, and acceptance gates. See
+[`AGENT_TERMINAL_ROADMAP.md`](AGENT_TERMINAL_ROADMAP.md). Calendar proposal
+lanes and other OpenClaw integrations retain their existing independent safety
+boundaries; none grants Brainstorm remote-agent or tool authority.
 
 The native macOS bridge binds its one accepted Unix-socket peer to the exact
 Python PID launched by `JOAT.app`, revoking the previous peer when that PID

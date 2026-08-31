@@ -324,6 +324,27 @@ successfully completed Reminder disappears. When a Reminder completion is
 uncertain or its native due instant cannot be proven, JOAT returns to generic
 Planning rather than displaying a possibly wrong day.
 
+### QUICKNOTES — one recorder and one archive
+
+`QuickNotes` unifies the meeting/speech recorder and exact dictated text
+notes. "JOAT, start a quicknote about X" (or "voice note") begins a
+journal-first capture in which the microphone belongs EXCLUSIVELY to the
+recording — nothing said mid-meeting reaches the assistant. The QuickNotes
+menu row therefore becomes the recorder's control panel while a capture is
+live (Save and finish / Pause / Discard as tappable rows, with a two-row
+Confirm/Keep page guarding discard); voice control returns while paused.
+Save shows an honest `SAVING` frame through transcription, then the unified
+list: recordings first ("· recorded", "· gaps" when degraded), text notes
+after. On save the Mac auto-summarizes locally (resident MLX; transcripts
+never leave the Mac) into summary + key points + todos, engine-attributed
+and replaceable — "resummarize with claude" is the explicit cloud opt-in via
+the official CLI. Tapping a recording opens summary/key points/todos;
+"ask the last note …" answers from the transcript; "create reminders from
+the last note" walks each todo through the existing confirmed EventKit gate
+(due tomorrow 09:00, provenance `voice_note.todo`); "send the last note to
+my notes" writes Apple Notes on the Mac (JOAT folder — the Even plugin has
+no phone-side Notes API) and iCloud carries it to the phone.
+
 ### Gesture map — original exploration
 
 This table records the design exploration that preceded implementation. It is

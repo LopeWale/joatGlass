@@ -370,3 +370,113 @@ def test_discard_hard_purges_title_audio_and_transcript(tmp_path: Path) -> None:
         assert discarded.raw_retained is False
         assert notes.frame_count("capture-1") == 0
         assert notes.segments("capture-1") == ()
+
+
+def _retained_note(notes: VoiceNoteStore, capture_id: str, *, base_us: int) -> None:
+    notes.create(
+        capture_id=capture_id,
+        idempotency_key=f"voice-note:{capture_id}",
+        title=f"Note {capture_id}",
+        source_kind="g2.microphone",
+        now_us=base_us,
+    )
+    notes.transition(capture_id, "recording", now_us=base_us + 1)
+    notes.append_frame(
+        capture_id,
+        connection_generation="socket-a",
+        seq=1,
+        source="glasses",
+        speaker="wearer",
+        pcm=b"\x01\x00",
+        received_at_us=base_us + 2,
+    )
+    notes.transition(capture_id, "finalizing", now_us=base_us + 3)
+    notes.append_transcript(
+        capture_id,
+        text="Discussed the launch and assigned owners.",
+        first_frame_ordinal=0,
+        last_frame_ordinal=0,
+        now_us=base_us + 4,
+    )
+    notes.finalize(
+        capture_id,
+        complete=True,
+        completion_code="transcript_checkpointed_raw_purged",
+        now_us=base_us + 5,
+    )
+
+
+def test_insights_replace_and_read_back(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _retained_note(notes, "capture-1", base_us=10)
+        assert notes.insights("capture-1") is None
+
+        stored = notes.replace_insights(
+            "capture-1",
+            engine="mlx-local",
+            summary="  The team agreed to ship Friday.  ",
+            key_points=("Ship on Friday", "", "QA signs off Thursday"),
+            todos=("Email the release notes",),
+            now_us=100,
+        )
+        assert stored.summary == "The team agreed to ship Friday."
+        assert stored.key_points == ("Ship on Friday", "QA signs off Thursday")
+        assert stored.todos == ("Email the release notes",)
+
+        # Re-summarizing with another engine replaces, never appends.
+        notes.replace_insights(
+            "capture-1",
+            engine="claude-cli",
+            summary="Ship Friday; QA Thursday.",
+            key_points=("Ship Friday",),
+            todos=(),
+            now_us=200,
+        )
+        read = notes.insights("capture-1")
+        assert read is not None
+        assert read.engine == "claude-cli"
+        assert read.generated_at_us == 200
+        assert read.key_points == ("Ship Friday",)
+        assert read.todos == ()
+
+
+def test_insights_require_a_retained_transcribed_note(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        notes.create(
+            capture_id="capture-1",
+            idempotency_key="voice-note:capture-1",
+            title="Still recording",
+            source_kind="g2.microphone",
+            now_us=10,
+        )
+        notes.transition("capture-1", "recording", now_us=11)
+        with pytest.raises(VoiceNoteConflictError, match="retained"):
+            notes.replace_insights(
+                "capture-1",
+                engine="mlx-local",
+                summary="Too early",
+                key_points=(),
+                todos=(),
+                now_us=12,
+            )
+
+
+def test_recent_retained_orders_newest_first_and_skips_discards(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _retained_note(notes, "capture-1", base_us=10)
+        _retained_note(notes, "capture-2", base_us=100)
+        notes.create(
+            capture_id="capture-3",
+            idempotency_key="voice-note:capture-3",
+            title="Dropped",
+            source_kind="g2.microphone",
+            now_us=200,
+        )
+        notes.transition("capture-3", "recording", now_us=201)
+        notes.discard("capture-3", now_us=202)
+
+        recent = notes.recent_retained(5)
+        assert [note.capture_id for note in recent] == ["capture-2", "capture-1"]

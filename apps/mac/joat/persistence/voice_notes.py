@@ -82,6 +82,24 @@ class VoiceNoteSegment:
     created_at_us: int
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceNoteInsights:
+    """Derived distillation of one retained note — replaceable, never truth.
+
+    Segments are capture-time evidence and freeze at completion; insights are
+    a generated view over them, attributed to the engine that produced them so
+    a wearer always knows whether a summary came from the local model or an
+    explicitly requested cloud pass.
+    """
+
+    capture_id: str
+    engine: str
+    generated_at_us: int
+    summary: str
+    key_points: tuple[str, ...]
+    todos: tuple[str, ...]
+
+
 def _identifier(name: str, value: str, *, maximum: int = 256) -> None:
     if (
         not isinstance(value, str)
@@ -593,6 +611,140 @@ class VoiceNoteStore:
         ).fetchall()
         return tuple(self._segment(row) for row in rows)
 
+    _RETAINED_STATES = ("saved", "saved_degraded", "interrupted")
+
+    def recent_retained(self, limit: int = 5) -> tuple[VoiceNote, ...]:
+        """Newest titled, non-discarded terminal notes for the HUD list."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        placeholders = ",".join("?" for _ in self._RETAINED_STATES)
+        rows = self._store.execute(
+            f"SELECT {self._NOTE_COLUMNS} FROM voice_notes "
+            f"WHERE state IN ({placeholders}) AND title IS NOT NULL "
+            "ORDER BY updated_at_us DESC,capture_id DESC LIMIT ?",
+            (*self._RETAINED_STATES, limit),
+        ).fetchall()
+        return tuple(self._note(row) for row in rows)
+
+    def replace_insights(
+        self,
+        capture_id: str,
+        *,
+        engine: str,
+        summary: str,
+        key_points: tuple[str, ...],
+        todos: tuple[str, ...],
+        now_us: int,
+    ) -> VoiceNoteInsights:
+        """Atomically replace the derived distillation of one retained note.
+
+        Insights never claim capture truth, so unlike segments they may be
+        regenerated after completion — but only for a retained note that has
+        at least one transcript section to distill from.
+        """
+        _identifier("capture_id", capture_id)
+        _identifier("engine", engine, maximum=64)
+        _timestamp(now_us)
+        cleaned_summary = " ".join(summary.split())
+        if not cleaned_summary or len(cleaned_summary) > 4_000:
+            raise ValueError("summary must be 1 to 4000 visible characters")
+        cleaned_points = self._clean_insight_lines("key_points", key_points)
+        cleaned_todos = self._clean_insight_lines("todos", todos)
+        with self._store.transaction() as db:
+            current = self._get_with(db, capture_id)
+            if current.state not in self._RETAINED_STATES:
+                raise VoiceNoteConflictError(
+                    "insights require a retained Voice Note"
+                )
+            if current.transcribed_segments < 1:
+                raise VoiceNoteConflictError(
+                    "insights require at least one transcript section"
+                )
+            db.execute(
+                "DELETE FROM voice_note_insights WHERE capture_id=?",
+                (capture_id,),
+            )
+            rows = [
+                (capture_id, "summary", 0, cleaned_summary, engine, now_us),
+                *(
+                    (capture_id, "key_point", ordinal, text, engine, now_us)
+                    for ordinal, text in enumerate(cleaned_points)
+                ),
+                *(
+                    (capture_id, "todo", ordinal, text, engine, now_us)
+                    for ordinal, text in enumerate(cleaned_todos)
+                ),
+            ]
+            db.executemany(
+                "INSERT INTO voice_note_insights("
+                "capture_id,kind,ordinal,text,engine,generated_at_us) "
+                "VALUES (?,?,?,?,?,?)",
+                rows,
+            )
+            db.execute(
+                "UPDATE voice_notes SET updated_at_us=MAX(updated_at_us,?) "
+                "WHERE capture_id=?",
+                (now_us, capture_id),
+            )
+        return VoiceNoteInsights(
+            capture_id=capture_id,
+            engine=engine,
+            generated_at_us=now_us,
+            summary=cleaned_summary,
+            key_points=cleaned_points,
+            todos=cleaned_todos,
+        )
+
+    def insights(self, capture_id: str) -> VoiceNoteInsights | None:
+        _identifier("capture_id", capture_id)
+        # Existence check keeps an unknown id an error rather than a None.
+        self._get_with(self._store._db, capture_id)
+        rows = self._store.execute(
+            "SELECT kind,ordinal,text,engine,generated_at_us "
+            "FROM voice_note_insights WHERE capture_id=? ORDER BY kind,ordinal",
+            (capture_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        summary = ""
+        engine = ""
+        generated_at_us = 0
+        key_points: list[str] = []
+        todos: list[str] = []
+        for row in rows:
+            kind = cast(str, row[0])
+            text = cast(str, row[2])
+            engine = cast(str, row[3])
+            generated_at_us = cast(int, row[4])
+            if kind == "summary":
+                summary = text
+            elif kind == "key_point":
+                key_points.append(text)
+            else:
+                todos.append(text)
+        return VoiceNoteInsights(
+            capture_id=capture_id,
+            engine=engine,
+            generated_at_us=generated_at_us,
+            summary=summary,
+            key_points=tuple(key_points),
+            todos=tuple(todos),
+        )
+
+    @staticmethod
+    def _clean_insight_lines(name: str, lines: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned: list[str] = []
+        for line in lines:
+            text = " ".join(line.split())
+            if not text:
+                continue
+            if len(text) > 500:
+                raise ValueError(f"each of {name} must be at most 500 characters")
+            cleaned.append(text)
+        if len(cleaned) > 12:
+            raise ValueError(f"{name} must contain at most 12 entries")
+        return tuple(cleaned)
+
     @classmethod
     def _get_with(cls, db: sqlite3.Connection, capture_id: str) -> VoiceNote:
         row = db.execute(
@@ -656,6 +808,7 @@ __all__ = [
     "VoiceNoteConflictError",
     "VoiceNoteError",
     "VoiceNoteFrame",
+    "VoiceNoteInsights",
     "VoiceNoteNotFoundError",
     "VoiceNoteSegment",
     "VoiceNoteStore",

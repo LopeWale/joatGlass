@@ -705,7 +705,11 @@ export class CapabilityMenu {
     ) return;
 
     const isMessagesRetry = title === 'MESSAGES';
-    const readable = title.charAt(0) + title.slice(1).toLowerCase();
+    // The guidance must name the row exactly as the sidebar prints it
+    // ('QuickNotes', 'Agent Terminal'), so map the timeout title back through
+    // CAPABILITIES instead of case-folding it.
+    const readable = CAPABILITIES.find((cap) => cap.toUpperCase() === title)
+      ?? title.charAt(0) + title.slice(1).toLowerCase();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
     const shown = await this.hud.showList(isMessagesRetry

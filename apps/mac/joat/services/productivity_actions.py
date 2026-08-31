@@ -110,6 +110,17 @@ class CalendarEventIntent:
 
 
 @dataclass(frozen=True)
+class ReminderIntent:
+    """Validated-shape reminder candidate; EventKit remains authoritative."""
+
+    title: str
+    date: str
+    time: str
+    time_zone: str
+    list_title: str | None = None
+
+
+@dataclass(frozen=True)
 class _CivilIntent:
     date: datetime
     zone: str
@@ -263,19 +274,51 @@ class ProductivityActionController:
         )
 
     async def _create_reminder(self, match: re.Match[str]) -> str:
+        return await self.create_reminder(ReminderIntent(
+            title=match.group("title"),
+            date=match.group("date"),
+            time=match.group("time"),
+            time_zone=match.group("zone"),
+            list_title=match.group("container"),
+        ))
+
+    async def create_reminder(
+        self,
+        intent: ReminderIntent,
+        *,
+        origin: ActionOrigin | None = None,
+    ) -> str:
+        """Validate a typed candidate, then use the same confirmed native path."""
         if self._bridge is None:
             return "Open JOAT on the Mac and connect Reminders first."
-        title = self._valid_title(match.group("title"))
+        title = self._valid_title(intent.title)
         if title is None:
             return "Reminder title must be 1 to 200 visible characters."
         try:
-            civil = self._civil(match.group("date"), match.group("time"), match.group("zone"))
+            if re.fullmatch(_ZONE, intent.time_zone) is None or len(intent.time_zone) > 128:
+                raise ValueError
+            civil = self._civil(intent.date, intent.time, intent.time_zone)
         except ValueError:
             return _REMINDER_USAGE
+        selected_list = intent.list_title
+        if selected_list is not None:
+            selected_list = self._valid_title(selected_list)
+            if selected_list is None:
+                return "Reminder list name must be 1 to 200 visible characters."
+        if origin is not None and (
+            not origin.kind
+            or len(origin.kind) > 128
+            or not origin.identifier
+            or len(origin.identifier) > 256
+            or isinstance(origin.ordinal, bool)
+            or not isinstance(origin.ordinal, int)
+            or origin.ordinal < 0
+        ):
+            return "Reminder proposal provenance was invalid. Nothing was created."
 
         prepared = await self._prepare(
             entity="reminders",
-            selected_title=match.group("container"),
+            selected_title=selected_list,
             civil=civil,
         )
         if isinstance(prepared, str):
@@ -311,6 +354,7 @@ class ProductivityActionController:
             failed="Reminders did not create the reminder. Check JOAT on the Mac.",
             monitor_due_unix_ms=chosen_ms,
             planning_anchor_unix_ms=chosen_ms,
+            origin=origin,
         )
 
     async def _complete_reminder(self, raw_title: str) -> str:
