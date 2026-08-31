@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -28,6 +28,7 @@ import re
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import time
 from typing import Any, TypeVar, cast
@@ -37,7 +38,9 @@ from urllib.parse import urlsplit
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.agents.openclaw_runtime import terminal_ready_activity
+from joat.audio.vad import RmsVad
 from joat.channels.cards import CardLog
+from joat.core.interfaces import SttEngine, Transcript
 from joat.core.protocol import BrainstormAction, BrainstormHudView, DownlinkMessage
 from joat.services.brainstorm_acceptance import (
     MAX_RETAINED_EVENTS,
@@ -47,7 +50,9 @@ from joat.services.brainstorm_acceptance import (
 )
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
-from joat.services.session import SessionManager
+from joat.services.orchestrator import VoiceOrchestrator
+from joat.services.roundtable import Participant, RoundTable
+from joat.services.session import DebateSession, SessionManager
 from joat.services.sinks import HudSink
 from joat.services.status import StatusPublisher
 
@@ -116,6 +121,52 @@ class DeterministicHermes:
         self._hold.set()
 
 
+_VOICE_FIXTURE_TOKEN = "glasses-direct"
+_VOICE_FIXTURE_COMMAND = "JOAT, brainstorm simulator route verification"
+_PCM_BATCH_SAMPLES = 3_200
+
+
+def _pcm_batch(amplitude: int) -> bytes:
+    """One fixed 200 ms signed-16-bit batch for the DEV-only simulator gate."""
+
+    samples = [amplitude if index % 2 == 0 else -amplitude for index in range(_PCM_BATCH_SAMPLES)]
+    return struct.pack(f"<{_PCM_BATCH_SAMPLES}h", *samples)
+
+
+# This is deliberately synthetic signal, not a wearer recording. Two voiced
+# batches followed by four quiet batches exercise the same VAD shape as the
+# focused voice tests. The temporary fixture is removed before the runner
+# returns, and only its source plus final framebuffer hash enter the receipt.
+VOICE_FIXTURE_PCM = b"".join((
+    _pcm_batch(8_000),
+    _pcm_batch(8_000),
+    _pcm_batch(50),
+    _pcm_batch(50),
+    _pcm_batch(50),
+    _pcm_batch(50),
+))
+
+
+class FixedVoiceFixtureStt(SttEngine):
+    """Content-free STT stand-in used only to prove plugin-to-voice routing."""
+
+    def __init__(self) -> None:
+        self._received = False
+
+    async def feed(self, pcm: bytes) -> Transcript | None:
+        self._received = self._received or bool(pcm)
+        return None
+
+    async def flush(self) -> Transcript | None:
+        if not self._received:
+            return None
+        self._received = False
+        return Transcript(text=_VOICE_FIXTURE_COMMAND, is_final=True)
+
+    def reset(self) -> None:
+        self._received = False
+
+
 T = TypeVar("T")
 
 _EXPECTED_FLOW = (
@@ -133,11 +184,21 @@ _EXPECTED_FLOW = (
     ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
     ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
     ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
+    ("voice-direct-running", "synthetic_mic", "start_brainstorm", "brainstorm", "running", False),
 )
 _VISUAL_ONLY_ARTIFACTS = (
     "dense-transcript-preview",
     "terminal-transcript-preview",
     "hermes-busy",
+)
+# The fixed visual samples are deliberately taken after the action flow has
+# settled but before the DEV-only direct-voice replay opens its own live
+# session. Keep that ordering explicit so every numbered screenshot still
+# corresponds to the actual simulator operation that produced it.
+_ARTIFACT_STATES = (
+    *(item[0] for item in _EXPECTED_FLOW[:-1]),
+    *_VISUAL_ONLY_ARTIFACTS,
+    _EXPECTED_FLOW[-1][0],
 )
 
 _SAFE_ARTIFACT_NAME = re.compile(r"^[0-9]{2}-[a-z-]+\.(?:rgba|optical)\.png$")
@@ -262,6 +323,24 @@ def validate_flow(
         raise BrainstormActionFlowError("acceptance retained a forbidden content field")
 
 
+def validate_voice_direct(receipt: Mapping[str, object]) -> None:
+    """Keep the simulated daily voice proof source-bound and content-free."""
+
+    if _walk_keys(receipt) & _BANNED_EVIDENCE_KEYS:
+        raise BrainstormActionFlowError("voice receipt retained a forbidden content field")
+    expected = {
+        "source": "glasses",
+        "route": "addressed_brainstorm",
+        "hud": "verified",
+        "stt": "deterministic_no_network",
+        "openclaw": "not_contacted",
+    }
+    if receipt.get("source") != "glasses":
+        raise BrainstormActionFlowError("voice receipt did not preserve glasses source")
+    if receipt != expected:
+        raise BrainstormActionFlowError("voice receipt has an invalid direct-voice contract")
+
+
 def validate_visual_artifacts(artifacts: dict[str, dict[str, str]]) -> None:
     """Require reviewable, content-free optical evidence for every driven HUD state.
 
@@ -272,10 +351,9 @@ def validate_visual_artifacts(artifacts: dict[str, dict[str, str]]) -> None:
     screenshot pixels stay out of the JSON receipt.
     """
 
-    expected = [item[0] for item in _EXPECTED_FLOW] + list(_VISUAL_ONLY_ARTIFACTS)
-    if list(artifacts) != expected:
+    if list(artifacts) != list(_ARTIFACT_STATES):
         raise BrainstormActionFlowError("simulator optical artifacts do not match the driven HUD flow")
-    for index, state in enumerate(expected, start=1):
+    for index, state in enumerate(_ARTIFACT_STATES, start=1):
         artifact = artifacts.get(state)
         if not isinstance(artifact, dict):
             raise BrainstormActionFlowError(f"{state}: missing visual artifact record")
@@ -364,6 +442,16 @@ def _prepare_simulator_plugin_root(repo: Path, output: Path, websocket_url: str)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     manifest_path.chmod(0o600)
     return root
+
+
+def _write_voice_fixture(root: Path) -> Path:
+    """Write the fixed DEV fixture below a disposable Vite public root only."""
+
+    fixture = root / "public" / "__joat-audio-fixture" / f"{_VOICE_FIXTURE_TOKEN}.pcm"
+    fixture.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fixture.write_bytes(VOICE_FIXTURE_PCM)
+    fixture.chmod(0o600)
+    return fixture
 
 
 def _start_process(
@@ -542,6 +630,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         reason="device_approval_required",
     )
     status.set_agent_terminal(state="approval_required", reason="write_scope_required")
+    voice_direct_started = asyncio.Event()
+    voice_fixture_sources: set[str] = set()
+    observe_voice_fixture = False
+    voice_terminal = DeterministicHermes()
+
     def topic_capture_view(capturing: bool) -> BrainstormHudView:
         terminal_state = str(status.agent_terminal_projection()["state"])
         if terminal_state != "ready":
@@ -596,15 +689,49 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             no_tools_checked=True,
         ))
 
+    def make_voice_brainstorm(topic: str) -> DebateSession:
+        """Use the production session and HUD producer after fixed STT routing.
+
+        The simulator intentionally substitutes only the remote model streams.
+        Its Vite plugin, Mac gateway, provenance-bearing voice orchestrator,
+        direct invocation grammar, SessionManager, and G2 HUD are all live.
+        """
+
+        voice_direct_started.set()
+        return DebateSession(
+            topic,
+            RoundTable([
+                Participant("codex", "proposer", voice_terminal.stream),
+                Participant("claude", "critic", voice_terminal.stream),
+                Participant("hermes", "agent terminal", voice_terminal.stream),
+            ]),
+            HudSink(hud, status.agent_terminal_projection),
+            judge=None,
+            max_rounds=1,
+        )
+
     sessions = SessionManager(
         hud,
-        lambda _topic: None,
+        make_voice_brainstorm,
         topic_capture_view=topic_capture_view,
         terminal_retry=retry_terminal,
         brainstorm_available=lambda: (
             str(status.agent_terminal_projection()["state"]) == "ready"
         ),
     )
+    voice_orchestrator = VoiceOrchestrator(
+        gateway,
+        FixedVoiceFixtureStt(),
+        vad=RmsVad(
+            hangover_batches=3,
+            adaptive=False,
+            speech_rms=0.015,
+            start_batches=1,
+        ),
+        sessions=sessions,
+        wake_words=("joat",),
+    )
+    voice_orchestrator.attach()
     capabilities = CapabilityRouter(
         hud=hud,
         transport=gateway,
@@ -619,8 +746,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         nonlocal hello_count
         hello_count += 1
         connected.set()
+        asyncio.get_running_loop().create_task(voice_orchestrator.on_connect())
 
     gateway.on_hello(on_hello)
+
+    def on_voice_fixture_frame(frame: object) -> None:
+        if observe_voice_fixture:
+            source = getattr(frame, "source", None)
+            if isinstance(source, str):
+                voice_fixture_sources.add(source)
+
+    gateway.on_audio_frame(on_voice_fixture_frame)
 
     def on_action(action: BrainstormAction) -> None:
         actions.append(action)
@@ -655,9 +791,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     managed: list[ManagedProcess] = []
     receipts: list[ScreenReceipt] = []
     artifacts: dict[str, dict[str, str]] = {}
+    fixture_path: Path | None = None
+    density_digest: str | None = None
     try:
         await gateway.start()
         simulator_root = _prepare_simulator_plugin_root(args.repo, output, args.ws_url)
+        fixture_path = _write_voice_fixture(simulator_root)
         env = dict(os.environ)
         env["VITE_MAC_WS_URL"] = args.ws_url
         vite = _start_process(
@@ -1061,7 +1200,6 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             raise BrainstormActionFlowError("acceptance receipt is not readable JSON") from exc
         if not isinstance(acceptance, dict):
             raise BrainstormActionFlowError("acceptance receipt must be an object")
-        validate_flow(receipts, acceptance)
 
         # This is deliberately separate from the causal receipt above. It
         # exercises the production Mac HUD producer with a fixed, content-free
@@ -1089,6 +1227,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "12-dense-transcript-preview",
             digest,
         )
+        density_digest = digest
         artifacts["dense-transcript-preview"] = {"raw": raw, "optical": optical}
 
         # The same bounded producer must stay legible after the wearer taps
@@ -1129,7 +1268,87 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             digest,
         )
         artifacts["hermes-busy"] = {"raw": raw, "optical": optical}
+
+        # The daily entry point must work without selecting a menu item or
+        # touching the home Mac. Restart the official simulator with the
+        # DEV-only fixed PCM query after the ordinary action flow is complete,
+        # then prove the real plugin sent glasses-origin audio through the
+        # gateway, VoiceOrchestrator, addressed Brainstorm grammar, production
+        # session manager, and live HUD.
+        status.set_agent_terminal(state="ready", reason="")
+        generation_before_voice = gateway.connection_generation
+        reconnected_simulator.stop()
+        await _wait_for(
+            lambda: True if not _port_busy(args.automation_port) else None,
+            label="stopped simulator before direct-voice fixture",
+        )
+        voice_fixture_sources.clear()
+        observe_voice_fixture = True
+        sent_before_voice = len(gateway.sent)
+        voice_simulator = await _start_official_simulator(
+            args=args,
+            plugin_url=f"{plugin_url}/?joatAudioFixture={_VOICE_FIXTURE_TOKEN}",
+            env=env,
+            output=output,
+            log_name="simulator-direct-voice.log",
+        )
+        managed.append(voice_simulator)
+        await _wait_for(
+            lambda: True
+            if gateway.connection_generation > generation_before_voice and hello_count >= 3
+            else None,
+            label="authenticated direct-voice simulator generation",
+        )
+        await _wait_for(
+            lambda: True if voice_fixture_sources else None,
+            label="production plugin voice fixture source",
+        )
+        if voice_fixture_sources != {"glasses"}:
+            raise BrainstormActionFlowError(
+                "direct-voice fixture did not preserve the glasses microphone source",
+            )
+        await _wait_for(
+            lambda: True if voice_direct_started.is_set() else None,
+            label="addressed glasses voice Brainstorm start",
+        )
+        voice_running = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                after=sent_before_voice,
+                screen="brainstorm",
+                state="running",
+            ),
+            label="direct glasses voice Brainstorm frame",
+        )
+        await asyncio.sleep(1.0)
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "15-voice-direct-running",
+            digest,
+        )
+        receipts.append(ScreenReceipt(
+            "voice-direct-running",
+            "synthetic_mic",
+            "start_brainstorm",
+            voice_running.screen,
+            voice_running.state,
+            voice_running.acceptance_armed,
+            digest,
+        ))
+        artifacts["voice-direct-running"] = {"raw": raw, "optical": optical}
+        voice_direct = {
+            "source": "glasses",
+            "route": "addressed_brainstorm",
+            "hud": "verified",
+            "stt": "deterministic_no_network",
+            "openclaw": "not_contacted",
+        }
+        validate_voice_direct(voice_direct)
+        validate_flow(receipts, acceptance)
         validate_visual_artifacts(artifacts)
+        if density_digest is None:
+            raise BrainstormActionFlowError("terminal density frame was not captured")
 
         return {
             "schemaVersion": 2,
@@ -1139,6 +1358,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "input": "official simulator input endpoint through production EventRouter",
                 "mac": "production gateway, capability router, session manager, and fixed acceptance controller",
                 "hermes": "deterministic no-network stream; no OpenClaw payload retained",
+                "voice": "DEV-only fixed PCM through production audio ingest; glasses source asserted",
                 "gestureSource": "simulator-fixed right temple only",
                 "leftTempleDoublePress": "not available; physical G2 remains required",
                 "physicalLens": "not run",
@@ -1148,9 +1368,10 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "artifacts": artifacts,
             "visualDensityPreview": {
                 "kind": "fixed_content_free_producer_sample",
-                "framebufferSha256": digest,
+                "framebufferSha256": density_digest,
                 "retainedInReceipt": False,
             },
+            "voiceDirect": voice_direct,
             "acceptanceReceipt": {
                 "file": str(receipt_path.relative_to(output)),
                 "sha256": file_sha256(receipt_path),
@@ -1161,9 +1382,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         }
     finally:
         terminal.release()
+        voice_terminal.release()
         await sessions.close(timeout_s=2.0)
         for process in reversed(managed):
             process.stop()
+        if fixture_path is not None and fixture_path.is_file():
+            fixture_path.unlink()
         await gateway.stop()
 
 
