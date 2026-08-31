@@ -110,12 +110,10 @@ describe('productivity escape copy', () => {
 });
 
 describe('flat productivity chrome', () => {
-  it('does not wrap Calendar or Reminders actions in a faux card', () => {
-    expect(HudCanvas.confirmationActionLayout()).toEqual({
-      boxed: false,
-      verticalDivider: false,
-      baselineY: 197,
-    });
+  it('collapses confirmation controls into one static low-bandwidth footer', () => {
+    expect(HudCanvas.confirmationActionHint()).toBe(
+      'tap: confirm · swipe: cancel · left x2: back · auto-cancel',
+    );
   });
 
   it('uses the same compact left reading axis as the other first-level HUDs', () => {
@@ -126,9 +124,11 @@ describe('flat productivity chrome', () => {
       dividerY: 78.5,
       contentX: 36,
       contentWidth: 504,
-      promptCenterY: 126,
-      progressY: 246,
-      timerBaselineY: 267,
+      promptTopBaselineY: 104,
+      promptFontSize: 16,
+      promptLineHeight: 20,
+      promptMaxLines: 4,
+      footerBaselineY: 267,
     });
   });
 
@@ -150,13 +150,6 @@ describe('selected visual geometry', () => {
       sidebarWidth: 160,
       sidebarBackdropOffsetX: 78,
       listContentX: 93,
-      confirmationActionsY: 178,
-      confirmationPrimaryX: 112,
-      confirmationSecondaryX: 294,
-      confirmationActionWidth: 170,
-      confirmationActionHeight: 36,
-      confirmationProgressX: 97,
-      confirmationProgressWidth: 367,
     });
   });
 
@@ -278,13 +271,12 @@ describe('compact Planning focus rows', () => {
 });
 
 describe('compact productivity outcome geometry', () => {
-  it('uses a text stack and divider rather than reserving a card-sized body', () => {
+  it('uses a compact text stack without a card or progress strip', () => {
     expect(HudCanvas.productivityOutcomeLayout()).toEqual({
-      titleBaselineY: 103,
-      dividerY: 125.5,
-      primaryBaselineY: 151,
-      secondaryBaselineY: 174,
-      progressY: 198,
+      titleBaselineY: 98,
+      dividerY: 136.5,
+      primaryBaselineY: 158,
+      secondaryBaselineY: 181,
       footerBaselineY: 267,
     });
   });
@@ -377,11 +369,9 @@ describe('Planning month geometry', () => {
 });
 
 describe('flat confirmation actions', () => {
-  it('keeps the safe-write actions explicit without button outlines', () => {
-    expect(HudCanvas.confirmationActionLabels()).toEqual([
-      { label: 'TAP · Confirm', x: 188, level: 238 },
-      { label: 'SWIPE · Cancel', x: 388, level: 170 },
-    ]);
+  it('does not expose countdown-dependent visual geometry', () => {
+    expect(HudCanvas.confirmationReviewLayout()).not.toHaveProperty('progressY');
+    expect(HudCanvas.confirmationReviewLayout()).not.toHaveProperty('timerBaselineY');
   });
 });
 

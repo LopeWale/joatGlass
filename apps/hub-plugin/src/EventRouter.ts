@@ -374,8 +374,10 @@ export class EventRouter {
 
     // Confirmation is exclusive: no menu navigation, OS exit dialog, or
     // generic Mac input may occur behind it. Either built-in G2 temple is the
-    // same source-agnostic TAP action. Optional R1 input remains compatible,
-    // but the decision never depends on owning that accessory.
+    // same source-agnostic TAP action. Left-temple double press is the
+    // consistent Back gesture and refuses the pending write. Optional R1
+    // input remains compatible, but the decision never depends on owning that
+    // accessory.
     if (this.imu.isPending()) {
       if (
         type === OsEventTypeList.CLICK_EVENT &&
@@ -386,6 +388,11 @@ export class EventRouter {
         )
       ) {
         this.imu.confirmByTap();
+      } else if (
+        type === OsEventTypeList.DOUBLE_CLICK_EVENT &&
+        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+      ) {
+        this.imu.declineByTap();
       }
       return;
     }

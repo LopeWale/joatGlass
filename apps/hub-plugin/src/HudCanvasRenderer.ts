@@ -133,34 +133,13 @@ export const HUD_VISUAL_GEOMETRY = {
   sidebarWidth: 160,
   sidebarBackdropOffsetX: 78,
   listContentX: 93,
-  confirmationActionsY: 178,
-  confirmationPrimaryX: 112,
-  confirmationSecondaryX: 294,
-  confirmationActionWidth: 170,
-  confirmationActionHeight: 36,
-  confirmationProgressX: 97,
-  confirmationProgressWidth: 367,
 } as const;
 
-/** Safe-write choices are named actions, not faux buttons. */
-export function confirmationActionLabels(): readonly {
-  label: string;
-  x: number;
-  level: number;
-}[] {
-  return [
-    { label: 'TAP · Confirm', x: 188, level: BRIGHT },
-    { label: 'SWIPE · Cancel', x: 388, level: SUPPORT },
-  ];
-}
-
-/** Confirmation gestures are inline instructions, never button/card chrome. */
-export function confirmationActionLayout(): {
-  boxed: false;
-  verticalDivider: false;
-  baselineY: number;
-} {
-  return { boxed: false, verticalDivider: false, baselineY: 197 };
+/** Safe-write gestures share one static footer with the other dense HUDs.
+ * Omitting the changing seconds counter prevents needless image transfers
+ * while the wearer reads an otherwise unchanged review. */
+export function confirmationActionHint(): string {
+  return 'tap: confirm · swipe: cancel · left x2: back · auto-cancel';
 }
 
 /** Calendar/Reminder review follows the same compact reading axis as
@@ -173,9 +152,11 @@ export function confirmationReviewLayout(): {
   dividerY: number;
   contentX: number;
   contentWidth: number;
-  promptCenterY: number;
-  progressY: number;
-  timerBaselineY: number;
+  promptTopBaselineY: number;
+  promptFontSize: number;
+  promptLineHeight: number;
+  promptMaxLines: number;
+  footerBaselineY: number;
 } {
   return {
     headerIconX: 36,
@@ -184,9 +165,11 @@ export function confirmationReviewLayout(): {
     dividerY: 78.5,
     contentX: 36,
     contentWidth: 504,
-    promptCenterY: 126,
-    progressY: 246,
-    timerBaselineY: 267,
+    promptTopBaselineY: 104,
+    promptFontSize: 16,
+    promptLineHeight: 20,
+    promptMaxLines: 4,
+    footerBaselineY: 267,
   };
 }
 
@@ -987,7 +970,6 @@ export interface ProductivityOutcomeLayout {
   dividerY: number;
   primaryBaselineY: number;
   secondaryBaselineY: number;
-  progressY: number;
   footerBaselineY: number;
 }
 
@@ -996,11 +978,10 @@ export interface ProductivityOutcomeLayout {
  * leave the lens calm while retaining the return gesture in the footer. */
 export function productivityOutcomeLayout(): ProductivityOutcomeLayout {
   return {
-    titleBaselineY: 103,
-    dividerY: 125.5,
-    primaryBaselineY: 151,
-    secondaryBaselineY: 174,
-    progressY: 198,
+    titleBaselineY: 98,
+    dividerY: 136.5,
+    primaryBaselineY: 158,
+    secondaryBaselineY: 181,
     footerBaselineY: 267,
   };
 }
@@ -1935,46 +1916,27 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.stroke();
 
     context.fillStyle = gray(BRIGHT);
-    this.drawFittedWrappedText(
+    context.font = `${reviewLayout.promptFontSize}px ${HUD_FONT}`;
+    this.drawWrappedText(
       context,
       frame.prompt,
       reviewLayout.contentX,
-      reviewLayout.promptCenterY,
+      reviewLayout.promptTopBaselineY,
       reviewLayout.contentWidth,
-      3,
-      'left',
+      reviewLayout.promptLineHeight,
+      reviewLayout.promptMaxLines,
+      'leading',
     );
 
-    const actionLayout = confirmationActionLayout();
     context.textAlign = 'center';
-    context.font = `10px ${HUD_FONT}`;
-    confirmationActionLabels().forEach(({ label, x, level }) => {
-      context.fillStyle = gray(level);
-      context.fillText(label, x, actionLayout.baselineY);
-    });
-
-    const progress = Math.max(0, Math.min(1, frame.secondsRemaining / 8));
-    context.fillStyle = gray(38);
-    context.fillRect(
-      reviewLayout.contentX,
-      reviewLayout.progressY,
-      reviewLayout.contentWidth,
-      3,
-    );
-    context.fillStyle = gray(SUPPORT);
-    context.fillRect(
-      reviewLayout.contentX,
-      reviewLayout.progressY,
-      Math.round(reviewLayout.contentWidth * progress),
-      3,
-    );
-    context.fillStyle = gray(CHROME);
+    context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
-    context.textAlign = 'right';
-    context.fillText(
-      `${frame.secondsRemaining}s remaining`,
-      reviewLayout.contentX + reviewLayout.contentWidth,
-      reviewLayout.timerBaselineY,
+    this.fitText(
+      context,
+      confirmationActionHint(),
+      288,
+      reviewLayout.footerBaselineY,
+      500,
     );
   }
 
@@ -2018,12 +1980,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(SUPPORT);
     context.font = `10px ${HUD_FONT}`;
     this.drawWrappedText(context, model.secondary, 36, layout.secondaryBaselineY, 504, 14, 2);
-
-    context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
-    context.fillRect(36, layout.progressY, 504, 3);
-    const progress = productivityPhaseProgress(model.phase);
-    context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
-    context.fillRect(36, layout.progressY, Math.round(504 * progress), 3);
 
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;

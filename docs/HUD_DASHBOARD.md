@@ -245,10 +245,9 @@ generation first, complete four-tile paint second, row activation last.
 |Create event “Design review”? Work · Sep 1    |
 |at 09:30 · 45m · America/Chicago              |
 |                                              |
-|        TAP · Confirm       SWIPE · Cancel    |
 |                                              |
-|==============================================|
-|                                 8s remaining |
+|tap: confirm · swipe: cancel · left x2: back ·|
+|auto-cancel                                    |
 +----------------------------------------------+  y=288
 ```
 
@@ -256,9 +255,11 @@ generation first, complete four-tile paint second, row activation last.
 is the only full-intensity content; outcomes are explicit but visually
 secondary. The review uses the same flat, left-aligned reading axis as
 Planning, Navigation, and Messages. It has no outer rounded card, no action
-box, and no faux button divider; the header divider and countdown line are
-semantic orientation marks. Ordinary content is deferred. A single press on
-either built-in G2 temple confirms, while a swipe in either direction cancels.
+box, faux button divider, progress strip, or changing countdown. That static
+frame avoids resending all four image tiles once per second while the wearer is
+reading; the real eight-second refusal window remains in the input gate.
+Ordinary content is deferred. A single press on either built-in G2 temple
+confirms, while either swipe refuses and left-temple double press is Back.
 An optional R1 press remains compatible but is deliberately not advertised or
 required; eight seconds without input refuses. The gate then restores the
 interrupted Overview, Sidebar, or focus page.

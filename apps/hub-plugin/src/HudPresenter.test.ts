@@ -870,7 +870,7 @@ describe('HudPresenter modal surfaces', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('starts the visual countdown only after the first complete frame lands', async () => {
+  it('does not repaint an unchanged visual confirmation every second', async () => {
     let finishPaint: ((painted: boolean) => void) | undefined;
     const visual = {
       paint: (frame: HudVisualFrame) => frame.kind === 'confirmation'
@@ -886,7 +886,7 @@ describe('HudPresenter modal surfaces', () => {
 
     finishPaint?.(true);
     expect(await opening).toBe(true);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
 
     await hud.dismissConfirmation('timing-proof');
     expect(vi.getTimerCount()).toBe(0);

@@ -69,7 +69,6 @@ type HudVisualBaseFrame =
     status: string;
     micOn: boolean;
     prompt: string;
-    secondsRemaining: number;
     reviewDomain?: ProductivityHudDomain;
     /** Explicit Mac-provided diagnostic category; never inferred from the
      * private confirmation prompt. */

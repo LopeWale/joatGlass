@@ -143,8 +143,6 @@ export class HudPresenter {
   private focusReturn?: HudContentState;
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
-  private confirmationStartedAt?: number;
-  private confirmationTimer?: ReturnType<typeof setInterval>;
   private assistantOverlay?: AssistantOverlayState;
   private assistantOverlayPaint?: Promise<boolean>;
   private assistantOverlayPaintTimer?: ReturnType<typeof setTimeout>;
@@ -832,8 +830,6 @@ export class HudPresenter {
       this.confirmation.diagnosticKind = diagnosticKind;
     }
 
-    if (this.visual) this.stopVisualConfirmationCountdown();
-
     return this.enqueueConfirmation(() => this.renderConfirmation(id, openedHere, priorPage));
   }
 
@@ -858,19 +854,12 @@ export class HudPresenter {
         }
       }
       const painted = await this.paintVisual();
-      if (painted && this.confirmation?.id === id) {
-        // Match the IMU/tap gate: its eight seconds begin only after this
-        // promise resolves, so the visible countdown begins after the first
-        // complete four-tile decision frame as well.
-        this.startVisualConfirmationCountdown(id);
-      }
       if (!painted && openedHere && this.confirmation?.id === id) {
         // A failed first paint must not leave an invisible decision gate owning
         // every later content update. Restore the logical surface snapshot so
         // the next healthy frame can recover, while still returning false so
         // the IMU/tap gate never activates.
         this.confirmation = undefined;
-        this.stopVisualConfirmationCountdown();
         this.surface = this.cloneSurface(current.surface);
         this.streams = new Map(current.streams);
         this.brightness = new Map(current.brightness);
@@ -895,7 +884,6 @@ export class HudPresenter {
     if (!ok) {
       if (openedHere) {
         this.confirmation = undefined;
-        this.stopVisualConfirmationCountdown();
       }
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', 'failed');
       return false;
@@ -929,7 +917,6 @@ export class HudPresenter {
     // Clear this synchronously before any awaited paint. A replacement
     // confirmation may be queued by a callback in the same event turn.
     this.confirmation = undefined;
-    this.stopVisualConfirmationCountdown();
 
     if (prior.surface.kind === 'list') {
       this.focusReturn = {
@@ -1268,15 +1255,11 @@ export class HudPresenter {
   private visualFrame(): HudVisualFrame {
     const status = this.streams.get(ContainerId.StatusBar) ?? '';
     if (this.confirmation) {
-      const elapsed = this.confirmationStartedAt === undefined
-        ? 0
-        : Math.floor((Date.now() - this.confirmationStartedAt) / 1000);
       return {
         kind: 'confirmation',
         status,
         micOn: this.micOn,
         prompt: this.confirmation.prompt,
-        secondsRemaining: Math.max(0, 8 - elapsed),
         reviewDomain: this.productivityReviewDomain(this.confirmation.prompt),
         ...(this.confirmation.diagnosticKind
           ? { diagnosticKind: this.confirmation.diagnosticKind }
@@ -1361,24 +1344,6 @@ export class HudPresenter {
     const ok = await this.visual.paint(this.visualFrame());
     if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
     return ok;
-  }
-
-  private startVisualConfirmationCountdown(id: string): void {
-    this.stopVisualConfirmationCountdown();
-    this.confirmationStartedAt = Date.now();
-    this.confirmationTimer = setInterval(() => {
-      if (this.confirmation?.id !== id) {
-        this.stopVisualConfirmationCountdown();
-        return;
-      }
-      void this.paintVisual();
-    }, 1000);
-  }
-
-  private stopVisualConfirmationCountdown(): void {
-    if (this.confirmationTimer !== undefined) clearInterval(this.confirmationTimer);
-    this.confirmationTimer = undefined;
-    this.confirmationStartedAt = undefined;
   }
 
   private cloneSurface(surface: HudSurface): HudSurface {
