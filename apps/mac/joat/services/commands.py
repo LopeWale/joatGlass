@@ -41,6 +41,7 @@ class VoiceCommandRouter:
         voice_notes: CommandController | None = None,
         note_insights: CommandController | None = None,
         hermes: CommandController | None = None,
+        terminal: CommandController | None = None,
     ) -> None:
         self._message_replies = message_replies
         self._models = models
@@ -49,6 +50,7 @@ class VoiceCommandRouter:
         self._voice_notes = voice_notes
         self._note_insights = note_insights
         self._hermes = hermes
+        self._terminal = terminal
 
     async def __call__(self, text: str) -> str | None:
         # New Message is an explicit, short-lived wearer flow. It gets first
@@ -83,6 +85,12 @@ class VoiceCommandRouter:
             productivity_result = await self._productivity.handle_command(text)
             if productivity_result is not None:
                 return productivity_result
+        # Agent Terminal claims only utterances that SAY "terminal", so it
+        # sits late in the order: nothing broader can be shadowed by it.
+        if self._terminal is not None:
+            terminal_result = await self._terminal.handle_command(text)
+            if terminal_result is not None:
+                return terminal_result
         if self._hermes is not None:
             hermes_result = await self._hermes.handle_command(text)
             if hermes_result is not None:

@@ -100,6 +100,7 @@ from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
 from .services.capabilities import CapabilityRouter
+from .services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster
 from .services.commands import VoiceCommandRouter
 from .services.hermes_productivity import (
     HermesCalendarProposalController,
@@ -1015,6 +1016,19 @@ async def main() -> None:
         exporter=AppleNotesExporter(),
         local_time_zone=system_local_time_zone,
     )
+    # Agent Terminal roster: the wearer's existing OpenClaw work sessions,
+    # by spoken name. Strictly NOT Brainstorm — these lanes never join the
+    # round table, and a missing daemon just means an empty roster.
+    terminal_lanes: list[tuple[str, object]] = [
+        (name, agent) for name, agent in (
+            ("hermes", openclaw_terminal),
+            ("calendar", openclaw_calendar_terminal),
+        ) if agent is not None
+    ]
+    agent_terminal = AgentTerminalRoster(
+        terminal_lanes,  # type: ignore[arg-type]
+        announce=hud.show,
+    )
     voice_commands = VoiceCommandRouter(
         message_replies,
         models,
@@ -1023,6 +1037,7 @@ async def main() -> None:
         voice_notes=voice_capture,
         note_insights=note_insight_commands,
         hermes=hermes_productivity,
+        terminal=AgentTerminalCommands(agent_terminal),
     )
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no

@@ -1,0 +1,246 @@
+"""Agent Terminal: the glasses-side control surface for Hermes/OpenClaw work.
+
+NOT Brainstorm. Per docs/AGENT_TERMINAL_ROADMAP.md and the wearer's ruling,
+this surface exists only to choose, watch, steer and cancel EXISTING
+Hermes/OpenClaw sessions — Codex and Claude never appear here, and nothing
+in this module gates or joins a Brainstorm.
+
+The roster composes the already-verified transport (`OpenClawTerminalAgent`
+serializes turns, demands runtime receipts, invalidates itself rather than
+guessing after a cancel) instead of loosening it: each lane keeps its own
+frozen policy, and what this adds is purely wearer-facing — a spoken way to
+pick a lane, send a line of terminal input, keep a bounded output tail per
+lane, and let two lanes work at once while only the focused one narrates.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol
+
+log = logging.getLogger(__name__)
+
+Announce = Callable[[str], Awaitable[None]]
+
+
+class TerminalAgentLike(Protocol):
+    """What a lane needs from its runtime — the adapter already satisfies it."""
+
+    def stream(self, prompt: str) -> AsyncIterator[str]: ...
+
+
+@dataclass
+class TerminalLane:
+    """One Hermes/OpenClaw session the wearer can address by name."""
+
+    name: str
+    """Spoken handle: 'hermes', 'calendar'."""
+    agent: TerminalAgentLike
+    tail: deque[str] = field(default_factory=lambda: deque(maxlen=200))
+    """Bounded output history — enough for 'terminal tail' and the future
+    dense HUD surface, small enough to never become an unbounded transcript
+    store (the runtime, not JOAT, owns full history)."""
+    task: asyncio.Task[None] | None = None
+    last_error: str = ""
+
+    @property
+    def busy(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    @property
+    def state(self) -> str:
+        if self.busy:
+            return "working"
+        if self.last_error:
+            return "needs recovery"
+        return "idle"
+
+
+class AgentTerminalRoster:
+    """The wearer's sessions: focus one, keep the others running.
+
+    Concurrency is the point (T3): each lane's send runs as its own task,
+    so switching focus never stops anyone's work. Output always lands in
+    that lane's tail; only the focused lane narrates via `announce`, so an
+    unfocused lane finishing is a quiet fact you can ask about, not an
+    interruption.
+    """
+
+    def __init__(
+        self,
+        lanes: Sequence[tuple[str, TerminalAgentLike]],
+        announce: Announce | None = None,
+    ) -> None:
+        self._lanes: dict[str, TerminalLane] = {
+            name: TerminalLane(name=name, agent=agent) for name, agent in lanes
+        }
+        self._announce = announce
+        self._focus: str | None = next(iter(self._lanes), None)
+
+    # ── roster ───────────────────────────────────────────────────────────
+
+    @property
+    def focused(self) -> str | None:
+        return self._focus
+
+    def names(self) -> list[str]:
+        return list(self._lanes)
+
+    def overview(self) -> str:
+        """One line per session — the spoken (and later HUD) roster."""
+        if not self._lanes:
+            return "No terminal sessions are configured on this Mac."
+        rows = []
+        for lane in self._lanes.values():
+            mark = "▸" if lane.name == self._focus else " "
+            last = lane.tail[-1] if lane.tail else "—"
+            rows.append(f"{mark} {lane.name}: {lane.state} · {last}")
+        return "\n".join(rows)
+
+    def focus(self, name: str) -> bool:
+        """Switch focus. Never touches any lane's running work."""
+        said = name.strip().lower()
+        for lane_name in self._lanes:
+            if lane_name == said or lane_name in said:
+                self._focus = lane_name
+                return True
+        return False
+
+    def tail(self, name: str | None = None, lines: int = 6) -> str:
+        lane = self._lanes.get(name or self._focus or "")
+        if lane is None:
+            return "No such terminal session."
+        if not lane.tail:
+            return f"{lane.name}: no output yet."
+        return "\n".join(list(lane.tail)[-lines:])
+
+    # ── input, work, cancel ──────────────────────────────────────────────
+
+    async def send(self, text: str, name: str | None = None) -> str:
+        """Voice becomes terminal input to the (focused) session — T2.
+
+        Returns the immediate receipt line; the turn itself runs as a task
+        so the wearer can switch away. One in-flight turn per lane: the
+        runtime serializes anyway, so a queued second utterance would only
+        fire much later with stale intent — refusing is more honest.
+        """
+        lane = self._lanes.get(name or self._focus or "")
+        if lane is None:
+            return "No terminal session is focused."
+        if lane.busy:
+            return (f"{lane.name} is still working — say 'terminal cancel' "
+                    "or wait for it to finish.")
+        lane.last_error = ""
+        lane.tail.append(f"> {text}")
+        lane.task = asyncio.get_running_loop().create_task(
+            self._run_send(lane, text), name=f"terminal-{lane.name}"
+        )
+        return f"{lane.name} ▸ sent."
+
+    async def _run_send(self, lane: TerminalLane, text: str) -> None:
+        pending = ""
+        try:
+            async for chunk in lane.agent.stream(text):
+                pending += chunk
+                *lines, pending = pending.split("\n")
+                for line in lines:
+                    if line.strip():
+                        lane.tail.append(line)
+                        await self._narrate(lane, line)
+            if pending.strip():
+                lane.tail.append(pending)
+                await self._narrate(lane, pending)
+            await self._narrate(lane, f"{lane.name} ▸ done.")
+        except asyncio.CancelledError:
+            lane.tail.append("[cancelled]")
+            raise
+        except Exception as exc:  # runtime already classified it; keep the line
+            # The adapter invalidates itself on any protocol doubt — that is
+            # its receipt discipline, not ours to soften. The wearer gets
+            # the reason and the retry path, never a silent dead lane.
+            lane.last_error = str(exc) or exc.__class__.__name__
+            lane.tail.append(f"[!] {lane.last_error}")
+            log.warning("terminal %s failed: %s", lane.name, lane.last_error)
+            await self._narrate(lane, f"{lane.name} ▸ failed — {lane.last_error}")
+
+    async def _narrate(self, lane: TerminalLane, line: str) -> None:
+        if self._announce is not None and lane.name == self._focus:
+            try:
+                await self._announce(line)
+            except Exception:  # a dead surface must not kill the work
+                pass
+
+    async def cancel(self, name: str | None = None) -> str:
+        """Cancel the (focused) lane's in-flight turn — T4's honest half.
+
+        The runtime treats a cancelled stream as grounds to invalidate the
+        connection rather than guess what the remote did (its abort path
+        confirms by runId inside the adapter). So the truthful report is
+        'cancelled — needs recovery before the next send', never 'stopped
+        cleanly' — a receipt we did not get is a receipt we do not claim.
+        """
+        lane = self._lanes.get(name or self._focus or "")
+        if lane is None:
+            return "No terminal session is focused."
+        if not lane.busy or lane.task is None:
+            return f"{lane.name} has nothing running."
+        lane.task.cancel()
+        try:
+            await lane.task
+        except (asyncio.CancelledError, Exception):
+            pass
+        lane.last_error = lane.last_error or "cancelled — needs recovery"
+        return f"{lane.name} ▸ cancelled; the session will re-verify on next send."
+
+
+# The word "terminal" is REQUIRED in every phrasing: an optional prefix
+# here once let plain "switch to decaf" get claimed by this grammar —
+# hijacked from the assistant and answered with a terminal error.
+_SWITCH = re.compile(
+    r"^(?:terminal switch to|switch terminal to|switch the terminal to)"
+    r" (?P<name>[a-z0-9 ]+)$"
+)
+
+
+class AgentTerminalCommands:
+    """The spoken grammar — deliberately prefix-gated on 'terminal'.
+
+    Free speech becoming terminal input is exactly the ambient-capture
+    hazard the wake gate exists for, so every send requires the wearer to
+    SAY the surface's name first. 'terminal run the tests' is one breath;
+    an overheard sentence can never be one.
+    """
+
+    def __init__(self, roster: AgentTerminalRoster) -> None:
+        self._roster = roster
+
+    async def handle_command(self, text: str) -> str | None:
+        said = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+        if not said:
+            return None
+        if said in ("terminal", "terminal sessions", "terminal list",
+                    "list terminal sessions", "agent terminal"):
+            return self._roster.overview()
+        m = _SWITCH.match(said)
+        if m is not None:
+            name = m.group("name").strip()
+            if self._roster.focus(name):
+                return f"Focused on {self._roster.focused}."
+            return f"No terminal session called {name}. " + self._roster.overview()
+        if said in ("terminal cancel", "terminal stop", "cancel the terminal"):
+            return await self._roster.cancel()
+        if said in ("terminal tail", "terminal output", "terminal history"):
+            return self._roster.tail()
+        if said.startswith("terminal "):
+            # Everything after the surface name is the input, from the RAW
+            # text so punctuation and casing survive into the session.
+            raw = text.strip()
+            body = raw[raw.lower().index("terminal") + len("terminal"):].strip(" ,:")
+            if body:
+                return await self._roster.send(body)
+        return None
