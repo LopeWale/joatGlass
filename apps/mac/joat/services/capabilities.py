@@ -62,6 +62,11 @@ MESSAGES_RETRY_ITEMS = [
     "Tap to try Messages again.",
 ]
 NEW_MESSAGE_ROW = "New message · voice recipient + text"
+# Eight visual body lines leave a safe footer margin on the G2 lens. This is
+# deliberately a content page, not a short notification preview: ordinary
+# texts should be readable without an unnecessary second page.
+_MESSAGE_READER_PAGE_CHARACTERS = 320
+_MESSAGE_READER_DISPLAY_LINE_CHARACTERS = 52
 
 
 # These strings are the only explanation of a terminal health state that
@@ -132,6 +137,16 @@ class _MessageHistoryState:
     index: int = 0
 
 
+@dataclass(slots=True)
+class _MessageDetailState:
+    """Mac-private reader pages for one entry in the selected conversation."""
+
+    thread: MessageThread
+    entry: MessageEntry
+    pages: tuple[str, ...]
+    index: int = 0
+
+
 def _age(unix: float) -> str:
     mins = max(0, int((time.time() - unix) / 60))
     if mins < 1:
@@ -170,6 +185,7 @@ class CapabilityRouter:
         self._acceptance_armed = acceptance_armed
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
+        self._message_detail: _MessageDetailState | None = None
         self._message_page_pending = False
         # The reply controller keeps its selected handle private. Mirror only
         # whether this router armed one, so a new wearer-visible picker can
@@ -211,6 +227,12 @@ class CapabilityRouter:
                 event.trace_id or "hud",
                 event.request_id,
             ))
+        elif event.container_name == "capmessage" and event.selected_index is not None:
+            asyncio.get_running_loop().create_task(self._select_message_detail(
+                event.selected_index,
+                event.trace_id or "hud",
+                event.request_id,
+            ))
         elif event.container_name == "cappage" and event.event_type is not None:
             if self._message_page_pending:
                 return
@@ -225,11 +247,18 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(self._repeat())
         elif (
             event.container_name == "capability-lifecycle"
-            and event.selected_name in ("messages-home", "messages-list")
+            and event.selected_name in ("messages-home", "messages-list", "messages-conversation")
         ):
-            self.clear_message_selection(
-                "home" if event.selected_name == "messages-home" else "list"
-            )
+            if event.selected_name == "messages-conversation":
+                # Hub Back is local and restores its retained conversation
+                # frame. Keep the selected thread armed, but retire the
+                # reader cursor so the next page gesture addresses history.
+                self._message_detail = None
+                self._message_page_pending = False
+            else:
+                self.clear_message_selection(
+                    "home" if event.selected_name == "messages-home" else "list"
+                )
         elif event.container_name == "menu" and event.selected_name == "closed":
             self.clear_message_selection("home")
             asyncio.get_running_loop().create_task(self.repaint_home())
@@ -238,6 +267,7 @@ class CapabilityRouter:
         """Disarm a private reply target when its wearer-visible context ends."""
         self._message_rows = []
         self._message_history = None
+        self._message_detail = None
         self._message_page_pending = False
         if self._replies is not None and self._message_selection_active:
             self._replies.clear_selection(reason)
@@ -406,7 +436,48 @@ class CapabilityRouter:
         self._replies.select(thread, trace_id)
         self._message_selection_active = True
         self._message_history = _MessageHistoryState(thread=thread, pages=[page])
+        self._message_detail = None
         await self._show_message_history_page()
+
+    async def _select_message_detail(
+        self,
+        index: int,
+        trace_id: str,
+        request_id: str | None,
+    ) -> None:
+        """Open one transcript entry without changing the reply target.
+
+        The Hub transmits only the rendered row index. The selected thread and
+        entry remain Mac-private, so a forged G2 request cannot redirect a
+        reply or make another conversation readable.
+        """
+
+        if (
+            request_id != self._active_request_id
+            or self._active_capability != "MESSAGES"
+            or self._message_history is None
+        ):
+            log.info("dropping stale Messages detail request=%s", request_id)
+            return
+        history = self._message_history
+        page = history.pages[history.index]
+        token = self._request_context.set(request_id)
+        try:
+            # Row zero is the page heading; speaker rows follow it. The final
+            # voice instructions are intentionally not message actions.
+            if not 1 <= index <= len(page.entries):
+                await self._show_message_history_page()
+                return
+            entry = page.entries[index - 1]
+            self._message_detail = _MessageDetailState(
+                thread=history.thread,
+                entry=entry,
+                pages=self._message_reader_pages(entry.text),
+            )
+            log.info("message detail trace=%s stage=page-visible page=0", trace_id)
+            await self._show_message_detail()
+        finally:
+            self._request_context.reset(token)
 
     async def _page_message_history(
         self,
@@ -421,6 +492,9 @@ class CapabilityRouter:
             or self._message_history is None
         ):
             log.info("dropping stale Messages page request=%s", request_id)
+            return
+        if self._message_detail is not None:
+            await self._page_message_detail(event_type, trace_id, request_id)
             return
         state = self._message_history
         next_index = state.index
@@ -474,6 +548,36 @@ class CapabilityRouter:
         finally:
             self._request_context.reset(token)
 
+    async def _page_message_detail(
+        self,
+        event_type: int,
+        trace_id: str,
+        request_id: str | None,
+    ) -> None:
+        state = self._message_detail
+        if state is None:
+            return
+        next_index = state.index
+        if event_type == EventType.SCROLL_TOP:
+            if state.index == 0:
+                return
+            next_index -= 1
+        elif event_type == EventType.SCROLL_BOTTOM:
+            if state.index + 1 >= len(state.pages):
+                return
+            next_index += 1
+        else:
+            return
+        if request_id != self._active_request_id or self._message_detail is not state:
+            return
+        state.index = next_index
+        log.info("message detail trace=%s stage=page-visible page=%d", trace_id, state.index)
+        token = self._request_context.set(request_id)
+        try:
+            await self._show_message_detail()
+        finally:
+            self._request_context.reset(token)
+
     async def _show_message_history_page(self) -> None:
         state = self._message_history
         if state is None:
@@ -484,19 +588,15 @@ class CapabilityRouter:
                 "Latest messages — down for older"
                 if page.has_older else "Complete conversation on this Mac"
             )
-            hint = (
-                "down older · say reply · left x2: back"
-                if page.has_older else "say reply · left x2: back"
-            )
+            # Paging is already spelled out in the Mac-authored heading.
+            # Keep the footer short enough to show every remaining action.
+            hint = "tap read · say reply · left x2: back"
         else:
             page_label = (
                 "Older messages — up newer, down older"
                 if page.has_older else "Older messages — up for newer"
             )
-            hint = (
-                "up newer · down older · say reply · left x2: back"
-                if page.has_older else "up newer · say reply · left x2: back"
-            )
+            hint = "tap read · say reply · left x2: back"
         context = [self._message_history_row(state.thread, entry) for entry in page.entries]
         await self._send_list(HudList(
             items=[page_label, *context,
@@ -505,7 +605,75 @@ class CapabilityRouter:
             ],
             title="MESSAGES · CONVERSATION",
             hint=hint,
+            selectable=bool(page.entries),
         ))
+
+    async def _show_message_detail(self) -> None:
+        state = self._message_detail
+        if state is None:
+            return
+        total = len(state.pages)
+        if state.index == 0:
+            hint = (
+                "down more · say reply · left x2: back"
+                if total > 1 else "say reply · left x2: back"
+            )
+        elif state.index + 1 < total:
+            hint = "up previous · down more · say reply · left x2: back"
+        else:
+            hint = "up previous · say reply · left x2: back"
+        await self._send_list(HudList(
+            items=[
+                self._message_detail_metadata(state.thread, state.entry, state.index, total),
+                *self._message_reader_pages(
+                    state.pages[state.index],
+                    _MESSAGE_READER_DISPLAY_LINE_CHARACTERS,
+                ),
+            ],
+            title="MESSAGES · MESSAGE",
+            hint=hint,
+        ))
+
+    @staticmethod
+    def _message_reader_pages(
+        text: str,
+        maximum_characters: int = _MESSAGE_READER_PAGE_CHARACTERS,
+    ) -> tuple[str, ...]:
+        """Split text at word boundaries for fixed G2 reader pages or lines."""
+
+        remaining = " ".join(text.split())
+        if not remaining:
+            return ("No text is available for this message.",)
+        pages: list[str] = []
+        while remaining:
+            if len(remaining) <= maximum_characters:
+                pages.append(remaining)
+                break
+            boundary = remaining.rfind(" ", 0, maximum_characters + 1)
+            if boundary <= 0:
+                boundary = maximum_characters
+            pages.append(remaining[:boundary].rstrip())
+            remaining = remaining[boundary:].lstrip()
+        return tuple(pages)
+
+    @staticmethod
+    def _message_detail_metadata(
+        thread: MessageThread,
+        entry: MessageEntry,
+        page_index: int,
+        page_count: int,
+    ) -> str:
+        role = "To" if entry.from_me else "From"
+        sender = "you" if entry.from_me else thread.sender
+        details: list[str] = []
+        if entry.unread:
+            details.append("unread")
+        if entry.delivery is not None:
+            details.append(entry.delivery)
+        if entry.attachment_count:
+            details.append("attachment")
+        details.append(f"{page_index + 1}/{page_count}")
+        return f"{role} {sender} · {' · '.join(details)}"
 
     async def _show_messages_read_failure(self, error: BaseException) -> None:
         """Keep a real permission denial distinct from a retryable DB blip.

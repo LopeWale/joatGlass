@@ -15,7 +15,11 @@ import {
   parseHudLabeledValue,
   parseHudListItem,
   parseMessagesConversationRow,
+  messagesConversationFooterFontSize,
+  messagesReaderBodyLines,
+  messagesFullTextContent,
   MESSAGES_COMPOSE_GUIDANCE,
+  MESSAGES_READER_BODY_LINE_CAPACITY,
   messagesListRows,
   messagesConversationTranscript,
   navigationDecisionRows,
@@ -52,6 +56,37 @@ describe('bounded HUD copy', () => {
   it('keeps the beginning of an incoming notification preview visible', () => {
     expect(visibleHudLeadingLines(['Sender and subject', 'First sentence', 'Older tail'], 2))
       .toEqual(['Sender and subject', 'First sentence…']);
+  });
+});
+
+describe('Messages full-text reader', () => {
+  it('preserves the leading body page as flat text instead of a card', () => {
+    expect(messagesFullTextContent([
+      'From Dele · unread · 1/2',
+      'Opening words remain visible',
+      'on this page.',
+    ])).toEqual({
+      metadata: 'From Dele · unread · 1/2',
+      body: 'Opening words remain visible on this page.',
+    });
+  });
+
+  it('reserves eight wrapped body lines before asking the wearer to page', () => {
+    expect(MESSAGES_READER_BODY_LINE_CAPACITY).toBe(8);
+  });
+
+  it('wraps the reader body by conservative visible columns, not the simulator width estimate', () => {
+    expect(messagesReaderBodyLines(
+      'Read reply with full reader detail with full reader detail',
+    )).toEqual([
+      'Read reply with full reader detail with full reader',
+      'detail',
+    ]);
+  });
+
+  it('uses the compact footer face when all real conversation controls are present', () => {
+    expect(messagesConversationFooterFontSize('down older · tap read · say reply · left x2: back')).toBe(8);
+    expect(messagesConversationFooterFontSize('left x2: back')).toBe(9);
   });
 });
 

@@ -1,6 +1,7 @@
 export type MessagesScreen =
   | 'conversations'
   | 'conversation'
+  | 'message_detail'
   | 'compose'
   | 'access'
   | 'setup'
@@ -9,7 +10,7 @@ export type MessagesScreen =
   | 'retry'
   | 'invalid';
 
-export type MessagesRowAction = 'select_conversation' | 'retry' | 'none';
+export type MessagesRowAction = 'select_conversation' | 'read_message' | 'retry' | 'none';
 
 export interface MessagesViewState {
   screen: MessagesScreen;
@@ -30,8 +31,18 @@ export function resolveMessagesViewState(
       selectable: wireSelectable,
     };
   }
-  if (normalized === 'MESSAGES · CONVERSATION' || normalized === 'MESSAGES · REPLY') {
+  if (normalized === 'MESSAGES · CONVERSATION') {
+    return {
+      screen: 'conversation',
+      rowAction: wireSelectable ? 'read_message' : 'none',
+      selectable: wireSelectable,
+    };
+  }
+  if (normalized === 'MESSAGES · REPLY') {
     return { screen: 'conversation', rowAction: 'none', selectable: false };
+  }
+  if (normalized === 'MESSAGES · MESSAGE') {
+    return { screen: 'message_detail', rowAction: 'none', selectable: false };
   }
   if (normalized === 'MESSAGES · COMPOSE') {
     return { screen: 'compose', rowAction: 'none', selectable: false };

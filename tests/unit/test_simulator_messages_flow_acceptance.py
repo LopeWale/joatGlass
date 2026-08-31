@@ -113,6 +113,39 @@ def test_messages_history_flow_requires_real_scrolls_between_distinct_pages() ->
     driver.validate_history_flow(receipts)
 
 
+def test_messages_reader_flow_requires_a_real_transcript_tap_and_page_turn() -> None:
+    driver = _driver()
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
+        driver.ScreenReceipt("messages-conversation", "down + down + click", "2" * 64),
+        driver.ScreenReceipt("messages-message-first", "down + down + click", "3" * 64),
+        driver.ScreenReceipt("messages-message-next", "down", "4" * 64),
+        driver.ScreenReceipt("messages-message-returned", "up", "3" * 64),
+    ]
+
+    driver.validate_reader_flow(receipts)
+
+
+def test_messages_reader_return_allows_unrelated_live_status_chrome_to_repaint() -> None:
+    driver = _driver()
+    assert driver is not None
+    receipts = [
+        driver.ScreenReceipt("messages-sidebar", "test-hook-open", "0" * 64),
+        driver.ScreenReceipt("messages-conversations", "click", "1" * 64),
+        driver.ScreenReceipt("messages-conversation", "down + down + click", "2" * 64),
+        driver.ScreenReceipt("messages-message-first", "down + down + click", "3" * 64),
+        driver.ScreenReceipt("messages-message-next", "down", "4" * 64),
+        # The Mac can truthfully update mic status while the user reads. The
+        # driver separately waits for the same reader page index before this
+        # screenshot, so the whole frame need not be byte-identical.
+        driver.ScreenReceipt("messages-message-returned", "up", "5" * 64),
+    ]
+
+    driver.validate_reader_flow(receipts)
+
+
 def test_messages_recovery_flow_requires_a_visible_retry_then_a_real_list() -> None:
     driver = _driver()
     assert driver is not None
@@ -178,6 +211,17 @@ def test_recovery_store_fails_once_then_delegates_to_the_real_fixture(tmp_path: 
             ),
         ),
         (
+            "reader",
+            (
+                "messages-sidebar",
+                "messages-conversations",
+                "messages-conversation",
+                "messages-message-first",
+                "messages-message-next",
+                "messages-message-returned",
+            ),
+        ),
+        (
             "recovery",
             (
                 "messages-sidebar",
@@ -203,6 +247,7 @@ def test_official_simulator_evidence_retains_every_required_rendered_frame(
         ("reply", ("click", "down", "click"), "down + click"),
         ("compose", ("click", "click"), "click"),
         ("history", ("click", "down", "down", "click"), "down + down + click"),
+        ("reader", ("click", "down", "down", "click"), "down + down + click"),
         ("recovery", ("click", "click"), "click"),
     ],
 )

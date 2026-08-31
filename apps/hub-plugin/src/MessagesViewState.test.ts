@@ -21,10 +21,19 @@ describe('MessagesViewState', () => {
     });
   });
 
+  it('permits a Mac-authorized transcript entry to open its full reader', () => {
+    expect(resolveMessagesViewState('MESSAGES · CONVERSATION', true)).toEqual({
+      screen: 'conversation', rowAction: 'read_message', selectable: true,
+    });
+    expect(resolveMessagesViewState('MESSAGES · CONVERSATION', false)).toEqual({
+      screen: 'conversation', rowAction: 'none', selectable: false,
+    });
+  });
+
   it.each([
-    ['MESSAGES · CONVERSATION', 'conversation'],
     ['MESSAGES · REPLY', 'conversation'],
     ['MESSAGES · COMPOSE', 'compose'],
+    ['MESSAGES · MESSAGE', 'message_detail'],
     ['MESSAGES · EMPTY', 'empty'],
     ['MESSAGES · READ ONLY', 'read_only'],
   ])('keeps %s informational', (title, screen) => {
