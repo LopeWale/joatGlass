@@ -46,6 +46,36 @@ class TestNearbyPlacesTool:
         assert "41.9" not in result
         assert "-87.65" not in result
 
+    async def test_prefers_a_fresh_phone_fix_over_an_existing_cached_location(self) -> None:
+        calls: list[tuple[str, NavigationPoint]] = []
+
+        async def refresh() -> tuple[float, float] | None:
+            return (41.91, -87.64)
+
+        async def search(query: str, point: NavigationPoint) -> list[NavigationCandidate]:
+            calls.append((query, point))
+            return [_candidate("Fresh Cafe", "2400 N Clark St")]
+
+        tool = nearby_places_tool(lambda: (41.9, -87.65), refresh, search)
+
+        assert "Fresh Cafe" in await tool.run({"query": "coffee"})
+        assert calls == [("coffee", NavigationPoint(41.91, -87.64))]
+
+    async def test_uses_the_cached_fix_only_when_the_fresh_phone_request_fails(self) -> None:
+        calls: list[NavigationPoint] = []
+
+        async def refresh() -> tuple[float, float] | None:
+            return None
+
+        async def search(_query: str, point: NavigationPoint) -> list[NavigationCandidate]:
+            calls.append(point)
+            return [_candidate("Cached Cafe", "2400 N Clark St")]
+
+        tool = nearby_places_tool(lambda: (41.9, -87.65), refresh, search)
+
+        assert "Cached Cafe" in await tool.run({"query": "coffee"})
+        assert calls == [NavigationPoint(41.9, -87.65)]
+
     async def test_never_searches_with_stale_or_missing_phone_location(self) -> None:
         searched = False
 

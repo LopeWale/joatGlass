@@ -2,6 +2,15 @@
 
 ## 2026-08-30
 
+- Explicit nearby-place questions now prefer a fresh, request-bound
+  high-accuracy phone fix from Even Hub before safely falling back to the
+  already-fresh location cache. Ambient tracking remains medium-accuracy and
+  battery-bounded; coordinates stay private between the plugin and the local
+  search provider, never entering the answer or diagnostic receipt. This is
+  source/fixture evidence only—the official simulator cannot prove iPhone GPS
+  delivery or physical-G2 walking behavior. No package, upload, install, or
+  release action occurred.
+
 - Removed always-on exact voice timing from normal logs. Successful STT no
   longer emits queue, POST, or audio-duration measurements, and the voice
   orchestrator no longer logs an utterance duration. The existing

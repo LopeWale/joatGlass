@@ -184,13 +184,14 @@ export class LocationSessionManager {
 
   /**
    * Answer a Mac-requested assistant lookup with one current phone fix.
-   * This deliberately stays medium accuracy and does not change the ambient
-   * stream: it is local context, not an implicit navigation session.
+   * An explicit nearby-place request gets the best available one-shot fix,
+   * but does not change the battery-bounded ambient stream or start a
+   * navigation session.
    */
   async requestAssistantLocation(requestId: string, signal?: AbortSignal): Promise<boolean> {
     if (!isRequestId(requestId) || signal?.aborted) return false;
     try {
-      const location = await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.Medium);
+      const location = await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.High);
       if (signal?.aborted || location === null) return false;
       return this.forwardAmbient(location, Date.now(), true, requestId);
     } catch {
