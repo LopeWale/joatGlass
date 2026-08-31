@@ -761,6 +761,62 @@ export function messagesConversationTranscript(
   };
 }
 
+/** Keep the reader wire shape deliberately small: the Mac supplies one
+ * bounded page, while the renderer preserves that page's opening words. */
+export function messagesFullTextContent(items: readonly string[]): {
+  metadata: string;
+  body: string;
+} {
+  return {
+    metadata: items[0]?.trim() || 'Message',
+    body: items.slice(1).map((item) => item.trim()).filter(Boolean).join(' ')
+      || 'No text is available for this message.',
+  };
+}
+
+/** Keep every truthful Messages action label visible on the fixed G2 footer.
+ * Dense transcript screens can expose paging, reading, reply, and Back at
+ * once, so they use the small but still legible footer face. */
+export function messagesConversationFooterFontSize(hint: string): 8 | 9 {
+  return hint.length > 42 ? 8 : 9;
+}
+
+/** A full message uses the lens body, while preserving its status footer. */
+export const MESSAGES_READER_BODY_LINE_CAPACITY = 8;
+
+/** The official simulator under-reports the width of the G2 bitmap font.
+ * This conservative visible-column limit keeps a rendered line inside the
+ * actual lens instead of trusting that inaccurate measurement. */
+export const MESSAGES_READER_VISIBLE_COLUMNS = 52;
+
+export function messagesReaderBodyLines(text: string): string[] {
+  return wrapHudText(
+    text,
+    MESSAGES_READER_VISIBLE_COLUMNS,
+    (value) => value.length,
+  );
+}
+
+/** The heading and spoken-reply instruction are informational. Only a real
+ * speaker row earns the thin selection rail that opens the full-text reader. */
+export function selectedMessagesConversationRow(
+  items: readonly string[],
+  selectedIndex: number,
+  capacity = 6,
+): number | undefined {
+  const speakerRows = items
+    .map((item, index) => ({ index, row: parseMessagesConversationRow(item) }))
+    .filter(({ row }) => row.kind !== 'instruction');
+  const selectedSpeaker = speakerRows.findIndex(({ index }) => index === selectedIndex);
+  if (selectedSpeaker < 0) return undefined;
+  const count = Math.max(1, capacity);
+  const start = Math.min(
+    Math.max(0, selectedSpeaker - count + 1),
+    Math.max(0, speakerRows.length - count),
+  );
+  return selectedSpeaker - start;
+}
+
 /** Every Mac-authored Messages screen is dense lens text, never a generic
  * browser-like list card. */
 export function usesMessagesCompactLayout(title: string): boolean {
@@ -1495,6 +1551,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
       const transcript = messagesConversationTranscript(frame.items, frame.selectedIndex);
+      const selectedRow = frame.selectable
+        ? selectedMessagesConversationRow(frame.items, frame.selectedIndex)
+        : undefined;
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
       this.fitText(context, transcript.heading, 36, 87, 504);
@@ -1508,9 +1567,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       transcript.rows.forEach((parsed, row) => {
         const y = 113 + row * 22;
         const outgoing = parsed.kind === 'outgoing';
+        const selected = row === selectedRow;
+        if (selected) {
+          context.fillStyle = gray(BRIGHT);
+          context.fillRect(36, y - 10, 3, 18);
+        }
         context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
         context.font = `9px ${HUD_FONT}`;
-        this.fitText(context, parsed.label, 36, y, 54);
+        this.fitText(context, parsed.label, selected ? 48 : 36, y, selected ? 42 : 54);
         context.fillStyle = gray(CHROME);
         context.fillText('·', 92, y);
         context.fillStyle = gray(outgoing ? BRIGHT : SUPPORT);
@@ -1518,6 +1582,32 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.fitText(context, parsed.body, 104, y, 436);
       });
 
+      context.fillStyle = gray(QUIET);
+      context.font = `${messagesConversationFooterFontSize(frame.hint)}px ${HUD_FONT}`;
+      context.textAlign = 'center';
+      this.fitText(context, frame.hint, 288, 267, 504);
+      return;
+    }
+
+    if (frame.title.trim().toUpperCase() === 'MESSAGES · MESSAGE') {
+      const detail = messagesFullTextContent(frame.items);
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, detail.metadata, 36, 87, 504);
+      context.strokeStyle = gray(HAIRLINE);
+      context.lineWidth = 0.7;
+      context.beginPath();
+      context.moveTo(36, 98);
+      context.lineTo(540, 98);
+      context.stroke();
+      context.fillStyle = gray(BRIGHT);
+      context.font = `14px ${HUD_FONT}`;
+      visibleHudLeadingLines(
+        messagesReaderBodyLines(detail.body),
+        MESSAGES_READER_BODY_LINE_CAPACITY,
+      ).forEach((line, index) => {
+        this.fitText(context, line, 36, 119 + index * 17, 504);
+      });
       context.fillStyle = gray(QUIET);
       context.font = `9px ${HUD_FONT}`;
       context.textAlign = 'center';

@@ -52,7 +52,7 @@ class ScreenReceipt:
 
 
 ReplyOutcome = Literal["accepted", "cancelled", "timed_out", "uncertain", "failed"]
-MessagesFlow = Literal["reply", "compose", "history", "recovery"]
+MessagesFlow = Literal["reply", "compose", "history", "reader", "recovery"]
 SimulatorControl = Literal["click", "down", "up"]
 MenuSelectionControl = Literal["click", "down"]
 
@@ -311,6 +311,15 @@ _EXPECTED_HISTORY_FLOW = (
     ("messages-latest-returned", "scroll-up"),
 )
 
+_EXPECTED_READER_FLOW = (
+    ("messages-sidebar", "test-hook-open"),
+    ("messages-conversations", "click"),
+    ("messages-conversation", "down + down + click"),
+    ("messages-message-first", "down + down + click"),
+    ("messages-message-next", "down"),
+    ("messages-message-returned", "up"),
+)
+
 _EXPECTED_RECOVERY_FLOW = (
     ("messages-sidebar", "test-hook-open"),
     ("messages-retry", "click"),
@@ -329,6 +338,7 @@ def menu_selection_controls(flow: str) -> tuple[MenuSelectionControl, ...]:
         "reply": ("click", "down", "click"),
         "compose": ("click", "click"),
         "history": ("click", "down", "down", "click"),
+        "reader": ("click", "down", "down", "click"),
         "recovery": ("click", "click"),
     }
     controls = controls_by_flow.get(flow)
@@ -359,7 +369,7 @@ def history_page_receipt_input(entry_count: int) -> str:
 
 async def _drive_initial_messages_selection(
     automation_base: str,
-    flow: Literal["reply", "compose", "history"],
+    flow: Literal["reply", "compose", "history", "reader"],
 ) -> None:
     """Drive the documented sidebar and picker controls through Even Hub.
 
@@ -379,6 +389,7 @@ def required_evidence_frames(flow: str) -> tuple[str, ...]:
         "reply": _EXPECTED_REPLY_FLOW,
         "compose": _EXPECTED_COMPOSE_FLOW,
         "history": _EXPECTED_HISTORY_FLOW,
+        "reader": _EXPECTED_READER_FLOW,
         "recovery": _EXPECTED_RECOVERY_FLOW,
     }.get(flow)
     if expected is None:
@@ -449,13 +460,17 @@ def _validate_receipts(
         digest = receipt.framebuffer_sha256
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise MessagesFlowError(f"{name}: invalid framebuffer digest")
-        # A transient result dismissal and an older-page return must expose
-        # the exact selected state that preceded them. Every other state must
-        # be visually distinct, so a stale/static capture cannot satisfy the
-        # causal route.
+        # A transient result dismissal and a conversation-page return must
+        # expose the exact selected state that preceded them. A full-message
+        # return may repaint truthful live status chrome (for example mic
+        # state) while the driver has already observed the Mac reader return
+        # to page zero; it must at least differ from the page-two capture.
         if name in {"messages-returned", "messages-latest-returned"}:
             if digest != receipts[2].framebuffer_sha256:
                 raise MessagesFlowError(f"{name}: did not restore the selected Messages frame")
+        elif name == "messages-message-returned":
+            if digest == receipts[4].framebuffer_sha256:
+                raise MessagesFlowError(f"{name}: still shows the later Messages page")
         elif digest in seen:
             raise MessagesFlowError(f"{name}: frame is not visually distinct")
         seen.add(digest)
@@ -481,6 +496,10 @@ def validate_compose_flow(receipts: list[ScreenReceipt]) -> None:
 
 def validate_history_flow(receipts: list[ScreenReceipt]) -> None:
     _validate_receipts(receipts, _EXPECTED_HISTORY_FLOW)
+
+
+def validate_reader_flow(receipts: list[ScreenReceipt]) -> None:
+    _validate_receipts(receipts, _EXPECTED_READER_FLOW)
 
 
 def validate_recovery_flow(receipts: list[ScreenReceipt]) -> None:
@@ -521,7 +540,7 @@ def build_fixture_store(path: Path) -> IMessageStore:
         "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             *dele_history,
-            (1, "Read reply", apple_now - 60, 1, 1, 1, 1,
+            (1, "Read reply " + "with full reader detail " * 20, apple_now - 60, 1, 1, 1, 1,
              apple_now - 60, apple_now - 30, 0),
             (1, None, apple_now, 0, 0, 0, 0, 0, 0, 1),
             (2, "Call me when you arrive.", apple_now + 1, 0, 1, 0, 0, 0, 0, 0),
@@ -631,7 +650,7 @@ async def run(
 ) -> None:
     if flow != "reply" and outcome != "accepted":
         raise MessagesFlowError(
-            "only reply flow accepts a non-success outcome; compose/history/recovery stay no-send fixtures"
+            "only reply flow accepts a non-success outcome; compose/history/reader/recovery stay no-send fixtures"
         )
     if (automation_base is None) != (evidence_dir is None):
         raise MessagesFlowError(
@@ -797,6 +816,60 @@ async def run(
                     )
                 await asyncio.sleep(1)
                 return
+            if flow == "reader":
+                # The conversation is selected through the ordinary sidebar
+                # and picker first. A second real transcript tap opens one
+                # Mac-owned entry; page turns are no-send reader controls.
+                if automation_base is not None:
+                    for action in ("down", "down", "click"):
+                        await _send_simulator_input(automation_base, action)
+                        await asyncio.sleep(0.1)
+                await asyncio.wait_for(_wait_for_message_detail(router, 0), timeout=90)
+                detail = router._message_detail
+                if detail is None or len(detail.pages) < 2:
+                    raise MessagesFlowError("reader flow did not reach a multi-page Messages entry")
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-message-first",
+                        "down + down + click",
+                    ))
+                    await _send_simulator_input(automation_base, "down")
+                await asyncio.wait_for(_wait_for_message_detail(router, 1), timeout=90)
+                if sender.called.is_set() or sender.sent.is_set():
+                    raise MessagesFlowError("reader-only trace reached sender")
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-message-next",
+                        "down",
+                    ))
+                    await _send_simulator_input(automation_base, "up")
+                await asyncio.wait_for(_wait_for_message_detail(router, 0), timeout=90)
+                if automation_base is not None:
+                    assert evidence_dir is not None
+                    frames.append(await _capture_frame(
+                        automation_base,
+                        evidence_dir,
+                        "messages-message-returned",
+                        "up",
+                    ))
+                    validate_reader_flow(frames)
+                    _write_evidence_receipt(
+                        evidence_dir,
+                        flow=flow,
+                        outcome=outcome,
+                        expectation=expectation,
+                        sender_called=False,
+                        frames=frames,
+                    )
+                log.info("stage=full-message-reader no_send=true")
+                await asyncio.sleep(1)
+                return
             log.info("stage=%s-selected action=voice-draft-injected", flow)
             command = (
                 "message Simulator Contact saying Simulator trace only. No message will be sent."
@@ -897,10 +970,15 @@ async def _wait_for_history_page(router: CapabilityRouter, index: int) -> None:
         await asyncio.sleep(0.05)
 
 
+async def _wait_for_message_detail(router: CapabilityRouter, index: int) -> None:
+    while router._message_detail is None or router._message_detail.index != index:
+        await asyncio.sleep(0.05)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18791)
-    parser.add_argument("--flow", choices=("reply", "compose", "history", "recovery"), default="reply")
+    parser.add_argument("--flow", choices=("reply", "compose", "history", "reader", "recovery"), default="reply")
     parser.add_argument(
         "--outcome",
         choices=("accepted", "cancelled", "timed_out", "uncertain", "failed"),

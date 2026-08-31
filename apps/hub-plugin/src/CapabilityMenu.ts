@@ -99,16 +99,21 @@ export class CapabilityMenu {
   private dataItemCount = 0;
   private dataRowsSelectable = false;
   private dataSelectionPending = false;
+  /** Some supported hosts emit a scroll while retaining the prior native-list
+   * index. Preserve the locally mirrored row for that gesture's following
+   * click; a later credible native index still takes precedence. */
+  private dataSelectionUsesStaleNativeIndex = false;
   private messagesRetry = false;
   /** The Mac owns conversation pagination. The Hub only forwards a boundary
    * gesture when the currently visible, Mac-authored hint says that page exists. */
   private messagesScreen?: MessagesScreen;
   private dataHint?: string;
   private dataPagePending = false;
-  /** One local parent is sufficient for the currently supported focus flows:
-   * a Messages/Notifications/Planning collection opens one detail page. */
+  /** Messages has two real read levels (conversation then full message), so
+   * retain those exact Mac-authored frames for contextual Back. */
   private dataSurface?: DataSurfaceSnapshot;
   private dataReturn?: DataSurfaceSnapshot;
+  private dataGrandparent?: DataSurfaceSnapshot;
   private pendingTitle?: string;
   private pendingRequestId?: string;
   private responseTimeout?: ReturnType<typeof setTimeout>;
@@ -154,6 +159,7 @@ export class CapabilityMenu {
     this.dataPagePending = false;
     this.dataSurface = undefined;
     this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
     this.planningDrillDown = false;
     await this.hud.showDefault();
   }
@@ -211,7 +217,10 @@ export class CapabilityMenu {
       : hint;
 
     const parent = this.detailReturnSurface(title);
-    if (parent) this.dataReturn = parent;
+    if (parent) {
+      this.dataGrandparent = this.dataReturn;
+      this.dataReturn = parent;
+    }
 
     this.clearResponseTimeout();
     this.messagesRetry = messagesState?.rowAction === 'retry';
@@ -239,6 +248,7 @@ export class CapabilityMenu {
     this.dataItemCount = items.length;
     this.dataRowsSelectable = effectiveSelectable;
     this.dataSelectionPending = false;
+    this.dataSelectionUsesStaleNativeIndex = false;
     this.messagesScreen = messagesState?.screen;
     this.dataHint = effectiveHint;
     this.dataPagePending = false;
@@ -379,27 +389,40 @@ export class CapabilityMenu {
           : eventType === OsEventTypeList.SCROLL_TOP_EVENT
             ? -1
             : 0;
-        this.selectedIndex = Math.max(
-          0,
-          Math.min(maximum, list.currentSelectItemIndex ?? before + delta),
-        );
+        const expected = Math.max(0, Math.min(maximum, before + delta));
+        const reported = list.currentSelectItemIndex;
+        const staleNativeIndex = delta !== 0
+          && expected !== before
+          && (
+            reported === before
+            || (this.dataSelectionUsesStaleNativeIndex && reported === 0)
+          );
+        this.selectedIndex = staleNativeIndex
+          ? expected
+          : Math.max(0, Math.min(maximum, reported ?? expected));
+        this.dataSelectionUsesStaleNativeIndex = staleNativeIndex;
+        if (staleNativeIndex) void this.hud.setSelection(this.selectedIndex);
         const stayedAtBoundary = before === this.selectedIndex
           && (this.selectedIndex === 0 || this.selectedIndex === maximum);
+        const messagesReader = this.messagesScreen === 'message_detail';
         if (
-          stayedAtBoundary
+          (messagesReader || stayedAtBoundary)
           && this.pendingTitle === 'MESSAGES'
-          && this.messagesScreen === 'conversation'
-          && !this.dataRowsSelectable
+          && (this.messagesScreen === 'conversation' || messagesReader)
           && this.canRequestMessagePage(eventType)
         ) {
           this.requestMessagePage(eventType);
         }
         return true;
       }
-      this.selectedIndex = Math.max(
-        0,
-        Math.min(maximum, list.currentSelectItemIndex ?? this.selectedIndex),
-      );
+      const reported = list.currentSelectItemIndex;
+      const preserveMirroredSelection = this.dataSelectionUsesStaleNativeIndex
+        && reported === 0
+        && this.selectedIndex !== 0;
+      this.selectedIndex = preserveMirroredSelection
+        ? this.selectedIndex
+        : Math.max(0, Math.min(maximum, reported ?? this.selectedIndex));
+      this.dataSelectionUsesStaleNativeIndex = false;
       return this.selectDataRow();
     }
 
@@ -429,8 +452,7 @@ export class CapabilityMenu {
     if (this.view === 'data') {
       if (
         this.pendingTitle === 'MESSAGES'
-        && this.messagesScreen === 'conversation'
-        && !this.dataRowsSelectable
+        && (this.messagesScreen === 'conversation' || this.messagesScreen === 'message_detail')
         && this.canRequestMessagePage(eventType)
       ) {
         this.requestMessagePage(eventType);
@@ -475,14 +497,18 @@ export class CapabilityMenu {
     const random = globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const traceId = `hud-${random}`;
-    const stage = this.pendingTitle === 'MESSAGES'
-      ? 'message-selected'
+    const readingMessage = this.pendingTitle === 'MESSAGES'
+      && this.messagesScreen === 'conversation';
+    const stage = readingMessage
+      ? 'message-read-requested'
+      : this.pendingTitle === 'MESSAGES'
+        ? 'message-selected'
       : 'capability-row-selected';
     console.info(`[joat trace] trace=${traceId} stage=${stage} index=${this.selectedIndex}`);
     this.link.send({
       kind: 'input',
       event: {
-        containerName: 'capdata',
+        containerName: readingMessage ? 'capmessage' : 'capdata',
         selectedIndex: this.selectedIndex,
         selectedName: this.pendingTitle,
         traceId,
@@ -585,6 +611,7 @@ export class CapabilityMenu {
     this.selectedIndex = 0;
     this.dataSurface = undefined;
     this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
     const event: InputEventPayload = {
       containerName: 'capmenu',
       eventType: 0,
@@ -668,6 +695,17 @@ export class CapabilityMenu {
    */
   private canRequestMessagePage(eventType: number): boolean {
     if (this.dataPagePending || !this.pendingRequestId) return false;
+    const isReader = this.messagesScreen === 'message_detail';
+    if (this.messagesScreen !== 'conversation' && !isReader) return false;
+    if (isReader) {
+      if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+        return this.dataHint?.includes('up previous') === true;
+      }
+      if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+        return this.dataHint?.includes('down more') === true;
+      }
+      return false;
+    }
     const atTop = this.selectedIndex === 0;
     const atBottom = this.selectedIndex === Math.max(0, this.dataItemCount - 1);
     if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -708,10 +746,10 @@ export class CapabilityMenu {
   }
 
   private detailReturnSurface(nextTitle: string): DataSurfaceSnapshot | undefined {
-    if (this.dataReturn || !this.pendingTitle || !this.dataSurface) return undefined;
+    if (!this.pendingTitle || !this.dataSurface) return undefined;
     const current = this.dataSurface.title.trim().toUpperCase();
     const next = nextTitle.trim().toUpperCase();
-    if (current !== this.pendingTitle || next === this.pendingTitle) return undefined;
+    if (current === next || next === this.pendingTitle) return undefined;
     if (!next.startsWith(`${this.pendingTitle} ·`)) return undefined;
     return {
       ...this.dataSurface,
@@ -724,7 +762,8 @@ export class CapabilityMenu {
   private async returnToDataSurface(): Promise<void> {
     const parent = this.dataReturn;
     if (!parent) return;
-    this.dataReturn = undefined;
+    this.dataReturn = this.dataGrandparent;
+    this.dataGrandparent = undefined;
     this.clearResponseTimeout();
     const transition = this.beginTransition();
     const shown = await this.hud.showList(parent.items, {
@@ -749,10 +788,18 @@ export class CapabilityMenu {
     this.selectedIndex = parent.selectedIndex;
     this.dataSurface = parent;
     if (this.pendingTitle === 'MESSAGES') {
-      this.link.send({
-        kind: 'input',
-        event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
-      });
+      const returnedTitle = parent.title.trim().toUpperCase();
+      if (returnedTitle === 'MESSAGES') {
+        this.link.send({
+          kind: 'input',
+          event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
+        });
+      } else if (returnedTitle === 'MESSAGES · CONVERSATION') {
+        this.link.send({
+          kind: 'input',
+          event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation' },
+        });
+      }
     }
   }
 
@@ -771,6 +818,7 @@ export class CapabilityMenu {
     this.dataSelectionPending = false;
     this.dataSurface = undefined;
     this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
     this.pendingTitle = undefined;
     this.pendingRequestId = undefined;
     const transition = this.beginTransition();
@@ -864,6 +912,7 @@ export class CapabilityMenu {
     this.dataPagePending = false;
     this.dataSurface = undefined;
     this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
     if (leavingMessages) {
       this.link.send({
         kind: 'input',

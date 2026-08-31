@@ -417,6 +417,33 @@ describe('CapabilityMenu', () => {
     info.mockRestore();
   });
 
+  it('keeps a Messages picker selection when a native scroll reports its stale zero index', async () => {
+    const { menu, selections, sent } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
+
+    // The official G2 simulator emits the same list index while reporting a
+    // downward scroll. The scroll direction remains an ordinary G2 control,
+    // so preserve the locally mirrored highlight until its following click.
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 0))).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 0))).toBe(true);
+    expect(menu.handleList(click(0))).toBe(true);
+
+    expect(selections).toEqual([1, 2]);
+    expect(sent[1]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capdata',
+        selectedIndex: 2,
+        selectedName: 'MESSAGES',
+        requestId,
+      },
+    });
+  });
+
   it('suppresses repeated physical message selections until the Mac replaces the frame', async () => {
     const { menu, sent } = rig();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -435,6 +462,97 @@ describe('CapabilityMenu', () => {
     )).toBe(true);
     expect(sent).toHaveLength(2);
     info.mockRestore();
+  });
+
+  it('routes a selected transcript line to the Mac-owned full-message reader', async () => {
+    const { menu, sent } = rig();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION',
+      ['Latest messages', 'Dele · Opening words', 'You · Reply', 'Say reply'],
+      requestId,
+      true,
+      'say reply · left x2: back',
+    )).toBe(true);
+
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capmessage',
+        selectedName: 'MESSAGES',
+        selectedIndex: 1,
+        requestId,
+      },
+    });
+    const traceId = (sent[2]?.event as { traceId?: string }).traceId;
+    expect(traceId).toMatch(/^hud-/);
+    expect(info).toHaveBeenCalledWith(
+      `[joat trace] trace=${traceId} stage=message-read-requested index=1`,
+    );
+
+    expect(await menu.presentList(
+      'MESSAGES · MESSAGE',
+      ['From Dele · 1/2', 'Opening words'],
+      requestId,
+      false,
+      'down more · say reply · left x2: back',
+    )).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(4);
+    expect(sent[3]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'cappage',
+        selectedName: 'MESSAGES',
+        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT,
+        requestId,
+      },
+    });
+    info.mockRestore();
+  });
+
+  it('returns from full text to the live conversation before clearing its reply target', async () => {
+    const { menu, lists, sent } = rig();
+    await menu.toggle();
+    menu.handleList(clickRow0());
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    const conversations = ['New message', 'Dele · Preview'];
+    const transcript = ['Latest messages', 'Dele · Opening words', 'Say reply'];
+    expect(await menu.presentList('MESSAGES', conversations, requestId, true)).toBe(true);
+    menu.handleList(click(1));
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', transcript, requestId, true,
+      'tap read · say reply · left x2: back',
+    )).toBe(true);
+    menu.handleList(click(1));
+    expect(await menu.presentList(
+      'MESSAGES · MESSAGE', ['From Dele · 1/1', 'Opening words'], requestId, false,
+      'say reply · left x2: back',
+    )).toBe(true);
+
+    await menu.toggle();
+    expect(lists[lists.length - 1]).toEqual(transcript);
+    expect(sent[3]).toEqual({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation' },
+    });
+
+    await menu.toggle();
+    expect(lists[lists.length - 1]).toEqual(conversations);
+    expect(sent[4]).toEqual({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
+    });
   });
 
   it('requests older and newer conversation pages only at scroll boundaries', async () => {

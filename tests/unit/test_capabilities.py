@@ -23,6 +23,7 @@ from joat.core.protocol import (
     AssistantOverlay,
     BrainstormHudView,
     ContainerId,
+    EventType,
     HudList,
     HudText,
     InputEvent,
@@ -180,6 +181,24 @@ class HistoryMessages(FakeMessages):
             MessageEntry("Great", 3.0, False, row_id=3),
             MessageEntry("On my way", 2.0, True, row_id=2),
             MessageEntry("Are you coming?", 1.0, False, row_id=1),
+        ), has_older=False)
+
+
+class LongHistoryMessages(FakeMessages):
+    """One conversation with a text long enough to require reader paging."""
+
+    body = "Opening words " + "continue through the full message " * 18
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del thread, limit, before_row_id
+        return MessageHistoryPage(entries=(
+            MessageEntry(self.body, 3.0, False, row_id=3, unread=True),
         ), has_older=False)
 
 
@@ -577,8 +596,88 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert detail.hint == "say reply · left x2: back"
-        assert detail.selectable is False
+        assert detail.hint == "tap read · say reply · left x2: back"
+        assert detail.selectable is True
+
+    async def test_selecting_a_transcript_entry_opens_the_paged_full_text_reader(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = LongHistoryMessages([  # type: ignore[assignment]
+            ("Dele", "Preview", time.time()),
+        ])
+        await router.open("Messages", request_id="messages-full-reader")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "] Dele ·"),
+            trace_id="hud-reader-conversation",
+            request_id="messages-full-reader",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
+            for item in transport.sent
+        ))
+
+        router.on_input(InputEvent(
+            container_name="capmessage",
+            selected_name="MESSAGES",
+            selected_index=1,
+            trace_id="hud-reader-open",
+            request_id="messages-full-reader",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
+            for item in transport.sent
+        ))
+        first_page = [
+            item for item in transport.sent
+            if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
+        ][-1]
+        assert first_page.items[0] == "From Dele · unread · 1/2"
+        assert len(first_page.items) > 2
+        assert all(len(line) <= 52 for line in first_page.items[1:])
+        assert " ".join(first_page.items[1:]).startswith("Opening words")
+        assert first_page.hint == "down more · say reply · left x2: back"
+        assert first_page.selectable is False
+        assert len(replies.selected) == 1
+
+        router.on_input(InputEvent(
+            container_name="cappage",
+            selected_name="MESSAGES",
+            event_type=EventType.SCROLL_BOTTOM,
+            trace_id="hud-reader-more",
+            request_id="messages-full-reader",
+        ))
+        await wait_until(lambda: len([
+            item for item in transport.sent
+            if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
+        ]) == 2)
+        second_page = [
+            item for item in transport.sent
+            if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
+        ][-1]
+        assert second_page.items[0] == "From Dele · unread · 2/2"
+        assert second_page.hint == "up previous · say reply · left x2: back"
+        assert first_page.items[1] != second_page.items[1]
+        assert len(replies.selected) == 1
+
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle",
+            selected_name="messages-conversation",
+        ))
+        assert router._message_detail is None
+        assert router._message_history is not None
+        assert replies.cleared == []
+
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle",
+            selected_name="messages-home",
+        ))
+        assert router._message_history is None
+        assert replies.cleared == ["home"]
 
     async def test_conversation_pages_are_request_bound_and_show_message_metadata(
         self, tmp_path,
@@ -610,7 +709,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert latest.hint == "down older · say reply · left x2: back"
+        assert latest.hint == "tap read · say reply · left x2: back"
 
         router.on_input(InputEvent(
             container_name="cappage",
@@ -633,7 +732,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert older.hint == "up newer · say reply · left x2: back"
+        assert older.hint == "tap read · say reply · left x2: back"
         # The async page task clears its duplicate-input guard after its
         # replacement frame is committed, as the production bridge does.
         await asyncio.sleep(0)
