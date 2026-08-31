@@ -86,6 +86,7 @@ def test_pass_requires_real_input_and_distinct_visible_frame_transitions() -> No
         "wearerVisibleHud": {"bridge": "verified", "lens": "not_recorded"},
         "lensVideoSha256": None,
         "hermesRun": "not_exercised",
+        "hermesStream": {"hud": "not_verified", "frameSha256": []},
         "g2Reconnect": "not_exercised",
     }
 
@@ -113,12 +114,14 @@ def test_summary_never_upgrades_bridge_proof_to_lens_video_proof() -> None:
 def test_live_hermes_receipt_requires_left_double_cancel_and_cancelled_remote_run() -> None:
     receipt = _receipt([
         _frame("brainstorm", _hash("a")),
-        _action("show_terminal", "brainstorm"),
-        _frame("agent_terminal", _hash("b")),
-        _action("show_brainstorm", "agent_terminal", "ring"),
+        _frame("brainstorm", _hash("b")),
         _frame("brainstorm", _hash("c")),
+        _action("show_terminal", "brainstorm"),
+        _frame("agent_terminal", _hash("d")),
+        _action("show_brainstorm", "agent_terminal", "ring"),
+        _frame("brainstorm", _hash("e")),
         _action("cancel", "brainstorm", "left", "double_press"),
-        {**_frame("brainstorm", _hash("d")), "state": "cancelled"},
+        {**_frame("brainstorm", _hash("f")), "state": "cancelled"},
     ])
 
     assert summarize_receipt(
@@ -127,6 +130,8 @@ def test_live_hermes_receipt_requires_left_double_cancel_and_cancelled_remote_ru
         g2_reconnect="restored",
         require_cancel=True,
         require_reconnect=True,
+        stream_frame_sha256=(_hash("b"), _hash("c")),
+        require_stream=True,
     )["result"] == "pass"
     assert summarize_receipt(
         receipt,
@@ -134,13 +139,64 @@ def test_live_hermes_receipt_requires_left_double_cancel_and_cancelled_remote_ru
         g2_reconnect="restored",
         require_cancel=True,
         require_reconnect=True,
+        stream_frame_sha256=(_hash("b"), _hash("c")),
+        require_stream=True,
     )["result"] == "inconclusive"
     assert summarize_receipt(
         receipt,
         hermes_run="cancelled",
         require_cancel=True,
         require_reconnect=True,
+        stream_frame_sha256=(_hash("b"), _hash("c")),
+        require_stream=True,
     )["result"] == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("frame_sha256", "message"),
+    [
+        ((), "not_verified"),
+        ((_hash("b"),), "not_verified"),
+        ((_hash("b"), _hash("b")), "not_verified"),
+        ((_hash("c"), _hash("b")), "not_verified"),
+    ],
+)
+def test_live_hermes_receipt_requires_an_ordered_distinct_running_frame_pair(
+    frame_sha256: tuple[str, ...], message: str,
+) -> None:
+    receipt = _receipt([
+        _frame("brainstorm", _hash("a")),
+        _frame("brainstorm", _hash("b")),
+        _frame("brainstorm", _hash("c")),
+        _action("show_terminal", "brainstorm"),
+        _frame("agent_terminal", _hash("d")),
+        _action("show_brainstorm", "agent_terminal", "ring"),
+        _frame("brainstorm", _hash("e")),
+        _action("cancel", "brainstorm", "left", "double_press"),
+        {**_frame("brainstorm", _hash("f")), "state": "cancelled"},
+    ])
+
+    summary = summarize_receipt(
+        receipt,
+        hermes_run="cancelled",
+        g2_reconnect="restored",
+        require_cancel=True,
+        require_reconnect=True,
+        stream_frame_sha256=frame_sha256,
+        require_stream=True,
+    )
+
+    assert summary["result"] == "inconclusive"
+    assert summary["hermesStream"]["hud"] == message
+
+
+def test_live_hermes_receipt_rejects_more_than_the_bounded_frame_pair() -> None:
+    with pytest.raises(ValueError, match="bounded pair"):
+        summarize_receipt(
+            _receipt([]),
+            stream_frame_sha256=(_hash("a"), _hash("b"), _hash("c")),
+            require_stream=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -284,7 +340,8 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
 
         async def stream(self, prompt: str) -> AsyncIterator[str]:
             self.prompt = prompt
-            yield "private remote text that must never be retained"
+            yield "private remote text one"
+            yield "private remote text two"
             await self._never.wait()
 
         async def close(self) -> None:
@@ -338,10 +395,25 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
             "kind": "g2.diagnostic", "event": _action("begin_topic_capture", "brainstorm"),
         }))
 
-        running = json.loads(await socket.recv())
-        assert running["brainstorm"]["state"] == "running"
+        opening = json.loads(await socket.recv())
+        assert opening["brainstorm"]["activity"] == "Preparing collaborators…"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("b")),
+        }))
+        turn = json.loads(await socket.recv())
+        assert turn["brainstorm"]["activity"] == "Thinking…"
+        await socket.send(json.dumps({
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("c")),
+        }))
+        first_chunk = json.loads(await socket.recv())
+        assert first_chunk["brainstorm"]["activity"].endswith("private remote text one")
+        await socket.send(json.dumps({
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("d")),
+        }))
+        second_chunk = json.loads(await socket.recv())
+        assert second_chunk["brainstorm"]["activity"].endswith("private remote text two")
+        await socket.send(json.dumps({
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("e")),
         }))
         await socket.send(json.dumps({"kind": "brainstorm.action", "action": "show_terminal"}))
         await socket.send(json.dumps({
@@ -351,7 +423,7 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         terminal = json.loads(await socket.recv())
         assert terminal["brainstorm"]["screen"] == "agent_terminal"
         await socket.send(json.dumps({
-            "kind": "g2.diagnostic", "event": _frame("agent_terminal", _hash("c")),
+            "kind": "g2.diagnostic", "event": _frame("agent_terminal", _hash("f")),
         }))
         await socket.send(json.dumps({"kind": "brainstorm.action", "action": "show_brainstorm"}))
         await socket.send(json.dumps({
@@ -361,13 +433,13 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         returned = json.loads(await socket.recv())
         assert returned["brainstorm"]["screen"] == "brainstorm"
         await socket.send(json.dumps({
-            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("d")),
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("0")),
         }))
 
         reconnect_prompt = json.loads(await socket.recv())
         assert reconnect_prompt["brainstorm"]["state"] == "running"
         await socket.send(json.dumps({
-            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("e")),
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("1")),
         }))
         await socket.close()
         replacement = await _connect_when_ready(f"ws://127.0.0.1:{unused_tcp_port}")
@@ -381,7 +453,7 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         restored = json.loads(await replacement.recv())
         assert restored["brainstorm"]["state"] == "running"
         await replacement.send(json.dumps({
-            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("f")),
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("2")),
         }))
         await replacement.send(json.dumps({"kind": "brainstorm.action", "action": "cancel"}))
         await replacement.send(json.dumps({
@@ -392,7 +464,7 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         cancelled = json.loads(await replacement.recv())
         assert cancelled["brainstorm"]["state"] == "cancelled"
         await replacement.send(json.dumps({
-            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("a"), "cancelled"),
+            "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("3"), "cancelled"),
         }))
         summary = await task
     finally:
@@ -405,6 +477,9 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
 
     assert summary["result"] == "pass"
     assert summary["hermesRun"] == "cancelled"
+    assert summary["hermesStream"] == {
+        "hud": "verified", "frameSha256": [_hash("d"), _hash("e")],
+    }
     assert summary["g2Reconnect"] == "restored"
     assert hermes.prompt is not None
     assert hermes.closed is True
