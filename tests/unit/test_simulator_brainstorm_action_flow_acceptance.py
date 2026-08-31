@@ -8,9 +8,13 @@ from joat.services.brainstorm_acceptance import RUN_SCHEMA
 from scripts.simulator_brainstorm_action_flow_acceptance import (
     BrainstormActionFlowError,
     ScreenReceipt,
+    VOICE_FIXTURE_PCM,
+    _ARTIFACT_STATES,
     _VISUAL_ONLY_ARTIFACTS,
     _prepare_simulator_plugin_root,
+    _write_voice_fixture,
     default_ws_url,
+    validate_voice_direct,
     validate_visual_artifacts,
     validate_flow,
 )
@@ -65,6 +69,7 @@ def _frames() -> list[ScreenReceipt]:
         ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
         ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
         ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
+        ("voice-direct-running", "synthetic_mic", "start_brainstorm", "brainstorm", "running", False),
     ]
     return [
         ScreenReceipt(*row, framebuffer_sha256=f"{index:064x}")
@@ -111,13 +116,22 @@ def _acceptance() -> dict[str, object]:
 
 
 def _artifacts() -> dict[str, dict[str, str]]:
-    names = [frame.name for frame in _frames()] + list(_VISUAL_ONLY_ARTIFACTS)
     return {
         name: {
             "raw": f"{index:02d}-{name}.rgba.png",
             "optical": f"{index:02d}-{name}.optical.png",
         }
-        for index, name in enumerate(names, start=1)
+        for index, name in enumerate(_ARTIFACT_STATES, start=1)
+    }
+
+
+def _voice_direct() -> dict[str, object]:
+    return {
+        "source": "glasses",
+        "route": "addressed_brainstorm",
+        "hud": "verified",
+        "stt": "deterministic_no_network",
+        "openclaw": "not_contacted",
     }
 
 
@@ -149,6 +163,29 @@ def test_flow_rejects_duplicate_visible_frames_and_content_fields() -> None:
     leaked["payload"] = "forbidden"
     with pytest.raises(BrainstormActionFlowError, match="forbidden content"):
         validate_flow(_frames(), leaked)
+
+
+def test_voice_direct_receipt_requires_glasses_source_and_remains_content_free() -> None:
+    validate_voice_direct(_voice_direct())
+
+    wrong_source = _voice_direct()
+    wrong_source["source"] = "phone"
+    with pytest.raises(BrainstormActionFlowError, match="glasses source"):
+        validate_voice_direct(wrong_source)
+
+    leaked = _voice_direct()
+    leaked["transcript"] = "forbidden"
+    with pytest.raises(BrainstormActionFlowError, match="forbidden content"):
+        validate_voice_direct(leaked)
+
+
+def test_voice_fixture_is_fixed_synthetic_pcm_under_the_disposable_plugin_root(tmp_path) -> None:
+    root = tmp_path / "simulator-plugin-root"
+    fixture = _write_voice_fixture(root)
+
+    assert fixture == root / "public" / "__joat-audio-fixture" / "glasses-direct.pcm"
+    assert fixture.read_bytes() == VOICE_FIXTURE_PCM
+    assert fixture.stat().st_mode & 0o777 == 0o600
 
 
 def test_flow_rejects_a_diagnostic_arm_on_the_daily_glasses_path() -> None:
