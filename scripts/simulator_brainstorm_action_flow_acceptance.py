@@ -136,6 +136,7 @@ _EXPECTED_FLOW = (
 )
 _VISUAL_ONLY_ARTIFACTS = (
     "dense-transcript-preview",
+    "terminal-transcript-preview",
     "hermes-busy",
 )
 
@@ -1090,6 +1091,20 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         artifacts["dense-transcript-preview"] = {"raw": raw, "optical": optical}
 
+        # The same bounded producer must stay legible after the wearer taps
+        # into Agent Terminal. This proves that its running state reserves the
+        # lens for the actual transcript instead of spending it on static
+        # connection chrome. It is a fixed, content-free visual sample—not a
+        # retained Brainstorm or OpenClaw payload.
+        await density_sink.show_terminal()
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "13-terminal-transcript-preview",
+            digest,
+        )
+        artifacts["terminal-transcript-preview"] = {"raw": raw, "optical": optical}
+
         # A healthy terminal that is currently streaming is deliberately not
         # an admission to a second Brainstorm. Exercise the real capability
         # route and retain only its optical frame—not a transcript or payload.
@@ -1110,7 +1125,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "13-hermes-busy",
+            "14-hermes-busy",
             digest,
         )
         artifacts["hermes-busy"] = {"raw": raw, "optical": optical}

@@ -4,6 +4,7 @@ import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
   NOTIFICATION_DISMISS_HINT,
   agentTerminalSafetyLabel,
+  agentTerminalTranscriptLayout,
   assistantOverlayTextLayout,
   brainstormTranscriptLines,
   HUD_VISUAL_GEOMETRY,
@@ -421,6 +422,28 @@ describe('Brainstorm wearable actions', () => {
       .toBe('TERMINAL BLOCKED');
     expect(agentTerminalSafetyLabel({ state: 'ready', noToolsChecked: true }))
       .toBe('NO TOOLS CHECKED BEFORE SEND');
+  });
+
+  it('makes a running Agent Terminal a transcript-first surface', () => {
+    expect(agentTerminalTranscriptLayout({ state: 'running', noToolsChecked: true }))
+      .toEqual({
+        summary: 'HERMES > RUNNING · NO TOOLS CHECKED BEFORE SEND',
+        dividerY: 111.5,
+        transcriptBaselineY: 132,
+        transcriptLineCapacity: 7,
+        showRecoveryDetails: false,
+      });
+  });
+
+  it('keeps connection and policy detail on a recoverable terminal state', () => {
+    expect(agentTerminalTranscriptLayout({ state: 'approval_required', noToolsChecked: false }))
+      .toEqual({
+        summary: 'HERMES > APPROVAL REQUIRED',
+        dividerY: 177.5,
+        transcriptBaselineY: 199,
+        transcriptLineCapacity: 4,
+        showRecoveryDetails: true,
+      });
   });
 
   it('discloses both physical cancellation gestures while a session is running', () => {
