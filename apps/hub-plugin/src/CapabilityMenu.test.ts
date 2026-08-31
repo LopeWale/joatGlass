@@ -125,7 +125,7 @@ describe('CapabilityMenu', () => {
     expect(sidebars[0]).toEqual([
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
       'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Repeat', 'Reconnect', 'Settings',
+      'Settings',
     ]);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
@@ -165,6 +165,19 @@ describe('CapabilityMenu', () => {
     expect(menu.handleClick()).toBe(true);
     await vi.waitFor(() => expect(lists).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent planning…']);
+    expect(listOptions[0]?.title).toBe('PLANNING');
+  });
+
+  it('uses the mirrored visual sidebar row when a host reports a stale native list index', async () => {
+    const { menu, lists, listOptions } = rig();
+    await menu.toggle();
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
+
+    // Some firmware emits a list click from the invisible event-capture
+    // layer. Its native list index is still zero even though JOAT visibly
+    // moved the custom sidebar highlight to Planning.
+    expect(menu.handleList(clickRow0())).toBe(true);
+    await vi.waitFor(() => expect(lists).toHaveLength(1));
     expect(listOptions[0]?.title).toBe('PLANNING');
   });
 
@@ -366,7 +379,7 @@ describe('CapabilityMenu', () => {
     expect(sidebars[0]).toEqual([
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
       'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Repeat', 'Reconnect', 'Settings',
+      'Settings',
     ]);
     for (let index = 0; index < 2; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);

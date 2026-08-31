@@ -68,11 +68,11 @@ function isPlanningAnchor(value: unknown): value is number {
 // The visual sidebar shows five rows at a time and scrolls this one continuous
 // list. Nothing is hidden behind a second "More" interaction: a wearer can
 // keep scrolling from Messages through every available glasses capability or
-// direct action. The renderer and G2 list limit both accept these 11 rows.
+// direct action. The renderer and G2 list limit both accept these 9 rows.
 const CAPABILITIES = [
   'Messages', 'Planning', 'Navigation', 'Brainstorm',
   'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-  'Repeat', 'Reconnect', 'Settings',
+  'Settings',
 ] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
@@ -453,7 +453,16 @@ export class CapabilityMenu {
     if ((list.eventType ?? 0) !== OsEventTypeList.CLICK_EVENT) {
       return true; // scrolls: host moves the highlight; keep them off the uplink
     }
-    const index = list.currentSelectItemIndex ?? 0;
+    const reported = list.currentSelectItemIndex ?? 0;
+    // Custom visual surfaces own their cursor through handleScroll(). Some
+    // G2 hosts still deliver their subsequent tap as a native List event,
+    // whose hidden list cursor remains at row zero. A zero report after our
+    // cursor visibly moved is therefore stale, not an instruction to open
+    // Messages. Preserve a genuine non-zero List selection for the fallback
+    // hosts that do keep that native cursor in sync.
+    const index = reported === 0 && this.selectedIndex !== 0
+      ? this.selectedIndex
+      : reported;
     this.selectedIndex = index;
     return this.select(index);
   }
@@ -560,20 +569,6 @@ export class CapabilityMenu {
 
     const picked = CAPABILITIES[index];
     if (picked) {
-      if (picked === 'Repeat') {
-        // Keep the established Mac contract: repeat only the last completed
-        // stored reply. It never re-runs a prompt, resumes audio, or creates
-        // a capability-data page.
-        void this.repeatLastReply();
-        return true;
-      }
-      if (picked === 'Reconnect') {
-        // Force the real authenticated WebSocket redial. MacLink owns the
-        // socket replacement, auth, failover/backoff, and Chrome's truthful
-        // connecting/reconnecting/connected HUD state.
-        void this.reconnectToMac();
-        return true;
-      }
       if (picked === 'Settings') {
         // This is the persisted listening-resume settings surface, not an
         // imitation static page. Its existing left-double return stays Home.
@@ -593,23 +588,8 @@ export class CapabilityMenu {
     return `${active ? '*' : ' '} ${row.label}`;
   }
 
-  private async repeatLastReply(): Promise<void> {
-    // Match the G2 contextual-menu wire shape exactly so the Mac's existing
-    // CapabilityRouter._repeat() owns the response and assistant overlay.
-    this.link.send({
-      kind: 'input',
-      event: { containerName: 'sysmenu', selectedIndex: 1 },
-    });
-    await this.close();
-  }
-
-  private async reconnectToMac(): Promise<void> {
-    this.link.connect();
-    await this.close();
-  }
-
   private async openCapability(
-    picked: Exclude<(typeof CAPABILITIES)[number], 'Repeat' | 'Reconnect' | 'Settings'>,
+    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'>,
     index: number,
     planningAnchorUnixMs?: number,
   ): Promise<void> {
