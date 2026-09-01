@@ -1798,3 +1798,113 @@ class TestMidSessionNoteSaving:
         await asyncio.sleep(0)
         assert session.consumed == ["note that the cache is stale"]
         await manager.close()
+
+
+class TestANewTopicDuringALiveSession:
+    """docs/SESSION_MODEL.md:52 — "a clearly unrelated replacement request →
+    ask before replacing context; never guess or silently reset."
+
+    What happened instead: "brainstorm <something else>" spoken during a
+    live session was swallowed whole. It became a YOU turn inside the OLD
+    conversation, so the wearer's new question was filed as a comment on
+    the previous one and the session they asked for never started —
+    silently, with no refusal and no queue.
+    """
+
+    class Steerable(Session):
+        def __init__(self) -> None:
+            self.consumed: list[str] = []
+            self.cancelled = False
+
+        async def run(self) -> None:
+            while not self.cancelled:
+                await asyncio.sleep(0.01)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            self.consumed.append(text)
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+    def _live(self):
+        transport = SinkTransport()
+        started: list[str] = []
+        session = self.Steerable()
+
+        def factory(topic: str):
+            started.append(topic)
+            return self.Steerable() if len(started) > 1 else session
+
+        manager = SessionManager(HudWriter(transport), factory)
+        assert manager.handle_transcript("brainstorm the first question")
+        return manager, session, started, transport
+
+    async def test_a_new_topic_asks_instead_of_being_absorbed(self) -> None:
+        manager, session, started, transport = self._live()
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript(
+            "JOAT, brainstorm something completely different",
+            addressed="brainstorm something completely different",
+        )
+        await asyncio.sleep(0)
+
+        # NOT filed as a remark in the old conversation.
+        assert session.consumed == []
+        # …and not started behind the wearer's back either.
+        assert started == ["the first question"]
+        overlays = [m for m in transport.sent
+                    if type(m).__name__ == "AssistantOverlay"]
+        assert overlays and "something completely different" in overlays[-1].text
+        await manager.close()
+
+    async def test_yes_ends_the_old_session_and_starts_the_new_one(self) -> None:
+        manager, session, started, _ = self._live()
+        await asyncio.sleep(0)
+        manager.handle_transcript(
+            "JOAT, brainstorm the second question",
+            addressed="brainstorm the second question",
+        )
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript("JOAT, yes", addressed="yes")
+        for _ in range(60):
+            await asyncio.sleep(0.02)
+            if len(started) > 1:
+                break
+        assert session.cancelled
+        assert started == ["the first question", "the second question"]
+        await manager.close()
+
+    async def test_no_keeps_the_running_session(self) -> None:
+        manager, session, started, _ = self._live()
+        await asyncio.sleep(0)
+        manager.handle_transcript(
+            "JOAT, brainstorm the second question",
+            addressed="brainstorm the second question",
+        )
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript("JOAT, no", addressed="no")
+        await asyncio.sleep(0.05)
+        assert not session.cancelled
+        assert started == ["the first question"]
+        await manager.close()
+
+    async def test_an_ordinary_remark_is_still_a_remark(self) -> None:
+        """The guard must key on the TRIGGER, not on any long utterance —
+        the wearer's actual thoughts still belong in the transcript."""
+        manager, session, started, _ = self._live()
+        await asyncio.sleep(0)
+        assert manager.handle_transcript(
+            "JOAT, I think the cache is the wrong layer",
+            addressed="I think the cache is the wrong layer",
+        )
+        await asyncio.sleep(0)
+        assert session.consumed == ["I think the cache is the wrong layer"]
+        assert started == ["the first question"]
+        await manager.close()
