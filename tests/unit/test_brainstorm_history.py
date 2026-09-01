@@ -300,3 +300,86 @@ class TestTheDefaultConstructionIsContained:
         )
         assert list(history.export_dir.iterdir()), "nothing was exported at all"
         assert history.recent(), "nothing was recorded at all"
+
+
+class TestTheDurableRecord:
+    """docs/SESSION_MODEL.md:30-35 specifies what a stored session IS.
+
+    None of the identity fields existed, so twenty sessions with full
+    turns sat on disk reachable only as four lines of dead text — the
+    wearer could see that past sessions existed and could not open one.
+    """
+
+    def _history(self, tmp_path):
+        from joat.services.brainstorm_history import BrainstormHistory
+
+        return BrainstormHistory(
+            path=tmp_path / "brainstorms.json",
+            export_dir=tmp_path / "exports",
+        )
+
+    def test_a_recorded_session_can_be_loaded_back_by_id(self, tmp_path) -> None:
+        history = self._history(tmp_path)
+        history.record("cold-start latency", ("Codex", "Claude"),
+                       (("CODEX", "Cache it."), ("JOAT", "AGREED: cache it.")),
+                       "done — converged")
+        [row] = history.sessions()
+        assert row.session_id
+        loaded = history.load(row.session_id)
+        assert loaded is not None
+        assert loaded.topic == "cold-start latency"
+        # The whole turn survives, not the collapsed row the panel draws.
+        assert loaded.turns[0] == ("CODEX", "Cache it.")
+
+    def test_the_id_never_encodes_the_question(self, tmp_path) -> None:
+        """An id that carries wearer content is the content in another
+        shape — and this one is logged and spoken back."""
+        history = self._history(tmp_path)
+        history.record("my private medical question", ("Codex",),
+                       (("CODEX", "x"),), "done")
+        [row] = history.sessions()
+        for word in ("private", "medical", "question"):
+            assert word not in row.session_id.lower()
+
+    def test_an_unbranched_session_is_its_own_root(self, tmp_path) -> None:
+        """So lineage is always answerable without a "no parent" case."""
+        history = self._history(tmp_path)
+        history.record("t", ("Codex",), (("CODEX", "x"),), "done")
+        [row] = history.sessions()
+        assert row.root_id == row.session_id
+        assert row.parent_id == ""
+
+    def test_status_is_machine_readable_not_prose(self, tmp_path) -> None:
+        history = self._history(tmp_path)
+        history.record("a", ("Codex",), (("CODEX", "x"),), "cancelled")
+        history.record("b", ("Codex",), (("CODEX", "x"),), "done — converged")
+        assert [r.status for r in history.sessions()] == ["settled", "cancelled"]
+
+    def test_sessions_written_before_this_record_stay_selectable(
+        self, tmp_path,
+    ) -> None:
+        """The wearer already has twenty of these on disk. A migration that
+        drops them, or leaves them without ids, makes the picker lie about
+        what exists."""
+        import json
+
+        path = tmp_path / "brainstorms.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([
+            {"topic": "tabs or spaces", "speakers": ["Codex"],
+             "turns": [["CODEX", "tabs"]], "verdict": "done", "at": 1000.0},
+            {"topic": "BLE retries", "speakers": ["Claude"],
+             "turns": [["CLAUDE", "back off"]], "verdict": "cancelled",
+             "at": 2000.0},
+        ]))
+        history = self._history(tmp_path)
+        rows = history.sessions()
+        assert [r.topic for r in rows] == ["BLE retries", "tabs or spaces"]
+        assert all(r.session_id for r in rows), "a legacy row must be openable"
+        assert history.load(rows[0].session_id) is not None
+        # Status is read out of the prose verdict, since it was not stored.
+        assert rows[0].status == "cancelled"
+        # Ids are stable across reloads, or the picker's rows change under
+        # the wearer between one open and the next.
+        assert [r.session_id for r in self._history(tmp_path).sessions()] == \
+            [r.session_id for r in rows]

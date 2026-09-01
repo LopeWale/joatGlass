@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import time
 from dataclasses import dataclass
@@ -45,15 +46,61 @@ and an unbounded file of wearer conversation is a liability, not a
 feature."""
 
 
+def _status_from_verdict(verdict: str) -> str:
+    """The machine-readable outcome, for records written before it existed.
+
+    ``verdict`` is prose aimed at the wearer ("done — converged",
+    "cancelled", "blocked · collaborator disconnected"), so migrating an
+    old row means reading it. Anything not recognisably an ending counts
+    as settled: a session in the history file is by definition finished.
+    """
+    lowered = verdict.strip().lower()
+    if lowered.startswith("cancelled"):
+        return "cancelled"
+    return "settled"
+
+
 @dataclass(frozen=True)
 class PastBrainstorm:
-    """One finished session, as the wearer would recognise it."""
+    """One session, as the durable record docs/SESSION_MODEL.md:30-35 asks for.
+
+    That list is: an opaque local session ID, title and creation/update
+    time, root and parent branch IDs, the ordered turns, verification state
+    and latest synthesis, and an ``active``/``settled``/``cancelled``
+    status. None of the identity fields existed, which is why nothing could
+    SELECT a past session — there was no id to select. A list of rows the
+    wearer cannot open is not a list, and the recent-session picker the
+    spec calls for at :47 had no record to build on.
+    """
 
     topic: str
     speakers: tuple[str, ...]
     turns: tuple[tuple[str, str], ...]
     verdict: str
-    at: float
+    created_at: float
+    #: Opaque and local. Never derived from wearer content, so it can be
+    #: spoken, logged, or put on the wire without carrying the question.
+    session_id: str = ""
+    updated_at: float = 0.0
+    #: Lineage. ``root_id`` is the first session of a branch family and
+    #: equals ``session_id`` for an unbranched one; ``parent_id`` is the
+    #: session this one forked from. SESSION_MODEL.md:51 specifies
+    #: "branch this"; these are the fields it will need.
+    root_id: str = ""
+    parent_id: str = ""
+    #: SESSION_MODEL.md:35. ``verdict`` is prose for the wearer; this is
+    #: the machine-readable outcome the picker filters and labels on.
+    status: str = "settled"
+    #: Whether the verifier passed every claim it checked. ``None`` means
+    #: nothing needed checking — which is most thinking sessions, and is
+    #: NOT the same as "failed".
+    verified: bool | None = None
+
+    @property
+    def at(self) -> float:
+        """When this session last changed. Retained under the old name so
+        every existing caller (age, rows, export) keeps working."""
+        return self.updated_at or self.created_at
 
     @property
     def title(self) -> str:
@@ -99,8 +146,18 @@ class BrainstormHistory:
     def export_dir(self) -> Path:
         return self._export_dir
 
-    def record(self, topic: str, speakers: tuple[str, ...],
-               turns: tuple[tuple[str, str], ...], verdict: str) -> None:
+    def record(
+        self,
+        topic: str,
+        speakers: tuple[str, ...],
+        turns: tuple[tuple[str, str], ...],
+        verdict: str,
+        *,
+        session_id: str | None = None,
+        parent_id: str = "",
+        root_id: str = "",
+        verified: bool | None = None,
+    ) -> None:
         """Keep a finished session. A session with no turns is not kept.
 
         Never raises: losing a history entry must not take down the
@@ -109,9 +166,23 @@ class BrainstormHistory:
         """
         if not turns:
             return
+        now = time.time()
+        # Opaque: 16 hex characters of os.urandom, never derived from the
+        # topic. An id that encodes wearer content is not an id, it is the
+        # content in another shape — and this one is spoken back, logged,
+        # and eventually put on the wire to the glasses.
+        identifier = session_id or secrets.token_hex(8)
         entry = PastBrainstorm(
             topic=topic, speakers=tuple(speakers),
-            turns=tuple(turns), verdict=verdict, at=time.time(),
+            turns=tuple(turns), verdict=verdict,
+            created_at=now, updated_at=now,
+            session_id=identifier,
+            # An unbranched session is its own root, so lineage is always
+            # answerable without a special case for "no parent".
+            root_id=root_id or identifier,
+            parent_id=parent_id,
+            status=_status_from_verdict(verdict),
+            verified=verified,
         )
         try:
             kept = [*self._load(), entry][-self._keep:]
@@ -133,6 +204,32 @@ class BrainstormHistory:
         except Exception:
             log.warning("brainstorm history not readable", exc_info=True)
             return []
+
+    def sessions(self, limit: int = KEEP) -> list[PastBrainstorm]:
+        """Newest first, for the recent-session picker.
+
+        `recent()` already returns these rows; this name exists because the
+        picker asks a different question — "what can I OPEN?" — and the
+        answer is only useful now that every row carries an id. (Not named
+        `list`: inside this class that shadows the builtin.)
+        """
+        return self.recent(limit)
+
+    def load(self, session_id: str) -> PastBrainstorm | None:
+        """One session by its opaque id — the operation the HUD needs.
+
+        Without this, twenty stored sessions with full turns were reachable
+        only as four lines of dead text on the glasses: the wearer could
+        SEE that past sessions existed and could not open one. The picker,
+        `continue <title>` and `branch this` (SESSION_MODEL.md:49-51) all
+        land here.
+        """
+        if not session_id:
+            return None
+        for past in self.recent(limit=self._keep):
+            if past.session_id == session_id:
+                return past
+        return None
 
     def find(self, spoken: str) -> PastBrainstorm | None:
         """The session the wearer means, by however they say the question.
@@ -201,7 +298,7 @@ class BrainstormHistory:
         if not isinstance(raw, list):
             return []
         out: list[PastBrainstorm] = []
-        for record in raw:
+        for index, record in enumerate(raw):
             if not isinstance(record, dict):
                 continue
             turns = record.get("turns")
@@ -215,7 +312,20 @@ class BrainstormHistory:
                     if isinstance(t, (list, tuple)) and len(t) == 2
                 ),
                 verdict=str(record.get("verdict", "")),
-                at=float(record.get("at", 0.0)),
+                created_at=float(record.get("createdAt") or record.get("at") or 0.0),
+                updated_at=float(record.get("at") or 0.0),
+                # Sessions written before the durable record existed have no
+                # id. Deriving one from a hash would leak the topic into the
+                # identifier, so a stable synthetic id is minted from the
+                # record's POSITION and timestamp instead, and persisted on
+                # the next write. An old row stays selectable either way.
+                session_id=str(record.get("id") or f"legacy-{index:02d}"),
+                root_id=str(record.get("rootId") or record.get("id") or f"legacy-{index:02d}"),
+                parent_id=str(record.get("parentId", "")),
+                status=str(record.get("status") or _status_from_verdict(
+                    str(record.get("verdict", "")))),
+                verified=record.get("verified") if isinstance(
+                    record.get("verified"), bool) else None,
             ))
         return out
 
@@ -223,9 +333,16 @@ class BrainstormHistory:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = [
             {
+                "id": e.session_id,
+                "rootId": e.root_id or e.session_id,
+                "parentId": e.parent_id,
                 "topic": e.topic, "speakers": list(e.speakers),
                 "turns": [list(t) for t in e.turns],
-                "verdict": e.verdict, "at": e.at,
+                "verdict": e.verdict,
+                "status": e.status,
+                "verified": e.verified,
+                "createdAt": e.created_at,
+                "at": e.at,
             }
             for e in entries
         ]
