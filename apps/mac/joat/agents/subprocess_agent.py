@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import json
 import logging
 import os
 import re
@@ -48,6 +49,41 @@ def find_claude_binary() -> str | None:
     return bundles[-1] if bundles else None
 
 
+def _stream_json_event(line: str) -> tuple[str, str | None, bool]:
+    """One `--output-format stream-json` line, read for what it carries.
+
+    Returns (incremental text, final answer or None, the CLI called it an
+    error). Shapes taken from a real run, not from documentation:
+
+        {"type":"stream_event","event":{"type":"content_block_delta",
+         "index":0,"delta":{"type":"text_delta","text":"Ca"}}}
+        {"type":"result","result":"<the whole answer>","is_error":false}
+
+    Anything unrecognised yields nothing, so an added event type is inert
+    rather than corrupting.
+    """
+    try:
+        event = json.loads(line)
+    except (ValueError, UnicodeError):
+        return "", None, False
+    if not isinstance(event, dict):
+        return "", None, False
+    kind = event.get("type")
+    if kind == "stream_event":
+        inner = event.get("event")
+        if isinstance(inner, dict) and inner.get("type") == "content_block_delta":
+            delta = inner.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str):
+                    return text, None, False
+        return "", None, False
+    if kind == "result":
+        final = event.get("result")
+        return "", final if isinstance(final, str) else "", bool(event.get("is_error"))
+    return "", None, False
+
+
 class SubprocessAgent:
     """Run a CLI agent; yield its stdout in chunks as they arrive."""
 
@@ -55,7 +91,15 @@ class SubprocessAgent:
                  timeout_s: float = 240.0, noise: re.Pattern[str] | None = None,
                  name: str | None = None,
                  model: Callable[[], str | None] | None = None,
-                 model_flag: str = "-m") -> None:
+                 model_flag: str = "-m",
+                 stream_json: bool = False) -> None:
+        # Read the CLI's incremental protocol instead of its final stdout.
+        # Measured on the real binaries: plain `-p` delivers a whole answer
+        # in one chunk with the first byte at 10.4s of a 10.7s turn, so the
+        # wearer watches "Thinking…" for 98% of every turn. With deltas the
+        # first words land at 6.7s. Opt-in per seat because `codex exec
+        # --json` has no equivalent — it emits one item.completed at the end.
+        self._stream_json = stream_json
         self._command = command
         self._name = name or os.path.basename(command[0])
         self._env_strip = env_strip
@@ -88,6 +132,9 @@ class SubprocessAgent:
         deadline = loop.time() + self._timeout_s
         pending = ""
         timed_out = False
+        streamed = False
+        final_answer = ""
+        result_failed = False
         try:
             while True:
                 remaining = deadline - loop.time()
@@ -104,10 +151,25 @@ class SubprocessAgent:
                 pending += raw.decode(errors="replace")
                 # Emit complete lines (noise-filtered); keep the tail fragment.
                 *lines, pending = pending.split("\n")
+                if self._stream_json:
+                    for line in lines:
+                        text, final, failed = _stream_json_event(line)
+                        if final is not None:
+                            final_answer, result_failed = final, failed
+                        if text:
+                            streamed = True
+                            yield text
+                    continue
                 out = "\n".join(ln for ln in lines if not self._is_noise(ln))
                 if out.strip():
                     yield out + "\n"
-            if pending.strip() and not self._is_noise(pending):
+            if self._stream_json:
+                # Never lose an answer to a parse gap: if no delta arrived
+                # but the CLI reported one, emit what it reported. A silent
+                # truncation would be worse than no streaming at all.
+                if not streamed and final_answer and not result_failed:
+                    yield final_answer
+            elif pending.strip() and not self._is_noise(pending):
                 yield pending
             # How the turn ended, in the wearer's view. The exit code is the
             # ONLY trustworthy success signal: a failing CLI prints its
@@ -195,6 +257,12 @@ def critic(model: Callable[[], str | None] | None = None) -> SubprocessAgent | N
         return None
     # `claude --model <alias|full-name>` (verified against --help). No
     # provider, or one returning None, leaves the CLI on its own default.
-    return SubprocessAgent([binary, "-p"], env_strip=("ANTHROPIC_API_KEY",),
+    # stream-json so the wearer sees the first words at ~6.7s instead of
+    # ~10.4s of a ~10.7s turn. `--verbose` is required alongside it in
+    # print mode; both were verified against the installed binary.
+    return SubprocessAgent([binary, "-p", "--output-format", "stream-json",
+                            "--include-partial-messages", "--verbose"],
+                           env_strip=("ANTHROPIC_API_KEY",),
                            noise=_CLAUDE_NOISE, name="claude",
-                           model=model, model_flag="--model")
+                           model=model, model_flag="--model",
+                           stream_json=True)
