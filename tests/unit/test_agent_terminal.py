@@ -208,7 +208,22 @@ class TestApprovals:
         assert agent2_report is not None
 
 
+class _RosterPolicy:
+    """What the gateway actually consults before allowing a roster read.
+
+    The production selection is `agent.policy.roster`, so a double that
+    enumerates sessions must carry it — a double that only *looks* capable
+    is how the real selection came to be `hasattr(agent, "list_sessions")`,
+    which every lane satisfies.
+    """
+
+    roster = True
+
+
 class ListingAgent(FakeAgent):
+    #: Only a roster lane may enumerate; see _is_roster_lane.
+    policy = _RosterPolicy()
+
     def __init__(self, rows: list[dict[str, str]] | None = None,
                  fail: str | None = None) -> None:
         super().__init__()
@@ -1015,3 +1030,75 @@ class TestWatchingConcurrentWork:
         assert len(painted) > settled, (
             "run -> ask1 is exactly the transition the wearer must not miss"
         )
+
+
+class TestRosterLaneSelection:
+    """Which lane may enumerate and adopt the wearer's other sessions.
+
+    The selection was `hasattr(agent, "list_sessions")`, which looks like a
+    capability check and is not one: every lane is the same class, so every
+    lane answered True and the winner was whichever came first in dict
+    order. It worked only because "work" is registered first.
+    """
+
+    def test_a_non_roster_lane_is_never_chosen_to_enumerate(self) -> None:
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        # Brainstorm's lane FIRST, exactly the ordering that used to decide
+        # this — and it is not allowed to read the roster.
+        roster = AgentTerminalRoster(
+            [("hermes", FakeAgent()), ("work", ListingAgent(ROWS))],
+        )
+        chosen = [name for name, lane in roster._lanes.items()
+                  if getattr(getattr(lane.agent, "policy", None), "roster", False)]
+        assert chosen == ["work"]
+
+    async def test_without_a_roster_lane_it_says_so(self) -> None:
+        """Rather than picking a lane that will fail at the policy layer and
+        report a policy problem for what is really an ordering bug."""
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        roster = AgentTerminalRoster([("hermes", FakeAgent())])
+        answer = await roster.discover()
+        assert "enumerate" in answer
+
+    async def test_discovery_works_when_the_roster_lane_is_not_first(self) -> None:
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        roster = AgentTerminalRoster(
+            [("hermes", FakeAgent()), ("work", ListingAgent(ROWS))],
+        )
+        answer = await roster.discover()
+        assert "enumerate" not in answer
+        assert any("[discover]" in line for line in roster.frame().lines)
+
+
+class TestTheTerminalReportsItsOwnLane:
+    """The terminal's state must come from the terminal's lanes.
+
+    `model.terminalState` — which gates whether a tap arms terminal input —
+    was `status.agent_terminal_projection()["state"]`, and that projection
+    is published by the BRAINSTORM lane (__main__: the work lane is built
+    with state_changed=None). So a blocked Brainstorm lane made terminal
+    input unreachable no matter what the work lane was doing.
+    """
+
+    async def test_frame_state_tracks_the_lanes_not_a_foreign_projection(
+        self,
+    ) -> None:
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        roster = AgentTerminalRoster([("work", FakeAgent(gate=asyncio.Event()))])
+        assert roster.frame().state == "ready"
+
+        await roster.send("do the thing")
+        assert roster.frame().state == "running", (
+            "a working lane reports running, whatever any other lane is doing"
+        )
+
+    async def test_an_approval_shows_on_the_lane_that_has_it(self) -> None:
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        roster = AgentTerminalRoster([("work", FakeAgent())])
+        roster.note_approval("work", "id-1", "tool", "write a file")
+        assert roster.frame().state == "approval_required"
