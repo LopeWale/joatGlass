@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wave
+from pathlib import Path
 from typing import Any
 
 from ..core.interfaces import SttEngine, Transcript
@@ -35,6 +36,20 @@ log = logging.getLogger(__name__)
 
 MIN_UTTERANCE_BYTES = SAMPLE_RATE * SAMPLE_WIDTH // 4  # < 250 ms is a VAD blip
 DEFAULT_READY_TIMEOUT_S = 30.0
+
+DEFAULT_MODEL_DIR = Path.home() / "Library/Application Support/JOAT/models"
+"""Where the ~3 GB of WhisperKit weights are kept.
+
+Said explicitly because whisperkit-cli's own default is
+`~/Documents/huggingface`, and on this Mac `~/Documents` is an
+iCloud-synced folder (Desktop & Documents is on). That put three
+gigabytes of regenerable model weights into the wearer's iCloud —
+uploaded, counted against their storage, and synced to every device they
+own, to hold a file that any machine can re-download.
+
+Application Support is where the rest of JOAT's state already lives and
+is not synced.
+"""
 
 
 def is_prompt_echo(text: str, prompt: str | None) -> bool:
@@ -101,11 +116,13 @@ class WhisperServeEngine(SttEngine):
         ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S,
         temperature_fallback_count: int = 0,
         without_timestamps: bool = True,
+        model_dir: Path | None = None,
     ) -> None:
         if temperature_fallback_count < 0:
             raise ValueError("temperature_fallback_count must be non-negative")
         self._binary = binary
         self._model = model
+        self._model_dir = model_dir or DEFAULT_MODEL_DIR
         self._port = port
         self._base_url = base_url or f"http://127.0.0.1:{port}"
         # Vocabulary bias. Whisper renders unknown proper nouns phonetically
@@ -181,8 +198,10 @@ class WhisperServeEngine(SttEngine):
         if self._command is not None:
             cmd = self._command
         else:
+            self._model_dir.mkdir(parents=True, exist_ok=True)
             cmd = [
                 self._binary, "serve", "--model", self._model,
+                "--download-model-path", str(self._model_dir),
                 "--host", "127.0.0.1", "--port", str(self._port),
                 "--temperature-fallback-count", str(self._temperature_fallback_count),
             ]
