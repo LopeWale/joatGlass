@@ -857,6 +857,29 @@ def _read_challenge(frame: dict[str, object]) -> tuple[str, int]:
     return nonce, challenge_ts
 
 
+_GATEWAY_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+def _safe_error_code(*candidates: object) -> str | None:
+    """The Gateway's own refusal code, if it is shaped like one.
+
+    Without it every refusal reads identically — unknown device, expired
+    token, denied scope all arrive as "OpenClaw rejected the connection" —
+    and an operator cannot tell which, on a surface whose whole job is
+    reaching someone else's machine.
+
+    Two deliberate limits. The code must match an enum-like token, so a
+    Gateway cannot write arbitrary text into this Mac's logs. And the
+    free-text `message` is NOT carried: nothing guarantees a Gateway keeps
+    credentials out of it, and this project redacts secrets from transport
+    logging precisely because that guarantee does not exist.
+    """
+    for value in candidates:
+        if isinstance(value, str) and _GATEWAY_ERROR_CODE.fullmatch(value):
+            return value
+    return None
+
+
 def _read_connect_response(
     frame: dict[str, object], *, request_id: str, requested_scopes: tuple[str, ...]
 ) -> tuple[dict[str, object], str | None]:
@@ -926,7 +949,11 @@ def _read_connect_response(
         raw_reason = details.get("reason") if details else None
         reason = raw_reason if isinstance(raw_reason, str) else None
         raise OpenClawPairingRequired(request_id=pairing_request_id, reason=reason)
-    raise OpenClawGatewayError("OpenClaw rejected the connection")
+    code = _safe_error_code(detail_code, error.get("code") if error else None)
+    raise OpenClawGatewayError(
+        f"OpenClaw rejected the connection ({code})" if code
+        else "OpenClaw rejected the connection"
+    )
 
 
 def _is_string_list(value: object) -> bool:
