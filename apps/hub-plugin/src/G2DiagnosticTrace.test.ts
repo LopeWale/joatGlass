@@ -111,6 +111,10 @@ describe('MacG2DiagnosticTrace', () => {
       source: 'right', gesture: 'tap', delivery: 'sys',
     });
     trace.record({
+      type: 'brainstorm_action', action: 'begin_terminal_input', surface: 'agent_terminal',
+      source: 'right', gesture: 'tap', delivery: 'sys',
+    });
+    trace.record({
       type: 'visual_frame', kind: 'brainstorm', surface: 'agent_terminal', state: 'running',
       sha256: 'a'.repeat(64),
     });
@@ -125,6 +129,12 @@ describe('MacG2DiagnosticTrace', () => {
       kind: 'g2.diagnostic',
       event: {
         type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
+        source: 'right', gesture: 'tap', delivery: 'sys',
+      },
+    }, {
+      kind: 'g2.diagnostic',
+      event: {
+        type: 'brainstorm_action', action: 'begin_terminal_input', surface: 'agent_terminal',
         source: 'right', gesture: 'tap', delivery: 'sys',
       },
     }, {
