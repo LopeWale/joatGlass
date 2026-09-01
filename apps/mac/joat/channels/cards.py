@@ -101,6 +101,13 @@ class Card:
     urgency: Urgency = Urgency.NOTIFY
     count: int = 1       # coalesced siblings
     at: float = field(default_factory=time.time)
+    # Machine taxonomy ("messages.incoming_text", "reminders.due"), so a
+    # reader can route on the kind of thing that happened rather than
+    # re-parsing rendered text. Matches the vocabulary the observation store
+    # already uses.
+    event_class: str = ""
+    # The producing store's own id, for dedup across sources.
+    origin_id: str | None = None
 
     def render(self) -> str:
         """Two lines: who, then what. The HUD is glanced at, not read."""
@@ -141,8 +148,12 @@ class DeliveryPolicy:
             count = prev[1] + 1
             self._last_by_source[key] = (now, count)
             # Same person again inside the window: replace, don't stack.
+            # Carry the taxonomy fields explicitly — a coalesced repeat is
+            # still the same kind of event, and positional construction
+            # would silently drop them.
             return Card(card.source, card.channel, card.summary,
-                        card.urgency, count, now)
+                        card.urgency, count, now,
+                        event_class=card.event_class, origin_id=card.origin_id)
         self._last_by_source[key] = (now, 1)
 
         self._recent = [t for t in self._recent if now - t < 60.0]
@@ -187,15 +198,19 @@ class CardLog:
 
     Cards were rendered to the HUD and immediately forgotten — the model was
     asked about notifications it had no record of. Bounded; newest last.
+
+    Entries are whole `Card`s, not pre-rendered text: a reader that only
+    kept the rendered string had thrown away urgency, channel, and kind, so
+    the Notifications view could do nothing but replay old HUD lines.
     """
 
     def __init__(self, keep: int = 10) -> None:
         self._keep = keep
-        self._entries: list[tuple[float, str]] = []
+        self._entries: list[Card] = []
 
-    def add(self, card: str, at: float | None = None) -> None:
-        self._entries.append((time.time() if at is None else at, card))
+    def add(self, card: Card) -> None:
+        self._entries.append(card)
         del self._entries[:-self._keep]
 
-    def recent(self, limit: int = 5) -> list[tuple[float, str]]:
+    def recent(self, limit: int = 5) -> list[Card]:
         return self._entries[-max(1, min(limit, self._keep)):]

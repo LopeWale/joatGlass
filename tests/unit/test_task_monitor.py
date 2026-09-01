@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import joat.persistence.store as store_module
+from joat.channels.cards import CardLog, Urgency
 from joat.core.protocol import ProductivityHudView
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.store import DurableStore
@@ -190,6 +191,40 @@ async def test_restart_catches_up_due_once_without_duplicate(tmp_path: Path) -> 
             for card in cards
         ] == [("reminders", "due", "Take medicine", 1_000)]
         assert occurrences._get_with(reopened._db, occurrence.occurrence_id).state == "alerted"
+
+
+async def test_due_reminder_joins_the_shared_history_without_changing_delivery(
+    tmp_path: Path,
+) -> None:
+    """History only: a due reminder keeps its own acknowledged delivery path,
+    but "what did I miss?" should see it beside notifications, not in a silo."""
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        occurrences, _ = register(store)
+        views: list[ProductivityHudView] = []
+        card_log = CardLog()
+        monitor = TaskMonitor(
+            occurrences, accepted_delivery(views), card_log=card_log,
+        )
+
+        assert await monitor.run_due_once(now_unix_ms=2_000, now_us=2_000_000) == 1
+
+        # The ack path is untouched — the view still went out as before.
+        assert [v.phase for v in views] == ["due"]
+        logged = card_log.recent(5)
+        assert [(c.channel, c.event_class, c.urgency) for c in logged] == [
+            ("Reminders", "reminders.due", Urgency.URGENT),
+        ]
+        assert logged[0].source == "Take medicine"
+
+
+async def test_due_reminder_history_is_optional(tmp_path: Path) -> None:
+    """No card log wired: delivery must behave exactly as before."""
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        occurrences, _ = register(store)
+        views: list[ProductivityHudView] = []
+        monitor = TaskMonitor(occurrences, accepted_delivery(views))
+        assert await monitor.run_due_once(now_unix_ms=2_000, now_us=2_000_000) == 1
+        assert [v.phase for v in views] == ["due"]
 
 
 async def test_future_occurrence_is_not_alerted(tmp_path: Path) -> None:

@@ -49,6 +49,7 @@ class VoiceCommandRouter:
         hermes: CommandController | None = None,
         terminal: CommandController | None = None,
         capability_opens: CapabilityOpenCommandController | None = None,
+        brainstorm_history: CommandController | None = None,
     ) -> None:
         self._message_replies = message_replies
         self._models = models
@@ -59,6 +60,7 @@ class VoiceCommandRouter:
         self._hermes = hermes
         self._terminal = terminal
         self._capability_opens = capability_opens
+        self._brainstorm_history = brainstorm_history
 
     async def __call__(self, text: str) -> str | None:
         # New Message is an explicit, short-lived wearer flow. It gets first
@@ -107,6 +109,12 @@ class VoiceCommandRouter:
                 return productivity_result
         # Agent Terminal claims only utterances that SAY "terminal", so it
         # sits late in the order: nothing broader can be shadowed by it.
+        # "where are my brainstorms" — narrow, and only about Brainstorm's
+        # own exports, so it cannot shadow the terminal or notes grammars.
+        if self._brainstorm_history is not None:
+            history_result = await self._brainstorm_history.handle_command(text)
+            if history_result is not None:
+                return history_result
         if self._terminal is not None:
             terminal_result = await self._terminal.handle_command(text)
             if terminal_result is not None:

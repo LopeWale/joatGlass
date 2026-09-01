@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from joat.channels.cards import Card
 from joat.channels.notification_mux import NotificationLane, NotificationMux
 from joat.channels.notifications import Notification
 from joat.persistence.notifications import (
@@ -79,7 +80,7 @@ async def test_messages_and_banner_ingest_together_but_authority_suppression_kee
     banner = notification(2, app="Messages", title="Ada", body="Call me")
     messages = ScriptedSource(0, [([message], 1)])
     banners = ScriptedSource(0, [([banner], 1)])
-    cards: list[str] = []
+    cards: list[Card] = []
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         observations = NotificationObservationStore(store)
         mux = NotificationMux(
@@ -114,7 +115,7 @@ async def test_messages_and_banner_ingest_together_but_authority_suppression_kee
         except asyncio.CancelledError:
             pass
 
-        assert cards == ["Ada · Messages\nCall me"]
+        assert [c.render() for c in cards] == ["Ada · Messages\nCall me"]
         assert store.execute("SELECT count(*) FROM notification_observations").fetchone()[0] == 2
         assert dict(store.execute(
             "SELECT state,count(*) FROM notification_outbox GROUP BY state"
@@ -165,7 +166,7 @@ async def test_healthy_authority_without_exact_observation_does_not_hide_banner(
         0,
         [([notification(2, app="Messages", title="Ada", body="Attachment")], 1)],
     )
-    cards: list[str] = []
+    cards: list[Card] = []
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         mux = NotificationMux(
             [
@@ -197,7 +198,7 @@ async def test_healthy_authority_without_exact_observation_does_not_hide_banner(
         except asyncio.CancelledError:
             pass
 
-        assert cards == ["Ada · Messages\nAttachment"]
+        assert [c.render() for c in cards] == ["Ada · Messages\nAttachment"]
         assert store.execute(
             "SELECT state FROM notification_outbox"
         ).fetchone()[0] == "enqueued"
@@ -315,7 +316,7 @@ async def test_authority_grace_closes_one_poll_ingestion_race(tmp_path: Path) ->
     banner = notification(2, app="Messages", title="Ada", body="Hi")
     messages = ScriptedSource(0, [([], 0), ([authoritative], 1)])
     banners = ScriptedSource(0, [([banner], 1)])
-    cards: list[str] = []
+    cards: list[Card] = []
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         mux = NotificationMux(
             [
@@ -350,7 +351,7 @@ async def test_authority_grace_closes_one_poll_ingestion_race(tmp_path: Path) ->
         except asyncio.CancelledError:
             pass
 
-        assert cards == ["Ada · Messages\nHi"]
+        assert [c.render() for c in cards] == ["Ada · Messages\nHi"]
 
 
 async def test_restart_waits_for_authoritative_catch_up_before_old_fallback(
@@ -358,7 +359,7 @@ async def test_restart_waits_for_authoritative_catch_up_before_old_fallback(
 ) -> None:
     authoritative = notification(1, app="Messages", title="Ada", body="Hi")
     banner = notification(2, app="Messages", title="Ada", body="Hi")
-    cards: list[str] = []
+    cards: list[Card] = []
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         observations = NotificationObservationStore(store)
         observations.initialize_source(
@@ -427,7 +428,7 @@ async def test_restart_waits_for_authoritative_catch_up_before_old_fallback(
         except asyncio.CancelledError:
             pass
 
-        assert cards == ["Ada · Messages\nHi"]
+        assert [c.render() for c in cards] == ["Ada · Messages\nHi"]
 
 
 async def test_metadata_only_observation_is_retained_but_never_rendered(
@@ -437,7 +438,7 @@ async def test_metadata_only_observation_is_retained_but_never_rendered(
         0,
         [([notification(1, app="com.apple.Calendar", title="opaque", body="")], 1)],
     )
-    cards: list[str] = []
+    cards: list[Card] = []
     with DurableStore(tmp_path / "joat.sqlite3") as store:
         mux = NotificationMux(
             [NotificationLane(

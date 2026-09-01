@@ -97,7 +97,10 @@ from .persistence.tasks import TaskOccurrenceStore
 from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
-from .services.brainstorm_history import BrainstormHistory
+from .services.brainstorm_history import (
+    BrainstormHistory,
+    BrainstormHistoryCommands,
+)
 from .services.brainstorm_acceptance import (
     try_start_g2_gesture_acceptance,
 )
@@ -1122,6 +1125,7 @@ async def main() -> None:
         note_insights=note_insight_commands,
         hermes=hermes_productivity,
         terminal=terminal_commands,
+        brainstorm_history=BrainstormHistoryCommands(brainstorm_history),
         capability_opens=capability_opens,
     )
     # The assistant's name is JOAT — plus mishearings observed LIVE from

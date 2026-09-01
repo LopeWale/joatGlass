@@ -20,12 +20,18 @@ from ..persistence.voice_notes import VoiceNote, VoiceNoteFrame, VoiceNoteStore
 # also splits or joins the compound unpredictably. Every control phrase
 # accepts all three spellings so the recorder never looks deaf to its own
 # name.
-_NOTE_NOUNS = ("voice note", "quick note", "quicknote")
+_NOTE_NOUNS = ("voice note", "quick note", "quicknote", "recording", "note")
 
 
 def _phrases(*templates: str) -> frozenset[str]:
+    # Speak-what-you-see: the HUD control rows say "Pause recording" and
+    # "Save and finish", so the grammar accepts every noun a wearer would
+    # naturally read off the lens, with or without an article.
     return frozenset(
-        template.format(noun=noun) for template in templates for noun in _NOTE_NOUNS
+        template.format(noun=article + noun)
+        for template in templates
+        for noun in _NOTE_NOUNS
+        for article in ("", "the ", "this ")
     )
 
 
@@ -35,11 +41,15 @@ _START = re.compile(
     r"(?: (?P<title>.+))?$",
     re.IGNORECASE,
 )
-_STOP = _phrases("stop {noun}", "save {noun}", "finish {noun}")
+# The visible control rows are also speakable verbatim ("Save and finish",
+# "Confirm discard") — a wearer reads the lens and says what it says.
+_STOP = _phrases("stop {noun}", "save {noun}", "finish {noun}") | frozenset(
+    {"save and finish"},
+)
 _PAUSE = _phrases("pause {noun}")
 _RESUME = _phrases("resume {noun}", "continue {noun}")
 _DISCARD = _phrases("discard {noun}", "cancel {noun}")
-_CONFIRM_DISCARD = _phrases("confirm discard {noun}")
+_CONFIRM_DISCARD = _phrases("confirm discard {noun}") | frozenset({"confirm discard"})
 _KEEP = _phrases("keep {noun}", "cancel discard {noun}")
 _SHOW_LAST = _phrases("show last {noun}")
 _EXPORT_LAST = _phrases("export last {noun}")
@@ -131,7 +141,10 @@ class VoiceNoteCaptureController:
         )
 
     async def handle_command(self, text: str) -> str | None:
-        normalized = " ".join(text.strip().split())
+        # Whisper punctuates short utterances ("Pause recording."). Terminal
+        # punctuation is STT noise for the exact lifecycle grammar; the
+        # _START title group still keeps its own interior punctuation.
+        normalized = " ".join(text.strip().split()).rstrip(".,!?").rstrip()
         lowered = normalized.casefold()
         start = _START.fullmatch(normalized)
         if start is not None:

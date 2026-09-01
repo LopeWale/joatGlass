@@ -84,17 +84,34 @@ class TestCardLog:
     """Cards were rendered and immediately forgotten — 'what did I miss?'
     was answered by a model with no record (audit finding 6)."""
 
+    @staticmethod
+    def _card(source: str) -> Card:
+        return Card(source=source, channel="Messages", summary="hi", at=1.0)
+
     def test_remembers_newest_last(self) -> None:
         log = CardLog(keep=3)
         for c in ("a", "b", "c"):
-            log.add(c, at=1.0)
-        assert [c for _, c in log.recent(3)] == ["a", "b", "c"]
+            log.add(self._card(c))
+        assert [c.source for c in log.recent(3)] == ["a", "b", "c"]
 
     def test_bounded_to_keep(self) -> None:
         log = CardLog(keep=2)
         for c in ("a", "b", "c", "d"):
-            log.add(c, at=1.0)
-        assert [c for _, c in log.recent(5)] == ["c", "d"]
+            log.add(self._card(c))
+        assert [c.source for c in log.recent(5)] == ["c", "d"]
+
+    def test_keeps_structure_so_readers_need_not_reparse_rendered_text(self) -> None:
+        """The defect this replaced: the log stored rendered strings, so the
+        Notifications view could only replay old HUD lines."""
+        log = CardLog(keep=2)
+        log.add(Card(source="Dele", channel="Messages", summary="On my way",
+                     urgency=Urgency.URGENT, event_class="messages.incoming_text",
+                     origin_id="n-1", at=1.0))
+        entry = log.recent(1)[0]
+        assert entry.urgency is Urgency.URGENT
+        assert entry.event_class == "messages.incoming_text"
+        assert entry.origin_id == "n-1"
+        assert entry.at == 1.0
 
     def test_empty_log_is_empty(self) -> None:
         assert CardLog().recent() == []

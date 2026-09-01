@@ -18,7 +18,7 @@ from ..core.interfaces import ReplyEngine
 from ..core.protocol import AudioSource, BrainstormAction, BrainstormHudView
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
-from ..channels.cards import CardLog
+from ..channels.cards import Card, CardLog, Urgency
 from .hud import HudWriter
 from .roundtable import (
     Participant, RoundTable, build_prompt, is_failure, parse_direction,
@@ -26,6 +26,10 @@ from .roundtable import (
 from .sinks import TranscriptSink
 
 log = logging.getLogger(__name__)
+
+# Firmware textColor: a corroborated-urgent card is the brightest thing on
+# the lens; routine traffic sits one step down.
+_CARD_BRIGHTNESS = {Urgency.NOTIFY: 3, Urgency.URGENT: 4}
 
 _UNSET_ADDRESSED = "\x00joat-unset-addressed"
 """Sentinel: the caller did not evaluate address at all (tests, internal
@@ -101,7 +105,7 @@ class SessionManager:
         self._factory = factory
         self._active: Session | None = None
         self._task: asyncio.Task[None] | None = None
-        self._pending_cards: list[tuple[str, asyncio.Future[None] | None]] = []
+        self._pending_cards: list[tuple[Card, asyncio.Future[None] | None]] = []
         self._card_log = card_log
         self._terminal_capture = terminal_capture
         self._on_state = on_state
@@ -132,17 +136,17 @@ class SessionManager:
         """Whether a visible G2 tap is waiting for one glasses-mic phrase."""
         return self._topic_capture_armed
 
-    def notify(self, card: str) -> None:
+    def notify(self, card: Card) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
         shows the card now; an active session is never interrupted — cards
         queue and drain the moment it ends."""
         if self._active is not None:
             self._pending_cards.append((card, None))
-            log.info("card queued behind active session chars=%d", len(card))
+            log.info("card queued behind active session urgency=%s", card.urgency.name)
             return
         asyncio.get_running_loop().create_task(self._show_card(card))
 
-    async def notify_and_wait(self, card: str) -> None:
+    async def notify_and_wait(self, card: Card) -> None:
         """Return only after the Mac HUD write completes.
 
         This is the durable-outbox seam. It still is not physical-G2 proof,
@@ -154,20 +158,22 @@ class SessionManager:
             return
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_cards.append((card, future))
-        log.info("card queued behind active session chars=%d", len(card))
+        log.info("card queued behind active session urgency=%s", card.urgency.name)
         await future
 
-    async def _show_card(self, card: str) -> None:
-        # Urgency gets BRIGHTNESS now, not merely punctuation: firmware
-        # textColor 4 for "!!" cards, a shade dimmer for routine ones.
-        urgent = card.startswith("!!")
-        await self._hud.show_with_brightness(
-            card,
-            4 if urgent else 3,
-            content_kind="notification",
-        )
+    async def _show_card(self, card: Card) -> None:
+        await self._paint(card.render(), card.urgency)
         if self._card_log is not None:
             self._card_log.add(card)
+
+    async def _paint(self, rendered: str, urgency: Urgency) -> None:
+        # Urgency gets BRIGHTNESS from the enum the triage layer already
+        # decided, rather than re-deriving it by sniffing rendered text.
+        await self._hud.show_with_brightness(
+            rendered,
+            _CARD_BRIGHTNESS.get(urgency, 3),
+            content_kind="notification",
+        )
 
     def _drain_cards(self) -> None:
         if not self._pending_cards:
@@ -179,17 +185,23 @@ class SessionManager:
                 future.set_exception(
                     RuntimeError("notification queue overflowed before HUD write")
                 )
-        combined = "\n".join(card for card, _ in selected)
+        combined = "\n".join(card.render() for card, _ in selected)
+        # One glance carries the batch, but history keeps each event: a
+        # drained batch logged as a single blob is unreadable afterwards.
+        loudest = max((card.urgency for card, _ in selected), default=Urgency.NOTIFY)
 
         async def show_and_resolve() -> None:
             try:
-                await self._show_card(combined)
+                await self._paint(combined, loudest)
             except BaseException as exc:
                 for _, future in selected:
                     if future is not None and not future.done():
                         future.set_exception(exc)
                 log.exception("queued notification HUD write failed")
             else:
+                if self._card_log is not None:
+                    for card, _ in selected:
+                        self._card_log.add(card)
                 for _, future in selected:
                     if future is not None and not future.done():
                         future.set_result(None)

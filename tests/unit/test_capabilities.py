@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from joat.channels.cards import CardLog
+from joat.channels.cards import Card, CardLog, Urgency
 from joat.channels.imessage import MessageEntry, MessageHistoryPage, MessageThread
 from joat.core.protocol import (
     VOICE_REQUEST_PREFIX,
@@ -419,6 +419,14 @@ class FakeVoiceCapture:
         return "Saved Voice Note: fixture."
 
 
+def _urgent_card() -> Card:
+    """Renders as "!! Adaeze · Messages\\nCall me now" — the prefix and the
+    two-line shape come from the card, not from hand-written text."""
+    return Card(source="Adaeze", channel="Messages", summary="Call me now",
+                urgency=Urgency.URGENT, event_class="messages.incoming_text",
+                at=1.0)
+
+
 def make_router(
     tmp_path,
     rows=None,
@@ -435,7 +443,7 @@ def make_router(
     status = StatusPublisher(path=tmp_path / "status.json")
     log = CardLog()
     for c in cards or []:
-        log.add(c, at=1.0)
+        log.add(c)
     router = CapabilityRouter(
         hud=HudWriter(transport),  # type: ignore[arg-type]
         transport=transport,  # type: ignore[arg-type]
@@ -1078,7 +1086,7 @@ class TestCapabilityViews:
         assert rendered.request_id == "messages-transient"
 
     async def test_notifications_view_lists_recent_cards(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        router, transport, _ = make_router(tmp_path, cards=["!! Adaeze · Messages\nCall me now"])
+        router, transport, _ = make_router(tmp_path, cards=[_urgent_card()])
         await router.open("Notifications")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert lists and "!! Adaeze · Messages" in lists[0].to_wire()["items"][0]
@@ -1087,7 +1095,7 @@ class TestCapabilityViews:
     async def test_notification_selection_opens_the_complete_two_line_card(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(
             tmp_path,
-            cards=["!! Adaeze · Messages\nCall me now"],
+            cards=[_urgent_card()],
         )
         await router.open("Notifications")
         router.on_input(InputEvent(
@@ -1542,3 +1550,40 @@ class TestMessageListRow:
             "Adele", "handle-1", "Send the mockups?", time.time(), True,
         ))
         assert "●" not in row
+
+
+class TestVoiceOpenChain:
+    """The full Mac half of "JOAT, show my messages": real command router,
+    real open controller, real capability router — one voice-generation list
+    lands on the transport exactly as the plugin will adopt it."""
+
+    async def test_punctuated_speech_opens_messages_end_to_end(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from joat.services.commands import VoiceCommandRouter
+        from joat.services.models import ModelRegistry
+
+        router, transport, _ = make_router(
+            tmp_path, rows=[("Adele", "Send the mockups?", time.time())],
+        )
+
+        class _NoReplies:
+            def is_compose_armed(self) -> bool:
+                return False
+
+            async def handle_command(self, text: str) -> str | None:
+                del text
+                return None
+
+        commands = VoiceCommandRouter(
+            _NoReplies(),  # type: ignore[arg-type]
+            ModelRegistry([]),
+            capability_opens=CapabilityOpenController(lambda: router),
+        )
+
+        # Whisper's punctuation and casing, post wake-strip.
+        assert await commands("Show my messages.") == "Opening Messages."
+
+        painted = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert painted.title == "MESSAGES"
+        assert painted.request_id is not None
+        assert painted.request_id.startswith(VOICE_REQUEST_PREFIX)
+        assert any("Adele" in item for item in painted.items)

@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -32,6 +33,12 @@ log = logging.getLogger(__name__)
 DEFAULT_HISTORY_PATH = (
     Path.home() / "Library/Application Support/JOAT/brainstorms.json"
 )
+DEFAULT_EXPORT_DIR = Path.home() / "Documents/JOAT Brainstorms"
+"""Where a finished session becomes a file the wearer can actually open.
+
+Documents, not Application Support: the point of an export is that the
+result LEAVES the glasses and is readable without JOAT running. A file
+buried in a support directory is storage, not an export."""
 KEEP = 20
 """How many sessions to retain. A glance-sized surface cannot show more,
 and an unbounded file of wearer conversation is a liability, not a
@@ -80,9 +87,17 @@ class PastBrainstorm:
 class BrainstormHistory:
     """Append finished sessions; read the recent ones back."""
 
-    def __init__(self, path: Path | None = None, keep: int = KEEP) -> None:
+    def __init__(self, path: Path | None = None, keep: int = KEEP,
+                 export_dir: Path | None = None) -> None:
         self._path = Path(path) if path is not None else DEFAULT_HISTORY_PATH
         self._keep = keep
+        self._export_dir = (
+            Path(export_dir) if export_dir is not None else DEFAULT_EXPORT_DIR
+        )
+
+    @property
+    def export_dir(self) -> Path:
+        return self._export_dir
 
     def record(self, topic: str, speakers: tuple[str, ...],
                turns: tuple[tuple[str, str], ...], verdict: str) -> None:
@@ -103,6 +118,13 @@ class BrainstormHistory:
             self._write(kept)
         except Exception:
             log.warning("brainstorm history not written", exc_info=True)
+        # The export is separate on purpose: a readable file is the thing
+        # the wearer opens later, and losing one must not lose the other.
+        try:
+            written = self._export(entry)
+            log.info("brainstorm exported: %s", written.name)
+        except Exception:
+            log.warning("brainstorm not exported", exc_info=True)
 
     def recent(self, limit: int = 5) -> list[PastBrainstorm]:
         """Newest first — the wearer is looking for what they just did."""
@@ -128,6 +150,24 @@ class BrainstormHistory:
                 title = title[:room - 1].rstrip() + "…"
             rows.append(f"{title}{meta}")
         return rows
+
+    def _export(self, entry: PastBrainstorm) -> Path:
+        """Write one session as Markdown the wearer can open anywhere."""
+        self._export_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(entry.at))
+        slug = re.sub(r"[^a-z0-9]+", "-", entry.topic.lower()).strip("-")[:48]
+        target = self._export_dir / f"{stamp}-{slug or 'brainstorm'}.md"
+        lines = [
+            f"# {entry.topic or 'Brainstorm'}",
+            "",
+            f"*{time.strftime('%d %b %Y, %H:%M', time.localtime(entry.at))} · "
+            f"{', '.join(entry.speakers) or 'no seats'} · {entry.verdict}*",
+            "",
+        ]
+        for label, text in entry.turns:
+            lines += [f"## {label}", "", text.strip(), ""]
+        target.write_text("\n".join(lines))
+        return target
 
     # ── storage ──────────────────────────────────────────────────────────
 
@@ -178,3 +218,31 @@ class BrainstormHistory:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
+
+
+_WHERE = re.compile(
+    r"^(?:where|what)(?: are| is)?(?: my| the)? "
+    r"(?:brainstorms?|brainstorm (?:exports?|files?|notes?))"
+    r"(?: saved| stored| kept| go)?$"
+)
+
+
+class BrainstormHistoryCommands:
+    """Answer 'where are my brainstorms' — the glasses are voice-first.
+
+    An export nobody can find is not an export. The wearer asks on the
+    glasses and gets the folder they will open on the Mac.
+    """
+
+    def __init__(self, history: BrainstormHistory) -> None:
+        self._history = history
+
+    async def handle_command(self, text: str) -> str | None:
+        said = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+        if not _WHERE.match(said):
+            return None
+        recent = self._history.recent(1)
+        where = f"Saved in {self._history.export_dir.name}."
+        if not recent:
+            return f"No brainstorms yet. {where}"
+        return f"{len(self._history.recent(99))} saved, newest “{recent[0].title}”. {where}"
