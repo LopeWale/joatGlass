@@ -595,7 +595,9 @@ class TestFinishedTurnsCollapseToTheirGist:
                if line.startswith("CODEX > ")][0]
         assert row.startswith("CODEX > No gist line here, just prose")
         assert row.endswith("…"), "an unbounded fallback would eat the screen"
-        assert len(row) <= 74, f"a collapsed row must fit one line: {len(row)}"
+        assert len(row) <= HudSink.ROW_COLUMNS, (
+            f"a collapsed row must fit one line: {len(row)}"
+        )
 
     async def test_a_long_speaker_prefix_does_not_push_the_row_over(self) -> None:
         """The row budget is the WHOLE row, prefix included.
@@ -607,7 +609,7 @@ class TestFinishedTurnsCollapseToTheirGist:
         """
         sink, transport = await self._sink()
         await sink.turn("claude (critic) — round 2")
-        await sink.chunk("GIST: " + "keep the judge warm during active work " * 4)
+        await sink.chunk("GIST: " + "keep the judge warm during active work " * 5)
         await sink.turn("codex (proposer)")
         await sink.chunk("GIST: noted.")
 

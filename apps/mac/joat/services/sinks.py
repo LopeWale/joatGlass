@@ -89,14 +89,20 @@ class HudSink:
 
     _GIST = re.compile(r"^\s*GIST:\s*(\S.*)$", re.MULTILINE)
 
-    ROW_COLUMNS = 74
-    """What one transcript row holds on the glasses.
+    ROW_COLUMNS = 96
+    """Character budget for a COLLAPSED turn's single row.
 
-    HudCanvasRenderer draws the transcript at 11px in the `"SF Mono", …,
-    Menlo, monospace` stack across a 504px column; SF Mono's advance is
-    1266/2048 em, so 504 / 6.80 = 74 characters. See
-    BRAINSTORM_ACTIVITY_MAX, which is this times the tallest surface's
-    line count.
+    Was 74, derived for the old monospace face. The surface now sets
+    light proportional type (Helvetica Neue at 12px, ~5.2px average
+    advance over a 504px column ≈ 96 characters), and the wearer caught
+    the stale budget on screen within minutes: collapsed rows ended in
+    "…" with a quarter of the width still empty — "why are some words
+    being cut off when there is obviously room on the right?"
+
+    An estimate, deliberately: the engine cannot measure pixels. A
+    glyph-wide row that overruns simply wraps at paint time — the
+    renderer wraps by measured pixels — which costs one extra row rarely
+    instead of wasting 100px always.
     """
 
     @classmethod
