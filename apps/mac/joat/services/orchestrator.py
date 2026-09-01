@@ -66,7 +66,7 @@ class VoiceOrchestrator:
         wake_words: tuple[str, ...] | None = None,
         status: object | None = None,
         commands: Callable[[str], Awaitable[str | None]] | None = None,
-        fuzzy_wake: tuple[str, ...] = ("joat",),
+        fuzzy_wake: tuple[str, ...] = ("joat", "jode", "jodh"),
         fuzzy_threshold: float = 0.86,
         latency_observer: LatencyObserver | None = None,
         frames: AudioFrameSource | None = None,
@@ -83,6 +83,18 @@ class VoiceOrchestrator:
         # Curated live aliases are supplied by __main__. Fuzzy fallback is
         # intentionally strict: 0.72 also accepts ordinary ambient words
         # coat/goat/boat, which can turn room speech into local note writes.
+        #
+        # The threshold stays where it is; the CORES carry the known
+        # failures instead. whisper_serve documents what actually happens
+        # to this name — "Whisper renders unknown proper nouns
+        # phonetically ('JOAT' -> 'Jode'/'Jodh')" — and both score 0.50
+        # against "joat", so the fallback could not catch either of the two
+        # renderings this project had already written down. Matching them
+        # directly costs nothing: at 0.86 the nearest ordinary words to
+        # "jode" are code/node/mode/rode/joke/jade, all 0.75.
+        #
+        # The STT prompt bias remains the primary defence — this only
+        # matters on the utterances where it does not take.
         self._fuzzy_wake = fuzzy_wake
         self._fuzzy_threshold = fuzzy_threshold
         # Longest first so "hey joat" strips before "joat" matches.

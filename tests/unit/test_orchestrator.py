@@ -932,3 +932,45 @@ class TestQuickNoteVoicePath:
 
         assert commands_seen == ["start a quicknote called Standup."]
         assert assistant_text(transport) == ["Recording Voice Note: Standup."]
+
+
+class TestTheWakeGateCatchesItsOwnName:
+    """`whisper_serve` documents what Whisper does to this name — renders
+    it "Jode"/"Jodh" — and the fuzzy fallback scored both at 0.50 against
+    "joat", so it could not catch either failure the project had already
+    written down. The wearer says JOAT and is silently ignored.
+
+    The 0.86 threshold is deliberate and unchanged: 0.72 would admit
+    coat/goat/boat and turn room speech into local writes, which is the
+    ambient-capture hazard the wake gate exists for. The known renderings
+    are matched directly instead.
+    """
+
+    @staticmethod
+    def _wakes(word: str) -> bool:
+        import difflib
+        import inspect
+
+        from joat.services.orchestrator import VoiceOrchestrator
+
+        sig = inspect.signature(VoiceOrchestrator.__init__)
+        cores = sig.parameters["fuzzy_wake"].default
+        threshold = sig.parameters["fuzzy_threshold"].default
+        if len(word) < 4:
+            return False  # the orchestrator skips short words outright
+        return any(
+            difflib.SequenceMatcher(None, word, core).ratio() >= threshold
+            for core in cores
+        )
+
+    def test_the_documented_mis_renderings_wake_it(self) -> None:
+        for heard in ("joat", "jode", "jodh"):
+            assert self._wakes(heard), heard
+
+    def test_ordinary_room_speech_still_does_not(self) -> None:
+        # The reason the threshold is 0.86 rather than 0.72, and adding
+        # cores must not quietly undo it.
+        for ambient in ("coat", "goat", "boat", "code", "node", "mode",
+                        "rode", "road", "joke", "jade", "note", "vote",
+                        "load", "toad", "jodhpur"):
+            assert not self._wakes(ambient), ambient
