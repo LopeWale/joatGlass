@@ -41,7 +41,7 @@ from joat.agents.openclaw_runtime import terminal_ready_activity
 from joat.audio.vad import RmsVad
 from joat.channels.cards import CardLog
 from joat.core.interfaces import SttEngine, Transcript
-from joat.core.protocol import BrainstormAction, BrainstormHudView, DownlinkMessage
+from joat.core.protocol import AgentTerminalHudView, BrainstormAction, BrainstormHudView, DownlinkMessage
 from joat.services.brainstorm_acceptance import (
     MAX_RETAINED_EVENTS,
     RUN_SCHEMA,
@@ -660,19 +660,10 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         # as a third collaborator — both sides of the boundary this
         # acceptance now exists to hold.
         terminal_state = str(status.agent_terminal_projection()["state"])
-        return BrainstormHudView(
-            screen="brainstorm",
-            state="topic_capture" if capturing else "ready",
-            topic="Speak your question" if capturing else "Ready for a question",
-            collaborators=["Codex", "Claude"],
-            activity=(
+        return BrainstormHudView(state="topic_capture" if capturing else "ready", topic="Speak your question" if capturing else "Ready for a question", collaborators=["Codex", "Claude"], activity=(
                 "Your next spoken phrase starts this Brainstorm."
                 if capturing else "Tap to choose a question, then speak."
-            ),
-            terminal_state=terminal_state,
-            no_tools_checked=True,
-            acceptance_armed=diagnostic_armed,
-        )
+            ), acceptance_armed=diagnostic_armed)
 
     async def retry_terminal() -> None:
         """Model a completed out-of-band approval without retaining its payload.
@@ -690,15 +681,13 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             reason="",
         )
         status.set_agent_terminal(state="ready", reason="")
-        await hud.show_brainstorm(BrainstormHudView(
-            screen="agent_terminal",
+        await hud.show_brainstorm(AgentTerminalHudView(
             state="ready",
-            topic="Hermes Agent Terminal",
-            collaborators=[],
+            focus="Hermes Agent Terminal",
+            lanes=[],
             activity=terminal_ready_activity(reverified=True),
-            terminal_state="ready",
             endpoint_host="simulator-only",
-            terminal_reason="",
+            reason="",
             no_tools_checked=True,
         ))
 

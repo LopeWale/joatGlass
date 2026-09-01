@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 import logging
 import re
@@ -10,12 +11,10 @@ import time
 from typing import Literal, cast
 
 from ..core.interfaces import GlassesTransport, NavigationProvider
-from ..navigation.map_image import map_move_meters
-from ..navigation.map_vector import MapVectorError, fetch_road_network
+from ..navigation.map_image import MapImageError, map_move_meters, render_map_tile
 from ..core.navigation import NavigationCandidate, NavigationPoint, ProviderRoute
 from ..core.protocol import (
-    NavigationRoadLine,
-    NavigationRoads,
+    NavigationMapPanel,
     NavigationAction,
     NavigationHudView,
     NavigationOrigin,
@@ -99,7 +98,17 @@ class _SearchReady:
 
 
 #: How far the wearer must move before the street panel is refetched.
-_MAP_REFRESH_METERS = 120.0
+#:
+#: This is a distance on the PANEL, not an arbitrary round number. At zoom
+#: 16 and this latitude the tile runs about 1.95 m per pixel, so the old
+#: 120 m let the wearer drift ~62 px from the centre of a 208 px-tall pane —
+#: 60% of the way to the edge, with the ground ahead of them scrolled off
+#: and their own marker sitting in the bottom corner. 60 m halves that to
+#: under a third of the half-pane, which keeps the road ahead in view.
+#:
+#: The cost is bounded: each refresh is one Mapbox fetch and one image send
+#: (~0.5-2 s over BLE), and at walking pace 60 m is about 45 seconds apart.
+_MAP_REFRESH_METERS = 60.0
 
 _ROUTE_FAILURE_COPY: dict[str, tuple[str, str]] = {
     # Each one names a different next move for the wearer.
@@ -578,32 +587,24 @@ class NavigationSession(Session):
 
         async def fetch() -> None:
             try:
-                network = await fetch_road_network(
+                tile = await render_map_tile(
                     self._map_token, origin.latitude, origin.longitude,
                 )
-            except (MapVectorError, OSError) as exc:
-                log.info("navigation roads unavailable: %s", type(exc).__name__)
+            except (MapImageError, OSError) as exc:
+                log.info("navigation map unavailable: %s", type(exc).__name__)
                 return
             except asyncio.CancelledError:
                 raise
             if self._cancelled or self._session_id != session_id:
                 return
-            await self._transport.send(NavigationRoads(
+            await self._transport.send(NavigationMapPanel(
                 session_id=session_id,
-                latitude=network.latitude,
-                longitude=network.longitude,
-                roads=tuple(
-                    NavigationRoadLine(
-                        name=road.name,
-                        weight=road.weight,
-                        points=tuple(
-                            value
-                            for point in road.points
-                            for value in point
-                        ),
-                    )
-                    for road in network.roads
-                ),
+                latitude=tile.latitude,
+                longitude=tile.longitude,
+                zoom=tile.zoom,
+                width=tile.width,
+                height=tile.height,
+                png_base64=base64.b64encode(tile.png).decode("ascii"),
             ))
 
         self._map_task = asyncio.get_running_loop().create_task(fetch())

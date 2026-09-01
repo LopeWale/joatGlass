@@ -407,14 +407,6 @@ export type DownlinkMessage =
     condition: string;
     unread: number;
   }
-  | {
-    kind: 'navigation.roads';
-    sessionId: string;
-    latitude: number;
-    longitude: number;
-    /** Roads as geometry, so JOAT draws the lines and sets the names. */
-    roads: Array<{ name: string; weight: number; points: number[] }>;
-  }
   | { kind: 'navigation.stop'; sessionId: string }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 

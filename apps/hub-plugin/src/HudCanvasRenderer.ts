@@ -1440,15 +1440,21 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
 /** Where the guidance map panel sits: the right half of the canvas, under
  * the status spine. Left of it belongs to the maneuver the wearer must act
  * on; a turn instruction and the shape of the road are different jobs. */
+/**
+ * The map pane, full-bleed.
+ *
+ * It touches the right edge of the canvas and runs from just under the
+ * status spine down to the progress bar — no border, no inner padding. The
+ * reference HUD does the same, and for the same reason: the map IS the
+ * content of its pane, so a frame around it only steals pixels from the
+ * thing the wearer came to look at.
+ */
 export const NAVIGATION_MAP_PANEL = {
-  x: 296,
-  y: 46,
-  // As large as the frame allows, stopping clear of the progress bar. A
-  // bigger window is not decoration here: it is how many street names the
-  // wearer can actually read.
-  width: 264,
-  height: 194,
-  padding: 8,
+  x: 292,
+  y: 40,
+  width: 284,
+  height: 208,
+  padding: 0,
 } as const;
 
 export interface NavigationMapProjection {
@@ -2952,50 +2958,45 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const projection = navigation.map && panel
       ? projectNavigationMapToPanel(navigation.map, panel)
       : undefined;
-    // Two panes: ACT on the left (what to do, how far, how much is left),
-    // SEE on the right (the streets and where the wearer is among them).
-    // Without real streets there is nothing worth splitting the frame for,
-    // so the instruction takes the whole width instead of sharing it with
-    // a bare line on black.
-    const actWidth = projection ? 244 : 504;
+    // Four bands, as the reference HUD lays them out: the status spine, two
+    // panes side by side, and one fact line along the bottom. Without real
+    // streets there is nothing worth splitting the frame for, so the
+    // instruction simply takes the whole width.
+    const actWidth = projection ? 236 : 504;
 
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 59);
+    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 56);
 
-    this.drawManeuver(context, navigation.maneuver ?? 'continue', 62, 108, BRIGHT);
+    this.drawManeuver(context, navigation.maneuver ?? 'continue', 60, 102, BRIGHT);
     context.fillStyle = gray(BRIGHT);
     context.font = `20px ${HUD_FONT}`;
-    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 100, 108);
+    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 98, 102);
 
     context.fillStyle = gray(BRIGHT);
     context.font = `19px ${HUD_FONT}`;
-    this.fitText(context, navigation.primary, 36, 152, actWidth - 12);
+    this.fitText(context, navigation.primary, 36, 146, actWidth);
     context.fillStyle = gray(SUPPORT);
     context.font = `13px ${HUD_FONT}`;
-    this.drawWrappedText(context, navigation.secondary, 36, 180, actWidth - 12, 17, 2);
+    this.drawWrappedText(context, navigation.secondary, 36, 174, actWidth, 17, 2);
 
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, navigation.hint, 36, 212, actWidth - 12);
-
-    // Remaining distance and ETA belong in the act column, on the band that
-    // used to sit empty under the instruction — not in a centred footer
-    // that had the whole width to itself for two short facts.
-    context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
-    this.fitText(
-      context,
-      `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`,
-      36,
-      238,
-      actWidth - 12,
-    );
+    this.fitText(context, navigation.hint, 36, 210, actWidth);
 
     if (projection) this.drawNavigationMap(context, projection, panel);
+
+    // The bottom band: progress, then the facts it measures. Both span the
+    // whole canvas beneath the panes, exactly like the reference frame's
+    // "Interior · Exterior · Climate · Sentry" line.
     this.drawNavigationProgress(context, navigation.progress ?? 0);
+    const mode = navigation.mode === 'cycling' ? 'Cycling' : 'Walking';
+    this.drawNavigationFooter(
+      context,
+      `${mode} · ${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`,
+    );
   }
 
   /** The route as a picture: a dim full polyline, a bright travelled-to
@@ -3008,15 +3009,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   ): void {
     const [first, ...rest] = projection.points;
     if (!first) return;
-    // One divider, same language as the home dashboard: act on the left,
-    // see on the right.
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 1;
-    context.beginPath();
-    context.moveTo(288.5, 56);
-    context.lineTo(288.5, 226);
-    context.stroke();
-
     // Surroundings first, under everything JOAT draws: the streets are the
     // answer to "where am I", and the route is the answer to "where next".
     if (panel) {
@@ -3027,10 +3019,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         NAVIGATION_MAP_PANEL.width, NAVIGATION_MAP_PANEL.height,
       );
       context.clip();
-      // Streets are CONTEXT. Painted at full strength they compete with the
-      // route the wearer must actually follow — and every lit pixel on an
-      // optical HUD costs power and adds glare. Held to roughly chrome.
-      context.globalAlpha = 0.45;
+      // Drawn at full strength. An earlier version dimmed this to 45% on
+      // the theory that streets are "context" — which crushed the land tone
+      // back toward black and undid the whole point of tone-mapping the
+      // tile. Brightness is decided ONCE, by the Mac's tone curve
+      // (MAP_LAND_FLOOR); the renderer does not second-guess it.
       context.drawImage(
         panel.image,
         NAVIGATION_MAP_PANEL.x + (NAVIGATION_MAP_PANEL.width - panel.width) / 2,
@@ -3041,9 +3034,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.restore();
     }
 
-    // With real streets underneath, the route must be the BRIGHTEST line on
-    // the panel or it disappears into them; without them it recedes below
-    // the maneuver instead.
     context.save();
     context.beginPath();
     context.rect(
@@ -3051,14 +3041,49 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       NAVIGATION_MAP_PANEL.width, NAVIGATION_MAP_PANEL.height,
     );
     context.clip();
-    context.strokeStyle = gray(panel ? BRIGHT : CHROME);
-    context.lineWidth = panel ? 3 : 2;
     context.lineJoin = 'round';
     context.lineCap = 'round';
-    context.beginPath();
-    context.moveTo(first[0], first[1]);
-    for (const [x, y] of rest) context.lineTo(x, y);
-    context.stroke();
+
+    const traceRoute = (): void => {
+      context.beginPath();
+      context.moveTo(first[0], first[1]);
+      for (const [x, y] of rest) context.lineTo(x, y);
+      context.stroke();
+    };
+
+    if (panel) {
+      // Over a map of lit streets a bright line is just one more street. Two
+      // things separate the route from them, and only one of them is tone:
+      //
+      // * The dark CASING. Black is transparent glass, so the gap costs
+      //   nothing and is what makes the line read as ABOVE the grid.
+      // * WIDTH. This is the load-bearing one. The map is capped at level 11
+      //   and the route draws at 14, but three levels of headroom is a
+      //   difference the wearer should not have to hunt for — and it is not
+      //   even resolvable in the simulator, whose screenshot curve returns
+      //   the same value for both. Width survives quantization, survives the
+      //   capture path, and is what makes the route obvious at a glance: no
+      //   Mapbox road at this zoom is drawn anywhere near five pixels wide.
+      // Bright RAILS around a dark CHANNEL. Every road on this map is lit,
+      // so one more lit line is camouflage — the route has to differ in
+      // kind, not degree. Cutting it out of the ground makes it the only
+      // unlit path on the panel, and on a transparent lens unlit is the
+      // real street showing through, so the wearer follows a clear line
+      // instead of hunting for a brighter one. The rails keep it from
+      // reading as a gap where the map failed to render.
+      context.strokeStyle = gray(BRIGHT);
+      context.lineWidth = 11;
+      traceRoute();
+      context.strokeStyle = '#000000';
+      context.lineWidth = 7;
+      traceRoute();
+    } else {
+      // No streets underneath: nothing to separate from, and the route is
+      // context rather than the instruction.
+      context.strokeStyle = gray(CHROME);
+      context.lineWidth = 2;
+      traceRoute();
+    }
 
     // Destination end of the line, so the wearer can see which way it runs.
     const last = projection.points[projection.points.length - 1];
@@ -3146,20 +3171,22 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   }
 
   private drawNavigationFooter(context: CanvasRenderingContext2D, copy: string): void {
-    context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
-    context.textAlign = 'center';
+    // Left-aligned on the bottom band, not centred: it is a row of facts,
+    // and facts line up with the content above them.
+    context.fillStyle = gray(SUPPORT);
+    context.font = `11px ${HUD_FONT}`;
+    context.textAlign = 'left';
     context.textBaseline = 'middle';
-    this.fitText(context, copy, 288, 267, 500);
+    this.fitText(context, copy, 36, 268, 504);
   }
 
   private drawNavigationProgress(context: CanvasRenderingContext2D, progress: number): void {
     const normalized = Math.max(0, Math.min(1, progress));
-    // Along the very bottom, where nothing else competes for the band.
+    // Directly above the fact line it measures.
     context.fillStyle = gray(HAIRLINE);
-    context.fillRect(36, 262, 504, 3);
+    context.fillRect(36, 253, 504, 3);
     context.fillStyle = gray(SUPPORT);
-    context.fillRect(36, 262, Math.round(504 * normalized), 3);
+    context.fillRect(36, 253, Math.round(504 * normalized), 3);
   }
 
   private drawWarningMark(
