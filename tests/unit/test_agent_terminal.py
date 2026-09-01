@@ -503,3 +503,36 @@ class TestTapToSpeak:
         c = AgentTerminalCommands(roster(work=agent))
         assert await c.handle_command("rerun the failing test") is None
         assert agent.prompts == []
+
+
+class TestArmExpiry:
+    """A tap buys ONE utterance, soon — not an open microphone.
+
+    An arm that never expires is exactly the ambient-capture hazard the
+    'terminal' prefix exists to prevent, reintroduced by a gesture: tap,
+    get distracted, and the next thing said — minutes later, to a
+    colleague — arrives at a session that can run tools.
+    """
+
+    async def test_a_stale_arm_does_not_capture_later_speech(self) -> None:
+        agent = FakeAgent()
+        c = AgentTerminalCommands(roster(work=agent), window_s=0.0)
+        c.arm()
+        assert c.armed is False                     # already lapsed
+        assert await c.handle_command("tell Bob about the meeting") is None
+        assert agent.prompts == []                  # nothing reached Hermes
+
+    async def test_a_fresh_arm_still_captures(self) -> None:
+        agent = FakeAgent()
+        c = AgentTerminalCommands(roster(work=agent), window_s=60.0)
+        c.arm()
+        assert c.armed is True
+        assert await c.handle_command("rerun the tests") is not None
+        await asyncio.sleep(0)
+        assert agent.prompts == ["rerun the tests"]
+
+    async def test_the_window_is_bounded_by_default(self) -> None:
+        c = AgentTerminalCommands(roster(work=FakeAgent()))
+        assert 0 < AgentTerminalCommands.ARM_WINDOW_S <= 120
+        c.arm()
+        assert c.armed is True
