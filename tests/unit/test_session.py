@@ -1203,3 +1203,53 @@ class TestWearerTurn:
         session = debate(transport, pair(agent(["a"]), agent(["b"])), None)
         session.cancel()
         assert session.consume_transcript("too late") is False
+
+
+class TestInterruptionAttribution:
+    """A wearer turn mid-stream must not steal the speaker's remaining text.
+
+    The wearer speaks WHILE a collaborator streams, so the YOU block lands
+    between that speaker's chunks. Interleaving is honest — it is what
+    happened — but without re-announcing the speaker, everything after the
+    interruption sits under the YOU header and reads as the wearer's words.
+    """
+
+    async def test_the_speaker_is_re_announced_after_an_interruption(self) -> None:
+        transport = SinkTransport()
+        holder: dict[str, object] = {}
+
+        async def interrupted(prompt: str) -> AsyncIterator[str]:
+            yield "before the interruption. "
+            session = holder["s"]
+            session.consume_transcript("wait — assume a cold climate")  # type: ignore[attr-defined]
+            await asyncio.sleep(0)      # let the YOU turn paint
+            yield "after the interruption."
+
+        session = debate(transport, pair(interrupted, agent(["second seat"])), None)
+        holder["s"] = session
+        await session.run()
+
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        you_at = joined.index("wait — assume a cold climate")
+        after_at = joined.index("after the interruption.")
+        # Between the wearer's words and the resumed answer there must be a
+        # fresh attribution — otherwise the answer reads as the wearer's.
+        assert "CODEX" in joined[you_at:after_at]
+
+    async def test_an_uninterrupted_turn_announces_itself_once(self) -> None:
+        # At the sink boundary, so this pins MY contract (one turn() per
+        # speaker) rather than how HudSink happens to format a label.
+        turns: list[str] = []
+
+        class Recorder:
+            async def open(self, topic: str, speakers: list[str]) -> None: ...
+            async def turn(self, label: str) -> None: turns.append(label)
+            async def chunk(self, text: str) -> None: ...
+            async def close(self, verdict: str) -> None: ...
+
+        await DebateSession(
+            "topic", pair(agent(["a ", "b ", "c"]), agent(["d"])),
+            Recorder(), None,
+        ).run()
+        assert turns.count("CODEX (proposer)") == 1
+        assert turns.count("CLAUDE (critic)") == 1
