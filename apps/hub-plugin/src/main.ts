@@ -3,7 +3,7 @@ import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
-import { HudCanvasRenderer } from './HudCanvasRenderer';
+import { HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
 import { encodeGray8TilePng, HudVisualSurface } from './HudVisualSurface';
 import {
   activateVisualHudPage,
@@ -100,6 +100,7 @@ type VisualState =
   | 'more'
   | 'confirmation'
   | 'assistant-overlay'
+  | 'nav-receipt'
   | ProductivityVisualState
   | ProductivityLifecycleVisualState
   | BrainstormVisualState
@@ -142,6 +143,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
   const requested = new URLSearchParams(window.location.search).get('joatVisual');
   return requested === 'overview' || requested === 'sidebar' || requested === 'more'
     || requested === 'confirmation' || requested === 'assistant-overlay'
+    || requested === 'nav-receipt'
     || isProductivityVisualState(requested)
     || isProductivityLifecycleVisualState(requested)
     || isBrainstormVisualState(requested)
@@ -477,6 +479,13 @@ async function boot(): Promise<void> {
         {
           const receipt = productivityViewAckFor(msg.productivity)
             ?? reminderDueAckFor(msg.productivity);
+          if (navigation.isActive() && usesActionPillLayout(msg.productivity.phase)) {
+            // A live route keeps the lenses: strip over it, no menu state,
+            // no scheduled return that would replace the route with Planning.
+            const shown = await awaitCurrent(hud.showProductivity(msg.productivity));
+            if (shown && receipt) link.send(receipt);
+            break;
+          }
           await awaitCurrent(menu.presentProductivity(
             msg.productivity,
             receipt
@@ -809,9 +818,11 @@ async function renderVisualState(
 ): Promise<void> {
   hud.setMicState(true);
 
-  if (isNavigationVisualState(state)) {
+  if (isNavigationVisualState(state) || state === 'nav-receipt') {
     const simulatorStatus = '9:41       JOAT simulator no route       bat 87%';
-    const fixture = navigationVisualFixture(state);
+    const fixture = navigationVisualFixture(
+      state === 'nav-receipt' ? 'nav-guidance' : state,
+    );
     // Development only: load a real Mac-rendered street panel so the
     // simulator shows the same composite the wearer gets, not a bare line.
     if (fixture.map && !fixture.map.panel) {
@@ -828,6 +839,10 @@ async function renderVisualState(
       }, simulatorStatus);
     } else {
       await hud.showNavigation(fixture, simulatorStatus);
+    }
+    if (state === 'nav-receipt') {
+      // Receipt strip over the live route; the route must stay visible.
+      await hud.showProductivity(productivityLifecycleFixture('calendar-saved'));
     }
     return;
   }

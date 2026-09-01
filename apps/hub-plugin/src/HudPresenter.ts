@@ -555,7 +555,9 @@ export class HudPresenter {
         kinds: new Map(this.kinds),
       };
     }
-    this.clearActionOverlay();
+    // Route progress updates the SAME page; only entering navigation
+    // supersedes a receipt strip.
+    if (this.surface.kind !== 'navigation') this.clearActionOverlay();
     return this.renderNavigation(surface, statusOverride, prior);
   }
 
