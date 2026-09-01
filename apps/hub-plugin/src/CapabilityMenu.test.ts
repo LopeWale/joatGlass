@@ -125,7 +125,7 @@ describe('CapabilityMenu', () => {
     expect(sidebars[0]).toEqual([
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
       'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Repeat', 'Reconnect', 'Settings',
+      'Settings',
     ]);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
@@ -489,7 +489,7 @@ describe('CapabilityMenu', () => {
     expect(sidebars[0]).toEqual([
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
       'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Repeat', 'Reconnect', 'Settings',
+      'Settings',
     ]);
     for (let index = 0; index < 2; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
@@ -1378,7 +1378,13 @@ describe('CapabilityMenu', () => {
   it('Settings renders a selectable G2 policy list and applies its scrolled cursor', async () => {
     const { menu, lists, listOptions, selections, sent } = rig();
     await menu.openSettings(); // contextual-menu item
-    expect(lists[0]!.some((r) => r.includes('Resume mic'))).toBe(true);
+    expect(lists[0]?.map((row) => row.replace('*', ' '))).toEqual([
+      '  Resume mic: instantly',
+      '  Resume mic: Mac decides',
+      '  Resume mic: ask me first',
+      'Repeat last reply',
+      'Reconnect JOAT',
+    ]);
     expect(listOptions[0]).toEqual({
       title: 'LISTENING RESUME',
       hint: 'tap: apply · left x2: back',

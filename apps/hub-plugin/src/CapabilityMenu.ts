@@ -69,11 +69,11 @@ function isPlanningAnchor(value: unknown): value is number {
 // The visual sidebar shows five rows at a time and scrolls this one continuous
 // list. Nothing is hidden behind a second "More" interaction: a wearer can
 // keep scrolling from Messages through every available glasses capability or
-// direct action. The renderer and G2 list limit both accept these 11 rows.
+// direct action. The renderer and G2 list limit both accept these 9 rows.
 const CAPABILITIES = [
   'Messages', 'Planning', 'Navigation', 'Brainstorm',
   'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-  'Repeat', 'Reconnect', 'Settings',
+  'Settings',
 ] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
@@ -81,6 +81,11 @@ const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'mac', label: 'Resume mic: Mac decides' },
   { policy: 'confirm', label: 'Resume mic: ask me first' },
 ];
+
+const SETTINGS_ACTION_ROWS = [
+  { action: 'repeat', label: 'Repeat last reply' },
+  { action: 'reconnect', label: 'Reconnect JOAT' },
+] as const;
 
 const SETTINGS_SURFACE = {
   title: 'LISTENING RESUME',
@@ -211,7 +216,10 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     this.selectedIndex = 0;
     const shown = await this.hud.showList(
-      POLICY_ROWS.map((row) => this.label(row)),
+      [
+        ...POLICY_ROWS.map((row) => this.label(row)),
+        ...SETTINGS_ACTION_ROWS.map((row) => row.label),
+      ],
       { ...SETTINGS_SURFACE, selectable: true },
     );
     if (!this.isCurrentTransition(transition)) return;
@@ -547,8 +555,10 @@ export class CapabilityMenu {
       if (applied !== 0) void this.hud.moveSelection(applied);
       return true;
     }
-    const rows = this.view === 'settings' ? POLICY_ROWS : CAPABILITIES;
-    this.selectedIndex = Math.max(0, Math.min(rows.length - 1, this.selectedIndex + delta));
+    const maximum = this.view === 'settings'
+      ? POLICY_ROWS.length + SETTINGS_ACTION_ROWS.length - 1
+      : CAPABILITIES.length - 1;
+    this.selectedIndex = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
     void this.hud.setSelection(this.selectedIndex);
     return true;
   }
@@ -609,29 +619,24 @@ export class CapabilityMenu {
 
   private select(index: number): boolean {
     if (this.view === 'settings') {
-      const row = POLICY_ROWS[index];
-      if (row) {
-        this.settings.setResumePolicy(row.policy);
-        this.link.send({ kind: 'policy', resume: row.policy });
+      const policy = POLICY_ROWS[index];
+      if (policy) {
+        this.settings.setResumePolicy(policy.policy);
+        this.link.send({ kind: 'policy', resume: policy.policy });
         void this.close();
+        return true;
+      }
+      const action = SETTINGS_ACTION_ROWS[index - POLICY_ROWS.length];
+      if (action?.action === 'repeat') {
+        void this.repeatLastReply();
+      } else if (action?.action === 'reconnect') {
+        void this.reconnectToMac();
       }
       return true;
     }
 
     const picked = CAPABILITIES[index];
     if (picked) {
-      if (picked === 'Repeat') {
-        // Repeat has a Mac-held contract: it replays only the last stored
-        // reply; it never resumes audio or opens an inert local screen.
-        void this.repeatLastReply();
-        return true;
-      }
-      if (picked === 'Reconnect') {
-        // MacLink owns the authenticated redial and its truthful connection
-        // state; this G2 row is the direct recovery entry point.
-        void this.reconnectToMac();
-        return true;
-      }
       if (picked === 'Settings') {
         // This is the persisted listening-resume settings surface, not an
         // imitation static page. Its existing left-double return stays Home.
@@ -665,7 +670,7 @@ export class CapabilityMenu {
   }
 
   private async openCapability(
-    picked: Exclude<(typeof CAPABILITIES)[number], 'Repeat' | 'Reconnect' | 'Settings'>,
+    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'>,
     index: number,
     planningAnchorUnixMs?: number,
   ): Promise<void> {
