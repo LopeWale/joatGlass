@@ -3165,7 +3165,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       this.thinkingKey = '';
     }
     lines.forEach((line, index) => {
-      this.fitText(context, line, x, y + index * 14, 504);
+      // The SAME width the wrapper used. When the column widened to 548
+      // this literal stayed 504, so a row the wrapper legally filled to
+      // 548 was ellipsized by fitText at 504 — the exact mid-row "…"
+      // the wearer reported, reintroduced by a second copy of a number.
+      this.fitText(context, line, x, y + index * 14, width);
     });
   }
 
