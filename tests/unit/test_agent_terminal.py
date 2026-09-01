@@ -812,6 +812,27 @@ class TestTheFrameAlwaysFitsTheWire:
         from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
         from joat.services.agent_terminal import HUD_COLUMNS, HUD_LINES
 
-        assert HUD_LINES * HUD_COLUMNS == BRAINSTORM_ACTIVITY_MAX, (
+        # Rows, their columns, AND the newlines that separate them.
+        assert (HUD_LINES * HUD_COLUMNS + (HUD_LINES - 1)
+                == BRAINSTORM_ACTIVITY_MAX), (
             "the terminal's geometry and the wire's bound have drifted"
         )
+
+    def test_a_full_frame_uses_every_row_and_still_fits(self) -> None:
+        """The worst case the geometry allows must be a legal frame."""
+        from joat.core.protocol import BrainstormHudView
+        from joat.services.agent_terminal import (
+            AgentTerminalRoster, HUD_COLUMNS, HUD_LINES,
+        )
+
+        r = AgentTerminalRoster([("hermes", FakeAgent())])
+        for index in range(HUD_LINES + 5):
+            r._lanes["hermes"].tail.append(f"{index}" * (HUD_COLUMNS * 2))
+        frame = r.frame()
+
+        assert len(frame.lines) == HUD_LINES, "a transcript row went unused"
+        BrainstormHudView(
+            screen="agent_terminal", state="running", topic=frame.topic,
+            collaborators=frame.lanes, activity="\n".join(frame.lines),
+            terminal_state="running",
+        ).to_wire()

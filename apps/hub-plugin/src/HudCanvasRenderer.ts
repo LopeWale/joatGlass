@@ -301,21 +301,35 @@ export interface AgentTerminalTranscriptLayout {
   showRecoveryDetails: boolean;
 }
 
+/** Which lane the terminal is focused on, for the summary spine.
+ *
+ * The engine sends "<lane> · <state>[ · N waiting]" as the topic. This
+ * header said HERMES whatever was focused, so a wearer running a calendar
+ * lane or a gateway session read someone else's name above their own
+ * output. Falls back to HERMES only when no lane is named. */
+export function agentTerminalFocusLabel(topic: string | undefined): string {
+  const named = ((topic ?? '').split(' · ')[0] ?? '').trim();
+  return (named || 'HERMES').slice(0, 24).toUpperCase();
+}
+
 export function agentTerminalTranscriptLayout(
-  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked'>,
+  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked' | 'topic'>,
 ): AgentTerminalTranscriptLayout {
   const state = brainstormStateLabel(model.state);
+  const focus = agentTerminalFocusLabel(model.topic);
   if (model.state === 'running') {
     return {
-      summary: `HERMES > ${state} · ${agentTerminalSafetyLabel(model)}`,
-      dividerY: 111.5,
-      transcriptBaselineY: 132,
+      summary: `${focus} > ${state} · ${agentTerminalSafetyLabel(model)}`,
+      // Room for the LANES row: without it the roster's concurrency marks
+      // reached the glasses on the wire and were never drawn.
+      dividerY: 127.5,
+      transcriptBaselineY: 148,
       transcriptLineCapacity: 7,
       showRecoveryDetails: false,
     };
   }
   return {
-    summary: `HERMES > ${state}`,
+    summary: `${focus} > ${state}`,
     dividerY: 177.5,
     transcriptBaselineY: 199,
     transcriptLineCapacity: 4,
@@ -1956,6 +1970,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(BRIGHT);
       context.font = `13px ${HUD_FONT}`;
       this.fitText(context, layout.summary, 36, 98, 504);
+      if (!layout.showRecoveryDetails) {
+        // Watching CONCURRENT work is the whole point of a roster: each
+        // chip already carries its lane's state ("work·run",
+        // "calendar·ask1"), so one glance covers every session. These
+        // were built, sent over the wire, and then dropped by this renderer.
+        context.fillStyle = gray(SUPPORT);
+        context.font = `10px ${HUD_FONT}`;
+        this.fitText(
+          context,
+          `LANES > ${model.collaborators.join('  |  ') || 'one session'}`,
+          36,
+          117,
+          504,
+        );
+      }
       if (layout.showRecoveryDetails) {
         context.fillStyle = gray(SUPPORT);
         context.font = `10px ${HUD_FONT}`;

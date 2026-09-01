@@ -37,9 +37,10 @@ HUD_COLUMNS = 74
 
 HudCanvasRenderer draws the transcript at 11px in the `"SF Mono", …,
 Menlo, monospace` stack across a 504px column; SF Mono's advance is
-1266/2048 em, so 504 / 6.80 = 74. HUD_LINES * HUD_COLUMNS is exactly the
-wire's activity bound (BRAINSTORM_ACTIVITY_MAX), and a test pins that
-equality so the two cannot drift apart.
+1266/2048 em, so 504 / 6.80 = 74. HUD_LINES rows of HUD_COLUMNS, plus the
+newlines between them, is exactly the wire's activity bound
+(BRAINSTORM_ACTIVITY_MAX); a test pins that equality so the terminal's
+geometry and the wire's bound cannot drift apart.
 """
 
 HUD_TOPIC_COLUMNS = 96
@@ -192,8 +193,12 @@ class AgentTerminalRoster:
         # on a stale frame with nothing logged, which is precisely the
         # "watch concurrent work" the roster exists to provide.
         header = header[:HUD_TOPIC_COLUMNS]
+        # All HUD_LINES rows, not one fewer: the header is a separate
+        # field drawn above the divider, so it never cost a transcript row.
+        # Each line is bounded to exactly one row, so the row count is the
+        # line count.
         body = [line[:HUD_COLUMNS]
-                for line in list(lane.tail)[-(HUD_LINES - 1):]] or ["no output yet"]
+                for line in list(lane.tail)[-HUD_LINES:]] or ["no output yet"]
         state = (
             "running" if lane.busy
             else "approval_required" if lane.approvals

@@ -518,7 +518,11 @@ _PRODUCTIVITY_HUD_PHASES = frozenset({
 _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
-BRAINSTORM_ACTIVITY_MAX = 518
+BRAINSTORM_ROW_COLUMNS = 74
+BRAINSTORM_ROWS = 7
+BRAINSTORM_ACTIVITY_MAX = (
+    BRAINSTORM_ROW_COLUMNS * BRAINSTORM_ROWS + (BRAINSTORM_ROWS - 1)
+)
 """How much transcript the glasses can actually display, in characters.
 
 Derived from the renderer's geometry, not chosen. HudCanvasRenderer draws
@@ -527,7 +531,12 @@ stack across a 504px column (x=36 to x=540). SF Mono's advance width is
 1266/2048 em, so a glyph is 6.80px at 11px and a line holds
 504 / 6.80 = 74 characters. The taller of the two surfaces is a RUNNING
 Agent Terminal at seven lines (agentTerminalTranscriptLayout); Brainstorm
-draws six. 7 x 74 = 518.
+draws six.
+
+Rows are separated by newlines, and those are characters too: seven full
+rows is 7 x 74 PLUS the six separators between them. Leaving them out
+made the bound one row short of the display, which is why the terminal
+was taking only six of its seven rows.
 
 This was 180 — under 40% of the glass — so a wearer read a third of a
 screen while the rest sat empty, on the one surface whose entire job is

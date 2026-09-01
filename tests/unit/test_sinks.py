@@ -507,7 +507,8 @@ class TestTheTranscriptFillsTheGlass:
         assert capacity is not None, "the transcript layout has moved"
         lines = int(capacity.group(1))
         # 504px column at 11px SF Mono (advance 1266/2048 em) = 74 columns.
-        assert BRAINSTORM_ACTIVITY_MAX == lines * 74, (
+        # Rows, their columns, and the newlines between them.
+        assert BRAINSTORM_ACTIVITY_MAX == lines * 74 + (lines - 1), (
             f"the renderer now draws {lines} lines; re-derive the bound"
         )
 
