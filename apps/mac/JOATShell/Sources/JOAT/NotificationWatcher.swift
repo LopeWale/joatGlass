@@ -368,9 +368,11 @@ final class NotificationWatcher {
     /// at 115 MB, growing ~35 MB/day, on a Mac whose owner had no idea. An
     /// unbounded diagnostic is a disk leak wearing a helpful hat.
     ///
-    /// Truncation loses the OLDEST lines, which is the right end to lose: a
-    /// debug log is read after something went wrong, and what went wrong is
-    /// at the bottom.
+    /// The NEWEST half is retained, not merely the newest line. A plain
+    /// truncate-to-empty is bounded too, and measurably worse: it sawtooths
+    /// between the cap and nothing, so a failure landing just after one
+    /// leaves a log with no context at the exact moment the log is opened.
+    /// Keeping half means there is always at least half a cap of history.
     private static let debugLogMaxBytes: UInt64 = 4 * 1024 * 1024
 
     private func appendDebug(_ line: String) {
@@ -379,9 +381,24 @@ final class NotificationWatcher {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
         if size > Self.debugLogMaxBytes {
-            let marker = "\(Date().timeIntervalSince1970) "
-                + "--- ax-debug.log truncated at \(size) bytes ---\n"
-            try? Data(marker.utf8).write(to: url, options: .atomic)
+            let keep = Int(Self.debugLogMaxBytes / 2)
+            var retained = Data()
+            if let handle = try? FileHandle(forReadingFrom: url) {
+                defer { try? handle.close() }
+                // Seek rather than read the whole file: this runs while the
+                // log is at its largest, which is the worst moment to pull
+                // several megabytes into memory.
+                try? handle.seek(toOffset: size - UInt64(keep))
+                retained = (try? handle.readToEnd()) ?? Data()
+            }
+            // Resume at a line boundary so the first surviving row is not a
+            // fragment of whatever sentence the cut landed in.
+            if let newline = retained.firstIndex(of: 0x0A) {
+                retained = retained.suffix(from: retained.index(after: newline))
+            }
+            let marker = Data(("\(Date().timeIntervalSince1970) "
+                + "--- ax-debug.log trimmed from \(size) bytes ---\n").utf8)
+            try? (marker + retained).write(to: url, options: .atomic)
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: url.path
             )
