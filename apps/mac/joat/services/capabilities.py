@@ -270,6 +270,7 @@ class CapabilityRouter:
         acceptance_armed: bool = False,
         terminal_view: Callable[[], Awaitable[None]] | None = None,
         brainstorm_recap: Callable[[], DebateSnapshot] | None = None,
+        brainstorm_recent: Callable[..., list[str]] | None = None,
     ) -> None:
         self._hud = hud
         self._transport = transport
@@ -285,6 +286,7 @@ class CapabilityRouter:
         self._acceptance_armed = acceptance_armed
         self._terminal_view = terminal_view
         self._brainstorm_recap = brainstorm_recap
+        self._brainstorm_recent = brainstorm_recent
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
         self._message_detail: _MessageDetailState | None = None
@@ -436,6 +438,11 @@ class CapabilityRouter:
         terminal = self._status.agent_terminal_projection()
         recap = self._brainstorm_recap() if self._brainstorm_recap else None
         rows = recap.rows() if recap is not None else []
+        if not rows and self._brainstorm_recent is not None:
+            # Nothing live this run, but earlier sessions survive a restart.
+            past = self._brainstorm_recent(4)
+            if past:
+                rows = ["Recent:", *past]
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="brainstorm",
             state="settled" if rows else "ready",

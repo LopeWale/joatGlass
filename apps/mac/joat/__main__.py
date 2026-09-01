@@ -97,6 +97,7 @@ from .persistence.tasks import TaskOccurrenceStore
 from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
+from .services.brainstorm_history import BrainstormHistory
 from .services.brainstorm_acceptance import (
     try_start_g2_gesture_acceptance,
 )
@@ -684,7 +685,10 @@ async def main() -> None:
 
     # One snapshot outlives any single debate: the wearer opens the Debate
     # panel after the fact and must still see what was said.
-    debate_state = DebateStateSink()
+    # Finished sessions outlive the process: the synthesis the wearer
+    # walked away with survives a restart, and Recent has a source.
+    brainstorm_history = BrainstormHistory()
+    debate_state = DebateStateSink(on_finished=brainstorm_history.record)
 
     navigation_provider: NavigationProvider | None = mapbox_provider
     if navigation_provider is not None:
@@ -1216,6 +1220,7 @@ async def main() -> None:
         # wearer has already accepted. The snapshot outlives the session
         # for exactly this.
         brainstorm_recap=lambda: debate_state.snapshot,
+        brainstorm_recent=brainstorm_history.rows,
     )
     transport.on_input(capabilities.on_input)
 
