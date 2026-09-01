@@ -76,22 +76,6 @@ export interface NavigationMapModel {
   /** Street surroundings rendered by the Mac. Without it the pane still
    * draws the route's shape; with it the wearer sees the actual blocks. */
   panel?: NavigationMapPanelModel;
-  /** The road network around the wearer, drawn by JOAT with real names. */
-  roads?: NavigationRoadsModel;
-}
-
-/** One road the HUD draws itself: shape, importance, and name. */
-export interface NavigationRoadModel {
-  name: string;
-  weight: number;
-  /** Flattened [lat, lon, lat, lon, …] straight off the wire. */
-  points: readonly number[];
-}
-
-export interface NavigationRoadsModel {
-  latitude: number;
-  longitude: number;
-  roads: readonly NavigationRoadModel[];
 }
 
 export interface NavigationMapPanelModel {
@@ -122,23 +106,21 @@ export function formatNavigationDistance(distanceM: number): string {
  * Deterministic review data used by the browser preview and official G2
  * simulator. It never starts location, search, routing, or native actions.
  */
-/** A real-shaped walking route (Lincoln Ave → Fullerton) for development
- * screenshots. Inert: no provider call, no stored place. */
+/** A real walking route near 1007 N Shartel Ave, Oklahoma City — the same
+ * place the checked-in map sample covers, so the development frame shows
+ * the true composite: streets underneath, route and position on top. A
+ * fixture whose route sits in a different city verifies nothing. */
 const VISUAL_ROUTE_MAP: NavigationMapModel = {
   geometry: [
-    { latitude: 41.9100, longitude: -87.6401 },
-    { latitude: 41.9112, longitude: -87.6399 },
-    { latitude: 41.9124, longitude: -87.6396 },
-    { latitude: 41.9136, longitude: -87.6390 },
-    { latitude: 41.9147, longitude: -87.6379 },
-    { latitude: 41.9155, longitude: -87.6362 },
-    { latitude: 41.9158, longitude: -87.6341 },
-    { latitude: 41.9159, longitude: -87.6318 },
-    { latitude: 41.9166, longitude: -87.6299 },
-    { latitude: 41.9178, longitude: -87.6288 },
-    { latitude: 41.9191, longitude: -87.6284 },
+    { latitude: 35.47590, longitude: -97.52564 },
+    { latitude: 35.47660, longitude: -97.52564 },
+    { latitude: 35.47730, longitude: -97.52564 },
+    { latitude: 35.47781, longitude: -97.52564 },
+    { latitude: 35.47781, longitude: -97.52430 },
+    { latitude: 35.47781, longitude: -97.52300 },
+    { latitude: 35.47850, longitude: -97.52300 },
   ],
-  position: { latitude: 41.9147, longitude: -87.6379 },
+  position: { latitude: 35.47730, longitude: -97.52564 },
 };
 
 export function navigationVisualFixture(state: NavigationVisualState): NavigationHudModel {

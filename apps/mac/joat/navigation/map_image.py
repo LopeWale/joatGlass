@@ -9,10 +9,15 @@ own route on top, aligned to the pixel.
 
 Two properties matter more than fidelity:
 
-* **Black must stay black.** On the G2 a black pixel is transparent glass.
-  The tone curve maps the map's land tone to zero and stretches only the
-  road tones, so roughly a seventh of the panel lights up instead of the
-  whole rectangle glowing.
+* **Tone is the information.** A black pixel is transparent glass, and an
+  early version of this used that as a reason to minimise lit pixels — it
+  thresholded land to black and shipped a wireframe. On a map, tone IS the
+  content: blocks, parks and water only exist as areas. The curve below
+  spreads the tile across the map's level budget instead, which the measured
+  LZ4 sizes show costs about a kilobyte.
+* **The map does not get all sixteen levels.** It gets 3–11; JOAT keeps the
+  top for the route, the position marker, and anything else it draws over
+  the streets. A route that cannot out-shine a road is not a route.
 * **The token never leaves this Mac.** The plugin receives pixels, not a
   URL, so the access token is never on the wire, in the HUD, or in a log.
 """
@@ -42,10 +47,11 @@ MAP_STYLE = "navigation-night-v1"
 # ~230 m across the panel: close enough to name the cross-street you are
 # standing at, wide enough to see the next two blocks.
 MAP_ZOOM = 16
-# The map owns the right half down to the progress bar: the biggest window
-# the frame can give it, because street names are the point.
-MAP_WIDTH = 264
-MAP_HEIGHT = 194
+# The map is FULL-BLEED in its pane, like the reference HUD: it runs to the
+# right edge of the canvas and down to the fact line, with no border and no
+# inner padding. A map with a frame around it is a picture of a map.
+MAP_WIDTH = 284
+MAP_HEIGHT = 208
 # Mapbox Static Images works in 512-pixel tiles; the plugin must use the
 # same constant or the route it draws will not sit on the drawn roads.
 MAP_TILE_PIXELS = 512
@@ -69,44 +75,115 @@ class MapImageError(RuntimeError):
     """A bounded, token-free map failure. Guidance continues without a map."""
 
 
-def _tone_curve(image: "ImageType") -> "ImageType":
-    """Map land to black and stretch the road tones across the full range.
+#: The map's three bands, and the headroom above them.
+#:
+#: Read off the reference HUD rather than reasoned from first principles,
+#: because reasoning got this wrong twice in opposite directions. On that
+#: display the ground is a MID tone — roads sit brighter than it, buildings
+#: and label glyphs sit darker than it. Three bands around a mid anchor.
+#:
+#: Both failures were a collapse of that structure into two bands:
+#: thresholding land to black left a wireframe with no blocks, and later
+#: flattening the ground to 0 lost the middle band the same way, while an
+#: earlier floor-of-3-on-everything pushed all three bands up into a slab.
+#: Ground tone is what makes blocks, parks and water read as AREAS.
+#:
+#: The ceiling is a budget, not a range: the map stops at 11 so JOAT keeps
+#: 12–15 for the route and the position marker. A route that cannot
+#: out-shine a road is not a route.
+#:
+#: The ground sits LOW in the range, not in the middle of it, because the
+#: panel's response compresses as it brightens: measured off a captured
+#: frame, a ground at level 6 left the roads only 9 display units above it
+#: while the buildings below got 49 — so the streets, the thing the wearer
+#: is actually reading, had the least contrast of anything on the map.
+#: Anchoring at 4 spends the compressed top of the range on the roads.
+MAP_SHADOW_FLOOR = 1
+MAP_GROUND_LEVEL = 4
+MAP_TONE_CEILING = 11
 
-    The thresholds are measured from THIS tile rather than fixed, because a
-    dense downtown and a park have very different tone distributions and a
-    constant cutoff would black out one or flood the other.
+
+def _tone_curve(image: "ImageType") -> "ImageType":
+    """Pin the ground to a mid tone and open a band either side of it.
+
+    The tile's own ground tone — whichever level covers the most pixels —
+    is mapped to `MAP_GROUND_LEVEL`, and the two bands are stretched
+    independently around that anchor:
+
+        darker than ground -> MAP_SHADOW_FLOOR .. MAP_GROUND_LEVEL
+        ground             -> MAP_GROUND_LEVEL
+        brighter           -> MAP_GROUND_LEVEL .. MAP_TONE_CEILING
+
+    Anchoring on the MODE rather than the midpoint is what makes this hold
+    across tiles: a dense downtown tile and an open suburban one have very
+    different means, but in both the ground is the tone that covers the
+    most pixels, so the streets land in the same band on both.
+
+    Splitting the stretch either side of the anchor is what preserves the
+    three bands. A single linear ramp across the whole range lets one
+    lopsided tile — mostly dark, or mostly bright — push the ground off
+    the anchor and collapse the structure back into the slab or the
+    wireframe this has already shipped once each.
+
+    Cost is measured, not assumed: `updateImageRawData` is LZ4-compressed
+    by the SDK (0.0.12+) and flat quantized regions compress well — a real
+    tile measured 5,850 B full-tone against 4,784 B thresholded, while
+    Floyd-Steinberg dithering cost 22,345 B and buys nothing at four bits.
     """
     histogram = image.histogram()
-    total = sum(histogram) or 1
-    accumulated = 0
-    low = 0
-    high = 255
-    for value, count in enumerate(histogram):
-        accumulated += count
-        fraction = accumulated / total
-        if low == 0 and fraction >= 0.80:
-            low = value
-        if fraction >= 0.99:
-            high = value
-            break
-    if high <= low:
-        high = min(255, low + 1)
-    span = high - low
+    ground = max(range(len(histogram)), key=lambda value: histogram[value])
+    occupied = [value for value, count in enumerate(histogram) if count]
+    # Read the extremes off the histogram already in hand: getextrema() is
+    # typed for multi-band images and needs unwrapping for no benefit here.
+    low = min(occupied, default=ground)
+    high = max(occupied, default=ground)
+    if low == high:
+        # A single-tone tile carries no map at all — a blank or failed
+        # fetch. Anchoring it to the ground level would hang a solid lit
+        # rectangle on the lens to say nothing; render nothing instead.
+        return image.point(lambda _: 0)
+
+    # Cumulative share of the above-ground pixels at or below each tone, so a
+    # tone's level reflects how much of the map is darker than it rather than
+    # where it happens to sit between the ground and the brightest label.
+    above_total = sum(histogram[ground + 1:]) or 1
+    ranks: dict[int, float] = {}
+    seen = 0
+    for value, count in enumerate(histogram[ground + 1:], start=ground + 1):
+        seen += count
+        ranks[value] = seen / above_total
+
+    def _above_ground_rank(value: int) -> float:
+        return ranks.get(min(high, value), 1.0)
 
     def curve(value: int) -> int:
-        if value <= low:
-            return 0
-        if value >= high:
-            return 255
-        return int(255 * (value - low) / span)
+        if value < ground:
+            # Buildings, water, and label glyphs: darker than the ground they
+            # sit on, and kept off pure black so they read as shapes.
+            span = max(1, ground - low)
+            normalized = (max(low, value) - low) / span
+            level = MAP_SHADOW_FLOOR + normalized * (
+                MAP_GROUND_LEVEL - MAP_SHADOW_FLOOR
+            )
+        elif value > ground:
+            # Roads and their casings, up to but never into JOAT's own levels.
+            #
+            # Spread by RANK, not by value. Stretching this band linearly
+            # measured 68.8% of the tile at the ground level, 18.3% one step
+            # above it, and 1.6% across the remaining six — because a few
+            # near-white label pixels set `high` and squashed every road into
+            # the bottom of the band. The streets are the thing being read,
+            # and they were the flattest part of the map. Ranking against how
+            # many above-ground pixels fall below this tone spends the whole
+            # band on the tones that actually cover the panel.
+            level = MAP_GROUND_LEVEL + _above_ground_rank(value) * (
+                MAP_TONE_CEILING - MAP_GROUND_LEVEL
+            )
+        else:
+            level = MAP_GROUND_LEVEL
+        return int(round(level)) * 17
 
-    stretched = image.point(curve)
-    # Quantize to the sixteen levels the G2 protocol can actually carry, so
-    # what the Mac previews is what the lens shows.
-    def quantize(value: int) -> int:
-        return int(round(int(value) / 255 * 15)) * 17
-
-    return stretched.point(quantize)
+    return image.point(curve)
 
 
 async def render_map_tile(

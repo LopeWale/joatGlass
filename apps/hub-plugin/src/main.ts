@@ -540,9 +540,6 @@ async function boot(): Promise<void> {
           unread: msg.unread,
         }));
         break;
-      case 'navigation.roads':
-        navigation.installRoads(msg);
-        break;
       case 'navigation.map':
         // Fire and forget: a map is an enhancement, and the downlink loop
         // must never wait on an image decode.
@@ -836,11 +833,13 @@ async function loadDevMapPanel(): Promise<NavigationMapPanelModel | undefined> {
       image.onload = () => resolve();
       image.onerror = () => reject(new Error('sample map failed'));
       // Under __joat- so the release guard refuses any build that carries it.
-      image.src = '/__joat-dev-fixtures/dev-map-sample.png';
+      // Cache-bust: the WebView serves a stale sample happily, which made a
+      // regenerated tile look like the renderer had ignored the change.
+      image.src = `/__joat-dev-fixtures/dev-map-sample.png?v=${Date.now()}`;
     });
     return {
-      latitude: 41.9147, longitude: -87.6379, zoom: 16,
-      width: 248, height: 168, image,
+      latitude: 35.477809, longitude: -97.525642, zoom: 16,
+      width: 284, height: 208, image,
     };
   } catch {
     return undefined;

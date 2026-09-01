@@ -829,7 +829,6 @@ async def main() -> None:
 
     def topic_capture_view(armed: bool) -> BrainstormHudView:
         """Show the explicit one-utterance capture or its cleared recovery."""
-        terminal = status.agent_terminal_projection()
         if not brainstorm_available():
             # A missing CLI seat is a Mac-side install problem — name the
             # seat so the wearer knows which binary is gone, and never
