@@ -677,13 +677,7 @@ export function planningDashboardHeading(dayIso: string): string {
   return `${weekdays[parsed.getUTCDay()]} ${months[parsed.getUTCMonth()]} ${parsed.getUTCDate()}`;
 }
 
-/** Transient outcome receipts are a STRIP, not a page (wearer's ruling,
- * 2026-09-01, pointing at the platform's own "Even AI Listening" pill): a
- * save or delete confirmation lights one small wide rectangle and leaves the
- * rest of the glass clear. Truth states the wearer must actually read stay
- * full pages — `failed`/`check` decide whether a retry is safe, and `due` is
- * an interactive alert with its own acknowledged delivery. The logical state
- * machine (acks, Back, the 5s auto-return) is unchanged; only pixels differ. */
+/** Transient receipts are a strip over the live page; failed/check/due stay full pages. */
 export function usesActionPillLayout(phase: ProductivityHudModel['phase']): boolean {
   return phase === 'verifying'
     || phase === 'saved'
@@ -1616,6 +1610,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       frame.kind !== 'overview' && frame.kind !== 'sidebar',
       hudSpinePageTitle(frame),
     );
+    if (frame.actionOverlay) {
+      this.drawActionPill(context, frame.actionOverlay.productivity, icons);
+    }
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
     // impossible fifth image container or replacing the feature underneath.
@@ -2552,14 +2549,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     model: ProductivityHudModel,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    if (usesActionPillLayout(model.phase)) {
-      this.drawActionPill(context, model, icons);
-      return;
-    }
+    // Transient phases route to actionOverlay; a productivity frame is always a truth page.
     this.drawProductivityPage(context, model, icons);
   }
 
-  /** One small wide strip; everything around it stays unlit glass. */
+  /** Strip over the live page; black-fills its own rect so rows beneath can't bleed through. */
   private drawActionPill(
     context: CanvasRenderingContext2D,
     model: ProductivityHudModel,
@@ -2570,8 +2564,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const headline = `${isCalendar ? 'Calendar' : 'Reminders'} · ${
       productivityPhaseLabel(model.phase)}`;
 
-    context.strokeStyle = gray(SUPPORT);
-    context.lineWidth = 1;
+    context.fillStyle = gray(0);
     roundedRect(
       context,
       ACTION_PILL.x,
@@ -2580,6 +2573,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       ACTION_PILL.height,
       ACTION_PILL.radius,
     );
+    context.fill();
+    context.strokeStyle = gray(SUPPORT);
+    context.lineWidth = 1;
     context.stroke();
 
     context.textBaseline = 'middle';

@@ -503,6 +503,9 @@ async function boot(): Promise<void> {
           unread: msg.unread,
         }));
         break;
+      case 'navigation.roads':
+        navigation.installRoads(msg);
+        break;
       case 'navigation.map':
         // Fire and forget: a map is an enhancement, and the downlink loop
         // must never wait on an image decode.
@@ -858,6 +861,9 @@ async function renderVisualState(
       );
       return;
     }
+    // Base page first: transient phases render as a strip over it.
+    await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
+    await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
     await hud.showProductivity(productivityLifecycleFixture(state));
     return;
   }

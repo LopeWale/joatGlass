@@ -398,7 +398,7 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames.some((frame) => frame.kind === 'navigation')).toBe(false);
   });
 
-  it('defers a native reminder lifecycle page behind confirmation and restores it exactly', async () => {
+  it('defers a saved receipt behind confirmation and restores the page with the strip', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
@@ -420,9 +420,91 @@ describe('HudPresenter modal surfaces', () => {
     expect(await hud.showProductivity(reminder)).toBe(true);
     await hud.dismissConfirmation('reminder-create');
 
+    // Transient outcome = strip over the restored page, not a page swap.
     expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'productivity', productivity: reminder,
+      kind: 'overview', actionOverlay: { productivity: reminder },
     });
+    expect(hud.isProductivityVisible(reminder)).toBe(true);
+  });
+
+  it('keeps failed/check truth states as full pages', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const failed = {
+      domain: 'calendar' as const,
+      phase: 'failed' as const,
+      title: 'Design review',
+      primary: 'EventKit refused the write',
+      secondary: 'Safe to retry',
+      hint: 'left x2 Planning',
+    };
+
+    expect(await hud.showProductivity(failed)).toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'productivity', productivity: failed,
+    });
+    expect(frames[frames.length - 1]?.actionOverlay).toBeUndefined();
+  });
+
+  it('never draws a SAVED strip over a retained FAILED page', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const failed = {
+      domain: 'calendar' as const,
+      phase: 'failed' as const,
+      title: 'Design review',
+      primary: 'EventKit refused the write',
+      secondary: 'Safe to retry',
+      hint: 'left x2 Planning',
+    };
+    const saved = { ...failed, phase: 'saved' as const, primary: 'Saved and verified' };
+
+    // Direct retry: saved arrives while the failed page is still on glass.
+    await hud.showProductivity(failed);
+    await hud.showProductivity(saved);
+    const direct = frames[frames.length - 1];
+    expect(direct?.kind).not.toBe('productivity');
+    expect(direct).toMatchObject({ actionOverlay: { productivity: saved } });
+
+    // Deferred retry: the gate captured the failed page; dismissal must not
+    // resurrect it beneath the newer receipt.
+    await hud.showProductivity(failed);
+    await hud.showConfirmation('Create event “Design review”? Work', 'retry-create');
+    await hud.showProductivity(saved);
+    await hud.dismissConfirmation('retry-create');
+    const restored = frames[frames.length - 1];
+    expect(restored?.kind).not.toBe('productivity');
+    expect(restored).toMatchObject({ actionOverlay: { productivity: saved } });
+  });
+
+  it('supersedes the receipt strip when the next page arrives', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const saved = {
+      domain: 'calendar' as const,
+      phase: 'saved' as const,
+      title: 'Design review',
+      primary: 'Saved and verified',
+      secondary: 'Calendar read-back matched',
+      hint: 'left x2 Planning',
+    };
+
+    expect(await hud.showProductivity(saved)).toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'overview', actionOverlay: { productivity: saved },
+    });
+    await hud.showList(['[09:30] Design review'], { title: 'PLANNING', selectable: true });
+    expect(frames[frames.length - 1]?.actionOverlay).toBeUndefined();
+    expect(hud.isProductivityVisible(saved)).toBe(false);
   });
 
   it('marks a due surface visible only after its exact frame survives paint', async () => {
@@ -1042,5 +1124,61 @@ describe('HudPresenter diagnostic page transitions', () => {
       type: 'page_transition',
       from: 'overview', to: 'list', reason: 'show_list', outcome: 'success',
     }]);
+  });
+});
+
+describe('HudPresenter background migration', () => {
+  it('carries the wearer\'s open page across the host\'s WebView reload', async () => {
+    // Backgrounding builds a NEW page and replays a JSON snapshot into it, so
+    // this asserts across two presenters — not a save/load on one object.
+    const before = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await before.showList(['Client standup', 'Field walkthrough'], {
+      title: 'QUICKNOTES',
+      hint: 'tap: detail · left x2: back',
+      selectable: true,
+    });
+    before.setMicState(true);
+
+    const wire = JSON.parse(JSON.stringify(before.exportBackgroundState()));
+
+    const after = new HudPresenter(fakeClient(), new HudPageBuilder());
+    expect(after.importBackgroundState(wire)).toBe(true);
+
+    // The restored page shows what the wearer was looking at, not Overview.
+    const restored = after.exportBackgroundState() as {
+      surface: { kind: string; items?: string[] };
+      micOn: boolean;
+    };
+    expect(restored.surface.kind).toBe('list');
+    expect(restored.surface.items).toEqual(['Client standup', 'Field walkthrough']);
+    expect(restored.micOn).toBe(true);
+  });
+
+  it('survives the JSON round trip that Maps do not', async () => {
+    const before = new HudPresenter(fakeClient(), new HudPageBuilder());
+    await before.showText('Your meeting starts in 19 minutes.', ContainerId.Main);
+
+    const wire = JSON.parse(JSON.stringify(before.exportBackgroundState()));
+    // Container-keyed Maps become plain records or they vanish in transit.
+    expect(wire.streams[String(ContainerId.Main)]).toContain('19 minutes');
+
+    const after = new HudPresenter(fakeClient(), new HudPageBuilder());
+    after.importBackgroundState(wire);
+    const out = after.exportBackgroundState() as { streams: Record<string, string> };
+    expect(out.streams[String(ContainerId.Main)]).toContain('19 minutes');
+  });
+
+  it('refuses a corrupt snapshot instead of bricking the surface', () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    expect(hud.importBackgroundState({})).toBe(false);
+    expect(hud.importBackgroundState({ surface: 'nonsense' })).toBe(false);
+    expect(hud.importBackgroundState({ surface: { kind: 42 } })).toBe(false);
+    // Garbage container keys are dropped rather than trusted.
+    expect(hud.importBackgroundState({
+      surface: { kind: 'default' },
+      streams: { notANumber: 'x', 2: 'kept' },
+    })).toBe(true);
+    const out = hud.exportBackgroundState() as { streams: Record<string, string> };
+    expect(out.streams).toEqual({ 2: 'kept' });
   });
 });
