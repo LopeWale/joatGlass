@@ -52,7 +52,13 @@ class HudSink:
         self._topic = ""
         self._speakers: list[str] = []
         self._speaker = ""
-        self._activity = ""
+        # A finished turn keeps its GIST; only the LIVE turn keeps its
+        # detail. Holding them apart is what makes that possible — a flat
+        # string cannot say where one turn ended and the next began.
+        self._done: list[str] = []
+        self._head = ""
+        self._body = ""
+        self._placeholder = ""
         self._wait_task: asyncio.Task[None] | None = None
         self._streaming = False
         self._progress = ""
@@ -76,33 +82,70 @@ class HudSink:
         boundary = tail.find("\n")
         return tail[boundary + 1:] if boundary >= 0 else tail
 
-    def _replace_last_transcript(self, row: str) -> None:
-        """Update the newest row in place — the wait clock ticks, it does
-        not append a new line every three seconds."""
-        head, _, _ = self._activity.rpartition("\n")
-        self._activity = self._bounded_transcript(f"{head}\n{row}" if head else row)
+    _GIST = re.compile(r"^\s*GIST:\s*(\S.*)$", re.MULTILINE)
 
-    _WAIT_MARKER = re.compile(r"Thinking…(?: \d+:\d{2})?$")
+    ROW_COLUMNS = 74
+    """What one transcript row holds on the glasses.
 
-    def _retire_wait_marker(self) -> None:
-        """Take the silence marker off the row the answer is about to use.
+    HudCanvasRenderer draws the transcript at 11px in the `"SF Mono", …,
+    Menlo, monospace` stack across a 504px column; SF Mono's advance is
+    1266/2048 em, so 504 / 6.80 = 74 characters. See
+    BRAINSTORM_ACTIVITY_MAX, which is this times the tallest surface's
+    line count.
+    """
 
-        "Thinking…" is a claim that nothing has been produced yet. Leaving
-        it in front of the answer both states something false and spends
-        eleven of a row's ~48 readable columns saying it — on every turn of
-        every round.
+    @classmethod
+    def _summarise(cls, body: str, budget: int) -> str:
+        """One line standing for a whole finished turn.
 
-        Removes the whole marker, clock and all, and leaves the "NAME > "
-        prefix so the arriving text simply continues the row.
+        Every collaborator is instructed to open with `GIST: <a dozen
+        words>` (build_prompt), so the one-line summary is the speaker's
+        own, not something inferred here. Turns without one fall back to
+        their opening words.
+
+        `budget` is what is left of the row AFTER the speaker prefix. A
+        fixed body cap looked right until a live two-round session made
+        the prefix "CLAUDE — ROUND 2 > " — nineteen columns — and pushed
+        finished rows to 83, so the renderer truncated a second time on
+        top of this one.
         """
-        head, sep, last = self._activity.rpartition("\n")
-        trimmed = self._WAIT_MARKER.sub("", last)
-        self._activity = f"{head}{sep}{trimmed}" if sep else trimmed
+        if is_failure(body):
+            # The seat's stdout carried the CLI's complaint ("out of usage
+            # credits"). Quoted as a summary it reads exactly like an
+            # argument the collaborator never made.
+            return "could not answer"
+        found = cls._GIST.search(body)
+        line = " ".join((found.group(1) if found else body).split())
+        limit = max(1, budget)
+        return f"{line[:limit - 1]}…" if len(line) > limit else line
 
-    def _append_transcript(self, row: str) -> None:
-        self._activity = self._bounded_transcript(
-            f"{self._activity}\n{row}" if self._activity else row
-        )
+    @property
+    def _activity(self) -> str:
+        """What the glasses show: every finished turn as one line, plus the
+        live turn in full.
+
+        A 120-word turn wraps to about nine 74-column lines, and the
+        transcript region draws at most seven — so a raw stream showed
+        roughly ONE turn and the wearer could not follow who had said what.
+        The wearer's requirement was watching the debate happen; a session
+        they cannot follow does not meet it however faithfully it streams.
+        """
+        rows = list(self._done)
+        if self._head or self._body:
+            rows.append(f"{self._head}{self._body}")
+        elif not rows and self._placeholder:
+            rows.append(self._placeholder)
+        return self._bounded_transcript("\n".join(rows))
+
+    def _retire_live_turn(self, *, collapse: bool = True) -> None:
+        """Move the live turn into the finished rows."""
+        if self._head or self._body:
+            body = (self._summarise(self._body,
+                                    self.ROW_COLUMNS - len(self._head))
+                    if collapse else self._body)
+            self._done.append(f"{self._head}{body}")
+        self._head = ""
+        self._body = ""
 
     def _terminal_status(self) -> dict[str, str | bool]:
         if self._terminal_projection is not None:
@@ -161,7 +204,10 @@ class HudSink:
         self._topic = topic[:96]
         self._speakers = list(speakers)
         self._speaker = ""
-        self._activity = "JOAT > Preparing collaborators…"
+        self._done = []
+        self._head = ""
+        self._body = ""
+        self._placeholder = "JOAT > Preparing collaborators…"
         await self._paint("running")
 
     WAIT_TICK_S = 3.0
@@ -172,10 +218,11 @@ class HudSink:
     link nothing."""
 
     async def turn(self, label: str) -> None:
+        self._retire_live_turn()
+        self._placeholder = ""
         self._speaker = label
-        if self._activity == "JOAT > Preparing collaborators…":
-            self._activity = ""
-        self._append_transcript(f"{self._display_speaker(label).upper()} > Thinking…")
+        self._head = f"{self._display_speaker(label).upper()} > "
+        self._body = "Thinking…"
         self._streaming = False
         await self._paint("running")
         self._start_wait_clock()
@@ -193,9 +240,8 @@ class HudSink:
                 while True:
                     await asyncio.sleep(self.WAIT_TICK_S)
                     waited = int(time.monotonic() - started)
-                    speaker = self._display_speaker(self._speaker).upper()
-                    self._replace_last_transcript(
-                        f"{speaker} > Thinking… {waited // 60}:{waited % 60:02d}"
+                    self._body = (
+                        f"Thinking… {waited // 60}:{waited % 60:02d}"
                     )
                     await self._paint("running")
             except asyncio.CancelledError:
@@ -222,9 +268,9 @@ class HudSink:
         self._stop_wait_clock()
         if not self._streaming:
             self._streaming = True
-            self._retire_wait_marker()
-            text = text.lstrip()
-        self._activity = self._bounded_transcript(self._activity + text)
+            self._body = text.lstrip()
+        else:
+            self._body += text
         await self._paint("running")
 
     async def close(self, verdict: str) -> None:
@@ -237,9 +283,14 @@ class HudSink:
         footer, not a replacement.
         """
         self._stop_wait_clock()
+        # The last live turn is the SYNTHESIS — the thing the wearer sat
+        # through the session for. Every other turn collapses; this one
+        # stays whole.
+        self._retire_live_turn(collapse=False)
+        self._placeholder = ""
         self._speaker = ""
         self._progress = ""
-        self._append_transcript(f"JOAT > {verdict}")
+        self._done.append(f"JOAT > {verdict}")
         if verdict == "cancelled":
             await self._paint("cancelled")
         elif verdict.startswith("blocked"):

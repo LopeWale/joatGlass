@@ -510,3 +510,107 @@ class TestTheTranscriptFillsTheGlass:
         assert BRAINSTORM_ACTIVITY_MAX == lines * 74, (
             f"the renderer now draws {lines} lines; re-derive the bound"
         )
+
+
+class TestFinishedTurnsCollapseToTheirGist:
+    """The wearer must be able to FOLLOW the debate, not just witness it.
+
+    A turn is capped at 120 words, which wraps to about nine 74-column
+    lines; the transcript region draws at most seven. Streamed raw, the
+    glass showed roughly one turn and the wearer could not tell who had
+    said what. Collaborators are instructed to open with
+    `GIST: <a dozen words>`, so a finished turn has a one-line summary of
+    the speaker's OWN making to fall back to.
+    """
+
+    LONG = (
+        "GIST: Buffer to clause boundaries; never stream raw tokens.\n\n"
+        "Token-level streaming is wrong for this display. Every partial "
+        "update is a BLE page write, and re-sending lines as words shift "
+        "wrap position produces jitter in a monochrome overlay."
+    )
+
+    async def _sink(self):
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex", "claude"])
+        return sink, transport
+
+    async def test_the_live_turn_keeps_its_detail(self) -> None:
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk(self.LONG)
+        assert "monochrome overlay" in transport.sent[-1].activity
+
+    async def test_a_finished_turn_keeps_only_its_gist(self) -> None:
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk(self.LONG)
+        await sink.turn("claude (critic)")
+        await sink.chunk("GIST: Stream it.\n\nDetail nobody has read yet.")
+
+        activity = transport.sent[-1].activity
+        assert "CODEX > Buffer to clause boundaries; never stream raw tokens." \
+            in activity
+        assert "monochrome overlay" not in activity, "a finished turn kept its prose"
+        assert "Detail nobody has read yet." in activity, "the live turn lost detail"
+
+    async def test_the_synthesis_is_never_collapsed(self) -> None:
+        """close() retires the last turn WHOLE. It is the answer the wearer
+        sat through the session for; a one-line summary of it is a loss."""
+        sink, transport = await self._sink()
+        await sink.turn("joat (synthesis)")
+        await sink.chunk("AGREED\nMeasure before caching.\n\nOPEN\nEviction order.")
+        await sink.close("converged (agreement 0.93, round 2)")
+
+        activity = transport.sent[-1].activity
+        assert "OPEN" in activity and "Eviction order." in activity
+        assert "JOAT > converged (agreement 0.93, round 2)" in activity
+
+    async def test_a_failed_seat_is_not_quoted_as_an_argument(self) -> None:
+        """Its stdout carried the CLI's complaint. Summarised verbatim it
+        reads exactly like a position the collaborator never took."""
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk("[!] You are out of usage credits until August 28.")
+        await sink.turn("claude (critic)")
+        await sink.chunk("GIST: I will take it from here.")
+
+        activity = transport.sent[-1].activity
+        assert "CODEX > could not answer" in activity
+        assert "usage credits" not in activity
+
+    async def test_a_turn_without_a_gist_falls_back_to_its_opening_words(self) -> None:
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk("No gist line here, just " + "prose " * 40)
+        await sink.turn("claude (critic)")
+        await sink.chunk("GIST: noted.")
+
+        row = [line for line in transport.sent[-1].activity.splitlines()
+               if line.startswith("CODEX > ")][0]
+        assert row.startswith("CODEX > No gist line here, just prose")
+        assert row.endswith("…"), "an unbounded fallback would eat the screen"
+        assert len(row) <= 74, f"a collapsed row must fit one line: {len(row)}"
+
+    async def test_a_long_speaker_prefix_does_not_push_the_row_over(self) -> None:
+        """The row budget is the WHOLE row, prefix included.
+
+        A fixed body cap read as correct until a live two-round session
+        produced the prefix "CLAUDE — ROUND 2 > " — nineteen columns — and
+        finished rows reached 83, so the renderer truncated a second time
+        on top of this one.
+        """
+        sink, transport = await self._sink()
+        await sink.turn("claude (critic) — round 2")
+        await sink.chunk("GIST: " + "keep the judge warm during active work " * 4)
+        await sink.turn("codex (proposer)")
+        await sink.chunk("GIST: noted.")
+
+        collapsed = [line for line in transport.sent[-1].activity.splitlines()
+                     if line.startswith("CLAUDE")][0]
+        assert collapsed.startswith("CLAUDE — ROUND 2 > keep the judge warm")
+        assert len(collapsed) == HudSink.ROW_COLUMNS, (
+            f"row is {len(collapsed)} columns, glass holds {HudSink.ROW_COLUMNS}"
+        )
+        assert collapsed.endswith("…")
