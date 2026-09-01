@@ -1,12 +1,13 @@
 # Agent Terminal roadmap
 
-Agent Terminal is a future dense CLI/chat interface for controlling existing
-Hermes and OpenClaw work from the glasses. It is separate from Brainstorm and
+Agent Terminal is a dense CLI/chat interface for controlling existing Hermes
+and OpenClaw work from the glasses. It is separate from Brainstorm and
 never uses Codex CLI or Claude Code.
 
-This document is a roadmap only. The Brainstorm documentation update does not
-implement Agent Terminal, alter Hermes/OpenClaw configuration, or enable A2A
-services.
+Status: the wearer-facing control surface and its gateway policy lane are
+now implemented; A2A remains untouched and unenabled. See "Implemented" and
+"Still outstanding" below — the acceptance gates at the end are unchanged and
+none of them has been met, because none can be met without a live gateway.
 
 JOAT remains the glasses brain and wearer-facing controller. Agent Terminal is
 one JOAT capability: JOAT shows the external session roster, binds speech and
@@ -30,6 +31,53 @@ the glasses interface.
 The interaction should feel like a glasses-scale Claude Code or Codex CLI:
 speaker/tool/system-prefixed lines, minimal chrome, no cards, and no separate
 "Home Brain" page duplicating the terminal.
+
+## Implemented
+
+Engine side, verified by unit tests and by policy tests that run without a
+gateway. None of it has been exercised against a live Hermes/OpenClaw.
+
+| Capability | Where | Spoken as |
+|---|---|---|
+| Session roster with focus | `services/agent_terminal.py` | `terminal sessions` |
+| Switch focus, work continues | same | `switch terminal to <lane>` |
+| Voice becomes terminal input | same | `terminal <instruction>` |
+| Cancel with honest recovery wording | same | `terminal cancel` |
+| Bounded per-lane output tail | same (deque, 200) | `terminal tail` |
+| Enumerate the wearer's sessions | `agents/openclaw_terminal.py` | `terminal discover` |
+| Resume a listed session | `agents/openclaw_runtime.py` | `terminal resume <label>` |
+| Approvals: receive, list, answer | `agents/openclaw_terminal.py` | `terminal approve/deny [N]` |
+| Dense terminal view on the lenses | `services/agent_terminal.py` | (repaints on change) |
+
+Two rules the implementation holds, both load-bearing:
+
+- **Approvals ride a separate policy lane.** `WORK_TERMINAL_POLICY` carries
+  `allows_approvals` and `roster`; the Brainstorm lane's no-tools tripwire is
+  untouched, and its policy identity includes the flags so a Brainstorm-shaped
+  lane with approvals cannot be constructed at all.
+- **Resumable targets are the gateway's own listings.** A roster lane may
+  address a session outside its namespace only after the gateway named it in
+  an `involvingMe` listing on that same connection. The key set is
+  per-connection, so a reconnect re-earns authority rather than inheriting it
+  — which is the reconnect-without-replay requirement, not a separate feature.
+
+Every gateway capability above was checked against the published protocol
+documentation before it was written (`sessions.list` with `involvingMe`;
+`session.approval` opted into via `sessions.messages.subscribe`
+`includeApprovals`; answered with `approval.resolve {id, kind, decision}`,
+first answer wins).
+
+## Still outstanding
+
+- **A live-gateway pass.** Nothing here has spoken to a real Hermes/OpenClaw.
+  The first run will settle whether the documented `approve`/`deny` literals
+  match the deployment, and it will surface at the adapter seam.
+- **Its own HUD surface.** The terminal still renders as a `screen` variant of
+  the Brainstorm frame — one model, one controller, one wire kind. Splitting it
+  touches `types.ts` and `core/protocol.py` in the same commit.
+- **Concurrency beyond the configured lanes.** Lanes are fixed at boot; a
+  resumed session replaces a lane's target rather than adding a row.
+- **A2A.** Unchanged, unenabled, and still not the terminal transport.
 
 ## Runtime contract required before implementation
 
