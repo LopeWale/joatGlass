@@ -155,13 +155,17 @@ class HudSink:
     def _retire_live_turn(self, *, collapse: bool = True) -> None:
         """Move the live turn into the finished rows."""
         if self._head or self._body:
-            if not self._streaming:
-                # The turn is over and produced nothing — a CLI whose output
-                # was entirely noise-filtered, or which exited cleanly and
-                # silently. Keeping the marker would record "CODEX >
-                # Thinking…" as that seat's contribution for the rest of the
-                # session: the same false status this sink already had to
-                # stop printing in front of live answers.
+            if not self._streaming or not self._body.strip():
+                # The turn is over and produced nothing usable — a CLI whose
+                # output was entirely noise-filtered, one that exited cleanly
+                # and silently, or one whose only chunk was a stray newline.
+                #
+                # Both cases matter. Keying this on "did a chunk arrive"
+                # alone caught the silent turn and left its sibling: a turn
+                # that streamed WHITESPACE retired as a bare "CODEX >", an
+                # empty speaker row spending a line to say nothing — while
+                # keeping the marker would have recorded "CODEX > Thinking…"
+                # as that seat's contribution for the rest of the session.
                 body = "said nothing"
             elif collapse:
                 body = self._summarise(
