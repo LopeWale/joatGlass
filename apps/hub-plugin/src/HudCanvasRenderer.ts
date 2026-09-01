@@ -115,7 +115,6 @@ export const HUD_VISUAL_GEOMETRY = {
   overviewTrayY: 168,
   overviewContextY: 214,
   sidebarWidth: 160,
-  sidebarBackdropOffsetX: 78,
   listContentX: 93,
 } as const;
 
@@ -1311,16 +1310,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       hint: string;
     },
     icons: Record<HudIconName, HTMLImageElement>,
-    opacity = 1,
-    offsetX = 0,
   ): void {
     context.save();
-    context.globalAlpha = opacity;
-    context.translate(offsetX, 0);
     const overview = resolveHudOverview(frame);
 
     if (overview.kind === 'empty') {
-      const left = opacity < 1 ? 110 : 36;
+      const left = 36;
       context.textAlign = 'left';
       context.textBaseline = 'middle';
       context.fillStyle = gray(BRIGHT);
@@ -1335,7 +1330,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(QUIET);
       context.font = `9px ${HUD_FONT}`;
       context.textAlign = 'center';
-      context.fillText(overview.hint, 288 - offsetX, 267);
+      context.fillText(overview.hint, 288, 267);
       context.restore();
       return;
     }
@@ -1362,15 +1357,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const mainX = mainIcon ? HUD_VISUAL_GEOMETRY.overviewMainX : 110;
       const mainWidth = 359 + (HUD_VISUAL_GEOMETRY.overviewMainX - mainX);
       context.fillStyle = gray(mainLevel);
-      const mainSize = opacity < 1 ? 19 : main.structured ? 25 : 18;
+      const mainSize = main.structured ? 25 : 18;
       context.font = `${mainSize}px ${HUD_FONT}`;
-      if (main.structured || opacity < 1) {
+      if (main.structured) {
         this.fitText(
           context,
           main.value,
           mainX,
           112,
-          opacity < 1 ? 330 : mainWidth,
+          mainWidth,
         );
       } else {
         this.drawWrappedText(
@@ -1421,7 +1416,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'center';
     context.fillText(
       frame.mainKind === 'notification' ? NOTIFICATION_DISMISS_HINT : frame.hint,
-      288 - offsetX,
+      288,
       263,
     );
     context.restore();
@@ -1432,13 +1427,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     frame: Extract<HudVisualFrame, { kind: 'sidebar' }>,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    this.drawOverview(
-      context,
-      frame,
-      icons,
-      0.24,
-      HUD_VISUAL_GEOMETRY.sidebarBackdropOffsetX,
-    );
+    // The backdrop is drawn EXACTLY as the Overview draws it — same
+    // intensity, same position. That is a transfer decision, not only a
+    // visual one: the frame ships as four 288x144 tiles over a serialized
+    // BLE lane, and the presenter skips any tile whose pixels are unchanged.
+    // Dimming or shifting the backdrop moves every lit pixel, so all four
+    // tiles go dirty and the wearer watches the top half arrive, then the
+    // bottom. Leaving the right half identical means only the two left tiles
+    // carrying the rail are sent, and the menu appears in half the transfers.
+    this.drawOverview(context, frame, icons);
     context.fillStyle = '#000000';
     context.fillRect(3, 38, HUD_VISUAL_GEOMETRY.sidebarWidth - 3, 246);
     context.strokeStyle = gray(HAIRLINE);
