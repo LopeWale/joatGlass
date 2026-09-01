@@ -73,8 +73,15 @@ describe('Agent Terminal geometry', () => {
     // Both are drawn at SECOND_ROW_Y and are mutually exclusive: LANES
     // only when !showRecoveryDetails, HOST only when it is set. If that
     // ever stops being exclusive they overlap on the glass.
-    expect(layoutFor('running').showRecoveryDetails).toBe(false);
-    for (const state of ['ready', 'approval_required', 'blocked'] as const) {
+    // READY moved to the dense side. Recovery detail is there to be ACTED
+    // ON — a host and policy the wearer must go fix — and a healthy
+    // terminal was spending four rows on it over an empty lens. The
+    // wearer's question was whether "the mac mini tailscale and shit" was
+    // needed there; on a working terminal it is not.
+    for (const state of ['running', 'ready'] as const) {
+      expect(layoutFor(state).showRecoveryDetails).toBe(false);
+    }
+    for (const state of ['approval_required', 'blocked', 'unavailable'] as const) {
       expect(layoutFor(state).showRecoveryDetails).toBe(true);
     }
   });

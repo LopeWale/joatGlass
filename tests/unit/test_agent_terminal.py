@@ -886,3 +886,70 @@ class TestTheFrameAlwaysFitsTheWire:
             collaborators=frame.lanes, activity="\n".join(frame.lines),
             terminal_state="running",
         ).to_wire()
+
+
+class TestReplyRouting:
+    """JOAT is the glue: a Brainstorm reply becomes terminal input.
+
+    The wearer's design, verbatim: "asking to take the last response from
+    claude or codex and send it to the hermes in the Agent Terminal; you
+    need to understand what i am trying to build here."
+    """
+
+    def _commands(self, replies=None):
+        from joat.services.agent_terminal import (
+            AgentTerminalCommands, AgentTerminalRoster,
+        )
+
+        roster = AgentTerminalRoster([("hermes", FakeAgent())])
+        commands = AgentTerminalCommands(
+            roster,
+            last_reply=lambda who: replies(who) if replies else None,
+        )
+        return commands, roster
+
+    def test_the_grammar_reads_natural_phrasings(self) -> None:
+        from joat.services.agent_terminal import parse_reply_route
+
+        # "Claude's" arrives from the normalizer as "claude s".
+        assert parse_reply_route("send claude s last reply to hermes") == (
+            "claude", "hermes")
+        assert parse_reply_route("send codex s answer") == ("codex", None)
+        assert parse_reply_route("send the last response to hermes") == (
+            None, "hermes")
+        assert parse_reply_route("send that to hermes") == (None, "hermes")
+        # "to the terminal" means the focused lane, like every other verb.
+        assert parse_reply_route("send claude s reply to the terminal") == (
+            "claude", None)
+        # Ordinary speech must not be claimed as routing.
+        assert parse_reply_route("send an email to my mother") is None
+        assert parse_reply_route("what should i reply") is None
+
+    async def test_a_reply_is_sent_into_the_focused_lane(self) -> None:
+        commands, roster = self._commands(
+            replies=lambda who: ("CLAUDE (critic)", "Verify the cache key.")
+            if who in (None, "claude") else None,
+        )
+        answer = await commands.handle_command("terminal send claude's last reply")
+        assert answer is not None
+        assert "CLAUDE" in answer
+        # The reply text itself — not the spoken command — became input.
+        lane = roster._lanes["hermes"]
+        assert any("Verify the cache key." in line for line in lane.tail)
+
+    async def test_no_session_yet_is_an_honest_refusal(self) -> None:
+        from joat.services.agent_terminal import (
+            AgentTerminalCommands, AgentTerminalRoster,
+        )
+
+        commands = AgentTerminalCommands(
+            AgentTerminalRoster([("hermes", FakeAgent())]),
+        )
+        answer = await commands.handle_command("terminal send claude's reply")
+        assert answer == "No Brainstorm has run yet — nothing to send."
+
+    async def test_a_missing_reply_names_the_seat(self) -> None:
+        commands, _ = self._commands(replies=lambda who: None)
+        answer = await commands.handle_command(
+            "terminal send codex's last answer")
+        assert answer == "No reply from Codex to send yet."

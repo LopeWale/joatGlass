@@ -54,6 +54,9 @@ function make(
     isAcceptanceArmed: vi.fn(() => brainstormAcceptanceArmed),
     handleClick: vi.fn(() => brainstormActive),
     handleCancel: vi.fn(() => brainstormActive),
+    // False by default: only the topic-capture state claims a swipe as a
+    // backout; every test that wants that behaviour flips it explicitly.
+    handleSwipe: vi.fn(() => false),
     handleAcceptance: vi.fn(() => {
       acceptedBrainstormAction = 'begin_acceptance';
       return brainstormActive;
@@ -524,6 +527,18 @@ describe('EventRouter — text and list', () => {
     expect(brainstorm.handleCancel).not.toHaveBeenCalled();
     expect(menu.handleScroll).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
+  });
+
+  it('lets a swipe back out of topic capture, where there is nothing to scroll', () => {
+    // The one state that keeps the old swipe-cancel: no transcript exists
+    // yet, the screen is a single promise, and the wearer who swipes is
+    // saying never mind. The controller decides (it knows the state); the
+    // router only offers it the swipe before falling back to scrolling.
+    const { fire, brainstorm, transcriptScroll } = make(false, undefined, false, true);
+    brainstorm.handleSwipe.mockReturnValueOnce(true);
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(brainstorm.handleSwipe).toHaveBeenCalledTimes(1);
+    expect(transcriptScroll).not.toHaveBeenCalled();
   });
 
   it('maps G2 swipes to the active navigation choice owner before menu or relay', () => {

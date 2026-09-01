@@ -58,8 +58,13 @@ def test_default_websocket_origin_tracks_the_isolated_gateway_port() -> None:
 
 def _frames() -> list[ScreenReceipt]:
     rows = [
-        ("brainstorm-hermes-required", None, None, "agent_terminal", "approval_required", False),
+        # Mirrors _EXPECTED_FLOW. Brainstorm opens READY while the terminal
+        # still needs approval — the Hermes gate is gone, and this fixture
+        # is where the removed gate would otherwise stay alive as a spec.
+        ("brainstorm-ungated", None, None, "brainstorm", "ready", False),
+        ("terminal-hermes-required", None, None, "agent_terminal", "approval_required", False),
         ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready", False),
+        ("brainstorm-reopened", None, None, "brainstorm", "ready", False),
         ("daily-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture", False),
         ("daily-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready", False),
         ("diagnostic-ready", None, None, "brainstorm", "ready", True),
@@ -68,7 +73,7 @@ def _frames() -> list[ScreenReceipt]:
         ("terminal", "click", "show_terminal", "agent_terminal", "running", False),
         ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
         ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
-        ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
+        ("cancelled", None, "cancel", "brainstorm", "cancelled", False),
         ("voice-direct-running", "synthetic_mic", "start_brainstorm", "brainstorm", "running", False),
     ]
     return [
@@ -273,15 +278,15 @@ def test_visual_artifacts_require_an_opaque_optical_preview_for_every_hud_state(
         validate_visual_artifacts(alpha_only)
 
     missing_busy = _artifacts()
-    del missing_busy["hermes-busy"]
+    del missing_busy["brainstorm-while-terminal-busy"]
     with pytest.raises(BrainstormActionFlowError, match="HUD flow"):
         validate_visual_artifacts(missing_busy)
 
 
 def test_visual_previews_include_the_running_agent_terminal_transcript() -> None:
     """The terminal density change needs an optical proof, not just geometry tests."""
-    assert _VISUAL_ONLY_ARTIFACTS == (
+assert _VISUAL_ONLY_ARTIFACTS == (
         "dense-transcript-preview",
         "terminal-transcript-preview",
-        "hermes-busy",
+        "brainstorm-while-terminal-busy",
     )

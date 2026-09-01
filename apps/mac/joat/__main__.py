@@ -107,6 +107,7 @@ from .services.brainstorm_acceptance import (
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
+from .services.ambient import AmbientPublisher
 from .services.capabilities import CapabilityOpenController, CapabilityRouter
 from .services.agent_terminal import (
     AgentTerminalCommands,
@@ -740,6 +741,9 @@ async def main() -> None:
             transport,
             session_id=session_id,
             proximity=proximity,
+            # Same credential as search/routing, and it stays on this Mac:
+            # the session sends rendered pixels, never a tile URL.
+            map_token=mapbox_token,
         )
 
     def publish_brainstorm_phase(phase: str) -> None:
@@ -930,6 +934,17 @@ async def main() -> None:
         await agent_terminal.repaint()
         await hud.show("Speak your terminal instruction.")
 
+    async def save_brainstorm_reply(who: str | None) -> str:
+        """"Save Claude's reply as a note" — the discussion feeds the notes."""
+        found = debate_state.snapshot.last_reply(who)
+        if found is None:
+            seat = who.capitalize() if who else "any collaborator"
+            return f"No reply from {seat} to save yet."
+        label, text = found
+        receipt = note_commands.save_text(f"{label.split(' (')[0]}: {text}")
+        log.info("brainstorm reply saved as note from %s", label)
+        return receipt
+
     sessions = SessionManager(
         hud,
         make_debate,
@@ -940,6 +955,11 @@ async def main() -> None:
         terminal_retry=retry_openclaw_terminal,
         topic_capture_view=topic_capture_view,
         brainstorm_available=brainstorm_available,
+        # "Send Claude's last reply to Hermes", spoken into a live
+        # Brainstorm. terminal_commands is composed further down; the
+        # lambda defers the lookup to call time, same as capability_opens.
+        route_reply=lambda who, lane: terminal_commands.route_reply(who, lane),
+        save_reply=save_brainstorm_reply,
     )
 
     def active_navigation() -> NavigationSession | NavigationUnavailableSession | None:
@@ -1111,7 +1131,12 @@ async def main() -> None:
         announce=terminal_announce,
         paint=terminal_paint,
     )
-    terminal_commands = AgentTerminalCommands(agent_terminal)
+    terminal_commands = AgentTerminalCommands(
+        agent_terminal,
+        # The Brainstorm snapshot answers "what did Claude just say?" with
+        # the whole reply — live during a session and after it settles.
+        last_reply=lambda who: debate_state.snapshot.last_reply(who),
+    )
     # The capability router is composed later; the provider defers the
     # lookup to call time, when it is guaranteed to exist.
     capability_opens = CapabilityOpenController(lambda: capabilities)
@@ -1226,6 +1251,17 @@ async def main() -> None:
         brainstorm_recent=brainstorm_history.rows,
     )
     transport.on_input(capabilities.on_input)
+
+    # The resting dashboard's margin facts. Weather is not in the Even Hub
+    # SDK, so JOAT resolves it on this Mac from the position the phone
+    # already reports, and sends only the finished words.
+    ambient = AmbientPublisher(
+        transport,
+        unread_count=lambda: len(card_log.recent(99)),
+    )
+    transport.on_location(
+        lambda fix: ambient.accept_position(fix.latitude, fix.longitude)
+    )
 
     async def deliver_task_alert(alert: ProductivityHudView) -> bool:
         return await transport.request_reminder_due_ack(alert)

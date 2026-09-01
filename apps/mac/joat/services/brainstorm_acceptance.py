@@ -778,6 +778,20 @@ class G2GestureBrainstormAcceptanceSession(Session):
             self._controller.attach(subscribe_actions=False)
             await self._controller.wait()
         except asyncio.CancelledError:
+            # The wearer's spoken escape ("JOAT, stop") lands here: the
+            # manager cancels the task, and this session used to write only
+            # its receipt — leaving the lenses showing a RUNNING Brainstorm
+            # forever after the wearer had already ended it. Paint the
+            # cancelled frame as a detached task: the transport outlives
+            # this session, and teardown must not await a diagnostics ack
+            # on a channel that is being torn down beneath it.
+            paint = asyncio.get_running_loop().create_task(
+                self._transport.send(_view(
+                    "brainstorm", state="cancelled",
+                    activity="Acceptance run cancelled",
+                )),
+            )
+            paint.add_done_callback(lambda t: t.exception())
             await self._controller.close()
             raise
         finally:

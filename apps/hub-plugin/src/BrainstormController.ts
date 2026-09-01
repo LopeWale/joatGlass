@@ -97,6 +97,22 @@ export class BrainstormController {
     return false;
   }
 
+  /** A swipe during TOPIC CAPTURE backs out of the armed capture.
+   *
+   * Everywhere else a swipe pages the transcript — the wearer asked for
+   * scrollback in as many words, and a swipe that cancelled a RUNNING
+   * session while they re-read a reply was the harshest possible answer
+   * to "can I scroll?". Topic capture is the one state with nothing to
+   * scroll: no transcript exists yet, the screen is a single promise
+   * ("Speak your question"), and the wearer who swipes is saying never
+   * mind — the same hands-free backout this surface always offered. */
+  handleSwipe(): boolean {
+    return this.model?.screen === 'brainstorm'
+      && this.model.state === 'topic_capture'
+      ? this.send('cancel')
+      : false;
+  }
+
   /** Left-double-click is a visible cancellation affordance during a live run. */
   handleCancel(): boolean {
     return this.model?.screen === 'brainstorm'

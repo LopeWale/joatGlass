@@ -775,3 +775,40 @@ async def test_simulator_can_render_cancel_without_inventing_physical_source(
         for event in receipt["events"]
         if event.get("type") == "brainstorm_action"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_stop_still_paints_the_cancelled_frame(
+    tmp_path: Path,
+) -> None:
+    """The wearer's escape hatch must be VISIBLE, not just effective.
+
+    "JOAT, stop" reaches this session as a bare task cancellation — no
+    BrainstormAction, no gesture. The session used to write its receipt
+    and die silently, leaving the lenses showing a RUNNING Brainstorm
+    forever after the wearer had already ended it. The only feedback that
+    a cancel worked is the cancelled frame.
+    """
+    events: list[dict[str, object]] = []
+    transport = FakeTransport(events)
+    transport.emit_hello()
+    session = make_g2_gesture_acceptance_session(
+        transport=transport,
+        terminal=lambda: FakeHermes(),
+        trigger=acceptance_trigger(),
+        output_directory=tmp_path,
+        action_timeout_s=1,
+        connect_timeout_s=1,
+    )
+    assert isinstance(session, G2GestureBrainstormAcceptanceSession)
+
+    run_task = asyncio.create_task(session.run())
+    await _wait_for(lambda: len(transport.sent) == 1)
+
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    await _wait_for(lambda: any(
+        frame.screen == "brainstorm" and frame.state == "cancelled"
+        for frame in transport.sent
+    ))
