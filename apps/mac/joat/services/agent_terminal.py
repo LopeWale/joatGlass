@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -476,9 +477,19 @@ class AgentTerminalCommands:
     an overheard sentence can never be one.
     """
 
-    def __init__(self, roster: AgentTerminalRoster) -> None:
+    ARM_WINDOW_S = 45.0
+    """How long a tap's promise lasts.
+
+    An arm that never expires is an open microphone into a session that
+    can run tools: tap, get distracted, and the next thing said — minutes
+    later, to a colleague — arrives at Hermes as an instruction. The
+    gesture buys ONE utterance, soon."""
+
+    def __init__(self, roster: AgentTerminalRoster,
+                 window_s: float | None = None) -> None:
         self._roster = roster
-        self._armed = False
+        self._armed_until = 0.0
+        self._window_s = self.ARM_WINDOW_S if window_s is None else window_s
 
     def arm(self) -> None:
         """A tap on the terminal promises the NEXT utterance as its input.
@@ -486,17 +497,20 @@ class AgentTerminalCommands:
         The promise is one utterance and it is explicit, so the phrase does
         not need the 'terminal' prefix — the gesture already established
         that this is terminal speech, which is exactly the consent the
-        prefix exists to obtain.
+        prefix exists to obtain. It also expires: see ARM_WINDOW_S.
         """
-        self._armed = True
+        self._armed_until = time.monotonic() + self._window_s
 
     @property
     def armed(self) -> bool:
-        return self._armed
+        return time.monotonic() < self._armed_until
+
+    def _disarm(self) -> None:
+        self._armed_until = 0.0
 
     async def handle_command(self, text: str) -> str | None:
-        if self._armed:
-            self._armed = False
+        if self.armed:
+            self._disarm()
             said = text.strip()
             if not said:
                 return None
