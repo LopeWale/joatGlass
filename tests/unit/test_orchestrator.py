@@ -974,3 +974,59 @@ class TestTheWakeGateCatchesItsOwnName:
                         "rode", "road", "joke", "jade", "note", "vote",
                         "load", "toad", "jodhpur"):
             assert not self._wakes(ambient), ambient
+
+
+class TestOrdinaryEnglishWakeWordsMustOpenTheUtterance:
+    """Three wake words are also ordinary English.
+
+    They are in the list because Whisper renders JOAT as them, which is
+    real. But matched ANYWHERE, "I really liked your jokes last night",
+    "give the door a jolt" and "we should jot that down" were speech
+    addressed to the assistant — stripped of that word and answered.
+
+    The fuzzy path is held to 0.86 precisely so coat/goat/boat cannot do
+    this. The exact path was admitting three such words outright, which
+    made the strictness next to it decorative.
+    """
+
+    @staticmethod
+    async def _addressed(text: str) -> str | None:
+        from joat.services.orchestrator import VoiceOrchestrator
+
+        class Transport:
+            async def send(self, *a: object, **k: object) -> None: ...
+
+        o = VoiceOrchestrator(
+            Transport(),  # type: ignore[arg-type]
+            stt=None, stt_available=False,
+            wake_words=("hey joat", "joat", "jote", "jolt", "jokes", "jot"),
+        )
+        return o._strip_wake_word(text)
+
+    async def test_conversation_containing_them_is_not_addressed(self) -> None:
+        for ambient in (
+            "I really liked your jokes last night",
+            "he tells terrible jokes",
+            "give the door a jolt",
+            "the comedian told jokes about goats",
+            "we should jot that in the notes app later",
+            "that was a jolt of caffeine honestly",
+        ):
+            assert await self._addressed(ambient) is None, ambient
+
+    async def test_a_mis_rendering_that_opens_the_utterance_still_wakes(self) -> None:
+        """What the words are in the list FOR."""
+        for heard in ("jokes what is the weather",
+                      "jot remind me at six",
+                      "so jokes tell me the time"):
+            assert await self._addressed(heard) is not None, heard
+
+    async def test_the_assistants_own_name_is_never_anchored(self) -> None:
+        """No way of addressing JOAT by name may be lost — it is not an
+        ordinary word, so it carries no ambient risk wherever it lands."""
+        for heard in ("JOAT what is the weather",
+                      "hey JOAT open the terminal",
+                      "so JOAT tell me the time",
+                      "I was wondering JOAT what is next",
+                      "okay so anyway JOAT what is on my calendar"):
+            assert await self._addressed(heard) is not None, heard
