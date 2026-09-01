@@ -494,6 +494,8 @@ class DebateSession(Session):
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
         self._wearer_turns = 0
+        self._speaking_label = ""
+        self._interrupted = False
         self._cancelled = False
         self._failed = False
 
@@ -526,9 +528,20 @@ class DebateSession(Session):
         return True
 
     async def _show_wearer_turn(self, said: str) -> None:
+        """Paint the YOU turn immediately, then hand the floor back.
+
+        The wearer speaks WHILE a collaborator is streaming, so this lands
+        between two of that speaker's chunks. Interleaving is honest — it
+        is what happened — but the chunks that follow would sit under the
+        YOU header and read as the wearer's words. Setting _interrupted
+        makes the streaming turn re-announce itself before it continues,
+        so every line stays attributed to whoever actually said it.
+        """
         try:
             await self._sink.turn(self.WEARER_LABEL)
             await self._sink.chunk(said + "\n")
+            if self._speaking_label:
+                self._interrupted = True
         except Exception:  # a dead surface must not lose the turn
             log.warning("wearer turn not painted", exc_info=True)
 
@@ -775,12 +788,22 @@ class DebateSession(Session):
 
     async def _stream_turn(self, label: str, stream: AsyncIterator[str]) -> str:
         await self._sink.turn(label)
+        self._speaking_label = label
         collected: list[str] = []
-        async for chunk in stream:
-            if self._cancelled:
-                break
-            collected.append(chunk)
-            await self._sink.chunk(chunk)
+        try:
+            async for chunk in stream:
+                if self._cancelled:
+                    break
+                if self._interrupted:
+                    # The wearer spoke mid-turn. Re-announce this speaker so
+                    # the rest of its answer is not read as the wearer's.
+                    self._interrupted = False
+                    await self._sink.turn(label)
+                collected.append(chunk)
+                await self._sink.chunk(chunk)
+        finally:
+            self._speaking_label = ""
+            self._interrupted = False
         return "".join(collected).strip()
 
     async def _finish(self, status: str) -> None:
