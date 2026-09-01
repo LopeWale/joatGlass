@@ -1970,7 +1970,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 148, 504);
         context.fillStyle = gray(CHROME);
         context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, `SESSION > ${model.terminalReason || 'Hermes participates as a Brainstorm seat.'}`, 36, 165, 504);
+        this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, 36, 165, 504);
       }
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();

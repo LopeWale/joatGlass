@@ -77,7 +77,9 @@ describe('visual fixtures', () => {
 
   it('covers real Brainstorm and Hermes terminal visual states', () => {
     expect(brainstormVisualFixture('brainstorm-live')).toMatchObject({
-      screen: 'brainstorm', state: 'running', activeSpeaker: 'Hermes · terminal',
+      // Brainstorm seats are Codex and Claude only; Hermes/OpenClaw are
+      // Agent Terminal workers and never speak in a Brainstorm.
+      screen: 'brainstorm', state: 'running', activeSpeaker: 'Claude · critic',
     });
     expect(brainstormVisualFixture('agent-terminal-ready')).toMatchObject({
       screen: 'agent_terminal', state: 'ready', noToolsChecked: true,

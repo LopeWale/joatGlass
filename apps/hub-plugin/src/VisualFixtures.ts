@@ -61,7 +61,7 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
     state: 'ready' as const,
     topic: 'Hermes Agent Terminal',
     collaborators: [],
-    activity: 'Hermes is available as a Brainstorm collaborator.',
+    activity: 'Say “terminal sessions” to choose a work session.',
     endpointHost: 'home-mac.example-tailnet.ts.net',
     terminalState: 'ready' as const,
     terminalReason: 'Dedicated JOAT session',
@@ -71,15 +71,15 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
     case 'brainstorm-ready':
       return {
         screen: 'brainstorm', state: 'ready', topic: 'How should JOAT plan today?',
-        collaborators: ['Codex · proposer', 'Claude · critic', 'Hermes · terminal'],
+        collaborators: ['Codex · proposer', 'Claude · critic'],
         activity: 'Say “JOAT, brainstorm …” to begin.',
         terminalState: 'ready', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
       };
     case 'brainstorm-live':
       return {
         screen: 'brainstorm', state: 'running', topic: 'How should JOAT plan today?',
-        collaborators: ['Codex · proposer', 'Claude · critic', 'Hermes · terminal'],
-        activeSpeaker: 'Hermes · terminal',
+        collaborators: ['Codex · proposer', 'Claude · critic'],
+        activeSpeaker: 'Claude · critic',
         activity: [
           'CODEX > Keep the next step explicit.',
           'CLAUDE > Verify the calendar before committing.',
