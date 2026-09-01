@@ -26,6 +26,7 @@ import {
 import {
   formatNavigationDistance,
   type NavigationHudModel,
+  type NavigationMapModel,
   type NavigationManeuver,
 } from './NavigationHud';
 
@@ -35,6 +36,19 @@ const CHROME = 102;
 const QUIET = 68;
 const HAIRLINE = 51;
 const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
+
+/** Prose face for the brainstorm/terminal surfaces.
+
+ * The wearer, comparing this HUD against Even's own UI photos: "Why is
+ * the font bold everywhere? … you see how they utilize spacing and not
+ * wasting space?" The official G2 screens set light PROPORTIONAL type;
+ * monospace at small sizes reads as bold slab on a phosphor display and
+ * fits ~74 characters where a proportional face fits ~95. Weight is
+ * pinned to 400 explicitly — canvas default weight on some hosts
+ * renders these families heavier. Mono remains for the chrome/status
+ * spine, where column alignment is the point.
+ */
+const HUD_TEXT_FONT = '"Helvetica Neue", "SF Pro Text", Arial, sans-serif';
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
 export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
 
@@ -52,16 +66,28 @@ export function showNavigationSecondaryInHeader(
  * wearer's ruling: the chrome was the waste, not any single line). */
 export interface NavigationDecisionRow {
   baselineY: number;
-  railTopY: number;
-  railHeight: number;
+  boxTopY: number;
+  boxHeight: number;
   fontSize: number;
 }
+
+/** The selection box: one outline around the CHOSEN row, never one per row.
+ * This is the affordance the platform's own control surfaces use, and it is
+ * not the retired per-row card — unchosen rows stay flat and unboxed. */
+export const NAVIGATION_DECISION_BOX = {
+  x: 30,
+  width: 516,
+  radius: 8,
+  textX: 46,
+} as const;
 
 export function navigationDecisionRows(optionCount: number): readonly NavigationDecisionRow[] {
   const count = Math.min(3, Math.max(0, Math.floor(optionCount)));
   return Array.from({ length: count }, (_, index) => {
-    const baselineY = 132 + index * 20;
-    return { baselineY, railTopY: baselineY - 10, railHeight: 19, fontSize: 12 };
+    // A route choice is read in motion, so it gets the legible face rather
+    // than the dense reading size a stationary list can use.
+    const baselineY = 128 + index * 34;
+    return { baselineY, boxTopY: baselineY - 15, boxHeight: 30, fontSize: 15 };
   });
 }
 
@@ -104,6 +130,59 @@ export function assistantOverlayTextLayout(
     footerBaselineY: ASSISTANT_OVERLAY_GEOMETRY.footerBaselineY,
     lineHeight,
   };
+}
+
+/**
+ * The resting screen is a DASHBOARD, not a sentence.
+ *
+ * The wearer glances at these lenses dozens of times an hour without asking
+ * JOAT anything, so the idle frame has to be worth the glance on its own:
+ * a large clock anchoring the left, and whatever JOAT currently has to say
+ * filling a second pane on the right. A single hairline divides them — one
+ * frame, not a stack of cards.
+ *
+ * Time and date come from the phone clock, so this pane stays truthful even
+ * when the Mac is offline: the HUD is never a dead rectangle.
+ */
+export const OVERVIEW_DASHBOARD = {
+  dateBaselineY: 58,
+  clockX: 26,
+  // Sized and spaced so the two rows fill the pane from under the date to
+  // just above the hint: no orphan gap beneath the clock.
+  clockFontSize: 82,
+  hoursBaselineY: 130,
+  minutesBaselineY: 212,
+  dividerX: 256.5,
+  dividerTopY: 46,
+  dividerBottomY: 252,
+  paneX: 280,
+  paneWidth: 268,
+  labelBaselineY: 62,
+  mainTopBaselineY: 92,
+  mainLineHeight: 21,
+  mainMaxLines: 4,
+  contextLabelBaselineY: 196,
+  contextValueBaselineY: 214,
+  trayBaselineY: 244,
+} as const;
+
+/** Split "9:41" into the two stacked rows the dashboard prints. A missing
+ * or malformed clock still renders placeholders rather than an empty pane. */
+export function hudClockParts(time: string): { hours: string; minutes: string } {
+  const match = time.trim().match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return { hours: '--', minutes: '--' };
+  return {
+    hours: (match[1] ?? '').padStart(2, '0'),
+    minutes: match[2] ?? '--',
+  };
+}
+
+const HUD_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+/** "Mon 9/1" — the phone's own date, which the Mac never has to supply. */
+export function hudDateLabel(now: Date): string {
+  const weekday = HUD_WEEKDAYS[now.getDay()] ?? '';
+  return `${weekday} ${now.getMonth() + 1}/${now.getDate()}`;
 }
 
 /** Measured from the selected 576×288 reference panels. Keeping the major
@@ -767,8 +846,8 @@ export interface MessagesConversationTranscript {
 }
 
 /** Seven transcript rows use the vertical budget between the Mac-owned
- * heading (y87) and the footer hint: 113 + 22·6 = 245. */
-export const MESSAGES_CONVERSATION_ROW_CAPACITY = 7;
+ * heading (y58) and the footer hint: 84 + 22·7 = 238. */
+export const MESSAGES_CONVERSATION_ROW_CAPACITY = 8;
 
 /** Conversation frames are deliberately not rendered as notification rows.
  * The Mac owns the text; this parser only distinguishes the already-labeled
@@ -836,7 +915,7 @@ export function messagesConversationFooterFontSize(hint: string): 8 | 9 {
 }
 
 /** A full message uses the lens body, while preserving its status footer. */
-export const MESSAGES_READER_BODY_LINE_CAPACITY = 8;
+export const MESSAGES_READER_BODY_LINE_CAPACITY = 10;
 
 /** The official simulator under-reports the width of the G2 bitmap font.
  * This conservative visible-column limit keeps a rendered line inside the
@@ -935,37 +1014,33 @@ export function listReservesMarkerColumn(items: readonly string[]): boolean {
  * on each line; on a 288-pixel-tall lens that left three rows per glance
  * (wearer's ruling: wasteful). Planning day agendas keep a second line for
  * their time/kind pair; everything else shows six rows per screen. */
+/** With the page name in the spine, rows begin directly under it. The
+ * reclaimed 24px is a whole extra row of the wearer's actual content. */
 export function planningFocusRows(
   title: string,
   itemCount: number,
 ): readonly PlanningFocusRow[] {
-  const normalized = title.trim().toUpperCase();
-
-  const agenda = /^(?:PLANNING|CALENDAR|TASKS) · PLAN · (?:MON|TUE|WED|THU|FRI|SAT|SUN)\b/
-    .test(normalized);
-  // Use the vertical budget: the content column runs from under the title to
-  // just above the footer. Nine single-line rows (or six two-line agenda
-  // rows) per glance, no separator lines — pitch alone divides rows, and
-  // every reclaimed pixel is another visible row of the wearer's content.
-  const firstBaselineY = agenda ? 88 : 84;
-  const pitch = agenda ? 30 : 20;
+  void title;
+  // ONE dense row language for every focus list. The two-line agenda variant
+  // existed because a Planning day row spelled out "16:30 · EVENT · Title"
+  // and needed a second line to fit. Those rows now read "[16:30] □ Title" —
+  // quiet time chip, marker, title — so they fit one line like every other
+  // list, and a day shows nine entries per glance instead of six.
+  // The page name lives in the status spine now (the wearer's ruling), so
+  // rows start directly beneath it instead of under a second title bar.
+  // That reclaimed band is a whole extra row of real content: ten per page.
+  const firstBaselineY = 60;
+  const pitch = 20;
   const lastBaselineY = 246;
   const capacity = Math.floor((lastBaselineY - firstBaselineY) / pitch) + 1;
   const count = Math.min(capacity, Math.max(0, Math.floor(itemCount)));
   return Array.from({ length: count }, (_, index) => {
     const primaryBaselineY = firstBaselineY + index * pitch;
-    return agenda
-      ? {
-        primaryBaselineY,
-        secondaryBaselineY: primaryBaselineY + 13,
-        railTopY: primaryBaselineY - 11,
-        railHeight: 27,
-      }
-      : {
-        primaryBaselineY,
-        railTopY: primaryBaselineY - 10,
-        railHeight: 19,
-      };
+    return {
+      primaryBaselineY,
+      railTopY: primaryBaselineY - 10,
+      railHeight: 19,
+    };
   });
 }
 
@@ -1169,6 +1244,96 @@ export function visibleHudSidebarItems(
   }));
 }
 
+/**
+ * What the status spine says on this frame, in place of "JOAT · READY".
+ *
+ * The wearer's ruling: a feature page must not repeat its own name in a
+ * second title bar under the spine. The spine already has the wearer's eye,
+ * so the page name lives there and the whole body belongs to the feature.
+ * Home (overview/sidebar) keeps "JOAT" — that IS the page.
+ */
+export function hudSpinePageTitle(frame: HudVisualFrame): string {
+  switch (frame.kind) {
+    case 'list':
+      return hudDisplayTitle(frame.title);
+    case 'navigation':
+      return 'Navigation';
+    case 'productivity':
+      return 'Planning';
+    default:
+      return '';
+  }
+}
+
+/** Where the guidance map panel sits: the right half of the canvas, under
+ * the status spine. Left of it belongs to the maneuver the wearer must act
+ * on; a turn instruction and the shape of the road are different jobs. */
+export const NAVIGATION_MAP_PANEL = {
+  x: 300,
+  y: 52,
+  width: 248,
+  // Stops clear of the progress bar: the route must never look like it
+  // runs into the chrome underneath it.
+  height: 168,
+  padding: 12,
+} as const;
+
+export interface NavigationMapProjection {
+  points: ReadonlyArray<readonly [number, number]>;
+  position?: readonly [number, number];
+}
+
+/**
+ * Project a lat/lon polyline into the map panel.
+ *
+ * Equirectangular with a cos(latitude) correction on longitude: over a
+ * walking or cycling route the error is far below one HUD pixel, and it
+ * costs no projection library on a battery-bound phone. The route is scaled
+ * to fit the panel with its aspect ratio intact, so the shape a wearer sees
+ * is the shape of the road, not a stretched one.
+ */
+export function projectNavigationMap(
+  map: NavigationMapModel,
+  panel: { x: number; y: number; width: number; height: number; padding: number }
+    = NAVIGATION_MAP_PANEL,
+): NavigationMapProjection | undefined {
+  const geometry = map.geometry;
+  if (geometry.length < 2) return undefined;
+  const midLatitude = (geometry[0]?.latitude ?? 0) * Math.PI / 180;
+  const scaleX = Math.max(0.01, Math.cos(midLatitude));
+  const raw: ReadonlyArray<readonly [number, number]> = geometry.map(
+    (point) => [point.longitude * scaleX, point.latitude] as const,
+  );
+  const xs = raw.map(([x]: readonly [number, number]) => x);
+  const ys = raw.map(([, y]: readonly [number, number]) => y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1e-9);
+  const spanY = Math.max(maxY - minY, 1e-9);
+  const usableWidth = panel.width - panel.padding * 2;
+  const usableHeight = panel.height - panel.padding * 2;
+  const scale = Math.min(usableWidth / spanX, usableHeight / spanY);
+  // Centre the drawn route inside the panel rather than pinning it to a
+  // corner: a route is a picture, and a picture is centred.
+  const offsetX = panel.x + panel.padding + (usableWidth - spanX * scale) / 2;
+  const offsetY = panel.y + panel.padding + (usableHeight - spanY * scale) / 2;
+  const place = (longitude: number, latitude: number): readonly [number, number] => [
+    offsetX + (longitude * scaleX - minX) * scale,
+    // Screen y grows downward; latitude grows north, so it is inverted.
+    offsetY + (maxY - latitude) * scale,
+  ];
+  return {
+    points: raw.map((_entry: readonly [number, number], index: number) => place(
+      geometry[index]?.longitude ?? 0, geometry[index]?.latitude ?? 0,
+    )),
+    ...(map.position
+      ? { position: place(map.position.longitude, map.position.latitude) }
+      : {}),
+  };
+}
+
 export class HudCanvasRenderer implements HudFrameRenderer {
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
 
@@ -1227,6 +1392,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         frame.kind === 'list' ? frame.title : '',
         frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
+      frame.kind !== 'overview' && frame.kind !== 'sidebar',
+      hudSpinePageTitle(frame),
     );
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
@@ -1249,6 +1416,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     micOn: boolean,
     icons: Record<HudIconName, HTMLImageElement>,
     flat: boolean,
+    /** The dashboard prints the time at full size; a designer never sets
+     * the same fact twice on one screen, so the spine yields its clock. */
+    showTime = true,
+    /** On a feature page the spine carries the page's name where "JOAT"
+     * sits on the home screen, so the body below the spine belongs
+     * entirely to the feature — no second title bar eating 40px. */
+    pageTitle = '',
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1262,14 +1436,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(SUPPORT);
     context.font = `12px ${HUD_FONT}`;
     context.textAlign = 'left';
-    context.fillText(
-      status.time || '--:--',
-      30,
-      HUD_VISUAL_GEOMETRY.statusBaselineY,
-    );
+    if (showTime) {
+      context.fillText(
+        status.time || '--:--',
+        30,
+        HUD_VISUAL_GEOMETRY.statusBaselineY,
+      );
+    }
     context.textAlign = 'center';
     context.font = `10px ${HUD_FONT}`;
-    context.fillText(status.state, 288, HUD_VISUAL_GEOMETRY.statusBaselineY);
+    // A degraded link outranks navigation: if JOAT is not READY the wearer
+    // must see that, whatever page they are standing on.
+    const spineLabel = pageTitle && status.state.endsWith('READY')
+      ? pageTitle.toUpperCase()
+      : status.state;
+    this.fitText(context, spineLabel, 288, HUD_VISUAL_GEOMETRY.statusBaselineY, 300);
 
     this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
     context.textAlign = 'left';
@@ -1352,105 +1533,121 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       hint: string;
     },
     icons: Record<HudIconName, HTMLImageElement>,
+    opacity = 1,
+    offsetX = 0,
   ): void {
     context.save();
+    context.globalAlpha = opacity;
+    context.translate(offsetX, 0);
     const overview = resolveHudOverview(frame);
+    const layout = OVERVIEW_DASHBOARD;
+    const status = parseStatus(frame.status);
+
+    // ── Left pane: the clock anchor ──────────────────────────────────────
+    // Phone-clock truth, so this half stays alive and useful even when the
+    // Mac is unreachable.
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(CHROME);
+    context.font = `11px ${HUD_FONT}`;
+    context.fillText(hudDateLabel(new Date()), layout.clockX + 4, layout.dateBaselineY);
+
+    const clock = hudClockParts(status.time);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `${layout.clockFontSize}px ${HUD_FONT}`;
+    context.fillText(clock.hours, layout.clockX, layout.hoursBaselineY);
+    context.fillText(clock.minutes, layout.clockX, layout.minutesBaselineY);
+
+    // One hairline divides the two panes. Not a card: a single frame edge.
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(layout.dividerX, layout.dividerTopY);
+    context.lineTo(layout.dividerX, layout.dividerBottomY);
+    context.stroke();
+
+    // ── Right pane: whatever JOAT currently has to say ───────────────────
+    const paneX = layout.paneX;
+    const paneWidth = layout.paneWidth;
 
     if (overview.kind === 'empty') {
-      const left = 36;
-      context.textAlign = 'left';
-      context.textBaseline = 'middle';
-      context.fillStyle = gray(BRIGHT);
-      context.font = `20px ${HUD_FONT}`;
-      context.fillText(overview.title, left, 64);
-      context.fillStyle = gray(SUPPORT);
-      context.font = `16px ${HUD_FONT}`;
-      context.fillText(overview.primary, left, 106);
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
-      context.fillText(overview.recovery, left, 132);
+      context.fillText(overview.title.toUpperCase(), paneX, layout.labelBaselineY);
+      context.fillStyle = gray(SUPPORT);
+      context.font = `15px ${HUD_FONT}`;
+      this.drawWrappedText(
+        context, overview.primary, paneX, layout.mainTopBaselineY,
+        paneWidth, layout.mainLineHeight, 3, 'leading',
+      );
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      this.drawWrappedText(
+        context, overview.recovery, paneX, layout.contextValueBaselineY,
+        paneWidth, 14, 2, 'leading',
+      );
       context.fillStyle = gray(QUIET);
       context.font = `9px ${HUD_FONT}`;
       context.textAlign = 'center';
-      context.fillText(overview.hint, 288, 267);
+      context.fillText(overview.hint, 288 - offsetX, 267);
       context.restore();
       return;
     }
 
+    // The pane FLOWS: each block starts under the one above it. Pinning
+    // these to fixed baselines left a hole in the middle whenever JOAT's
+    // answer was short — the exact wasted space the whole redesign is
+    // about. The tray still anchors to the bottom of the pane.
+    let cursorY = layout.labelBaselineY;
     if (overview.main) {
       const main = overview.main;
-      context.textAlign = 'left';
-      context.textBaseline = 'middle';
-      context.fillStyle = gray(SUPPORT);
-      context.font = `10px ${HUD_FONT}`;
-      context.fillText(main.label.toUpperCase(), 110, 76);
-      // The icon states the KIND of the main content — calendar for what's
-      // next, a chat glyph only for an actual message/notification. Plain
-      // assistant text gets no icon at all: JOAT's resting screen is JOAT,
-      // not a Messages app wearing a chat bubble.
-      const mainIcon = main.structured && /NEXT|CALENDAR/i.test(main.label)
-        ? icons.calendar
-        : frame.mainKind === 'notification'
-          ? icons.notifications
-          : undefined;
       const mainLevel = hudBrightnessGray(frame.mainBrightness);
-      if (mainIcon) this.drawIcon(context, mainIcon, 111, 91, 32, mainLevel);
-      // Without an icon the text owns the icon column too — no dead gutter.
-      const mainX = mainIcon ? HUD_VISUAL_GEOMETRY.overviewMainX : 110;
-      const mainWidth = 359 + (HUD_VISUAL_GEOMETRY.overviewMainX - mainX);
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      context.fillText(main.label.toUpperCase(), paneX, cursorY);
       context.fillStyle = gray(mainLevel);
-      const mainSize = main.structured ? 25 : 18;
-      context.font = `${mainSize}px ${HUD_FONT}`;
       if (main.structured) {
-        this.fitText(
-          context,
-          main.value,
-          mainX,
-          112,
-          mainWidth,
-        );
+        // A calendar/reminder value is one short fact — give it size.
+        cursorY += 34;
+        context.font = `22px ${HUD_FONT}`;
+        this.fitText(context, main.value, paneX, cursorY, paneWidth);
+        cursorY += 14;
       } else {
-        this.drawWrappedText(
+        cursorY += 28;
+        context.font = `15px ${HUD_FONT}`;
+        const drawn = this.drawWrappedText(
           context,
           main.value,
-          mainX,
-          103,
-          mainWidth,
-          22,
-          2,
+          paneX,
+          cursorY,
+          paneWidth,
+          layout.mainLineHeight,
+          layout.mainMaxLines,
           frame.mainKind === 'notification' ? 'leading' : 'tail',
         );
+        cursorY += (drawn - 1) * layout.mainLineHeight + 10;
       }
     }
 
-    if (overview.tray) {
-      this.drawIcon(context, icons.notifications, 112, 158, 19, SUPPORT);
-      context.fillStyle = gray(SUPPORT);
-      context.font = `14px ${HUD_FONT}`;
-      context.fillText(
-        overview.tray,
-        147,
-        HUD_VISUAL_GEOMETRY.overviewTrayY,
-      );
-    }
-
     if (overview.context) {
+      cursorY += 26;
       context.fillStyle = gray(CHROME);
       context.font = `9px ${HUD_FONT}`;
-      context.fillText(
-        overview.context.label.toUpperCase(),
-        110,
-        HUD_VISUAL_GEOMETRY.overviewContextY,
-      );
+      context.fillText(overview.context.label.toUpperCase(), paneX, cursorY);
+      cursorY += 18;
       context.fillStyle = gray(SUPPORT);
-      context.font = `10px ${HUD_FONT}`;
-      this.fitText(
-        context,
-        overview.context.value,
-        205,
-        HUD_VISUAL_GEOMETRY.overviewContextY,
-        330,
-      );
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(context, overview.context.value, paneX, cursorY, paneWidth);
+    }
+
+    if (overview.tray) {
+      // Anchored to the pane bottom: the ambient line belongs at the edge,
+      // not floating wherever the answer above happened to end.
+      const trayY = Math.max(cursorY + 26, layout.trayBaselineY);
+      this.drawIcon(context, icons.notifications, paneX, trayY - 8, 16, SUPPORT);
+      context.fillStyle = gray(SUPPORT);
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(context, overview.tray, paneX + 24, trayY, paneWidth - 24);
     }
 
     context.fillStyle = gray(QUIET);
@@ -1458,8 +1655,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'center';
     context.fillText(
       frame.mainKind === 'notification' ? NOTIFICATION_DISMISS_HINT : frame.hint,
-      288,
-      263,
+      288 - offsetX,
+      267,
     );
     context.restore();
   }
@@ -1584,9 +1781,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    context.fillStyle = gray(BRIGHT);
-    context.font = `20px ${HUD_FONT}`;
-    context.fillText(hudDisplayTitle(frame.title), 36, 60);
 
     const visible = visibleHudListItems(frame.items, frame.selectedIndex, rows.length);
     visible.forEach((entry, index) => {
@@ -1721,9 +1915,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   ): void {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    context.fillStyle = gray(BRIGHT);
-    context.font = `20px ${HUD_FONT}`;
-    context.fillText(hudDisplayTitle(frame.title), 36, 64);
 
     if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
       const transcript = messagesConversationTranscript(
@@ -1740,10 +1931,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         : undefined;
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
-      this.fitText(context, transcript.heading, 36, 87, 504);
+      this.fitText(context, transcript.heading, 36, 58, 504);
 
       transcript.rows.forEach((parsed, row) => {
-        const y = 113 + row * 22;
+        const y = 84 + row * 22;
         const outgoing = parsed.kind === 'outgoing';
         const selected = row === selectedRow;
         if (selected) {
@@ -1773,14 +1964,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const detail = messagesFullTextContent(frame.items);
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, detail.metadata, 36, 87, 504);
+    this.fitText(context, detail.metadata, 36, 58, 504);
     context.fillStyle = gray(BRIGHT);
     context.font = `14px ${HUD_FONT}`;
     visibleHudLeadingLines(
       messagesReaderBodyLines(detail.body),
       MESSAGES_READER_BODY_LINE_CAPACITY,
     ).forEach((line, index) => {
-      this.fitText(context, line, 36, 119 + index * 17, 504);
+      this.fitText(context, line, 36, 84 + index * 17, 504);
     });
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
@@ -2017,18 +2208,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const layout = agentTerminalTranscriptLayout(model);
       this.drawIcon(context, icons.brainstorm, 36, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = `400 11px ${HUD_TEXT_FONT}`;
       this.fitText(context, layout.summary, 56, 58, 380);
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
-      context.font = `9px ${HUD_FONT}`;
+      context.font = `400 9px ${HUD_TEXT_FONT}`;
       context.fillText(state, 540, 58);
       context.textAlign = 'left';
       if (!layout.showRecoveryDetails) {
         // Each chip carries its lane's state ("work·run", "calendar·ask1")
         // so one glance covers every concurrent session.
         context.fillStyle = gray(SUPPORT);
-        context.font = `9px ${HUD_FONT}`;
+        context.font = `400 9px ${HUD_TEXT_FONT}`;
         this.fitText(
           context,
           `LANES > ${model.collaborators.join('  |  ') || 'one session'}`,
@@ -2038,7 +2229,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         );
       } else {
         context.fillStyle = gray(SUPPORT);
-        context.font = `9px ${HUD_FONT}`;
+        context.font = `400 9px ${HUD_TEXT_FONT}`;
         this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 72, 504);
         context.fillStyle = gray(SUPPORT);
         this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 88, 504);
@@ -2051,7 +2242,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.lineTo(540, layout.dividerY);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = `400 11px ${HUD_TEXT_FONT}`;
       this.drawBrainstormTranscript(
         context,
         model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
@@ -2063,21 +2254,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     } else {
       this.drawIcon(context, icons.brainstorm, 36, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = `400 11px ${HUD_TEXT_FONT}`;
       this.fitText(
         context,
         model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
         56,
         58,
-        360,
+        310,
       );
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
-      context.font = `9px ${HUD_FONT}`;
+      context.font = `400 9px ${HUD_TEXT_FONT}`;
       const liveNow = model.state === 'running' && model.activeSpeaker
         ? `${model.activeSpeaker} · ${state}`
         : state;
-      this.fitText(context, liveNow, 540, 58, 120);
+      this.fitText(context, liveNow, 540, 58, 190);
       context.textAlign = 'left';
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();
@@ -2085,7 +2276,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.lineTo(540, 66.5);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = `400 11px ${HUD_TEXT_FONT}`;
       this.drawBrainstormTranscript(
         context,
         model.activity
@@ -2100,7 +2291,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       ? `▼ ${scroll.offset} newer — swipe down · left x2: ${model.state === 'running' ? 'cancel' : 'menu'}`
       : brainstormActionHint(model);
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = `400 9px ${HUD_TEXT_FONT}`;
     context.textAlign = 'center';
     this.fitText(context, actionHint, 288, 267, 500);
   }
@@ -2195,12 +2386,31 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         const row = rows[index]!;
         const selected = index === navigation.selectedIndex;
         if (selected) {
-          context.fillStyle = gray(BRIGHT);
-          context.fillRect(36, row.railTopY, 3, row.railHeight);
+          // Outline the CHOSEN row and let the rest recede. On transparent
+          // glass an outline survives a busy background far better than a
+          // 3px edge, and the unchosen rows dropping to chrome is what makes
+          // the choice readable at a glance while walking.
+          context.strokeStyle = gray(BRIGHT);
+          context.lineWidth = 1;
+          roundedRect(
+            context,
+            NAVIGATION_DECISION_BOX.x,
+            row.boxTopY,
+            NAVIGATION_DECISION_BOX.width,
+            row.boxHeight,
+            NAVIGATION_DECISION_BOX.radius,
+          );
+          context.stroke();
         }
-        context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
+        context.fillStyle = gray(selected ? BRIGHT : CHROME);
         context.font = `${row.fontSize}px ${HUD_FONT}`;
-        this.fitText(context, option, 52, row.baselineY, 488);
+        this.fitText(
+          context,
+          option,
+          NAVIGATION_DECISION_BOX.textX,
+          row.baselineY,
+          NAVIGATION_DECISION_BOX.width - 32,
+        );
       });
     } else if (navigation.view === 'error') {
       // A recovery state keeps a small unmistakable mark and its plain
@@ -2241,36 +2451,100 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
+    const projection = navigation.map ? projectNavigationMap(navigation.map) : undefined;
+    // Two panes, like a car's instrument cluster: the ACT column on the
+    // left (what to do, how far), the SEE column on the right (the shape of
+    // the road and where the wearer is on it). Half a lens of black next to
+    // a single line of text was the waste; the route itself fills it.
+    const actWidth = projection ? 250 : 504;
+
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
     context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 59);
 
-    // One divider keeps the maneuver as a stable scan column without turning
-    // the active guidance view into a dashboard of outlined cards.
-    context.fillStyle = gray(HAIRLINE);
-    context.fillRect(128, 76, 1, 108);
-    this.drawManeuver(context, navigation.maneuver ?? 'continue', 82, 118, BRIGHT);
+    this.drawManeuver(context, navigation.maneuver ?? 'continue', 62, 108, BRIGHT);
     context.fillStyle = gray(BRIGHT);
-    context.font = `16px ${HUD_FONT}`;
-    context.textAlign = 'center';
-    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 82, 164);
-
+    context.font = `20px ${HUD_FONT}`;
     context.textAlign = 'left';
+    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 100, 108);
+
     context.fillStyle = gray(BRIGHT);
-    context.font = `25px ${HUD_FONT}`;
-    this.fitText(context, navigation.primary, 150, 95, 390);
+    context.font = `19px ${HUD_FONT}`;
+    this.fitText(context, navigation.primary, 36, 152, actWidth - 12);
     context.fillStyle = gray(SUPPORT);
-    context.font = `16px ${HUD_FONT}`;
-    this.drawWrappedText(context, navigation.secondary, 150, 128, 390, 21, 2);
+    context.font = `13px ${HUD_FONT}`;
+    this.drawWrappedText(context, navigation.secondary, 36, 180, actWidth - 12, 17, 2);
+
+    // The next action stays in the act column whether or not a map exists;
+    // an empty band under the instruction is waste either way.
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, navigation.hint, 150, 190, 390);
+    this.fitText(context, navigation.hint, 36, 214, actWidth - 12);
+    if (projection) this.drawNavigationMap(context, projection);
 
     this.drawNavigationProgress(context, navigation.progress ?? 0);
     const footer = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
     this.drawNavigationFooter(context, footer);
+  }
+
+  /** The route as a picture: a dim full polyline, a bright travelled-to
+   * position, and no chrome around it. The panel has no border — the map IS
+   * the content, and a box around it would only steal pixels. */
+  private drawNavigationMap(
+    context: CanvasRenderingContext2D,
+    projection: NavigationMapProjection,
+  ): void {
+    const [first, ...rest] = projection.points;
+    if (!first) return;
+    // One divider, same language as the home dashboard: act on the left,
+    // see on the right.
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(288.5, 56);
+    context.lineTo(288.5, 226);
+    context.stroke();
+
+    // The road is CONTEXT, not the instruction: it sits a full step below
+    // the maneuver so the wearer's eye still lands on "Turn right" first.
+    context.strokeStyle = gray(CHROME);
+    context.lineWidth = 2;
+    context.lineJoin = 'round';
+    context.lineCap = 'round';
+    context.beginPath();
+    context.moveTo(first[0], first[1]);
+    for (const [x, y] of rest) context.lineTo(x, y);
+    context.stroke();
+
+    // Destination end of the line, so the wearer can see which way it runs.
+    const last = projection.points[projection.points.length - 1];
+    if (last) {
+      context.fillStyle = gray(SUPPORT);
+      context.beginPath();
+      context.arc(last[0], last[1], 4, 0, Math.PI * 2);
+      context.fill();
+    }
+
+    if (projection.position) {
+      const [x, y] = projection.position;
+      // A filled dot inside a ring: unmistakably "you", and it survives the
+      // Gray4 quantization that would swallow a subtler marker.
+      context.fillStyle = '#000000';
+      context.beginPath();
+      context.arc(x, y, 7, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = gray(BRIGHT);
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(x, y, 6, 0, Math.PI * 2);
+      context.stroke();
+      context.fillStyle = gray(BRIGHT);
+      context.beginPath();
+      context.arc(x, y, 2.5, 0, Math.PI * 2);
+      context.fill();
+    }
   }
 
   private drawNavigationWarning(
@@ -2493,7 +2767,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     lineHeight: number,
     maximumLines: number,
     retention: 'tail' | 'leading' = 'tail',
-  ): void {
+  ): number {
     const lines = wrapHudText(text, maxWidth, (value) => context.measureText(value).width);
     const visible = retention === 'leading'
       ? visibleHudLeadingLines(lines, maximumLines)
@@ -2501,6 +2775,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     visible.forEach((value, index) => {
       this.fitText(context, value, x, y + index * lineHeight, maxWidth);
     });
+    // The count lets a flowing pane place whatever comes next directly
+    // under the real last line instead of guessing a fixed baseline.
+    return visible.length;
   }
 
   /** A dense terminal tail is the primary content surface for Brainstorm.
