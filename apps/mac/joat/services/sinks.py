@@ -214,9 +214,18 @@ class HudSink:
         await self._paint("running")
 
     async def close(self, verdict: str) -> None:
+        """End the session WITHOUT erasing what it produced.
+
+        This used to replace the whole transcript with 'JOAT > <verdict>',
+        so the verified synthesis — the thing the wearer sat through the
+        session for — vanished at the exact moment it finished, leaving a
+        one-line status where the answer had been. The verdict is a
+        footer, not a replacement.
+        """
         self._stop_wait_clock()
         self._speaker = ""
-        self._activity = f"JOAT > {verdict}"[:180]
+        self._progress = ""
+        self._append_transcript(f"JOAT > {verdict}")
         if verdict == "cancelled":
             await self._paint("cancelled")
         elif verdict.startswith("blocked"):
