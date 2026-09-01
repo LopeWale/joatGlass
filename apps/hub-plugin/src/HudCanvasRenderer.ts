@@ -490,7 +490,17 @@ export function agentTerminalTranscriptLayout(
 ): AgentTerminalTranscriptLayout {
   const state = brainstormStateLabel(model.state);
   const focus = agentTerminalFocusLabel(model.topic);
-  if (model.state === 'running') {
+  // Recovery chrome exists to be ACTED ON — a blocked terminal names the
+  // host and policy the wearer must go fix. A READY terminal was printing
+  // the same four rows (HOST, POLICY, SESSION, and a title) over a mostly
+  // empty lens, and the wearer asked whether "the mac mini tailscale and
+  // shit" was needed there. It is not: when nothing is wrong, one summary
+  // row carries the state and the safety attestation, and the rest of the
+  // glass belongs to the transcript.
+  const needsRecovery = model.state === 'blocked'
+    || model.state === 'approval_required'
+    || model.state === 'unavailable';
+  if (!needsRecovery) {
     return {
       summary: `${focus} > ${state} · ${agentTerminalSafetyLabel(model)}`,
       // Dense by demand: the wearer's words were "stop wasting so much
@@ -512,11 +522,19 @@ export function agentTerminalTranscriptLayout(
 }
 
 export function brainstormStateLabel(state: BrainstormHudModel['state']): string {
-  return state === 'topic_capture'
-    ? 'SPEAK NOW'
-    : state === 'acceptance_ready'
-    ? 'TEST READY'
-    : state.replace(/_/g, ' ').toUpperCase();
+  // Wearer words, not wire states. "SETTLED" and "ACCEPTANCE READY" are
+  // this codebase's internal vocabulary, and the wearer read them off the
+  // lens and asked, verbatim, what the fuck they mean. The wire keeps its
+  // names; the glass speaks plainly.
+  switch (state) {
+    case 'topic_capture': return 'SPEAK NOW';
+    case 'acceptance_ready': return 'TEST READY';
+    case 'running': return 'LIVE';
+    case 'settled': return 'DONE';
+    case 'approval_required': return 'NEEDS APPROVAL';
+    case 'unavailable': return 'OFFLINE';
+    default: return state.replace(/_/g, ' ').toUpperCase();
+  }
 }
 
 export interface PlanningMonthDay {

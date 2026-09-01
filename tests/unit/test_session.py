@@ -1697,3 +1697,140 @@ class TestFailureIsActionable:
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         assert "insufficient collaborators" in joined
         assert "switch its model, then ask again" in joined
+
+
+class TestMidSessionReplyRouting:
+    """"Send Claude's last reply to Hermes", spoken INTO a live session.
+
+    Routing outranks steering: it is an instruction TO JOAT about another
+    surface — the wearer thinks WITH the collaborators and hands the useful
+    parts to the workers — not a redirection of who speaks next.
+    """
+
+    class Steerable(Session):
+        def __init__(self) -> None:
+            self.directed: list[str] = []
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        def cancel(self) -> None:
+            pass
+
+        def consume_transcript(self, text: str) -> bool:
+            return False
+
+        def direct(self, text: str) -> str | None:
+            self.directed.append(text)
+            return None
+
+    def _manager(self, route):
+        session = self.Steerable()
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda t: session,
+            route_reply=route,
+        )
+        assert manager.handle_transcript("debate heat pumps") is True
+        return manager, session
+
+    async def test_a_routing_phrase_reaches_the_router_not_the_table(
+        self,
+    ) -> None:
+        routed: list[tuple[str | None, str | None]] = []
+
+        async def route(who: str | None, lane: str | None) -> str:
+            routed.append((who, lane))
+            return "sent"
+
+        manager, session = self._manager(route)
+        await asyncio.sleep(0)
+        assert manager.handle_transcript(
+            "JOAT, send Claude's last reply to Hermes",
+            addressed="send Claude's last reply to Hermes",
+        )
+        await asyncio.sleep(0)
+        assert routed == [("claude", "hermes")]
+        assert session.directed == []
+        await manager.close()
+
+    async def test_ordinary_steering_still_steers(self) -> None:
+        async def route(who: str | None, lane: str | None) -> str:
+            raise AssertionError("steering must not be routed")
+
+        manager, session = self._manager(route)
+        await asyncio.sleep(0)
+        assert manager.handle_transcript(
+            "JOAT, claude respond", addressed="claude respond",
+        )
+        await asyncio.sleep(0)
+        assert session.directed == ["claude respond"]
+        await manager.close()
+
+
+class TestMidSessionNoteSaving:
+    """"Note that" keeps a collaborator's reply without leaving the room."""
+
+    class Steerable(Session):
+        def __init__(self) -> None:
+            self.directed: list[str] = []
+            self.consumed: list[str] = []
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        def cancel(self) -> None:
+            pass
+
+        def consume_transcript(self, text: str) -> bool:
+            self.consumed.append(text)
+            return False
+
+        def direct(self, text: str) -> str | None:
+            self.directed.append(text)
+            return None
+
+    def _manager(self, save):
+        session = self.Steerable()
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda t: session,
+            save_reply=save,
+        )
+        assert manager.handle_transcript("debate heat pumps") is True
+        return manager, session
+
+    async def test_note_that_saves_the_newest_reply(self) -> None:
+        saved: list[str | None] = []
+
+        async def save(who: str | None) -> str:
+            saved.append(who)
+            return "Saved QuickNote: …"
+
+        manager, session = self._manager(save)
+        await asyncio.sleep(0)
+        assert manager.handle_transcript("JOAT, note that", addressed="note that")
+        assert manager.handle_transcript(
+            "JOAT, save Claude's last answer as a note",
+            addressed="save Claude's last answer as a note",
+        )
+        await asyncio.sleep(0)
+        assert saved == [None, "claude"]
+        assert session.directed == []
+        await manager.close()
+
+    async def test_a_remark_opening_with_note_that_stays_a_remark(self) -> None:
+        """"Note that the cache is stale" is a POINT, not a filing request.
+        Claiming it as an action would silently eat the wearer's argument."""
+        async def save(who: str | None) -> str:
+            raise AssertionError("a remark must not be filed as a note")
+
+        manager, session = self._manager(save)
+        await asyncio.sleep(0)
+        assert manager.handle_transcript(
+            "JOAT, note that the cache is stale",
+            addressed="note that the cache is stale",
+        )
+        await asyncio.sleep(0)
+        assert session.consumed == ["note that the cache is stale"]
+        await manager.close()

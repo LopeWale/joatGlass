@@ -27,6 +27,19 @@ from .roundtable import (
 )
 from .sinks import TranscriptSink
 
+from .agent_terminal import parse_reply_route
+
+# "Note that" / "save Claude's reply as a note", spoken into a live
+# session. Anchored so a REMARK that happens to open with "note that…"
+# ("note that the cache is stale") still lands as a YOU turn — only the
+# closed phrasings below are claimed as actions.
+_SAVE_REPLY = re.compile(
+    r"^(?:save|note|keep) (?:the )?"
+    r"(?:(?P<who>codex|claude)(?: ?s)? )?"
+    r"(?:last |latest )?(?:reply|response|answer|that|this|it)"
+    r"(?: down| as a note| to (?:my )?notes)?$"
+)
+
 log = logging.getLogger(__name__)
 
 # Firmware textColor: a corroborated-urgent card is the brightest thing on
@@ -112,6 +125,9 @@ class SessionManager:
         terminal_retry: Callable[[], Awaitable[None]] | None = None,
         topic_capture_view: TopicCaptureView | None = None,
         brainstorm_available: BrainstormAvailable | None = None,
+        route_reply: Callable[
+            [str | None, str | None], Awaitable[str]] | None = None,
+        save_reply: Callable[[str | None], Awaitable[str]] | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
@@ -125,6 +141,11 @@ class SessionManager:
         self._terminal_retry = terminal_retry
         self._topic_capture_view = topic_capture_view
         self._brainstorm_available = brainstorm_available
+        # JOAT as the glue between surfaces: "send Claude's last reply to
+        # Hermes" is spoken INTO a live Brainstorm but acts on the Agent
+        # Terminal. Injected so this manager stays ignorant of the roster.
+        self._route_reply = route_reply
+        self._save_reply = save_reply
         # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
         # not decoration. Keep it explicit so the next wearer phrase starts
         # the round without requiring them to repeat the capability name.
@@ -331,6 +352,39 @@ class SessionManager:
                 )
                 return True
             if self._active.consume_transcript(steer):
+                return True
+            # Routing outranks steering: "send Claude's last reply to
+            # Hermes" is an instruction TO JOAT about another surface, not
+            # a redirection of who speaks next — the wearer thinks WITH the
+            # collaborators here and hands the useful parts to the workers.
+            normalized = " ".join(
+                re.sub(r"[^a-z0-9]+", " ", steer.lower()).split()
+            )
+            route = parse_reply_route(normalized)
+            if route is not None and self._route_reply is not None:
+                router = self._route_reply
+
+                async def run_route() -> None:
+                    try:
+                        receipt = await router(*route)
+                        log.info("reply routed: %s", receipt)
+                    except Exception:
+                        log.exception("reply routing failed")
+
+                asyncio.get_running_loop().create_task(run_route())
+                return True
+            save = _SAVE_REPLY.match(normalized)
+            if save is not None and self._save_reply is not None:
+                saver, who = self._save_reply, save.group("who")
+
+                async def run_save() -> None:
+                    try:
+                        receipt = await saver(who)
+                        log.info("reply saved: %s", receipt)
+                    except Exception:
+                        log.exception("reply save failed")
+
+                asyncio.get_running_loop().create_task(run_save())
                 return True
             # Chairing the room is not an interruption: "claude, respond"
             # steers who speaks next without ending anything.

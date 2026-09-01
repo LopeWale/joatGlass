@@ -54,6 +54,16 @@ class NoteCommandController:
             return self._export()
         return None
 
+    def save_text(self, visible_text: str) -> str:
+        """Save arbitrary text as a QuickNote — the cross-surface entry.
+
+        "Save Claude's last reply as a note", spoken into a live
+        Brainstorm, lands here: the wearer thinks with the collaborators
+        and keeps the parts worth keeping. Public because other surfaces
+        route text in; the spoken "take a note" grammar shares it.
+        """
+        return self._save(visible_text)
+
     def _save(self, visible_text: str) -> str:
         if not visible_text:
             return "Say the text after “take a note”."

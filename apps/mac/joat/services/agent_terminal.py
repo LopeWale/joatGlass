@@ -558,6 +558,35 @@ _SWITCH = re.compile(
     r" (?P<name>[a-z0-9 ]+)$"
 )
 
+# Cross-surface routing: JOAT is the glue between Brainstorm and this
+# terminal. "Send Claude's last reply to Hermes" takes a collaborator's
+# whole answer out of the discussion and hands it to a work session —
+# the wearer's own words for what they are building: "the JOAT assistant
+# should be able to take anything and do something i ask it to do with
+# it". Matched against the normalized transcript, where "Claude's"
+# arrives as "claude s".
+_ROUTE_REPLY = re.compile(
+    r"^send (?:the )?(?:(?P<who>codex|claude)(?: ?s)? )?"
+    r"(?:last |latest )?(?:reply|response|answer|message|that)"
+    r"(?: to (?:the )?(?P<lane>[a-z0-9 ]+?))?$"
+)
+
+
+def parse_reply_route(said: str) -> tuple[str | None, str | None] | None:
+    """(who, lane) from a normalized routing phrase, or None.
+
+    Shared between the 'terminal …'-prefixed grammar and the mid-session
+    addressed path so the two surfaces cannot drift apart on what counts
+    as a routing request.
+    """
+    m = _ROUTE_REPLY.match(said)
+    if m is None:
+        return None
+    lane = (m.group("lane") or "").strip() or None
+    if lane in ("terminal", "agent terminal"):
+        lane = None  # the focused lane, same as every other terminal verb
+    return m.group("who"), lane
+
 
 class AgentTerminalCommands:
     """The spoken grammar — deliberately prefix-gated on 'terminal'.
@@ -577,10 +606,17 @@ class AgentTerminalCommands:
     gesture buys ONE utterance, soon."""
 
     def __init__(self, roster: AgentTerminalRoster,
-                 window_s: float | None = None) -> None:
+                 window_s: float | None = None,
+                 last_reply: Callable[
+                     [str | None], tuple[str, str] | None] | None = None,
+                 ) -> None:
         self._roster = roster
         self._armed_until = 0.0
         self._window_s = self.ARM_WINDOW_S if window_s is None else window_s
+        # Answers "what did <seat> last say?" from the Brainstorm snapshot.
+        # Injected, because the discussion belongs to another feature and
+        # this grammar must not import its internals to quote it.
+        self._last_reply = last_reply
 
     def arm(self) -> None:
         """A tap on the terminal promises the NEXT utterance as its input.
@@ -623,6 +659,27 @@ class AgentTerminalCommands:
             await self._roster.repaint()
         return answer
 
+    async def route_reply(self, who: str | None, lane: str | None) -> str:
+        """Hand a Brainstorm collaborator's last reply to a work session.
+
+        The receipt names the seat that was quoted, so the wearer can tell
+        "sent Claude's answer" from "sent the newest answer" without
+        opening the terminal to check.
+        """
+        if self._last_reply is None:
+            return "No Brainstorm has run yet — nothing to send."
+        found = self._last_reply(who)
+        if found is None:
+            seat = who.capitalize() if who else "any collaborator"
+            return f"No reply from {seat} to send yet."
+        label, text = found
+        if lane is not None and not self._roster.focus(lane):
+            return (f"No terminal session called {lane}. "
+                    + self._roster.overview())
+        sent = await self._roster.send(text)
+        await self._roster.repaint()
+        return f"{label.split(' (')[0]}'s reply → {sent}"
+
     async def _dispatch(self, text: str) -> str | None:
         said = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
         if not said:
@@ -657,6 +714,9 @@ class AgentTerminalCommands:
         if said in ("terminal tail", "terminal output", "terminal history"):
             return self._roster.tail()
         if said.startswith("terminal "):
+            route = parse_reply_route(said[len("terminal "):])
+            if route is not None:
+                return await self.route_reply(*route)
             # Everything after the surface name is the input, from the RAW
             # text so punctuation and casing survive into the session.
             raw = text.strip()

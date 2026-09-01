@@ -494,7 +494,9 @@ describe('Brainstorm wearable actions', () => {
       state: 'running', noToolsChecked: true, topic: 'hermes · running',
     }))
       .toEqual({
-        summary: 'HERMES > RUNNING · NO TOOLS CHECKED BEFORE SEND',
+        // LIVE, not RUNNING: the wearer asked what our state words meant,
+        // so the glass speaks theirs.
+        summary: 'HERMES > LIVE · NO TOOLS CHECKED BEFORE SEND',
         // Dense: header + LANES in two tight rows, 12 transcript rows.
         dividerY: 78.5,
         transcriptBaselineY: 92,
@@ -508,7 +510,7 @@ describe('Brainstorm wearable actions', () => {
       state: 'approval_required', noToolsChecked: false, topic: 'hermes · waiting',
     }))
       .toEqual({
-        summary: 'HERMES > APPROVAL REQUIRED',
+        summary: 'HERMES > NEEDS APPROVAL',
         dividerY: 118.5,
         transcriptBaselineY: 132,
         transcriptLineCapacity: 9,
@@ -521,7 +523,7 @@ describe('Brainstorm wearable actions', () => {
     // gateway session read someone else's name above their own output.
     expect(agentTerminalTranscriptLayout({
       state: 'running', noToolsChecked: false, topic: 'calendar · running · 2 waiting',
-    }).summary).toBe('CALENDAR > RUNNING · TOOL STATE NOT CLEARED');
+    }).summary).toBe('CALENDAR > LIVE · TOOL STATE NOT CLEARED');
     expect(agentTerminalFocusLabel('agent:hermes:nightly · running'))
       .toBe('AGENT:HERMES:NIGHTLY');
     // A gateway key we do not choose must not run off the spine.

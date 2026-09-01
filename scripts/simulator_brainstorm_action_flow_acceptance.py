@@ -170,8 +170,15 @@ class FixedVoiceFixtureStt(SttEngine):
 T = TypeVar("T")
 
 _EXPECTED_FLOW = (
-    ("brainstorm-hermes-required", None, None, "agent_terminal", "approval_required", False),
+    # The boundary, stated as a frame: Brainstorm opens READY while the
+    # Hermes terminal is still approval_required. An earlier build gated
+    # this open on the terminal and this script pinned that gate as
+    # correct behaviour — so when the engine removed it, the acceptance
+    # run "failed" against a product that had gotten better.
+    ("brainstorm-ungated", None, None, "brainstorm", "ready", False),
+    ("terminal-hermes-required", None, None, "agent_terminal", "approval_required", False),
     ("terminal-retry-ready", "click", "retry_terminal", "agent_terminal", "ready", False),
+    ("brainstorm-reopened", None, None, "brainstorm", "ready", False),
     ("daily-topic-capture", "click", "begin_topic_capture", "brainstorm", "topic_capture", False),
     ("daily-topic-capture-cancelled", "down", "cancel", "brainstorm", "ready", False),
     ("diagnostic-ready", None, None, "brainstorm", "ready", True),
@@ -183,13 +190,16 @@ _EXPECTED_FLOW = (
     ("terminal", "click", "show_terminal", "agent_terminal", "running", False),
     ("returned", "click", "show_brainstorm", "brainstorm", "running", False),
     ("reconnected", None, "authenticated_replay", "brainstorm", "running", False),
-    ("cancelled", "down", "cancel", "brainstorm", "cancelled", False),
+    # No injected gesture: swipes scroll a running transcript now, and
+    # the left-temple cancel press cannot be injected here. The cancel
+    # ACTION is driven engine-side through the production route instead.
+    ("cancelled", None, "cancel", "brainstorm", "cancelled", False),
     ("voice-direct-running", "synthetic_mic", "start_brainstorm", "brainstorm", "running", False),
 )
 _VISUAL_ONLY_ARTIFACTS = (
     "dense-transcript-preview",
     "terminal-transcript-preview",
-    "hermes-busy",
+    "brainstorm-while-terminal-busy",
 )
 # The fixed visual samples are deliberately taken after the action flow has
 # settled but before the DEV-only direct-voice replay opens its own live
@@ -578,7 +588,15 @@ async def _start_official_simulator(
 ) -> ManagedProcess:
     simulator = _start_process(
         "official-evenhub-simulator",
-        [str(args.simulator), plugin_url, "--automation-port", str(args.automation_port)],
+        # --aid: without it the simulator opens the system-default input,
+        # and a Bluetooth default (AirPods) has crashed it with SIGABRT in
+        # its tokio audio worker. The voice phase feeds fixed PCM through
+        # the DEV fixture URL; the device only has to exist and stay up.
+        [
+            str(args.simulator), plugin_url,
+            "--automation-port", str(args.automation_port),
+            "--aid", args.audio_input,
+        ],
         cwd=args.repo,
         env=env,
         log_path=output / log_name,
@@ -636,27 +654,22 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     voice_terminal = DeterministicHermes()
 
     def topic_capture_view(capturing: bool) -> BrainstormHudView:
+        # Never an agent_terminal frame, whatever Hermes is doing: the
+        # terminal neither gates nor joins a Brainstorm. This view used to
+        # divert to a "Hermes is required" recovery card and seat Hermes
+        # as a third collaborator — both sides of the boundary this
+        # acceptance now exists to hold.
         terminal_state = str(status.agent_terminal_projection()["state"])
-        if terminal_state != "ready":
-            return BrainstormHudView(
-                screen="agent_terminal",
-                state=terminal_state,
-                topic="Hermes Agent Terminal",
-                collaborators=[],
-                activity="Hermes is required for Brainstorm. Tap to retry.",
-                terminal_state=terminal_state,
-                no_tools_checked=False,
-            )
         return BrainstormHudView(
             screen="brainstorm",
             state="topic_capture" if capturing else "ready",
             topic="Speak your question" if capturing else "Ready for a question",
-            collaborators=["Codex", "Claude", "Hermes"],
+            collaborators=["Codex", "Claude"],
             activity=(
                 "Your next spoken phrase starts this Brainstorm."
                 if capturing else "Tap to choose a question, then speak."
             ),
-            terminal_state="ready",
+            terminal_state=terminal_state,
             no_tools_checked=True,
             acceptance_armed=diagnostic_armed,
         )
@@ -700,10 +713,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         voice_direct_started.set()
         return DebateSession(
             topic,
+            # Codex and Claude only. Hermes held a seat here for as long
+            # as the harness mirrored the old engine; production seats the
+            # two CLI collaborators and no Agent Terminal worker.
             RoundTable([
                 Participant("codex", "proposer", voice_terminal.stream),
                 Participant("claude", "critic", voice_terminal.stream),
-                Participant("hermes", "agent terminal", voice_terminal.stream),
             ]),
             HudSink(hud, status.agent_terminal_projection),
             judge=None,
@@ -715,9 +730,10 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         make_voice_brainstorm,
         topic_capture_view=topic_capture_view,
         terminal_retry=retry_terminal,
-        brainstorm_available=lambda: (
-            str(status.agent_terminal_projection()["state"]) == "ready"
-        ),
+        # Production availability is "two CLI seats", never the terminal;
+        # this harness's deterministic seats always exist. Wiring this to
+        # Hermes readiness was the removed gate, restated.
+        brainstorm_available=lambda: True,
     )
     voice_orchestrator = VoiceOrchestrator(
         gateway,
@@ -833,33 +849,72 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         except asyncio.TimeoutError as exc:
             raise BrainstormActionFlowError("simulator authenticated but never sent Hello") from exc
 
-        # Open the real Brainstorm capability producer while Hermes is not
-        # ready. The simulator cannot inject the left-temple sidebar gesture
-        # that selects this row, so sidebar ingress remains a physical G2
-        # gate. It *does* prove that the production Brainstorm row exposes a
-        # truthful terminal recovery surface and that its tap retries Hermes
-        # instead of silently opening a local-only session.
+        # Open the real Brainstorm capability while Hermes is NOT ready
+        # and require it to open anyway. The simulator cannot inject the
+        # left-temple sidebar gesture that selects the row, so sidebar
+        # ingress remains a physical G2 gate; what this proves is the
+        # boundary itself: Brainstorm's collaborators are the Codex and
+        # Claude CLIs, and no Agent Terminal worker gates or joins it.
+        # (This step used to expect the OPPOSITE — a "Hermes required"
+        # recovery card — and kept that removed gate alive as a spec.)
         await capabilities.open("Brainstorm")
+        ungated = await _wait_for(
+            lambda: _last_brainstorm(
+                gateway,
+                screen="brainstorm",
+                state="ready",
+            ),
+            label="ungated Brainstorm open",
+        )
+        if list(ungated.collaborators) != ["Codex", "Claude"]:
+            raise BrainstormActionFlowError(
+                "Brainstorm seated someone besides the two CLI collaborators: "
+                f"{ungated.collaborators!r}"
+            )
+        if ungated.terminal_state == "ready":
+            raise BrainstormActionFlowError(
+                "harness error: the terminal was already ready, so this run "
+                "proved nothing about the removed Hermes gate"
+            )
+        digest, raw, optical = await _capture(
+            automation_base,
+            output,
+            "01-brainstorm-ungated",
+            None,
+        )
+        receipts.append(ScreenReceipt(
+            "brainstorm-ungated", None, None,
+            ungated.screen, ungated.state,
+            ungated.acceptance_armed, digest,
+        ))
+        artifacts["brainstorm-ungated"] = {"raw": raw, "optical": optical}
+
+        # The recovery surface still exists — on the feature it belongs
+        # to. Opening the Agent Terminal while Hermes needs approval must
+        # show a truthful recovery card whose tap retries the terminal.
+        sent_before = len(gateway.sent)
+        await capabilities.open("Agent Terminal")
         terminal_approval = await _wait_for(
             lambda: _last_brainstorm(
                 gateway,
+                after=sent_before,
                 screen="agent_terminal",
                 state="approval_required",
             ),
-            label="Hermes-required Brainstorm capability",
+            label="Hermes-required Agent Terminal capability",
         )
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "01-brainstorm-hermes-required",
-            None,
+            "02-terminal-hermes-required",
+            digest,
         )
         receipts.append(ScreenReceipt(
-            "brainstorm-hermes-required", None, None,
+            "terminal-hermes-required", None, None,
             terminal_approval.screen, terminal_approval.state,
             terminal_approval.acceptance_armed, digest,
         ))
-        artifacts["brainstorm-hermes-required"] = {"raw": raw, "optical": optical}
+        artifacts["terminal-hermes-required"] = {"raw": raw, "optical": optical}
 
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
@@ -884,7 +939,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "02-terminal-retry-ready",
+            "03-terminal-retry-ready",
             digest,
         )
         receipts.append(ScreenReceipt(
@@ -894,20 +949,59 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         ))
         artifacts["terminal-retry-ready"] = {"raw": raw, "optical": optical}
 
-        # Agent Terminal deliberately starts an ordinary Brainstorm rather
-        # than a free-form remote console. Drive its production tap through
+        # Topic capture is a BRAINSTORM gesture, so return to that surface
+        # first: on a ready terminal a tap arms terminal input instead —
+        # this same block used to claim "Agent Terminal deliberately starts
+        # an ordinary Brainstorm", which is the conflation the plugin has
+        # since been fixed to refuse. Then drive the production tap through
         # EventRouter and prove the one-utterance capture plus explicit
         # cancellation before beginning the content-free diagnostic run.
+        reopen_before = len(gateway.sent)
+        await capabilities.open("Brainstorm")
+        reopened = await _wait_for(
+            # after=: without it this matches the phase-1 frame instantly.
+            lambda: _last_brainstorm(
+                gateway, after=reopen_before, screen="brainstorm", state="ready",
+            ),
+            label="Brainstorm reopened for topic capture",
+        )
+        # The engine has SENT the frame; the plugin has not necessarily
+        # PAINTED it. A click issued in that gap lands on the terminal
+        # surface — where a tap arms terminal input — which is exactly what
+        # this run recorded before this capture existed (actions since
+        # click: ['begin_terminal_input']). _capture(prior=...) is the
+        # script's settle idiom: it returns only after the framebuffer has
+        # visibly changed from the retry screen and held still.
+        digest, raw, optical = await _capture(
+            automation_base, output, "04-brainstorm-reopened", digest,
+        )
+        receipts.append(ScreenReceipt(
+            "brainstorm-reopened", None, None,
+            reopened.screen, reopened.state,
+            reopened.acceptance_armed, digest,
+        ))
+        artifacts["brainstorm-reopened"] = {"raw": raw, "optical": optical}
+
         action_count, sent_before = len(actions), len(gateway.sent)
         await _input(automation_base, "click")
-        topic_capture = await _wait_for(
-            lambda: next(
+        def _topic_capture_or_report() -> BrainstormAction | None:
+            hit = next(
                 (item for item in actions[action_count:]
                  if item.action == "begin_topic_capture"),
                 None,
-            ),
-            label="Agent Terminal topic-capture tap",
-        )
+            )
+            return hit
+
+        try:
+            topic_capture = await _wait_for(
+                _topic_capture_or_report,
+                label="Brainstorm topic-capture tap",
+            )
+        except BrainstormActionFlowError as exc:
+            observed = [item.action for item in actions[action_count:]]
+            raise BrainstormActionFlowError(
+                f"{exc} (actions since click: {observed!r})"
+            ) from exc
         capture_view = await _wait_for(
             lambda: _last_brainstorm(
                 gateway,
@@ -918,7 +1012,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "03-daily-topic-capture", digest,
+            automation_base, output, "05-daily-topic-capture", digest,
         )
         receipts.append(ScreenReceipt(
             "daily-topic-capture", "click", topic_capture.action,
@@ -946,7 +1040,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="cleared Agent Terminal topic-capture Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "04-daily-topic-capture-cancelled", digest,
+            automation_base, output, "06-daily-topic-capture-cancelled", digest,
         )
         receipts.append(ScreenReceipt(
             "daily-topic-capture-cancelled", "down", clear_capture.action,
@@ -979,7 +1073,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="explicitly armed diagnostic Brainstorm frame",
         )
         digest, raw, optical = await _capture(
-            automation_base, output, "05-diagnostic-ready", digest,
+            automation_base, output, "07-diagnostic-ready", digest,
         )
         receipts.append(ScreenReceipt(
             "diagnostic-ready", None, None,
@@ -1009,7 +1103,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "06-acceptance-ready",
+            "08-acceptance-ready",
             digest,
         )
         receipts.append(ScreenReceipt(
@@ -1042,7 +1136,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="streaming Brainstorm frame",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "07-running", digest)
+        digest, raw, optical = await _capture(automation_base, output, "09-running", digest)
         receipts.append(ScreenReceipt(
             "running", "click", begin.action, running.screen, running.state,
             running.acceptance_armed, digest,
@@ -1067,7 +1161,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="Agent Terminal frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "08-terminal", digest)
+        digest, raw, optical = await _capture(automation_base, output, "10-terminal", digest)
         receipts.append(ScreenReceipt(
             "terminal",
             "click",
@@ -1097,7 +1191,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="returned Brainstorm frame",
         )
-        digest, raw, optical = await _capture(automation_base, output, "09-returned", digest)
+        digest, raw, optical = await _capture(automation_base, output, "11-returned", digest)
         receipts.append(ScreenReceipt(
             "returned",
             "click",
@@ -1142,7 +1236,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             label="restored Brainstorm frame after reconnect",
         )
         await asyncio.sleep(1.0)
-        digest, raw, optical = await _capture(automation_base, output, "10-reconnected", digest)
+        digest, raw, optical = await _capture(automation_base, output, "12-reconnected", digest)
         receipts.append(ScreenReceipt(
             "reconnected",
             None,
@@ -1154,31 +1248,50 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         ))
         artifacts["reconnected"] = {"raw": raw, "optical": optical}
 
-        # Simulator swipe-down has text delivery and no physical source. The
-        # visible cancel path runs, while the receipt stays non-physical.
+        # A RUNNING session cannot be cancelled by a swipe any more —
+        # swipes page the scrollback, because a swipe that cancelled the
+        # session while the wearer re-read a reply was the harshest
+        # possible answer to "can I scroll?". The gesture that cancels is
+        # the left-temple double press, which this simulator cannot inject
+        # (every injected event reports the right temple), so the GESTURE
+        # stays a physical G2 gate. Everything after the gesture is
+        # driveable: hand SessionManager the same cancel action the plugin
+        # emits, and the production route lets the typed acceptance session
+        # claim it — orderly Hermes teardown, the cancelled paint, and the
+        # hermesRun="cancelled" receipt the validation below insists on.
+        # (The spoken "JOAT, stop" escape also works here, but it is a hard
+        # task cancellation: right for a wearer bailing out, wrong for
+        # proving the graceful path — and it is pinned by its own unit
+        # test, test_a_spoken_stop_still_paints_the_cancelled_frame.)
         action_count, sent_before = len(actions), len(gateway.sent)
-        await _input(automation_base, "down")
-        cancel = await _wait_for(
-            lambda: next(
-                (item for item in actions[action_count:] if item.action == "cancel"),
-                None,
-            ),
-            label="simulator cancellation fallback",
-        )
-        cancelled = await _wait_for(
-            lambda: _last_brainstorm(
-                gateway,
-                after=sent_before,
-                screen="brainstorm",
-                state="cancelled",
-            ),
-            label="cancelled Brainstorm frame",
-        )
-        digest, raw, optical = await _capture(automation_base, output, "11-cancelled", digest)
+        sessions.handle_brainstorm_action(BrainstormAction(
+            action="cancel",
+            connection_generation=gateway.connection_generation,
+        ))
+        try:
+            cancelled = await _wait_for(
+                lambda: _last_brainstorm(
+                    gateway,
+                    after=sent_before,
+                    screen="brainstorm",
+                    state="cancelled",
+                ),
+                label="cancelled Brainstorm frame",
+            )
+        except BrainstormActionFlowError as exc:
+            tail = [
+                f"{m.screen}/{m.state}"
+                for m in gateway.sent[-8:]
+                if isinstance(m, BrainstormHudView)
+            ]
+            raise BrainstormActionFlowError(
+                f"{exc} (last frames: {tail!r}, active={sessions._active!r})"
+            ) from exc
+        digest, raw, optical = await _capture(automation_base, output, "13-cancelled", digest)
         receipts.append(ScreenReceipt(
             "cancelled",
-            "down",
-            cancel.action,
+            None,
+            "cancel",
             cancelled.screen,
             cancelled.state,
             cancelled.acceptance_armed,
@@ -1224,7 +1337,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "12-dense-transcript-preview",
+            "14-dense-transcript-preview",
             digest,
         )
         density_digest = digest
@@ -1239,14 +1352,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "13-terminal-transcript-preview",
+            "15-terminal-transcript-preview",
             digest,
         )
         artifacts["terminal-transcript-preview"] = {"raw": raw, "optical": optical}
 
-        # A healthy terminal that is currently streaming is deliberately not
-        # an admission to a second Brainstorm. Exercise the real capability
-        # route and retain only its optical frame—not a transcript or payload.
+        # A BUSY terminal is no more a Brainstorm gate than an absent one:
+        # this used to expect a "Hermes is finishing the current response"
+        # recovery card here, i.e. the removed gate wearing its politest
+        # copy. Opening Brainstorm while the terminal streams must open
+        # Brainstorm — and the frame still carries the true terminal state,
+        # so nothing is hidden from the wearer either.
         status.set_agent_terminal(state="running", reason="")
         sent_before = len(gateway.sent)
         await capabilities.open("Brainstorm")
@@ -1254,20 +1370,22 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             lambda: _last_brainstorm(
                 gateway,
                 after=sent_before,
-                screen="agent_terminal",
-                state="running",
+                screen="brainstorm",
+                state="ready",
             ),
-            label="busy Hermes Brainstorm recovery",
+            label="Brainstorm open while the terminal streams",
         )
-        if busy.activity != "Hermes is finishing the current response. Wait for ready.":
-            raise BrainstormActionFlowError("busy Hermes recovery copy is not truthful")
+        if busy.terminal_state != "running":
+            raise BrainstormActionFlowError(
+                "the frame hid the busy terminal instead of carrying it"
+            )
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "14-hermes-busy",
+            "16-brainstorm-while-terminal-busy",
             digest,
         )
-        artifacts["hermes-busy"] = {"raw": raw, "optical": optical}
+        artifacts["brainstorm-while-terminal-busy"] = {"raw": raw, "optical": optical}
 
         # The daily entry point must work without selecting a menu item or
         # touching the home Mac. Restart the official simulator with the
@@ -1324,7 +1442,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         digest, raw, optical = await _capture(
             automation_base,
             output,
-            "15-voice-direct-running",
+            "17-voice-direct-running",
             digest,
         )
         receipts.append(ScreenReceipt(
@@ -1399,6 +1517,11 @@ def main() -> None:
     parser.add_argument("--automation-port", type=int, default=9993)
     parser.add_argument("--ws-port", type=int, default=8793)
     parser.add_argument("--ws-listen-host", default="0.0.0.0")
+    parser.add_argument(
+        "--audio-input",
+        default="coreaudio:BuiltInMicrophoneDevice",
+        help="simulator audio input device (see --list-audio-input-devices)",
+    )
     parser.add_argument(
         "--ws-url",
         default=None,

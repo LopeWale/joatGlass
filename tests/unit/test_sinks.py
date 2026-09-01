@@ -820,3 +820,48 @@ class TestTheTerminalHandoffSurvivesStreaming:
 
         assert transport.sent[-1].screen == "brainstorm"
         assert "converged" in transport.sent[-1].activity
+
+
+class TestTheSnapshotQuotesWholeReplies:
+    """last_reply feeds cross-surface routing, so it must return the FULL
+    turn — the collapsed panel row would send a summary to Hermes."""
+
+    def _snapshot(self):
+        from joat.services.sinks import DebateSnapshot
+
+        return DebateSnapshot(
+            topic="caching",
+            speakers=("CODEX (proposer)", "CLAUDE (critic)"),
+            turns=(
+                ("CODEX (proposer)", "Cache on session id."),
+                ("CLAUDE (critic)", "Key it on the id AND the generation, "
+                                    "or a handoff replays stale rounds."),
+            ),
+        )
+
+    def test_names_resolve_case_insensitively_without_roles(self) -> None:
+        snapshot = self._snapshot()
+        found = snapshot.last_reply("claude")
+        assert found is not None
+        assert found[0] == "CLAUDE (critic)"
+        assert found[1].startswith("Key it on the id")
+
+    def test_no_name_means_the_newest_turn(self) -> None:
+        snapshot = self._snapshot()
+        found = snapshot.last_reply(None)
+        assert found is not None and found[0] == "CLAUDE (critic)"
+
+    def test_a_failed_turn_is_never_routed(self) -> None:
+        """Routing a CLI usage-limit complaint into a work session would
+        execute an error message as an instruction."""
+        from joat.services.roundtable import FAILURE_MARK
+        from joat.services.sinks import DebateSnapshot
+
+        snapshot = DebateSnapshot(turns=(
+            ("CODEX (proposer)", "Real answer."),
+            ("CLAUDE (critic)",
+             f"{FAILURE_MARK} You've hit your usage limit."),
+        ))
+        found = snapshot.last_reply(None)
+        assert found is not None and found[0] == "CODEX (proposer)"
+        assert snapshot.last_reply("claude") is None

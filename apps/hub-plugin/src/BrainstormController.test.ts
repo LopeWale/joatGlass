@@ -7,7 +7,9 @@ function model(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudModel 
     screen: 'brainstorm',
     state: 'ready',
     topic: 'How should JOAT plan today?',
-    collaborators: ['Codex', 'Claude', 'Hermes'],
+    // The two CLI collaborators, and no one else: Hermes sat in this
+    // fixture for as long as the engine wrongly seated it in production.
+    collaborators: ['Codex', 'Claude'],
     activity: 'Say “JOAT, brainstorm …” to begin.',
     terminalState: 'ready',
     noToolsChecked: true,
@@ -170,5 +172,22 @@ describe('BrainstormController', () => {
     expect(controller.handleClick()).toBe(false);
     expect(controller.handleCancel()).toBe(false);
     expect(sent).toEqual([]);
+  });
+});
+
+describe('swipe ownership by state', () => {
+  it('claims a swipe only during topic capture', () => {
+    const { controller, sent } = make();
+    controller.present(model({ state: 'topic_capture' }));
+    expect(controller.handleSwipe()).toBe(true);
+    expect(sent.map((m) => (m as { action: string }).action)).toEqual(['cancel']);
+
+    // A RUNNING session must never lose itself to a swipe — the wearer
+    // re-reading a reply is the whole reason swipes scroll now.
+    controller.present(model({ state: 'running' }));
+    expect(controller.handleSwipe()).toBe(false);
+    controller.present(model({ state: 'ready' }));
+    expect(controller.handleSwipe()).toBe(false);
+    expect(sent).toHaveLength(1);
   });
 });

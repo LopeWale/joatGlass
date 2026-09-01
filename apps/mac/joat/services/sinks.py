@@ -472,6 +472,30 @@ class DebateSnapshot:
             out.append(f"— {self.verdict}"[:width])
         return out
 
+    def last_reply(self, who: str | None = None) -> tuple[str, str] | None:
+        """The newest full turn — the thing JOAT routes onward.
+
+        The wearer's design, in their words: "asking to take the last
+        response from claude or codex and send it to the hermes in the
+        Agent Terminal" — JOAT is the glue between the surfaces, so the
+        snapshot must be able to answer "what did Claude just say?" with
+        the WHOLE reply, not the collapsed row the panel draws.
+
+        ``who`` filters by seat name ("claude", "codex"), matched against
+        the label's name half so "CLAUDE (critic)" answers to "claude".
+        Failed turns are skipped: routing a CLI's usage-limit complaint
+        into a work session would execute an error message.
+        """
+        wanted = who.strip().lower() if who else None
+        for label, text in reversed(self.turns):
+            if is_failure(text):
+                continue
+            name = label.split(" (")[0].strip().lower()
+            if wanted is not None and name != wanted:
+                continue
+            return label, text
+        return None
+
 
 class DebateStateSink:
     """Keeps the current debate as STATE, so a panel can be reopened.

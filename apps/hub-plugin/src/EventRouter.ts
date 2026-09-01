@@ -36,6 +36,9 @@ export interface BrainstormInputOwner {
   handleClick(): boolean;
   /** Left-temple double press cancels an active Brainstorm round. */
   handleCancel(): boolean;
+  /** A swipe during topic capture backs out of the armed capture; every
+   * other state lets the swipe fall through to transcript scrolling. */
+  handleSwipe(): boolean;
   /** True only when the Mac has explicitly armed the isolated diagnostic. */
   isAcceptanceArmed(): boolean;
   /** Right-temple/ring double press starts the fixed content-free test only
@@ -237,12 +240,16 @@ export class EventRouter {
       // the deliberate left double-press only.
       if (this.brainstorm?.isActive()) {
         const swipe = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
-        if (swipe === OsEventTypeList.SCROLL_TOP_EVENT) {
-          this.transcriptScroll?.('up');
-          return;
-        }
-        if (swipe === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-          this.transcriptScroll?.('down');
+        if (
+          swipe === OsEventTypeList.SCROLL_TOP_EVENT
+          || swipe === OsEventTypeList.SCROLL_BOTTOM_EVENT
+        ) {
+          // Topic capture first: it has nothing to scroll, and a swipe
+          // there is the wearer backing out of the armed capture.
+          if (this.brainstorm.handleSwipe()) return;
+          this.transcriptScroll?.(
+            swipe === OsEventTypeList.SCROLL_TOP_EVENT ? 'up' : 'down',
+          );
           return;
         }
       }
