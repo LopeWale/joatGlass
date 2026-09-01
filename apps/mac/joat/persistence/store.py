@@ -507,6 +507,19 @@ _MIGRATION_7 = (
     """,
 )
 
+_MIGRATION_8 = (
+    """
+    CREATE TABLE calendar_event_alerts (
+        event_identifier TEXT NOT NULL CHECK (
+            typeof(event_identifier) = 'text' AND length(event_identifier) > 0
+        ),
+        starts_at_unix_ms INTEGER NOT NULL CHECK (starts_at_unix_ms >= 0),
+        alerted_at_us INTEGER NOT NULL CHECK (alerted_at_us >= 0),
+        PRIMARY KEY (event_identifier, starts_at_unix_ms)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -515,6 +528,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (5, "retain_task_alert_history", _MIGRATION_5),
     (6, "durable_local_voice_notes", _MIGRATION_6),
     (7, "voice_note_insights", _MIGRATION_7),
+    (8, "calendar_starting_soon_alerts", _MIGRATION_8),
 )
 
 

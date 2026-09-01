@@ -175,8 +175,9 @@ def notifications_tool(log_: "CardLog") -> Tool:
             return "no notifications shown recently"
         now = time.time()
         return "; ".join(
-            f"[{max(0, int((now - at) / 60))}m ago] {card.replace(chr(10), ' / ')}"
-            for at, card in entries
+            f"[{max(0, int((now - c.at) / 60))}m ago] "
+            f"{c.render().replace(chr(10), ' / ')}"
+            for c in entries
         )
 
     return Tool(

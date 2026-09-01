@@ -164,6 +164,23 @@ def parse_triage(reply: str) -> tuple[Urgency, str] | None:
     return None
 
 
+# Channels where the notification TITLE is a person, not an app. The same
+# set decides the card's `source`, so both derive from one place.
+PERSON_CHANNELS = ("Messages", "Mail", "Slack", "Discord")
+
+
+def _event_class(channel: str) -> str:
+    """Machine taxonomy for a card, derived from the humanized channel.
+
+    Deliberately local: `persistence/notifications.py` already imports
+    `Notification` from this module, so importing its classifier back here
+    would cycle. The two classifiers stay independent by design.
+    """
+    if channel in PERSON_CHANNELS:
+        return "messages.incoming_text"
+    return f"notifications.{channel.lower().replace(' ', '_')}" if channel else "notifications.unknown"
+
+
 class NotificationSource(Protocol):
     """Watermark-generic store: sqlite (legacy) or Biome (macOS 26+)."""
 
@@ -178,7 +195,7 @@ class NotificationChannel:
         self,
         store: NotificationSource,
         triage: ReplyEngine | None,
-        deliver: Callable[[str], None | Awaitable[None]],
+        deliver: Callable[[Card], None | Awaitable[None]],
         poll_interval_s: float = 2.0,
         status: object | None = None,
         policy: DeliveryPolicy | None = None,
@@ -269,7 +286,7 @@ class NotificationChannel:
         channel = humanize_app(n.app)
         # For a person-to-person channel the TITLE is the sender, which is
         # what the wearer needs to see; for app alerts the app name is.
-        source = n.title if channel in ("Messages", "Mail", "Slack", "Discord") else channel
+        source = n.title if channel in PERSON_CHANNELS else channel
         if level is Urgency.URGENT:
             # Urgency must be corroborated by the text itself, not asserted
             # by a 3B model that marked routine texts URGENT in testing.
@@ -278,8 +295,10 @@ class NotificationChannel:
         if not summary.strip():
             summary = n.body or n.title
 
-        card = self._policy.admit(Card(source=source, channel=channel,
-                                       summary=summary, urgency=level))
+        card = self._policy.admit(Card(
+            source=source, channel=channel, summary=summary, urgency=level,
+            event_class=_event_class(channel), origin_id=n.native_id,
+        ))
         if card is None:
             log.info(
                 "notification disposition=suppressed urgency=%s channel=%s chars=%d",
@@ -288,6 +307,8 @@ class NotificationChannel:
                 len(summary),
             )
             return False
+        # The card itself is delivered; this rendering is only for the log
+        # line and the status mirror.
         rendered = card.render()
         log.info(
             "notification disposition=enqueued channel=%s latency_s=%.1f chars=%d",
@@ -295,7 +316,7 @@ class NotificationChannel:
             time.time() - n.delivered_unix,
             len(rendered),
         )
-        delivery = self._deliver(rendered)
+        delivery = self._deliver(card)
         if inspect.isawaitable(delivery):
             await delivery
         if self._status is not None:

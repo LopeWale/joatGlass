@@ -11,6 +11,7 @@ from datetime import datetime
 from enum import Enum
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..channels.cards import Card, CardLog, Urgency
 from ..core.protocol import ProductivityHudView
 from ..native.bridge import (
     NativeBridgeClient,
@@ -197,6 +198,7 @@ class TaskMonitor:
         evaluate: Callable[
             [TaskOccurrence], Awaitable[ReminderNativeState | None]
         ] | None = None,
+        card_log: CardLog | None = None,
     ) -> None:
         if poll_interval_s <= 0:
             raise ValueError("poll interval must be positive")
@@ -204,6 +206,10 @@ class TaskMonitor:
         self._deliver = deliver
         self._interval = poll_interval_s
         self._evaluate = evaluate
+        # History only. Due reminders keep their own acknowledged delivery
+        # path — this just lets "what did I miss?" see them alongside
+        # notifications instead of in a separate silo.
+        self._card_log = card_log
         self._running = False
 
     async def run(self) -> None:
@@ -298,5 +304,14 @@ class TaskMonitor:
                 occurrence.occurrence_id,
                 now_us=receipt_us,
             )
+            if self._card_log is not None:
+                self._card_log.add(Card(
+                    source=occurrence.title,
+                    channel="Reminders",
+                    summary="Due now",
+                    urgency=Urgency.URGENT,
+                    event_class="reminders.due",
+                    origin_id=occurrence.occurrence_id,
+                ))
             delivered += 1
         return delivered

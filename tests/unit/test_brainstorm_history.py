@@ -146,3 +146,78 @@ class TestSinkIntegration:
         await sink.chunk("said something")
         await sink.close("done")          # must not raise
         assert sink.snapshot.verdict == "done"
+
+
+class TestExport:
+    """'The result has to leave the glasses.'
+
+    The transcript streamed to the HUD and to stdout — which under JOAT.app
+    is redirected to a log file, so there was no attached terminal to read
+    and nothing a wearer could open later.
+    """
+
+    def _export(self, tmp_path: Path, topic: str = "cold-start latency"):
+        history = BrainstormHistory(path=tmp_path / "b.json",
+                                    export_dir=tmp_path / "exports")
+        history.record(topic, ("codex", "claude"), TURNS, "converged 0.91")
+        files = sorted((tmp_path / "exports").iterdir())
+        return files[0].read_text(), files[0].name
+
+    def test_a_finished_session_becomes_a_readable_file(self, tmp_path: Path) -> None:
+        text, name = self._export(tmp_path)
+        assert name.endswith("-cold-start-latency.md")
+        assert text.startswith("# cold-start latency")
+        assert "codex, claude" in text and "converged 0.91" in text
+
+    def test_every_turn_is_attributed(self, tmp_path: Path) -> None:
+        text, _ = self._export(tmp_path)
+        for label, said in TURNS:
+            assert f"## {label}" in text
+            assert said.strip().splitlines()[0] in text
+
+    def test_the_filename_survives_an_awkward_question(self, tmp_path: Path) -> None:
+        _, name = self._export(tmp_path, "Tabs vs. spaces?! (again)")
+        assert name.endswith(".md")
+        assert "/" not in name and "?" not in name
+
+    def test_an_unwritable_export_dir_never_breaks_recording(
+        self, tmp_path: Path
+    ) -> None:
+        # The history and the export are separate on purpose: losing one
+        # must not lose the other, and neither may break the session.
+        blocked = tmp_path / "not-a-dir"
+        blocked.write_text("x")
+        history = BrainstormHistory(path=tmp_path / "b.json",
+                                    export_dir=blocked / "nested")
+        history.record("t", ("codex",), TURNS, "done")
+        assert history.recent()[0].topic == "t"   # history still landed
+
+
+class TestSpokenLookup:
+    """An export nobody can find is not an export."""
+
+    def _commands(self, tmp_path: Path):
+        from joat.services.brainstorm_history import BrainstormHistoryCommands
+
+        history = BrainstormHistory(path=tmp_path / "b.json",
+                                    export_dir=tmp_path / "JOAT Brainstorms")
+        return BrainstormHistoryCommands(history), history
+
+    async def test_it_names_the_folder_and_the_newest(self, tmp_path: Path) -> None:
+        commands, history = self._commands(tmp_path)
+        history.record("cold-start latency", ("codex",), TURNS, "converged")
+        answer = await commands.handle_command("where are my brainstorms")
+        assert answer is not None
+        assert "cold-start latency" in answer
+        assert "JOAT Brainstorms" in answer
+
+    async def test_it_answers_before_there_is_anything(self, tmp_path: Path) -> None:
+        commands, _ = self._commands(tmp_path)
+        answer = await commands.handle_command("where are my brainstorms saved")
+        assert answer is not None and "No brainstorms yet" in answer
+
+    async def test_ordinary_speech_is_left_alone(self, tmp_path: Path) -> None:
+        commands, _ = self._commands(tmp_path)
+        for said in ("where is the nearest coffee shop",
+                     "what is a brainstorm", "brainstorm heat pumps"):
+            assert await commands.handle_command(said) is None

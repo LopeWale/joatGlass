@@ -8,7 +8,7 @@ import plistlib
 import sqlite3
 from pathlib import Path
 
-from joat.channels.cards import Urgency
+from joat.channels.cards import Card, Urgency
 from joat.channels.notifications import (
     COCOA_EPOCH_UNIX,
     Notification,
@@ -88,7 +88,7 @@ class TestChannel:
     async def test_polls_triages_and_delivers_with_urgency_prefix(self, tmp_path: Path) -> None:
         db = tmp_path / "db"
         make_db(db, [("com.seed.app", "old", "", "pre-existing")])
-        delivered: list[str] = []
+        delivered: list[Card] = []
         channel = NotificationChannel(
             NotificationStore(db),
             ScriptedTriage({
@@ -115,7 +115,7 @@ class TestChannel:
         # New contract: humanized channel, sender headline, two lines, and a
         # SHORT message shown verbatim rather than model-paraphrased. The
         # promo is still classified IGNORE by the model and never delivered.
-        assert delivered == ["Dele · Messages\nare you coming?"]
+        assert [c.render() for c in delivered] == ["Dele · Messages\nare you coming?"]
 
     async def test_unreadable_store_goes_dormant_not_fatal(self, tmp_path: Path) -> None:
         channel = NotificationChannel(
@@ -125,7 +125,7 @@ class TestChannel:
 
     async def test_delivery_log_never_contains_sender_or_message(self, caplog) -> None:  # type: ignore[no-untyped-def]
         caplog.set_level(logging.INFO)
-        delivered: list[str] = []
+        delivered: list[Card] = []
         channel = NotificationChannel(
             None,  # type: ignore[arg-type] -- _handle is the unit under test
             None,
@@ -142,7 +142,7 @@ class TestChannel:
 
         await channel._handle(notification)
 
-        assert delivered == ["Private Sender · Messages\nThe private message body"]
+        assert [c.render() for c in delivered] == ["Private Sender · Messages\nThe private message body"]
         assert "Private Sender" not in caplog.text
         assert "The private message body" not in caplog.text
         assert "channel=Messages" in caplog.text
@@ -154,7 +154,7 @@ class TestChannel:
                 await asyncio.Event().wait()
                 return None
 
-        delivered: list[str] = []
+        delivered: list[Card] = []
         channel = NotificationChannel(
             None,  # type: ignore[arg-type] -- _handle is the unit under test
             NeverReplies(),
@@ -170,7 +170,7 @@ class TestChannel:
             delivered_unix=0.0,
         ))
 
-        assert delivered == ["Ada · Messages\nCall me"]
+        assert [c.render() for c in delivered] == ["Ada · Messages\nCall me"]
 
     async def test_failed_triage_does_not_block_raw_delivery(self) -> None:
         class BrokenTriage(ReplyEngine):
@@ -178,7 +178,7 @@ class TestChannel:
                 del text
                 raise RuntimeError("model unavailable")
 
-        delivered: list[str] = []
+        delivered: list[Card] = []
         channel = NotificationChannel(
             None,  # type: ignore[arg-type] -- _handle is the unit under test
             BrokenTriage(),
@@ -193,7 +193,7 @@ class TestChannel:
             delivered_unix=0.0,
         ))
 
-        assert delivered == ["Ada · Messages\nCall me"]
+        assert [c.render() for c in delivered] == ["Ada · Messages\nCall me"]
 
 
 class TestManagerCards:
@@ -216,16 +216,17 @@ class TestManagerCards:
 
         sess = Gated()
         mgr = SessionManager(HudWriter(transport), lambda t: sess)
-        mgr.notify("[Mail] first card")
+        mgr.notify(Card(source="Mail", channel="Mail", summary="first card"))
         await asyncio.sleep(0)
         assert any(isinstance(m, HudText) and "first card" in m.text for m in transport.sent)
 
         assert mgr.handle_transcript("debate something") is True
         await asyncio.sleep(0)
-        mgr.notify("[SMS] queued while debating")
+        mgr.notify(Card(source="SMS", channel="Messages",
+                        summary="queued while debating"))
         assert not any("queued while debating" in getattr(m, "text", "") for m in transport.sent)
         assert "queued while debating" not in caplog.text
-        assert "card queued behind active session chars=" in caplog.text
+        assert "card queued behind active session urgency=" in caplog.text
         sess.gate.set()
         await asyncio.sleep(0); await asyncio.sleep(0); await asyncio.sleep(0)
         assert any("queued while debating" in getattr(m, "text", "") for m in transport.sent)

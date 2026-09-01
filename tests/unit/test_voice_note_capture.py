@@ -459,3 +459,18 @@ async def test_typed_controls_mirror_the_voice_grammar(tmp_path: Path) -> None:
         receipt = await capture.control_stop()
         assert receipt.startswith("Saved Voice Note")
         assert capture.active is False
+
+
+async def test_whisper_terminal_punctuation_never_deafens_the_grammar(
+    tmp_path: Path,
+) -> None:
+    """Short utterances come back punctuated ("Pause recording."). Terminal
+    punctuation is STT noise, not part of the lifecycle command."""
+    durable, notes, source, capture = controller(tmp_path / "joat.sqlite3")
+    with durable:
+        assert await capture.handle_command("Start a quicknote called Standup.") is not None
+        source.emit(0)
+        assert await capture.handle_command("Pause recording.") == "Paused Voice Note: Standup."
+        assert await capture.handle_command("Resume recording!") == "Resumed Voice Note: Standup."
+        receipt = await capture.handle_command("Stop the quicknote.")
+        assert receipt is not None and receipt.startswith("Saved Voice Note")

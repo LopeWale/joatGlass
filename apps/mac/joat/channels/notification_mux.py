@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from ..core.interfaces import ReplyEngine
 from ..persistence.notifications import NotificationObservationStore, PendingNotification
+from .cards import Card
 from .notifications import NotificationChannel, NotificationSource
 
 log = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class NotificationMux:
         observations: NotificationObservationStore,
         *,
         triage: ReplyEngine | None,
-        deliver: Callable[[str], None | Awaitable[None]],
+        deliver: Callable[[Card], None | Awaitable[None]],
         status: object | None = None,
         poll_interval_s: float = 1.0,
         authority_grace_s: float = 1.25,
