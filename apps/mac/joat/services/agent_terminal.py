@@ -174,8 +174,24 @@ class AgentTerminalRoster:
         )
         return TerminalFrame(
             topic=header, state=state,
-            lanes=list(self._lanes)[:3], lines=body,
+            # Names alone made 'watch concurrent work' impossible: a
+            # background lane could finish, block, or start waiting on an
+            # approval and the frame looked identical. Each lane now
+            # carries its state, so a glance covers the whole roster.
+            lanes=[f"{name}·{self._mark(other)}"
+                   for name, other in list(self._lanes.items())[:3]],
+            lines=body,
         )
+
+    @staticmethod
+    def _mark(lane: TerminalLane) -> str:
+        if lane.approvals:
+            return f"ask{len(lane.approvals)}"
+        if lane.busy:
+            return "run"
+        if lane.last_error:
+            return "err"
+        return "idle"
 
     def _visible_lane(self, fallback: TerminalLane) -> TerminalLane:
         """Where output must land to actually be SEEN.
@@ -262,6 +278,15 @@ class AgentTerminalRoster:
             lane.tail.append(f"[!] {lane.last_error}")
             log.warning("terminal %s failed: %s", lane.name, lane.last_error)
             await self._narrate(lane, f"{lane.name} ▸ failed — {lane.last_error}")
+
+    async def _alert(self, line: str) -> None:
+        """Say something about a lane the wearer is NOT watching."""
+        await self.repaint()
+        if self._announce is not None:
+            try:
+                await self._announce(line)
+            except Exception:  # a dead surface must not kill the work
+                pass
 
     async def _narrate(self, lane: TerminalLane, line: str) -> None:
         # Only the focused lane changes what the lenses show. A background
@@ -378,10 +403,18 @@ class AgentTerminalRoster:
         line = f"[approval] {kind}: {summary or approval_id} — say 'terminal approve' or 'terminal deny'"
         lane.tail.append(line)
         loop = asyncio.get_running_loop()
-        if self._announce is not None and lane.name == self._focus:
+        if lane.name == self._focus:
             loop.create_task(self._narrate(lane, line))
         else:
-            loop.create_task(self.repaint())
+            # A BACKGROUND approval is the one thing that must interrupt.
+            # Ordinary output from an unwatched lane stays quiet on
+            # purpose, but an approval halts that session until it is
+            # answered — staying silent means the wearer discovers a
+            # stalled job much later, wondering why nothing happened.
+            loop.create_task(self._alert(
+                f"{lane.name} is waiting on approval: {summary or kind}. "
+                f"Say 'switch terminal to {lane.name}'."
+            ))
 
     def approvals_view(self) -> str:
         lane = self._lanes.get(self._focus or "")

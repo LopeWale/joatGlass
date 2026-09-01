@@ -675,3 +675,75 @@ class TestBrainstormRowIsNotGatedOnHermes:
         assert "cold-start latency" in frame.topic
         assert "keep the weights resident" in frame.activity
         assert frame.state == "settled"
+
+
+class TestWatchingConcurrentWork:
+    """'Watch concurrent work' is in the roadmap; it needs to be visible.
+
+    The frame listed lane NAMES only, so a background lane could finish,
+    fail, or start waiting on an approval and the frame looked identical.
+    """
+
+    async def test_every_lane_carries_its_state(self) -> None:
+        gate = asyncio.Event()
+        r = roster(work=FakeAgent(gate=gate), calendar=FakeAgent(["done\n"]))
+        await r.send("long job")                 # work: running
+        await asyncio.sleep(0)
+        frame = r.frame()
+        assert "work·run" in frame.lanes
+        assert "calendar·idle" in frame.lanes
+        gate.set()
+
+    async def test_a_waiting_lane_shows_its_count(self) -> None:
+        r = roster(work=FakeAgent(), calendar=ApprovingAgent())
+        r.note_approval("calendar", "a1", "exec", "deploy")
+        assert "calendar·ask1" in r.frame().lanes
+
+    async def test_a_failed_background_lane_is_visible(self) -> None:
+        r = roster(work=FakeAgent(), other=FakeAgent(fail="gateway said no"))
+        await r.send("doomed", name="other")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert "other·err" in r.frame().lanes
+
+
+class TestBackgroundApprovalsInterrupt:
+    """An approval halts its session until answered — silence hides a stall.
+
+    Ordinary output from an unwatched lane stays quiet on purpose (BLE
+    economy), but an approval is the one thing that must reach the wearer
+    wherever they are looking.
+    """
+
+    async def test_a_background_approval_is_announced(self) -> None:
+        said: list[str] = []
+
+        async def announce(line: str) -> None:
+            said.append(line)
+
+        r = AgentTerminalRoster(
+            [("work", FakeAgent()), ("calendar", ApprovingAgent())],
+            announce=announce,
+        )
+        assert r.focused == "work"
+        r.note_approval("calendar", "a1", "exec", "deploy to prod")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert said, "a blocking approval was never surfaced"
+        assert "calendar" in said[-1] and "deploy to prod" in said[-1]
+        # And it tells the wearer how to get there.
+        assert "switch terminal to calendar" in said[-1]
+
+    async def test_background_OUTPUT_stays_quiet(self) -> None:
+        said: list[str] = []
+
+        async def announce(line: str) -> None:
+            said.append(line)
+
+        r = AgentTerminalRoster(
+            [("work", FakeAgent(gate=asyncio.Event())),
+             ("other", FakeAgent(["chatter\n", "more chatter\n"]))],
+            announce=announce,
+        )
+        await r.send("background", name="other")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert said == []          # not an interruption
+        assert "chatter" in r.tail("other")   # but still recorded
