@@ -8,6 +8,7 @@ able to silence the other.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import io
 
@@ -288,6 +289,13 @@ class TestSilentWaitClock:
     """A turn says nothing for 12-40s. Without a moving number the wearer
     cannot tell working from hung, and the only remedy they know is to
     cancel a healthy session.
+
+    The number still moves — it is animated ON DEVICE now. The engine used
+    to recompute it and re-ship a whole frame every three seconds, and the
+    wearer saw straight through that: "it's only changing every three
+    seconds … we're doing it the difficult way." What the engine owes the
+    plugin is a marker to animate and silence afterwards; the tests that
+    used to pin the ticker pin those two things instead.
     """
 
     def _sink(self):
@@ -302,68 +310,55 @@ class TestSilentWaitClock:
         return [m for m in transport.sent
                 if type(m).__name__ == "BrainstormHudView"]
 
-    async def test_the_wait_is_counted_while_the_model_is_silent(self) -> None:
-        from joat.services.sinks import HudSink
-
+    async def test_a_silent_turn_shows_the_marker_the_plugin_animates(
+        self,
+    ) -> None:
         sink, transport = self._sink()
-        original = HudSink.WAIT_TICK_S
-        HudSink.WAIT_TICK_S = 0.01          # keep the test honest and quick
-        try:
-            await sink.open("t", ["codex"])
-            await sink.turn("CODEX (proposer)")
-            await asyncio.sleep(0.05)
-            activity = self._frames(transport)[-1].activity
-            assert "Thinking… 0:0" in activity
-        finally:
-            HudSink.WAIT_TICK_S = original
-            sink._stop_wait_clock()
-
-    async def test_the_clock_stops_once_tokens_arrive(self) -> None:
-        from joat.services.sinks import HudSink
-
-        sink, transport = self._sink()
-        original = HudSink.WAIT_TICK_S
-        HudSink.WAIT_TICK_S = 0.01
-        try:
-            await sink.open("t", ["codex"])
-            await sink.turn("CODEX (proposer)")
-            await asyncio.sleep(0.03)
-            await sink.chunk("the answer")
-            painted = len(self._frames(transport))
-            await asyncio.sleep(0.05)
-            # Streaming is its own progress signal; the ticker must cost
-            # the link nothing once it is under way.
-            assert len(self._frames(transport)) == painted
-            assert "the answer" in self._frames(transport)[-1].activity
-        finally:
-            HudSink.WAIT_TICK_S = original
-            sink._stop_wait_clock()
-
-    async def test_the_elapsed_suffix_does_not_survive_into_the_answer(self) -> None:
-        from joat.services.sinks import HudSink
-
-        sink, transport = self._sink()
-        original = HudSink.WAIT_TICK_S
-        HudSink.WAIT_TICK_S = 0.01
-        try:
-            await sink.open("t", ["codex"])
-            await sink.turn("CODEX (proposer)")
-            await asyncio.sleep(0.03)
-            await sink.chunk("resident weights")
-            activity = self._frames(transport)[-1].activity
-            assert "Thinking… 0:" not in activity   # the clock is gone
-            assert "resident weights" in activity
-        finally:
-            HudSink.WAIT_TICK_S = original
-            sink._stop_wait_clock()
-
-    async def test_closing_stops_the_clock(self) -> None:
-        sink, _ = self._sink()
         await sink.open("t", ["codex"])
         await sink.turn("CODEX (proposer)")
-        await sink.close("done")
-        assert sink._wait_task is None or sink._wait_task.cancelled() \
-            or sink._wait_task.done()
+        assert self._frames(transport)[-1].activity.endswith("Thinking…")
+
+    async def test_the_engine_does_not_reship_frames_to_move_a_counter(
+        self,
+    ) -> None:
+        """The whole point of the change. A silent turn costs the link one
+        frame, not one every three seconds — however long it stays silent.
+        """
+        sink, transport = self._sink()
+        await sink.open("t", ["codex"])
+        await sink.turn("CODEX (proposer)")
+        painted = len(self._frames(transport))
+        await asyncio.sleep(0.05)
+        assert len(self._frames(transport)) == painted
+
+    async def test_the_marker_gives_way_to_the_answer(self) -> None:
+        sink, transport = self._sink()
+        await sink.open("t", ["codex"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("resident weights")
+        activity = self._frames(transport)[-1].activity
+        assert "Thinking…" not in activity
+        assert "resident weights" in activity
+
+    def test_the_marker_matches_what_the_renderer_animates(self) -> None:
+        """The counter hangs on a STRING SHARED ACROSS TWO REPOSITORIES.
+
+        HudCanvasRenderer decides to animate by testing the tail row with
+        `endsWith('Thinking…')`. Nothing links that to the engine's
+        spelling, so changing this word here — to "Working…", or dropping
+        the ellipsis — would stop the clock on the glasses with every test
+        in both repositories still green. Pin them together.
+        """
+        from pathlib import Path
+
+        from joat.services.sinks import HudSink
+
+        renderer = (Path(__file__).resolve().parents[2]
+                    / "apps/hub-plugin/src/HudCanvasRenderer.ts").read_text()
+        assert "endsWith('Thinking…')" in renderer, (
+            "the renderer's tail match has moved; re-pin it"
+        )
+        assert HudSink.THINKING_MARKER == "Thinking…"
 
 
 class TestCostVisibility:
@@ -500,7 +495,8 @@ class TestTheTranscriptFillsTheGlass:
         import re
         from pathlib import Path
         from joat.core.protocol import (
-            BRAINSTORM_ACTIVITY_MAX, BRAINSTORM_SCROLLBACK_ROWS,
+            BRAINSTORM_ACTIVITY_MAX, BRAINSTORM_ROW_COLUMNS,
+            BRAINSTORM_SCROLLBACK_ROWS,
         )
 
         renderer = (Path(__file__).resolve().parents[2]
@@ -509,7 +505,17 @@ class TestTheTranscriptFillsTheGlass:
         assert capacity is not None, "the transcript layout has moved"
         window = int(capacity.group(1))
         assert BRAINSTORM_ACTIVITY_MAX == (
-            BRAINSTORM_SCROLLBACK_ROWS * 74 + (BRAINSTORM_SCROLLBACK_ROWS - 1)
+            BRAINSTORM_SCROLLBACK_ROWS * BRAINSTORM_ROW_COLUMNS
+            + (BRAINSTORM_SCROLLBACK_ROWS - 1)
+        )
+        # A literal here is how the bound went stale: it stayed 74 (the
+        # old monospace column) for a release after the transcript became
+        # proportional, and the wearer saw the truncation before any test
+        # did. Pinning the ARITHMETIC catches a row/column change; only
+        # reading the renderer catches a font change, which the column
+        # count's own docstring is responsible for.
+        assert BRAINSTORM_ROW_COLUMNS == 96, (
+            "re-derive from HudCanvasRenderer's HUD_TEXT_FONT before editing"
         )
         assert BRAINSTORM_SCROLLBACK_ROWS >= window * 3, (
             "scrollback should hold several windows of history"
@@ -632,22 +638,29 @@ class TestTheSilentWaitIsCovered:
     tools buffer; the streaming loop in subprocess_agent already yields
     each line the moment it arrives.
 
-    Every other test here overrides WAIT_TICK_S to run fast, which leaves
-    the shipped value itself unguarded — and the shipped value is the one
-    the wearer actually experiences.
+    The tick lives in the plugin now, so this asserts across the seam.
+    The engine no longer has a rate to guard — it paints the marker once —
+    but the wearer's experience still depends on one, and a rate nobody
+    tests is how it reached three seconds in the first place.
     """
 
     def test_the_tick_reassures_well_inside_one_turn(self) -> None:
-        from joat.services.sinks import HudSink
+        from pathlib import Path
 
-        assert HudSink.WAIT_TICK_S <= 5.0, (
+        presenter = (Path(__file__).resolve().parents[2]
+                     / "apps/hub-plugin/src/HudPresenter.ts").read_text()
+        ticker = presenter[presenter.index("private armThinkingTicker"):]
+        rate = re.search(r"\}, (\d+)\);", ticker)
+        assert rate is not None, "the thinking ticker has moved; re-pin it"
+        seconds = int(rate.group(1)) / 1000
+        assert seconds <= 5.0, (
             "turns run 10-18s and are silent for nearly all of it; a slower "
             "tick leaves the wearer unable to tell working from hung, and "
             "the only remedy they know is cancelling a healthy session"
         )
-        assert HudSink.WAIT_TICK_S >= 1.0, (
-            "every tick is a BLE page write for a counter nobody reads that "
-            "closely"
+        assert seconds >= 1.0, (
+            "the counter shows whole seconds — ticking faster than it can "
+            "change is repaint for no new information"
         )
 
     async def test_a_turn_that_produced_nothing_says_so(self) -> None:
