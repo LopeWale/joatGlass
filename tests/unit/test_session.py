@@ -1278,3 +1278,90 @@ class TestInterruptionAttribution:
         ).run()
         assert turns.count("CODEX (proposer)") == 1
         assert turns.count("CLAUDE (critic)") == 1
+
+
+class TestRelayRouting:
+    """The artifact's central screen: identical text, opposite instructions.
+
+    "The first two rows send identical text with opposite instructions —
+    one asks for the weakest claim, the other forbids restating and demands
+    an addition. That is the whole difference between a debate and a
+    brainstorm." Before this, one blended instruction did both jobs and the
+    wearer could not choose.
+    """
+
+    def _recorder(self, seen: list[str], reply: str):
+        async def stream(prompt: str) -> AsyncIterator[str]:
+            seen.append(prompt)
+            yield reply
+        return stream
+
+    async def test_critique_hunts_the_weakest_claim(self) -> None:
+        seen: list[str] = []
+        session = debate(
+            SinkTransport(),
+            pair(self._recorder(seen, "one"), self._recorder(seen, "two")),
+            ScriptedJudge(["No.\nAGREEMENT: 0.2\nBLOCKING: yes",
+                           "Yes.\nAGREEMENT: 0.95\nBLOCKING: no"]),
+            max_rounds=2,
+        )
+        assert session.consume_transcript("tear that apart") is True
+        await session.run()
+        round_two = seen[2]
+        assert "WEAKEST claim" in round_two
+        assert "stress-test" in round_two
+
+    async def test_build_forbids_disputing(self) -> None:
+        seen: list[str] = []
+        session = debate(
+            SinkTransport(),
+            pair(self._recorder(seen, "one"), self._recorder(seen, "two")),
+            ScriptedJudge(["No.\nAGREEMENT: 0.2\nBLOCKING: yes",
+                           "Yes.\nAGREEMENT: 0.95\nBLOCKING: no"]),
+            max_rounds=2,
+        )
+        session.consume_transcript("build on that")
+        await session.run()
+        round_two = seen[2]
+        assert "STRONGEST idea" in round_two
+        assert "Do not dispute" in round_two
+
+    async def test_a_nomination_can_carry_its_instruction(self) -> None:
+        # "claude, tear that apart" is one breath, not two commands.
+        session = debate(SinkTransport(),
+                         pair(agent(["a"]), agent(["b"])), None)
+        assert session.direct("claude, tear that apart") == "claude"
+        assert session._next_mode == "critique"
+
+    async def test_a_routing_phrase_is_not_quoted_as_a_wearer_turn(self) -> None:
+        # Quoting the stage direction would make the collaborators discuss
+        # the wearer's instruction instead of following it.
+        session = debate(SinkTransport(),
+                         pair(agent(["a"]), agent(["b"])), None)
+        assert session.consume_transcript("build on that") is True
+        assert session._transcript == []
+
+    async def test_the_mode_applies_to_one_turn_then_lapses(self) -> None:
+        seen: list[str] = []
+        session = debate(
+            SinkTransport(),
+            pair(self._recorder(seen, "one"), self._recorder(seen, "two")),
+            ScriptedJudge(["No.\nAGREEMENT: 0.2\nBLOCKING: yes",
+                           "Yes.\nAGREEMENT: 0.95\nBLOCKING: no"]),
+            max_rounds=2,
+        )
+        session.consume_transcript("tear that apart")
+        await session.run()
+        assert "WEAKEST claim" in seen[2]        # the routed turn
+        assert "WEAKEST claim" not in seen[3]    # the room returns to normal
+
+    async def test_round_one_is_unaffected_by_routing(self) -> None:
+        # Round 1 is independent: there is nothing yet to critique or build on.
+        seen: list[str] = []
+        session = debate(SinkTransport(),
+                         pair(self._recorder(seen, "one"),
+                              self._recorder(seen, "two")), None)
+        session.consume_transcript("tear that apart")
+        await session.run()
+        assert "WEAKEST claim" not in seen[0]
+        assert "Open the discussion" in seen[0]
