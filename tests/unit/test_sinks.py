@@ -665,3 +665,63 @@ class TestTheSilentWaitIsCovered:
         activity = transport.sent[-1].activity
         assert "CODEX > said nothing" in activity
         assert "Thinking…" not in activity
+
+
+class TestBlankRowsAreNotAffordable:
+    """Seven rows, and a paragraph break spends one of them on nothing.
+
+    Collaborators are told to open with a GIST line and then argue, so
+    almost every live turn arrives as "GIST: …\\n\\n<argument>" — 14% of
+    the glass showing a blank row, on the surface whose complaint was that
+    it did not show enough.
+
+    The depth is not lost: the stored transcript, the saved history and
+    the Markdown export all keep the wearer's paragraphs. This is a
+    rendering decision about a 576x288 display.
+    """
+
+    async def _sink(self):
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        return sink, transport
+
+    async def test_a_paragraph_break_does_not_cost_a_row(self) -> None:
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk("GIST: cache them.\n\nCold start costs 2.1s per query.")
+
+        rows = transport.sent[-1].activity.splitlines()
+        assert "" not in rows, rows
+        assert rows == ["CODEX > GIST: cache them.",
+                        "Cold start costs 2.1s per query."]
+
+    async def test_it_survives_a_break_split_across_chunks(self) -> None:
+        """Streaming delivers "\\n" and "\\n" separately, so a per-chunk
+        check would never see the pair. This collapses at render time."""
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        for piece in ("GIST: cache them.", "\n", "\n", "Cold start costs 2.1s."):
+            await sink.chunk(piece)
+
+        rows = transport.sent[-1].activity.splitlines()
+        assert "" not in rows, rows
+        assert len(rows) == 2, rows
+
+    async def test_whitespace_only_rows_go_too(self) -> None:
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk("GIST: cache them.\n   \n\t\nCold start costs 2.1s.")
+
+        rows = transport.sent[-1].activity.splitlines()
+        assert [r for r in rows if not r.strip()] == [], rows
+
+    async def test_single_line_breaks_are_kept(self) -> None:
+        """Structure the model chose is still structure — only EMPTY rows
+        are unaffordable, not line breaks."""
+        sink, transport = await self._sink()
+        await sink.turn("joat (synthesis)")
+        await sink.chunk("AGREED\nMeasure first.\nOPEN\nEviction order.")
+
+        rows = transport.sent[-1].activity.splitlines()
+        assert len(rows) == 4, rows
