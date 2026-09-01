@@ -51,6 +51,20 @@ const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
  * spine, where column alignment is the point.
  */
 const HUD_TEXT_FONT = '"Helvetica Neue", "SF Pro Text", Arial, sans-serif';
+
+/** Where content starts and stops on the 576px lens.
+ *
+ * The transcript ran x=36..540 — 504px of 576, with 72px of nothing down
+ * both sides. The wearer measured it by eye before any test did: "why are
+ * we still not fully using the display? Why are you making words wrap when
+ * there's still the left or the right side fully empty?"
+ *
+ * Fourteen, not zero: the outermost pixels of a waveguide are where the
+ * image is least reliable, and a glyph clipped by the lens edge is worse
+ * than one that never reached it. Everything between is content. */
+const HUD_EDGE = 14;
+const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
+const HUD_CONTENT_RIGHT = 576 - HUD_EDGE;       // 562
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
 export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
 
@@ -290,7 +304,11 @@ export function usesFlatHudShell(
 ): boolean {
   void title;
   if (kind === 'navigation') return FLAT_NAVIGATION_VIEWS.has(navigationView ?? '');
-  return kind === 'confirmation' || kind === 'productivity' || kind === 'list';
+  // Brainstorm and Agent Terminal are transcripts: every pixel the
+  // rounded frame occupies is a pixel of discussion the wearer cannot
+  // read, and it is the surface they said was wasting space.
+  return kind === 'confirmation' || kind === 'productivity' || kind === 'list'
+    || kind === 'brainstorm';
 }
 
 export type HudIconName =
@@ -1341,6 +1359,18 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
       return 'Navigation';
     case 'productivity':
       return 'Planning';
+    case 'brainstorm':
+      // These are two features, not one screen with two moods, and the
+      // spine is where the wearer reads which one they are standing in.
+      // It used to fall through to the empty default, so the spine showed
+      // the link status instead — and the Agent Terminal was captured
+      // reading "JOAT · BRAINSTORM" across its top, which is precisely
+      // the confusion the two surfaces are specified apart to prevent:
+      // Codex and Claude collaborate in Brainstorm, Hermes and OpenClaw
+      // work in the Terminal, and neither belongs in the other.
+      return frame.brainstorm.screen === 'agent_terminal'
+        ? 'Agent Terminal'
+        : 'Brainstorm';
     default:
       return '';
   }
@@ -2481,14 +2511,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const scroll = this.transcriptScrollFor(model);
     if (model.screen === 'agent_terminal') {
       const layout = agentTerminalTranscriptLayout(model);
-      this.drawIcon(context, icons.brainstorm, 36, 52, 14, BRIGHT);
+      this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
       context.font = `400 11px ${HUD_TEXT_FONT}`;
-      this.fitText(context, layout.summary, 56, 58, 380);
+      this.fitText(context, layout.summary, HUD_EDGE + 20, 58, HUD_CONTENT_WIDTH - 190);
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
       context.font = `400 9px ${HUD_TEXT_FONT}`;
-      context.fillText(state, 540, 58);
+      context.fillText(state, HUD_CONTENT_RIGHT, 58);
       context.textAlign = 'left';
       if (!layout.showRecoveryDetails) {
         // Each chip carries its lane's state ("work·run", "calendar·ask1")
@@ -2498,44 +2528,44 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.fitText(
           context,
           `LANES > ${model.collaborators.join('  |  ') || 'one session'}`,
-          36,
+          HUD_EDGE,
           72,
-          504,
+          HUD_CONTENT_WIDTH,
         );
       } else {
         context.fillStyle = gray(SUPPORT);
         context.font = `400 9px ${HUD_TEXT_FONT}`;
-        this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 72, 504);
+        this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, HUD_EDGE, 72, HUD_CONTENT_WIDTH);
         context.fillStyle = gray(SUPPORT);
-        this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 88, 504);
+        this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, HUD_EDGE, 88, HUD_CONTENT_WIDTH);
         context.fillStyle = gray(CHROME);
-        this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, 36, 104, 504);
+        this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, HUD_EDGE, 104, HUD_CONTENT_WIDTH);
       }
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();
-      context.moveTo(36, layout.dividerY);
-      context.lineTo(540, layout.dividerY);
+      context.moveTo(HUD_EDGE, layout.dividerY);
+      context.lineTo(HUD_CONTENT_RIGHT, layout.dividerY);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
       context.font = `400 11px ${HUD_TEXT_FONT}`;
       this.drawBrainstormTranscript(
         context,
         model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
-        36,
+        HUD_EDGE,
         layout.transcriptBaselineY,
         layout.transcriptLineCapacity,
         scroll,
       );
     } else {
-      this.drawIcon(context, icons.brainstorm, 36, 52, 14, BRIGHT);
+      this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
       context.font = `400 11px ${HUD_TEXT_FONT}`;
       this.fitText(
         context,
         model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
-        56,
+        HUD_EDGE + 20,
         58,
-        310,
+        HUD_CONTENT_WIDTH - 210,
       );
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
@@ -2543,12 +2573,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const liveNow = model.state === 'running' && model.activeSpeaker
         ? `${model.activeSpeaker} · ${state}`
         : state;
-      this.fitText(context, liveNow, 540, 58, 190);
+      this.fitText(context, liveNow, HUD_CONTENT_RIGHT, 58, 190);
       context.textAlign = 'left';
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();
-      context.moveTo(36, 66.5);
-      context.lineTo(540, 66.5);
+      context.moveTo(HUD_EDGE, 66.5);
+      context.lineTo(HUD_CONTENT_RIGHT, 66.5);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
       context.font = `400 11px ${HUD_TEXT_FONT}`;
@@ -2556,7 +2586,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context,
         model.activity
           || `SEATS > ${model.collaborators.join(' · ') || 'waiting for collaborators'}`,
-        36,
+        HUD_EDGE,
         82,
         13,
         scroll,
@@ -2568,7 +2598,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(QUIET);
     context.font = `400 9px ${HUD_TEXT_FONT}`;
     context.textAlign = 'center';
-    this.fitText(context, actionHint, 288, 267, 500);
+    this.fitText(context, actionHint, 288, 267, HUD_CONTENT_WIDTH);
   }
 
   /** Scrollback state for the brainstorm/terminal transcript.
@@ -3104,7 +3134,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     scroll: { offset: number; rows: number; visible: number },
   ): void {
     const measure = (value: string) => context.measureText(value).width;
-    const total = brainstormTranscriptRowCount(transcript, 504, measure);
+    const width = 576 - x * 2;
+    const total = brainstormTranscriptRowCount(transcript, width, measure);
     if (scroll.offset > 0 && total > scroll.rows) {
       // Content grew while the wearer was reading history: keep their
       // place, not the distance-from-tail.
