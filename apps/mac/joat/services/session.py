@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -117,7 +118,7 @@ class SessionManager:
         # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
         # not decoration. Keep it explicit so the next wearer phrase starts
         # the round without requiring them to repeat the capability name.
-        self._topic_capture_armed = False
+        self._topic_capture_armed_until = 0.0
 
     @property
     def active(self) -> bool:
@@ -132,10 +133,32 @@ class SessionManager:
         """Typed event-routing seam; ownership remains read-only to callers."""
         return self._active
 
+    TOPIC_CAPTURE_WINDOW_S = 45.0
+    """How long a tap's promise of "the next phrase is the topic" lasts.
+
+    The gesture is consent for the NEXT utterance, which is why this path
+    deliberately bypasses the wake gate. Consent to the next thing the
+    wearer says does not extend to whatever they happen to say an hour
+    later — and an unbounded arm turns a forgotten tap into exactly the
+    ambient capture the wake gate exists to prevent, with two paid
+    collaborators on the other end of it.
+
+    AgentTerminalCommands.ARM_WINDOW_S bounds the sibling promise for the
+    same reason and with the same number.
+    """
+
+    def _arm_topic_capture(self) -> None:
+        self._topic_capture_armed_until = (
+            time.monotonic() + self.TOPIC_CAPTURE_WINDOW_S
+        )
+
+    def _disarm_topic_capture(self) -> None:
+        self._topic_capture_armed_until = 0.0
+
     @property
     def topic_capture_armed(self) -> bool:
         """Whether a visible G2 tap is waiting for one glasses-mic phrase."""
-        return self._topic_capture_armed
+        return time.monotonic() < self._topic_capture_armed_until
 
     def notify(self, card: Card) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
@@ -252,7 +275,7 @@ class SessionManager:
                     len(text),
                 )
             return True
-        if self._topic_capture_armed:
+        if self.topic_capture_armed:
             # The wearer armed this path on the glasses. A phone or legacy
             # source may still exist as a general voice fallback, but it must
             # not satisfy the explicit glasses-owned next-utterance promise.
@@ -260,7 +283,7 @@ class SessionManager:
                 log.info("ignoring non-glasses transcript while G2 topic capture is armed")
                 self._show_topic_capture(armed=True)
                 return True
-            self._topic_capture_armed = False
+            self._disarm_topic_capture()
             # The capture surface explicitly promises that the next phrase is
             # the topic. Treat cancel as an exit from that surface rather than
             # accidentally debating the word "cancel".
@@ -271,7 +294,7 @@ class SessionManager:
             if not topic:
                 # An empty STT result is not a topic. Re-arm and preserve the
                 # truthful lens instruction for the next utterance.
-                self._topic_capture_armed = True
+                self._arm_topic_capture()
                 self._show_topic_capture(armed=True)
                 return True
             started = self._start(topic)
@@ -326,7 +349,7 @@ class SessionManager:
                 asyncio.get_running_loop().create_task(run_arm())
             return
         if action.action == "begin_topic_capture" and active is None:
-            if self._topic_capture_armed:
+            if self.topic_capture_armed:
                 return
             if not self._brainstorm_is_available():
                 # A glasses tap must never promise an ordinary local
@@ -335,11 +358,11 @@ class SessionManager:
                 # current Agent Terminal recovery state on the lenses.
                 self._show_topic_capture(armed=False)
                 return
-            self._topic_capture_armed = True
+            self._arm_topic_capture()
             self._show_topic_capture(armed=True)
             return
-        if action.action == "cancel" and active is None and self._topic_capture_armed:
-            self._topic_capture_armed = False
+        if action.action == "cancel" and active is None and self.topic_capture_armed:
+            self._disarm_topic_capture()
             self._show_topic_capture(armed=False)
             return
         if active is None:
@@ -371,7 +394,7 @@ class SessionManager:
 
     def clear_topic_capture(self) -> None:
         """Drop a pending spoken topic when its G2 connection is replaced."""
-        self._topic_capture_armed = False
+        self._disarm_topic_capture()
 
     def _show_topic_capture(self, *, armed: bool) -> None:
         view = self._topic_capture_view
@@ -408,7 +431,7 @@ class SessionManager:
             # through to the unrelated assistant. The wearer receives the
             # same terminal recovery frame as a glasses tap, and can retry
             # it from the glasses when the dedicated Hermes seat recovers.
-            self._topic_capture_armed = False
+            self._disarm_topic_capture()
             self._show_topic_capture(armed=False)
             log.info("brainstorm requested while required terminal is unavailable")
             return True
