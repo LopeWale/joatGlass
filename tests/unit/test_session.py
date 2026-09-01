@@ -1063,3 +1063,68 @@ class TestCapabilityNaming:
         ) is True
         await asyncio.sleep(0)
         assert started == ["confirm system readiness using Copper Falcon"]
+
+
+class TestActiveSessionAddressGate:
+    """A running session does not get unaddressed speech.
+
+    Only the cancel words are heard without the wake word — failing toward
+    'stopped' is safe. Everything that STEERS the session requires the
+    wearer to address JOAT: an overheard 'ask claude about that' must never
+    reorder the round table, and once follow-ups reach the collaborators
+    the same sentence would be room conversation shipped to a subprocess.
+    """
+
+    class Steerable(Session):
+        def __init__(self) -> None:
+            self.directed: list[str] = []
+            self.consumed: list[str] = []
+            self.cancelled = False
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            self.consumed.append(text)
+            return False
+
+        def direct(self, text: str) -> str | None:
+            if "claude" in text.lower():
+                self.directed.append(text)
+                return "claude"
+            return None
+
+    async def _active(self):
+        session = self.Steerable()
+        mgr = SessionManager(HudWriter(SinkTransport()), lambda t: session)
+        assert mgr.handle_transcript("debate heat pumps") is True
+        await asyncio.sleep(0)
+        return mgr, session
+
+    async def test_unaddressed_steering_is_ignored(self) -> None:
+        mgr, session = await self._active()
+        # A colleague, mid-room, says something that mentions a seat.
+        assert mgr.handle_transcript("ask claude about that", addressed=None) is True
+        assert session.directed == []      # the table was NOT reordered
+        assert session.consumed == []      # and nothing reached a follow-up
+        assert mgr.active                  # the session keeps running
+
+    async def test_addressed_steering_works(self) -> None:
+        mgr, session = await self._active()
+        assert mgr.handle_transcript(
+            "JOAT, ask claude about that", addressed="ask claude about that"
+        ) is True
+        assert session.directed == ["ask claude about that"]
+
+    async def test_cancel_is_heard_unaddressed_on_purpose(self) -> None:
+        mgr, session = await self._active()
+        assert mgr.handle_transcript("stop", addressed=None) is True
+        assert session.cancelled is True
+
+    async def test_callers_that_omit_address_keep_the_old_behaviour(self) -> None:
+        mgr, session = await self._active()
+        assert mgr.handle_transcript("ask claude about that") is True
+        assert session.directed == ["ask claude about that"]

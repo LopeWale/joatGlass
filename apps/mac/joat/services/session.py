@@ -27,6 +27,10 @@ from .sinks import TranscriptSink
 
 log = logging.getLogger(__name__)
 
+_UNSET_ADDRESSED = "\x00joat-unset-addressed"
+"""Sentinel: the caller did not evaluate address at all (tests, internal
+flows), as distinct from None, which means the wearer did NOT address JOAT."""
+
 
 class Session(ABC):
     """A focused interaction that owns the HUD until run() returns."""
@@ -195,19 +199,36 @@ class SessionManager:
         text: str,
         *,
         capture_source: AudioSource | None = None,
+        addressed: str | None = _UNSET_ADDRESSED,
     ) -> bool:
-        """True = consumed (session active or started); False = default flow."""
+        """True = consumed (session active or started); False = default flow.
+
+        ``addressed`` is the utterance with the wake word stripped, or None
+        when the wearer did not address JOAT. Callers that omit it (tests,
+        internal flows) are treated as addressed, preserving the previous
+        behaviour for everything except the live microphone path.
+        """
         lowered = text.lower().strip().rstrip(".!?")
         if self._active is not None:
             if lowered in ("stop", "cancel", "stop the debate"):
                 log.info("wearer cancelled the active session")
                 self._cancel_active()
                 return True
-            if self._active.consume_transcript(text):
+            # STEERING requires address. An overheard sentence must not
+            # reorder the round table, and must never become a follow-up
+            # the collaborators answer.
+            steer = text if addressed is _UNSET_ADDRESSED else addressed
+            if not steer:
+                log.info(
+                    "session active — unaddressed speech ignored chars=%d",
+                    len(text),
+                )
+                return True
+            if self._active.consume_transcript(steer):
                 return True
             # Chairing the room is not an interruption: "claude, respond"
             # steers who speaks next without ending anything.
-            directed = self._active.direct(text)
+            directed = self._active.direct(steer)
             if directed is not None:
                 log.info("wearer gave the floor to %s", directed)
             else:
