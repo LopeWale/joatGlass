@@ -467,3 +467,58 @@ class TestMessagesAppSender:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         with pytest.raises(MessageSendError, match="Messages is not signed in"):
             await MessagesAppSender().send("+14055550123", "hello")
+
+
+class TestSpokenReplyGrammar:
+    """The lens footer teaches exactly "say reply" — every phrasing a wearer
+    would naturally produce from that hint must reach the confirmed send."""
+
+    async def test_bare_reply_prompts_then_next_utterance_becomes_the_body(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-1")
+
+        assert await replies.handle_command("Reply.") == "Say the reply."
+        assert replies.is_compose_armed() is True  # first refusal for the body
+
+        result = await replies.handle_command("Good morning, on my way.")
+        assert confirm.calls, "the prompted body must reach confirmation"
+        assert sender.sent == [(THREAD.handle, "Good morning, on my way.")]
+        assert result is not None and "Submitted" in result
+
+    async def test_bare_reply_without_a_selection_says_so(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+
+        assert await replies.handle_command("reply") == (
+            "Select a Messages conversation first."
+        )
+        assert replies.is_compose_armed() is False
+
+    async def test_prompted_reply_can_be_cancelled(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-1")
+
+        assert await replies.handle_command("reply") == "Say the reply."
+        assert await replies.handle_command("never mind") == "Reply cancelled."
+        assert replies.is_compose_armed() is False
+        assert sender.sent == []
+
+    async def test_whisper_commas_and_periods_never_break_the_one_shot_form(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-1")
+
+        result = await replies.handle_command("Reply, saying, On my way.")
+        assert sender.sent == [(THREAD.handle, "On my way")]
+        assert result is not None and "Submitted" in result
+
+    async def test_full_command_spoken_while_prompted_wins_over_body_capture(self) -> None:
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-1")
+
+        assert await replies.handle_command("reply") == "Say the reply."
+        await replies.handle_command("reply saying Running late")
+        assert sender.sent == [(THREAD.handle, "Running late")]

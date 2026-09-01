@@ -5,6 +5,11 @@ description = "J.A.R.V.I.S. brain for the Even Realities G2 — Mac Studio side.
 requires-python = ">=3.12"
 dependencies = [
     "websockets>=13.0",
+    # Street surroundings for the guidance HUD. Vector tiles rather than a
+    # rendered image: JOAT draws the roads and sets their names itself, so
+    # nothing is lost to a raster styled for a full-colour phone screen.
+    "mapbox-vector-tile>=2.1",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

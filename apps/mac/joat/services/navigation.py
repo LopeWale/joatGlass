@@ -10,8 +10,12 @@ import time
 from typing import Literal, cast
 
 from ..core.interfaces import GlassesTransport, NavigationProvider
+from ..navigation.map_image import map_move_meters
+from ..navigation.map_vector import MapVectorError, fetch_road_network
 from ..core.navigation import NavigationCandidate, NavigationPoint, ProviderRoute
 from ..core.protocol import (
+    NavigationRoadLine,
+    NavigationRoads,
     NavigationAction,
     NavigationHudView,
     NavigationOrigin,
@@ -94,6 +98,19 @@ class _SearchReady:
     candidates: list[NavigationCandidate] | None
 
 
+#: How far the wearer must move before the street panel is refetched.
+_MAP_REFRESH_METERS = 120.0
+
+_ROUTE_FAILURE_COPY: dict[str, tuple[str, str]] = {
+    # Each one names a different next move for the wearer.
+    "no_route": ("No route from here", "Try cycling or a closer destination"),
+    "too_long": ("Route too long for the HUD", "Choose a closer destination"),
+    "unreachable": ("Can't reach the map service", "Check this Mac's internet, then retry"),
+    "incomplete": ("Route data was incomplete", "Try again or change destination"),
+    "rejected": ("Route unavailable", "Try again or change destination"),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class _RouteReady:
     token: int
@@ -101,6 +118,10 @@ class _RouteReady:
     route: ProviderRoute | None
     revision: int
     install_immediately: bool
+    #: Why the route failed, when it did. One blind "Route unavailable" for a
+    #: dead network, an unreachable destination, and an over-long route left
+    #: the wearer with no next move.
+    failure: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,12 +147,19 @@ class NavigationSession(Session):
         *,
         session_id: str,
         proximity: NavigationPoint | None = None,
+        map_token: str = "",
     ) -> None:
         self._initial_query = query
         self._provider = provider
         self._transport = transport
         self._session_id = session_id
         self._proximity = proximity
+        # Street surroundings for the guidance pane. Empty means the wearer
+        # still gets the route's shape; the map is an enhancement, never a
+        # precondition for navigating.
+        self._map_token = map_token
+        self._map_task: asyncio.Task[None] | None = None
+        self._map_centre: NavigationPoint | None = None
         self._events: asyncio.Queue[object] = asyncio.Queue()
         self._generation = 0
         self._search_generation = 0
@@ -529,6 +557,57 @@ class NavigationSession(Session):
         self._error_recovery = None
         await self._transport.send(self._origin_request)
 
+    def _refresh_map_panel(self, origin: NavigationPoint) -> None:
+        """Fetch the streets around the wearer, at most one request in flight.
+
+        Throttled by distance, not by time: standing still costs nothing,
+        and a HUD panel is only stale once the wearer has actually walked
+        out of it.
+        """
+        if not self._map_token:
+            return
+        centre = self._map_centre
+        if centre is not None and map_move_meters(
+            centre.latitude, centre.longitude, origin.latitude, origin.longitude,
+        ) < _MAP_REFRESH_METERS:
+            return
+        if self._map_task is not None and not self._map_task.done():
+            return
+        self._map_centre = origin
+        session_id = self._session_id
+
+        async def fetch() -> None:
+            try:
+                network = await fetch_road_network(
+                    self._map_token, origin.latitude, origin.longitude,
+                )
+            except (MapVectorError, OSError) as exc:
+                log.info("navigation roads unavailable: %s", type(exc).__name__)
+                return
+            except asyncio.CancelledError:
+                raise
+            if self._cancelled or self._session_id != session_id:
+                return
+            await self._transport.send(NavigationRoads(
+                session_id=session_id,
+                latitude=network.latitude,
+                longitude=network.longitude,
+                roads=tuple(
+                    NavigationRoadLine(
+                        name=road.name,
+                        weight=road.weight,
+                        points=tuple(
+                            value
+                            for point in road.points
+                            for value in point
+                        ),
+                    )
+                    for road in network.roads
+                ),
+            ))
+
+        self._map_task = asyncio.get_running_loop().create_task(fetch())
+
     async def _handle_origin(self, origin: NavigationOrigin) -> None:
         request = self._origin_request
         if (
@@ -543,6 +622,7 @@ class NavigationSession(Session):
         self._origin_request = None
         self._locating_visible_since = None
         self._origin = NavigationPoint(origin.latitude, origin.longitude)
+        self._refresh_map_panel(self._origin)
         await self._send_view(NavigationHudView(
             view="uncertain",
             primary=f"Finding a {self._mode} route",
@@ -634,11 +714,27 @@ class NavigationSession(Session):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # A provider that declares `reason` is promising a bounded,
+                # token-free failure (NavigationProvider contract), so its
+                # message is safe to log. Anything else is logged by type
+                # only: a raw urllib error can carry the access token in its
+                # URL, and that must never reach a log file.
+                failure = getattr(exc, "reason", None)
                 log.warning(
-                    "navigation route request failed type=%s",
+                    "navigation route request failed type=%s reason=%s detail=%s",
                     type(exc).__name__,
+                    failure or "unknown",
+                    str(exc)[:200] if isinstance(failure, str) else "",
                 )
-                result = None
+                await self._events.put(_RouteReady(
+                    token,
+                    generation,
+                    None,
+                    revision,
+                    install_immediately,
+                    failure if isinstance(failure, str) else "unreachable",
+                ))
+                return
             await self._events.put(_RouteReady(
                 token,
                 generation,
@@ -659,10 +755,17 @@ class NavigationSession(Session):
         if ready.route is None or not self._provider_route_is_usable(ready.route):
             self._pending_reroute_request_id = None
             self._error_recovery = "route"
+            travel = self._mode or "walking"
+            primary, secondary = _ROUTE_FAILURE_COPY.get(
+                ready.failure or "rejected",
+                ("Route unavailable", "Try again or change destination"),
+            )
+            if ready.failure == "no_route":
+                primary = f"No {travel} route from here"
             await self._send_view(NavigationHudView(
                 view="error",
-                primary="Route unavailable",
-                secondary="Try again or change destination",
+                primary=primary,
+                secondary=secondary,
                 hint="tap/say retry · swipe cancel",
                 interaction="stationary",
             ), "route-error")

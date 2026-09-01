@@ -1402,13 +1402,11 @@ class CapabilityRouter:
         elif snapshot.state == "recording":
             page, controls = "RECORDING", _RECORDING_CONTROLS["recording"]
         else:
-            # Transient (finalizing) — render truth without dead actions.
+            # Finalizing: no tappable rows would do anything, so say so in
+            # the transient band rather than building a page for it.
             if self._request_is_current():
                 self._note_rows = []
-            await self._show_focus(
-                "QUICKNOTES · SAVING",
-                ["Finishing the recording…"],
-            )
+            await self._hud.assistant("Saving quicknote…")
             return
         if not self._request_is_current():
             return
@@ -1443,13 +1441,12 @@ class CapabilityRouter:
             return
         receipt: str | None = None
         if action == "stop":
-            # Transcription of a long recording takes real time. Replace the
-            # controls with an honest progress frame first, so the wearer is
-            # not staring at tappable rows that no longer do anything.
-            await self._show_focus(
-                "QUICKNOTES · SAVING",
-                ["Finishing the recording…", "Transcribing on this Mac."],
-            )
+            # Transcription of a long recording takes real time, so the
+            # wearer needs to know it is happening — but a whole page for
+            # one transient line is waste (the wearer's ruling). It goes out
+            # as the same slim band Even AI uses for "listening": the page
+            # underneath stays, and the band replaces itself on completion.
+            await self._hud.assistant("Saving quicknote…")
             receipt = await capture.control_stop()
         elif action == "pause":
             receipt = capture.control_pause()
@@ -1463,6 +1460,10 @@ class CapabilityRouter:
             receipt = capture.control_keep()
         if receipt is not None:
             log.info("quicknote control %s: %s", action, receipt)
+            # The receipt itself is the band's final word; it settles on its
+            # own rather than occupying the lens until the wearer dismisses.
+            await self._hud.assistant(receipt)
+            await self._hud.settle_assistant()
         # Re-render whatever is now true: updated controls, or — after a save
         # or discard — the unified notes list itself.
         await self._show_notes()

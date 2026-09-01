@@ -959,6 +959,60 @@ class NavigationRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class NavigationRoadLine:
+    """One drawable road: name, importance, and shape."""
+
+    name: str
+    weight: int
+    #: Flattened [lat, lon, lat, lon, …]; halves the JSON of a point list.
+    points: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationRoads:
+    """The wearer's surroundings as GEOMETRY, not a picture of geometry.
+
+    A rendered map tile loses its street names when it is crushed to
+    sixteen levels of green — they are baked at a size nobody chose for
+    this display. Sending the roads themselves lets JOAT draw each line at
+    the weight it wants and set each NAME in the HUD's own font.
+    """
+
+    session_id: str
+    latitude: float
+    longitude: float
+    roads: tuple[NavigationRoadLine, ...]
+
+    def to_wire(self) -> dict[str, Any]:
+        if len(self.roads) > 160:
+            raise ProtocolError("navigation road payload is too large")
+        roads: list[dict[str, Any]] = []
+        for road in self.roads:
+            if len(road.points) < 4 or len(road.points) % 2 or len(road.points) > 200:
+                raise ProtocolError("navigation road geometry is invalid")
+            if not 1 <= road.weight <= 3:
+                raise ProtocolError("navigation road weight is invalid")
+            roads.append({
+                "name": _navigation_text(road.name, "roadName", 40, allow_empty=True),
+                "weight": road.weight,
+                # Five decimals is about a metre — far finer than one HUD
+                # pixel here, and it keeps the payload small.
+                "points": [round(value, 5) for value in road.points],
+            })
+        return {
+            "kind": "navigation.roads",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+            "latitude": _navigation_number(
+                self.latitude, "latitude", minimum=-90, maximum=90,
+            ),
+            "longitude": _navigation_number(
+                self.longitude, "longitude", minimum=-180, maximum=180,
+            ),
+            "roads": roads,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class HudAmbient:
     """The margin facts on the resting dashboard.
 
@@ -1112,6 +1166,7 @@ DownlinkMessage = (
     | NavigationOriginRequest
     | NavigationRoute
     | NavigationMapPanel
+    | NavigationRoads
     | HudAmbient
     | NavigationStop
     | ConfirmRequest
@@ -1211,8 +1266,14 @@ def _reminder_due_generation(value: Any) -> int:
     return value
 
 
-def _navigation_text(value: Any, name: str, maximum: int) -> str:
-    if not isinstance(value, str) or not value or len(value) > maximum:
+def _navigation_text(
+    value: Any, name: str, maximum: int, *, allow_empty: bool = False,
+) -> str:
+    """An unnamed road is still a road worth drawing, so callers may opt in
+    to an empty string rather than inventing a placeholder name for it."""
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ProtocolError(f"navigation {name} is invalid")
+    if not value and not allow_empty:
         raise ProtocolError(f"navigation {name} is invalid")
     return value
 
