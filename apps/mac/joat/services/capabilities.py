@@ -47,6 +47,7 @@ from ..persistence.actions import ActionActivity, ActionJournal
 from ..persistence.notes import NoteStore, QuickNote
 from ..persistence.voice_notes import VoiceNote, VoiceNoteStore
 from .hud import HudWriter
+from .sinks import DebateSnapshot
 from .voice_note_capture import VoiceNoteCaptureSnapshot
 from .hermes_productivity import system_local_time_zone
 from .planning import (
@@ -268,6 +269,7 @@ class CapabilityRouter:
         actions: ActionJournal | None = None,
         acceptance_armed: bool = False,
         terminal_view: Callable[[], Awaitable[None]] | None = None,
+        brainstorm_recap: Callable[[], DebateSnapshot] | None = None,
     ) -> None:
         self._hud = hud
         self._transport = transport
@@ -282,6 +284,7 @@ class CapabilityRouter:
         self._actions = actions
         self._acceptance_armed = acceptance_armed
         self._terminal_view = terminal_view
+        self._brainstorm_recap = brainstorm_recap
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
         self._message_detail: _MessageDetailState | None = None
@@ -417,44 +420,34 @@ class CapabilityRouter:
             self._request_context.reset(token)
 
     async def _show_brainstorm(self) -> None:
-        """Open Brainstorm only when its required Hermes seat is ready."""
+        """Open Brainstorm on its LAST session, or on an invitation.
+
+        This used to refuse unless the Hermes terminal was ready and to
+        seat Hermes beside Codex and Claude. Both contradict the boundary:
+        Brainstorm's collaborators are the Codex and Claude CLIs, and
+        Hermes/OpenClaw are Agent Terminal workers that neither participate
+        nor gate. A wearer opening this row was told to go fix a daemon
+        their conversation never speaks to.
+
+        When a session has run, the row shows what was actually said —
+        the snapshot exists precisely so the wearer can re-read the
+        synthesis they walked away with.
+        """
         terminal = self._status.agent_terminal_projection()
-        state = str(terminal["state"])
-        reason = str(terminal["reason"])
-        if state != "ready":
-            activity = (
-                "Hermes must be set up on this home brain."
-                if state == "unavailable" and reason == "endpoint_missing"
-                else "Hermes is finishing the current response. Wait for ready."
-                if state == "running"
-                else "Hermes is required for Brainstorm. Tap to retry."
-            )
-            # The glasses are the control surface: a wearer selecting
-            # Brainstorm must land on the actionable recovery state instead
-            # of a deceptive local-only ready room. Once Hermes is ready,
-            # the same menu row opens the normal round-table surface.
-            await self._hud.show_brainstorm(BrainstormHudView(
-                screen="agent_terminal",
-                state=state,
-                topic="Hermes Agent Terminal",
-                collaborators=[],
-                activity=activity,
-                terminal_state=state,
-                endpoint_host=str(terminal["endpoint_host"]),
-                terminal_reason=_agent_terminal_instruction(state, reason),
-                no_tools_checked=bool(terminal["no_tools_checked"]),
-                acceptance_armed=False,
-            ))
-            return
+        recap = self._brainstorm_recap() if self._brainstorm_recap else None
+        rows = recap.rows() if recap is not None else []
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="brainstorm",
-            state="ready",
-            topic="Ready for a question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity='Say “JOAT, brainstorm …” to begin.',
-            terminal_state=state,
+            state="settled" if rows else "ready",
+            topic=(recap.topic[:40] if recap is not None and recap.topic
+                   else "Ready for a question"),
+            collaborators=list(recap.speakers[:3]) if recap is not None and recap.speakers
+            else ["Codex", "Claude"],
+            activity=("\n".join(rows) if rows
+                      else 'Say “JOAT, brainstorm …” to begin.'),
+            terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=reason,
+            terminal_reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
             acceptance_armed=self._acceptance_armed,
         ))
