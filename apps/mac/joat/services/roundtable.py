@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
+from typing import Literal
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -185,12 +186,70 @@ def parse_direction(text: str, table: RoundTable) -> Participant | None:
     return None
 
 
+RelayMode = Literal["open", "cross", "critique", "build"]
+"""How the wearer routed this turn.
+
+The wearer's own framing: send the answer to the other model "to debate",
+or have them pass it back and forth. Those are different instructions on
+identical text, and the difference is the whole distinction between a
+debate and a brainstorm — critique hunts the weakest claim, build forbids
+disputing and demands an addition. 'cross' is the default blend when the
+wearer has not steered.
+"""
+
+_MODE_INSTRUCTION: dict[str, str] = {
+    "cross": (
+        "Add what the others missed, name any point you think is wrong and "
+        "why, and say plainly where you agree — do not restate what has "
+        "already been said."
+    ),
+    "critique": (
+        "Find the WEAKEST claim above and say plainly why it fails. Quote "
+        "the claim you are attacking. Do not add new proposals and do not "
+        "soften it with agreement — this turn exists to stress-test."
+    ),
+    "build": (
+        "Take the STRONGEST idea above and extend it. Do not dispute it, do "
+        "not restate it, and do not hedge — say what it makes possible next, "
+        "or what it needs to work."
+    ),
+}
+
+
+_CRITIQUE = re.compile(
+    r"\b(tear (?:it|that) apart|pull (?:it|that) apart|critique (?:it|that|this)|"
+    r"poke holes|find the (?:weak|weakest)|what.s wrong with (?:it|that)|"
+    r"push back(?: on (?:it|that))?|challenge (?:it|that))\b"
+)
+_BUILD = re.compile(
+    r"\b(build on (?:it|that|this)|expand on (?:it|that|this)|"
+    r"run with (?:it|that)|take (?:it|that) further|"
+    r"develop (?:it|that)|go deeper(?: on (?:it|that))?)\b"
+)
+
+
+def parse_relay_mode(text: str) -> RelayMode | None:
+    """How the wearer wants this turn routed, or None if they didn't say.
+
+    Recognised alongside a nomination, so "claude, tear that apart" both
+    hands over the floor and sets the instruction — which is how a person
+    actually says it, rather than two separate commands.
+    """
+    said = " ".join(re.sub(r"[^a-z0-9' ]+", " ", text.lower()).split())
+    if _CRITIQUE.search(said):
+        return "critique"
+    if _BUILD.search(said):
+        return "build"
+    return None
+
+
 def build_prompt(topic: str, speaker: Participant, transcript: Sequence[tuple[str, str]],
-                 contract: str = "") -> str:
+                 contract: str = "", mode: RelayMode = "cross") -> str:
     """What this speaker sees: the question, the room, and their job.
 
     The transcript IS the sequencing mechanism — a speaker cannot be prompted
-    before the turns they are answering exist.
+    before the turns they are answering exist. ``mode`` is how the wearer
+    routed the turn; identical text with opposite instructions.
     """
     lines = [f"Question under discussion: {topic}", ""]
     if transcript:
@@ -199,9 +258,8 @@ def build_prompt(topic: str, speaker: Participant, transcript: Sequence[tuple[st
             lines.append(f"\n[{label}]\n{text.strip()}")
         lines.append("")
         lines.append(
-            f"You are {speaker.label}. Add what the others missed, name any "
-            "point you think is wrong and why, and say plainly where you "
-            "agree — do not restate what has already been said."
+            f"You are {speaker.label}. "
+            + _MODE_INSTRUCTION.get(mode, _MODE_INSTRUCTION["cross"])
         )
     else:
         lines.append(

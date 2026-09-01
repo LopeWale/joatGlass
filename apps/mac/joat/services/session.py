@@ -21,7 +21,8 @@ from ..verifier.gate import CitationStatus, VerifierGate
 from ..channels.cards import Card, CardLog, Urgency
 from .hud import HudWriter
 from .roundtable import (
-    Participant, RoundTable, build_prompt, is_failure, parse_direction,
+    Participant, RelayMode, RoundTable, build_prompt, is_failure,
+    parse_direction, parse_relay_mode,
 )
 from .sinks import TranscriptSink
 
@@ -519,6 +520,7 @@ class DebateSession(Session):
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
         self._wearer_turns = 0
+        self._next_mode: RelayMode | None = None
         self._speaking_label = ""
         self._interrupted = False
         self._cancelled = False
@@ -546,6 +548,15 @@ class DebateSession(Session):
             return False
         if parse_direction(said, self._table) is not None:
             return False
+        # "tear that apart" / "build on that" ROUTE the next turn; they are
+        # instructions about the relay, not remarks to be answered. Quoting
+        # them as a YOU turn would make the collaborators discuss the
+        # wearer's stage direction.
+        mode = parse_relay_mode(said)
+        if mode is not None:
+            self._next_mode = mode
+            log.info("wearer routed the next turn: %s", mode)
+            return True
         self._transcript.append((self.WEARER_LABEL, said))
         self._wearer_turns += 1
         asyncio.get_running_loop().create_task(self._show_wearer_turn(said))
@@ -581,11 +592,25 @@ class DebateSession(Session):
         return "failed" if self._failed else "settled"
 
     def direct(self, text: str) -> str | None:
-        """Give the floor to a named seat. Returns the name, or None."""
+        """Give the floor to a named seat. Returns the name, or None.
+
+        A nomination may carry its instruction — "claude, tear that apart"
+        is one breath, and splitting it into two commands is not how
+        anyone speaks.
+        """
         seat = parse_direction(text, self._table)
+        mode = parse_relay_mode(text)
+        if seat is None and mode is not None:
+            # "claude, tear that apart" is not one of the nomination
+            # phrasings, but naming a seat beside an instruction is
+            # unambiguously handing them the floor.
+            seat = self._table.find(text)
         if seat is None:
             return None
         self._table.direct(seat.name)
+        if mode is not None:
+            self._next_mode = mode
+            log.info("wearer routed %s: %s", seat.name, mode)
         return seat.name
 
     async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
@@ -770,8 +795,19 @@ class DebateSession(Session):
             [t for t in self._transcript if t[0] == self.WEARER_LABEL]
             if round_no == 1 else self._transcript
         )
+        # A routed mode applies to the NEXT turn only, then the room
+        # returns to ordinary cross-review — the wearer steered one relay,
+        # not the rest of the session.
+        if not prior:
+            # Round 1 is independent — there is nothing yet to critique or
+            # build on, so a mode set before the session began must SURVIVE
+            # to the first cross-review turn instead of being eaten here.
+            mode: RelayMode = "open"
+        else:
+            mode = self._next_mode or "cross"
+            self._next_mode = None
         prompt = build_prompt(self._topic, speaker, prior,
-                              self.SOURCES_CONTRACT)
+                              self.SOURCES_CONTRACT, mode=mode)
         text = await self._stream_turn(label, speaker.stream(prompt))
         if self._gate is None or self._cancelled or is_failure(text):
             return text
