@@ -128,3 +128,89 @@ class TestModelIsChosenPerCall:
                                 model=lambda: None, model_flag="--model")
         out = "".join([c async for c in agent.stream("q")])
         assert "--model" not in out              # the CLI keeps its own default
+
+
+class TestStreamJsonReading:
+    """Reading the CLI's incremental protocol instead of its final stdout.
+
+    Measured on the real binary: plain `-p` delivered a whole answer in one
+    chunk with the first byte at 10.4s of a 10.7s turn — the wearer watched
+    "Thinking…" for 98% of it. With deltas the first words land at 4.7s, in
+    ten chunks. Codex has no equivalent (`exec --json` emits one
+    item.completed at the end), so this is opt-in per seat.
+
+    Event shapes below are copied from a real run, not from documentation —
+    the documentation for this project's other CLI protocol was wrong about
+    an enum this same evening.
+    """
+
+    @staticmethod
+    def _read(line: str):
+        from joat.agents.subprocess_agent import _stream_json_event
+        return _stream_json_event(line)
+
+    def test_a_text_delta_is_the_incremental_output(self) -> None:
+        text, final, failed = self._read(
+            '{"type":"stream_event","event":{"type":"content_block_delta",'
+            '"index":0,"delta":{"type":"text_delta","text":"Ca"}}}'
+        )
+        assert (text, final, failed) == ("Ca", None, False)
+
+    def test_the_result_carries_the_whole_answer_and_the_verdict(self) -> None:
+        text, final, failed = self._read(
+            '{"type":"result","result":"the whole answer","is_error":false}'
+        )
+        assert (text, final, failed) == ("", "the whole answer", False)
+        _t, _f, failed = self._read(
+            '{"type":"result","result":"","is_error":true}'
+        )
+        assert failed is True
+
+    def test_unrecognised_events_are_inert(self) -> None:
+        """A new event type must be ignored, never mistaken for output."""
+        for line in (
+            '{"type":"system","subtype":"init"}',
+            '{"type":"rate_limit_event","x":1}',
+            '{"type":"stream_event","event":{"type":"message_start"}}',
+            '{"type":"stream_event","event":{"type":"content_block_delta",'
+            '"delta":{"type":"thinking_delta","thinking":"hmm"}}}',
+            "not json at all",
+            "[]",
+            "",
+        ):
+            assert self._read(line) == ("", None, False), line
+
+    async def test_a_parse_gap_never_loses_the_answer(self) -> None:
+        """If no delta is understood, the reported result still reaches the
+        wearer. A silent truncation is worse than no streaming at all."""
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(
+            ["/bin/sh", "-c",
+             'printf \'%s\\n\' \'{"type":"stream_event","event":'
+             '{"type":"content_block_delta","delta":'
+             '{"type":"UNKNOWN_FUTURE","text":"x"}}}\' '
+             '\'{"type":"result","result":"the whole answer","is_error":false}\'; '
+             'exit 0'],
+            stream_json=True, name="fake",
+        )
+        out = "".join([chunk async for chunk in agent.stream("ignored")])
+        assert "the whole answer" in out
+
+    async def test_streamed_deltas_are_not_duplicated_by_the_fallback(self) -> None:
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(
+            ["/bin/sh", "-c",
+             'printf \'%s\\n\' \'{"type":"stream_event","event":'
+             '{"type":"content_block_delta","delta":'
+             '{"type":"text_delta","text":"half "}}}\' '
+             '\'{"type":"stream_event","event":'
+             '{"type":"content_block_delta","delta":'
+             '{"type":"text_delta","text":"answer"}}}\' '
+             '\'{"type":"result","result":"half answer","is_error":false}\'; '
+             'exit 0'],
+            stream_json=True, name="fake",
+        )
+        out = "".join([chunk async for chunk in agent.stream("ignored")])
+        assert out.count("half answer") == 1, out
