@@ -314,12 +314,19 @@ class SessionManager:
         # synonym because it is one of the MOVES inside a brainstorm (relay
         # a turn to be torn apart rather than built on), it is what the
         # wearer already says, and older plugin builds still send it.
-        # Natural speech transcription commonly inserts a comma after the
-        # capability name ("brainstorm, compare these"). Keep the delimiter
-        # grammar narrow so "brainstorming" cannot become an invocation.
+        # Whisper PUNCTUATES. The live transcript of the exact phrase this
+        # surface tells the wearer to say is
+        #     "JOAT. Brainstorm. Should a wearable assistant cache …?"
+        # — the capability name arrives with a full stop, every time. The
+        # delimiter grammar accepted only a colon, comma, or space, so the
+        # spoken opener had NEVER matched once in this engine's whole log:
+        # zero voice-started sessions, 25 chat replies, a wearer told to
+        # say words that could not work. Accept sentence punctuation after
+        # the trigger; the word boundary still keeps "brainstorming …" from
+        # becoming an invocation.
         request = text.strip().rstrip(".!?")
         trigger = re.match(
-            r"^(?:brainstorm|debate)(?:\s*[:,]\s*|\s+)(.+)$",
+            r"^(?:brainstorm|debate)(?:\s*[.:,!?\u2014-]\s*|\s+)(.+)$",
             request,
             flags=re.IGNORECASE,
         )
