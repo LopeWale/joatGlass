@@ -272,6 +272,7 @@ class CapabilityRouter:
         acceptance_armed: bool = False,
         terminal_view: Callable[[], Awaitable[None]] | None = None,
         brainstorm_recap: Callable[[], DebateSnapshot] | None = None,
+        brainstorm_replay: Callable[[], Awaitable[bool]] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
     ) -> None:
         self._hud = hud
@@ -288,6 +289,8 @@ class CapabilityRouter:
         self._acceptance_armed = acceptance_armed
         self._terminal_view = terminal_view
         self._brainstorm_recap = brainstorm_recap
+        # Restores a LIVE session's own frame — see _show_brainstorm.
+        self._brainstorm_replay = brainstorm_replay
         self._brainstorm_recent = brainstorm_recent
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
@@ -451,8 +454,20 @@ class CapabilityRouter:
         When a session has run, the row shows what was actually said —
         the snapshot exists precisely so the wearer can re-read the
         synthesis they walked away with.
+
+        And when one is RUNNING, opening this row returns the wearer to it.
+        docs/SESSION_MODEL.md:46 says so in one line — "open Brainstorm
+        during an active run → restore the current conversation" — and the
+        opposite shipped: any non-empty transcript painted state="settled",
+        which renders DONE on the glass and makes the tap a no-op. A wearer
+        who opened the menu mid-session was told their live conversation had
+        finished, and had no way back into it.
         """
-        terminal = self._status.agent_terminal_projection()
+        # The live session's own sink is the authority for its frame, so
+        # ask it to repaint rather than rebuilding one from the snapshot:
+        # a reconstruction would drop the streaming turn in progress.
+        if self._brainstorm_replay is not None and await self._brainstorm_replay():
+            return
         recap = self._brainstorm_recap() if self._brainstorm_recap else None
         rows = recap.rows() if recap is not None else []
         if not rows and self._brainstorm_recent is not None:
