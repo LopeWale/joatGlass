@@ -568,3 +568,43 @@ class TestSidebarOpensTheRoster:
         # must never open onto an empty frame.
         frame = AgentTerminalRoster([]).frame()
         assert frame.lines and "No terminal sessions" in frame.lines[0]
+
+
+class TestSpokenCapabilityOpeners:
+    """The glasses are voice-first: both features open by asking.
+
+    The capability-open grammar covered Messages, Planning, Notifications
+    and friends but neither Brainstorm nor Agent Terminal — the two
+    surfaces this work owns were reachable only by tapping a sidebar row.
+    """
+
+    def _resolve(self, said: str) -> str | None:
+        from joat.services.capabilities import (
+            _OPEN_CAPABILITY, _SPOKEN_CAPABILITY,
+        )
+        match = _OPEN_CAPABILITY.fullmatch(" ".join(said.split()).rstrip(".,!?"))
+        if match is None:
+            return None
+        return _SPOKEN_CAPABILITY[" ".join(match.group("name").lower().split())]
+
+    def test_both_features_have_spoken_openers(self) -> None:
+        assert self._resolve("open brainstorm") == "Brainstorm"
+        assert self._resolve("show my brainstorm") == "Brainstorm"
+        assert self._resolve("open agent terminal") == "Agent Terminal"
+        assert self._resolve("show the terminal") == "Agent Terminal"
+
+    def test_they_remain_different_features(self) -> None:
+        # Nothing in the opener maps one onto the other.
+        assert self._resolve("open debate") == "Brainstorm"
+        assert self._resolve("open terminal") == "Agent Terminal"
+
+    def test_the_terminal_command_grammar_is_not_shadowed(self) -> None:
+        # 'terminal sessions' must still reach AgentTerminalCommands rather
+        # than being swallowed as a surface-open request.
+        assert self._resolve("terminal sessions") is None
+        assert self._resolve("terminal cancel") is None
+
+    def test_ordinary_speech_is_left_alone(self) -> None:
+        for said in ("open the door", "show me the weather",
+                     "navigate to the park", "open a new tab"):
+            assert self._resolve(said) is None

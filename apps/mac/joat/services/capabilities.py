@@ -1522,7 +1522,10 @@ def voice_request_id() -> str:
 _OPEN_CAPABILITY = re.compile(
     r"^(?:open|show|read)(?:\s+(?:my|the))?\s+(?P<name>"
     r"messages|texts|conversations|quick\s?notes|notes|planning|calendar|"
-    r"tasks|reminders|notifications|activity)$",
+    r"tasks|reminders|notifications|activity|"
+    # The two surfaces that had no spoken opener. 'agent terminal' before
+    # 'terminal' so the longer name wins the alternation.
+    r"brainstorm|debate|agent\s?terminal|terminal)$",
     re.IGNORECASE,
 )
 
@@ -1539,6 +1542,13 @@ _SPOKEN_CAPABILITY = {
     "reminders": "Reminders",
     "notifications": "Notifications",
     "activity": "Activity",
+    # Brainstorm and Agent Terminal are DIFFERENT features; both need a
+    # spoken opener, and neither maps to the other.
+    "brainstorm": "Brainstorm",
+    "debate": "Brainstorm",
+    "agent terminal": "Agent Terminal",
+    "agentterminal": "Agent Terminal",
+    "terminal": "Agent Terminal",
 }
 
 
