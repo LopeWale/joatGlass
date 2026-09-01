@@ -94,6 +94,7 @@ NAVIGATION_ACTIONS: tuple[str, ...] = (
 BRAINSTORM_ACTIONS: tuple[str, ...] = (
     "begin_acceptance",
     "begin_topic_capture",
+    "begin_terminal_input",
     "show_terminal",
     "show_brainstorm",
     "cancel",
@@ -1371,7 +1372,8 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "type": "brainstorm_action",
             "action": _trace_enum(
                 event["action"], "action",
-                ("begin_acceptance", "begin_topic_capture", "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
+                ("begin_acceptance", "begin_topic_capture", "begin_terminal_input",
+                 "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
             ),
             "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
             "source": _trace_enum(event["source"], "source", ("left", "right", "ring")),

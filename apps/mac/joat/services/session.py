@@ -90,6 +90,7 @@ class SessionManager:
         hud: HudWriter,
         factory: SessionFactory,
         card_log: CardLog | None = None,
+        terminal_capture: Callable[[], Awaitable[None]] | None = None,
         on_state: Callable[[str], None] | None = None,
         starters: Sequence[SessionStarter] = (),
         terminal_retry: Callable[[], Awaitable[None]] | None = None,
@@ -102,6 +103,7 @@ class SessionManager:
         self._task: asyncio.Task[None] | None = None
         self._pending_cards: list[tuple[str, asyncio.Future[None] | None]] = []
         self._card_log = card_log
+        self._terminal_capture = terminal_capture
         self._on_state = on_state
         self._starters = list(starters)
         self._terminal_retry = terminal_retry
@@ -299,6 +301,17 @@ class SessionManager:
                 asyncio.get_running_loop().create_task(run_retry())
             return
         active = self._active
+        if action.action == "begin_terminal_input" and active is None:
+            # One utterance, into the focused terminal session. Symmetrical
+            # with topic capture and deliberately separate from it: this
+            # feature has different workers and must never start a
+            # Brainstorm by accident.
+            arm = self._terminal_capture
+            if arm is not None:
+                async def run_arm() -> None:
+                    await arm()
+                asyncio.get_running_loop().create_task(run_arm())
+            return
         if action.action == "begin_topic_capture" and active is None:
             if self._topic_capture_armed:
                 return
