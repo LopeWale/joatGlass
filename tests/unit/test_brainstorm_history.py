@@ -273,3 +273,30 @@ class TestRecall:
         for said in ("read the last message", "what did we decide",
                      "show me the weather"):
             assert await commands.handle_command(said) is None
+
+
+class TestTheDefaultConstructionIsContained:
+    """`__main__` builds `BrainstormHistory()` with no arguments.
+
+    That is the construction whose defaults point at
+    `~/Documents/JOAT Brainstorms`, and the one that wrote 312 real files
+    into the wearer's Documents before tests/conftest.py redirected it.
+    Every other test here passes an explicit path, so the no-argument
+    form — the production form — went unexercised.
+    """
+
+    def test_no_argument_construction_writes_nowhere_near_home(self) -> None:
+        from pathlib import Path
+
+        from joat.services.brainstorm_history import BrainstormHistory
+
+        history = BrainstormHistory()
+        history.record("contained", ("codex",),
+                       (("CODEX (proposer)", "x"),), "converged")
+
+        home_documents = Path.home() / "Documents"
+        assert not history.export_dir.is_relative_to(home_documents), (
+            f"exports would land in {history.export_dir}"
+        )
+        assert list(history.export_dir.iterdir()), "nothing was exported at all"
+        assert history.recent(), "nothing was recorded at all"
