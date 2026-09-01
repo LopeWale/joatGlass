@@ -162,7 +162,7 @@ STUB_SERVER_SCRIPT = textwrap.dedent("""
 
 class TestLifecycle:
     async def test_spawn_uses_one_text_only_decode_without_temperature_fallbacks(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         captured: list[object] = []
 
@@ -175,15 +175,34 @@ class TestLifecycle:
             return Process()
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
-        engine = WhisperServeEngine(port=50_061)
+        engine = WhisperServeEngine(port=50_061, model_dir=tmp_path / "models")
 
         await engine._spawn()
 
         assert captured[:-1] == [
             "whisperkit-cli", "serve", "--model", "large-v3_turbo",
+            "--download-model-path", str(tmp_path / "models"),
             "--host", "127.0.0.1", "--port", "50061",
             "--temperature-fallback-count", "0", "--without-timestamps",
         ]
+
+    async def test_the_weights_never_land_in_an_icloud_synced_folder(self) -> None:
+        """whisperkit-cli defaults its download to ~/Documents/huggingface.
+
+        On a Mac with Desktop & Documents sync on — as the wearer's is —
+        that uploads ~3 GB of regenerable model weights to their iCloud,
+        counted against their storage and pushed to every device, to hold
+        a file any machine can fetch again.
+        """
+        from pathlib import Path
+
+        from joat.audio.whisper_serve import DEFAULT_MODEL_DIR
+
+        assert "Documents" not in DEFAULT_MODEL_DIR.parts
+        assert "Mobile Documents" not in str(DEFAULT_MODEL_DIR)
+        assert DEFAULT_MODEL_DIR.is_relative_to(
+            Path.home() / "Library/Application Support"
+        )
 
     async def test_spawn_decode_policy_remains_configurable_for_ab_trials(
         self, monkeypatch: pytest.MonkeyPatch
