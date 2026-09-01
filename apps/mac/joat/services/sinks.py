@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-import time
 from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Protocol, TextIO
@@ -26,7 +25,11 @@ from .hud import HudWriter
 FinishedSession = Callable[
     [str, tuple[str, ...], tuple[tuple[str, str], ...], str], None
 ]
-from ..core.protocol import BRAINSTORM_ACTIVITY_MAX, BrainstormHudView
+from ..core.protocol import (
+    BRAINSTORM_ACTIVITY_MAX,
+    BRAINSTORM_ROW_COLUMNS,
+    BrainstormHudView,
+)
 from .roundtable import is_failure
 
 
@@ -63,7 +66,6 @@ class HudSink:
         self._head = ""
         self._body = ""
         self._placeholder = ""
-        self._wait_task: asyncio.Task[None] | None = None
         self._streaming = False
         self._handed_to_terminal = False
         self._progress = ""
@@ -89,7 +91,7 @@ class HudSink:
 
     _GIST = re.compile(r"^\s*GIST:\s*(\S.*)$", re.MULTILINE)
 
-    ROW_COLUMNS = 96
+    ROW_COLUMNS = BRAINSTORM_ROW_COLUMNS
     """Character budget for a COLLAPSED turn's single row.
 
     Was 74, derived for the old monospace face. The surface now sets
@@ -253,49 +255,30 @@ class HudSink:
         self._placeholder = "JOAT > Preparing collaborators…"
         await self._paint("running")
 
-    WAIT_TICK_S = 3.0
-    """How often the silent-wait counter repaints.
+    THINKING_MARKER = "Thinking…"
+    """What a seat shows while it has produced nothing yet.
 
-    Only while a collaborator has produced NOTHING. Once tokens arrive the
-    stream is its own progress signal, so the ticker stops and costs the
-    link nothing."""
+    HudCanvasRenderer keys its local elapsed counter off this exact
+    string (`endsWith('Thinking…')`), so it is a contract across two
+    repositories, not a label. test_sinks pins both spellings together;
+    without that, renaming it here would stop the clock on the glasses
+    with every test in both repositories still green."""
+
+    # The silent-wait counter is animated ON DEVICE now. It used to be
+    # computed here and re-shipped as a whole frame over BLE every three
+    # seconds — the wearer noticed: "it's only changing every three
+    # seconds … we're doing it the difficult way." The engine paints the
+    # "Thinking…" marker once; the plugin appends live elapsed seconds
+    # locally — smooth at one second, free on the link.
 
     async def turn(self, label: str) -> None:
         self._retire_live_turn()
         self._placeholder = ""
         self._speaker = label
         self._head = f"{self._display_speaker(label).upper()} > "
-        self._body = "Thinking…"
+        self._body = self.THINKING_MARKER
         self._streaming = False
         await self._paint("running")
-        self._start_wait_clock()
-
-    def _start_wait_clock(self) -> None:
-        """Count the silence. A turn takes 12-40s and says nothing while it
-        thinks; without a moving number the wearer cannot tell working from
-        hung, and the only remedy they know is to cancel a healthy session.
-        """
-        self._stop_wait_clock()
-        started = time.monotonic()
-
-        async def tick() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(self.WAIT_TICK_S)
-                    waited = int(time.monotonic() - started)
-                    self._body = (
-                        f"Thinking… {waited // 60}:{waited % 60:02d}"
-                    )
-                    await self._paint("running")
-            except asyncio.CancelledError:
-                raise
-
-        self._wait_task = asyncio.get_running_loop().create_task(tick())
-
-    def _stop_wait_clock(self) -> None:
-        task, self._wait_task = self._wait_task, None
-        if task is not None and not task.done():
-            task.cancel()
 
     async def chunk(self, text: str) -> None:
         # Tokens are arriving, so the stream is its own progress signal and
@@ -308,7 +291,6 @@ class HudSink:
         # each chunk and ate real text from a turn that opened with the
         # word "first". Tracking whether the turn has begun makes that
         # class of mistake unreachable rather than merely unlikely.
-        self._stop_wait_clock()
         if not self._streaming:
             self._streaming = True
             self._body = text.lstrip()
@@ -325,7 +307,6 @@ class HudSink:
         one-line status where the answer had been. The verdict is a
         footer, not a replacement.
         """
-        self._stop_wait_clock()
         self._handed_to_terminal = False
         # The last live turn is the SYNTHESIS — the thing the wearer sat
         # through the session for. Every other turn collapses; this one

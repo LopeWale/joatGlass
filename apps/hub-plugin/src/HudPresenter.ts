@@ -156,6 +156,8 @@ export class HudPresenter {
   private brightness = new Map<number, number>();
   private kinds = new Map<number, HudContentKind>();
   private surface: HudSurface = { kind: 'default' };
+  /** Margin facts (weather, unread) resolved by the Mac for the dashboard. */
+  private ambient?: { temperature: string; condition: string; unread: number };
   private focusReturn?: HudContentState;
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
@@ -491,6 +493,28 @@ export class HudPresenter {
   }
 
   /** Dedicated four-tile production page for a live Brainstorm or Hermes. */
+  private thinkingTicker?: ReturnType<typeof setTimeout>;
+
+  /** While the transcript tail is a silent "Thinking…" marker, repaint
+   * locally once a second so the elapsed counter moves.
+   *
+   * No frame arrives from the Mac until the collaborator produces a
+   * token — the engine used to compute this counter and re-ship a whole
+   * frame over BLE every three seconds, which the wearer spotted on
+   * sight: "it's only changing every three seconds … we're doing it the
+   * difficult way." Device-local animation is smooth and costs the link
+   * nothing. */
+  private armThinkingTicker(): void {
+    if (this.thinkingTicker !== undefined) return;
+    if (this.surface.kind !== 'brainstorm') return;
+    if (!(this.visual?.transcriptIsThinking?.() ?? false)) return;
+    this.thinkingTicker = setTimeout(() => {
+      this.thinkingTicker = undefined;
+      if (this.surface.kind !== 'brainstorm') return;
+      void this.paintVisual();
+    }, 1000);
+  }
+
   /** Swipe on the brainstorm/terminal surface pages through history. */
   scrollTranscript(direction: 'up' | 'down'): boolean {
     if (this.surface.kind !== 'brainstorm' || !this.visual) return false;
@@ -747,6 +771,22 @@ export class HudPresenter {
     const restored = await this.restoreLiveStatus(liveStatus);
     this.recordPageTransition(from, 'list', 'show_list', restored ? 'success' : 'failed');
     return restored;
+  }
+
+  /** Adopt the Mac's margin facts and repaint if the dashboard is showing. */
+  async setAmbient(
+    ambient: { temperature: string; condition: string; unread: number },
+  ): Promise<boolean> {
+    const changed = this.ambient?.temperature !== ambient.temperature
+      || this.ambient?.condition !== ambient.condition
+      || this.ambient?.unread !== ambient.unread;
+    this.ambient = ambient;
+    if (!changed) return true;
+    // Only the resting screen wears these; repainting a feature page for a
+    // temperature would cost BLE transfers the wearer never asked for.
+    if (this.surface.kind !== 'default' && this.surface.kind !== 'sidebar') return true;
+    if (!this.visual) return true;
+    return this.paintVisual();
   }
 
   async showDefault(): Promise<boolean> {
@@ -1353,6 +1393,7 @@ export class HudPresenter {
       kind: 'overview',
       status,
       micOn: this.micOn,
+      ...(this.ambient ? { ambient: this.ambient } : {}),
       mainBrightness: this.brightness.get(ContainerId.Main)
         ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
       main: this.streams.get(ContainerId.Main) ?? '',
@@ -1379,6 +1420,8 @@ export class HudPresenter {
   private async paintVisual(): Promise<boolean> {
     if (!this.visual) return false;
     const ok = await this.visual.paint(this.visualFrame());
+    // Keep the local elapsed counter moving between Mac frames.
+    this.armThinkingTicker();
     if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
     return ok;
   }

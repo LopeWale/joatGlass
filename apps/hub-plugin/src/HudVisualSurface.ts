@@ -24,6 +24,13 @@ export interface HudImageTile {
   pixels: Uint8Array;
 }
 
+/** Margin facts for the resting dashboard, resolved by the Mac. */
+export interface HudAmbientModel {
+  temperature: string;
+  condition: string;
+  unread: number;
+}
+
 export interface AssistantOverlayVisual {
   text: string;
 }
@@ -33,6 +40,7 @@ type HudVisualBaseFrame =
     kind: 'overview';
     status: string;
     micOn: boolean;
+    ambient?: HudAmbientModel;
     mainBrightness: number;
     main: string;
     mainKind?: HudContentKind;
@@ -44,6 +52,7 @@ type HudVisualBaseFrame =
     kind: 'sidebar';
     status: string;
     micOn: boolean;
+    ambient?: HudAmbientModel;
     mainBrightness: number;
     mainKind?: HudContentKind;
     items: string[];
@@ -101,6 +110,7 @@ export type HudVisualFrame = HudVisualBaseFrame & {
 
 export interface HudFrameRenderer {
   scrollTranscript?(direction: 'up' | 'down'): boolean;
+  transcriptIsThinking?(): boolean;
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
 }
 
@@ -108,6 +118,8 @@ export interface HudFramePainter {
   paint(frame: HudVisualFrame): Promise<boolean>;
   /** Move the brainstorm/terminal transcript window; true if it moved. */
   scrollTranscript?(direction: 'up' | 'down'): boolean;
+  /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
+  transcriptIsThinking?(): boolean;
 }
 
 /** Converts one raw raster tile into an image format the native bridge and
@@ -254,6 +266,10 @@ export class HudVisualSurface implements HudFramePainter {
 
   scrollTranscript(direction: 'up' | 'down'): boolean {
     return this.renderer.scrollTranscript?.(direction) ?? false;
+  }
+
+  transcriptIsThinking(): boolean {
+    return this.renderer.transcriptIsThinking?.() ?? false;
   }
 
   paint(frame: HudVisualFrame): Promise<boolean> {

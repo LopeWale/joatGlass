@@ -24,26 +24,32 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
+
 log = logging.getLogger(__name__)
 
 Announce = Callable[[str], Awaitable[None]]
 Paint = Callable[["TerminalFrame"], Awaitable[None]]
 
-HUD_LINES = 7
-"""Rows the glasses' terminal transcript area actually fits."""
+HUD_LINES = BRAINSTORM_SCROLLBACK_ROWS
+"""Rows of terminal transcript that ride the wire.
 
-HUD_COLUMNS = 74
+Scrollback, not one screenful. This was 7 — fewer rows than the renderer's
+running-terminal window even shows (12) — so the terminal could not fill
+its own screen, let alone be scrolled. Brainstorm was given scrollback
+when the wearer asked for it; the terminal is the same surface with the
+same swipe, and was simply missed."""
+
+HUD_COLUMNS = BRAINSTORM_ROW_COLUMNS
 """Characters one of those rows holds.
 
-HudCanvasRenderer draws the transcript at 11px in the `"SF Mono", …,
-Menlo, monospace` stack across a 504px column; SF Mono's advance is
-1266/2048 em, so 504 / 6.80 = 74. It is measured because it is the WIDEST
-candidate in that stack (Menlo gives 76, Consolas 83), which makes 74 a
-lower bound that holds whichever font the WebView actually resolves. HUD_LINES rows of HUD_COLUMNS, plus the
-newlines between them, must FIT the wire's activity bound
-(BRAINSTORM_ACTIVITY_MAX); a test pins that so the shipped scrollback
-and the wire's bound cannot drift apart.
-"""
+Derived once, in protocol.py, from the face HudCanvasRenderer actually
+draws with — read that docstring before changing this. It lived here as a
+literal 74 (the old monospace derivation) for one release after the
+transcript became proportional, which is exactly the truncation the
+wearer reported. HUD_LINES rows of HUD_COLUMNS, plus the newlines between
+them, are what BRAINSTORM_ACTIVITY_MAX is: the wire bound and the shipped
+scrollback cannot drift apart because they are now the same arithmetic."""
 
 HUD_TOPIC_COLUMNS = 96
 """The wire's bound on the header line."""

@@ -518,7 +518,7 @@ _PRODUCTIVITY_HUD_PHASES = frozenset({
 _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
-BRAINSTORM_ROW_COLUMNS = 74
+BRAINSTORM_ROW_COLUMNS = 96
 BRAINSTORM_SCROLLBACK_ROWS = 40
 BRAINSTORM_ACTIVITY_MAX = (
     BRAINSTORM_ROW_COLUMNS * BRAINSTORM_SCROLLBACK_ROWS
@@ -526,31 +526,32 @@ BRAINSTORM_ACTIVITY_MAX = (
 )
 """How much transcript rides the wire, in characters.
 
-No longer the DISPLAY size. The wearer asked to scroll — "can i scroll up
-and down to see the replies?" — and a bound derived from what fits on
-screen at once is exactly what made scrolling pointless: there was
-nothing off-screen to scroll to. The renderer keeps a window (13 rows on
-Brainstorm, 12 on a running terminal) over this scrollback; forty rows is
-several full turns of history at the renderer's 74-column wrap.
+Not the DISPLAY size. The wearer asked to scroll — "can i scroll up and
+down to see the replies?" — and a bound derived from what fits on screen
+at once is exactly what made scrolling pointless: there was nothing
+off-screen to scroll to. The renderer keeps a window (13 rows on
+Brainstorm, 12 on a running terminal) over this scrollback, so forty rows
+is several full turns of history.
 
-Derived from the renderer's geometry, not chosen. HudCanvasRenderer draws
-the transcript at 11px in the `"SF Mono", SFMono-Regular, Menlo, monospace`
-stack across a 504px column (x=36 to x=540). SF Mono's advance width is
-1266/2048 em, so a glyph is 6.80px at 11px and a line holds
-504 / 6.80 = 74 characters.
+Ninety-six is the column count, derived from the face the renderer
+actually draws with. HudCanvasRenderer sets the transcript in
+`HUD_TEXT_FONT` — `"Helvetica Neue", "SF Pro Text", Arial, sans-serif` —
+at 11px across a 504px column (x=36 to x=540). Helvetica Neue's average
+advance over mixed English prose is ~0.52em, so 504 / 5.7 = 96.
 
-SF Mono is measured because it is the WIDEST candidate in that stack, not
-because it is the one most likely to resolve. The plugin renders in a
-WebView, where SF Mono is often unavailable to web content and Menlo
-answers instead — and Menlo (1233/2048) yields 76 columns, Courier New
-and DejaVu Sans Mono 76, Consolas 83. Measuring the widest makes 74 a
-LOWER bound that holds whichever font wins, so a row can never wrap.
+This constant was 74 for a monospace transcript and stayed 74 after the
+face changed, which is what the wearer saw: "why are some words being cut
+off when there is obviously room on the right". A derived number outlives
+the thing it was derived from unless the derivation is written down next
+to it, so: **if the transcript's font or column ever changes, this number
+is wrong until it is re-derived.**
 
-Do not "correct" this to 76 on discovering Menlo resolves on iOS. Rows
-that wrap stop being one row each, seven of them render as fourteen, and
-the renderer's tail trim silently drops half of them. The taller of the two surfaces is a RUNNING
-Agent Terminal at seven lines (agentTerminalTranscriptLayout); Brainstorm
-draws six.
+Proportional type has no true column count — 96 is an average, not a
+bound, so an all-caps or wide-glyph row can wrap. That is why the
+renderer measures each row with the canvas and wraps on the measurement
+(`brainstormTranscriptRowCount`) instead of trusting this number. Here it
+sizes the wire budget; there it decides the pixels. Neither is guessing
+the other's job.
 
 Rows are separated by newlines, and those are characters too — the
 separators are counted, so the bound carries exactly forty full rows.
@@ -920,6 +921,74 @@ class NavigationRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class HudAmbient:
+    """The margin facts on the resting dashboard.
+
+    The Even Hub SDK exposes no weather (verified against the installed
+    0.0.14 typings: location, device, glasses, user, storage only), so the
+    Mac resolves it from the wearer's own phone position and sends the
+    finished line. Empty fields simply do not paint.
+    """
+
+    temperature: str = ""
+    condition: str = ""
+    unread: int = 0
+
+    def to_wire(self) -> dict[str, Any]:
+        if len(self.temperature) > 8 or len(self.condition) > 24:
+            raise ProtocolError("ambient text is too long for the margin")
+        if not 0 <= self.unread <= 999:
+            raise ProtocolError("ambient unread count is out of range")
+        return {
+            "kind": "hud.ambient",
+            "temperature": self.temperature,
+            "condition": self.condition,
+            "unread": self.unread,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationMapPanel:
+    """Street surroundings for the guidance HUD, as prepared pixels.
+
+    The Mac renders this: the access token never reaches the wire. The
+    plugin needs `latitude`/`longitude`/`zoom`/size to project JOAT's own
+    route onto the same pixels, so those travel with the image.
+    """
+
+    session_id: str
+    latitude: float
+    longitude: float
+    zoom: int
+    width: int
+    height: int
+    #: base64 PNG, sixteen grey levels, black where the glass stays clear.
+    png_base64: str
+
+    def to_wire(self) -> dict[str, Any]:
+        if not 1 <= self.zoom <= 22:
+            raise ProtocolError("navigation map zoom is invalid")
+        if not 16 <= self.width <= 576 or not 16 <= self.height <= 288:
+            raise ProtocolError("navigation map size is invalid")
+        if not self.png_base64 or len(self.png_base64) > 400_000:
+            raise ProtocolError("navigation map payload is invalid")
+        return {
+            "kind": "navigation.map",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+            "latitude": _navigation_number(
+                self.latitude, "latitude", minimum=-90, maximum=90,
+            ),
+            "longitude": _navigation_number(
+                self.longitude, "longitude", minimum=-180, maximum=180,
+            ),
+            "zoom": self.zoom,
+            "width": self.width,
+            "height": self.height,
+            "png": self.png_base64,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NavigationStop:
     session_id: str
 
@@ -1004,6 +1073,8 @@ DownlinkMessage = (
     | NavigationView
     | NavigationOriginRequest
     | NavigationRoute
+    | NavigationMapPanel
+    | HudAmbient
     | NavigationStop
     | ConfirmRequest
     | PolicySet
