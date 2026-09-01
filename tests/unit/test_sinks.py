@@ -743,3 +743,25 @@ class TestBlankRowsAreNotAffordable:
         assert [r for r in rows if not r.strip()] == [], rows
         assert "AGREED" in rows[0] and "OPEN" in rows[2], rows
         assert rows[-1].startswith("JOAT > converged")
+
+    async def test_a_turn_that_streams_only_whitespace_says_so_too(self) -> None:
+        """The sibling of the silent turn, and the one I missed.
+
+        Keying on "did a chunk arrive" caught a turn that never streamed
+        and left the turn whose only chunk was a stray newline: it retired
+        as a bare "CODEX >", an empty speaker row spending a line of seven
+        to say nothing.
+        """
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex", "claude"])
+        await sink.turn("codex (proposer)")
+        await sink.chunk("\n")
+        await sink.chunk("   ")
+        await sink.turn("claude (critic)")
+        await sink.chunk("GIST: I will answer instead.")
+        await sink.close("converged")
+
+        rows = transport.sent[-1].activity.splitlines()
+        assert "CODEX > said nothing" in rows, rows
+        assert not any(r.rstrip().endswith(">") for r in rows), rows
