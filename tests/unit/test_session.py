@@ -1908,3 +1908,90 @@ class TestANewTopicDuringALiveSession:
         assert session.consumed == ["I think the cache is the wrong layer"]
         assert started == ["the first question"]
         await manager.close()
+
+
+class TestContinuingAStoredSession:
+    """docs/SESSION_MODEL.md:49 — "continue <title> → resume the matching
+    durable session."
+
+    Nothing could resume anything before: the stored record had no id, so
+    the wearer's sessions were four lines of dead text and every question
+    started from zero, however many times they had already worked on it.
+    """
+
+    class Recorded:
+        def __init__(self, topic, turns):
+            self.topic = topic
+            self.turns = turns
+
+    class FakeHistory:
+        def __init__(self, past):
+            self._past = past
+            self.asked: list[str] = []
+
+        def find(self, spoken: str):
+            self.asked.append(spoken)
+            return self._past
+
+    class Quiet(Session):
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        def cancel(self) -> None:
+            pass
+
+    def _manager(self, past):
+        seen: list[tuple[str, tuple]] = []
+
+        def continuation(topic, prior):
+            seen.append((topic, prior))
+            return TestContinuingAStoredSession.Quiet()
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda topic: None,
+            history=self.FakeHistory(past),
+            continuation_factory=continuation,
+        )
+        return manager, seen
+
+    async def test_continue_carries_the_earlier_turns_forward(self) -> None:
+        past = self.Recorded("cold-start latency",
+                             (("CODEX", "Cache it."), ("CLAUDE", "Not on handoff.")))
+        manager, seen = self._manager(past)
+
+        assert manager.handle_transcript("continue cold-start latency")
+        await asyncio.sleep(0)
+
+        assert len(seen) == 1
+        topic, prior = seen[0]
+        assert topic == "cold-start latency"
+        assert prior == (("CODEX", "Cache it."), ("CLAUDE", "Not on handoff."))
+        await manager.close()
+
+    async def test_an_unknown_title_starts_nothing(self) -> None:
+        """Better to do nothing than to resume the wrong conversation."""
+        manager, seen = self._manager(None)
+        assert manager.handle_transcript("continue something never discussed") is False
+        assert seen == []
+        await manager.close()
+
+    async def test_prior_turns_are_context_not_positions(self) -> None:
+        """A continuation whose collaborators all fail must still report
+        "insufficient collaborators" — borrowed history is not a position
+        anyone took in this run."""
+        from joat.services.roundtable import Participant, RoundTable
+
+        async def silent(prompt: str):
+            if False:
+                yield ""
+
+        transport = SinkTransport()
+        table = RoundTable([Participant("codex", "proposer", silent)])
+        session = debate(
+            transport, table, None,
+            prior=(("CODEX", "an old answer"), ("CLAUDE", "an old reply")),
+        )
+        await session.run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "insufficient collaborators" in joined

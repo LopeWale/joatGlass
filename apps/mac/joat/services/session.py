@@ -9,6 +9,7 @@ behavior applies (the orchestrator's streamed reply).
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 import logging
 import time
 import re
@@ -26,6 +27,16 @@ from .roundtable import (
     parse_direction, parse_relay_mode,
 )
 from .sinks import TranscriptSink
+
+#: docs/SESSION_MODEL.md:49-51. "continue <title>" resumes a stored
+#: session's lineage; "branch this" forks the one on screen; "new
+#: brainstorm" starts a fresh lineage explicitly. All three require the
+#: word, so ordinary speech cannot trip them.
+_CONTINUE = re.compile(
+    r"^continue(?:\s+(?:the\s+)?(?:brainstorm\s+)?(?:about\s+|on\s+)?)(?P<title>.+)$",
+    re.IGNORECASE,
+)
+_BRANCH = re.compile(r"^branch(?:\s+(?:this|it|that))?$", re.IGNORECASE)
 
 _BRAINSTORM_TRIGGER = re.compile(
     # Whisper PUNCTUATES. The live transcript of the exact phrase this
@@ -142,6 +153,9 @@ class SessionManager:
         route_reply: Callable[
             [str | None, str | None], Awaitable[str]] | None = None,
         save_reply: Callable[[str | None], Awaitable[str]] | None = None,
+        history: Any | None = None,
+        continuation_factory: Callable[
+            [str, tuple[tuple[str, str], ...]], Session | None] | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
@@ -162,6 +176,11 @@ class SessionManager:
         # A new topic offered while a session is live, held until
         # the wearer answers. Never started behind their back.
         self._pending_topic: str = ""
+        # docs/SESSION_MODEL.md:49-51 — "continue <title>" and "branch this"
+        # need a store to resume FROM and a factory that accepts the earlier
+        # turns. Optional so existing embeddings keep working unchanged.
+        self._history = history
+        self._continuation_factory = continuation_factory
         self._save_reply = save_reply
         # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
         # not decoration. Keep it explicit so the next wearer phrase starts
@@ -497,6 +516,9 @@ class SessionManager:
         # the trigger; the word boundary still keeps "brainstorming …" from
         # becoming an invocation.
         request = text.strip().rstrip(".!?")
+        resumed = _CONTINUE.match(request)
+        if resumed is not None and self._resume(resumed.group("title").strip()):
+            return True
         trigger = _BRAINSTORM_TRIGGER.match(request)
         if trigger is not None:
             return self._start(trigger.group(1).strip())
@@ -692,6 +714,31 @@ class SessionManager:
             return False
         return self.try_start_session(session, publish_state=True)
 
+    def _resume(self, title: str) -> bool:
+        """Continue a stored session, carrying its turns forward.
+
+        docs/SESSION_MODEL.md:49 — "continue <title> → resume the matching
+        durable session; ask on ambiguity." Until now nothing could resume
+        anything: the record had no id, so twenty stored conversations were
+        four lines of dead text and every question started from zero.
+        """
+        if self._history is None or self._continuation_factory is None:
+            return False
+        past = self._history.find(title)
+        if past is None:
+            log.info("no stored brainstorm matches that title")
+            return False
+        if not self._brainstorm_is_available():
+            self._show_topic_capture(armed=False)
+            return True
+        session = self._continuation_factory(past.topic, tuple(past.turns))
+        if session is None:
+            log.warning("continuation requested but agents unavailable")
+            return False
+        log.info("continuing a stored brainstorm (%d prior turns)",
+                 len(past.turns))
+        return self.try_start_session(session, publish_state=True)
+
     def _brainstorm_is_available(self) -> bool:
         """Keep legacy embeddings permissive until they opt into the policy."""
         available = self._brainstorm_available
@@ -784,6 +831,7 @@ class DebateSession(Session):
         max_rounds: int = 2,
         agreement_threshold: float = 0.85,
         on_phase: Callable[[str], None] | None = None,
+        prior: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self._topic = topic
         self._table = table
@@ -795,6 +843,13 @@ class DebateSession(Session):
         self._agreement_threshold = agreement_threshold
         self._on_phase = on_phase
         self._verify_summary: list[str] = []
+        # A CONTINUATION's earlier turns. Deliberately not seeded into
+        # `_transcript`: that list is also how this session counts how many
+        # positions were actually taken THIS run ("insufficient
+        # collaborators — 1 of 2 spoke"), and seeding it would make that
+        # guard pass on borrowed history while nobody present said a word.
+        # Context for the prompts, evidence for nothing.
+        self._prior: tuple[tuple[str, str], ...] = tuple(prior)
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
         self._wearer_turns = 0
@@ -1092,7 +1147,11 @@ class DebateSession(Session):
         return "".join(collected)
 
     def _transcript_text(self) -> str:
-        return "\n\n".join(f"[{label}]\n{text}" for label, text in self._transcript)
+        """What the collaborators are shown: the earlier conversation, then
+        this one. A continuation that dropped the earlier turns would be a
+        new session wearing an old title."""
+        turns = [*self._prior, *self._transcript]
+        return "\n\n".join(f"[{label}]\n{text}" for label, text in turns)
 
     async def _verified_turn(self, speaker: Participant, round_no: int) -> str:
         """One speaker's turn plus its visible verification (and one repair).
@@ -1107,9 +1166,14 @@ class DebateSession(Session):
         # the turns still execute one at a time on the HUD. The wearer's own
         # turns are NOT withheld — independence means not seeing the other
         # collaborators, never ignoring the person who asked.
+        # A CONTINUATION's earlier conversation is never withheld: it is
+        # the reason the wearer said "continue" rather than starting fresh,
+        # and independence means not seeing the other seats' answers to THIS
+        # question — not amnesia about the one before it.
         prior = (
-            [t for t in self._transcript if t[0] == self.WEARER_LABEL]
-            if round_no == 1 else self._transcript
+            [*self._prior,
+             *[t for t in self._transcript if t[0] == self.WEARER_LABEL]]
+            if round_no == 1 else [*self._prior, *self._transcript]
         )
         # A routed mode applies to the NEXT turn only, then the room
         # returns to ordinary cross-review — the wearer steered one relay,

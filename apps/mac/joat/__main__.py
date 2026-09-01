@@ -700,6 +700,30 @@ async def main() -> None:
     else:
         log.info("navigation provider unavailable (MAPBOX_ACCESS_TOKEN not configured)")
 
+    def make_continuation(
+        topic: str, prior: tuple[tuple[str, str], ...],
+    ) -> Session | None:
+        """A continuation is an ordinary session that remembers.
+
+        SESSION_MODEL.md:49 — "continue <title>" resumes the stored
+        conversation, so the earlier turns become context the collaborators
+        can see. They are NOT counted as positions taken this run; see
+        DebateSession._prior.
+        """
+        session = make_debate(topic)
+        if isinstance(session, DebateSession) and prior:
+            return DebateSession(
+                topic,
+                seat_participants(current_seated()),
+                Broadcast([HudSink(hud, status.agent_terminal_projection),
+                           TerminalSink(), debate_state]),
+                replier,
+                gate=gate,
+                on_phase=publish_brainstorm_phase,
+                prior=prior,
+            )
+        return session
+
     def make_debate(topic: str) -> Session | None:
         # The SessionManager has already painted the unavailable frame if
         # this is false; retain the guard for direct/internal callers.
@@ -952,6 +976,8 @@ async def main() -> None:
         # lambda defers the lookup to call time, same as capability_opens.
         route_reply=lambda who, lane: terminal_commands.route_reply(who, lane),
         save_reply=save_brainstorm_reply,
+        history=brainstorm_history,
+        continuation_factory=make_continuation,
     )
 
     def active_navigation() -> NavigationSession | NavigationUnavailableSession | None:
