@@ -103,10 +103,12 @@ type HudVisualBaseFrame =
     productivity: ProductivityHudModel;
   };
 
-/** The assistant layer is composited into the same four G2 images, not a
- * fifth native image container. That preserves the current feature page. */
+/** Overlays composite into the same four G2 images, not a fifth container.
+ * `actionOverlay`: transient outcome strip over the page the action came from;
+ * truth states (failed/check/due) still arrive as a full productivity frame. */
 export type HudVisualFrame = HudVisualBaseFrame & {
   assistantOverlay?: AssistantOverlayVisual;
+  actionOverlay?: { productivity: ProductivityHudModel };
 };
 
 export interface HudFrameRenderer {
@@ -116,7 +118,10 @@ export interface HudFrameRenderer {
 }
 
 export interface HudFramePainter {
-  paint(frame: HudVisualFrame): Promise<boolean>;
+  /** `localTick`: this repaint carries no new information from the Mac —
+   * only a device-side clock digit moved. It draws normally but is NOT
+   * recorded as a wearer-visible frame receipt. */
+  paint(frame: HudVisualFrame, localTick?: boolean): Promise<boolean>;
   /** Move the brainstorm/terminal transcript window; true if it moved. */
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
@@ -184,6 +189,7 @@ async function completedVisualFrameReceipt(
 
 interface PendingPaint {
   frame: HudVisualFrame;
+  localTick: boolean;
   resolve: Array<(painted: boolean) => void>;
 }
 
@@ -273,11 +279,11 @@ export class HudVisualSurface implements HudFramePainter {
     return this.renderer.transcriptIsThinking?.() ?? false;
   }
 
-  paint(frame: HudVisualFrame): Promise<boolean> {
+  paint(frame: HudVisualFrame, localTick = false): Promise<boolean> {
     return new Promise((resolve) => {
       if (!this.painting) {
         this.painting = true;
-        void this.drain({ frame, resolve: [resolve] });
+        void this.drain({ frame, localTick, resolve: [resolve] });
         return;
       }
       const pending = this.queue[this.queue.length - 1];
@@ -289,9 +295,11 @@ export class HudVisualSurface implements HudFramePainter {
         // after this exact four-tile frame finishes, so acknowledging a newer
         // generation on behalf of an older one would corrupt HUD/input truth.
         pending.frame = frame;
+        // A real frame superseding a queued tick is a real frame.
+        pending.localTick = pending.localTick && localTick;
         pending.resolve.push(resolve);
       } else {
-        this.queue.push({ frame, resolve: [resolve] });
+        this.queue.push({ frame, localTick, resolve: [resolve] });
       }
     });
   }
@@ -299,14 +307,14 @@ export class HudVisualSurface implements HudFramePainter {
   private async drain(current: PendingPaint): Promise<void> {
     let next: PendingPaint | undefined = current;
     while (next) {
-      const painted = await this.paintNow(next.frame);
+      const painted = await this.paintNow(next.frame, next.localTick);
       next.resolve.forEach((resolve) => resolve(painted));
       next = this.queue.shift();
     }
     this.painting = false;
   }
 
-  private async paintNow(frame: HudVisualFrame): Promise<boolean> {
+  private async paintNow(frame: HudVisualFrame, localTick = false): Promise<boolean> {
     const frameNumber = ++this.frameNumber;
     let current: { order: number; tile: HudImageTile } | undefined;
     try {
@@ -352,6 +360,12 @@ export class HudVisualSurface implements HudFramePainter {
       // four-tile output without retaining a frame, text, topic, or device
       // identifier. Hashing is detached: it must not delay a visual ack or a
       // generation-bound navigation action after those four uploads succeed.
+      // A clock tick is not a new wearer-visible frame. Recording one
+      // every second floods the acceptance trace — which is bounded at
+      // MAX_RETAINED_EVENTS — and the whole receipt collapses to an empty
+      // "fail" that names no cause. The counter still DRAWS; it just does
+      // not claim the Mac told the lens anything new.
+      if (localTick) return true;
       void completedVisualFrameReceipt(frame, tiles)
         .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })
         .catch(() => undefined);

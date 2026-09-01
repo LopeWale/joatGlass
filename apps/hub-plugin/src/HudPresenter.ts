@@ -3,6 +3,7 @@ import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
 import type { AssistantOverlayVisual, HudFramePainter, HudVisualFrame } from './HudVisualSurface';
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
+import { usesActionPillLayout } from './HudCanvasRenderer';
 import type { NavigationHudModel } from './NavigationHud';
 import {
   CONFIRM_PROMPT_MAX_UNITS,
@@ -158,10 +159,37 @@ interface ConfirmationReturnState extends HudContentState {
   diagnosticKind?: 'messages';
   surface: HudSurface;
   onDeferredProductivityVisible?: () => void;
+  /** Pill deferred behind an in-flight dismissal; fires once the restore paints. */
+  onDeferredPillVisible?: () => void;
 }
 
 interface AssistantOverlayState extends AssistantOverlayVisual {
   dismissTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface ActionOverlayState {
+  productivity: ProductivityHudModel;
+  dismissTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** Failsafe only — CapabilityMenu owns the real auto-return; this stops a
+ * lost frame from leaving the receipt on the glass forever. */
+const ACTION_PILL_FAILSAFE_MS = 8_000;
+
+function sameProductivity(a: ProductivityHudModel, b: ProductivityHudModel): boolean {
+  return a.domain === b.domain
+    && a.phase === b.phase
+    && a.title === b.title
+    && a.primary === b.primary
+    && a.secondary === b.secondary
+    && a.hint === b.hint
+    && a.planningAnchorUnixMs === b.planningAnchorUnixMs
+    && a.monitoringArmed === b.monitoringArmed
+    && a.reminderDueId === b.reminderDueId
+    && a.reminderDueAttemptId === b.reminderDueAttemptId
+    && a.reminderDueGeneration === b.reminderDueGeneration
+    && a.presentationReceiptId === b.presentationReceiptId
+    && a.presentationReceiptGeneration === b.presentationReceiptGeneration;
 }
 
 /** A Home notification temporarily replaces Main, but must never destroy the
@@ -197,6 +225,7 @@ export class HudPresenter {
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private assistantOverlay?: AssistantOverlayState;
+  private actionOverlay?: ActionOverlayState;
   private assistantOverlayPaint?: Promise<boolean>;
   private assistantOverlayPaintTimer?: ReturnType<typeof setTimeout>;
   private assistantOverlayPaintDirty = false;
@@ -483,6 +512,7 @@ export class HudPresenter {
         kinds: new Map(this.kinds),
       };
     }
+    this.clearActionOverlay();
     return this.renderList(surface);
   }
 
@@ -499,6 +529,7 @@ export class HudPresenter {
         kinds: new Map(this.kinds),
       };
     }
+    this.clearActionOverlay();
     return this.renderSidebar(surface);
   }
 
@@ -524,6 +555,7 @@ export class HudPresenter {
         kinds: new Map(this.kinds),
       };
     }
+    this.clearActionOverlay();
     return this.renderNavigation(surface, statusOverride, prior);
   }
 
@@ -546,7 +578,8 @@ export class HudPresenter {
     this.thinkingTicker = setTimeout(() => {
       this.thinkingTicker = undefined;
       if (this.surface.kind !== 'brainstorm') return;
-      void this.paintVisual();
+      // localTick: only the counter's digits moved.
+      void this.paintVisual(true);
     }, 1000);
   }
 
@@ -560,6 +593,7 @@ export class HudPresenter {
 
   async showBrainstorm(brainstorm: BrainstormHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual || this.confirmation) return false;
+    this.clearActionOverlay();
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
       kind: 'brainstorm',
@@ -599,6 +633,10 @@ export class HudPresenter {
     onDeferredProductivityVisible?: () => void,
   ): Promise<boolean> {
     if (!this.visual) return false;
+    if (usesActionPillLayout(productivity.phase)) {
+      return this.showActionPill(productivity, onDeferredProductivityVisible);
+    }
+    this.clearActionOverlay();
     const surface: HudSurface = {
       kind: 'productivity',
       productivity: this.cloneProductivity(productivity),
@@ -638,25 +676,60 @@ export class HudPresenter {
     return painted;
   }
 
+  /** Receipt strip over whatever page the wearer is on; no surface swap. */
+  private async showActionPill(
+    productivity: ProductivityHudModel,
+    onVisible?: () => void,
+  ): Promise<boolean> {
+    this.clearActionOverlay();
+    if (this.confirmation) {
+      // A retained truth page under the gate is superseded by this newer
+      // outcome — never restore FAILED beneath a SAVED strip.
+      if (this.confirmation.surface.kind === 'productivity') {
+        this.confirmation.surface = { kind: 'default' };
+      }
+      this.armActionOverlay(productivity);
+      this.confirmation.onDeferredPillVisible = onVisible;
+      return true;
+    }
+    if (this.surface.kind === 'productivity') {
+      await this.showDefault();
+    }
+    const overlay = this.armActionOverlay(productivity);
+    const painted = await this.paintVisual();
+    if (!painted && this.actionOverlay === overlay) this.clearActionOverlay();
+    return painted;
+  }
+
+  private armActionOverlay(productivity: ProductivityHudModel): ActionOverlayState {
+    const overlay: ActionOverlayState = {
+      productivity: this.cloneProductivity(productivity),
+    };
+    overlay.dismissTimer = setTimeout(() => {
+      if (this.actionOverlay !== overlay) return;
+      this.actionOverlay = undefined;
+      void this.paintVisual();
+    }, ACTION_PILL_FAILSAFE_MS);
+    this.actionOverlay = overlay;
+    return overlay;
+  }
+
+  private clearActionOverlay(): void {
+    if (this.actionOverlay?.dismissTimer !== undefined) {
+      clearTimeout(this.actionOverlay.dismissTimer);
+    }
+    this.actionOverlay = undefined;
+  }
+
   /** Whether this exact productivity surface is currently retained after a
    * successful paint. A deferred confirmation or a failed paint is not a
    * visible surface and must not be used as a delivery acknowledgement. */
   isProductivityVisible(productivity: ProductivityHudModel): boolean {
+    if (!this.confirmation && this.actionOverlay) {
+      if (sameProductivity(this.actionOverlay.productivity, productivity)) return true;
+    }
     if (this.surface.kind !== 'productivity') return false;
-    const visible = this.surface.productivity;
-    return visible.domain === productivity.domain
-      && visible.phase === productivity.phase
-      && visible.title === productivity.title
-      && visible.primary === productivity.primary
-      && visible.secondary === productivity.secondary
-      && visible.hint === productivity.hint
-      && visible.planningAnchorUnixMs === productivity.planningAnchorUnixMs
-      && visible.monitoringArmed === productivity.monitoringArmed
-      && visible.reminderDueId === productivity.reminderDueId
-      && visible.reminderDueAttemptId === productivity.reminderDueAttemptId
-      && visible.reminderDueGeneration === productivity.reminderDueGeneration
-      && visible.presentationReceiptId === productivity.presentationReceiptId
-      && visible.presentationReceiptGeneration === productivity.presentationReceiptGeneration;
+    return sameProductivity(this.surface.productivity, productivity);
   }
 
   /** Repaint the Planning dashboard with a new hover/pane focus. Local-only
@@ -849,6 +922,7 @@ export class HudPresenter {
       }
       return true;
     }
+    this.clearActionOverlay();
     const from = this.tracePage();
     const deferred = this.focusReturn;
     const liveStatus = this.captureLiveStatus();
@@ -923,6 +997,8 @@ export class HudPresenter {
   ): Promise<boolean> {
     const priorPage = this.tracePage();
     const openedHere = this.confirmation === undefined;
+    // A new decision gate supersedes any lingering outcome strip.
+    this.clearActionOverlay();
     const safePrompt = prompt.trim() || 'Confirm requested action.';
     if (safePrompt.length > CONFIRM_PROMPT_MAX_UNITS) {
       console.error('[HudPresenter] exact confirmation preview exceeds HUD capacity');
@@ -1037,6 +1113,13 @@ export class HudPresenter {
     // confirmation may be queued by a callback in the same event turn.
     this.confirmation = undefined;
 
+    const result = await this.restoreAfterConfirmation(prior);
+    // A pill deferred behind this gate rode along in the restore repaint.
+    if (result && this.actionOverlay) prior.onDeferredPillVisible?.();
+    return result;
+  }
+
+  private async restoreAfterConfirmation(prior: ConfirmationReturnState): Promise<boolean> {
     if (prior.surface.kind === 'list') {
       this.focusReturn = {
         streams: new Map(prior.streams),
@@ -1391,7 +1474,7 @@ export class HudPresenter {
       };
     }
     if (this.surface.kind === 'sidebar') {
-      return this.withAssistantOverlay({
+      return this.withOverlays({
         kind: 'sidebar',
         status,
         micOn: this.micOn,
@@ -1407,7 +1490,7 @@ export class HudPresenter {
       });
     }
     if (this.surface.kind === 'list') {
-      return this.withAssistantOverlay({
+      return this.withOverlays({
         kind: 'list',
         status,
         micOn: this.micOn,
@@ -1421,7 +1504,7 @@ export class HudPresenter {
       });
     }
     if (this.surface.kind === 'navigation') {
-      return this.withAssistantOverlay({
+      return this.withOverlays({
         kind: 'navigation',
         status,
         micOn: this.micOn,
@@ -1429,7 +1512,7 @@ export class HudPresenter {
       });
     }
     if (this.surface.kind === 'brainstorm') {
-      return this.withAssistantOverlay({
+      return this.withOverlays({
         kind: 'brainstorm',
         status,
         micOn: this.micOn,
@@ -1437,14 +1520,14 @@ export class HudPresenter {
       });
     }
     if (this.surface.kind === 'productivity') {
-      return this.withAssistantOverlay({
+      return this.withOverlays({
         kind: 'productivity',
         status,
         micOn: this.micOn,
         productivity: this.cloneProductivity(this.surface.productivity),
       });
     }
-    return this.withAssistantOverlay({
+    return this.withOverlays({
       kind: 'overview',
       status,
       micOn: this.micOn,
@@ -1459,10 +1542,20 @@ export class HudPresenter {
     });
   }
 
-  private withAssistantOverlay<T extends HudVisualFrame>(frame: T): T {
-    const overlay = this.assistantOverlay;
-    if (!overlay) return frame;
-    return { ...frame, assistantOverlay: { text: overlay.text } };
+  private withOverlays<T extends HudVisualFrame>(frame: T): T {
+    let out = frame;
+    if (this.actionOverlay) {
+      out = {
+        ...out,
+        actionOverlay: {
+          productivity: this.cloneProductivity(this.actionOverlay.productivity),
+        },
+      };
+    }
+    if (this.assistantOverlay) {
+      out = { ...out, assistantOverlay: { text: this.assistantOverlay.text } };
+    }
+    return out;
   }
 
   /** Paint the surface adopted from a background snapshot. Exactly one paint:
@@ -1472,9 +1565,9 @@ export class HudPresenter {
     return this.paintVisual();
   }
 
-  private async paintVisual(): Promise<boolean> {
+  private async paintVisual(localTick = false): Promise<boolean> {
     if (!this.visual) return false;
-    const ok = await this.visual.paint(this.visualFrame());
+    const ok = await this.visual.paint(this.visualFrame(), localTick);
     // Keep the local elapsed counter moving between Mac frames.
     this.armThinkingTicker();
     if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
