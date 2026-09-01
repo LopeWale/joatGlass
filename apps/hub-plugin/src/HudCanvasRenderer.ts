@@ -10,6 +10,7 @@ import activitySvg from '@phosphor-icons/core/regular/pulse.svg?raw';
 import navigationSvg from '@phosphor-icons/core/regular/navigation-arrow.svg?raw';
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
+import weatherSvg from '@phosphor-icons/core/regular/cloud-sun.svg?raw';
 import {
   CANVAS,
   type BrainstormHudModel,
@@ -27,6 +28,7 @@ import {
   formatNavigationDistance,
   type NavigationHudModel,
   type NavigationMapModel,
+  type NavigationMapPanelModel,
   type NavigationManeuver,
 } from './NavigationHud';
 
@@ -164,7 +166,42 @@ export const OVERVIEW_DASHBOARD = {
   contextLabelBaselineY: 196,
   contextValueBaselineY: 214,
   trayBaselineY: 244,
+  //: The margin facts sit under the clock, where the reference HUD puts
+  //: them: what day it is, what it is like outside, what is waiting.
+  ambientBaselineY: 252,
 } as const;
+
+export interface HudNotificationRow {
+  source: string;
+  age: string;
+  headline: string;
+}
+
+/**
+ * The home pane shows the notifications THEMSELVES, not a count.
+ *
+ * A counter ("2 notifications") tells the wearer only that they must open
+ * another page — the exact menu page the reference HUDs prove is
+ * unnecessary. The Mac sends one row per card as
+ * "Source · age · headline", newest first; the wearer reads them at a
+ * glance and never taps.
+ */
+export function parseHudNotificationRows(tray: string): HudNotificationRow[] {
+  return tray
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split(' · ');
+      if (parts.length < 3) return { source: '', age: '', headline: line };
+      return {
+        source: (parts[0] ?? '').trim(),
+        age: (parts[1] ?? '').trim(),
+        headline: parts.slice(2).join(' · ').trim(),
+      };
+    })
+    .filter((row) => row.headline.length > 0);
+}
 
 /** Split "9:41" into the two stacked rows the dashboard prints. A missing
  * or malformed clock still renders placeholders rather than an empty pane. */
@@ -193,7 +230,7 @@ export const HUD_VISUAL_GEOMETRY = {
   overviewMainX: 176,
   overviewTrayY: 168,
   overviewContextY: 214,
-  sidebarWidth: 160,
+  sidebarWidth: 256,
   listContentX: 93,
 } as const;
 
@@ -268,7 +305,8 @@ export type HudIconName =
   | 'navigation'
   | 'settings'
   | 'microphone'
-  | 'battery';
+  | 'battery'
+  | 'weather';
 
 const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   messages: chatCircleSvg,
@@ -283,6 +321,7 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   settings: gearSvg,
   microphone: microphoneSvg,
   battery: batteryHighSvg,
+  weather: weatherSvg,
 };
 
 /** A month is intentionally a real six-row grid on the lens, rather than a
@@ -551,6 +590,48 @@ export function hudSidebarIconName(item: string): HudIconName {
     activity: 'activity',
   };
   return icons[normalized] ?? 'settings';
+}
+
+/** Transient outcome receipts are a STRIP, not a page (wearer's ruling,
+ * 2026-09-01, pointing at the platform's own "Even AI Listening" pill): a
+ * save or delete confirmation lights one small wide rectangle and leaves the
+ * rest of the glass clear. Truth states the wearer must actually read stay
+ * full pages — `failed`/`check` decide whether a retry is safe, and `due` is
+ * an interactive alert with its own acknowledged delivery. The logical state
+ * machine (acks, Back, the 5s auto-return) is unchanged; only pixels differ. */
+export function usesActionPillLayout(phase: ProductivityHudModel['phase']): boolean {
+  return phase === 'verifying'
+    || phase === 'saved'
+    || phase === 'monitoring'
+    || phase === 'completed'
+    || phase === 'cancelled'
+    || phase === 'not_saved';
+}
+
+/** Geometry for the outcome strip: low on the glass like the reference pill,
+ * clear of the status spine and the footer line. */
+export const ACTION_PILL = {
+  x: 88,
+  y: 196,
+  width: 400,
+  height: 44,
+  radius: 10,
+  iconX: 106,
+  iconY: 207,
+  iconSize: 20,
+  headlineX: 136,
+  headlineY: 212,
+  detailY: 229,
+} as const;
+
+/** A one-line answer in a 460x183 card is the productivity-page mistake in
+ * card form. "Reply sent.", "Reply cancelled.", a note receipt — anything
+ * that fits the measured 46-character working line — renders as the same
+ * slim strip, over the live page like the platform's own listening pill.
+ * Real replies (multi-line, streamed) keep the card. */
+export function usesAssistantPillLayout(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length > 0 && trimmed.length <= 48 && !trimmed.includes('\n');
 }
 
 export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): string {
@@ -1283,6 +1364,49 @@ export interface NavigationMapProjection {
   position?: readonly [number, number];
 }
 
+/** Project the route onto the Mac-rendered panel, so line meets road. */
+export function projectNavigationMapToPanel(
+  map: NavigationMapModel,
+  panel: NavigationMapPanelModel,
+): NavigationMapProjection | undefined {
+  if (map.geometry.length < 2) return undefined;
+  const bounds = NAVIGATION_MAP_PANEL;
+  return {
+    points: map.geometry.map((point) => projectMercatorPanel(point, panel, bounds)),
+    ...(map.position
+      ? { position: projectMercatorPanel(map.position, panel, bounds) }
+      : {}),
+  };
+}
+
+/**
+ * Web Mercator, in the same 512-pixel tile scheme Mapbox Static Images
+ * uses. The route JOAT draws must land ON the roads the Mac fetched, so
+ * both halves have to agree on this transform exactly — a different tile
+ * size would slide the line a block sideways at street zoom.
+ */
+export function projectMercatorPanel(
+  point: { latitude: number; longitude: number },
+  panel: NavigationMapPanelModel,
+  bounds: { x: number; y: number; width: number; height: number },
+): readonly [number, number] {
+  const worldPixels = 512 * Math.pow(2, panel.zoom);
+  const toWorld = (latitude: number, longitude: number): readonly [number, number] => {
+    const clamped = Math.max(-85.05112878, Math.min(85.05112878, latitude));
+    const sin = Math.sin((clamped * Math.PI) / 180);
+    return [
+      ((longitude + 180) / 360) * worldPixels,
+      (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * worldPixels,
+    ];
+  };
+  const [centreX, centreY] = toWorld(panel.latitude, panel.longitude);
+  const [x, y] = toWorld(point.latitude, point.longitude);
+  return [
+    bounds.x + bounds.width / 2 + (x - centreX),
+    bounds.y + bounds.height / 2 + (y - centreY),
+  ];
+}
+
 /**
  * Project a lat/lon polyline into the map panel.
  *
@@ -1477,6 +1601,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     text: string,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
+    if (usesAssistantPillLayout(text)) {
+      this.drawAssistantPill(context, text);
+      return;
+    }
     context.save();
     // The assistant preserves the feature *state*, but temporarily owns the
     // complete content field beneath the status spine. A smaller card leaves
@@ -1531,10 +1659,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context: string;
       tray: string;
       hint: string;
+      ambient?: { temperature: string; condition: string; unread: number };
     },
     icons: Record<HudIconName, HTMLImageElement>,
     opacity = 1,
     offsetX = 0,
+    /** The Sidebar draws its own right-hand edge; painting the dashboard's
+     * divider as well left two parallel rules on one screen. */
+    showDivider = true,
+    /** Where the footer hint is centred. The Sidebar's black field covers
+     * the left half of the canvas, which clipped a canvas-centred hint to
+     * "ft x2 overview"; it centres the hint in the visible pane instead. */
+    hintCenterX = 288,
   ): void {
     context.save();
     context.globalAlpha = opacity;
@@ -1548,8 +1684,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Mac is unreachable.
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    context.fillStyle = gray(CHROME);
-    context.font = `11px ${HUD_FONT}`;
+    // The date is a FACT the wearer glances for, not a caption: it reads at
+    // support weight, like the reference dashboard's "Wed 09/12".
+    context.fillStyle = gray(SUPPORT);
+    context.font = `13px ${HUD_FONT}`;
     context.fillText(hudDateLabel(new Date()), layout.clockX + 4, layout.dateBaselineY);
 
     const clock = hudClockParts(status.time);
@@ -1558,13 +1696,41 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillText(clock.hours, layout.clockX, layout.hoursBaselineY);
     context.fillText(clock.minutes, layout.clockX, layout.minutesBaselineY);
 
+    // Weather and unread count live under the clock. The Even Hub SDK has
+    // no weather API (checked against the installed 0.0.14 typings), so the
+    // Mac resolves it from the phone's own position and sends the words.
+    const ambient = frame.ambient;
+    if (ambient && (ambient.temperature || ambient.unread > 0)) {
+      let ambientX = layout.clockX + 4;
+      if (ambient.temperature) {
+        this.drawIcon(
+          context, icons.weather, ambientX, layout.ambientBaselineY - 8, 15, CHROME,
+        );
+        ambientX += 20;
+        context.fillStyle = gray(SUPPORT);
+        context.font = `13px ${HUD_FONT}`;
+        context.fillText(ambient.temperature, ambientX, layout.ambientBaselineY);
+        ambientX += context.measureText(ambient.temperature).width + 22;
+      }
+      if (ambient.unread > 0) {
+        this.drawIcon(
+          context, icons.notifications, ambientX, layout.ambientBaselineY - 8, 15, CHROME,
+        );
+        context.fillStyle = gray(SUPPORT);
+        context.font = `13px ${HUD_FONT}`;
+        context.fillText(String(ambient.unread), ambientX + 20, layout.ambientBaselineY);
+      }
+    }
+
     // One hairline divides the two panes. Not a card: a single frame edge.
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 1;
-    context.beginPath();
-    context.moveTo(layout.dividerX, layout.dividerTopY);
-    context.lineTo(layout.dividerX, layout.dividerBottomY);
-    context.stroke();
+    if (showDivider) {
+      context.strokeStyle = gray(HAIRLINE);
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(layout.dividerX, layout.dividerTopY);
+      context.lineTo(layout.dividerX, layout.dividerBottomY);
+      context.stroke();
+    }
 
     // ── Right pane: whatever JOAT currently has to say ───────────────────
     const paneX = layout.paneX;
@@ -1589,7 +1755,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(QUIET);
       context.font = `9px ${HUD_FONT}`;
       context.textAlign = 'center';
-      context.fillText(overview.hint, 288 - offsetX, 267);
+      context.fillText(overview.hint, hintCenterX - offsetX, 267);
       context.restore();
       return;
     }
@@ -1641,13 +1807,25 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
 
     if (overview.tray) {
-      // Anchored to the pane bottom: the ambient line belongs at the edge,
-      // not floating wherever the answer above happened to end.
-      const trayY = Math.max(cursorY + 26, layout.trayBaselineY);
-      this.drawIcon(context, icons.notifications, paneX, trayY - 8, 16, SUPPORT);
-      context.fillStyle = gray(SUPPORT);
-      context.font = `11px ${HUD_FONT}`;
-      this.fitText(context, overview.tray, paneX + 24, trayY, paneWidth - 24);
+      // Notifications are CONTENT on the home screen: source, age, and the
+      // headline itself, stacked. No count, and no menu page to reach them.
+      const rows = parseHudNotificationRows(overview.tray);
+      let trayY = Math.max(cursorY + 24, 196);
+      for (const row of rows) {
+        if (trayY > 236) break;
+        if (row.source) {
+          this.drawIcon(context, icons.notifications, paneX, trayY - 8, 13, CHROME);
+          context.fillStyle = gray(CHROME);
+          context.font = `9px ${HUD_FONT}`;
+          const label = row.age ? `${row.source} · ${row.age}` : row.source;
+          this.fitText(context, label, paneX + 18, trayY, paneWidth - 18);
+          trayY += 15;
+        }
+        context.fillStyle = gray(SUPPORT);
+        context.font = `12px ${HUD_FONT}`;
+        this.fitText(context, row.headline, paneX + 18, trayY, paneWidth - 18);
+        trayY += 22;
+      }
     }
 
     context.fillStyle = gray(QUIET);
@@ -1655,7 +1833,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'center';
     context.fillText(
       frame.mainKind === 'notification' ? NOTIFICATION_DISMISS_HINT : frame.hint,
-      288 - offsetX,
+      hintCenterX - offsetX,
       267,
     );
     context.restore();
@@ -1674,7 +1852,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // tiles go dirty and the wearer watches the top half arrive, then the
     // bottom. Leaving the right half identical means only the two left tiles
     // carrying the rail are sent, and the menu appears in half the transfers.
-    this.drawOverview(context, frame, icons);
+    this.drawOverview(
+      context, frame, icons, 1, 0, false,
+      // Centre of the pane the menu leaves visible, not of the canvas.
+      (HUD_VISUAL_GEOMETRY.sidebarWidth + CANVAS.width) / 2,
+    );
     context.fillStyle = '#000000';
     context.fillRect(3, 38, HUD_VISUAL_GEOMETRY.sidebarWidth - 3, 246);
     context.strokeStyle = gray(HAIRLINE);
@@ -2145,6 +2327,99 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     model: ProductivityHudModel,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
+    if (usesActionPillLayout(model.phase)) {
+      this.drawActionPill(context, model, icons);
+      return;
+    }
+    this.drawProductivityPage(context, model, icons);
+  }
+
+  /** One small wide strip; everything around it stays unlit glass. */
+  private drawActionPill(
+    context: CanvasRenderingContext2D,
+    model: ProductivityHudModel,
+    icons: Record<HudIconName, HTMLImageElement>,
+  ): void {
+    const isCalendar = model.domain === 'calendar';
+    const icon = icons[isCalendar ? 'calendar' : 'tasks'];
+    const headline = `${isCalendar ? 'Calendar' : 'Reminders'} · ${
+      productivityPhaseLabel(model.phase)}`;
+
+    context.strokeStyle = gray(SUPPORT);
+    context.lineWidth = 1;
+    roundedRect(
+      context,
+      ACTION_PILL.x,
+      ACTION_PILL.y,
+      ACTION_PILL.width,
+      ACTION_PILL.height,
+      ACTION_PILL.radius,
+    );
+    context.stroke();
+
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    this.drawIcon(
+      context, icon, ACTION_PILL.iconX, ACTION_PILL.iconY, ACTION_PILL.iconSize, BRIGHT,
+    );
+    context.fillStyle = gray(BRIGHT);
+    context.font = `13px ${HUD_FONT}`;
+    this.fitText(
+      context,
+      headline,
+      ACTION_PILL.headlineX,
+      ACTION_PILL.headlineY,
+      ACTION_PILL.x + ACTION_PILL.width - ACTION_PILL.headlineX - 16,
+    );
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    this.fitText(
+      context,
+      model.title,
+      ACTION_PILL.headlineX,
+      ACTION_PILL.detailY,
+      ACTION_PILL.x + ACTION_PILL.width - ACTION_PILL.headlineX - 16,
+    );
+  }
+
+  /** A short spoken receipt ("Reply sent.") over the live page — the same
+   * strip shape as an outcome pill, so every transient acknowledgement in the
+   * product reads the same way regardless of which subsystem produced it. */
+  private drawAssistantPill(context: CanvasRenderingContext2D, text: string): void {
+    context.save();
+    context.fillStyle = gray(0);
+    roundedRect(
+      context,
+      ACTION_PILL.x,
+      ACTION_PILL.y,
+      ACTION_PILL.width,
+      ACTION_PILL.height,
+      ACTION_PILL.radius,
+    );
+    context.fill();
+    context.strokeStyle = gray(SUPPORT);
+    context.lineWidth = 1;
+    context.stroke();
+
+    context.textBaseline = 'middle';
+    context.textAlign = 'center';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `13px ${HUD_FONT}`;
+    this.fitText(
+      context,
+      text.trim(),
+      ACTION_PILL.x + ACTION_PILL.width / 2,
+      ACTION_PILL.y + ACTION_PILL.height / 2,
+      ACTION_PILL.width - 32,
+    );
+    context.restore();
+  }
+
+  private drawProductivityPage(
+    context: CanvasRenderingContext2D,
+    model: ProductivityHudModel,
+    icons: Record<HudIconName, HTMLImageElement>,
+  ): void {
     const isCalendar = model.domain === 'calendar';
     const label = isCalendar ? 'Calendar' : 'Reminders';
     const phase = productivityPhaseLabel(model.phase);
@@ -2451,7 +2726,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
-    const projection = navigation.map ? projectNavigationMap(navigation.map) : undefined;
+    const projection = navigation.map
+      ? (navigation.map.panel
+        ? projectNavigationMapToPanel(navigation.map, navigation.map.panel)
+        : projectNavigationMap(navigation.map))
+      : undefined;
     // Two panes, like a car's instrument cluster: the ACT column on the
     // left (what to do, how far), the SEE column on the right (the shape of
     // the road and where the wearer is on it). Half a lens of black next to
@@ -2482,7 +2761,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
     this.fitText(context, navigation.hint, 36, 214, actWidth - 12);
-    if (projection) this.drawNavigationMap(context, projection);
+    if (projection) this.drawNavigationMap(context, projection, navigation.map?.panel);
 
     this.drawNavigationProgress(context, navigation.progress ?? 0);
     const footer = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
@@ -2495,6 +2774,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawNavigationMap(
     context: CanvasRenderingContext2D,
     projection: NavigationMapProjection,
+    panel?: NavigationMapPanelModel,
   ): void {
     const [first, ...rest] = projection.points;
     if (!first) return;
@@ -2507,10 +2787,42 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.lineTo(288.5, 226);
     context.stroke();
 
-    // The road is CONTEXT, not the instruction: it sits a full step below
-    // the maneuver so the wearer's eye still lands on "Turn right" first.
-    context.strokeStyle = gray(CHROME);
-    context.lineWidth = 2;
+    // Surroundings first, under everything JOAT draws: the streets are the
+    // answer to "where am I", and the route is the answer to "where next".
+    if (panel) {
+      context.save();
+      context.beginPath();
+      context.rect(
+        NAVIGATION_MAP_PANEL.x, NAVIGATION_MAP_PANEL.y,
+        NAVIGATION_MAP_PANEL.width, NAVIGATION_MAP_PANEL.height,
+      );
+      context.clip();
+      // Streets are CONTEXT. Painted at full strength they compete with the
+      // route the wearer must actually follow — and every lit pixel on an
+      // optical HUD costs power and adds glare. Held to roughly chrome.
+      context.globalAlpha = 0.45;
+      context.drawImage(
+        panel.image,
+        NAVIGATION_MAP_PANEL.x + (NAVIGATION_MAP_PANEL.width - panel.width) / 2,
+        NAVIGATION_MAP_PANEL.y + (NAVIGATION_MAP_PANEL.height - panel.height) / 2,
+        panel.width,
+        panel.height,
+      );
+      context.restore();
+    }
+
+    // With real streets underneath, the route must be the BRIGHTEST line on
+    // the panel or it disappears into them; without them it recedes below
+    // the maneuver instead.
+    context.save();
+    context.beginPath();
+    context.rect(
+      NAVIGATION_MAP_PANEL.x, NAVIGATION_MAP_PANEL.y,
+      NAVIGATION_MAP_PANEL.width, NAVIGATION_MAP_PANEL.height,
+    );
+    context.clip();
+    context.strokeStyle = gray(panel ? BRIGHT : CHROME);
+    context.lineWidth = panel ? 3 : 2;
     context.lineJoin = 'round';
     context.lineCap = 'round';
     context.beginPath();
@@ -2545,6 +2857,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.arc(x, y, 2.5, 0, Math.PI * 2);
       context.fill();
     }
+    context.restore();
   }
 
   private drawNavigationWarning(
@@ -2805,9 +3118,34 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const lines = brainstormTranscriptLines(
       transcript, 504, maximumLines, measure, scroll.offset,
     );
+    // Elapsed-while-thinking is DEVICE time. It used to be computed on
+    // the Mac and re-shipped as a whole frame over BLE every three
+    // seconds; the wearer clocked the chunkiness immediately. The engine
+    // paints "Thinking…" once, and this appends live seconds locally.
+    const last = lines.length - 1;
+    if (last >= 0 && scroll.offset === 0 && lines[last]!.endsWith('Thinking…')) {
+      if (this.thinkingKey !== lines[last]) {
+        this.thinkingKey = lines[last]!;
+        this.thinkingSince = Date.now();
+      }
+      const waited = Math.max(0, Math.floor((Date.now() - this.thinkingSince) / 1000));
+      lines[last] = `${lines[last]} ${Math.floor(waited / 60)}:${String(waited % 60).padStart(2, '0')}`;
+    } else if (last >= 0 && !lines[last]!.endsWith('Thinking…')) {
+      this.thinkingKey = '';
+    }
     lines.forEach((line, index) => {
       this.fitText(context, line, x, y + index * 14, 504);
     });
+  }
+
+  private thinkingKey = '';
+  private thinkingSince = 0;
+
+  /** True while the transcript tail is a silent "Thinking…" marker — the
+   * presenter uses this to run a LOCAL 1s repaint, since no frame will
+   * arrive from the Mac until the collaborator produces something. */
+  transcriptIsThinking(): boolean {
+    return this.thinkingKey !== '';
   }
 
   private drawAssistantOverlayText(

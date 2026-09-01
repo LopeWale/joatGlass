@@ -533,6 +533,17 @@ _MIGRATION_9 = (
     """,
 )
 
+_MIGRATION_10 = (
+    # The calendar starting-soon poller is gone: EventKit alarms are the
+    # wearer's own configured lead times and macOS already fires them into
+    # the banner lane, so the second scheduler (and this, its dedup cursor)
+    # duplicated the platform. Migration 8 is checksummed history and cannot
+    # be edited; the table is dropped here instead of left orphaned.
+    """
+    DROP TABLE calendar_event_alerts
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -543,6 +554,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (7, "voice_note_insights", _MIGRATION_7),
     (8, "calendar_starting_soon_alerts", _MIGRATION_8),
     (9, "index_notification_observations_class_time", _MIGRATION_9),
+    (10, "drop_calendar_starting_soon_alerts", _MIGRATION_10),
 )
 
 
@@ -789,15 +801,48 @@ class DurableStore:
             for statement in statements
         )
         expected: dict[tuple[str, str], str] = {}
-        pattern = re.compile(
+        # Which table each index belongs to, so dropping a table also retires
+        # the indexes SQLite drops with it.
+        index_owner: dict[str, str] = {}
+        created_pattern = re.compile(
             r"^\s*CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+([A-Za-z_][A-Za-z0-9_]*)",
             re.IGNORECASE,
         )
+        index_on_pattern = re.compile(
+            r"^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+[A-Za-z_][A-Za-z0-9_]*\s+ON\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)",
+            re.IGNORECASE,
+        )
+        # A migration set that can only ever grow cannot retire a mistake.
+        # The manifest is the ORDERED result of the migrations, not the union
+        # of every CREATE, so a later migration may remove earlier schema.
+        dropped_pattern = re.compile(
+            r"^\s*DROP\s+(TABLE|INDEX)\s+(?:IF\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+            re.IGNORECASE,
+        )
         for sql in expected_sql:
-            match = pattern.match(sql)
-            if match is None:
-                raise StorageSchemaError("internal migration has unrecognized DDL")
-            expected[(match.group(1).lower(), match.group(2))] = self._normalize_ddl(sql)
+            created = created_pattern.match(sql)
+            if created is not None:
+                kind, name = created.group(1).lower(), created.group(2)
+                expected[(kind, name)] = self._normalize_ddl(sql)
+                if kind == "index":
+                    owned = index_on_pattern.match(sql)
+                    if owned is not None:
+                        index_owner[name] = owned.group(1)
+                continue
+            dropped = dropped_pattern.match(sql)
+            if dropped is not None:
+                kind, name = dropped.group(1).lower(), dropped.group(2)
+                expected.pop((kind, name), None)
+                if kind == "table":
+                    for index, owner in list(index_owner.items()):
+                        if owner == name:
+                            expected.pop(("index", index), None)
+                            del index_owner[index]
+                else:
+                    index_owner.pop(name, None)
+                continue
+            raise StorageSchemaError("internal migration has unrecognized DDL")
         actual = {
             (str(kind), str(name)): self._normalize_ddl(str(sql))
             for kind, name, sql in self._db.execute(
