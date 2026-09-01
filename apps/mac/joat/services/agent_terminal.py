@@ -176,6 +176,16 @@ class AgentTerminalRoster:
             lanes=list(self._lanes)[:3], lines=body,
         )
 
+    def _visible_lane(self, fallback: TerminalLane) -> TerminalLane:
+        """Where output must land to actually be SEEN.
+
+        The frame draws the FOCUSED lane. Recording into the lane that
+        happened to serve the request leaves the line invisible whenever
+        the two differ — which is most of the time, since only one lane
+        can enumerate.
+        """
+        return self._lanes.get(self._focus or "", fallback)
+
     def _record(self, lane: TerminalLane, line: str) -> None:
         lane.tail.append(line)
 
@@ -253,10 +263,16 @@ class AgentTerminalRoster:
             await self._narrate(lane, f"{lane.name} ▸ failed — {lane.last_error}")
 
     async def _narrate(self, lane: TerminalLane, line: str) -> None:
-        # Every narrated line is also a frame change: the glasses show the
-        # tail, not one sentence that scrolls away.
+        # Only the focused lane changes what the lenses show. A background
+        # lane streaming its own output must not repaint an unchanged frame
+        # once per line — that is pure BLE traffic on a link the wearer
+        # needs for the session they are actually watching.
+        if lane.name != self._focus:
+            return
+        # Every narrated line IS a frame change: the glasses show the tail,
+        # not one sentence that scrolls away.
         await self.repaint()
-        if self._announce is not None and lane.name == self._focus:
+        if self._announce is not None:
             try:
                 await self._announce(line)
             except Exception:  # a dead surface must not kill the work
@@ -288,7 +304,8 @@ class AgentTerminalRoster:
             return f"Session listing failed — {reason}"
         self._discovered = rows
         if not rows:
-            self._record(lister, "[discover] no sessions involving you")
+            self._record(self._visible_lane(lister),
+                         "[discover] no sessions involving you")
             return "The gateway lists no sessions involving you."
         lines = []
         for row in rows[:12]:
@@ -297,7 +314,7 @@ class AgentTerminalRoster:
         # A listing IS terminal output: putting it in the tail is what lets
         # the wearer READ their sessions on the lenses instead of having to
         # remember what was just spoken.
-        self._record(lister, "[discover] " + ", ".join(
+        self._record(self._visible_lane(lister), "[discover] " + ", ".join(
             (row.get("label") or row.get("key") or "?") for row in rows[:6]
         ))
         suffix = f"\n(+{len(rows) - 12} more)" if len(rows) > 12 else ""
