@@ -67,6 +67,8 @@ class VoiceOrchestrator:
         status: object | None = None,
         commands: Callable[[str], Awaitable[str | None]] | None = None,
         fuzzy_wake: tuple[str, ...] = ("joat", "jode", "jodh"),
+        anchored_wake: tuple[str, ...] = ("jokes", "jot", "jolt"),
+        anchor_window: int = 2,
         fuzzy_threshold: float = 0.86,
         latency_observer: LatencyObserver | None = None,
         frames: AudioFrameSource | None = None,
@@ -95,6 +97,26 @@ class VoiceOrchestrator:
         #
         # The STT prompt bias remains the primary defence — this only
         # matters on the utterances where it does not take.
+        # Wake words that are also ordinary English. They are in the list
+        # because Whisper renders JOAT as them, which is real — but matched
+        # ANYWHERE they turned "I liked your jokes", "give the door a jolt"
+        # and "jot that down" into speech addressed to the assistant, which
+        # was then stripped of that word and answered.
+        #
+        # The fuzzy path is strict to 0.86 precisely so coat/goat/boat
+        # cannot do this; the exact path was admitting three such words
+        # outright. Requiring them to OPEN the utterance keeps the
+        # mis-rendering they exist for ("jokes, what is the weather") while
+        # dropping the conversational use.
+        #
+        # Two words rather than one, because the mis-rendering can follow a
+        # filler ("so jokes, tell me the time"). Measured over thirteen
+        # cases: a window of 1 loses that, 3 re-admits "we should jot that
+        # in the notes app later", 2 gets all thirteen right. The
+        # assistant's own name is never anchored — it may appear anywhere,
+        # so no way of addressing JOAT by name is lost.
+        self._anchored_wake = anchored_wake
+        self._anchor_window = anchor_window
         self._fuzzy_wake = fuzzy_wake
         self._fuzzy_threshold = fuzzy_threshold
         # Longest first so "hey joat" strips before "joat" matches.
@@ -444,7 +466,13 @@ class VoiceOrchestrator:
         for wake in self._wake_words:  # longest first
             wake_words = wake.split()
             n = len(wake_words)
-            for i in range(len(words) - n + 1):
+            # Wake words that are also ORDINARY ENGLISH must open the
+            # utterance; the assistant's own name may appear anywhere.
+            limit = (
+                self._anchor_window if wake in self._anchored_wake
+                else len(words) - n + 1
+            )
+            for i in range(max(0, min(limit, len(words) - n + 1))):
                 if words[i:i + n] != wake_words:
                     continue
                 # Addressed. Rebuild the query from the ORIGINAL text minus
