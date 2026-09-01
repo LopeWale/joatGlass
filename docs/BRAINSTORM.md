@@ -73,9 +73,23 @@ never turns a missing citation or provider failure into a verified synthesis.
 ## G2 layout
 
 The 576x288 optical surface keeps the required JOAT status spine, then uses a
-flat title/state row, approximately eleven transcript rows, a compact voice
-composer, and a truthful gesture footer. Transcript continuation lines align
-under their speaker text. Session rows use a selection rail, not cards.
+flat title/state row, a TOPIC/SEATS/LIVE block, a hairline divider, the
+transcript, and a truthful gesture footer. Session rows use a selection rail,
+not cards.
+
+The transcript is **six rows** on Brainstorm and **seven** on a running Agent
+Terminal (`agentTerminalTranscriptLayout`), each holding **74 characters**:
+HudCanvasRenderer draws it at 11px in the `"SF Mono", …, Menlo, monospace`
+stack across a 504px column, and SF Mono's advance is 1266/2048 em, so
+504 / 6.80 = 74. Seven rows plus the newlines between them is the wire's
+bound on `activity` (`BRAINSTORM_ACTIVITY_MAX`), and a test re-derives that
+equality from the renderer so the two cannot drift.
+
+Those rows hold about one 120-word turn, so a FINISHED turn collapses to the
+one-line `GIST:` its speaker is instructed to open with, and only the live
+turn keeps its prose. The synthesis is never collapsed. Without that the
+glass showed a single turn and the wearer could not follow who had said
+what — which is the whole point of watching.
 
 No card borders, boxed panels, oversized topic title, permanent collaborator
 row, decorative empty space, or fake waveform is permitted. A recording dot is
