@@ -905,13 +905,16 @@ async function renderVisualState(
           } : {}),
         };
       });
-      await hud.showList(fixture.items, {
-        title: 'PLANNING · PLAN · SEPTEMBER 2026',
-        hint: 'tap: choose · swipe: move · left x2: back',
-        selectable: true,
-        planningGrid: grid,
-        planningPane: { dateIndex: 1, focused: true, itemIndex: 1 },
-      });
+      // Through the REAL voice-adoption path: arms CapabilityMenu's dashboard
+      // state machine so simulator-injected gestures drive hover/pane live.
+      await menu.presentList(
+        'PLANNING · PLAN · SEPTEMBER 2026',
+        fixture.items,
+        'voice-fixture-calendar',
+        true,
+        'tap: choose · swipe: move · left x2: back',
+        grid,
+      );
       return;
     }
     await hud.showList(fixture.items, {
