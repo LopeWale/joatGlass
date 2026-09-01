@@ -233,3 +233,25 @@ class TestStreamJsonReading:
         )
         chunks = [chunk async for chunk in agent.stream("ignored")]
         assert chunks == ["one two three"], chunks
+
+    async def test_a_final_line_without_a_newline_still_reaches_the_wearer(
+        self,
+    ) -> None:
+        """The last line carries `result` — the whole answer — and nothing
+        promises it ends in a newline. Leaving it in the pending fragment
+        put the fallback out of reach in the one case it exists for."""
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        agent = SubprocessAgent(
+            ["/bin/sh", "-c",
+             # An unrecognised delta type, so ONLY the fallback can save it,
+             # and no trailing newline on the result line.
+             'printf \'%s\\n\' \'{"type":"stream_event","event":'
+             '{"type":"content_block_delta","delta":'
+             '{"type":"UNKNOWN_FUTURE","text":"x"}}}\'; '
+             'printf \'%s\' \'{"type":"result","result":"the whole answer",'
+             '"is_error":false}\'; exit 0'],
+            stream_json=True, name="fake",
+        )
+        out = "".join([chunk async for chunk in agent.stream("ignored")])
+        assert "the whole answer" in out, out

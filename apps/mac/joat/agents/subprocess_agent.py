@@ -173,6 +173,17 @@ class SubprocessAgent:
                 if out.strip():
                     yield out + "\n"
             if self._stream_json:
+                # The last line need not arrive with a trailing newline, and
+                # the last line is the one carrying `result` — the whole
+                # answer. Leaving it in `pending` put the safety net below
+                # out of reach in exactly the case it exists for.
+                if pending.strip():
+                    text, final, failed = _stream_json_event(pending)
+                    if final is not None:
+                        final_answer, result_failed = final, failed
+                    if text:
+                        streamed = True
+                        yield text
                 # Never lose an answer to a parse gap: if no delta arrived
                 # but the CLI reported one, emit what it reported. A silent
                 # truncation would be worse than no streaming at all.
