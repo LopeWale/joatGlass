@@ -700,6 +700,24 @@ async def main() -> None:
     else:
         log.info("navigation provider unavailable (MAPBOX_ACCESS_TOKEN not configured)")
 
+    async def joat_transform(instruction: str, material: str) -> str:
+        """JOAT doing what was asked WITH a collaborator's answer.
+
+        The local model, not a billed CLI turn: this fires while a session
+        is already running two subscriptions, and rewording an answer the
+        wearer is looking at should not cost a third.
+        """
+        if replier is None:
+            return "No local model is loaded, so I cannot do that here."
+        answer = await replier.reply(
+            "You are JOAT. Do exactly what the wearer asks with the text "
+            "below, and reply with the RESULT only — no preamble, no "
+            "restating the request.\n\n"
+            f"Wearer's instruction: {instruction}\n\n"
+            f"Text:\n{material}"
+        )
+        return (answer or "").strip()
+
     def make_continuation(
         topic: str, prior: tuple[tuple[str, str], ...],
     ) -> Session | None:
@@ -977,6 +995,7 @@ async def main() -> None:
         route_reply=lambda who, lane: terminal_commands.route_reply(who, lane),
         save_reply=save_brainstorm_reply,
         history=brainstorm_history,
+        transform=joat_transform,
         continuation_factory=make_continuation,
     )
 

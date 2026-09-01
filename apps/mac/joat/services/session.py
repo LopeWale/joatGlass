@@ -38,6 +38,34 @@ _CONTINUE = re.compile(
 )
 _BRANCH = re.compile(r"^branch(?:\s+(?:this|it|that))?$", re.IGNORECASE)
 
+#: The open-ended verb layer. The wearer's own framing: "the JOAT
+#: assistant should be able to take anything and do something I ask it to
+#: do with it" — sending a reply to Hermes was their EXAMPLE, not the
+#: specification. What existed was two hardcoded verbs.
+#:
+#: Two conditions, both required, because this runs inside a live session
+#: that already consumes every utterance:
+#:
+#:  1. an IMPERATIVE opening — this is how people give instructions, and
+#:     it is what separates "make that shorter" from "that seems short";
+#:  2. an explicit REFERENCE to the material, so a remark that merely
+#:     contains a verb cannot be mistaken for a command about it.
+#:
+#: A remark still becomes a YOU turn. Being wrong in that direction costs
+#: the wearer a line in the transcript; being wrong the other way silently
+#: eats the thought they were trying to contribute.
+_MATERIAL_VERB = re.compile(
+    r"^(?P<instruction>"
+    r"(?:make|turn|rewrite|reword|shorten|trim|summarise|summarize|expand|"
+    r"elaborate|explain|simplify|clarify|translate|convert|tighten|"
+    r"compare|extract|list|outline|draft|title|name|critique|check)"
+    r"\b.*?"
+    r"\b(?:that|it|this|the\s+(?:last\s+|latest\s+)?"
+    r"(?:reply|answer|response|message|point|turn))"
+    r".*)$",
+    re.IGNORECASE,
+)
+
 _BRAINSTORM_TRIGGER = re.compile(
     # Whisper PUNCTUATES. The live transcript of the exact phrase this
     # surface tells the wearer to say is
@@ -154,6 +182,7 @@ class SessionManager:
             [str | None, str | None], Awaitable[str]] | None = None,
         save_reply: Callable[[str | None], Awaitable[str]] | None = None,
         history: Any | None = None,
+        transform: Callable[[str, str], Awaitable[str]] | None = None,
         continuation_factory: Callable[
             [str, tuple[tuple[str, str], ...]], Session | None] | None = None,
     ) -> None:
@@ -180,6 +209,8 @@ class SessionManager:
         # need a store to resume FROM and a factory that accepts the earlier
         # turns. Optional so existing embeddings keep working unchanged.
         self._history = history
+        # JOAT acting ON the material, rather than routing it elsewhere.
+        self._transform = transform
         self._continuation_factory = continuation_factory
         self._save_reply = save_reply
         # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
@@ -420,8 +451,6 @@ class SessionManager:
                     len(text),
                 )
                 return True
-            if self._active.consume_transcript(steer):
-                return True
             # Routing outranks steering: "send Claude's last reply to
             # Hermes" is an instruction TO JOAT about another surface, not
             # a redirection of who speaks next — the wearer thinks WITH the
@@ -442,6 +471,17 @@ class SessionManager:
 
                 asyncio.get_running_loop().create_task(run_route())
                 return True
+            instruction = _MATERIAL_VERB.match(steer.strip().rstrip("."))
+            if (
+                instruction is not None
+                and self._transform is not None
+                and self._save_reply is not None      # implies a snapshot exists
+            ):
+                asked = instruction.group("instruction").strip()
+                asyncio.get_running_loop().create_task(
+                    self._act_on_material(asked)
+                )
+                return True
             save = _SAVE_REPLY.match(normalized)
             if save is not None and self._save_reply is not None:
                 saver, who = self._save_reply, save.group("who")
@@ -454,6 +494,16 @@ class SessionManager:
                         log.exception("reply save failed")
 
                 asyncio.get_running_loop().create_task(run_save())
+                return True
+
+            # …and only now does the session get it as a REMARK. This order
+            # is load-bearing and was wrong: consume_transcript ran first,
+            # and production's DebateSession.consume_transcript returns True
+            # for essentially any addressed text — so every instruction above
+            # was being filed as a YOU turn instead of executed. The unit
+            # tests missed it because their session double returned False,
+            # which real sessions never do.
+            if self._active.consume_transcript(steer):
                 return True
             # Chairing the room is not an interruption: "claude, respond"
             # steers who speaks next without ending anything.
@@ -541,6 +591,45 @@ class SessionManager:
             )
         except Exception:
             log.warning("replacement question not painted", exc_info=True)
+
+    async def _act_on_material(self, instruction: str) -> None:
+        """Do what the wearer asked WITH the last reply.
+
+        This is the general case the two hardcoded verbs were special cases
+        of. The material is resolved the same way "send that to Hermes"
+        resolves it; what changes is that the instruction is open — "make
+        that shorter", "turn that into a spec", "explain the last reply" —
+        and JOAT answers it locally instead of routing it somewhere.
+
+        Local on purpose: this runs while two subscription CLIs are already
+        mid-session, and spending another billed turn to reword an answer
+        the wearer is looking at would be the wrong trade.
+        """
+        material = self._material()
+        if not material:
+            log.info("nothing to act on yet")
+            return
+        try:
+            answer = await self._transform(instruction, material)  # type: ignore[misc]
+        except Exception:
+            log.exception("instruction on the last reply failed")
+            return
+        if not answer:
+            return
+        try:
+            await self._hud.assistant(answer)
+        except Exception:
+            log.warning("instruction result not painted", exc_info=True)
+
+    def _material(self) -> str:
+        """The text "that" refers to: the newest usable reply."""
+        active = self._active
+        found = getattr(active, "last_reply", None)
+        if callable(found):
+            reply = found()
+            if reply:
+                return str(reply[1])
+        return ""
 
     async def _replace_with(self, topic: str) -> None:
         """End the running session, then start the one they asked for.
@@ -896,6 +985,20 @@ class DebateSession(Session):
         asyncio.get_running_loop().create_task(self._show_wearer_turn(said))
         log.info("wearer added a turn chars=%d", len(said))
         return True
+
+    def last_reply(self) -> tuple[str, str] | None:
+        """The newest collaborator turn — what "that" refers to.
+
+        The wearer's own turns are skipped: "make that shorter" means the
+        answer they just read, not the thing they themselves just said.
+        Failed turns are skipped too — a provider's error text is not a
+        position, and rewording it would be acting on a stack trace.
+        """
+        for label, text in reversed(self._transcript):
+            if label == self.WEARER_LABEL or is_failure(text):
+                continue
+            return label, text
+        return None
 
     async def _show_wearer_turn(self, said: str) -> None:
         """Paint the YOU turn immediately, then hand the floor back.

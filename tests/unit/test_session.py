@@ -1995,3 +1995,182 @@ class TestContinuingAStoredSession:
         await session.run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         assert "insufficient collaborators" in joined
+
+
+class TestTheVerbLayer:
+    """"The JOAT assistant should be able to take anything and do something
+    I ask it to do with it" — the wearer's own words. Sending a reply to
+    Hermes was their EXAMPLE; what shipped was that example and one other,
+    both behind closed regexes. This is the general case.
+    """
+
+    class Speaking(Session):
+        def __init__(self) -> None:
+            self.consumed: list[str] = []
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        def cancel(self) -> None:
+            pass
+
+        def consume_transcript(self, text: str) -> bool:
+            self.consumed.append(text)
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+        def last_reply(self):
+            return ("CLAUDE (critic)", "A long and careful answer about caching.")
+
+    def _live(self):
+        transport = SinkTransport()
+        asked: list[tuple[str, str]] = []
+        session = self.Speaking()
+
+        async def transform(instruction: str, material: str) -> str:
+            asked.append((instruction, material))
+            return "shorter version"
+
+        async def save(_who):
+            return "saved"
+
+        manager = SessionManager(
+            HudWriter(transport), lambda t: session,
+            transform=transform, save_reply=save,
+        )
+        assert manager.handle_transcript("brainstorm caching")
+        return manager, session, asked, transport
+
+    async def test_an_open_instruction_acts_on_the_last_reply(self) -> None:
+        manager, session, asked, transport = self._live()
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript(
+            "JOAT, make that shorter", addressed="make that shorter")
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if asked:
+                break
+
+        assert asked == [("make that shorter",
+                          "A long and careful answer about caching.")]
+        # …and it did NOT become a remark in the transcript.
+        assert session.consumed == []
+        overlays = [m for m in transport.sent
+                    if type(m).__name__ == "AssistantOverlay"]
+        assert overlays and overlays[-1].text == "shorter version"
+        await manager.close()
+
+    async def test_many_different_verbs_all_work(self) -> None:
+        """Two hardcoded verbs is not "anything"."""
+        manager, _s, asked, _t = self._live()
+        await asyncio.sleep(0)
+        for said in ("turn that into a spec", "explain the last reply",
+                     "summarise that", "rewrite it as bullet points",
+                     "compare that to what codex said"):
+            manager.handle_transcript(f"JOAT, {said}", addressed=said)
+        for _ in range(60):
+            await asyncio.sleep(0.01)
+            if len(asked) == 5:
+                break
+        assert [a for a, _m in asked] == [
+            "turn that into a spec", "explain the last reply",
+            "summarise that", "rewrite it as bullet points",
+            "compare that to what codex said",
+        ]
+        await manager.close()
+
+    async def test_a_remark_is_still_a_remark(self) -> None:
+        """The wearer's actual thoughts must keep reaching the transcript.
+        Being wrong here costs them the contribution entirely."""
+        manager, session, asked, _t = self._live()
+        await asyncio.sleep(0)
+        for said in ("that seems short", "I think the cache is the wrong layer",
+                     "that is exactly my point"):
+            manager.handle_transcript(f"JOAT, {said}", addressed=said)
+            await asyncio.sleep(0)
+        assert asked == []
+        assert session.consumed == [
+            "that seems short", "I think the cache is the wrong layer",
+            "that is exactly my point",
+        ]
+        await manager.close()
+
+
+class TestInstructionsOutrankAbsorption:
+    """The ORDER of the live-session checks is load-bearing.
+
+    `consume_transcript` used to run first, and production's
+    DebateSession.consume_transcript returns True for essentially any
+    addressed text — so "send Claude's last reply to Hermes", shipped and
+    tested the same day, would have been filed as a YOU turn on real
+    hardware and never routed. Every unit test passed because their session
+    double returned False, which no real session does.
+
+    This double behaves like the real one.
+    """
+
+    class Absorbing(Session):
+        """consume_transcript returns True, exactly like DebateSession."""
+
+        def __init__(self) -> None:
+            self.consumed: list[str] = []
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        def cancel(self) -> None:
+            pass
+
+        def consume_transcript(self, text: str) -> bool:
+            self.consumed.append(text)
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+        def last_reply(self):
+            return ("CODEX (proposer)", "cache on the session id")
+
+    async def test_routing_survives_a_session_that_absorbs_everything(self) -> None:
+        routed: list[tuple] = []
+
+        async def route(who, lane):
+            routed.append((who, lane))
+            return "sent"
+
+        session = self.Absorbing()
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: session, route_reply=route)
+        assert manager.handle_transcript("brainstorm caching")
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript(
+            "JOAT, send Claude's last reply to Hermes",
+            addressed="send Claude's last reply to Hermes")
+        await asyncio.sleep(0)
+
+        assert routed == [("claude", "hermes")]
+        assert session.consumed == []
+        await manager.close()
+
+    async def test_saving_survives_it_too(self) -> None:
+        saved: list = []
+
+        async def save(who):
+            saved.append(who)
+            return "saved"
+
+        session = self.Absorbing()
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: session, save_reply=save)
+        assert manager.handle_transcript("brainstorm caching")
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript("JOAT, note that", addressed="note that")
+        await asyncio.sleep(0)
+        assert saved == [None]
+        assert session.consumed == []
+        await manager.close()
