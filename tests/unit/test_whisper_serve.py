@@ -309,3 +309,67 @@ class TestPromptEcho:
 
     def test_no_prompt_never_matches(self) -> None:
         assert not is_prompt_echo("anything", None)
+
+
+class TestWhereTheWeightsLive:
+    """~3 GB of model, and where it lands is not a detail.
+
+    whisperkit-cli downloads to ~/Documents/huggingface by default, which
+    is iCloud-synced whenever Desktop & Documents sync is on — so the
+    weights get uploaded, counted against the wearer's storage, and pushed
+    to every device they own, to hold a file any machine can refetch.
+    """
+
+    def test_a_fresh_machine_downloads_somewhere_unsynced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from joat.audio import whisper_serve as ws
+
+        monkeypatch.setattr(ws, "LEGACY_MODEL_DIR", tmp_path / "Documents/huggingface")
+        assert ws._existing_model_dir(tmp_path / "prefer", "large-v3_turbo") \
+            == tmp_path / "prefer"
+
+    def test_weights_already_downloaded_are_used_where_they_are(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pointing straight at the new directory would be WORSE than
+        leaving it alone: the next start re-downloads 3 GB while the old
+        copy still sits in iCloud, so the wearer briefly owns six
+        gigabytes of one model to fix a problem about three."""
+        from joat.audio import whisper_serve as ws
+
+        legacy = tmp_path / "Documents/huggingface"
+        (legacy / "models/argmaxinc/whisperkit-coreml"
+         / "openai_whisper-large-v3_turbo").mkdir(parents=True)
+        monkeypatch.setattr(ws, "LEGACY_MODEL_DIR", legacy)
+
+        assert ws._existing_model_dir(tmp_path / "prefer", "large-v3_turbo") == legacy
+
+    def test_the_unsynced_copy_wins_once_it_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from joat.audio import whisper_serve as ws
+
+        legacy = tmp_path / "Documents/huggingface"
+        (legacy / "models/argmaxinc/whisperkit-coreml"
+         / "openai_whisper-large-v3_turbo").mkdir(parents=True)
+        monkeypatch.setattr(ws, "LEGACY_MODEL_DIR", legacy)
+        preferred = tmp_path / "prefer"
+        (preferred / "models").mkdir(parents=True)
+
+        assert ws._existing_model_dir(preferred, "large-v3_turbo") == preferred
+
+    def test_a_different_model_does_not_count_as_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy tree holding some OTHER model must not stop the
+        wanted one downloading to the unsynced path."""
+        from joat.audio import whisper_serve as ws
+
+        legacy = tmp_path / "Documents/huggingface"
+        (legacy / "models/argmaxinc/whisperkit-coreml"
+         / "openai_whisper-tiny").mkdir(parents=True)
+        monkeypatch.setattr(ws, "LEGACY_MODEL_DIR", legacy)
+
+        assert ws._existing_model_dir(tmp_path / "prefer", "large-v3_turbo") \
+            == tmp_path / "prefer"
