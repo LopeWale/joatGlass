@@ -34,7 +34,35 @@ so its app-owned native bridge can use the Mini's Keychain identity; see
 `docs/MAC_APP.md`.
 The voice loop is wired, but the earlier desk result did not survive current
 physical use: roughly 15-second replies have been observed and the production-G2
-metric is reopened. Phase 2 is in progress: debate loop with visible verifier
+metric is reopened.
+
+**A lead on that, 2026-08-31.** Whisper serve had been FAILING to start, and
+when it does the engine says so and falls back to the batch engine for the
+rest of the session — the slower path, which is a strong candidate for the
+15-second replies. From `~/Library/Logs/joat/brain.log`:
+
+    2026-08-30 22:34:42 ERROR whisper serve failed to start:
+                              serve not ready after 30.0s
+    2026-08-31 22:38:43 ERROR whisper serve failed to start:
+                              serve not ready after 30.0s
+    2026-08-31 22:56:25 INFO  whisper serve ready at http://127.0.0.1:50060
+                              (model large-v3_turbo)
+
+Measured, not inferred: every start since has been ready in about FIVE
+seconds, against a `DEFAULT_READY_TIMEOUT_S` of 30. A warm load has six
+times the margin it needs; the two failures were both first-starts after a
+long gap.
+
+Inferred, and worth confirming before acting: that a COLD load — first run
+after a reboot, or after the model cache is evicted — exceeds 30s, and that
+the timed-out process keeps loading in the background, which is why the next
+start finds it warm. If that holds, one cold start costs the whole session
+its fast STT path, and the timeout is the wrong knob to be tight on: a
+generous wait costs seconds once, while the fallback costs every utterance.
+
+To confirm: evict the WhisperKit model cache, start the engine, and time the
+first load. Do not raise the timeout on this reasoning alone — nobody has
+watched a genuinely cold load. Phase 2 is in progress: debate loop with visible verifier
 turns and repair, wake-word address gate, and the DebateLoop
 convergence state machine (agreement >= 0.85, capped rounds). NLI claim-support (MiniCheck flan-t5-large, optional `nli` extra) now runs
 inside the gate: a real quote propping up a misrepresenting claim gets visibly
