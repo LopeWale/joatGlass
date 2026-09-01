@@ -363,9 +363,30 @@ final class NotificationWatcher {
         return append(line, to: outURL)
     }
 
+    /// Debug output is bounded. Nothing ever truncated this file, and with
+    /// the AXDebug default switched on it sweeps once a second: it was found
+    /// at 115 MB, growing ~35 MB/day, on a Mac whose owner had no idea. An
+    /// unbounded diagnostic is a disk leak wearing a helpful hat.
+    ///
+    /// Truncation loses the OLDEST lines, which is the right end to lose: a
+    /// debug log is read after something went wrong, and what went wrong is
+    /// at the bottom.
+    private static let debugLogMaxBytes: UInt64 = 4 * 1024 * 1024
+
     private func appendDebug(_ line: String) {
-        append("\(Date().timeIntervalSince1970) \(line)\n",
-               to: outURL.deletingLastPathComponent().appendingPathComponent("ax-debug.log"))
+        let url = outURL.deletingLastPathComponent()
+            .appendingPathComponent("ax-debug.log")
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+        if size > Self.debugLogMaxBytes {
+            let marker = "\(Date().timeIntervalSince1970) "
+                + "--- ax-debug.log truncated at \(size) bytes ---\n"
+            try? Data(marker.utf8).write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path
+            )
+        }
+        append("\(Date().timeIntervalSince1970) \(line)\n", to: url)
     }
 
     /// Content-free proof that trust and the Notification Center AX query both
