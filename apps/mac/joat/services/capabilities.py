@@ -35,6 +35,7 @@ from ..core.protocol import (
     HudList,
     InputEvent,
     PlanningGridCell,
+    PlanningGridEntry,
 )
 from ..core.interfaces import GlassesTransport
 from ..native.bridge import (
@@ -329,6 +330,21 @@ class CapabilityRouter:
                 event.selected_name or "",
                 event.selected_index,
                 event.trace_id or "hud",
+                event.request_id,
+            ))
+        elif (
+            event.container_name == "capgrid"
+            and event.selected_index is not None
+            and event.planning_anchor_unix_ms is not None
+        ):
+            # Dashboard right-pane tap: the hovered DATE travels as the
+            # planning anchor and the item's position as the index. No
+            # calendar/reminder identifier crosses the wire — the entry is
+            # re-resolved from a fresh authoritative DAY projection, so a
+            # native edit between paint and tap can never open the wrong item.
+            asyncio.get_running_loop().create_task(self._select_grid_entry(
+                event.planning_anchor_unix_ms,
+                event.selected_index,
                 event.request_id,
             ))
         elif event.container_name == "capmessage" and event.selected_index is not None:
@@ -1045,6 +1061,16 @@ class CapabilityRouter:
                 event_count=day.event_count,
                 reminder_count=day.reminder_count,
                 in_month=day.day.month == projection.selected_day.month,
+                # The dashboard's right pane repaints from these on hover;
+                # a per-hover Mac request would ride the serialized BLE lane.
+                entries=tuple(
+                    PlanningGridEntry(
+                        time=entry.time_label,
+                        kind=entry.kind,
+                        title=entry.title,
+                    )
+                    for entry in day.entries[:6]
+                ),
             )
             for day in projection.days
         )
@@ -1204,6 +1230,60 @@ class CapabilityRouter:
                 ],
                 hint="left x2 Planning",
             )
+
+    async def _select_grid_entry(
+        self,
+        anchor_unix_ms: int,
+        entry_index: int,
+        request_id: str | None,
+    ) -> None:
+        """Open one entry tapped on the dashboard's right pane.
+
+        The wire carries only the date and the item's position. The entry is
+        re-resolved from a fresh authoritative DAY projection — the same
+        never-stale rule every Planning read follows — so a native edit
+        between the month paint and the tap opens current truth or nothing.
+        """
+        client = self._personal_data
+        if client is None or not (0 <= anchor_unix_ms <= 32_503_680_000_000):
+            return
+        selected_day = datetime.fromtimestamp(
+            anchor_unix_ms / 1_000, tz=timezone.utc
+        ).astimezone(self._planning_zone()).date()
+        token = self._request_context.set(request_id)
+        try:
+            try:
+                projection = await load_native_planning(
+                    client,
+                    selected_day=selected_day,
+                    scope=PlanningScope.DAY,
+                    zone=self._planning_zone(),
+                )
+            except (PlanningAuthorizationError, NativeBridgeError):
+                # The month view stays on screen; a failed drill-down must
+                # not replace it with an error page for a tap.
+                log.info("dashboard entry open failed; leaving the month view")
+                return
+            if not self._request_is_current():
+                return
+            entries = projection.days[0].entries if projection.days else ()
+            if not 0 <= entry_index < len(entries):
+                log.info("dashboard entry index stale; leaving the month view")
+                return
+            # Anchor follow-up Back navigation on the tapped day.
+            self._planning_selected_day = selected_day
+            entry = entries[entry_index]
+            await self._show_focus(
+                f"{self._planning_origin()} · {entry.kind.upper()}",
+                [
+                    entry.title,
+                    f"{entry.time_label} · {entry.kind.title()}",
+                    "Read-only native item · left x2 Planning",
+                ],
+                hint="left x2 Planning",
+            )
+        finally:
+            self._request_context.reset(token)
 
     def _planning_origin(self) -> str:
         """Name the current menu contract while accepting old package aliases."""

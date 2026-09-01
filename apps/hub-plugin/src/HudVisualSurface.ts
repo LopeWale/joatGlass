@@ -72,6 +72,7 @@ type HudVisualBaseFrame =
     selectable: boolean;
     hint: string;
     planningGrid?: readonly PlanningGridCell[];
+    planningPane?: { dateIndex: number; focused: boolean; itemIndex: number };
   }
   | {
     kind: 'confirmation';
