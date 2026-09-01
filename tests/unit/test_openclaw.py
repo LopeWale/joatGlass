@@ -155,3 +155,62 @@ class TestAvailability:
     def test_base_url_comes_from_the_environment_when_unset(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         monkeypatch.setenv("OPENCLAW_BASE_URL", "http://127.0.0.1:9999")
         assert OpenClawAgent()._base_url == "http://127.0.0.1:9999"
+
+
+class TestTheGatewaysRefusalCodeSurvives:
+    """Every refusal used to read identically.
+
+    Unknown device, expired token, denied scope — all arrived as
+    "OpenClaw rejected the connection", with the Gateway's own code
+    extracted and then discarded unless it was PAIRING_REQUIRED. On a
+    surface whose entire job is reaching another machine, that is the one
+    piece of information an operator needs.
+    """
+
+    @staticmethod
+    def _refuse(error: dict[str, object]) -> str:
+        from joat.agents.openclaw_gateway import (
+            OpenClawGatewayError, _read_connect_response,
+        )
+        import pytest as _pytest
+        with _pytest.raises(OpenClawGatewayError) as caught:
+            _read_connect_response(
+                {"type": "res", "id": "r1", "ok": False, "error": error},
+                request_id="r1", requested_scopes=("operator.read",),
+            )
+        return str(caught.value)
+
+    def test_a_detail_code_reaches_the_operator(self) -> None:
+        assert "UNKNOWN_DEVICE" in self._refuse(
+            {"code": "BAD_REQUEST", "details": {"code": "UNKNOWN_DEVICE"}}
+        )
+
+    def test_a_top_level_code_is_used_when_there_is_no_detail(self) -> None:
+        assert "SCOPE_DENIED" in self._refuse({"code": "SCOPE_DENIED"})
+
+    def test_free_text_is_never_carried(self) -> None:
+        """A Gateway's message has no guarantee of being secret-free."""
+        message = self._refuse({
+            "code": "UNAUTHORIZED",
+            "message": "token sk-live-abcdef123456 is expired",
+        })
+        assert "UNAUTHORIZED" in message
+        assert "sk-live" not in message and "expired" not in message
+
+    def test_a_malformed_code_is_dropped_rather_than_logged(self) -> None:
+        """A Gateway must not write arbitrary text into this Mac's logs."""
+        for hostile in ("../../etc/passwd", "x" * 400, "lower case", 42, None):
+            message = self._refuse({"code": hostile})
+            assert message == "OpenClaw rejected the connection"
+
+    def test_pairing_required_still_takes_its_own_path(self) -> None:
+        from joat.agents.openclaw_gateway import (
+            OpenClawPairingRequired, _read_connect_response,
+        )
+        import pytest as _pytest
+        with _pytest.raises(OpenClawPairingRequired):
+            _read_connect_response(
+                {"type": "res", "id": "r1", "ok": False,
+                 "error": {"details": {"code": "PAIRING_REQUIRED"}}},
+                request_id="r1", requested_scopes=("operator.read",),
+            )
