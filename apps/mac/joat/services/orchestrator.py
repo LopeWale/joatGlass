@@ -304,12 +304,22 @@ class VoiceOrchestrator:
                 )
             ):
                 return
-            # An ACTIVE session owns the HUD and consumes transcripts
-            # ("stop", turn directions) without needing the wake word — the
-            # wearer already invoked it.
-            if (self._sessions is not None and self._sessions.active
-                    and self._sessions.handle_transcript(transcript.text)):
-                return
+            # An ACTIVE session owns the HUD, but it does NOT get unaddressed
+            # speech. Only the cancel words are heard unaddressed — failing
+            # toward "stopped" is safe, and a wearer who wants it to stop
+            # should not have to negotiate with the wake gate. Everything
+            # that STEERS the session (turn direction, and any future
+            # follow-up) requires the wearer to address JOAT: an overheard
+            # "ask claude about that" must never reorder the wearer's round
+            # table, and once follow-ups reach the collaborators the same
+            # sentence would be room conversation shipped to a subprocess.
+            if self._sessions is not None and self._sessions.active:
+                session_addressed = self._strip_wake_word(transcript.text)
+                if self._sessions.handle_transcript(
+                    transcript.text,
+                    addressed=session_addressed,
+                ):
+                    return
             # Address gate BEFORE any trigger phrase: session routing used to
             # run first, so room speech merely beginning with "debate " (or a
             # notification read aloud) started a cloud debate and shipped the
