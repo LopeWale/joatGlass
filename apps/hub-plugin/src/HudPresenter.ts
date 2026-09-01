@@ -31,6 +31,22 @@ const MAX_FOCUS_COPY_CHARS = 46;
 /** The downlink is a WebSocket boundary, so treat its optional visual
  * metadata as untrusted even though TypeScript says it is well shaped. A bad
  * or partial grid must fall back to the ordinary selectable list. */
+/** Rebuild a container-keyed Map from a JSON record, dropping bad entries.
+ * A background snapshot crosses a JSON boundary and a process boundary, so it
+ * is untrusted input, not a value this page wrote. */
+function numericMap<T>(
+  raw: unknown,
+  valid: (value: unknown) => value is T,
+): Map<number, T> {
+  const map = new Map<number, T>();
+  if (typeof raw !== 'object' || raw === null) return map;
+  for (const [key, value] of Object.entries(raw)) {
+    const id = Number(key);
+    if (Number.isInteger(id) && valid(value)) map.set(id, value);
+  }
+  return map;
+}
+
 function normalizePlanningGrid(
   planningGrid: readonly PlanningGridCell[] | undefined,
 ): PlanningGridCell[] | undefined {
@@ -257,6 +273,12 @@ export class HudPresenter {
    * only a consent confirmation remains visually exclusive.
    */
   async showAssistantOverlay(text: string, append = false): Promise<boolean> {
+    // Never over a brainstorm/terminal page. Seen live in the simulator:
+    // a queued reply drained the instant a session settled and painted
+    // "REPLY — Using the phone mic…" across the synthesis — default-layout
+    // text stamped over a full-frame surface. The session's answer owns
+    // that screen; the assistant can speak once the wearer leaves it.
+    if (this.surface.kind === 'brainstorm') return false;
     if (!this.visual || !text) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
@@ -469,6 +491,14 @@ export class HudPresenter {
   }
 
   /** Dedicated four-tile production page for a live Brainstorm or Hermes. */
+  /** Swipe on the brainstorm/terminal surface pages through history. */
+  scrollTranscript(direction: 'up' | 'down'): boolean {
+    if (this.surface.kind !== 'brainstorm' || !this.visual) return false;
+    if (!(this.visual.scrollTranscript?.(direction) ?? false)) return true;
+    void this.paintVisual();
+    return true;
+  }
+
   async showBrainstorm(brainstorm: BrainstormHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual || this.confirmation) return false;
     const prior = this.capturePresenterSnapshot();
@@ -1339,6 +1369,13 @@ export class HudPresenter {
     return { ...frame, assistantOverlay: { text: overlay.text } };
   }
 
+  /** Paint the surface adopted from a background snapshot. Exactly one paint:
+   * the reloaded page already drew its startup frame, and the BLE lane is
+   * serialized, so a second repaint would queue behind this one for nothing. */
+  async repaintRestoredSurface(): Promise<boolean> {
+    return this.paintVisual();
+  }
+
   private async paintVisual(): Promise<boolean> {
     if (!this.visual) return false;
     const ok = await this.visual.paint(this.visualFrame());
@@ -1381,6 +1418,47 @@ export class HudPresenter {
       brightness: new Map(content.brightness),
       kinds: new Map(content.kinds),
     };
+  }
+
+  /**
+   * A JSON-safe projection of everything the wearer is currently looking at.
+   *
+   * The host's background migration reloads the plugin URL into a fresh
+   * WebView, so anything held only in memory is gone on return. The internal
+   * snapshot uses Maps, which do not survive a JSON round trip, so the
+   * container keys become plain records here.
+   */
+  exportBackgroundState(): Record<string, unknown> {
+    return {
+      surface: this.cloneSurface(this.surface),
+      streams: Object.fromEntries(this.streams),
+      brightness: Object.fromEntries(this.brightness),
+      kinds: Object.fromEntries(this.kinds),
+      micOn: this.micOn,
+    };
+  }
+
+  /**
+   * Adopt a snapshot from the page this one replaced, WITHOUT painting.
+   *
+   * The caller repaints once afterwards; painting here would race the startup
+   * frame on the serialized BLE lane. Unknown or malformed fields are skipped
+   * rather than trusted — a corrupt snapshot must not brick the surface.
+   */
+  importBackgroundState(saved: Record<string, unknown>): boolean {
+    const surface = saved.surface;
+    if (typeof surface !== 'object' || surface === null) return false;
+    const kind = (surface as { kind?: unknown }).kind;
+    if (typeof kind !== 'string') return false;
+    this.surface = this.cloneSurface(surface as HudSurface);
+    this.streams = numericMap(saved.streams, (v): v is string => typeof v === 'string');
+    this.brightness = numericMap(saved.brightness, (v): v is number => typeof v === 'number');
+    this.kinds = numericMap(
+      saved.kinds,
+      (v): v is HudContentKind => typeof v === 'string',
+    );
+    if (typeof saved.micOn === 'boolean') this.micOn = saved.micOn;
+    return true;
   }
 
   private capturePresenterSnapshot(): PresenterSnapshot {

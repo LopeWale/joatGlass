@@ -519,11 +519,19 @@ _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
 BRAINSTORM_ROW_COLUMNS = 74
-BRAINSTORM_ROWS = 7
+BRAINSTORM_SCROLLBACK_ROWS = 40
 BRAINSTORM_ACTIVITY_MAX = (
-    BRAINSTORM_ROW_COLUMNS * BRAINSTORM_ROWS + (BRAINSTORM_ROWS - 1)
+    BRAINSTORM_ROW_COLUMNS * BRAINSTORM_SCROLLBACK_ROWS
+    + (BRAINSTORM_SCROLLBACK_ROWS - 1)
 )
-"""How much transcript the glasses can actually display, in characters.
+"""How much transcript rides the wire, in characters.
+
+No longer the DISPLAY size. The wearer asked to scroll — "can i scroll up
+and down to see the replies?" — and a bound derived from what fits on
+screen at once is exactly what made scrolling pointless: there was
+nothing off-screen to scroll to. The renderer keeps a window (13 rows on
+Brainstorm, 12 on a running terminal) over this scrollback; forty rows is
+several full turns of history at the renderer's 74-column wrap.
 
 Derived from the renderer's geometry, not chosen. HudCanvasRenderer draws
 the transcript at 11px in the `"SF Mono", SFMono-Regular, Menlo, monospace`
@@ -544,15 +552,13 @@ the renderer's tail trim silently drops half of them. The taller of the two surf
 Agent Terminal at seven lines (agentTerminalTranscriptLayout); Brainstorm
 draws six.
 
-Rows are separated by newlines, and those are characters too: seven full
-rows is 7 x 74 PLUS the six separators between them. Leaving them out
-made the bound one row short of the display, which is why the terminal
-was taking only six of its seven rows.
+Rows are separated by newlines, and those are characters too — the
+separators are counted, so the bound carries exactly forty full rows.
 
-This was 180 — under 40% of the glass — so a wearer read a third of a
-screen while the rest sat empty, on the one surface whose entire job is
-showing the discussion. Raising it past 518 buys nothing: the renderer
-keeps only the newest lines (visibleHudTailLines) and drops the rest.
+This was 180 — under 40% of one screen — then one screenful (524), and
+now scrollback. History: the wearer read a third of a screen while the
+rest sat empty, on the one surface whose entire job is showing the
+discussion.
 """
 
 

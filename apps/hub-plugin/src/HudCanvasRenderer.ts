@@ -249,7 +249,10 @@ export function brainstormActionHint(
 ): string {
   if (model.screen === 'brainstorm') {
     if (model.state === 'running') {
-      return 'tap: Hermes · swipe down or left x2: cancel';
+      // "tap: Hermes" described a different feature, and a downward swipe
+      // used to CANCEL — the wearer asked to scroll, so swipes scroll and
+      // cancel is the deliberate left double-press only.
+      return 'swipe: scroll · tap: terminal · left x2: cancel';
     }
     if (model.state === 'acceptance_ready') {
       return 'tap: start test · left x2: menu';
@@ -266,7 +269,7 @@ export function brainstormActionHint(
         ? 'tap: speak · right/ring x2: test · left x2: menu'
         : 'tap: speak · left x2: menu';
     }
-    return 'left x2: menu · long-press: mic';
+    return 'swipe: scroll · left x2: menu · long-press: mic';
   }
   // The Agent Terminal surface. These must mirror handleClick(), which
   // branches on terminalState — NOT state — once no lane is running.
@@ -290,7 +293,7 @@ export function brainstormActionHint(
     return 'tap: retry Hermes, then approve · left x2: menu';
   }
   if (model.state === 'running') {
-    return 'tap: Brainstorm · say "terminal cancel" · left x2: menu';
+    return 'swipe: scroll · say "terminal cancel" · left x2: menu';
   }
   return model.terminalState === 'ready'
     ? 'tap: speak to the terminal · left x2: menu'
@@ -342,19 +345,20 @@ export function agentTerminalTranscriptLayout(
   if (model.state === 'running') {
     return {
       summary: `${focus} > ${state} · ${agentTerminalSafetyLabel(model)}`,
-      // Room for the LANES row: without it the roster's concurrency marks
-      // reached the glasses on the wire and were never drawn.
-      dividerY: 127.5,
-      transcriptBaselineY: 148,
-      transcriptLineCapacity: 7,
+      // Dense by demand: the wearer's words were "stop wasting so much
+      // place on things that do not affect functionality". Header and
+      // LANES are two tight rows; everything else is transcript.
+      dividerY: 78.5,
+      transcriptBaselineY: 92,
+      transcriptLineCapacity: 12,
       showRecoveryDetails: false,
     };
   }
   return {
     summary: `${focus} > ${state}`,
-    dividerY: 177.5,
-    transcriptBaselineY: 199,
-    transcriptLineCapacity: 4,
+    dividerY: 118.5,
+    transcriptBaselineY: 132,
+    transcriptLineCapacity: 9,
     showRecoveryDetails: true,
   };
 }
@@ -1039,11 +1043,24 @@ export function brainstormTranscriptLines(
   maxWidth: number,
   maximumLines: number,
   measure: (value: string) => number,
+  scrollFromTail = 0,
 ): string[] {
   const lines = transcript
     .split(/\r?\n/)
     .flatMap((entry) => wrapHudText(entry, maxWidth, measure));
-  return visibleHudTailLines(lines, maximumLines);
+  return windowHudTailLines(lines, maximumLines, scrollFromTail);
+}
+
+/** Total wrapped rows — the scroll clamp needs the real extent. */
+export function brainstormTranscriptRowCount(
+  transcript: string,
+  maxWidth: number,
+  measure: (value: string) => number,
+): number {
+  return transcript
+    .split(/\r?\n/)
+    .flatMap((entry) => wrapHudText(entry, maxWidth, measure))
+    .length;
 }
 
 /** Streaming replies show the newest complete lines. The opening words have
@@ -1052,9 +1069,26 @@ export function visibleHudTailLines(
   lines: readonly string[],
   maximumLines: number,
 ): string[] {
+  return windowHudTailLines(lines, maximumLines, 0);
+}
+
+/** The tail window, moved `scrollFromTail` rows toward the beginning.
+ *
+ * Scrollback is the wearer's ask, verbatim: "can i scroll up and down to
+ * see the replies?" — the settled synthesis is the whole point of a
+ * session, and a tail-only view threw away every earlier turn the moment
+ * it left the bottom. `…` marks hidden older rows; the caller announces
+ * hidden NEWER rows in the hint, where the eye already is. */
+export function windowHudTailLines(
+  lines: readonly string[],
+  maximumLines: number,
+  scrollFromTail: number,
+): string[] {
   const count = Math.max(1, maximumLines);
-  const visible = lines.slice(-count);
-  if (lines.length > count && visible.length > 0) visible[0] = `…${visible[0]}`;
+  const back = Math.max(0, Math.min(scrollFromTail, lines.length - count));
+  const end = lines.length - back;
+  const visible = lines.slice(Math.max(0, end - count), end);
+  if (end - count > 0 && visible.length > 0) visible[0] = `…${visible[0]}`;
   return visible;
 }
 
@@ -1967,59 +2001,49 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     model: BrainstormHudModel,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
+    // Dense on purpose. The wearer, watching this render live: "why are we
+    // not able to use the full screen? … stop wasting so much place on
+    // things that do not affect functionality." The old layout spent four
+    // rows and two rules on a title, TOPIC, SEATS and LIVE before the
+    // first word of content; the transcript got six rows of a 288px lens.
+    // Now: one header row, one rule, and everything else is transcript —
+    // SEATS live in the speaker prefixes, LIVE is whoever's row is
+    // growing, and the surface's name is its content.
     const state = brainstormStateLabel(model.state);
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    this.drawIcon(context, icons.brainstorm, 36, 49, 20, BRIGHT);
-    context.fillStyle = gray(BRIGHT);
-    context.font = `15px ${HUD_FONT}`;
-    context.fillText(model.screen === 'agent_terminal' ? 'Agent Terminal' : 'Brainstorm', 66, 60);
-    context.textAlign = 'right';
-    context.fillStyle = gray(SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
-    context.fillText(state, 540, 60);
-    context.strokeStyle = gray(HAIRLINE);
-    context.beginPath();
-    context.moveTo(36, 76.5);
-    context.lineTo(540, 76.5);
-    context.stroke();
-
+    const scroll = this.transcriptScrollFor(model);
     if (model.screen === 'agent_terminal') {
       const layout = agentTerminalTranscriptLayout(model);
-      context.textAlign = 'left';
+      this.drawIcon(context, icons.brainstorm, 36, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
-      context.font = `13px ${HUD_FONT}`;
-      this.fitText(context, layout.summary, 36, 98, 504);
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(context, layout.summary, 56, 58, 380);
+      context.textAlign = 'right';
+      context.fillStyle = gray(SUPPORT);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText(state, 540, 58);
+      context.textAlign = 'left';
       if (!layout.showRecoveryDetails) {
-        // Watching CONCURRENT work is the whole point of a roster: each
-        // chip already carries its lane's state ("work·run",
-        // "calendar·ask1"), so one glance covers every session. These
-        // were built, sent over the wire, and then dropped by this renderer.
+        // Each chip carries its lane's state ("work·run", "calendar·ask1")
+        // so one glance covers every concurrent session.
         context.fillStyle = gray(SUPPORT);
-        context.font = `10px ${HUD_FONT}`;
+        context.font = `9px ${HUD_FONT}`;
         this.fitText(
           context,
           `LANES > ${model.collaborators.join('  |  ') || 'one session'}`,
           36,
-          117,
+          72,
           504,
         );
-      }
-      if (layout.showRecoveryDetails) {
+      } else {
         context.fillStyle = gray(SUPPORT);
-        context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 117, 504);
-        context.strokeStyle = gray(HAIRLINE);
-        context.beginPath();
-        context.moveTo(36, 130.5);
-        context.lineTo(540, 130.5);
-        context.stroke();
+        context.font = `9px ${HUD_FONT}`;
+        this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, 36, 72, 504);
         context.fillStyle = gray(SUPPORT);
-        context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 148, 504);
+        this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, 36, 88, 504);
         context.fillStyle = gray(CHROME);
-        context.font = `10px ${HUD_FONT}`;
-        this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, 36, 165, 504);
+        this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, 36, 104, 504);
       }
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();
@@ -2030,42 +2054,88 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.font = `11px ${HUD_FONT}`;
       this.drawBrainstormTranscript(
         context,
-        model.activity || 'JOAT > Terminal is ready for a Brainstorm.',
+        model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
         36,
         layout.transcriptBaselineY,
         layout.transcriptLineCapacity,
+        scroll,
       );
     } else {
-      context.textAlign = 'left';
+      this.drawIcon(context, icons.brainstorm, 36, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
-      context.font = `13px ${HUD_FONT}`;
-      this.fitText(context, `TOPIC > ${model.topic || 'Choose a question to explore'}`, 36, 98, 504);
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(
+        context,
+        model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
+        56,
+        58,
+        360,
+      );
+      context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
       context.font = `9px ${HUD_FONT}`;
-      this.fitText(context, `SEATS > ${model.collaborators.join(' · ') || 'waiting for collaborators'}`, 36, 117, 504);
-      context.fillStyle = gray(CHROME);
-      this.fitText(context, model.activeSpeaker ? `LIVE > ${model.activeSpeaker}` : 'LIVE > waiting for a collaborator', 36, 133, 504);
+      const liveNow = model.state === 'running' && model.activeSpeaker
+        ? `${model.activeSpeaker} · ${state}`
+        : state;
+      this.fitText(context, liveNow, 540, 58, 120);
+      context.textAlign = 'left';
       context.strokeStyle = gray(HAIRLINE);
       context.beginPath();
-      context.moveTo(36, 144.5);
-      context.lineTo(540, 144.5);
+      context.moveTo(36, 66.5);
+      context.lineTo(540, 66.5);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
       context.font = `11px ${HUD_FONT}`;
       this.drawBrainstormTranscript(
         context,
-        model.activity || 'JOAT > Say “JOAT, brainstorm …” to begin.',
+        model.activity
+          || `SEATS > ${model.collaborators.join(' · ') || 'waiting for collaborators'}`,
         36,
-        165,
-        6,
+        82,
+        13,
+        scroll,
       );
     }
-    const actionHint = brainstormActionHint(model);
+    const actionHint = scroll.offset > 0
+      ? `▼ ${scroll.offset} newer — swipe down · left x2: ${model.state === 'running' ? 'cancel' : 'menu'}`
+      : brainstormActionHint(model);
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
     this.fitText(context, actionHint, 288, 267, 500);
   }
+
+  /** Scrollback state for the brainstorm/terminal transcript.
+
+   * Lives on the renderer because the renderer is what knows how prose
+   * wraps into rows. Keyed by screen+topic so a new session starts back
+   * at the live tail; while the wearer is scrolled up, freshly arriving
+   * rows must not drag the view — the offset grows with the content so
+   * the words under the wearer's eyes stay put. */
+  private transcriptScroll = { key: '', offset: 0, rows: 0, visible: 13 };
+
+  private transcriptScrollFor(
+    model: BrainstormHudModel,
+  ): { offset: number; rows: number; visible: number } {
+    const key = `${model.screen}|${model.topic}`;
+    if (key !== this.transcriptScroll.key) {
+      this.transcriptScroll = { key, offset: 0, rows: 0, visible: this.transcriptScroll.visible };
+    }
+    return this.transcriptScroll;
+  }
+
+  scrollTranscript(direction: 'up' | 'down'): boolean {
+    const step = 6; // half a screen per swipe — enough to move, easy to track
+    const state = this.transcriptScroll;
+    const maximum = Math.max(0, state.rows - state.visible);
+    const next = direction === 'up'
+      ? Math.min(state.offset + step, maximum)
+      : Math.max(0, state.offset - step);
+    if (next === state.offset) return false;
+    state.offset = next;
+    return true;
+  }
+
 
   private drawNavigation(
     context: CanvasRenderingContext2D,
@@ -2441,12 +2511,22 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     x: number,
     y: number,
     maximumLines: number,
+    scroll: { offset: number; rows: number; visible: number },
   ): void {
+    const measure = (value: string) => context.measureText(value).width;
+    const total = brainstormTranscriptRowCount(transcript, 504, measure);
+    if (scroll.offset > 0 && total > scroll.rows) {
+      // Content grew while the wearer was reading history: keep their
+      // place, not the distance-from-tail.
+      scroll.offset = Math.min(
+        scroll.offset + (total - scroll.rows),
+        Math.max(0, total - maximumLines),
+      );
+    }
+    scroll.rows = total;
+    scroll.visible = maximumLines;
     const lines = brainstormTranscriptLines(
-      transcript,
-      504,
-      maximumLines,
-      (value) => context.measureText(value).width,
+      transcript, 504, maximumLines, measure, scroll.offset,
     );
     lines.forEach((line, index) => {
       this.fitText(context, line, x, y + index * 14, 504);

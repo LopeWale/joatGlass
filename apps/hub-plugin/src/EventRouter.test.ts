@@ -89,6 +89,7 @@ function make(
       shutDownPageContainer,
     }),
   };
+  const transcriptScroll = vi.fn(() => true);
   new EventRouter(
     client as unknown as BridgeClient,
     link as unknown as MacLink,
@@ -100,10 +101,12 @@ function make(
     navigation,
     brainstorm,
     assistantOverlay,
+    transcriptScroll,
   ).attach();
   return {
     fire: (e: unknown) => dispatch(e as EvenHubEvent),
     sent,
+    transcriptScroll,
     audio,
     imu,
     menu,
@@ -508,10 +511,17 @@ describe('EventRouter — text and list', () => {
     expect(JSON.stringify(events)).not.toMatch(/topic|prompt|payload|token|https?:/i);
   });
 
-  it('maps a downward G2 swipe to the live Brainstorm cancellation owner', () => {
-    const { fire, sent, menu, brainstorm } = make(false, undefined, false, true);
+  it('maps G2 swipes on a live Brainstorm to the transcript, never to cancel', () => {
+    // The wearer, watching this live: "can i scroll up and down to see the
+    // replies?" A downward swipe used to CANCEL the session — the harshest
+    // possible answer to someone trying to re-read a reply. Cancel is the
+    // deliberate left double-press only.
+    const { fire, sent, menu, brainstorm, transcriptScroll } = make(false, undefined, false, true);
     fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
-    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
+    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
+    expect(transcriptScroll).toHaveBeenNthCalledWith(1, 'down');
+    expect(transcriptScroll).toHaveBeenNthCalledWith(2, 'up');
+    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
     expect(menu.handleScroll).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });

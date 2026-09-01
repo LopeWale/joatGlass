@@ -77,7 +77,7 @@ describe('Agent Terminal action hints', () => {
       {
         model: terminal({ state: 'running' }),
         action: 'show_brainstorm',
-        says: 'Brainstorm',
+        says: 'scroll',
       },
       {
         model: terminal({ state: 'blocked', terminalState: 'blocked' }),

@@ -808,14 +808,16 @@ class TestTheFrameAlwaysFitsTheWire:
             terminal_state="running",
         ).to_wire()
 
-    def test_the_geometry_matches_the_wire_bound_it_was_derived_from(self) -> None:
+    def test_the_shipped_scrollback_fits_the_wire_bound(self) -> None:
         from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
         from joat.services.agent_terminal import HUD_COLUMNS, HUD_LINES
 
-        # Rows, their columns, AND the newlines that separate them.
+        # Rows, their columns, AND the newlines that separate them. The
+        # bound is scrollback depth now — the wearer swipes a 12-row
+        # window over it — so shipped rows must FIT, not equal.
         assert (HUD_LINES * HUD_COLUMNS + (HUD_LINES - 1)
-                == BRAINSTORM_ACTIVITY_MAX), (
-            "the terminal's geometry and the wire's bound have drifted"
+                <= BRAINSTORM_ACTIVITY_MAX), (
+            "the terminal ships more scrollback than the wire admits"
         )
 
     def test_a_full_frame_uses_every_row_and_still_fits(self) -> None:

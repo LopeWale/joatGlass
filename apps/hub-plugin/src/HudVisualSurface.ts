@@ -100,11 +100,14 @@ export type HudVisualFrame = HudVisualBaseFrame & {
 };
 
 export interface HudFrameRenderer {
+  scrollTranscript?(direction: 'up' | 'down'): boolean;
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
 }
 
 export interface HudFramePainter {
   paint(frame: HudVisualFrame): Promise<boolean>;
+  /** Move the brainstorm/terminal transcript window; true if it moved. */
+  scrollTranscript?(direction: 'up' | 'down'): boolean;
 }
 
 /** Converts one raw raster tile into an image format the native bridge and
@@ -248,6 +251,10 @@ export class HudVisualSurface implements HudFramePainter {
     private readonly diagnostics?: G2DiagnosticTrace,
     private readonly imageEncoder: HudImageEncoder = async (tile) => tile.pixels,
   ) {}
+
+  scrollTranscript(direction: 'up' | 'down'): boolean {
+    return this.renderer.scrollTranscript?.(direction) ?? false;
+  }
 
   paint(frame: HudVisualFrame): Promise<boolean> {
     return new Promise((resolve) => {
