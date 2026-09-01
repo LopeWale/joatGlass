@@ -32,6 +32,22 @@ Paint = Callable[["TerminalFrame"], Awaitable[None]]
 HUD_LINES = 7
 """Rows the glasses' terminal transcript area actually fits."""
 
+HUD_COLUMNS = 74
+"""Characters one of those rows holds.
+
+HudCanvasRenderer draws the transcript at 11px in the `"SF Mono", …,
+Menlo, monospace` stack across a 504px column; SF Mono's advance is
+1266/2048 em, so 504 / 6.80 = 74. HUD_LINES * HUD_COLUMNS is exactly the
+wire's activity bound (BRAINSTORM_ACTIVITY_MAX), and a test pins that
+equality so the two cannot drift apart.
+"""
+
+HUD_TOPIC_COLUMNS = 96
+"""The wire's bound on the header line."""
+
+HUD_LANE_COLUMNS = 48
+"""The wire's bound on one lane chip."""
+
 
 @dataclass(frozen=True)
 class TerminalFrame:
@@ -159,13 +175,25 @@ class AgentTerminalRoster:
         lane = self._lanes.get(self._focus or "")
         if lane is None:
             return TerminalFrame(
-                topic="Agent Terminal", state="unavailable",
+                topic="Agent Terminal"[:HUD_TOPIC_COLUMNS], state="unavailable",
                 lanes=[], lines=["No terminal sessions on this Mac."],
             )
         header = f"{lane.name} · {lane.state}"
         if lane.approvals:
             header += f" · {len(lane.approvals)} waiting"
-        body = list(lane.tail)[-(HUD_LINES - 1):] or ["no output yet"]
+        # Bounded HERE, where the frame is built, so an over-long frame
+        # cannot be constructed at all.
+        #
+        # Agent output is arbitrary: the lane tail is bounded by LINE COUNT
+        # (deque maxlen), never by line width, so six verbose lines from a
+        # working Hermes ran past the wire's activity bound. That failure
+        # was silent by design — repaint() swallows sink exceptions so a
+        # dead surface cannot kill the work — so the terminal simply froze
+        # on a stale frame with nothing logged, which is precisely the
+        # "watch concurrent work" the roster exists to provide.
+        header = header[:HUD_TOPIC_COLUMNS]
+        body = [line[:HUD_COLUMNS]
+                for line in list(lane.tail)[-(HUD_LINES - 1):]] or ["no output yet"]
         state = (
             "running" if lane.busy
             else "approval_required" if lane.approvals
@@ -178,7 +206,7 @@ class AgentTerminalRoster:
             # background lane could finish, block, or start waiting on an
             # approval and the frame looked identical. Each lane now
             # carries its state, so a glance covers the whole roster.
-            lanes=[f"{name}·{self._mark(other)}"
+            lanes=[f"{name}·{self._mark(other)}"[:HUD_LANE_COLUMNS]
                    for name, other in list(self._lanes.items())[:3]],
             lines=body,
         )

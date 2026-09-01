@@ -747,3 +747,71 @@ class TestBackgroundApprovalsInterrupt:
         await asyncio.sleep(0); await asyncio.sleep(0)
         assert said == []          # not an interruption
         assert "chatter" in r.tail("other")   # but still recorded
+
+
+class TestTheFrameAlwaysFitsTheWire:
+    """A frame the wire rejects is a terminal that silently freezes.
+
+    repaint() swallows sink exceptions on purpose — a dead surface must
+    not kill the work — so an over-long frame does not raise anywhere the
+    wearer or the log can see it. The lenses just stop updating. The frame
+    must therefore be impossible to build too large, not merely unlikely.
+    """
+
+    VERBOSE = [
+        "> audit every outbound HTTP call for missing timeouts and retries",
+        "Scanning 1,284 files across src/ and services/ for requests/httpx usage",
+        "Found 37 call sites. 12 pass no timeout at all, 9 pass a connect "
+        "timeout but no read timeout, and 4 retry inside a bare except.",
+        "The bare-except retries swallow asyncio.CancelledError, so a "
+        "cancelled request keeps retrying forever.",
+        "Writing report to docs/http-audit.md and staging fixes for the worst.",
+        "Proposed diff touches 6 files (+204 -71). Approve to write?",
+    ]
+
+    def test_verbose_agent_output_still_makes_a_legal_frame(self) -> None:
+        from joat.core.protocol import BrainstormHudView
+        from joat.services.agent_terminal import (
+            AgentTerminalRoster, HUD_COLUMNS,
+        )
+
+        r = AgentTerminalRoster([("hermes", FakeAgent())])
+        lane = r._lanes["hermes"]
+        for line in self.VERBOSE:
+            lane.tail.append(line)
+        frame = r.frame()
+
+        assert all(len(line) <= HUD_COLUMNS for line in frame.lines)
+        # The exact construction __main__.terminal_paint performs.
+        BrainstormHudView(
+            screen="agent_terminal", state=frame.state, topic=frame.topic,
+            collaborators=frame.lanes, activity="\n".join(frame.lines),
+            terminal_state="running",
+        ).to_wire()
+
+    def test_a_gateway_session_key_cannot_overflow_a_lane_chip(self) -> None:
+        """Roster lanes are named by GATEWAY keys, which we do not choose."""
+        from joat.core.protocol import BrainstormHudView
+        from joat.services.agent_terminal import (
+            AgentTerminalRoster, HUD_LANE_COLUMNS,
+        )
+
+        key = "agent:hermes:" + "a-very-long-branch-name" * 5
+        r = AgentTerminalRoster([(key, FakeAgent())])
+        frame = r.frame()
+
+        assert all(len(chip) <= HUD_LANE_COLUMNS for chip in frame.lanes)
+        assert len(frame.topic) <= 96
+        BrainstormHudView(
+            screen="agent_terminal", state=frame.state, topic=frame.topic,
+            collaborators=frame.lanes, activity="\n".join(frame.lines),
+            terminal_state="running",
+        ).to_wire()
+
+    def test_the_geometry_matches_the_wire_bound_it_was_derived_from(self) -> None:
+        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+        from joat.services.agent_terminal import HUD_COLUMNS, HUD_LINES
+
+        assert HUD_LINES * HUD_COLUMNS == BRAINSTORM_ACTIVITY_MAX, (
+            "the terminal's geometry and the wire's bound have drifted"
+        )
