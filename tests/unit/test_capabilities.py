@@ -1458,9 +1458,14 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         assert capture.calls == ["stop"]
         titles = [m.title for m in transport.sent if isinstance(m, HudList)]
-        # An honest progress frame lands before the potentially long
-        # transcription, then the unified list returns.
-        assert titles[-2:] == ["QUICKNOTES · SAVING", "QUICKNOTES"]
+        # Saving is a transient band over the live page, not a page of its
+        # own; the unified list is the next full frame.
+        assert titles[-1] == "QUICKNOTES"
+        assert "QUICKNOTES · SAVING" not in titles
+        assert any(
+            isinstance(m, AssistantOverlay) and m.text == "Saving quicknote…"
+            for m in transport.sent
+        )
         after = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert "● Standup notes" in after.items[0]
 
