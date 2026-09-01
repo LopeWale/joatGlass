@@ -140,9 +140,20 @@ class HudSink:
     def _retire_live_turn(self, *, collapse: bool = True) -> None:
         """Move the live turn into the finished rows."""
         if self._head or self._body:
-            body = (self._summarise(self._body,
-                                    self.ROW_COLUMNS - len(self._head))
-                    if collapse else self._body)
+            if not self._streaming:
+                # The turn is over and produced nothing — a CLI whose output
+                # was entirely noise-filtered, or which exited cleanly and
+                # silently. Keeping the marker would record "CODEX >
+                # Thinking…" as that seat's contribution for the rest of the
+                # session: the same false status this sink already had to
+                # stop printing in front of live answers.
+                body = "said nothing"
+            elif collapse:
+                body = self._summarise(
+                    self._body, self.ROW_COLUMNS - len(self._head)
+                )
+            else:
+                body = self._body
             self._done.append(f"{self._head}{body}")
         self._head = ""
         self._body = ""

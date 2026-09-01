@@ -644,3 +644,24 @@ class TestTheSilentWaitIsCovered:
             "every tick is a BLE page write for a counter nobody reads that "
             "closely"
         )
+
+    async def test_a_turn_that_produced_nothing_says_so(self) -> None:
+        """A silent turn must not be filed as "Thinking…" forever.
+
+        Reachable whenever a CLI exits cleanly with nothing usable — all
+        of its output noise-filtered, say. The marker is a claim about a
+        turn IN PROGRESS; once the turn is over it is simply false, which
+        is the same defect this sink already had to fix in front of live
+        answers.
+        """
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex", "claude"])
+        await sink.turn("codex (proposer)")          # no chunk ever arrives
+        await sink.turn("claude (critic)")
+        await sink.chunk("GIST: I will answer instead.")
+        await sink.close("converged")
+
+        activity = transport.sent[-1].activity
+        assert "CODEX > said nothing" in activity
+        assert "Thinking…" not in activity
