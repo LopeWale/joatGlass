@@ -23,7 +23,7 @@ function rig(
 ) {
   const sidebars: string[][] = [];
   const lists: string[][] = [];
-  const listOptions: Array<{ title?: string; hint?: string } | undefined> = [];
+  const listOptions: Array<{ title?: string; hint?: string; selectable?: boolean } | undefined> = [];
   const statuses: string[] = [];
   const operations: string[] = [];
   const productivities: ProductivityHudModel[] = [];
@@ -46,7 +46,7 @@ function rig(
       return result;
     }),
     showList: vi.fn(async (
-      items: string[], options?: { title?: string; hint?: string },
+      items: string[], options?: { title?: string; hint?: string; selectable?: boolean },
     ) => {
       operations.push('list');
       lists.push(items);
@@ -125,7 +125,7 @@ describe('CapabilityMenu', () => {
     expect(sidebars[0]).toEqual([
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
       'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Settings',
+      'Repeat', 'Reconnect', 'Settings',
     ]);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
@@ -489,7 +489,7 @@ describe('CapabilityMenu', () => {
     expect(sidebars[0]).toEqual([
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
       'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Settings',
+      'Repeat', 'Reconnect', 'Settings',
     ]);
     for (let index = 0; index < 2; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
@@ -1375,16 +1375,19 @@ describe('CapabilityMenu', () => {
     expect(defaultsCount()).toBe(1);
   });
 
-  it('Settings lives one level down and still applies a policy', async () => {
-    const { menu, lists, listOptions, sent } = rig();
+  it('Settings renders a selectable G2 policy list and applies its scrolled cursor', async () => {
+    const { menu, lists, listOptions, selections, sent } = rig();
     await menu.openSettings(); // contextual-menu item
     expect(lists[0]!.some((r) => r.includes('Resume mic'))).toBe(true);
     expect(listOptions[0]).toEqual({
       title: 'LISTENING RESUME',
       hint: 'tap: apply · left x2: back',
+      selectable: true,
     });
-    menu.handleList(clickRow0()); // pick 'instantly' (row 0, zero-dropped)
-    expect(sent.some((m) => m.kind === 'policy' && (m as { resume?: string }).resume === 'auto')).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(selections).toEqual([1]);
+    expect(menu.handleClick()).toBe(true); // pick the visibly highlighted Mac policy
+    expect(sent.some((m) => m.kind === 'policy' && (m as { resume?: string }).resume === 'mac')).toBe(true);
     expect(menu.isOpen()).toBe(false); // applied and closed home
   });
 
