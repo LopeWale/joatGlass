@@ -137,7 +137,12 @@ describe('flat productivity chrome', () => {
     // list page is flat now — Messages, QuickNotes, and all the rest.
     expect(HudCanvas.usesFlatHudShell('list', 'MESSAGES')).toBe(true);
     expect(HudCanvas.usesFlatHudShell('list', 'QUICKNOTES')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('brainstorm')).toBe(false);
+    // Brainstorm went flat too, and last: it is the surface whose whole
+    // job is showing prose, so the frame cost it most. The wearer had to
+    // say it twice — "stop wasting so much place on things that does not
+    // affect functionality", then "why are we still not fully using the
+    // display?" — before the transcript surfaces followed the lists.
+    expect(HudCanvas.usesFlatHudShell('brainstorm')).toBe(true);
   });
 
   it('renders stationary navigation pages flat; only moving states keep the shell', () => {

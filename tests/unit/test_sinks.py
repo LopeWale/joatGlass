@@ -514,7 +514,7 @@ class TestTheTranscriptFillsTheGlass:
         # did. Pinning the ARITHMETIC catches a row/column change; only
         # reading the renderer catches a font change, which the column
         # count's own docstring is responsible for.
-        assert BRAINSTORM_ROW_COLUMNS == 96, (
+        assert BRAINSTORM_ROW_COLUMNS == 105, (
             "re-derive from HudCanvasRenderer's HUD_TEXT_FONT before editing"
         )
         assert BRAINSTORM_SCROLLBACK_ROWS >= window * 3, (

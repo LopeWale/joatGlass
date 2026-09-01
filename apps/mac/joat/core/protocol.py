@@ -453,26 +453,57 @@ class HudRebuild:
 
 
 @dataclass(frozen=True, slots=True)
-class PlanningGridCell:
-    """One redacted native workload total for a Planning month day.
+class PlanningGridEntry:
+    """One entry of a Planning day, for the dashboard's right pane.
 
-    This is deliberately not a title, calendar identifier, or reminder
-    identifier. The glasses need only date placement and bounded event/task
-    totals to avoid presenting a scheduled day as free.
+    Time is the Mac-formatted local label ("16:30", "ALL DAY"); the plugin
+    renders, it does not do timezone math. Kind picks the marker glyph.
+    """
+
+    time: str
+    kind: str  # "event" | "reminder"
+    title: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "time": self.time[:8],
+            "kind": self.kind if self.kind in ("event", "reminder") else "event",
+            "title": self.title[:64],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningGridCell:
+    """One native workload summary for a Planning month day.
+
+    The first design carried only redacted totals so the month view could not
+    leak titles. The split dashboard (wearer's ask, 2026-09-01: month grid on
+    the left, hovered day's items on the right) changes that judgment: titles
+    now travel WITH the month, because repainting the right pane per hover
+    from local state is the only way scrolling dates can feel instant — a
+    per-hover Mac round trip would queue behind the serialized BLE lane. The
+    payload still carries no calendar or reminder identifiers; opening an
+    entry remains a Mac-owned request.
     """
 
     day: date
     event_count: int
     reminder_count: int
     in_month: bool
+    entries: tuple[PlanningGridEntry, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        wire: dict[str, Any] = {
             "day": self.day.isoformat(),
             "eventCount": min(99, max(0, self.event_count)),
             "reminderCount": min(99, max(0, self.reminder_count)),
             "inMonth": self.in_month,
         }
+        if self.entries:
+            # Bounded like every wire list: the pane shows at most six rows,
+            # and a denser day ends with a "+N more" the DAY view expands.
+            wire["entries"] = [entry.to_wire() for entry in self.entries[:6]]
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -518,7 +549,7 @@ _PRODUCTIVITY_HUD_PHASES = frozenset({
 _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
-BRAINSTORM_ROW_COLUMNS = 96
+BRAINSTORM_ROW_COLUMNS = 105
 BRAINSTORM_SCROLLBACK_ROWS = 40
 BRAINSTORM_ACTIVITY_MAX = (
     BRAINSTORM_ROW_COLUMNS * BRAINSTORM_SCROLLBACK_ROWS
@@ -533,11 +564,18 @@ off-screen to scroll to. The renderer keeps a window (13 rows on
 Brainstorm, 12 on a running terminal) over this scrollback, so forty rows
 is several full turns of history.
 
-Ninety-six is the column count, derived from the face the renderer
-actually draws with. HudCanvasRenderer sets the transcript in
-`HUD_TEXT_FONT` — `"Helvetica Neue", "SF Pro Text", Arial, sans-serif` —
-at 11px across a 504px column (x=36 to x=540). Helvetica Neue's average
-advance over mixed English prose is ~0.52em, so 504 / 5.7 = 96.
+A hundred and five is the column count, derived from the face and the
+column the renderer actually draws with. HudCanvasRenderer sets the
+transcript in `HUD_TEXT_FONT` — `"Helvetica Neue", "SF Pro Text", Arial,
+sans-serif` — at 11px across HUD_CONTENT_WIDTH, which is 548px
+(x=14 to x=562). The advance is MEASURED, not assumed: a 63-character
+transcript row rendered by the real simulator spans 326px, so 5.18px per
+character, and 548 / 5.18 = 105.
+
+The column was 504px when this said 96. Both numbers moved together
+because the wearer objected to the 72px of margin the old column left
+unused — "why are we still not fully using the display?" — so if the
+column moves again, this moves with it.
 
 This constant was 74 for a monospace transcript and stayed 74 after the
 face changed, which is what the wearer saw: "why are some words being cut

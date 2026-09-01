@@ -795,7 +795,11 @@ async function renderVisualState(
   if (isBrainstormVisualState(state)) {
     await hud.showBrainstorm(
       brainstormVisualFixture(state),
-      '9:41       JOAT brainstorm       bat 87%',
+      // A LINK status, not a feature name: the spine names the surface
+      // itself now. This fixture used to hand both screens the string
+      // "JOAT brainstorm", which is how the Agent Terminal came to be
+      // captured with BRAINSTORM printed across its top.
+      '9:41       JOAT READY       bat 87%',
     );
     return;
   }

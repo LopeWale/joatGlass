@@ -80,10 +80,30 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
         screen: 'brainstorm', state: 'running', topic: 'How should JOAT plan today?',
         collaborators: ['Codex · proposer', 'Claude · critic'],
         activeSpeaker: 'Claude · critic',
+        // Only the SEATED collaborators speak here. This fixture used to
+        // put HERMES in the Brainstorm transcript, which is the one thing
+        // the two surfaces are defined against each other by: Codex and
+        // Claude are Brainstorm collaborators, Hermes and OpenClaw are
+        // exclusively Agent Terminal workers. A fixture is what the HUD
+        // gets verified against, so a wrong one verifies the wrong screen.
+        //
+        // These are WHOLE utterances with no hand-inserted breaks. The
+        // previous version wrapped them by hand into short lines, which
+        // made the lens look two-thirds empty and — worse — meant the
+        // wrapper under test was never once exercised by the fixture used
+        // to check it. Let the renderer wrap; that is the thing being
+        // verified. It ends on the marker the renderer animates.
         activity: [
-          'CODEX > Keep the next step explicit.',
-          'CLAUDE > Verify the calendar before committing.',
-          'HERMES > I can turn that into a bounded action.',
+          'JOAT > Round 1 — independent reviews. Codex first.',
+          'CODEX > Cache the last synthesis and replay it on reconnect, so the wearer never has to watch a round they already read a second time.',
+          'CLAUDE > That assumes the reconnect resumes the same session. After a lens handoff it does not: the seven-packet auth replay resets the page and the id with it.',
+          'JOAT > Unsupported claim: "never watch a round twice". Returning to Codex for repair.',
+          'CODEX > Withdrawn. Cache keyed on session id and replayed only while that id survives; a handoff starts a new one and redraws from the top.',
+          'JOAT > Verified. Round 2 — cross-review.',
+          'CLAUDE > Then the cache buys nothing on the one path that needed it. Ship the redraw and drop the cache entirely.',
+          'CODEX > Agreed for reconnect. It still pays on foreground return, which is the common case and keeps the same id.',
+          'JOAT > Round 3 — meta-review.',
+          'CLAUDE > Thinking…',
         ].join('\n'),
         endpointHost: terminalReady.endpointHost,
         terminalState: 'running', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
