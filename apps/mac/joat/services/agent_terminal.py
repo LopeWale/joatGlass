@@ -115,6 +115,25 @@ class ApprovalResolverLike(Protocol):
     ) -> str | None: ...
 
 
+def _is_roster_lane(lane: "TerminalLane") -> bool:
+    """Can this lane enumerate and adopt the wearer's other sessions?
+
+    Selecting on `hasattr(agent, "list_sessions")` looked like a capability
+    check and was not one: every lane is the same class, so every lane
+    answered True and the winner was decided by dict insertion order. It
+    worked only because "work" happens to be registered first
+    (__main__.py). Drop the work lane and `discover()` would silently pick
+    the BRAINSTORM lane and fail at the policy layer — with a message about
+    policy, for a bug that was really about ordering.
+
+    The gateway's own policy is the authority: `roster` is exactly the flag
+    it checks before allowing `sessions.list` in the involvingMe shape or a
+    resume. A lane with no policy is not a roster lane.
+    """
+    policy = getattr(lane.agent, "policy", None)
+    return bool(getattr(policy, "roster", False))
+
+
 @dataclass
 class TerminalLane:
     """One Hermes/OpenClaw session the wearer can address by name."""
@@ -390,8 +409,7 @@ class AgentTerminalRoster:
         learns resumable keys — shown honestly rather than pretended at.
         """
         lister = next(
-            (lane for lane in self._lanes.values()
-             if hasattr(lane.agent, "list_sessions")),
+            (lane for lane in self._lanes.values() if _is_roster_lane(lane)),
             None,
         )
         if lister is None:
@@ -438,8 +456,7 @@ class AgentTerminalRoster:
         if match is None:
             return f"No listed session matches '{spoken}'."
         lane = next(
-            (lane for lane in self._lanes.values()
-             if hasattr(lane.agent, "resume_session")),
+            (lane for lane in self._lanes.values() if _is_roster_lane(lane)),
             None,
         )
         if lane is None:
