@@ -374,3 +374,47 @@ class TestHudFrame:
         await r.send("go")
         await asyncio.sleep(0); await asyncio.sleep(0)
         assert "still works" in r.tail()
+
+
+class TestRepaintCoverage:
+    """Every command that changes what the lenses should show, repaints.
+
+    An earlier build repainted only on streamed output and approvals, so
+    switching focus or resuming left the glasses showing the OLD lane —
+    the worst kind of stale, because it looks live.
+    """
+
+    def _counting(self, **lanes):
+        painted: list[str] = []
+
+        async def paint(frame) -> None:
+            painted.append(frame.topic)
+
+        return AgentTerminalRoster(list(lanes.items()), paint=paint), painted
+
+    async def test_focus_switch_repaints(self) -> None:
+        r, painted = self._counting(hermes=FakeAgent(), calendar=FakeAgent())
+        c = AgentTerminalCommands(r)
+        await c.handle_command("switch terminal to calendar")
+        assert painted and painted[-1].startswith("calendar")
+
+    async def test_resume_repaints(self) -> None:
+        r, painted = self._counting(work=ResumingAgent(ROWS))
+        c = AgentTerminalCommands(r)
+        await c.handle_command("terminal discover")
+        await c.handle_command("terminal resume nightly build")
+        assert painted, "resume never reached the lenses"
+
+    async def test_discovery_is_readable_on_the_lenses(self) -> None:
+        r = roster(work=ListingAgent(ROWS))
+        await r.discover()
+        # The listing lands in the tail, so the wearer can READ their
+        # sessions rather than having to remember what was spoken.
+        assert any("[discover]" in line for line in r.frame().lines)
+        assert "nightly build" in " ".join(r.frame().lines)
+
+    async def test_an_unclaimed_utterance_does_not_repaint(self) -> None:
+        r, painted = self._counting(hermes=FakeAgent())
+        c = AgentTerminalCommands(r)
+        assert await c.handle_command("what is the weather") is None
+        assert painted == []
