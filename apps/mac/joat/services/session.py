@@ -27,6 +27,20 @@ from .roundtable import (
 )
 from .sinks import TranscriptSink
 
+_BRAINSTORM_TRIGGER = re.compile(
+    # Whisper PUNCTUATES. The live transcript of the exact phrase this
+    # surface tells the wearer to say is
+    #     "JOAT. Brainstorm. Should a wearable assistant cache …?"
+    # — the capability name arrives with a full stop, every time. The
+    # delimiter grammar accepted only a colon, comma, or space, so the
+    # spoken opener had NEVER matched once in this engine's whole log:
+    # zero voice-started sessions, 25 chat replies, a wearer told to say
+    # words that could not work. The word boundary still keeps
+    # "brainstorming …" from becoming an invocation.
+    r"^(?:brainstorm|debate)(?:\s*[.:,!?\u2014-]\s*|\s+)(.+)$",
+    re.IGNORECASE,
+)
+
 from .agent_terminal import parse_reply_route
 
 # "Note that" / "save Claude's reply as a note", spoken into a live
@@ -145,6 +159,9 @@ class SessionManager:
         # Hermes" is spoken INTO a live Brainstorm but acts on the Agent
         # Terminal. Injected so this manager stays ignorant of the roster.
         self._route_reply = route_reply
+        # A new topic offered while a session is live, held until
+        # the wearer answers. Never started behind their back.
+        self._pending_topic: str = ""
         self._save_reply = save_reply
         # A tap on the Brainstorm HUD is a deliberate one-utterance capture,
         # not decoration. Keep it explicit so the next wearer phrase starts
@@ -328,6 +345,21 @@ class SessionManager:
             # while a session was live). Wake-word prefix and filler are
             # stripped before the exact match; the vocabulary stays small so
             # dictating a sentence CONTAINING "stop" cannot end a session.
+            if self._pending_topic:
+                verdict = self._resolve_pending_topic(text)
+                if verdict is True:
+                    topic, self._pending_topic = self._pending_topic, ""
+                    log.info("wearer replaced the live session")
+                    asyncio.get_running_loop().create_task(
+                        self._replace_with(topic)
+                    )
+                    return True
+                if verdict is False:
+                    self._pending_topic = ""
+                    log.info("wearer kept the live session")
+                    return True
+                # Anything else falls through and is handled normally; the
+                # question stays up rather than being answered by accident.
             escape = lowered
             for wake in ("joat,", "joat"):
                 if escape.startswith(wake + " "):
@@ -345,6 +377,24 @@ class SessionManager:
             # reorder the round table, and must never become a follow-up
             # the collaborators answer.
             steer = text if addressed is _UNSET_ADDRESSED else addressed
+            if steer:
+                # A NEW TOPIC is not a remark. "brainstorm <something else>"
+                # spoken during a live session was swallowed whole: it became
+                # a YOU turn inside the OLD conversation, so the wearer's new
+                # question was quietly filed as a comment on the previous one
+                # and the session they asked for never started.
+                # SESSION_MODEL.md:52 forbids exactly this — "ask before
+                # replacing context; never guess or silently reset."
+                replacement = _BRAINSTORM_TRIGGER.match(
+                    steer.strip().rstrip(".!?")
+                )
+                if replacement is not None:
+                    self._pending_topic = replacement.group(1).strip()
+                    log.info("new topic offered while a session is live")
+                    asyncio.get_running_loop().create_task(
+                        self._ask_before_replacing(self._pending_topic)
+                    )
+                    return True
             if not steer:
                 log.info(
                     "session active — unaddressed speech ignored chars=%d",
@@ -447,14 +497,64 @@ class SessionManager:
         # the trigger; the word boundary still keeps "brainstorming …" from
         # becoming an invocation.
         request = text.strip().rstrip(".!?")
-        trigger = re.match(
-            r"^(?:brainstorm|debate)(?:\s*[.:,!?\u2014-]\s*|\s+)(.+)$",
-            request,
-            flags=re.IGNORECASE,
-        )
+        trigger = _BRAINSTORM_TRIGGER.match(request)
         if trigger is not None:
             return self._start(trigger.group(1).strip())
         return False
+
+    #: What the wearer can say to resolve a pending replacement. Kept tiny
+    #: on purpose: a live session already consumes every utterance, so a
+    #: broad vocabulary here would eat ordinary speech.
+    _REPLACE_YES = ("yes", "yeah", "yep", "do it", "go ahead", "replace it",
+                    "start it", "new one", "switch")
+    _REPLACE_NO = ("no", "nope", "never mind", "nevermind", "keep going",
+                   "stay", "cancel that")
+
+    async def _ask_before_replacing(self, topic: str) -> None:
+        """Put the question on the glass. It is the wearer's call."""
+        try:
+            await self._hud.assistant(
+                f"Start a new Brainstorm on “{topic[:48]}”? "
+                "The current one is still running — say yes or no."
+            )
+        except Exception:
+            log.warning("replacement question not painted", exc_info=True)
+
+    async def _replace_with(self, topic: str) -> None:
+        """End the running session, then start the one they asked for.
+
+        Sequential on purpose: try_start_session refuses while a session is
+        active, so starting before the old one has actually released the
+        slot would drop the new topic on the floor — silently, which is the
+        failure this whole path exists to prevent.
+        """
+        self._cancel_active()
+        deadline = time.monotonic() + CANCEL_GRACE_S + 1.0
+        while self._active is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        if self._active is not None:
+            log.warning("previous session would not release; new topic dropped")
+            try:
+                await self._hud.assistant(
+                    "The previous Brainstorm did not stop — say it again."
+                )
+            except Exception:
+                log.warning("replacement failure not painted", exc_info=True)
+            return
+        self._start(topic)
+
+    def _resolve_pending_topic(self, said: str) -> bool | None:
+        """True = start it, False = keep going, None = not an answer."""
+        answer = said.lower().strip().rstrip(".!?")
+        for wake in ("joat,", "joat"):
+            if answer.startswith(wake + " "):
+                answer = answer[len(wake):].strip()
+                break
+        if answer in self._REPLACE_YES:
+            return True
+        if answer in self._REPLACE_NO:
+            return False
+        return None
 
     def handle_brainstorm_action(self, action: BrainstormAction) -> None:
         """Route an explicit G2 control to the session currently on screen."""
