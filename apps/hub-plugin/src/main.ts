@@ -583,6 +583,15 @@ async function boot(): Promise<void> {
         }
         break;
       case 'hud.list':
+        // A data view REPLACES the Brainstorm on the glass, so the
+        // controller must stop owning input for it. Without this, tapping
+        // a Messages row after a terminal handoff was intercepted by
+        // BrainstormController — which still believed it was on screen —
+        // and sent `show_brainstorm`, yanking the wearer back into the
+        // session instead of opening the row they picked. Navigation,
+        // productivity and the default rebuild all clear it already; the
+        // list path was simply missed.
+        brainstorm.clear();
         if (await awaitCurrent(menu.presentList(
           msg.title,
           msg.items,
