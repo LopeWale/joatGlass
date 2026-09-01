@@ -1128,3 +1128,78 @@ class TestActiveSessionAddressGate:
         mgr, session = await self._active()
         assert mgr.handle_transcript("ask claude about that") is True
         assert session.directed == ["ask claude about that"]
+
+
+class TestWearerTurn:
+    """The wearer is a participant, not an audience.
+
+    BRAINSTORM.md lists YOU alongside CODEX / CLAUDE / VERIFY / JOAT as a
+    transcript prefix, and calls the session steerable — but consume_transcript
+    was a stub, so there was no way to add a thought mid-session.
+    """
+
+    async def test_an_addressed_thought_becomes_a_YOU_turn(self) -> None:
+        transport = SinkTransport()
+        session = debate(transport, pair(agent(["a"]), agent(["b"])), None)
+        assert session.consume_transcript("also weigh thermal limits") is True
+        await asyncio.sleep(0)
+        assert ("YOU", "also weigh thermal limits") in session._transcript
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "also weigh thermal limits" in joined   # visible, not silent
+
+    async def test_a_nomination_still_steers_instead_of_being_quoted(self) -> None:
+        transport = SinkTransport()
+        session = debate(transport, pair(agent(["a"]), agent(["b"])), None)
+        assert session.consume_transcript("claude, respond") is False
+        assert session._transcript == []
+
+    async def test_the_next_speaker_answers_the_wearer(self) -> None:
+        transport = SinkTransport()
+        seen: list[str] = []
+
+        def recorder(reply: str):
+            async def stream(prompt: str) -> AsyncIterator[str]:
+                seen.append(prompt)
+                yield reply
+            return stream
+
+        session = debate(transport, pair(recorder("one"), recorder("two")), None)
+        session.consume_transcript("start from the thermal budget")
+        await session.run()
+        assert all("start from the thermal budget" in p for p in seen)
+
+    async def test_blindness_hides_colleagues_never_the_wearer(self) -> None:
+        """Independence means not seeing the other collaborators — it was
+        never a reason to ignore the person who asked the question."""
+        transport = SinkTransport()
+        seen: list[str] = []
+
+        def recorder(reply: str):
+            async def stream(prompt: str) -> AsyncIterator[str]:
+                seen.append(prompt)
+                yield reply
+            return stream
+
+        session = debate(transport, pair(recorder("gas is cheaper"),
+                                         recorder("only near a pipeline")), None)
+        session.consume_transcript("assume a cold climate")
+        await session.run()
+        assert "assume a cold climate" in seen[1]   # the wearer IS heard
+        assert "gas is cheaper" not in seen[1]      # the colleague is not
+
+    async def test_wearer_turns_are_not_collaborator_positions(self) -> None:
+        """YOU plus one failed seat is still a monologue."""
+        transport = SinkTransport()
+        seats = pair(agent(["a real position"]),
+                     agent(["[!] claude could not answer: exited 1"]))
+        session = debate(transport, seats, OneShotJudge())
+        session.consume_transcript("here is my own thought")
+        await session.run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "insufficient collaborators — 1 of 2 spoke" in joined
+
+    async def test_a_cancelled_session_takes_no_more_turns(self) -> None:
+        transport = SinkTransport()
+        session = debate(transport, pair(agent(["a"]), agent(["b"])), None)
+        session.cancel()
+        assert session.consume_transcript("too late") is False
