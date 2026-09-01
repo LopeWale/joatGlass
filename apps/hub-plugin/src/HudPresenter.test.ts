@@ -483,6 +483,38 @@ describe('HudPresenter modal surfaces', () => {
     expect(restored).toMatchObject({ actionOverlay: { productivity: saved } });
   });
 
+  it('keeps the receipt strip across route progress updates but not page changes', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const saved = {
+      domain: 'calendar' as const,
+      phase: 'saved' as const,
+      title: 'Design review',
+      primary: 'Saved and verified',
+      secondary: 'Calendar read-back matched',
+      hint: 'left x2 Planning',
+    };
+
+    await hud.showNavigation(navigationVisualFixture('nav-guidance'));
+    expect(await hud.showProductivity(saved)).toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'navigation', actionOverlay: { productivity: saved },
+    });
+
+    // Progress frame: same page updating — the strip rides along.
+    await hud.showNavigation(navigationVisualFixture('nav-guidance'));
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'navigation', actionOverlay: { productivity: saved },
+    });
+
+    // A different page supersedes it.
+    await hud.showList(['[09:30] Design review'], { title: 'PLANNING', selectable: true });
+    expect(frames[frames.length - 1]?.actionOverlay).toBeUndefined();
+  });
+
   it('supersedes the receipt strip when the next page arrives', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
