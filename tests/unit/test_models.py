@@ -118,3 +118,46 @@ class TestHudRows:
     def test_overview_rows_name_every_slot(self) -> None:
         rows = registry().rows()
         assert rows == ["Codex seat: terra", "Claude seat: default", "Speech: turbo"]
+
+
+class TestTheNamesItReportsAreNamesItAccepts:
+    """`summary()` answers "which models are you using" with
+    "Codex seat: terra · Claude seat: default · Speech: turbo".
+
+    Those are the words the wearer has just been taught, and until now
+    "switch the claude seat to sonnet" was rejected — only the key and
+    aliases matched. A surface that teaches one vocabulary and accepts
+    another sends the wearer away believing the feature does not work,
+    which is the same defect as a HUD hint describing an action the
+    gesture does not perform.
+    """
+
+    async def test_every_reported_slot_title_is_speakable(self) -> None:
+        from joat.services.models import (
+            ModelRegistry, default_slots, handle_model_command,
+        )
+
+        registry = ModelRegistry(default_slots())
+        for slot in registry.slots:
+            assert registry.slot(slot.title) is slot, slot.title
+            assert registry.slot(slot.title.upper()) is slot, slot.title
+
+        # And through the spoken grammar, the way it is actually said.
+        assert await handle_model_command(
+            "switch the claude seat to sonnet", registry
+        ) is not None
+        assert await handle_model_command(
+            "use sonnet for the codex seat", registry
+        ) is not None
+
+    async def test_ordinary_speech_is_still_not_a_config_change(self) -> None:
+        from joat.services.models import (
+            ModelRegistry, default_slots, handle_model_command,
+        )
+
+        registry = ModelRegistry(default_slots())
+        for said in ("use the calendar to check tomorrow",
+                     "switch the lights off",
+                     "set a reminder for six",
+                     "switch the seat to the window"):
+            assert await handle_model_command(said, registry) is None, said
