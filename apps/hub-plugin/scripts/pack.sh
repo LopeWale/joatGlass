@@ -5,6 +5,31 @@ set -euo pipefail
 plugin_dir=${0:A:h:h}
 cd "$plugin_dir"
 
+# This packages the WORKING TREE, not a commit. That is convenient during
+# development and a hazard at release: a pack run in this repo quietly
+# archived another concurrent session's uncommitted, unreviewed renderer
+# edits into a hardware-deployable artifact, and nothing in the output said
+# so. A package is supposed to correspond to a revision someone can name.
+#
+# Set JOAT_RELEASE_ALLOW_DIRTY=1 to package a dirty tree deliberately (a
+# release candidate mid-edit); the stamp below then says which revision it
+# is based on and that it is not that revision.
+if git -C "$plugin_dir" rev-parse --git-dir >/dev/null 2>&1; then
+  release_rev=$(git -C "$plugin_dir" rev-parse --short HEAD)
+  dirty=$(git -C "$plugin_dir" status --porcelain -- "$plugin_dir")
+  if [[ -n "$dirty" ]]; then
+    if [[ "${JOAT_RELEASE_ALLOW_DIRTY:-0}" != "1" ]]; then
+      print -u2 "refusing to package uncommitted changes under $plugin_dir:"
+      print -u2 "$dirty"
+      print -u2 "commit them, or set JOAT_RELEASE_ALLOW_DIRTY=1 to override."
+      exit 65
+    fi
+    print -u2 "WARNING: packaging a DIRTY tree based on $release_rev"
+  else
+    print -u2 "packaging clean tree at $release_rev"
+  fi
+fi
+
 # A deployable package must never inherit the ignored developer `.env` route.
 # The caller selects the reviewed, private WSS G2 gateway explicitly; the
 # validator then requires every candidate to be an exact app.json allowlist
