@@ -182,13 +182,28 @@ engine must be up for voice/cards (the script warns on both).
 ### Path B — packed private build (survives without the dev server)
 
 ```
-cd apps/hub-plugin && npm run pack     # -> joat.ehpk, --sdk-ver pinned 0.0.14
+cd apps/hub-plugin && npm run pack     # -> build/joat.ehpk, --sdk-ver pinned 0.0.14
 ```
 
 Upload at hub.evenrealities.com → project → **Private builds**; install on
 the phone via Even Hub tab → Me → Apps → Private builds. Account-bound, no
 store review. Iteration is rebuild → re-upload → reinstall, so do Path A
 first.
+
+**Bump the version before every upload.** `--enforce-manual-version` means
+the packer never invents one; nothing bumps it automatically, so an
+unbumped repack collides with what is already on the hub and the only
+offer is "add and replace" — silently overwriting a build that was not
+this one. The number lives in `app.json`, `package.json`, and
+`package-lock.json`; all three move together.
+
+**The packer is deterministic** (measured 2026-09-01: two packs of one
+clean worktree were byte-identical, SHA-256 `f4a597b5…` both times). So a
+hash IS content identity: two artifacts on the same version string with
+different hashes contain different code, and one of them is a build
+nobody can name. Pack from a detached worktree at the revision you intend
+to ship — never from a shared tree carrying another session's in-flight
+edits — and record `<version, short-rev, sha256>` for whatever you upload.
 
 ### First-session checklist (maps to the Phase 0/1 metrics)
 
