@@ -1,0 +1,386 @@
+[
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Thinking… 0:06",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Thinking… 0:09",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Thinking… 0:12",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > GIST: Cut at measured pixel width on a word boundary, mark it visibly, never silently.\n\n",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE",
+    "activity": "",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "JUDGE — round 1",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Thinking…",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "JUDGE — round 1",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split.\nAGREEMENT: 0.40\nBLOCKING: yes",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CODEX — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Thinking…",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CODEX — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Thinking… 0:03",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CODEX — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Thinking… 0:06",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CODEX — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Thinking… 0:09",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CODEX — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > GIST: Preserve intent, prioritize reversibility, and make lost detail explicitly recoverable.\n\n",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Thinking…",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Thinking… 0:03",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Thinking… 0:06",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Thinking… 0:09",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Thinking… 0:12",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "CLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > GIST: Agree on reserved cue space; add streaming stability and replay-determinism; concede font tiers.\n\nCodex is right about font tiers: I withdraw automatic shrink. A surface may opt in only by declaring its minimum legible size, and the choice must never flip mid-answer.\n\n",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "CLAUDE — round 2",
+    "activity": "\nSecond miss: determinism. After a lens handoff the page state is resent, so truncation must be a pure function of text, font metrics, and viewport, never of arrival timing, or the two lenses show different frames.\n\nFull agreement: reserve the cue's pixels before layout, keep the head, expose the tail on demand.\n",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "JUDGE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Agree on reserved cue space; add streaming stability a…\nJUDGE — ROUND 2 > Thinking…",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "JUDGE — round 2",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Agree on reserved cue space; add streaming stability a…\nJUDGE — ROUND 2 > Aligned.\nAGREEMENT: 0.91\nBLOCKING: no",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "JOAT",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Agree on reserved cue space; add streaming stability a…\nJUDGE — ROUND 2 > Aligned. AGREEMENT: 0.91 BLOCKING: no\nJOAT > Thinking…",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "running",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "JOAT",
+    "activity": "CODEX > Retain semantic priority, truncate visibly, and offer determinist…\nCLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Agree on reserved cue space; add streaming stability a…\nJUDGE — ROUND 2 > Aligned. AGREEMENT: 0.91 BLOCKING: no\nJOAT > AGREED: bound the frame at the producer.\nOPEN: what to drop first.",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  },
+  {
+    "screen": "brainstorm",
+    "state": "settled",
+    "topic": "How should a wearable HUD drop text it cannot fit?",
+    "collaborators": [
+      "codex",
+      "claude"
+    ],
+    "activeSpeaker": "",
+    "activity": "CLAUDE > Cut at measured pixel width on a word boundary, mark it visibly,…\nJUDGE — ROUND 1 > Split. AGREEMENT: 0.40 BLOCKING: yes\nCODEX — ROUND 2 > Preserve intent, prioritize reversibility, and make los…\nCLAUDE — ROUND 2 > Agree on reserved cue space; add streaming stability a…\nJUDGE — ROUND 2 > Aligned. AGREEMENT: 0.91 BLOCKING: no\nJOAT > AGREED: bound the frame at the producer.\nOPEN: what to drop first.\nJOAT > done — converged (agreement 0.91, round 2)",
+    "endpointHost": "",
+    "terminalState": "unavailable",
+    "terminalReason": "gateway_not_ready",
+    "noToolsChecked": false,
+    "acceptanceArmed": false
+  }
+]
