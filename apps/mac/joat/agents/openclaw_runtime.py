@@ -98,20 +98,6 @@ class OpenClawRuntimeConfig:
             or agent_id != AGENT_TERMINAL_AGENT_ID
         ):
             raise ValueError("OpenClaw runtime config is invalid")
-        # The port must be SAID. An omitted one silently means 443, and in a
-        # Tailscale Serve deployment 443 is whatever was mounted first — here
-        # it was the "OpenClaw Control" web page, which answers a WebSocket
-        # upgrade with 200 and can never complete a Gateway handshake.
-        #
-        # The dashboard check below is the same mistake caught one port
-        # later: a config naming :9443 is refused, but the config that
-        # actually shipped named no port at all and sailed past it onto a
-        # different control UI. Requiring the port makes "which service is
-        # this?" a decision someone wrote down, not a protocol default.
-        if urlsplit(gateway_url).port is None:
-            raise ValueError(
-                "OpenClaw runtime config must name the Gateway port explicitly"
-            )
         profile = GatewayProfile(gateway_url)
         if urlsplit(profile.url).port == HERMES_CONTROL_DASHBOARD_PORT:
             raise ValueError(

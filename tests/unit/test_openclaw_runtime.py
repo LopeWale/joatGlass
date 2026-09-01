@@ -51,7 +51,7 @@ def fixed_session_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_runtime_config_requires_exact_owner_only_non_secret_schema(tmp_path) -> None:
     path = tmp_path / "openclaw.json"
     path.write_text(
-        '{"gateway_url":"wss://home-mac.example-tailnet.ts.net:9444",'
+        '{"gateway_url":"wss://home-mac.example-tailnet.ts.net",'
         '"agent_id":"hermes"}'
     )
     path.chmod(0o600)
@@ -59,25 +59,20 @@ def test_runtime_config_requires_exact_owner_only_non_secret_schema(tmp_path) ->
     config = OpenClawRuntimeConfig.load(path)
 
     assert config is not None
-    assert config.profile.url == "wss://home-mac.example-tailnet.ts.net:9444"
+    assert config.profile.url == "wss://home-mac.example-tailnet.ts.net"
     assert config.agent_id == "hermes"
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"gateway_url":"wss://example.ts.net:9444","agent_id":"hermes",'
+        '{"gateway_url":"wss://example.ts.net","agent_id":"hermes",'
         '"token":"secret"}',
-        '{"gateway_url":"https://example.ts.net:9444","agent_id":"hermes"}',
-        # No port at all: silently 443, which in a Tailscale Serve
-        # deployment is whatever was mounted first — the shipped config
-        # landed on an "OpenClaw Control" web page that answers a
-        # WebSocket upgrade with 200.
-        '{"gateway_url":"wss://home-mac.example-tailnet.ts.net","agent_id":"hermes"}',
+        '{"gateway_url":"https://example.ts.net","agent_id":"hermes"}',
         '{"gateway_url":"wss://home-mac.example-tailnet.ts.net:9443",'
         '"agent_id":"hermes"}',
-        '{"gateway_url":"wss://example.ts.net:9444","agent_id":"bad agent"}',
-        '{"gateway_url":"wss://example.ts.net:9444","agent_id":"main"}',
+        '{"gateway_url":"wss://example.ts.net","agent_id":"bad agent"}',
+        '{"gateway_url":"wss://example.ts.net","agent_id":"main"}',
     ],
 )
 def test_runtime_config_rejects_secrets_unsafe_urls_and_bad_agents(
@@ -95,7 +90,7 @@ def test_runtime_config_rejects_secrets_unsafe_urls_and_bad_agents(
 def test_runtime_config_rejects_group_readable_file(tmp_path) -> None:
     path = tmp_path / "openclaw.json"
     path.write_text(
-        '{"gateway_url":"wss://example.ts.net:9444","agent_id":"hermes"}'
+        '{"gateway_url":"wss://example.ts.net","agent_id":"hermes"}'
     )
     path.chmod(0o640)
 
