@@ -54,6 +54,7 @@ class HudSink:
         self._speaker = ""
         self._activity = ""
         self._wait_task: asyncio.Task[None] | None = None
+        self._progress = ""
         self._state = "ready"
 
     @staticmethod
@@ -121,13 +122,28 @@ class HudSink:
             state=state,
             topic=self._topic,
             collaborators=[speaker.split(" (")[0][:48] for speaker in self._speakers[:3]],
-            active_speaker=self._display_speaker(self._speaker),
+            # The live line carries the COST as well as the speaker: two
+            # subscription CLIs bill per turn, and a wearer who cannot see
+            # how many rounds remain cannot decide whether to let it run.
+            active_speaker=(
+                f"{self._display_speaker(self._speaker)} · {self._progress}"[:64]
+                if self._speaker and self._progress
+                else self._progress or self._display_speaker(self._speaker)
+            ),
             activity=self._activity,
             terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
+
+    async def progress(self, round_no: int, max_rounds: int, calls: int) -> None:
+        """Where the session is, and what it has spent so far.
+
+        Optional by design: discovered with getattr, so a terminal or a
+        snapshot sink never has to implement a HUD concern.
+        """
+        self._progress = f"round {round_no}/{max_rounds} · {calls} calls"
 
     async def open(self, topic: str, speakers: list[str]) -> None:
         self._topic = topic[:96]
