@@ -160,14 +160,26 @@ export function assistantOverlayTextLayout(
  * Time and date come from the phone clock, so this pane stays truthful even
  * when the Mac is offline: the HUD is never a dead rectangle.
  */
+/** Every capability fits, so nothing hides behind a scroll. Nine rows from
+ * y52 to y244 at a 24px pitch — the wearer's ruling: a menu that shows five
+ * of nine options wastes the pane it is standing in. */
+export const SIDEBAR_ROW_CAPACITY = 9;
+/** The last baseline a notification headline may occupy before it would
+ * collide with the footer hint. */
+export const OVERVIEW_TRAY_LAST_Y = 248;
+export const SIDEBAR_FIRST_ROW_Y = 60;
+export const SIDEBAR_ROW_PITCH = 24;
+
 export const OVERVIEW_DASHBOARD = {
-  dateBaselineY: 58,
+  // The left column is ONE block — date, clock, conditions — centred both
+  // ways in the pane between the spine (y44) and the hint (y267). Centre
+  // 152: date sits 92 above it, the two clock rows straddle it, and the
+  // ambient row closes 92 below.
+  dateBaselineY: 60,
   clockX: 26,
-  // Sized and spaced so the two rows fill the pane from under the date to
-  // just above the hint: no orphan gap beneath the clock.
   clockFontSize: 82,
-  hoursBaselineY: 130,
-  minutesBaselineY: 212,
+  hoursBaselineY: 116,
+  minutesBaselineY: 196,
   dividerX: 256.5,
   dividerTopY: 46,
   dividerBottomY: 252,
@@ -182,7 +194,7 @@ export const OVERVIEW_DASHBOARD = {
   trayBaselineY: 244,
   //: The margin facts sit under the clock, where the reference HUD puts
   //: them: what day it is, what it is like outside, what is waiting.
-  ambientBaselineY: 252,
+  ambientBaselineY: 246,
 } as const;
 
 export interface HudNotificationRow {
@@ -608,6 +620,43 @@ export function hudSidebarIconName(item: string): HudIconName {
     activity: 'activity',
   };
   return icons[normalized] ?? 'settings';
+}
+
+/** Split Planning dashboard geometry: month grid left, day items right. */
+export const PLANNING_DASHBOARD = {
+  gridLeft: 10,
+  gridRight: 262,
+  headerBaselineY: 58,
+  firstRowCenterY: 82,
+  rowPitch: 26,
+  dividerX: 276.5,
+  paneLeft: 292,
+  paneRight: 556,
+  paneHeadingY: 58,
+  paneFirstRowY: 84,
+  paneRowPitch: 24,
+  paneRowCapacity: 6,
+} as const;
+
+/** Center of one date cell on the dashboard grid, index 0..41 Monday-first. */
+export function planningDashboardDateCell(index: number): { x: number; y: number } {
+  const column = ((index % 7) + 7) % 7;
+  const row = Math.max(0, Math.min(5, Math.floor(index / 7)));
+  const cellWidth = (PLANNING_DASHBOARD.gridRight - PLANNING_DASHBOARD.gridLeft) / 7;
+  return {
+    x: PLANNING_DASHBOARD.gridLeft + cellWidth * (column + 0.5),
+    y: PLANNING_DASHBOARD.firstRowCenterY + row * PLANNING_DASHBOARD.rowPitch,
+  };
+}
+
+/** The pane heading for a hovered ISO date, without timezone math. */
+export function planningDashboardHeading(dayIso: string): string {
+  const parsed = new Date(`${dayIso}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return dayIso;
+  const weekdays = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+    'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  return `${weekdays[parsed.getUTCDay()]} ${months[parsed.getUTCMonth()]} ${parsed.getUTCDate()}`;
 }
 
 /** Transient outcome receipts are a STRIP, not a page (wearer's ruling,
@@ -1615,15 +1664,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       this.drawIcon(context, icons.battery, 538, 12, 20, SUPPORT);
     }
 
-    context.strokeStyle = gray(HAIRLINE);
-    context.beginPath();
-    context.moveTo(17, HUD_VISUAL_GEOMETRY.statusDividerY);
-    context.lineTo(280, HUD_VISUAL_GEOMETRY.statusDividerY);
-    context.lineTo(284, HUD_VISUAL_GEOMETRY.statusDividerY + 4);
-    context.lineTo(292, HUD_VISUAL_GEOMETRY.statusDividerY + 4);
-    context.lineTo(296, HUD_VISUAL_GEOMETRY.statusDividerY);
-    context.lineTo(559, HUD_VISUAL_GEOMETRY.statusDividerY);
-    context.stroke();
+    // No rule under the spine. It separated nothing that the gap below it
+    // does not already separate, and it lit 540 pixels to do it (the
+    // wearer's ruling: another waste).
   }
 
   private drawAssistantOverlay(
@@ -1714,41 +1757,49 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Mac is unreachable.
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    // The date is a FACT the wearer glances for, not a caption: it reads at
-    // support weight, like the reference dashboard's "Wed 09/12".
+    // The left pane is one centred column — date, clock, conditions — so it
+    // reads as a single object instead of text stranded against the edge.
+    const columnX = layout.dividerX / 2;
+    context.textAlign = 'center';
     context.fillStyle = gray(SUPPORT);
     context.font = `13px ${HUD_FONT}`;
-    context.fillText(hudDateLabel(new Date()), layout.clockX + 4, layout.dateBaselineY);
+    context.fillText(hudDateLabel(new Date()), columnX, layout.dateBaselineY);
 
     const clock = hudClockParts(status.time);
     context.fillStyle = gray(BRIGHT);
     context.font = `${layout.clockFontSize}px ${HUD_FONT}`;
-    context.fillText(clock.hours, layout.clockX, layout.hoursBaselineY);
-    context.fillText(clock.minutes, layout.clockX, layout.minutesBaselineY);
+    context.fillText(clock.hours, columnX, layout.hoursBaselineY);
+    context.fillText(clock.minutes, columnX, layout.minutesBaselineY);
+    context.textAlign = 'left';
 
     // Weather and unread count live under the clock. The Even Hub SDK has
     // no weather API (checked against the installed 0.0.14 typings), so the
     // Mac resolves it from the phone's own position and sends the words.
     const ambient = frame.ambient;
     if (ambient && (ambient.temperature || ambient.unread > 0)) {
-      let ambientX = layout.clockX + 4;
+      context.font = `13px ${HUD_FONT}`;
+      const unread = ambient.unread > 0 ? String(ambient.unread) : '';
+      // Measure the whole row first so it centres under the clock rather
+      // than starting wherever the left margin happened to be.
+      const temperatureWidth = ambient.temperature
+        ? 20 + context.measureText(ambient.temperature).width : 0;
+      const unreadWidth = unread ? 20 + context.measureText(unread).width : 0;
+      const gap = temperatureWidth && unreadWidth ? 22 : 0;
+      let ambientX = columnX - (temperatureWidth + gap + unreadWidth) / 2;
       if (ambient.temperature) {
         this.drawIcon(
           context, icons.weather, ambientX, layout.ambientBaselineY - 8, 15, CHROME,
         );
-        ambientX += 20;
         context.fillStyle = gray(SUPPORT);
-        context.font = `13px ${HUD_FONT}`;
-        context.fillText(ambient.temperature, ambientX, layout.ambientBaselineY);
-        ambientX += context.measureText(ambient.temperature).width + 22;
+        context.fillText(ambient.temperature, ambientX + 20, layout.ambientBaselineY);
+        ambientX += temperatureWidth + gap;
       }
-      if (ambient.unread > 0) {
+      if (unread) {
         this.drawIcon(
           context, icons.notifications, ambientX, layout.ambientBaselineY - 8, 15, CHROME,
         );
         context.fillStyle = gray(SUPPORT);
-        context.font = `13px ${HUD_FONT}`;
-        context.fillText(String(ambient.unread), ambientX + 20, layout.ambientBaselineY);
+        context.fillText(unread, ambientX + 20, layout.ambientBaselineY);
       }
     }
 
@@ -1803,13 +1854,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillText(main.label.toUpperCase(), paneX, cursorY);
       context.fillStyle = gray(mainLevel);
       if (main.structured) {
-        // A calendar/reminder value is one short fact — give it size.
-        cursorY += 34;
-        context.font = `22px ${HUD_FONT}`;
-        this.fitText(context, main.value, paneX, cursorY, paneWidth);
-        cursorY += 14;
-      } else {
+        // A calendar/reminder value is one short fact — give it size, but
+        // not a whole band: what is BELOW it is content too.
         cursorY += 28;
+        context.font = `21px ${HUD_FONT}`;
+        this.fitText(context, main.value, paneX, cursorY, paneWidth);
+        cursorY += 10;
+      } else {
+        cursorY += 24;
         context.font = `15px ${HUD_FONT}`;
         const drawn = this.drawWrappedText(
           context,
@@ -1821,16 +1873,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
           layout.mainMaxLines,
           frame.mainKind === 'notification' ? 'leading' : 'tail',
         );
-        cursorY += (drawn - 1) * layout.mainLineHeight + 10;
+        cursorY += (drawn - 1) * layout.mainLineHeight + 6;
       }
     }
 
     if (overview.context) {
-      cursorY += 26;
+      cursorY += 22;
       context.fillStyle = gray(CHROME);
       context.font = `9px ${HUD_FONT}`;
       context.fillText(overview.context.label.toUpperCase(), paneX, cursorY);
-      cursorY += 18;
+      cursorY += 16;
       context.fillStyle = gray(SUPPORT);
       context.font = `11px ${HUD_FONT}`;
       this.fitText(context, overview.context.value, paneX, cursorY, paneWidth);
@@ -1839,22 +1891,25 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     if (overview.tray) {
       // Notifications are CONTENT on the home screen: source, age, and the
       // headline itself, stacked. No count, and no menu page to reach them.
+      // As many notifications as the pane can actually hold. The count is
+      // decided by the remaining pixels, not by a number picked in advance:
+      // a short answer above should buy the wearer another card here.
       const rows = parseHudNotificationRows(overview.tray);
-      let trayY = Math.max(cursorY + 24, 196);
+      let trayY = cursorY + 22;
       for (const row of rows) {
-        if (trayY > 236) break;
+        if (trayY > OVERVIEW_TRAY_LAST_Y) break;
         if (row.source) {
-          this.drawIcon(context, icons.notifications, paneX, trayY - 8, 13, CHROME);
+          this.drawIcon(context, icons.notifications, paneX, trayY - 7, 12, CHROME);
           context.fillStyle = gray(CHROME);
           context.font = `9px ${HUD_FONT}`;
           const label = row.age ? `${row.source} · ${row.age}` : row.source;
-          this.fitText(context, label, paneX + 18, trayY, paneWidth - 18);
-          trayY += 15;
+          this.fitText(context, label, paneX + 16, trayY, paneWidth - 16);
+          trayY += 14;
         }
         context.fillStyle = gray(SUPPORT);
         context.font = `12px ${HUD_FONT}`;
-        this.fitText(context, row.headline, paneX + 18, trayY, paneWidth - 18);
-        trayY += 22;
+        this.fitText(context, row.headline, paneX + 16, trayY, paneWidth - 16);
+        trayY += 20;
       }
     }
 
@@ -1901,45 +1956,27 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.lineTo(HUD_VISUAL_GEOMETRY.sidebarWidth + 0.5, 250);
     context.stroke();
 
-    const visibleItems = visibleHudSidebarItems(frame.items, frame.selectedIndex);
+    const visibleItems = visibleHudSidebarItems(
+      frame.items, frame.selectedIndex, SIDEBAR_ROW_CAPACITY,
+    );
     visibleItems.forEach(({ item, index }, row) => {
-      const y = 70 + row * 39;
+      const y = SIDEBAR_FIRST_ROW_Y + row * SIDEBAR_ROW_PITCH;
       if (index === frame.selectedIndex) {
         context.fillStyle = '#000000';
-        context.fillRect(12, y - 17, HUD_VISUAL_GEOMETRY.sidebarWidth - 14, 34);
+        context.fillRect(12, y - 12, HUD_VISUAL_GEOMETRY.sidebarWidth - 14, 24);
         context.fillStyle = gray(BRIGHT);
-        context.fillRect(12, y - 17, 3, 34);
+        context.fillRect(12, y - 12, 3, 24);
       }
       const level = index === frame.selectedIndex ? BRIGHT : SUPPORT;
       const icon = icons[hudSidebarIconName(item)];
-      this.drawIcon(context, icon, 26, y - 9, 18, level);
+      this.drawIcon(context, icon, 24, y - 7, 15, level);
       context.fillStyle = gray(level);
       context.textAlign = 'left';
       context.textBaseline = 'middle';
       context.font = `13px ${HUD_FONT}`;
-      context.fillText(item, 54, y);
+      context.fillText(item, 48, y);
     });
 
-    // Tiny chevrons make the continuous capability list discoverable without
-    // adding another interactive control or consuming a wearable row.
-    const firstVisible = visibleItems[0]?.index ?? 0;
-    const lastVisible = visibleItems[visibleItems.length - 1]?.index ?? -1;
-    context.strokeStyle = gray(SUPPORT);
-    context.lineWidth = 1;
-    if (firstVisible > 0) {
-      context.beginPath();
-      context.moveTo(145, 49);
-      context.lineTo(149, 45);
-      context.lineTo(153, 49);
-      context.stroke();
-    }
-    if (lastVisible < frame.items.length - 1) {
-      context.beginPath();
-      context.moveTo(145, 254);
-      context.lineTo(149, 258);
-      context.lineTo(153, 254);
-      context.stroke();
-    }
   }
 
   private drawList(
@@ -1957,6 +1994,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // wearer scrolls to prior/next/view controls, use the normal list so the
     // selected control remains explicit and reachable instead of hiding it
     // beneath a decorative month grid.
+    // The split dashboard: month grid left, hovered day's items right
+    // (wearer's ask, 2026-09-01, pointing at the platform's own dashboard).
+    // The pane state is plugin-local hover, so this branch replaces the
+    // month -> week -> day page chain with one screen.
+    if (planningMonth && planningGrid && frame.planningPane) {
+      this.drawPlanningDashboard(
+        context, frame, planningMonth, planningGrid, frame.planningPane,
+      );
+      return;
+    }
     if (planningMonth && planningGrid && canRenderPlanningMonthGrid(
       planningMonth,
       planningGrid,
@@ -2284,6 +2331,136 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     this.fitText(context, frame.hint, 288, 267, 500);
+  }
+
+  /**
+   * One screen instead of the month -> week -> day chain: the grid owns the
+   * left half, the hovered day's real items own the right, and a tap hands
+   * input focus across the divider. Hover is plugin-local — repainting from
+   * the entries that arrived WITH the month is what makes scrolling dates
+   * feel instant on a serialized BLE lane.
+   */
+  private drawPlanningDashboard(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+    month: PlanningMonth,
+    planningGrid: readonly PlanningGridCell[],
+    pane: { dateIndex: number; focused: boolean; itemIndex: number },
+  ): void {
+    const geometry = PLANNING_DASHBOARD;
+    const cellWidth = (geometry.gridRight - geometry.gridLeft) / 7;
+    const dateIndex = Math.max(0, Math.min(41, pane.dateIndex));
+    const hovered = planningGrid[dateIndex];
+
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    context.fillStyle = gray(BRIGHT);
+    context.font = `14px ${HUD_FONT}`;
+    context.fillText('Planning', geometry.gridLeft + 2, geometry.headerBaselineY - 14);
+    context.textAlign = 'right';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    context.fillText(
+      `${month.label.slice(0, 3)} ${month.year}`,
+      geometry.gridRight,
+      geometry.headerBaselineY - 14,
+    );
+
+    context.textAlign = 'center';
+    context.fillStyle = gray(CHROME);
+    context.font = `9px ${HUD_FONT}`;
+    const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+    weekdays.forEach((weekday, column) => {
+      context.fillText(
+        weekday, geometry.gridLeft + cellWidth * (column + 0.5), geometry.headerBaselineY,
+      );
+    });
+
+    const days = planningMonthDays(month);
+    for (let index = 0; index < 42; index += 1) {
+      const day = days[index];
+      const cell = planningGrid[index];
+      if (!day || !cell) continue;
+      const center = planningDashboardDateCell(index);
+      const isHovered = index === dateIndex;
+      if (isHovered) {
+        // The hover outline dims while the right pane owns input, so exactly
+        // one place on the glass reads as "yours" at a time.
+        context.strokeStyle = gray(pane.focused ? CHROME : BRIGHT);
+        context.lineWidth = 1;
+        roundedRect(context, center.x - 15, center.y - 11, 30, 22, 5);
+        context.stroke();
+      }
+      const busy = cell.eventCount + cell.reminderCount > 0;
+      context.fillStyle = gray(
+        isHovered ? BRIGHT : day.inMonth ? (busy ? SUPPORT : CHROME) : QUIET,
+      );
+      context.font = `${day.inMonth ? 12 : 10}px ${HUD_FONT}`;
+      context.fillText(String(day.day), center.x, center.y);
+    }
+
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(geometry.dividerX, 48);
+    context.lineTo(geometry.dividerX, 250);
+    context.stroke();
+
+    // RIGHT pane: the hovered day's items from the month payload.
+    const paneWidth = geometry.paneRight - geometry.paneLeft;
+    context.textAlign = 'left';
+    context.fillStyle = gray(pane.focused ? BRIGHT : SUPPORT);
+    context.font = `12px ${HUD_FONT}`;
+    context.fillText(
+      hovered ? planningDashboardHeading(hovered.day) : '',
+      geometry.paneLeft,
+      geometry.paneHeadingY,
+    );
+
+    const entries = hovered?.entries ?? [];
+    if (entries.length === 0) {
+      context.fillStyle = gray(CHROME);
+      context.font = `11px ${HUD_FONT}`;
+      context.fillText('Free', geometry.paneLeft, geometry.paneFirstRowY);
+    }
+    entries.slice(0, geometry.paneRowCapacity).forEach((entry, row) => {
+      const y = geometry.paneFirstRowY + row * geometry.paneRowPitch;
+      const selected = pane.focused && row === pane.itemIndex;
+      if (selected) {
+        context.fillStyle = gray(BRIGHT);
+        context.fillRect(geometry.paneLeft - 8, y - 10, 3, 19);
+      }
+      let x = geometry.paneLeft;
+      context.fillStyle = gray(selected ? SUPPORT : CHROME);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText(`[${entry.time}]`, x, y);
+      x += 52;
+      if (entry.kind === 'reminder') {
+        context.fillStyle = gray(CHROME);
+        context.font = `11px ${HUD_FONT}`;
+        context.fillText('\u25a1', x, y);
+      }
+      x += 16;
+      context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
+      context.font = `12px ${HUD_FONT}`;
+      this.fitText(context, entry.title, x, y, geometry.paneRight - x);
+    });
+    const total = (hovered?.eventCount ?? 0) + (hovered?.reminderCount ?? 0);
+    if (total > entries.length && entries.length > 0) {
+      context.fillStyle = gray(QUIET);
+      context.font = `9px ${HUD_FONT}`;
+      context.fillText(
+        `+${total - entries.length} more`,
+        geometry.paneLeft,
+        geometry.paneFirstRowY + entries.length * geometry.paneRowPitch,
+      );
+    }
+
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    this.fitText(context, frame.hint, 288, 267, 500);
+    void paneWidth;
   }
 
   private drawConfirmation(
@@ -2756,10 +2933,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
-    const projection = navigation.map
-      ? (navigation.map.panel
-        ? projectNavigationMapToPanel(navigation.map, navigation.map.panel)
-        : projectNavigationMap(navigation.map))
+    const panel = navigation.map?.panel;
+    const projection = navigation.map && panel
+      ? projectNavigationMapToPanel(navigation.map, panel)
       : undefined;
     // Two panes, like a car's instrument cluster: the ACT column on the
     // left (what to do, how far), the SEE column on the right (the shape of
@@ -2791,7 +2967,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
     this.fitText(context, navigation.hint, 36, 214, actWidth - 12);
-    if (projection) this.drawNavigationMap(context, projection, navigation.map?.panel);
+    if (projection) this.drawNavigationMap(context, projection, panel);
 
     this.drawNavigationProgress(context, navigation.progress ?? 0);
     const footer = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;

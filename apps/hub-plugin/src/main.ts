@@ -51,6 +51,7 @@ import { MacG2DiagnosticTrace, type G2TraceEvent } from './G2DiagnosticTrace';
 import {
   isNavigationVisualState,
   navigationVisualFixture,
+  type NavigationMapPanelModel,
   type NavigationVisualState,
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
@@ -495,6 +496,18 @@ async function boot(): Promise<void> {
       case 'navigation.route':
         await awaitCurrent(navigation.installRoute(msg));
         break;
+      case 'hud.ambient':
+        await awaitCurrent(hud.setAmbient({
+          temperature: msg.temperature,
+          condition: msg.condition,
+          unread: msg.unread,
+        }));
+        break;
+      case 'navigation.map':
+        // Fire and forget: a map is an enhancement, and the downlink loop
+        // must never wait on an image decode.
+        void navigation.installMapPanel(msg);
+        break;
       case 'navigation.stop':
         brainstorm.clear();
         if (await awaitCurrent(navigation.stopRoute(msg.sessionId))) {
@@ -766,6 +779,24 @@ async function boot(): Promise<void> {
   window.addEventListener('beforeunload', () => { void teardown(); });
 }
 
+/** Dev-fixture helper: decode the checked-in sample street panel. */
+async function loadDevMapPanel(): Promise<NavigationMapPanelModel | undefined> {
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('sample map failed'));
+      image.src = '/dev-map-sample.png';
+    });
+    return {
+      latitude: 41.9147, longitude: -87.6379, zoom: 16,
+      width: 248, height: 168, image,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function renderVisualState(
   hud: HudPresenter,
   menu: CapabilityMenu,
@@ -778,6 +809,12 @@ async function renderVisualState(
   if (isNavigationVisualState(state)) {
     const simulatorStatus = '9:41       JOAT simulator no route       bat 87%';
     const fixture = navigationVisualFixture(state);
+    // Development only: load a real Mac-rendered street panel so the
+    // simulator shows the same composite the wearer gets, not a bare line.
+    if (fixture.map && !fixture.map.panel) {
+      const sample = await loadDevMapPanel();
+      if (sample) fixture.map = { ...fixture.map, panel: sample };
+    }
     if (navigation) {
       await navigation.present({
         kind: 'navigation.view',
@@ -827,6 +864,35 @@ async function renderVisualState(
 
   if (isProductivityVisualState(state)) {
     const fixture = visualListFixture(state);
+    // The Planning fixture demonstrates the split dashboard: month grid
+    // left, the hovered day's items right, pane focused on the second row.
+    if (state === 'calendar') {
+      const grid = Array.from({ length: 42 }, (_, index) => {
+        const day = new Date(Date.UTC(2026, 7, 31 + index));
+        const busy = index === 1 || index === 10 || index === 17;
+        return {
+          day: day.toISOString().slice(0, 10),
+          eventCount: busy ? 2 : 0,
+          reminderCount: busy ? 1 : 0,
+          inMonth: day.getUTCMonth() === 8,
+          ...(busy ? {
+            entries: [
+              { time: '09:30', kind: 'event' as const, title: 'Design review' },
+              { time: '16:30', kind: 'event' as const, title: 'Site walk with Adaeze' },
+              { time: '18:00', kind: 'reminder' as const, title: 'Buy filters' },
+            ],
+          } : {}),
+        };
+      });
+      await hud.showList(fixture.items, {
+        title: 'PLANNING · PLAN · SEPTEMBER 2026',
+        hint: 'tap: choose · swipe: move · left x2: back',
+        selectable: true,
+        planningGrid: grid,
+        planningPane: { dateIndex: 1, focused: true, itemIndex: 1 },
+      });
+      return;
+    }
     await hud.showList(fixture.items, {
       title: fixture.title,
       hint: fixture.hint,
@@ -843,7 +909,11 @@ async function renderVisualState(
 
   if (state === 'assistant-overlay') {
     await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
-    await hud.showText('Reminder monitoring armed', ContainerId.Tray, 2);
+    await hud.showText(
+    'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
+    ContainerId.Tray, 2,
+  );
+  await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
     await hud.showAssistantOverlay(ASSISTANT_OVERLAY_VISUAL_TEXT);
     return;
   }
@@ -852,7 +922,11 @@ async function renderVisualState(
   await hud.showText(
     'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
   );
-  await hud.showText('2 notifications waiting', ContainerId.Tray, 2);
+  await hud.showText(
+    'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
+    ContainerId.Tray, 2,
+  );
+  await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
   await hud.showText('left x2 menu · long-press mic', ContainerId.Hint, 1);
   if (state === 'sidebar') {
     await menu.toggle();

@@ -1429,3 +1429,119 @@ describe('CapabilityMenu', () => {
     expect(defaultsCount()).toBe(1);
   });
 });
+
+describe('Planning split dashboard', () => {
+  function dashboardRig() {
+    const panes: Array<{ dateIndex: number; focused: boolean; itemIndex: number }> = [];
+    const sent: Array<Record<string, unknown>> = [];
+    const hud = {
+      showSidebar: vi.fn(async () => true),
+      showList: vi.fn(async () => true),
+      setStatus: vi.fn(async () => true),
+      setSelection: vi.fn(async () => true),
+      moveSelection: vi.fn(async () => true),
+      updatePlanningPane: vi.fn(async (pane: { dateIndex: number; focused: boolean; itemIndex: number }) => {
+        panes.push({ ...pane });
+        return true;
+      }),
+      showProductivity: vi.fn(async () => true),
+      isProductivityVisible: vi.fn(() => true),
+      showDefault: vi.fn(async () => true),
+    } as unknown as HudPresenter;
+    const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
+    const menu = new CapabilityMenu(hud, new Settings(), link);
+    return { menu, panes, sent };
+  }
+
+  function monthGrid() {
+    // Sep 2026 grid: Monday Aug 31 leads, 42 cells. Sep 1 (index 1) carries
+    // two entries; every other day is free.
+    return Array.from({ length: 42 }, (_, index) => {
+      const day = new Date(Date.UTC(2026, 7, 31 + index));
+      const iso = day.toISOString().slice(0, 10);
+      const busy = index === 1;
+      return {
+        day: iso,
+        eventCount: busy ? 1 : 0,
+        reminderCount: busy ? 1 : 0,
+        inMonth: day.getUTCMonth() === 8,
+        ...(busy ? {
+          entries: [
+            { time: '09:30', kind: 'event' as const, title: 'Design review' },
+            { time: '18:00', kind: 'reminder' as const, title: 'Buy filters' },
+          ],
+        } : {}),
+      };
+    });
+  }
+
+  async function openDashboard() {
+    const rigParts = dashboardRig();
+    const { menu, sent } = rigParts;
+    await menu.toggle();
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
+    menu.handleClick();
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList(
+      'PLANNING · PLAN · SEPTEMBER 2026', rows(11), requestId, true,
+      undefined, monthGrid() as never,
+    )).toBe(true);
+    return { ...rigParts, requestId };
+  }
+
+  it('scroll hovers dates, tap hands focus to the pane, tap opens the entry', async () => {
+    const { menu, panes, sent, requestId } = await openDashboard();
+
+    // Hover moves locally — no Mac traffic, one repaint per move.
+    const before = sent.length;
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(sent.length).toBe(before);
+    expect(panes[panes.length - 1]).toMatchObject({ focused: false });
+
+    // Return to Sep 1 (hover starts on the first in-month day, index 1,
+    // when today is outside this month; the scroll above moved to 2).
+    menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
+    expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: false });
+
+    // First tap: the pane takes input. Second tap: the entry opens via the
+    // date+position wire, no identifiers.
+    menu.handleClick();
+    expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 0 });
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 1 });
+    menu.handleClick();
+    const grid = sent[sent.length - 1] as { event: Record<string, unknown> };
+    expect(grid.event.containerName).toBe('capgrid');
+    expect(grid.event.selectedIndex).toBe(1);
+    expect(grid.event.requestId).toBe(requestId);
+    expect(typeof grid.event.planningAnchorUnixMs).toBe('number');
+  });
+
+  it('Back walks pane to grid before leaving the dashboard', async () => {
+    const { menu, panes } = await openDashboard();
+    menu.handleClick(); // pane focus
+    expect(panes[panes.length - 1]).toMatchObject({ focused: true });
+    await menu.toggle(); // Back: pane -> grid, still on the dashboard
+    expect(panes[panes.length - 1]).toMatchObject({ focused: false });
+    expect(menu.isOpen()).toBe(true);
+  });
+
+  it('scrolling past the month edge asks the Mac for the neighbour month', async () => {
+    const { menu, sent } = await openDashboard();
+    // Walk hover to date 0, then one more up crosses the edge.
+    for (let i = 0; i < 42; i += 1) menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
+    const monthFlip = sent[sent.length - 1] as { event: Record<string, unknown> };
+    expect(monthFlip.event.containerName).toBe('capdata');
+    expect(monthFlip.event.selectedIndex).toBe(6); // the month list's ‹ previous row
+  });
+
+  it('a tap on a free day does not steal focus into an empty pane', async () => {
+    const { menu, panes } = await openDashboard();
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // a free day
+    const before = panes.length;
+    menu.handleClick();
+    // No pane repaint claiming focus happened.
+    expect(panes.slice(before).every((p) => !p.focused)).toBe(true);
+  });
+});

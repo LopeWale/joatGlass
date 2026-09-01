@@ -107,11 +107,26 @@ export type ProductivityHudDomain = 'calendar' | 'reminders';
 
 /** A redacted source-backed count for one fixed Planning month cell. Labels,
  * native identifiers, and times stay in the Week/Day drill-down payload. */
+/** One entry inside a Planning day, for the dashboard's right pane. */
+export interface PlanningGridEntry {
+  /** Local clock label the Mac already formatted ("16:30", "ALL DAY"). */
+  time: string;
+  kind: 'event' | 'reminder';
+  title: string;
+}
+
 export interface PlanningGridCell {
   day: string;
   eventCount: number;
   reminderCount: number;
   inMonth: boolean;
+  /**
+   * The day's entries, so hovering a date can repaint the right pane from
+   * local state. Asking the Mac per hover would put a round trip on the
+   * serialized BLE lane for every scroll tick; the month arrives once over
+   * the websocket instead, and only the changed tiles are transferred.
+   */
+  entries?: PlanningGridEntry[];
 }
 export type ProductivityHudPhase =
   | 'verifying'
@@ -330,6 +345,25 @@ export type DownlinkMessage =
     destinationLabel: string;
     etaMinutes: number;
     plan: NavigationRoutePlan;
+  }
+  | {
+    kind: 'navigation.map';
+    sessionId: string;
+    latitude: number;
+    longitude: number;
+    zoom: number;
+    width: number;
+    height: number;
+    /** base64 PNG rendered on the Mac; the access token never travels. */
+    png: string;
+  }
+  | {
+    kind: 'hud.ambient';
+    /** e.g. "72f" — already formatted by the Mac, which owns the unit. */
+    temperature: string;
+    /** One short sky word: clear, rain, fog… Empty when unknown. */
+    condition: string;
+    unread: number;
   }
   | { kind: 'navigation.stop'; sessionId: string }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };

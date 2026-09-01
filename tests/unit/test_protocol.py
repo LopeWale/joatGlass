@@ -49,6 +49,7 @@ from joat.core.protocol import (
     NavigationViewAck,
     NavigationView,
     PlanningGridCell,
+    PlanningGridEntry,
     PairingAck,
     PairingSet,
     ProductivityHudView,
@@ -604,6 +605,33 @@ class TestDownlinkWire:
         assert wire["hint"] == "H" * 46
         assert wire["requestId"] == "hud-request-7"
         assert wire["selectable"] is True
+
+    def test_planning_grid_entries_are_bounded_and_carry_no_identifiers(self) -> None:
+        """The dashboard's right pane repaints from these on hover, so titles
+        now travel with the month (wearer's ask, 2026-09-01) — but still no
+        calendar or reminder identifiers, and at most six rows per day."""
+        cell = PlanningGridCell(
+            day=date(2026, 9, 1),
+            event_count=8,
+            reminder_count=0,
+            in_month=True,
+            entries=tuple(
+                PlanningGridEntry(time="16:30", kind="event", title=f"Meeting {i}" + "x" * 90)
+                for i in range(8)
+            ),
+        )
+        wire = cell.to_wire()
+        assert len(wire["entries"]) == 6
+        for entry in wire["entries"]:
+            assert set(entry) == {"time", "kind", "title"}
+            assert len(entry["title"]) <= 64
+        bad_kind = PlanningGridEntry(time="09:00", kind="mystery", title="x").to_wire()
+        assert bad_kind["kind"] == "event"
+        # A cell without entries stays exactly the pre-dashboard shape.
+        bare = PlanningGridCell(
+            day=date(2026, 9, 1), event_count=1, reminder_count=0, in_month=True,
+        ).to_wire()
+        assert "entries" not in bare
 
     def test_hud_list_planning_grid_is_redacted_and_bounded_to_six_weeks(self) -> None:
         cells = tuple(

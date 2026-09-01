@@ -2,6 +2,7 @@ import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
+import { parsePlanningMonthTitle } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import {
   VOICE_REQUEST_PREFIX,
@@ -19,6 +20,7 @@ interface DataSurfaceSnapshot {
   selectable: boolean;
   hint?: string;
   planningGrid?: PlanningGridCell[];
+  planningPane?: { dateIndex: number; focused: boolean; itemIndex: number };
   selectedIndex: number;
   messagesRetry: boolean;
   messagesScreen?: MessagesScreen;
@@ -130,6 +132,14 @@ export class CapabilityMenu {
   /** A Planning row may open a day or item detail. Back returns to the live
    * schedule rather than throwing the wearer all the way to the overview. */
   private planningDrillDown = false;
+  /** The split Planning dashboard: hovered date, and whether the right pane
+   * owns input. Plugin-local — a hover never costs a Mac round trip. */
+  private dashboard?: {
+    grid: PlanningGridCell[];
+    dateIndex: number;
+    paneFocused: boolean;
+    paneIndex: number;
+  };
   private transitionId = 0;
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
@@ -150,6 +160,7 @@ export class CapabilityMenu {
   async beginLiveSession(session: 'brainstorm'): Promise<void> {
     void session;
     this.clearResponseTimeout();
+    this.dashboard = undefined;
     this.clearProductivityReturn();
     this.transitionId += 1;
     this.view = 'closed';
@@ -179,6 +190,7 @@ export class CapabilityMenu {
   releaseToLiveSession(): void {
     const leavingMessages = this.pendingTitle === 'MESSAGES';
     this.clearResponseTimeout();
+    this.dashboard = undefined;
     this.clearProductivityReturn();
     this.transitionId += 1;
     this.view = 'closed';
@@ -282,6 +294,24 @@ export class CapabilityMenu {
 
     this.clearResponseTimeout();
     this.messagesRetry = messagesState?.rowAction === 'retry';
+    // A month with a full grid becomes the split dashboard: grid left, the
+    // hovered day's items right. Hover starts on today when the month shows
+    // it, else the first in-month day.
+    const month = parsePlanningMonthTitle(title);
+    if (month && planningGrid?.length === 42 && effectiveSelectable) {
+      const todayIso = new Date().toLocaleDateString('en-CA');
+      let dateIndex = planningGrid.findIndex(
+        (cell) => cell.inMonth && cell.day === todayIso,
+      );
+      if (dateIndex < 0) {
+        dateIndex = Math.max(0, planningGrid.findIndex((cell) => cell.inMonth));
+      }
+      this.dashboard = {
+        grid: [...planningGrid], dateIndex, paneFocused: false, paneIndex: 0,
+      };
+    } else {
+      this.dashboard = undefined;
+    }
     const expectedRequestId = this.pendingRequestId;
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
@@ -291,6 +321,7 @@ export class CapabilityMenu {
       hint: effectiveHint,
       selectable: effectiveSelectable,
       planningGrid,
+      planningPane: this.dashboardPane(),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -431,6 +462,11 @@ export class CapabilityMenu {
         CAPABILITIES.indexOf(capability),
         this.productivityAnchorUnixMs,
       );
+    } else if (this.view === 'data' && this.dashboard?.paneFocused) {
+      // First Back hands input from the day pane to the date grid.
+      this.dashboard.paneFocused = false;
+      this.dashboard.paneIndex = 0;
+      await this.hud.updatePlanningPane(this.dashboardPane()!);
     } else if (
       this.view === 'data'
       && this.pendingTitle === 'PLANNING'
@@ -455,6 +491,15 @@ export class CapabilityMenu {
 
     if (this.view === 'data') {
       const eventType = list.eventType ?? 0;
+      if (this.dashboard) {
+        if (eventType === OsEventTypeList.CLICK_EVENT) return this.selectDataRow();
+        this.dashboardScroll(
+          eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+            ? 1
+            : eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 0,
+        );
+        return true;
+      }
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
       if (eventType !== OsEventTypeList.CLICK_EVENT) {
         // Native List containers move their own highlight before reporting a
@@ -538,6 +583,10 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
+      if (this.dashboard) {
+        this.dashboardScroll(delta);
+        return true;
+      }
       if (
         this.pendingTitle === 'MESSAGES'
         && (this.messagesScreen === 'conversation' || this.messagesScreen === 'message_detail')
@@ -574,7 +623,93 @@ export class CapabilityMenu {
     return this.select(this.selectedIndex);
   }
 
+  private dashboardPane():
+  { dateIndex: number; focused: boolean; itemIndex: number } | undefined {
+    return this.dashboard
+      ? {
+        dateIndex: this.dashboard.dateIndex,
+        focused: this.dashboard.paneFocused,
+        itemIndex: this.dashboard.paneIndex,
+      }
+      : undefined;
+  }
+
+  private dashboardEntryCount(): number {
+    const cell = this.dashboard?.grid[this.dashboard.dateIndex];
+    return cell?.entries?.length ?? 0;
+  }
+
+  /** Scroll on the dashboard: dates while the grid owns input, items once
+   * the pane does. Scrolling past either month edge asks the Mac for the
+   * neighbouring month through the existing row contract (rows 6 and 7 of
+   * the month list are its previous/next actions). */
+  private dashboardScroll(delta: number): void {
+    const dashboard = this.dashboard;
+    if (!dashboard || delta === 0) return;
+    if (dashboard.paneFocused) {
+      const maximum = Math.max(0, this.dashboardEntryCount() - 1);
+      dashboard.paneIndex = Math.max(0, Math.min(maximum, dashboard.paneIndex + delta));
+      void this.hud.updatePlanningPane(this.dashboardPane()!);
+      return;
+    }
+    const next = dashboard.dateIndex + delta;
+    if (next < 0 || next > 41) {
+      const monthRow = next < 0 ? 6 : 7;
+      if (this.pendingTitle && this.pendingRequestId) {
+        this.link.send({
+          kind: 'input',
+          event: {
+            containerName: 'capdata',
+            selectedIndex: monthRow,
+            selectedName: this.pendingTitle,
+            requestId: this.pendingRequestId,
+          },
+        });
+        this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+      }
+      return;
+    }
+    dashboard.dateIndex = next;
+    dashboard.paneIndex = 0;
+    void this.hud.updatePlanningPane(this.dashboardPane()!);
+  }
+
+  /** Tap on the dashboard: the first hands input to the right pane, the
+   * second opens the hovered item. The wire carries only the date and the
+   * row position — the Mac re-resolves the entry from a fresh projection. */
+  private dashboardTap(): void {
+    const dashboard = this.dashboard;
+    if (!dashboard) return;
+    if (!dashboard.paneFocused) {
+      if (this.dashboardEntryCount() === 0) return;
+      dashboard.paneFocused = true;
+      dashboard.paneIndex = 0;
+      void this.hud.updatePlanningPane(this.dashboardPane()!);
+      return;
+    }
+    const cell = dashboard.grid[dashboard.dateIndex];
+    if (!cell || !this.pendingTitle || !this.pendingRequestId) return;
+    const anchor = Date.parse(`${cell.day}T12:00:00Z`);
+    if (!Number.isFinite(anchor)) return;
+    this.planningDrillDown = true;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capgrid',
+        selectedIndex: dashboard.paneIndex,
+        selectedName: this.pendingTitle,
+        requestId: this.pendingRequestId,
+        planningAnchorUnixMs: anchor,
+      },
+    });
+    this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+  }
+
   private selectDataRow(): true {
+    if (this.dashboard) {
+      this.dashboardTap();
+      return true;
+    }
     if (this.messagesRetry) {
       this.messagesRetry = false;
       void this.openCapability('Messages', 0);
@@ -675,6 +810,7 @@ export class CapabilityMenu {
     planningAnchorUnixMs?: number,
   ): Promise<void> {
     if (picked === 'Planning') this.planningDrillDown = false;
+    this.dashboard = undefined;
     this.clearResponseTimeout();
     this.messagesRetry = false;
     const transition = this.beginTransition();
@@ -886,6 +1022,7 @@ export class CapabilityMenu {
       ...this.dataSurface,
       items: [...this.dataSurface.items],
       planningGrid: this.dataSurface.planningGrid ? [...this.dataSurface.planningGrid] : undefined,
+      planningPane: this.dashboardPane(),
       selectedIndex: this.selectedIndex,
     };
   }
@@ -897,11 +1034,22 @@ export class CapabilityMenu {
     this.dataGrandparent = undefined;
     this.clearResponseTimeout();
     const transition = this.beginTransition();
+    if (parent.planningGrid?.length === 42 && parent.planningPane) {
+      // Back from an entry lands on the dashboard with the same date
+      // hovered and the GRID owning input again.
+      this.dashboard = {
+        grid: [...parent.planningGrid],
+        dateIndex: parent.planningPane.dateIndex,
+        paneFocused: false,
+        paneIndex: 0,
+      };
+    }
     const shown = await this.hud.showList(parent.items, {
       title: parent.title,
       hint: parent.hint,
       selectable: parent.selectable,
       planningGrid: parent.planningGrid,
+      planningPane: this.dashboardPane(),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -936,6 +1084,7 @@ export class CapabilityMenu {
 
   private async returnToSidebar(): Promise<void> {
     const leavingMessages = this.pendingTitle === 'MESSAGES';
+    this.dashboard = undefined;
     const activeIndex = this.pendingTitle
       ? Math.max(0, CAPABILITIES.findIndex((item) => item.toUpperCase() === this.pendingTitle))
       : this.view === 'settings' ? CAPABILITIES.indexOf('Settings') : 0;
@@ -1024,6 +1173,7 @@ export class CapabilityMenu {
 
   private async close(): Promise<void> {
     const leavingMessages = this.pendingTitle === 'MESSAGES';
+    this.dashboard = undefined;
     this.clearResponseTimeout();
     this.clearProductivityReturn();
     this.transitionId += 1;

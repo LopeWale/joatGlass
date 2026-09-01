@@ -47,16 +47,40 @@ function numericMap<T>(
   return map;
 }
 
+function normalizePlanningEntries(
+  entries: PlanningGridCell['entries'],
+): PlanningGridCell['entries'] {
+  if (!Array.isArray(entries)) return undefined;
+  const kept = entries
+    .filter((entry) => (
+      typeof entry === 'object' && entry !== null
+      && typeof entry.time === 'string' && entry.time.length <= 8
+      && (entry.kind === 'event' || entry.kind === 'reminder')
+      && typeof entry.title === 'string' && entry.title.length > 0
+    ))
+    .slice(0, 6)
+    .map((entry) => ({
+      time: entry.time,
+      kind: entry.kind,
+      title: entry.title.slice(0, 64),
+    }));
+  return kept.length > 0 ? kept : undefined;
+}
+
 function normalizePlanningGrid(
   planningGrid: readonly PlanningGridCell[] | undefined,
 ): PlanningGridCell[] | undefined {
   if (!planningGrid || planningGrid.length !== 42) return undefined;
-  const normalized = planningGrid.map((cell) => ({
-    day: cell.day,
-    eventCount: cell.eventCount,
-    reminderCount: cell.reminderCount,
-    inMonth: cell.inMonth,
-  }));
+  const normalized = planningGrid.map((cell) => {
+    const entries = normalizePlanningEntries(cell.entries);
+    return {
+      day: cell.day,
+      eventCount: cell.eventCount,
+      reminderCount: cell.reminderCount,
+      inMonth: cell.inMonth,
+      ...(entries ? { entries } : {}),
+    };
+  });
   const isValid = normalized.every((cell) => (
     typeof cell.day === 'string'
     && /^\d{4}-\d{2}-\d{2}$/.test(cell.day)
@@ -79,11 +103,21 @@ const DEFAULT_BRIGHTNESS: Readonly<Record<number, number>> = {
   [ContainerId.Hint]: 1,
 };
 
+/** Plugin-local dashboard focus: which date is hovered, whether the right
+ * pane owns input, and which of its rows is hovered. Never crosses the wire —
+ * a hover must not cost a Mac round trip on the serialized lane. */
+export interface PlanningPaneState {
+  dateIndex: number;
+  focused: boolean;
+  itemIndex: number;
+}
+
 export interface ListSurfaceOptions {
   title?: string;
   hint?: string;
   selectable?: boolean;
   planningGrid?: readonly PlanningGridCell[];
+  planningPane?: PlanningPaneState;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -91,6 +125,7 @@ interface ResolvedListSurfaceOptions {
   hint: string;
   selectable: boolean;
   planningGrid?: readonly PlanningGridCell[];
+  planningPane?: PlanningPaneState;
 }
 
 interface HudContentState {
@@ -622,6 +657,20 @@ export class HudPresenter {
       && visible.reminderDueGeneration === productivity.reminderDueGeneration
       && visible.presentationReceiptId === productivity.presentationReceiptId
       && visible.presentationReceiptGeneration === productivity.presentationReceiptGeneration;
+  }
+
+  /** Repaint the Planning dashboard with a new hover/pane focus. Local-only
+   * state: no Mac request, one visual paint, and the unchanged-tile skip
+   * keeps a hover move to the tiles whose pixels actually differ. */
+  async updatePlanningPane(pane: PlanningPaneState): Promise<boolean> {
+    if (this.surface.kind !== 'list' || !this.surface.options.planningGrid) {
+      return false;
+    }
+    this.surface = {
+      ...this.surface,
+      options: { ...this.surface.options, planningPane: { ...pane } },
+    };
+    return this.paintVisual();
   }
 
   async setSelection(index: number): Promise<boolean> {
@@ -1310,6 +1359,11 @@ export class HudPresenter {
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_COPY_CHARS),
       selectable: options.selectable ?? false,
       ...(planningGrid ? { planningGrid } : {}),
+      // The pane rides only with a valid grid: hover state without dates
+      // would put the renderer on the dashboard path with nothing to draw.
+      ...(planningGrid && options.planningPane
+        ? { planningPane: { ...options.planningPane } }
+        : {}),
     };
   }
 
@@ -1363,6 +1417,7 @@ export class HudPresenter {
         selectable: this.surface.options.selectable,
         hint: this.surface.options.hint,
         planningGrid: this.surface.options.planningGrid,
+        planningPane: this.surface.options.planningPane,
       });
     }
     if (this.surface.kind === 'navigation') {
