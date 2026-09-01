@@ -353,3 +353,42 @@ class TestSilentWaitClock:
         await sink.close("done")
         assert sink._wait_task is None or sink._wait_task.cancelled() \
             or sink._wait_task.done()
+
+
+class TestCostVisibility:
+    """Two subscription CLIs bill per turn.
+
+    A wearer who cannot see how many rounds remain, or how many calls this
+    session has already spent, cannot decide whether to let it run — and
+    this project has hit provider quota limits repeatedly.
+    """
+
+    def _sink(self):
+        from joat.services.hud import HudWriter
+        from joat.services.sinks import HudSink
+        from tests.unit.test_session import SinkTransport
+
+        transport = SinkTransport()
+        return HudSink(HudWriter(transport)), transport
+
+    def _frames(self, transport):
+        return [m for m in transport.sent
+                if type(m).__name__ == "BrainstormHudView"]
+
+    async def test_the_live_line_carries_round_and_calls(self) -> None:
+        sink, transport = self._sink()
+        await sink.open("t", ["codex", "claude"])
+        await sink.progress(2, 2, 5)
+        await sink.turn("CLAUDE (critic)")
+        live = self._frames(transport)[-1].active_speaker
+        assert "CLAUDE" in live
+        assert "round 2/2" in live and "5 calls" in live
+
+    async def test_it_is_optional_for_other_sinks(self) -> None:
+        # A terminal or a snapshot has no use for a HUD concern and must
+        # not have to implement it — the session discovers it by getattr.
+        from joat.services.sinks import DebateStateSink, TerminalSink
+        import io
+
+        assert not hasattr(TerminalSink(out=io.StringIO()), "progress")
+        assert not hasattr(DebateStateSink(), "progress")

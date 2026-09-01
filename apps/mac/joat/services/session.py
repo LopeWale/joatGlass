@@ -521,6 +521,7 @@ class DebateSession(Session):
         self._silenced: list[str] = []
         self._wearer_turns = 0
         self._next_mode: RelayMode | None = None
+        self._calls = 0
         self._speaking_label = ""
         self._interrupted = False
         self._cancelled = False
@@ -664,6 +665,7 @@ class DebateSession(Session):
             # invariant. The snapshot makes mid-round redirects reorder the
             # seats still owing a turn instead of recounting them.
             self._table.start_round()
+            await self._report_progress(round_no)
             for _ in range(len(self._table)):
                 speaker = self._table.next_speaker()
                 said = await self._verified_turn(speaker, round_no)
@@ -715,6 +717,20 @@ class DebateSession(Session):
             self._set_phase("synthesis")
             await self._synthesis_turn(outcome)
         await self._finish(f"done — {outcome}")
+
+    async def _report_progress(self, round_no: int) -> None:
+        """Tell the surfaces where we are and what it has cost.
+
+        Optional on the sink, like the other HUD-only hooks: a terminal or
+        a snapshot has no use for it and must not have to implement it.
+        """
+        callback = getattr(self._sink, "progress", None)
+        if callback is None:
+            return
+        try:
+            await callback(round_no, self._max_rounds, self._calls)
+        except Exception:
+            log.warning("progress not painted", exc_info=True)
 
     async def _synthesis_turn(self, outcome: str) -> None:
         """JOAT's visible verified synthesis — the product of the session.
@@ -808,6 +824,7 @@ class DebateSession(Session):
             self._next_mode = None
         prompt = build_prompt(self._topic, speaker, prior,
                               self.SOURCES_CONTRACT, mode=mode)
+        self._calls += 1
         text = await self._stream_turn(label, speaker.stream(prompt))
         if self._gate is None or self._cancelled or is_failure(text):
             return text
@@ -815,6 +832,7 @@ class DebateSession(Session):
             verdict_ok, repair = await self._verify_visibly(label, text)
             if verdict_ok or self._cancelled or attempt == self._max_repairs:
                 return text
+            self._calls += 1
             text = await self._stream_turn(
                 f"{label} — repair {attempt + 1}",
                 speaker.stream(

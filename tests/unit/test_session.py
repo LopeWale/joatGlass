@@ -1365,3 +1365,36 @@ class TestRelayRouting:
         await session.run()
         assert "WEAKEST claim" not in seen[0]
         assert "Open the discussion" in seen[0]
+
+
+class TestProgressReporting:
+    """Rounds and calls reach the surfaces that want them."""
+
+    async def test_each_round_reports_its_position_and_cost(self) -> None:
+        reported: list[tuple[int, int, int]] = []
+
+        class Recorder:
+            async def open(self, topic: str, speakers: list[str]) -> None: ...
+            async def turn(self, label: str) -> None: ...
+            async def chunk(self, text: str) -> None: ...
+            async def close(self, verdict: str) -> None: ...
+            async def progress(self, r: int, m: int, c: int) -> None:
+                reported.append((r, m, c))
+
+        await DebateSession(
+            "topic", pair(agent(["a"]), agent(["b"])),
+            Recorder(),
+            ScriptedJudge(["No.\nAGREEMENT: 0.1\nBLOCKING: yes",
+                           "Yes.\nAGREEMENT: 0.95\nBLOCKING: no"]),
+            max_rounds=2,
+        ).run()
+
+        assert [r for r, _m, _c in reported] == [1, 2]
+        assert all(m == 2 for _r, m, _c in reported)
+        # Two seats spoke in round 1, so round 2 opens having spent two.
+        assert reported[0][2] == 0 and reported[1][2] == 2
+
+    async def test_a_sink_without_progress_is_fine(self) -> None:
+        # Every existing sink predates this hook.
+        transport = SinkTransport()
+        await debate(transport, pair(agent(["a"]), agent(["b"])), None).run()
