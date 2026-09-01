@@ -536,3 +536,35 @@ class TestArmExpiry:
         assert 0 < AgentTerminalCommands.ARM_WINDOW_S <= 120
         c.arm()
         assert c.armed is True
+
+
+class TestSidebarOpensTheRoster:
+    """Picking 'Agent Terminal' shows the wearer's sessions.
+
+    It used to draw a readiness card whose body read 'Hermes participates
+    as a Brainstorm collaborator' — false after the boundary change, and
+    useless before it: no roster, no sessions, no output. The feature was
+    unreachable from the menu it was listed in.
+    """
+
+    async def test_the_roster_paints_when_the_row_is_opened(self) -> None:
+        painted: list[list[str]] = []
+
+        async def paint(frame) -> None:
+            painted.append(frame.lines)
+
+        agent = FakeAgent(["build ok\n"])
+        r = AgentTerminalRoster([("work", agent)], paint=paint)
+        await r.send("build it")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        painted.clear()
+        # This is exactly what the capability row invokes.
+        await r.repaint()
+        assert painted, "opening the row painted nothing"
+        assert any("build ok" in line for line in painted[-1])
+
+    async def test_an_unconfigured_mac_still_answers(self) -> None:
+        # With no lanes the router keeps its own fallback copy, so the row
+        # must never open onto an empty frame.
+        frame = AgentTerminalRoster([]).frame()
+        assert frame.lines and "No terminal sessions" in frame.lines[0]
