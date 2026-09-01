@@ -39,6 +39,10 @@ class TranscriptSink(Protocol):
     async def close(self, verdict: str) -> None: ...
 
 
+_BLANK_LINES = re.compile(r"\n[ \t]*(?:\n[ \t]*)+")
+"""Runs of blank rows, which the glasses cannot afford."""
+
+
 class HudSink:
     """The glasses: a live production Brainstorm page, never a text dump."""
 
@@ -132,7 +136,14 @@ class HudSink:
         """
         rows = list(self._done)
         if self._head or self._body:
-            rows.append(f"{self._head}{self._body}")
+            # A blank line costs a whole row out of seven. Models separate
+            # their GIST from their argument with one, so nearly every live
+            # turn spent 14% of the glass showing nothing. Collapsed here at
+            # RENDER time rather than on the way in, because chunks arrive
+            # mid-sequence while streaming and "\n" + "\n" would slip past
+            # a per-chunk check. The stored transcript, the saved history
+            # and the Markdown export keep the wearer's paragraphs.
+            rows.append(f"{self._head}{_BLANK_LINES.sub(chr(10), self._body)}")
         elif not rows and self._placeholder:
             rows.append(self._placeholder)
         return self._bounded_transcript("\n".join(rows))
