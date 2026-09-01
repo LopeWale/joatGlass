@@ -279,7 +279,15 @@ export function brainstormActionHint(
   // an approval fell through to "tap: retry Hermes" — the wrong action,
   // with the only useful one ("terminal approve") never shown at all.
   if (model.state === 'approval_required') {
-    return 'say "terminal approve" or "terminal deny" · left x2: menu';
+    // Only worth saying while the gateway can actually carry the answer.
+    // A lane can hold a pending approval while the CONNECTION is blocked or
+    // unavailable — different fields, and they disagree — and telling the
+    // wearer to approve into a dead link is advice that cannot be followed,
+    // which is the same defect as the "tap: retry Hermes" this replaced.
+    if (model.terminalState === 'ready') {
+      return 'say "terminal approve" or "terminal deny" · left x2: menu';
+    }
+    return 'tap: retry Hermes, then approve · left x2: menu';
   }
   if (model.state === 'running') {
     return 'tap: Brainstorm · say "terminal cancel" · left x2: menu';
