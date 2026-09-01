@@ -26,6 +26,22 @@ Phase 0. Two real packages, each with a wired test command:
   keep it green, RULES.md #3). Setup: `python3 -m venv .venv &&
   .venv/bin/pip install -e ".[dev]"`.
 
+  **Testing a git worktree needs `PYTHONPATH`.** The editable install
+  writes an absolute path into
+  `.venv/.../__editable__.joat_g2-0.1.0.pth`, so `import joat` resolves to
+  THIS checkout no matter where pytest runs. A worktree run therefore
+  executes the worktree's TESTS against the main tree's SOURCE and looks
+  entirely normal while proving nothing — it cost a session three
+  confident, wrong "HEAD is green" reports. Use:
+
+      cd <worktree> && PYTHONPATH=<worktree>/apps/mac \
+        /path/to/main/.venv/bin/python -m pytest
+
+  PYTHONPATH precedes site-packages, so it wins. Verify before trusting a
+  run: `python -c "import joat, os; print(os.path.dirname(joat.__file__))"`
+  must print the worktree. (The plugin has no equivalent trap — vitest
+  compiles the worktree's own `src/`; only `node_modules` need be linked.)
+
 The wire protocol lives twice by design: `apps/hub-plugin/src/types.ts` and
 `apps/mac/joat/core/protocol.py` must change in the same commit
 (`tests/unit/test_protocol.py` pins the wire shapes).
