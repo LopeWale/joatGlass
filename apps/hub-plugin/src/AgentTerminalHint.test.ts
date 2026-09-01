@@ -96,6 +96,28 @@ describe('Agent Terminal action hints', () => {
     }
   });
 
+  it('does not offer an approval the gateway cannot carry', () => {
+    // A lane can hold a pending approval while the CONNECTION is down —
+    // model.state and model.terminalState are different fields. Saying
+    // "terminal approve" into a dead link is advice that cannot be
+    // followed, which is the defect this whole file exists to prevent.
+    for (const terminalState of ['blocked', 'unavailable'] as const) {
+      const hint = brainstormActionHint(
+        terminal({ state: 'approval_required', terminalState }),
+      );
+      expect(hint).toContain('retry Hermes');
+      expect(hint).toContain('approve');       // still names the goal
+      expect(tapAction(terminal({ state: 'approval_required', terminalState })))
+        .toBe('retry_terminal');               // and matches the tap
+    }
+    // Healthy gateway: the approval words are the useful ones.
+    const healthy = brainstormActionHint(
+      terminal({ state: 'approval_required', terminalState: 'ready' }),
+    );
+    expect(healthy).toContain('terminal approve');
+    expect(healthy).not.toContain('retry');
+  });
+
   it('keeps every hint inside the row it is drawn in', () => {
     // Centred at 9px across 500px: 500 / (9 * 1266/2048) = 89 columns.
     const states: BrainstormHudState[] = [
