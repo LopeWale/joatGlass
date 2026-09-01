@@ -798,7 +798,8 @@ async function loadDevMapPanel(): Promise<NavigationMapPanelModel | undefined> {
     await new Promise<void>((resolve, reject) => {
       image.onload = () => resolve();
       image.onerror = () => reject(new Error('sample map failed'));
-      image.src = '/dev-map-sample.png';
+      // Under __joat- so the release guard refuses any build that carries it.
+      image.src = '/__joat-dev-fixtures/dev-map-sample.png';
     });
     return {
       latitude: 41.9147, longitude: -87.6379, zoom: 16,
