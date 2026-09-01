@@ -93,7 +93,7 @@ export type G2TraceEvent =
    * its fixed, prompt-free action. */
   | {
     type: 'brainstorm_action';
-    action: 'begin_acceptance' | 'begin_topic_capture' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
+    action: 'begin_acceptance' | 'begin_topic_capture' | 'begin_terminal_input' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
     surface: 'brainstorm' | 'agent_terminal';
     source: 'left' | 'right' | 'ring';
     gesture: 'tap' | 'double_press';
