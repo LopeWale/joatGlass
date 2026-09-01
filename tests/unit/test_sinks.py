@@ -392,3 +392,54 @@ class TestCostVisibility:
 
         assert not hasattr(TerminalSink(out=io.StringIO()), "progress")
         assert not hasattr(DebateStateSink(), "progress")
+
+
+class TestTheAnswerSurvivesTheEnding:
+    """close() used to replace the transcript with a status line.
+
+    The verified synthesis is what the wearer sat through the session for,
+    and it vanished at the exact moment it finished.
+    """
+
+    def _sink(self):
+        from joat.services.hud import HudWriter
+        from joat.services.sinks import HudSink
+        from tests.unit.test_session import SinkTransport
+
+        transport = SinkTransport()
+        return HudSink(HudWriter(transport)), transport
+
+    def _last_activity(self, transport) -> str:
+        frames = [m for m in transport.sent
+                  if type(m).__name__ == "BrainstormHudView"]
+        return frames[-1].activity
+
+    async def test_the_synthesis_is_still_there_after_the_verdict(self) -> None:
+        sink, transport = self._sink()
+        await sink.open("cold-start latency", ["codex", "claude"])
+        await sink.turn("JOAT (synthesis)")
+        await sink.chunk("AGREED: measure the gate.")
+        await sink.close("done — converged (agreement 0.95, round 1)")
+        activity = self._last_activity(transport)
+        assert "AGREED: measure the gate." in activity   # the answer
+        assert "converged" in activity                   # and the verdict
+
+    async def test_a_cancelled_session_keeps_what_was_said(self) -> None:
+        sink, transport = self._sink()
+        await sink.open("t", ["codex"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("a partial thought")
+        await sink.close("cancelled")
+        activity = self._last_activity(transport)
+        assert "a partial thought" in activity
+        assert "cancelled" in activity
+
+    async def test_the_cost_meter_clears_when_the_session_ends(self) -> None:
+        sink, transport = self._sink()
+        await sink.open("t", ["codex"])
+        await sink.progress(1, 2, 3)
+        await sink.turn("CODEX (proposer)")
+        await sink.close("done")
+        frames = [m for m in transport.sent
+                  if type(m).__name__ == "BrainstormHudView"]
+        assert "calls" not in (frames[-1].active_speaker or "")
