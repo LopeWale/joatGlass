@@ -529,7 +529,18 @@ Derived from the renderer's geometry, not chosen. HudCanvasRenderer draws
 the transcript at 11px in the `"SF Mono", SFMono-Regular, Menlo, monospace`
 stack across a 504px column (x=36 to x=540). SF Mono's advance width is
 1266/2048 em, so a glyph is 6.80px at 11px and a line holds
-504 / 6.80 = 74 characters. The taller of the two surfaces is a RUNNING
+504 / 6.80 = 74 characters.
+
+SF Mono is measured because it is the WIDEST candidate in that stack, not
+because it is the one most likely to resolve. The plugin renders in a
+WebView, where SF Mono is often unavailable to web content and Menlo
+answers instead — and Menlo (1233/2048) yields 76 columns, Courier New
+and DejaVu Sans Mono 76, Consolas 83. Measuring the widest makes 74 a
+LOWER bound that holds whichever font wins, so a row can never wrap.
+
+Do not "correct" this to 76 on discovering Menlo resolves on iOS. Rows
+that wrap stop being one row each, seven of them render as fourteen, and
+the renderer's tail trim silently drops half of them. The taller of the two surfaces is a RUNNING
 Agent Terminal at seven lines (agentTerminalTranscriptLayout); Brainstorm
 draws six.
 
