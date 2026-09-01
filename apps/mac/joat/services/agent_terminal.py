@@ -167,6 +167,9 @@ class AgentTerminalRoster:
         self._paint = paint
         self._focus: str | None = next(iter(self._lanes), None)
         self._discovered: list[dict[str, str]] = []
+        # Last chip text painted per lane, so a background lane
+        # repaints on a STATE change and not on every line.
+        self._marks: dict[str, str] = {}
         """Rows from the last discover(); what 'resume <label>' can name."""
 
     # ── roster ───────────────────────────────────────────────────────────
@@ -347,12 +350,25 @@ class AgentTerminalRoster:
                 pass
 
     async def _narrate(self, lane: TerminalLane, line: str) -> None:
-        # Only the focused lane changes what the lenses show. A background
-        # lane streaming its own output must not repaint an unchanged frame
-        # once per line — that is pure BLE traffic on a link the wearer
-        # needs for the session they are actually watching.
+        # Only the focused lane's CONTENT changes what the lenses show. A
+        # background lane streaming its own output must not repaint once
+        # per line — that is pure BLE traffic on a link the wearer needs
+        # for the session they are actually watching.
+        #
+        # Its STATE is different, and this used to return before reaching
+        # it. The LANES strip exists so "one glance covers the roster", and
+        # the wearer asked for exactly this — "watch concurrent work" — but
+        # a background lane going idle → run → ask1 → err never repainted
+        # anything, so the strip showed whatever it happened to say when
+        # the focused lane last spoke. A state change is ONE chip, not a
+        # stream: repaint on the transition, never on the line.
         if lane.name != self._focus:
+            mark = self._mark(lane)
+            if self._marks.get(lane.name) != mark:
+                self._marks[lane.name] = mark
+                await self.repaint()
             return
+        self._marks[lane.name] = self._mark(lane)
         # Every narrated line IS a frame change: the glasses show the tail,
         # not one sentence that scrolls away.
         await self.repaint()
