@@ -418,3 +418,43 @@ class TestRepaintCoverage:
         c = AgentTerminalCommands(r)
         assert await c.handle_command("what is the weather") is None
         assert painted == []
+
+
+class TestFrameEconomy:
+    """Only what the wearer is looking at costs HUD traffic."""
+
+    def _counting(self, **lanes):
+        painted: list[str] = []
+
+        async def paint(frame) -> None:
+            painted.append(frame.topic)
+
+        return AgentTerminalRoster(list(lanes.items()), paint=paint), painted
+
+    async def test_a_background_lane_does_not_repaint_the_lenses(self) -> None:
+        # An unfocused lane streaming its own output was repainting the
+        # focused lane's UNCHANGED frame once per line — pure BLE traffic
+        # on a link the wearer needs for what they are watching.
+        r, painted = self._counting(
+            work=FakeAgent(gate=asyncio.Event()),
+            other=FakeAgent(["one\n", "two\n", "three\n"]),
+        )
+        await r.send("background job", name="other")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert "one" in r.tail("other")   # the work still happened…
+        assert painted == []             # …without touching the lenses
+
+    async def test_the_focused_lane_still_repaints_per_line(self) -> None:
+        r, painted = self._counting(work=FakeAgent(["one\n", "two\n"]))
+        await r.send("watched job")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert len(painted) >= 2
+
+    async def test_discovery_lands_where_the_wearer_is_looking(self) -> None:
+        # Only one lane can enumerate, so the listing used to be recorded
+        # into THAT lane while the frame drew the focused one — invisible
+        # whenever they differ, which is most of the time.
+        r = roster(work=ListingAgent(ROWS), hermes=FakeAgent())
+        assert r.focus("hermes") is True
+        await r.discover()
+        assert any("[discover]" in line for line in r.frame().lines)
