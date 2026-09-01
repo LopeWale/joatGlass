@@ -518,6 +518,24 @@ _PRODUCTIVITY_HUD_PHASES = frozenset({
 _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
+BRAINSTORM_ACTIVITY_MAX = 518
+"""How much transcript the glasses can actually display, in characters.
+
+Derived from the renderer's geometry, not chosen. HudCanvasRenderer draws
+the transcript at 11px in the `"SF Mono", SFMono-Regular, Menlo, monospace`
+stack across a 504px column (x=36 to x=540). SF Mono's advance width is
+1266/2048 em, so a glyph is 6.80px at 11px and a line holds
+504 / 6.80 = 74 characters. The taller of the two surfaces is a RUNNING
+Agent Terminal at seven lines (agentTerminalTranscriptLayout); Brainstorm
+draws six. 7 x 74 = 518.
+
+This was 180 — under 40% of the glass — so a wearer read a third of a
+screen while the rest sat empty, on the one surface whose entire job is
+showing the discussion. Raising it past 518 buys nothing: the renderer
+keeps only the newest lines (visibleHudTailLines) and drops the rest.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class BrainstormHudView:
     """Bounded, non-secret state for the four-tile Brainstorm HUD."""
@@ -559,7 +577,8 @@ class BrainstormHudView:
                     self.active_speaker, "active speaker", 64, allow_empty=True,
                 ),
                 "activity": _brainstorm_text(
-                    self.activity, "activity", 180, allow_empty=True,
+                    self.activity, "activity", BRAINSTORM_ACTIVITY_MAX,
+                    allow_empty=True,
                 ),
                 "endpointHost": _brainstorm_text(
                     self.endpoint_host, "endpoint host", 253, allow_empty=True,

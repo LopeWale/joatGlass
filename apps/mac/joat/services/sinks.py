@@ -3,9 +3,9 @@
 The wearer's requirement was visibility, twice over: streamed to the glasses
 ("I wanna see as they're debating ... otherwise I cannot prove that was
 debated") and streamed to the terminal, where a long discussion is actually
-readable. Those are different surfaces with opposite constraints — 46
-characters and a glance versus a scrollback — so the round table writes to a
-list of sinks and neither surface knows about the other.
+readable. Those are different surfaces with opposite constraints — seven
+74-column lines and a glance versus a scrollback — so the round table writes
+to a list of sinks and neither surface knows about the other.
 
 Adding a sink (a file, a web view, a transcript archive) is a class, not a
 change to the debate.
@@ -26,7 +26,7 @@ from .hud import HudWriter
 FinishedSession = Callable[
     [str, tuple[str, ...], tuple[tuple[str, str], ...], str], None
 ]
-from ..core.protocol import BrainstormHudView
+from ..core.protocol import BRAINSTORM_ACTIVITY_MAX, BrainstormHudView
 from .roundtable import is_failure
 
 
@@ -60,11 +60,19 @@ class HudSink:
 
     @staticmethod
     def _bounded_transcript(value: str) -> str:
-        """Keep recent complete terminal rows within the wire contract."""
+        """Keep recent complete terminal rows within the wire contract.
 
-        if len(value) <= 180:
+        Bounded by the SAME constant the wire validates against. These were
+        two independent literals, and the drift was a silent-failure trap:
+        a producer one byte over the wire's bound raises ProtocolError
+        inside to_wire(), Broadcast swallows every sink exception so one
+        dead surface cannot stop a debate, and the HUD simply stops
+        updating with nothing logged.
+        """
+
+        if len(value) <= BRAINSTORM_ACTIVITY_MAX:
             return value
-        tail = value[-180:]
+        tail = value[-BRAINSTORM_ACTIVITY_MAX:]
         boundary = tail.find("\n")
         return tail[boundary + 1:] if boundary >= 0 else tail
 
