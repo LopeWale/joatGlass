@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
 from joat.core.protocol import BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
-from joat.channels.cards import CardLog
+from joat.channels.cards import Card, CardLog, Urgency
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
 from joat.services.roundtable import Participant, RoundTable
@@ -419,8 +419,16 @@ class TestSessionManager:
         assert not manager.topic_capture_armed
         assert brainstorm_frames(transport) == [terminal_recovery, terminal_recovery]
 
-    async def test_brainstorm_menu_projects_terminal_recovery_until_hermes_is_ready(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        """The first menu frame must not advertise a local-only Brainstorm."""
+    async def test_brainstorm_menu_opens_regardless_of_hermes(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """Brainstorm's seats are the Codex and Claude CLIs.
+
+        This test previously pinned the opposite: opening the row with the
+        Hermes terminal unready projected a recovery card reading 'Hermes
+        is required for Brainstorm. Tap to retry.' Per docs/BRAINSTORM.md
+        and the wearer's ruling, Hermes/OpenClaw are Agent Terminal workers
+        that neither participate in a Brainstorm nor gate one — so the row
+        must open, and must not name a third party as a collaborator.
+        """
         transport = SinkTransport()
         status = StatusPublisher(path=tmp_path / "status.json")
         status.set_agent_terminal(state="approval_required", reason="write_scope_required")
@@ -435,18 +443,17 @@ class TestSessionManager:
         await router.open("Brainstorm")
 
         [frame] = brainstorm_frames(transport)
-        assert frame.screen == "agent_terminal"
-        assert frame.state == "approval_required"
-        assert frame.activity == "Hermes is required for Brainstorm. Tap to retry."
-        assert frame.terminal_reason == "Approve the JOAT device in OpenClaw, then tap retry."
+        assert frame.screen == "brainstorm"          # not a Hermes recovery card
+        assert "Hermes" not in frame.activity
+        assert frame.collaborators == ["Codex", "Claude"]
 
+        # A terminal mid-response is likewise irrelevant to a Brainstorm.
         status.set_agent_terminal(state="running", reason="")
         await router.open("Brainstorm")
 
         running = brainstorm_frames(transport)[-1]
-        assert running.screen == "agent_terminal"
-        assert running.state == "running"
-        assert running.activity == "Hermes is finishing the current response. Wait for ready."
+        assert running.screen == "brainstorm"
+        assert "Hermes" not in running.activity
 
     async def test_topic_capture_deduplicates_taps_and_clears_on_cancel_or_reconnect(self) -> None:
         transport = SinkTransport()
@@ -767,12 +774,28 @@ class TestSessionManager:
         transport = SinkTransport()
         manager = SessionManager(HudWriter(transport), lambda _topic: None)
 
-        manager.notify("Dele · Messages\nOn my way")
+        manager.notify(Card(source="Dele", channel="Messages", summary="On my way"))
         await asyncio.sleep(0)
 
         cards = [m for m in transport.sent if isinstance(m, HudText)]
         assert len(cards) == 1
         assert cards[0].content_kind == "notification"
+
+    async def test_brightness_comes_from_urgency_not_a_rendered_prefix(self) -> None:
+        """Triage already decided urgency; re-deriving it by sniffing '!!'
+        in the rendered text threw that decision away."""
+        transport = SinkTransport()
+        manager = SessionManager(HudWriter(transport), lambda _topic: None)
+
+        manager.notify(Card(source="Dele", channel="Messages", summary="Call me",
+                            urgency=Urgency.URGENT))
+        await asyncio.sleep(0)
+        manager.notify(Card(source="News", channel="News", summary="Digest ready",
+                            urgency=Urgency.NOTIFY))
+        await asyncio.sleep(0)
+
+        cards = [m for m in transport.sent if isinstance(m, HudText)]
+        assert [c.text_color for c in cards] == [4, 3]
 
     async def test_notify_and_wait_completes_only_after_hud_write(self) -> None:
         gate = asyncio.Event()
@@ -784,7 +807,9 @@ class TestSessionManager:
 
         transport = GatedTransport()
         manager = SessionManager(HudWriter(transport), lambda _topic: None)
-        delivery = asyncio.create_task(manager.notify_and_wait("Ada · Messages\nHi"))
+        delivery = asyncio.create_task(manager.notify_and_wait(
+            Card(source="Ada", channel="Messages", summary="Hi"),
+        ))
         await asyncio.sleep(0)
 
         assert not delivery.done()
