@@ -38,18 +38,46 @@ MIN_UTTERANCE_BYTES = SAMPLE_RATE * SAMPLE_WIDTH // 4  # < 250 ms is a VAD blip
 DEFAULT_READY_TIMEOUT_S = 30.0
 
 DEFAULT_MODEL_DIR = Path.home() / "Library/Application Support/JOAT/models"
-"""Where the ~3 GB of WhisperKit weights are kept.
+"""Where NEW WhisperKit weights are downloaded.
 
 Said explicitly because whisperkit-cli's own default is
-`~/Documents/huggingface`, and on this Mac `~/Documents` is an
-iCloud-synced folder (Desktop & Documents is on). That put three
-gigabytes of regenerable model weights into the wearer's iCloud —
-uploaded, counted against their storage, and synced to every device they
-own, to hold a file that any machine can re-download.
+`~/Documents/huggingface`, and `~/Documents` is an iCloud-synced folder
+whenever Desktop & Documents sync is on — as it is on this Mac. That put
+three gigabytes of regenerable model weights into the wearer's iCloud:
+uploaded, counted against their storage, and pushed to every device they
+own, to hold a file any machine can fetch again in minutes.
 
-Application Support is where the rest of JOAT's state already lives and
-is not synced.
+Application Support is where the rest of JOAT's state already lives, and
+is never synced.
 """
+
+LEGACY_MODEL_DIR = Path.home() / "Documents/huggingface"
+"""whisperkit-cli's own default, which earlier runs already populated."""
+
+
+def _existing_model_dir(preferred: Path, model: str) -> Path:
+    """Prefer weights that are already on disk, wherever they landed.
+
+    Pointing straight at the new directory would have been worse than
+    leaving it alone: the next start would re-download ~3 GB while the old
+    copy still sat in iCloud, so the wearer would briefly own SIX
+    gigabytes of the same model to fix a problem about three.
+
+    So an existing download wins, and only a genuinely absent model goes
+    to the unsynced path. Migrating the old copy is the wearer's call —
+    it is several gigabytes inside their Documents, not ours to move.
+    """
+    if (preferred / "models").exists():
+        return preferred
+    legacy = LEGACY_MODEL_DIR / "models/argmaxinc/whisperkit-coreml"
+    if any(legacy.glob(f"*{model}*")) if legacy.is_dir() else False:
+        log.info(
+            "whisper weights found in %s (iCloud-synced); using them rather "
+            "than re-downloading. Move them to %s to keep them out of iCloud.",
+            LEGACY_MODEL_DIR, preferred,
+        )
+        return LEGACY_MODEL_DIR
+    return preferred
 
 
 def is_prompt_echo(text: str, prompt: str | None) -> bool:
@@ -122,7 +150,10 @@ class WhisperServeEngine(SttEngine):
             raise ValueError("temperature_fallback_count must be non-negative")
         self._binary = binary
         self._model = model
-        self._model_dir = model_dir or DEFAULT_MODEL_DIR
+        self._model_dir = (
+            model_dir if model_dir is not None
+            else _existing_model_dir(DEFAULT_MODEL_DIR, model)
+        )
         self._port = port
         self._base_url = base_url or f"http://127.0.0.1:{port}"
         # Vocabulary bias. Whisper renders unknown proper nouns phonetically
