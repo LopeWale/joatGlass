@@ -493,11 +493,44 @@ class DebateSession(Session):
         self._verify_summary: list[str] = []
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
+        self._wearer_turns = 0
         self._cancelled = False
         self._failed = False
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    WEARER_LABEL = "YOU"
+
+    def consume_transcript(self, text: str) -> bool:
+        """The wearer adds a thought mid-session — the YOU turn.
+
+        docs/BRAINSTORM.md lists YOU alongside CODEX / CLAUDE / VERIFY /
+        JOAT as a transcript prefix and calls the session steerable; this
+        is what makes the wearer a participant rather than an audience.
+        The turn lands in the transcript, so the next speaker answers it.
+
+        Only reached with ADDRESSED speech (SessionManager gates that), and
+        never for a nomination — "claude, respond" steers the room rather
+        than becoming a quoted remark.
+        """
+        said = text.strip()
+        if not said or self._cancelled:
+            return False
+        if parse_direction(said, self._table) is not None:
+            return False
+        self._transcript.append((self.WEARER_LABEL, said))
+        self._wearer_turns += 1
+        asyncio.get_running_loop().create_task(self._show_wearer_turn(said))
+        log.info("wearer added a turn chars=%d", len(said))
+        return True
+
+    async def _show_wearer_turn(self, said: str) -> None:
+        try:
+            await self._sink.turn(self.WEARER_LABEL)
+            await self._sink.chunk(said + "\n")
+        except Exception:  # a dead surface must not lose the turn
+            log.warning("wearer turn not painted", exc_info=True)
 
     @property
     def status(self) -> str:
@@ -585,8 +618,11 @@ class DebateSession(Session):
             # A debate needs at least two positions in the room. One voice
             # plus a stack trace is a monologue, and scoring it would report
             # convergence with nobody to converge with.
-            if len(self._transcript) < 2:
-                spoke = len(self._transcript)
+            # The wearer's own turns are not collaborator positions: a
+            # transcript of YOU plus one failed seat is still a monologue.
+            positions = len(self._transcript) - self._wearer_turns
+            if positions < 2:
+                spoke = positions
                 await self._finish(
                     f"insufficient collaborators — {spoke} of {len(self._table)} spoke"
                     + (f" ({', '.join(self._silenced)} silent)" if self._silenced else "")
@@ -687,10 +723,15 @@ class DebateSession(Session):
         never silently rewritten: every repair streams under its own header.
         """
         label = speaker.label if round_no == 1 else f"{speaker.label} — round {round_no}"
-        # Round 1 is independent by construction: the transcript is
-        # WITHHELD, so a first-round speaker cannot echo a colleague even
-        # though the turns still execute one at a time on the HUD.
-        prior = [] if round_no == 1 else self._transcript
+        # Round 1 is independent by construction: colleague turns are
+        # WITHHELD, so a first-round speaker cannot echo a peer even though
+        # the turns still execute one at a time on the HUD. The wearer's own
+        # turns are NOT withheld — independence means not seeing the other
+        # collaborators, never ignoring the person who asked.
+        prior = (
+            [t for t in self._transcript if t[0] == self.WEARER_LABEL]
+            if round_no == 1 else self._transcript
+        )
         prompt = build_prompt(self._topic, speaker, prior,
                               self.SOURCES_CONTRACT)
         text = await self._stream_turn(label, speaker.stream(prompt))
