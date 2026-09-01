@@ -19,13 +19,14 @@ import re
 import secrets
 import sqlite3
 import time
+from collections.abc import Awaitable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone, tzinfo
 from typing import Any, Callable, Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ..channels.cards import CardLog
+from ..channels.cards import Card, CardLog
 from ..channels.imessage import IMessageStore, MessageEntry, MessageHistoryPage, MessageThread
 from ..core.protocol import (
     VOICE_REQUEST_PREFIX,
@@ -266,6 +267,7 @@ class CapabilityRouter:
         voice_capture: VoiceCaptureControls | None = None,
         actions: ActionJournal | None = None,
         acceptance_armed: bool = False,
+        terminal_view: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._hud = hud
         self._transport = transport
@@ -279,6 +281,7 @@ class CapabilityRouter:
         self._voice_capture = voice_capture
         self._actions = actions
         self._acceptance_armed = acceptance_armed
+        self._terminal_view = terminal_view
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
         self._message_detail: _MessageDetailState | None = None
@@ -287,7 +290,7 @@ class CapabilityRouter:
         # whether this router armed one, so a new wearer-visible picker can
         # reliably disarm it without clearing an unrelated controller state.
         self._message_selection_active = False
-        self._notification_rows: list[tuple[float, str]] = []
+        self._notification_rows: list[Card] = []
         # Calendar and Reminders have different EventKit stores, but a wearer
         # navigates time, not stores. Keep one bounded read-only projection and
         # the action rows that produced its current visible page.
@@ -457,7 +460,16 @@ class CapabilityRouter:
         ))
 
     async def _show_agent_terminal(self) -> None:
-        """Expose Hermes readiness and recovery without leaking gateway detail."""
+        """Open the terminal on the wearer's actual work sessions.
+
+        The roster paints the real thing — which sessions exist, which is
+        focused, what each last said. Only when no roster is configured
+        does this fall back to the readiness/recovery card, which is all
+        this surface used to show.
+        """
+        if self._terminal_view is not None:
+            await self._terminal_view()
+            return
         terminal = self._status.agent_terminal_projection()
         state = str(terminal["state"])
         reason = str(terminal["reason"])
@@ -466,7 +478,7 @@ class CapabilityRouter:
             state=state,
             topic="Hermes Agent Terminal",
             collaborators=[],
-            activity="Hermes participates as a Brainstorm collaborator.",
+            activity="No terminal sessions are configured on this Mac.",
             terminal_state=state,
             endpoint_host=str(terminal["endpoint_host"]),
             terminal_reason=_agent_terminal_instruction(state, reason),
@@ -908,7 +920,7 @@ class CapabilityRouter:
             await self._show_focus("NOTIFICATIONS · EMPTY", ["Nothing shown recently."])
             return
         await self._send_list(HudList(
-            items=[f"[{_age(at)}] {card.splitlines()[0]}" for at, card in entries],
+            items=[f"[{_age(c.at)}] {c.render().splitlines()[0]}" for c in entries],
             title="NOTIFICATIONS",
             hint=DETAIL_HINT,
             selectable=True,
@@ -917,10 +929,10 @@ class CapabilityRouter:
     async def _select_notification(self, index: int) -> None:
         if not 0 <= index < len(self._notification_rows):
             return
-        _, card = self._notification_rows[index]
+        card = self._notification_rows[index]
         await self._show_focus(
             "NOTIFICATIONS · DETAIL",
-            card.splitlines() or ["Notification content unavailable."],
+            card.render().splitlines() or ["Notification content unavailable."],
         )
 
     async def _show_planning(self) -> None:
@@ -1544,7 +1556,10 @@ class CapabilityOpenController:
         self._capabilities = capabilities
 
     async def handle_command(self, text: str) -> str | None:
-        match = _OPEN_CAPABILITY.fullmatch(" ".join(text.strip().split()))
+        # Whisper punctuates short utterances ("Show my messages."). Terminal
+        # punctuation is STT noise for a deterministic surface open.
+        normalized = " ".join(text.strip().split()).rstrip(".,!?").rstrip()
+        match = _OPEN_CAPABILITY.fullmatch(normalized)
         if match is None:
             return None
         name = _SPOKEN_CAPABILITY[" ".join(match.group("name").lower().split())]

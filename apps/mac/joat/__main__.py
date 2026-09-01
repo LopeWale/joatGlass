@@ -1203,6 +1203,12 @@ async def main() -> None:
         voice_capture=voice_capture,
         actions=action_journal,
         acceptance_armed=args.g2_diagnostics,
+        # Opening the sidebar row shows the wearer's actual work sessions,
+        # not a readiness card. Only configured lanes reach this: with no
+        # terminal on the Mac, the router keeps its own fallback copy.
+        terminal_view=(
+            agent_terminal.repaint if terminal_lanes else None
+        ),
     )
     transport.on_input(capabilities.on_input)
 
