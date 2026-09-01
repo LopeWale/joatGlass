@@ -152,13 +152,22 @@ class SubprocessAgent:
                 # Emit complete lines (noise-filtered); keep the tail fragment.
                 *lines, pending = pending.split("\n")
                 if self._stream_json:
+                    # Coalesce every delta in THIS read into one yield.
+                    # Each yield becomes a HUD repaint and a BLE frame, and
+                    # the deltas inside a single 512-byte read are already
+                    # simultaneous as far as the wearer is concerned —
+                    # emitting them separately buys no responsiveness and
+                    # spends link budget the glasses have to carry.
+                    batch = []
                     for line in lines:
                         text, final, failed = _stream_json_event(line)
                         if final is not None:
                             final_answer, result_failed = final, failed
                         if text:
-                            streamed = True
-                            yield text
+                            batch.append(text)
+                    if batch:
+                        streamed = True
+                        yield "".join(batch)
                     continue
                 out = "\n".join(ln for ln in lines if not self._is_noise(ln))
                 if out.strip():

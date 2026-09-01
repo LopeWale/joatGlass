@@ -214,3 +214,22 @@ class TestStreamJsonReading:
         )
         out = "".join([chunk async for chunk in agent.stream("ignored")])
         assert out.count("half answer") == 1, out
+
+    async def test_deltas_arriving_together_become_one_repaint(self) -> None:
+        """Every yield is a HUD repaint and a BLE frame.
+
+        Deltas inside one read are simultaneous as far as the wearer is
+        concerned, so emitting them separately buys no responsiveness and
+        spends link budget the glasses have to carry.
+        """
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        delta = ('{"type":"stream_event","event":{"type":"content_block_delta",'
+                 '"delta":{"type":"text_delta","text":"%s"}}}')
+        lines = " ".join(f"'{delta % word}'" for word in ("one ", "two ", "three"))
+        agent = SubprocessAgent(
+            ["/bin/sh", "-c", f"printf '%s\\n' {lines}; exit 0"],
+            stream_json=True, name="fake",
+        )
+        chunks = [chunk async for chunk in agent.stream("ignored")]
+        assert chunks == ["one two three"], chunks
