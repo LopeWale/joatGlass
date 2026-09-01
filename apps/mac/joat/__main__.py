@@ -102,7 +102,11 @@ from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
 from .services.capabilities import CapabilityOpenController, CapabilityRouter
-from .services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster
+from .services.agent_terminal import (
+    AgentTerminalCommands,
+    AgentTerminalRoster,
+    TerminalFrame,
+)
 from .services.commands import VoiceCommandRouter
 from .services.hermes_productivity import (
     HermesCalendarProposalController,
@@ -1058,9 +1062,33 @@ async def main() -> None:
         if not sessions.active:
             await hud.show(line)
 
+    async def terminal_paint(frame: TerminalFrame) -> None:
+        """Put the roster's own tail on the lenses, densely.
+
+        The agent_terminal screen already reserves a multi-row transcript
+        area; before this it only ever carried a status/retry line, so the
+        wearer could HEAR their sessions but not SEE them. Same wire, same
+        frame kind — the rows were simply never filled.
+        """
+        if sessions.active:
+            return
+        terminal = status.agent_terminal_projection()
+        await hud.show_brainstorm(BrainstormHudView(
+            screen="agent_terminal",
+            state=frame.state,
+            topic=frame.topic,
+            collaborators=frame.lanes,
+            activity="\n".join(frame.lines),
+            terminal_state=str(terminal["state"]),
+            endpoint_host=str(terminal["endpoint_host"]),
+            terminal_reason=str(terminal["reason"]),
+            no_tools_checked=bool(terminal["no_tools_checked"]),
+        ))
+
     agent_terminal = AgentTerminalRoster(
         terminal_lanes,  # type: ignore[arg-type]
         announce=terminal_announce,
+        paint=terminal_paint,
     )
     # The capability router is composed later; the provider defers the
     # lookup to call time, when it is guaranteed to exist.

@@ -307,3 +307,70 @@ class TestResume:
         await c.handle_command("terminal discover")
         report = await c.handle_command("terminal resume nightly build")
         assert report is not None and agent.resumed == ["agent:hermes:k1"]
+
+
+class TestHudFrame:
+    """The roster is visible, not merely audible.
+
+    Before this the agent_terminal screen carried a status/retry line only,
+    so the wearer could hear their sessions but never see them — on a
+    surface whose whole job is watching remote work.
+    """
+
+    async def test_the_frame_carries_the_tail_not_one_line(self) -> None:
+        agent = FakeAgent(["compiling\n", "linking\n", "done\n"])
+        r = roster(work=agent)
+        await r.send("build it")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        frame = r.frame()
+        assert frame.lines[0] == "> build it"      # your input opens the tail
+        assert "done" in frame.lines[-1]
+        assert len(frame.lines) <= 7               # fits the reserved rows
+
+    async def test_the_header_reports_lane_state_and_waiting_work(self) -> None:
+        r = roster(work=ApprovingAgent())
+        r.note_approval("work", "a1", "exec", "rm -rf build/")
+        frame = r.frame()
+        assert "1 waiting" in frame.topic
+        assert frame.state == "approval_required"
+
+    async def test_states_map_to_what_the_wearer_must_do(self) -> None:
+        gate = asyncio.Event()
+        r = roster(work=FakeAgent(gate=gate))
+        assert r.frame().state == "ready"
+        await r.send("slow")
+        await asyncio.sleep(0)
+        assert r.frame().state == "running"
+        gate.set()
+
+    async def test_a_failed_lane_reads_as_blocked(self) -> None:
+        r = roster(work=FakeAgent(fail="gateway said no"))
+        await r.send("doomed")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert r.frame().state == "blocked"
+
+    async def test_an_empty_roster_says_so_rather_than_drawing_nothing(self) -> None:
+        frame = AgentTerminalRoster([]).frame()
+        assert frame.state == "unavailable"
+        assert "No terminal sessions" in frame.lines[0]
+
+    async def test_painting_happens_as_output_arrives(self) -> None:
+        painted: list[int] = []
+
+        async def paint(frame) -> None:
+            painted.append(len(frame.lines))
+
+        r = AgentTerminalRoster([("work", FakeAgent(["a\n", "b\n"]))], paint=paint)
+        await r.send("go")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert painted, "the lenses were never updated"
+
+    async def test_a_dead_surface_never_kills_the_work(self) -> None:
+        async def broken(frame) -> None:
+            raise RuntimeError("HUD gone")
+
+        agent = FakeAgent(["still works\n"])
+        r = AgentTerminalRoster([("work", agent)], paint=broken)
+        await r.send("go")
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        assert "still works" in r.tail()
