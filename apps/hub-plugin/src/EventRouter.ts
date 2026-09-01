@@ -486,7 +486,7 @@ export class EventRouter {
       case 2: // Mute/unmute is LOCAL: a privacy control must not need the Mac
         this.toggleMic();
         return;
-      case 3: // Re-dial the brain
+      case 3: // Global Refresh: re-open the real bridge/gateway link.
         this.link.connect();
         return;
       case 4: // Five sidebar rows are spoken for; settings lives here.
