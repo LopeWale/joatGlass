@@ -69,11 +69,11 @@ function isPlanningAnchor(value: unknown): value is number {
 // The visual sidebar shows five rows at a time and scrolls this one continuous
 // list. Nothing is hidden behind a second "More" interaction: a wearer can
 // keep scrolling from Messages through every available glasses capability or
-// direct action. The renderer and G2 list limit both accept these 9 rows.
+// direct action. The renderer and G2 list limit both accept these 11 rows.
 const CAPABILITIES = [
   'Messages', 'Planning', 'Navigation', 'Brainstorm',
   'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-  'Settings',
+  'Repeat', 'Reconnect', 'Settings',
 ] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
@@ -212,7 +212,7 @@ export class CapabilityMenu {
     this.selectedIndex = 0;
     const shown = await this.hud.showList(
       POLICY_ROWS.map((row) => this.label(row)),
-      SETTINGS_SURFACE,
+      { ...SETTINGS_SURFACE, selectable: true },
     );
     if (!this.isCurrentTransition(transition)) return;
     if (shown) this.view = 'settings';
@@ -620,6 +620,18 @@ export class CapabilityMenu {
 
     const picked = CAPABILITIES[index];
     if (picked) {
+      if (picked === 'Repeat') {
+        // Repeat has a Mac-held contract: it replays only the last stored
+        // reply; it never resumes audio or opens an inert local screen.
+        void this.repeatLastReply();
+        return true;
+      }
+      if (picked === 'Reconnect') {
+        // MacLink owns the authenticated redial and its truthful connection
+        // state; this G2 row is the direct recovery entry point.
+        void this.reconnectToMac();
+        return true;
+      }
       if (picked === 'Settings') {
         // This is the persisted listening-resume settings surface, not an
         // imitation static page. Its existing left-double return stays Home.
@@ -639,8 +651,21 @@ export class CapabilityMenu {
     return `${active ? '*' : ' '} ${row.label}`;
   }
 
+  private async repeatLastReply(): Promise<void> {
+    this.link.send({
+      kind: 'input',
+      event: { containerName: 'sysmenu', selectedIndex: 1 },
+    });
+    await this.close();
+  }
+
+  private async reconnectToMac(): Promise<void> {
+    this.link.connect();
+    await this.close();
+  }
+
   private async openCapability(
-    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'>,
+    picked: Exclude<(typeof CAPABILITIES)[number], 'Repeat' | 'Reconnect' | 'Settings'>,
     index: number,
     planningAnchorUnixMs?: number,
   ): Promise<void> {

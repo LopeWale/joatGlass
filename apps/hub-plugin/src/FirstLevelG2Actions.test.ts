@@ -62,7 +62,10 @@ afterAll(() => {
 
 function rig() {
   const sidebars: string[][] = [];
-  const lists: Array<{ items: string[]; options?: { title?: string; hint?: string } }> = [];
+  const lists: Array<{
+    items: string[];
+    options?: { title?: string; hint?: string; selectable?: boolean };
+  }> = [];
   let dispatch: Dispatch | undefined;
 
   const client = {
@@ -82,7 +85,7 @@ function rig() {
     }),
     showList: vi.fn(async (
       items: string[],
-      options?: { title?: string; hint?: string },
+      options?: { title?: string; hint?: string; selectable?: boolean },
     ) => {
       lists.push({ items, options });
       return true;
@@ -94,7 +97,8 @@ function rig() {
     showProductivity: vi.fn(async () => true),
   } as unknown as HudPresenter;
   const link = new MacLink({ urls: ['ws://joat.test:8787/glasses'] });
-  const menu = new CapabilityMenu(hud, new Settings(), link);
+  const settings = new Settings();
+  const menu = new CapabilityMenu(hud, settings, link);
   const audio = {
     isOpen: false,
     ingest: vi.fn(),
@@ -112,7 +116,7 @@ function rig() {
     if (!dispatch) throw new Error('EventRouter did not attach');
     dispatch(event);
   };
-  return { fire, hud, link, lists, menu, sidebars };
+  return { fire, hud, link, lists, menu, settings, sidebars };
 }
 
 function leftDoublePress() {
@@ -199,12 +203,28 @@ describe('wearer G2 actions outside the capability list', () => {
       '  Resume mic: ask me first',
     ]);
     expect(harness.lists[0]?.options).toEqual({
-      title: 'LISTENING RESUME', hint: 'tap: apply · left x2: back',
+      title: 'LISTENING RESUME', hint: 'tap: apply · left x2: back', selectable: true,
     });
 
     harness.fire(leftDoublePress());
     await vi.waitFor(() => expect(harness.sidebars).toHaveLength(2));
     expect(harness.hud.showDefault).not.toHaveBeenCalled();
+    expect(sockets).toEqual([]);
+  });
+
+  it('scrolls and applies the visibly highlighted Settings policy through EventRouter', async () => {
+    const harness = rig();
+
+    await openAndScrollTo(harness, 'Settings');
+    harness.fire(rightPress());
+    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+
+    harness.fire(scrollDown());
+    await vi.waitFor(() => expect(harness.hud.setSelection).toHaveBeenCalledWith(1));
+    harness.fire(rightPress());
+
+    await vi.waitFor(() => expect(harness.settings.resumePolicy).toBe('mac'));
+    expect(harness.hud.showDefault).toHaveBeenCalledTimes(1);
     expect(sockets).toEqual([]);
   });
 });
