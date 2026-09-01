@@ -5,9 +5,16 @@ and OpenClaw work from the glasses. It is separate from Brainstorm and
 never uses Codex CLI or Claude Code.
 
 Status: the wearer-facing control surface and its gateway policy lane are
-now implemented; A2A remains untouched and unenabled. See "Implemented" and
-"Still outstanding" below — the acceptance gates at the end are unchanged and
-none of them has been met, because none can be met without a live gateway.
+implemented, and as of 2026-08-31 the engine REACHES A LIVE GATEWAY — the
+connect handshake is accepted and all three lanes (work, brainstorm,
+calendar) construct without error. A2A remains untouched and unenabled.
+
+What that does and does not settle: the transport, the identity handshake
+and the policy boundary are now exercised against a real deployment. The
+wearer-facing operations on top of them — listing real sessions, sending
+into one, answering a real approval — still need sessions to exist and be
+driven. The acceptance gates at the end are unchanged; the blocker on them
+is no longer "there is no live gateway".
 
 JOAT remains the glasses brain and wearer-facing controller. Agent Terminal is
 one JOAT capability: JOAT shows the external session roster, binds speech and
@@ -34,8 +41,10 @@ speaker/tool/system-prefixed lines, minimal chrome, no cards, and no separate
 
 ## Implemented
 
-Engine side, verified by unit tests and by policy tests that run without a
-gateway. None of it has been exercised against a live Hermes/OpenClaw.
+Engine side, verified by unit tests, by policy tests that need no gateway,
+and by `tests/unit/test_work_lane_live.py`, which drives the shipping client
+through a real WebSocket server. The CONNECT path is additionally verified
+against the live gateway; the operations below are not yet.
 
 | Capability | Where | Spoken as |
 |---|---|---|
@@ -67,14 +76,27 @@ documentation before it was written (`sessions.list` with `involvingMe`;
 `includeApprovals`; answered with `approval.resolve {id, kind, decision}`,
 first answer wins).
 
+That is necessary and it is not sufficient. The published documentation
+lists `"operator"` as a valid `client.mode`; the deployed gateway refuses
+it, accepting only node / backend / cli, and rejected every connect attempt
+with INVALID_REQUEST until the value was corrected. The docs describe some
+version; the deployment is the one that has to accept you. Where a service
+is reachable, ask its validator — sending candidate values and reading the
+schema errors settled in seconds what the prose had wrong.
+
 ## Still outstanding
 
-- **A live-gateway pass.** Nothing here has spoken to a real Hermes/OpenClaw.
-  The first run will settle whether the documented `approve`/`deny` literals
-  match the deployment, and it will surface at the adapter seam.
+- **A live-gateway pass, continued.** The connect path is done. The first
+  real mismatch arrived EARLIER than this document predicted and not at the
+  adapter seam: it was `client.mode` in the connect envelope, before any
+  session operation could run. The documented `approve`/`deny` literals are
+  still unconfirmed against the deployment, and now reachable to confirm.
 - **Its own HUD surface.** The terminal still renders as a `screen` variant of
   the Brainstorm frame — one model, one controller, one wire kind. Splitting it
-  touches `types.ts` and `core/protocol.py` in the same commit.
+  touches `types.ts` and `core/protocol.py` in the same commit. It is no longer
+  a bare variant: the surface now draws its own LANES row (each lane's state,
+  so concurrent work is legible at a glance) and names the focused lane in its
+  spine instead of always saying HERMES.
 - **Concurrency beyond the configured lanes.** Lanes are fixed at boot; a
   resumed session replaces a lane's target rather than adding a row.
 - **A2A.** Unchanged, unenabled, and still not the terminal transport.
