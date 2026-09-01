@@ -846,9 +846,32 @@ async function renderVisualState(
   navigation?: NavigationController,
 ): Promise<void> {
   hud.setMicState(true);
+  // Chrome owns status composition in production and is started well after
+  // this fixture gate returns. Without a composer here every setStatus (mic
+  // toggle, link change) clobbered the whole line, so the clock and battery
+  // vanished and the overview drew "--" for both — a simulator-only lie
+  // about production. Compose like Chrome; keep the clock fixed so captures
+  // stay byte-comparable.
+  hud.onStatus = (text: string): void => {
+    const macState = text.replace(/^JOAT\s*[·-]?\s*/i, '').trim();
+    // Chrome.setMic couples the privacy icon to the state word. Without that
+    // coupling the fixture drew "MIC OFF" beside a lit ON icon — a privacy
+    // indicator contradicting the line next to it.
+    if (/mic off/i.test(macState)) hud.setMicState(false);
+    else if (/listening/i.test(macState)) hud.setMicState(true);
+    void hud.showText(
+      `9:41 JOAT ${macState || 'ready'} bat 87%`,
+      ContainerId.StatusBar,
+    );
+  };
 
   if (isNavigationVisualState(state) || state === 'nav-receipt') {
-    const simulatorStatus = '9:41       JOAT simulator no route       bat 87%';
+    // READY on purpose. A degraded link outranks the page name in the spine
+    // (drawShell), so a fixture that says "simulator no route" makes every
+    // captured navigation frame read "JOAT · SIMULATOR NO ROUTE" instead of
+    // "NAVIGATION" — a fixture artefact that looks exactly like a title bug
+    // and cost a review cycle. Fixtures must show what the wearer sees.
+    const simulatorStatus = '9:41       JOAT ready       bat 87%';
     const fixture = navigationVisualFixture(
       state === 'nav-receipt' ? 'nav-guidance' : state,
     );

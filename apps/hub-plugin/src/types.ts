@@ -435,3 +435,25 @@ export interface InputEventPayload {
 }
 
 export type Unsubscribe = () => void;
+
+/**
+ * The wearer's one menu.
+ *
+ * It lives here, not in CapabilityMenu, because the firmware contextual menu
+ * (`menuObject`) and the plugin's own router must offer exactly the same rows.
+ * Two menus with two lists is how the wearer met a menu they could not reach.
+ *
+ * Notifications is deliberately absent: the resting dashboard already shows
+ * the cards themselves, so a row that opens a page to re-read the home screen
+ * is a page, a request, and a round trip spent on nothing (the wearer's ruling).
+ */
+export const CAPABILITIES = [
+  'Messages', 'Planning', 'Navigation', 'Brainstorm',
+  'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
+] as const;
+
+export type CapabilityName = (typeof CAPABILITIES)[number];
+
+/** Firmware menu ids for the rows above; item 0 is reserved by the protocol,
+ * and 1-5 are the retired internal controls, so capabilities start at 10. */
+export const CAPABILITY_MENU_ID_BASE = 10;

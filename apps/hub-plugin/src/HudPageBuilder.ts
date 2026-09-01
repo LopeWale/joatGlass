@@ -8,7 +8,13 @@ import {
   MenuContainerProperty,
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
-import { CANVAS, ContainerId, VisualContainerName } from './types';
+import {
+  CANVAS,
+  CAPABILITIES,
+  CAPABILITY_MENU_ID_BASE,
+  ContainerId,
+  VisualContainerName,
+} from './types';
 
 export interface SidebarBackdrop {
   main?: string;
@@ -143,15 +149,27 @@ export class HudPageBuilder {
   /** A non-destructive escape from any visual or text focus surface. */
   static readonly MENU_PLANNING = 5;
 
+  /**
+   * THE menu — the same capability rows the plugin router opens, offered
+   * through the mechanism the platform actually provides for one.
+   *
+   * `menuObject` is the firmware's contextual menu (SDK: "top-level
+   * contextual-menu entries; firmware accepts at most 10"). It is drawn by
+   * the glasses, so it costs ZERO image tiles, where our own menu page costs
+   * two — and an image frame is 0.5-2s over BLE. Registering leftovers here
+   * while the real menu lived in our tiles is why the menu gesture opened a
+   * menu the wearer did not recognise.
+   *
+   * Mute keeps its long-press gesture and Reconnect lives in Settings, so
+   * neither needs a row; the retired ids stay handled in EventRouter because
+   * a host may still be showing a cached menu.
+   */
   private systemMenu(): MenuContainerProperty {
     return new MenuContainerProperty({
-      menuItems: [
-        new MenuItemProperty({ itemID: HudPageBuilder.MENU_PLANNING, itemName: 'Open Planning' }),
-        new MenuItemProperty({ itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' }),
-        new MenuItemProperty({ itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' }),
-        new MenuItemProperty({ itemID: HudPageBuilder.MENU_REFRESH, itemName: 'Refresh connection' }),
-        new MenuItemProperty({ itemID: HudPageBuilder.MENU_SETTINGS, itemName: 'Listening settings' }),
-      ],
+      menuItems: CAPABILITIES.map((name, index) => new MenuItemProperty({
+        itemID: CAPABILITY_MENU_ID_BASE + index,
+        itemName: name,
+      })),
     });
   }
 

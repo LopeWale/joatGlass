@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
 import { HudPageBuilder } from './HudPageBuilder';
-import { CANVAS, ContainerId } from './types';
+import {
+  CANVAS,
+  CAPABILITIES,
+  CAPABILITY_MENU_ID_BASE,
+  ContainerId,
+} from './types';
 
 type Page = {
   containerTotalNum?: number;
@@ -68,8 +73,8 @@ describe('HudPageBuilder invariants', () => {
     const startup = builder.visualStartup() as Page;
     expect(startup.containerTotalNum).toBe(5);
     expect(startup.menuObject?.menuItems).toContainEqual({
-      itemID: HudPageBuilder.MENU_PLANNING,
-      itemName: 'Open Planning',
+      itemID: CAPABILITY_MENU_ID_BASE + CAPABILITIES.indexOf('Planning'),
+      itemName: 'Planning',
     });
     expect(startup.imageObject).toHaveLength(4);
     expect(startup.textObject).toHaveLength(1);
@@ -101,20 +106,28 @@ describe('HudPageBuilder invariants', () => {
       compatible.visualLayout() as Page,
     ];
     expect(pages.every((page) => page.menuObject === undefined)).toBe(true);
-    expect((builder.defaultLayout() as Page).menuObject?.menuItems).toHaveLength(5);
+    expect((builder.defaultLayout() as Page).menuObject?.menuItems)
+      .toHaveLength(CAPABILITIES.length);
   });
 
   it('keeps the contextual escape available on every image-first rebuild', () => {
     const visual = builder.visualLayout() as Page;
-    const expected = [
-      { itemID: HudPageBuilder.MENU_PLANNING, itemName: 'Open Planning' },
-      { itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' },
-      { itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' },
-      { itemID: HudPageBuilder.MENU_REFRESH, itemName: 'Refresh connection' },
-      { itemID: HudPageBuilder.MENU_SETTINGS, itemName: 'Listening settings' },
-    ];
+    // The firmware menu offers exactly the wearer's capability rows — one
+    // menu, reached by the platform's own gesture, costing zero image tiles.
+    const expected = CAPABILITIES.map((name, index) => ({
+      itemID: CAPABILITY_MENU_ID_BASE + index,
+      itemName: name,
+    }));
     expect(visual.menuObject?.menuItems).toEqual(expected);
     expect((builder.visualCompatibilityLayout() as Page).menuObject?.menuItems).toEqual(expected);
+  });
+
+  it('still routes a retired id from a host showing a cached menu', () => {
+    // The ids outlive the rows: EventRouter must keep handling Planning,
+    // Repeat and Settings even though this menu no longer offers them.
+    expect(HudPageBuilder.MENU_PLANNING).toBe(5);
+    expect(HudPageBuilder.MENU_REPEAT).toBe(1);
+    expect(HudPageBuilder.MENU_SETTINGS).toBe(4);
   });
 
   it.each(LAYOUTS)('%s: exactly one container captures events', (_name, page) => {
