@@ -1238,6 +1238,9 @@ async def main() -> None:
         # wearer has already accepted. The snapshot outlives the session
         # for exactly this.
         brainstorm_recap=lambda: debate_state.snapshot,
+        # SESSION_MODEL.md:46 — opening the row during an active run
+        # restores that conversation instead of declaring it finished.
+        brainstorm_replay=sessions.replay_active_hud,
         brainstorm_recent=brainstorm_history.rows,
     )
     transport.on_input(capabilities.on_input)

@@ -439,6 +439,7 @@ def make_router(
     voice_capture=None,
     actions=None,
     acceptance_armed=False,
+    brainstorm_replay=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -458,6 +459,7 @@ def make_router(
         voice_capture=voice_capture,
         actions=actions,
         acceptance_armed=acceptance_armed,
+        brainstorm_replay=brainstorm_replay,
     )
     return router, transport, status
 
@@ -1606,3 +1608,40 @@ class TestVoiceOpenChain:
         assert painted.request_id is not None
         assert painted.request_id.startswith(VOICE_REQUEST_PREFIX)
         assert any("Adele" in item for item in painted.items)
+
+
+class TestReenteringALiveBrainstorm:
+    """docs/SESSION_MODEL.md:46 — "open Brainstorm during an active run →
+    restore the current conversation."
+
+    The opposite shipped: any non-empty transcript painted state="settled",
+    which renders DONE on the glass and makes the tap a no-op. Opening the
+    menu mid-session told the wearer their live conversation had finished
+    and left no way back into it.
+    """
+
+    async def test_opening_the_row_mid_session_restores_it(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        replayed: list[bool] = []
+
+        async def replay() -> bool:
+            replayed.append(True)
+            return True                      # a session IS live
+
+        router, transport, _ = make_router(tmp_path, brainstorm_replay=replay)
+        await router.open("Brainstorm")
+
+        assert replayed == [True]
+        # The live sink owns the frame; the router must not paint a second,
+        # reconstructed one over it — that is how the streaming turn in
+        # progress got replaced by a "settled" recap.
+        assert not [m for m in transport.sent if isinstance(m, BrainstormHudView)]
+
+    async def test_an_idle_row_still_opens_normally(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        async def replay() -> bool:
+            return False                     # nothing live
+
+        router, transport, _ = make_router(tmp_path, brainstorm_replay=replay)
+        await router.open("Brainstorm")
+
+        frames = [m for m in transport.sent if isinstance(m, BrainstormHudView)]
+        assert frames and frames[-1].state == "ready"
