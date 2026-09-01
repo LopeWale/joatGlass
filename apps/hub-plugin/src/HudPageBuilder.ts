@@ -137,7 +137,8 @@ export class HudPageBuilder {
    */
   static readonly MENU_REPEAT = 1;
   static readonly MENU_MUTE = 2;
-  static readonly MENU_REDIAL = 3;
+  /** Universal recovery: tap, then long-press, then choose Refresh. */
+  static readonly MENU_REFRESH = 3;
   static readonly MENU_SETTINGS = 4;
   /** A non-destructive escape from any visual or text focus surface. */
   static readonly MENU_PLANNING = 5;
@@ -148,7 +149,7 @@ export class HudPageBuilder {
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_PLANNING, itemName: 'Open Planning' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' }),
-        new MenuItemProperty({ itemID: HudPageBuilder.MENU_REDIAL, itemName: 'Reconnect brain' }),
+        new MenuItemProperty({ itemID: HudPageBuilder.MENU_REFRESH, itemName: 'Refresh connection' }),
         new MenuItemProperty({ itemID: HudPageBuilder.MENU_SETTINGS, itemName: 'Listening settings' }),
       ],
     });

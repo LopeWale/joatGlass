@@ -110,7 +110,7 @@ describe('HudPageBuilder invariants', () => {
       { itemID: HudPageBuilder.MENU_PLANNING, itemName: 'Open Planning' },
       { itemID: HudPageBuilder.MENU_REPEAT, itemName: 'Repeat last reply' },
       { itemID: HudPageBuilder.MENU_MUTE, itemName: 'Mute / unmute mic' },
-      { itemID: HudPageBuilder.MENU_REDIAL, itemName: 'Reconnect brain' },
+      { itemID: HudPageBuilder.MENU_REFRESH, itemName: 'Refresh connection' },
       { itemID: HudPageBuilder.MENU_SETTINGS, itemName: 'Listening settings' },
     ];
     expect(visual.menuObject?.menuItems).toEqual(expected);

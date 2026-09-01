@@ -75,6 +75,10 @@ function make(
     onForegroundExit: vi.fn(),
     onExit: vi.fn(),
   };
+  const link = {
+    send: (message: UplinkMessage) => sent.push(message),
+    connect: vi.fn(),
+  };
   const client = {
     track: (u: () => void) => u,
     require: () => ({
@@ -87,7 +91,7 @@ function make(
   };
   new EventRouter(
     client as unknown as BridgeClient,
-    { send: (m: UplinkMessage) => sent.push(m) } as unknown as MacLink,
+    link as unknown as MacLink,
     audio as unknown as AudioStreamer,
     imu as unknown as ImuMonitor,
     menu as unknown as CapabilityMenu,
@@ -107,6 +111,7 @@ function make(
     brainstorm,
     assistantOverlay,
     lifecycle,
+    link,
     shutDownPageContainer,
   };
 }
@@ -660,14 +665,16 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.sent).toEqual([]);
   });
 
-  it('keeps tap-then-long-press contextual navigation from toggling the mic', () => {
+  it('refreshes globally through tap-then-long-press without toggling the mic', () => {
     const r = make();
 
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
+    r.fire({ menuItemClickEvent: { itemID: 3 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } });
 
+    expect(r.link.connect).toHaveBeenCalledTimes(1);
     expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.audio.start).not.toHaveBeenCalled();
     expect(r.lifecycle.onForegroundEnter).not.toHaveBeenCalled();
@@ -694,6 +701,15 @@ describe('EventRouter — long-press mutes the mic', () => {
     const r = make();
     r.fire({ menuItemClickEvent: { itemID: 4 } });
     expect(r.menu.openSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes the global Refresh tap through the real gateway recovery path', () => {
+    const r = make();
+
+    r.fire({ menuItemClickEvent: { itemID: 3 } });
+
+    expect(r.link.connect).toHaveBeenCalledTimes(1);
+    expect(r.sent).toEqual([]);
   });
 
   it('opens unified Planning from contextual-menu item five', () => {
