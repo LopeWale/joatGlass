@@ -154,14 +154,18 @@ async function openAndScrollTo(
   for (let current = 0; current < index; current += 1) harness.fire(scrollDown());
 }
 
-describe('wearer G2 actions outside the capability list', () => {
-  it('keeps Repeat contextual and routes it through the Mac-held last-reply contract', async () => {
+describe('wearer G2 actions through Settings', () => {
+  it('routes Repeat from Settings through the Mac-held last-reply contract', async () => {
     const harness = rig();
     harness.link.connect();
     sockets[0]?.open();
     sockets[0]?.receive({ kind: 'auth.accepted' });
 
-    harness.fire({ menuItemClickEvent: { itemID: 1 } } as EvenHubEvent);
+    await openAndScrollTo(harness, 'Settings');
+    harness.fire(rightPress());
+    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+    for (let index = 0; index < 3; index += 1) harness.fire(scrollDown());
+    harness.fire(rightPress());
 
     await vi.waitFor(() => expect(sockets[0]?.sent).toEqual([
       JSON.stringify({ kind: 'auth', token: null }),
@@ -170,16 +174,20 @@ describe('wearer G2 actions outside the capability list', () => {
         event: { containerName: 'sysmenu', selectedIndex: 1 },
       }),
     ]));
-    expect(harness.sidebars).toEqual([]);
+    expect(harness.sidebars).toHaveLength(1);
   });
 
-  it('keeps Reconnect contextual and routes it through the real link recovery entry point', async () => {
+  it('routes Reconnect from Settings through the real link recovery entry point', async () => {
     const harness = rig();
     harness.link.connect();
     sockets[0]?.open();
     sockets[0]?.receive({ kind: 'auth.accepted' });
 
-    harness.fire({ menuItemClickEvent: { itemID: 3 } } as EvenHubEvent);
+    await openAndScrollTo(harness, 'Settings');
+    harness.fire(rightPress());
+    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+    for (let index = 0; index < 4; index += 1) harness.fire(scrollDown());
+    harness.fire(rightPress());
 
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     expect(sockets[0]?.closed).toBe(true);
@@ -188,7 +196,7 @@ describe('wearer G2 actions outside the capability list', () => {
     expect(harness.link.linkState).toBe('connecting');
     sockets[1]?.receive({ kind: 'auth.accepted' });
     expect(harness.link.linkState).toBe('connected');
-    expect(harness.sidebars).toEqual([]);
+    expect(harness.sidebars).toHaveLength(1);
   });
 
   it('opens the persisted listening Settings surface and returns to the sidebar on left-double', async () => {
@@ -201,6 +209,8 @@ describe('wearer G2 actions outside the capability list', () => {
       '  Resume mic: instantly',
       '  Resume mic: Mac decides',
       '  Resume mic: ask me first',
+      'Repeat last reply',
+      'Reconnect JOAT',
     ]);
     expect(harness.lists[0]?.options).toEqual({
       title: 'LISTENING RESUME', hint: 'tap: apply · left x2: back', selectable: true,
