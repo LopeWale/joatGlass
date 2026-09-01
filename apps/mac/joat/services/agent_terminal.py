@@ -230,7 +230,7 @@ class AgentTerminalRoster:
             # background lane could finish, block, or start waiting on an
             # approval and the frame looked identical. Each lane now
             # carries its state, so a glance covers the whole roster.
-            lanes=[f"{name}·{self._mark(other)}"[:HUD_LANE_COLUMNS]
+            lanes=[_one_row(f"{name}·{self._mark(other)}", HUD_LANE_COLUMNS)
                    for name, other in list(self._lanes.items())[:3]],
             lines=body,
         )
