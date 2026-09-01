@@ -677,6 +677,7 @@ class DebateSession(Session):
                     # past, but it is not a position for anyone to answer.
                     if speaker.name not in self._silenced:
                         self._silenced.append(speaker.name)
+                        await self._offer_recovery(speaker)
                     log.warning("%s could not take its turn", speaker.name)
                 elif said:
                     self._transcript.append((speaker.label, said))
@@ -717,6 +718,22 @@ class DebateSession(Session):
             self._set_phase("synthesis")
             await self._synthesis_turn(outcome)
         await self._finish(f"done — {outcome}")
+
+    async def _offer_recovery(self, speaker: Participant) -> None:
+        """Name the way out, at the moment the wearer needs it.
+
+        A seat dies for reasons the wearer can actually fix — an exhausted
+        model quota is the common one — and switching that seat's model by
+        voice already works. Reporting only "claude silent" leaves them
+        holding a broken session and no idea that a one-sentence remedy
+        exists.
+        """
+        try:
+            await self._sink.chunk(
+                f"say “use another model for the {speaker.role}” to retry\n"
+            )
+        except Exception:
+            log.warning("recovery hint not painted", exc_info=True)
 
     async def _report_progress(self, round_no: int) -> None:
         """Tell the surfaces where we are and what it has cost.

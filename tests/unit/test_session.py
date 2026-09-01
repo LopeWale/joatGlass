@@ -1398,3 +1398,63 @@ class TestProgressReporting:
         # Every existing sink predates this hook.
         transport = SinkTransport()
         await debate(transport, pair(agent(["a"]), agent(["b"])), None).run()
+
+
+class TestFailureIsActionable:
+    """A seat dies for reasons the wearer can fix.
+
+    An exhausted model quota is the common one, and switching that seat's
+    model by voice already works — but reporting only 'claude silent' left
+    them holding a broken session with no idea a one-sentence remedy
+    existed. The artifact promises 'retry with FABLE is a real button, not
+    a wish'.
+    """
+
+    async def test_a_dead_seat_names_the_way_out(self) -> None:
+        transport = SinkTransport()
+        seats = pair(
+            agent(["a real position"]),
+            agent(["[!] claude could not answer: exited 1 — see the log"]),
+        )
+        await debate(transport, seats, OneShotJudge()).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "use another model for the critic" in joined
+
+    async def test_the_hint_names_the_ROLE_that_died(self) -> None:
+        transport = SinkTransport()
+        seats = pair(
+            agent(["[!] codex could not answer: exited 1"]),
+            agent(["a real position"]),
+        )
+        await debate(transport, seats, OneShotJudge()).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "for the proposer" in joined
+
+    async def test_a_healthy_session_offers_nothing(self) -> None:
+        transport = SinkTransport()
+        await debate(transport, pair(agent(["a"]), agent(["b"])), None).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "use another model" not in joined
+
+    async def test_the_hint_appears_once_per_seat(self) -> None:
+        # Two rounds of the same dead seat is one problem, not two.
+        # Counted at the SINK: the HUD activity is cumulative, so one
+        # painted line reappears in every later frame and counting the
+        # rendered text would measure repainting, not repetition.
+        chunks: list[str] = []
+
+        class Recorder:
+            async def open(self, topic: str, speakers: list[str]) -> None: ...
+            async def turn(self, label: str) -> None: ...
+            async def chunk(self, text: str) -> None: chunks.append(text)
+            async def close(self, verdict: str) -> None: ...
+
+        await DebateSession(
+            "topic",
+            pair(agent(["[!] claude could not answer: exited 1"]),
+                 agent(["[!] codex could not answer: exited 1"])),
+            Recorder(), None, max_rounds=2,
+        ).run()
+        emitted = "".join(chunks)
+        assert emitted.count("use another model for the proposer") == 1
+        assert emitted.count("use another model for the critic") == 1
