@@ -19,6 +19,10 @@ from collections.abc import Callable
 from typing import Protocol, TextIO
 
 from .hud import HudWriter
+
+FinishedSession = Callable[
+    [str, tuple[str, ...], tuple[tuple[str, str], ...], str], None
+]
 from ..core.protocol import BrainstormHudView
 from .roundtable import is_failure
 
@@ -287,9 +291,12 @@ class DebateStateSink:
     it and the debate that fills it stay independent.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_finished: FinishedSession | None = None) -> None:
         self.snapshot = DebateSnapshot()
         self._current: list[str] = []
+        # Called once when a session closes, so the answer outlives the
+        # process that produced it.
+        self._on_finished = on_finished
 
     async def open(self, topic: str, speakers: list[str]) -> None:
         self.snapshot = DebateSnapshot(topic=topic, speakers=tuple(speakers),
@@ -308,6 +315,16 @@ class DebateStateSink:
         self.snapshot.speaking = ""
         self.snapshot.verdict = verdict
         self.snapshot.running = False
+        if self._on_finished is not None:
+            # Never let persistence failure take down the session that
+            # just produced the answer — the wearer already has it.
+            try:
+                self._on_finished(
+                    self.snapshot.topic, self.snapshot.speakers,
+                    self.snapshot.turns, verdict,
+                )
+            except Exception:
+                pass
 
     def _flush(self) -> None:
         said = "".join(self._current).strip()
