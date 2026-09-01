@@ -145,17 +145,29 @@ async def test_lane_failure_does_not_stop_other_source_ingestion(tmp_path: Path)
             authority_grace_s=0.02,
         )
         task = asyncio.create_task(mux.run())
-        await asyncio.sleep(0.06)
+        # Wait for the CONDITION, not a duration. A fixed 60ms budgeted six
+        # poll cycles and measured scheduler luck: it flaked whenever the
+        # machine was busy — a full suite, live model calls, the running
+        # engine — and passed 12/12 the moment it was watched in isolation.
+        # A generous deadline only makes a healthy run slower on a slow
+        # machine; it can no longer make it red.
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while asyncio.get_running_loop().time() < deadline:
+            states = dict(store.execute(
+                "SELECT source_id,health FROM notification_sources").fetchall())
+            ingested = store.execute(
+                "SELECT count(*) FROM notification_observations WHERE source_id='good'"
+            ).fetchone()[0]
+            if states.get("bad") == "failed" and ingested == 1:
+                break
+            await asyncio.sleep(0.01)
         mux.stop(); task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
-        states = dict(store.execute("SELECT source_id,health FROM notification_sources").fetchall())
         assert states["bad"] == "failed"
-        assert store.execute(
-            "SELECT count(*) FROM notification_observations WHERE source_id='good'"
-        ).fetchone()[0] == 1
+        assert ingested == 1
 
 
 async def test_healthy_authority_without_exact_observation_does_not_hide_banner(
