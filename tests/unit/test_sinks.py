@@ -454,3 +454,59 @@ class TestTheAnswerSurvivesTheEnding:
         frames = [m for m in transport.sent
                   if type(m).__name__ == "BrainstormHudView"]
         assert "calls" not in (frames[-1].active_speaker or "")
+
+
+class TestTheTranscriptFillsTheGlass:
+    """The activity bound is display capacity, and it is bound ONCE.
+
+    The producer trims and the wire validates. While those were two
+    independent literals, raising one and forgetting the other was a
+    silent failure rather than a loud one: to_wire() raises ProtocolError,
+    Broadcast swallows every sink exception by design so a dead surface
+    cannot stop a debate, and the HUD just stops updating.
+    """
+
+    def test_the_producer_trims_to_exactly_what_the_wire_admits(self) -> None:
+        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+        from joat.services.sinks import HudSink
+
+        full = "x" * BRAINSTORM_ACTIVITY_MAX
+        assert HudSink._bounded_transcript(full) == full
+
+        # One byte over: trimmed, and still a legal frame.
+        trimmed = HudSink._bounded_transcript("y" + full)
+        assert len(trimmed) <= BRAINSTORM_ACTIVITY_MAX
+        BrainstormHudView(
+            screen="brainstorm", state="running", topic="t",
+            collaborators=["codex"], activity=trimmed, terminal_state="ready",
+        ).to_wire()
+
+    def test_a_full_transcript_survives_the_wire(self) -> None:
+        """What the producer considers in-bounds must actually serialise."""
+        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+
+        wire = BrainstormHudView(
+            screen="agent_terminal", state="running", topic="t",
+            collaborators=["hermes"],
+            activity="z" * BRAINSTORM_ACTIVITY_MAX,
+            terminal_state="running",
+        ).to_wire()
+        assert len(wire["brainstorm"]["activity"]) == BRAINSTORM_ACTIVITY_MAX
+
+    def test_the_bound_matches_the_renderer_it_was_derived_from(self) -> None:
+        """A number derived from geometry must be re-derived when the
+        geometry moves, so read the geometry from the renderer itself."""
+        import re
+        from pathlib import Path
+        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+
+        renderer = (Path(__file__).resolve().parents[2]
+                    / "apps/hub-plugin/src/HudCanvasRenderer.ts").read_text()
+        # The tallest surface: a running Agent Terminal.
+        capacity = re.search(r"transcriptLineCapacity:\s*(\d+)", renderer)
+        assert capacity is not None, "the transcript layout has moved"
+        lines = int(capacity.group(1))
+        # 504px column at 11px SF Mono (advance 1266/2048 em) = 74 columns.
+        assert BRAINSTORM_ACTIVITY_MAX == lines * 74, (
+            f"the renderer now draws {lines} lines; re-derive the bound"
+        )
