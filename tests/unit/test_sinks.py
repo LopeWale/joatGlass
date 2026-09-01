@@ -7,6 +7,8 @@ able to silence the other.
 
 from __future__ import annotations
 
+import asyncio
+
 import io
 
 from joat.core.protocol import BrainstormHudView
@@ -269,3 +271,85 @@ class TestDebateStateSink:
         assert sink.snapshot.headline() == "Brainstorm · 3 seats"
         await sink.close("converged 0.91")
         assert sink.snapshot.headline() == "Brainstorm · converged 0.91"
+
+
+class TestSilentWaitClock:
+    """A turn says nothing for 12-40s. Without a moving number the wearer
+    cannot tell working from hung, and the only remedy they know is to
+    cancel a healthy session.
+    """
+
+    def _sink(self):
+        from joat.services.hud import HudWriter
+        from joat.services.sinks import HudSink
+        from tests.unit.test_session import SinkTransport
+
+        transport = SinkTransport()
+        return HudSink(HudWriter(transport)), transport
+
+    def _frames(self, transport):
+        return [m for m in transport.sent
+                if type(m).__name__ == "BrainstormHudView"]
+
+    async def test_the_wait_is_counted_while_the_model_is_silent(self) -> None:
+        from joat.services.sinks import HudSink
+
+        sink, transport = self._sink()
+        original = HudSink.WAIT_TICK_S
+        HudSink.WAIT_TICK_S = 0.01          # keep the test honest and quick
+        try:
+            await sink.open("t", ["codex"])
+            await sink.turn("CODEX (proposer)")
+            await asyncio.sleep(0.05)
+            activity = self._frames(transport)[-1].activity
+            assert "Thinking… 0:0" in activity
+        finally:
+            HudSink.WAIT_TICK_S = original
+            sink._stop_wait_clock()
+
+    async def test_the_clock_stops_once_tokens_arrive(self) -> None:
+        from joat.services.sinks import HudSink
+
+        sink, transport = self._sink()
+        original = HudSink.WAIT_TICK_S
+        HudSink.WAIT_TICK_S = 0.01
+        try:
+            await sink.open("t", ["codex"])
+            await sink.turn("CODEX (proposer)")
+            await asyncio.sleep(0.03)
+            await sink.chunk("the answer")
+            painted = len(self._frames(transport))
+            await asyncio.sleep(0.05)
+            # Streaming is its own progress signal; the ticker must cost
+            # the link nothing once it is under way.
+            assert len(self._frames(transport)) == painted
+            assert "the answer" in self._frames(transport)[-1].activity
+        finally:
+            HudSink.WAIT_TICK_S = original
+            sink._stop_wait_clock()
+
+    async def test_the_elapsed_suffix_does_not_survive_into_the_answer(self) -> None:
+        from joat.services.sinks import HudSink
+
+        sink, transport = self._sink()
+        original = HudSink.WAIT_TICK_S
+        HudSink.WAIT_TICK_S = 0.01
+        try:
+            await sink.open("t", ["codex"])
+            await sink.turn("CODEX (proposer)")
+            await asyncio.sleep(0.03)
+            await sink.chunk("resident weights")
+            activity = self._frames(transport)[-1].activity
+            assert "Thinking… 0:" not in activity   # the clock is gone
+            assert "resident weights" in activity
+        finally:
+            HudSink.WAIT_TICK_S = original
+            sink._stop_wait_clock()
+
+    async def test_closing_stops_the_clock(self) -> None:
+        sink, _ = self._sink()
+        await sink.open("t", ["codex"])
+        await sink.turn("CODEX (proposer)")
+        await sink.close("done")
+        assert sink._wait_task is None or sink._wait_task.cancelled() \
+            or sink._wait_task.done()

@@ -13,7 +13,10 @@ change to the debate.
 
 from __future__ import annotations
 
+import asyncio
+import re
 import sys
+import time
 from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Protocol, TextIO
@@ -50,6 +53,7 @@ class HudSink:
         self._speakers: list[str] = []
         self._speaker = ""
         self._activity = ""
+        self._wait_task: asyncio.Task[None] | None = None
         self._state = "ready"
 
     @staticmethod
@@ -61,6 +65,26 @@ class HudSink:
         tail = value[-180:]
         boundary = tail.find("\n")
         return tail[boundary + 1:] if boundary >= 0 else tail
+
+    def _replace_last_transcript(self, row: str) -> None:
+        """Update the newest row in place — the wait clock ticks, it does
+        not append a new line every three seconds."""
+        head, _, _ = self._activity.rpartition("\n")
+        self._activity = self._bounded_transcript(f"{head}\n{row}" if head else row)
+
+    _WAIT_CLOCK = re.compile(r"(Thinking…) \d+:\d{2}$")
+
+    def _strip_wait_clock(self) -> None:
+        """Drop the elapsed suffix before the answer lands on the same row.
+
+        Matched as a CLOCK, not as 'anything after Thinking…'. A looser
+        strip ate real answer text: a turn already reading 'Thinking…
+        first' lost its word when the next chunk arrived.
+        """
+        head, sep, last = self._activity.rpartition("\n")
+        trimmed = self._WAIT_CLOCK.sub(r"\1", last)
+        if trimmed != last:
+            self._activity = f"{head}{sep}{trimmed}" if sep else trimmed
 
     def _append_transcript(self, row: str) -> None:
         self._activity = self._bounded_transcript(
@@ -112,18 +136,60 @@ class HudSink:
         self._activity = "JOAT > Preparing collaborators…"
         await self._paint("running")
 
+    WAIT_TICK_S = 3.0
+    """How often the silent-wait counter repaints.
+
+    Only while a collaborator has produced NOTHING. Once tokens arrive the
+    stream is its own progress signal, so the ticker stops and costs the
+    link nothing."""
+
     async def turn(self, label: str) -> None:
         self._speaker = label
         if self._activity == "JOAT > Preparing collaborators…":
             self._activity = ""
         self._append_transcript(f"{self._display_speaker(label).upper()} > Thinking…")
         await self._paint("running")
+        self._start_wait_clock()
+
+    def _start_wait_clock(self) -> None:
+        """Count the silence. A turn takes 12-40s and says nothing while it
+        thinks; without a moving number the wearer cannot tell working from
+        hung, and the only remedy they know is to cancel a healthy session.
+        """
+        self._stop_wait_clock()
+        started = time.monotonic()
+
+        async def tick() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(self.WAIT_TICK_S)
+                    waited = int(time.monotonic() - started)
+                    speaker = self._display_speaker(self._speaker).upper()
+                    self._replace_last_transcript(
+                        f"{speaker} > Thinking… {waited // 60}:{waited % 60:02d}"
+                    )
+                    await self._paint("running")
+            except asyncio.CancelledError:
+                raise
+
+        self._wait_task = asyncio.get_running_loop().create_task(tick())
+
+    def _stop_wait_clock(self) -> None:
+        task, self._wait_task = self._wait_task, None
+        if task is not None and not task.done():
+            task.cancel()
 
     async def chunk(self, text: str) -> None:
         # `turn()` paints a fixed progress marker before any model bytes
         # arrive. The first token is usually lexical rather than whitespace,
         # so concatenate it as readable prose once; later chunks must retain
         # their exact boundaries because a streaming model may split a word.
+        # Tokens are arriving: the stream itself is the progress signal now.
+        # Strip the elapsed suffix FIRST — the separator test looks for a
+        # bare "Thinking…", and a ticked clock ends in "Thinking… 0:12",
+        # so checking before stripping silently skipped both.
+        self._stop_wait_clock()
+        self._strip_wait_clock()
         needs_prefix_separator = (
             self._activity.endswith("Thinking…") and text and not text[0].isspace()
         )
@@ -132,6 +198,7 @@ class HudSink:
         await self._paint("running")
 
     async def close(self, verdict: str) -> None:
+        self._stop_wait_clock()
         self._speaker = ""
         self._activity = f"JOAT > {verdict}"[:180]
         if verdict == "cancelled":
