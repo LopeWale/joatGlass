@@ -48,3 +48,11 @@ docs/design/**/joat-glasses-dashboard.html
 output/
 .claude/ralph-loop.local.md
 apps/hub-plugin/public/dev-map-sample.png
+
+# DEV-only synthetic speech, written by
+# scripts/simulator_brainstorm_action_flow_acceptance.py so the official
+# simulator can drive the real STT path. Vite copies public/ verbatim into
+# every build, and pack.sh refuses any bundle containing a __joat-* path —
+# so committing one of these does not just add noise, it BLOCKS RELEASES.
+# It was committed once and blocked the first package build of the day.
+apps/hub-plugin/public/__joat-audio-fixture/
