@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, cast
 
+from ..channels.event_taxonomy import classify_event_class
 from ..channels.notifications import Notification
 from .store import DurableStore
 
@@ -133,6 +134,31 @@ class NotificationObservationStore:
         """Withdraw stale readiness before restart catch-up begins."""
 
         self.set_health(source_id, "stale", now_us=now_us)
+
+    def prune(self, *, before_us: int) -> int:
+        """Drop settled observations older than ``before_us``.
+
+        Nothing ever removed rows from this table, and the cross-source
+        duplicate-suppression queries filter it on every poll. Left to grow it
+        makes each incoming notification a little more expensive than the
+        last — the wearer experiences that as JOAT getting slower the longer
+        it runs.
+
+        Only SETTLED rows go: anything still `pending` in the outbox has not
+        reached the wearer yet. The outbox row follows by cascade, and the
+        retained window must stay wider than the suppression lookup's own
+        window or a duplicate could slip through behind the deletion.
+        """
+        cursor = self._store.execute(
+            "DELETE FROM notification_observations WHERE observation_id IN ("
+            "  SELECT o.observation_id FROM notification_observations o "
+            "  JOIN notification_outbox x ON x.observation_id=o.observation_id "
+            "  WHERE x.state != 'pending' "
+            "  AND COALESCE(o.occurred_at_us,o.observed_at_us) < ?"
+            ")",
+            (before_us,),
+        )
+        return cursor.rowcount if cursor.rowcount > 0 else 0
 
     def pending(self, *, limit: int = 50) -> tuple[PendingNotification, ...]:
         rows = self._store.execute(
@@ -288,16 +314,8 @@ class NotificationObservationStore:
 
     @staticmethod
     def event_class(notification: Notification) -> str:
-        identity = f"{notification.app} {notification.title}".casefold()
-        if "mobilesms" in identity or "messages" in identity:
-            return "messages.incoming_text"
-        if "reminder" in identity:
-            return "reminders.banner"
-        if "calendar" in identity:
-            return "calendar.banner"
-        if "mail" in identity:
-            return "mail.banner"
-        return "notifications.banner"
+        """One taxonomy, shared with the card producer — see event_taxonomy."""
+        return classify_event_class(notification.app, notification.title)
 
     @staticmethod
     def _payload(notification: Notification) -> bytes:

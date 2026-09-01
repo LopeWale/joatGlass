@@ -14,6 +14,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, tzinfo
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -89,7 +90,6 @@ from .native.bridge import (
     NativeBridgeUnavailable,
 )
 from .persistence.actions import ActionJournal
-from .persistence.calendar_alerts import CalendarAlertStore
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.store import DurableStore
@@ -107,7 +107,6 @@ from .services.brainstorm_acceptance import (
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
-from .services.calendar_monitor import CalendarMonitor
 from .services.capabilities import CapabilityOpenController, CapabilityRouter
 from .services.agent_terminal import (
     AgentTerminalCommands,
@@ -1239,27 +1238,14 @@ async def main() -> None:
     )
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
 
-    # Calendar events only. Reminders keep their own due path above; this is
-    # the schedule half of Planning, and merging the two would announce a
-    # reminder twice.
-    calendar_monitor: CalendarMonitor | None = None
-    calendar_monitor_task: asyncio.Task[None] | None = None
-    if personal_data is not None:
-        zone_name = system_local_time_zone()
-        try:
-            calendar_zone = ZoneInfo(zone_name) if zone_name else None
-        except ZoneInfoNotFoundError:
-            calendar_zone = None
-        if calendar_zone is not None:
-            calendar_monitor = CalendarMonitor(
-                personal_data,
-                CalendarAlertStore(durable_store),
-                sessions.notify,
-                zone=calendar_zone,
-            )
-            calendar_monitor_task = asyncio.get_running_loop().create_task(
-                calendar_monitor.run()
-            )
+    # NOT started: macOS already owns calendar alerting. An event carries its
+    # own EKAlarm(s) (EKCalendarItem.alarms, with relativeOffset/absoluteDate),
+    # the OS fires them at the time the wearer configured, and those alerts
+    # reach the glasses through the Notification Center banner lane below as
+    # `calendar.banner`. A second poller here announced on a hardcoded 10-minute
+    # lead, so it both ignored the wearer's chosen alarm and double-announced
+    # every event that had one. The platform is the right owner; the module and
+    # its store remain only until they can be deleted.
 
     notif_task: asyncio.Task[None] | None = None
     notification_mux: NotificationMux | None = None
@@ -1320,9 +1306,6 @@ async def main() -> None:
         beat_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()
-        if calendar_monitor is not None and calendar_monitor_task is not None:
-            calendar_monitor.stop()
-            calendar_monitor_task.cancel()
         if llm_warm_task is not None:
             if not llm_warm_task.done():
                 llm_warm_task.cancel()

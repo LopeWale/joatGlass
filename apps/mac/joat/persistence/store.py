@@ -520,6 +520,19 @@ _MIGRATION_8 = (
     """,
 )
 
+_MIGRATION_9 = (
+    # The cross-source duplicate-suppression queries filter on
+    # (event_class, occurred_at_us) every mux poll — once per second, on the
+    # event loop. notification_observations only grows (nothing prunes it),
+    # so without this index each incoming notification costs a full-table
+    # scan that lengthens for the life of the database: the wearer's
+    # "JOAT gets slower over a session" is this scan getting longer.
+    """
+    CREATE INDEX notification_observations_class_time
+    ON notification_observations(event_class, occurred_at_us)
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -529,6 +542,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (6, "durable_local_voice_notes", _MIGRATION_6),
     (7, "voice_note_insights", _MIGRATION_7),
     (8, "calendar_starting_soon_alerts", _MIGRATION_8),
+    (9, "index_notification_observations_class_time", _MIGRATION_9),
 )
 
 

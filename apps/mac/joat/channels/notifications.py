@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..core.interfaces import ReplyEngine
+from .event_taxonomy import classify_event_class
 from .cards import (
     Card,
     DeliveryPolicy,
@@ -169,18 +170,6 @@ def parse_triage(reply: str) -> tuple[Urgency, str] | None:
 PERSON_CHANNELS = ("Messages", "Mail", "Slack", "Discord")
 
 
-def _event_class(channel: str) -> str:
-    """Machine taxonomy for a card, derived from the humanized channel.
-
-    Deliberately local: `persistence/notifications.py` already imports
-    `Notification` from this module, so importing its classifier back here
-    would cycle. The two classifiers stay independent by design.
-    """
-    if channel in PERSON_CHANNELS:
-        return "messages.incoming_text"
-    return f"notifications.{channel.lower().replace(' ', '_')}" if channel else "notifications.unknown"
-
-
 class NotificationSource(Protocol):
     """Watermark-generic store: sqlite (legacy) or Biome (macOS 26+)."""
 
@@ -297,7 +286,7 @@ class NotificationChannel:
 
         card = self._policy.admit(Card(
             source=source, channel=channel, summary=summary, urgency=level,
-            event_class=_event_class(channel), origin_id=n.native_id,
+            event_class=classify_event_class(n.app, n.title), origin_id=n.native_id,
         ))
         if card is None:
             log.info(

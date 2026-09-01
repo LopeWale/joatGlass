@@ -37,13 +37,28 @@ class CalendarAlertStore:
         *,
         now_us: int,
     ) -> None:
-        """Idempotent: a repeated mark is the same fact, not a conflict."""
-        self._store.execute(
-            "INSERT INTO calendar_event_alerts "
-            "(event_identifier, starts_at_unix_ms, alerted_at_us) VALUES (?, ?, ?) "
-            "ON CONFLICT(event_identifier, starts_at_unix_ms) DO NOTHING",
-            (event_identifier, starts_at_unix_ms, now_us),
-        )
+        """Idempotent: a repeated mark is the same fact, not a conflict.
+
+        Only the most recently announced start is retained per event. An event
+        moved 10:00 -> 10:30 -> 10:00 must announce all three times: the card
+        on the wearer's HUD says 10:30, and that is now wrong. Keeping every
+        historical start would silently suppress that correction.
+        """
+        # One transaction, per the store's own rule for multi-statement
+        # changes: a crash between the DELETE and the INSERT would otherwise
+        # leave the event with no retained start at all.
+        with self._store.transaction() as db:
+            db.execute(
+                "DELETE FROM calendar_event_alerts "
+                "WHERE event_identifier = ? AND starts_at_unix_ms <> ?",
+                (event_identifier, starts_at_unix_ms),
+            )
+            db.execute(
+                "INSERT INTO calendar_event_alerts "
+                "(event_identifier, starts_at_unix_ms, alerted_at_us) VALUES (?, ?, ?) "
+                "ON CONFLICT(event_identifier, starts_at_unix_ms) DO NOTHING",
+                (event_identifier, starts_at_unix_ms, now_us),
+            )
 
     def prune(self, *, before_unix_ms: int) -> int:
         """Drop rows for events that already started; the wearer cannot be

@@ -61,6 +61,27 @@ class TestPolicy:
                   for i in range(4)]
         assert counts == [1, 2, 3, 4]
 
+    def test_coalescing_keeps_the_taxonomy_fields(self) -> None:
+        """A coalesced repeat is the same KIND of event as the first.
+
+        admit() rebuilds the Card positionally, so without this the second
+        notification inside the window silently returns a card whose
+        event_class and origin_id are gone — and nothing else would notice.
+        """
+        p = DeliveryPolicy(coalesce_window_s=20)
+        first = Card("Dele", "Messages", "m0",
+                     event_class="messages.incoming_text", origin_id="n-1")
+        assert p.admit(first, now=1000) is not None
+        second = p.admit(
+            Card("Dele", "Messages", "m1",
+                 event_class="messages.incoming_text", origin_id="n-2"),
+            now=1001,
+        )
+        assert second is not None
+        assert second.count == 2
+        assert second.event_class == "messages.incoming_text"
+        assert second.origin_id == "n-2"
+
     def test_rate_cap_drops_routine_but_lets_urgent_through(self) -> None:
         p = DeliveryPolicy(coalesce_window_s=0, max_per_minute=3)
         for i in range(3):

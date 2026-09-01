@@ -32,21 +32,25 @@ class NoteCommandController:
     async def handle_command(self, text: str) -> str | None:
         stripped = text.strip()
         lowered = stripped.casefold()
+        # Whisper punctuates short utterances ("Export notes."). Terminal
+        # punctuation is STT noise for the exact-match commands — but note
+        # BODIES keep the wearer's punctuation untouched.
+        command = lowered.rstrip(".,!?").rstrip()
         for prefix in ("take a note ", "note "):
             if lowered.startswith(prefix):
                 body = stripped[len(prefix):]
                 return self._save(body)
-        if lowered in ("take a note", "note"):
+        if command in ("take a note", "note"):
             return "Say the text after “take a note”."
         if lowered.startswith("find notes "):
             return self._search(stripped[len("find notes "):])
-        if lowered == "find notes":
+        if command == "find notes":
             return "Say what to search for after “find notes”."
-        if lowered == "undo last note":
+        if command == "undo last note":
             return self._delete_latest()
-        if lowered == "restore last note":
+        if command == "restore last note":
             return self._restore_latest()
-        if lowered == "export notes":
+        if command == "export notes":
             return self._export()
         return None
 

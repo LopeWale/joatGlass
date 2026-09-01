@@ -109,6 +109,25 @@ class Card:
     # The producing store's own id, for dedup across sources.
     origin_id: str | None = None
 
+    def home_row(self, now: float | None = None) -> str:
+        """One home-screen notification row: "Source · age · headline".
+
+        The wearer reads their notifications on the resting screen. A count
+        would only tell them to open a page; the reference HUDs show the
+        cards themselves, so JOAT does too.
+        """
+        elapsed = max(0.0, (now if now is not None else time.time()) - self.at)
+        if elapsed < 60:
+            age = "now"
+        elif elapsed < 3_600:
+            age = f"{int(elapsed // 60)}m"
+        elif elapsed < 86_400:
+            age = f"{int(elapsed // 3_600)}h"
+        else:
+            age = f"{int(elapsed // 86_400)}d"
+        headline = " ".join(self.summary.split())[:96]
+        return f"{self.source} · {age} · {headline}"
+
     def render(self) -> str:
         """Two lines: who, then what. The HUD is glanced at, not read."""
         mark = "!! " if self.urgency is Urgency.URGENT else ""

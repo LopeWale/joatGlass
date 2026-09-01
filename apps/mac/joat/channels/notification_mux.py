@@ -15,6 +15,13 @@ from .notifications import NotificationChannel, NotificationSource
 
 log = logging.getLogger(__name__)
 
+# Keep two days of settled observations: long enough that no suppression
+# lookup (which spans seconds) can miss a match, short enough that the table
+# stays small on a device that runs for weeks.
+OBSERVATION_RETENTION_S = 2 * 24 * 60 * 60.0
+# Housekeeping, not a hot path — hourly is plenty and stays off the poll tick.
+OBSERVATION_PRUNE_INTERVAL_S = 3600.0
+
 
 @dataclass(frozen=True, slots=True)
 class NotificationLane:
@@ -70,9 +77,34 @@ class NotificationMux:
             for lane in self._lanes:
                 group.create_task(self._ingest(lane))
             group.create_task(self._deliver())
+            group.create_task(self._prune())
 
     def stop(self) -> None:
         self._running = False
+
+    async def _prune(self) -> None:
+        """Keep the observation table bounded.
+
+        Every poll runs duplicate-suppression queries against this table, so
+        an unbounded history makes each incoming notification progressively
+        more expensive — the slow-drift the wearer feels over a long session.
+        Retention is far wider than the suppression window, so nothing a
+        lookup could still need is removed.
+        """
+        while self._running:
+            await asyncio.sleep(OBSERVATION_PRUNE_INTERVAL_S)
+            horizon = time.time_ns() // 1_000 - int(
+                OBSERVATION_RETENTION_S * 1_000_000
+            )
+            try:
+                removed = await asyncio.to_thread(
+                    self._observations.prune, before_us=horizon
+                )
+            except Exception as exc:
+                log.warning("notification prune failed error=%s", type(exc).__name__)
+                continue
+            if removed:
+                log.info("notification observations pruned rows=%d", removed)
 
     async def _ingest(self, lane: NotificationLane) -> None:
         cursor = None

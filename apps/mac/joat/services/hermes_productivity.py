@@ -232,7 +232,9 @@ class HermesCalendarProposalController:
         self._cleanup_timeout_s = cleanup
 
     async def handle_command(self, text: str) -> str | None:
-        normalized = " ".join(text.strip().split())
+        # Whisper punctuates short utterances; terminal punctuation is STT
+        # noise for a deterministic trigger.
+        normalized = " ".join(text.strip().split()).rstrip(".,!?").rstrip()
         matched = _TRIGGER.fullmatch(normalized)
         if matched is None:
             lowered = normalized.casefold()

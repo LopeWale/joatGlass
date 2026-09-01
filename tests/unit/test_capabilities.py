@@ -1236,8 +1236,8 @@ class TestCapabilityViews:
         day = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert day.title == "PLANNING · PLAN · TUE SEP 1"
         assert day.items[:2] == [
-            "09:30 · EVENT · Design review",
-            "18:00 · REMINDER · Buy filters",
+            "[09:30] Design review",
+            "[18:00] □ Buy filters",
         ]
 
         # A native item stays inside Planning; it is not a synthetic Calendar
@@ -1260,13 +1260,13 @@ class TestCapabilityViews:
         await router.open("Calendar")
         calendar = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert calendar.title == "CALENDAR · PLAN · TUE SEP 1"
-        assert "09:30 · EVENT · Design review" in calendar.items
+        assert "[09:30] Design review" in calendar.items
 
         await router.open("Tasks")
         tasks = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert tasks.title == "TASKS · PLAN · TUE SEP 1"
-        assert "09:30 · EVENT · Design review" in tasks.items
-        assert "18:00 · REMINDER · Buy filters" in tasks.items
+        assert "[09:30] Design review" in tasks.items
+        assert "[18:00] □ Buy filters" in tasks.items
 
         # A pre-Planning package could have opened the same projection under
         # ``Reminders``.  Its subsequent capdata selection must not become an
@@ -1309,7 +1309,7 @@ class TestCapabilityViews:
 
         rendered = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert rendered.title == "PLANNING · PLAN · TUE SEP 1"
-        assert rendered.items[0] == "09:30 · EVENT · Design review"
+        assert rendered.items[0] == "[09:30] Design review"
 
     async def test_quicknotes_and_activity_are_durable_reachable_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
