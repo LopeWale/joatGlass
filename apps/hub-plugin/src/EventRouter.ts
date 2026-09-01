@@ -478,6 +478,25 @@ export class EventRouter {
       return;
     }
 
+    // LEFT single press on a live Brainstorm opens the capability menu.
+    //
+    // Before this, the only way out of a running session was left DOUBLE
+    // press — which is cancel. So a wearer who wanted to check Messages
+    // mid-session had exactly one gesture available and it ended their
+    // conversation. Left-single was the one genuinely free gesture left on
+    // this surface (the brainstorm click predicate above accepts only
+    // right/ring, and the fallback relay carries no containerName, so the
+    // Mac drops it); long-press is globally claimed by the mic control.
+    // Cancel stays on left-double, unchanged.
+    if (
+      type === OsEventTypeList.CLICK_EVENT
+      && source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+      && this.brainstorm?.isActive()
+    ) {
+      void this.menu.toggle();
+      return;
+    }
+
     if (
       type === OsEventTypeList.CLICK_EVENT &&
       this.isLocalTapSource(source) &&

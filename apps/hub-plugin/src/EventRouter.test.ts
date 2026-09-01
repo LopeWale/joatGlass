@@ -529,6 +529,33 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
+  it('opens the menu from a live Brainstorm without ending it', () => {
+    // The only way out of a running session used to be left DOUBLE press,
+    // which is cancel — so checking Messages mid-session meant killing the
+    // conversation. Left-single was the one free gesture on this surface.
+    const { fire, menu, brainstorm } = make(false, undefined, false, true);
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+    expect(menu.toggle).toHaveBeenCalledTimes(1);
+    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(brainstorm.handleClick).not.toHaveBeenCalled();
+  });
+
+  it('keeps cancel on the left double press', () => {
+    const { fire, brainstorm } = make(false, undefined, false, true);
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
+  });
+
   it('lets a swipe back out of topic capture, where there is nothing to scroll', () => {
     // The one state that keeps the old swipe-cancel: no transcript exists
     // yet, the screen is a single promise, and the wearer who swipes is
