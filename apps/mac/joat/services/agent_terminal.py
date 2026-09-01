@@ -176,6 +176,9 @@ class AgentTerminalRoster:
             lanes=list(self._lanes)[:3], lines=body,
         )
 
+    def _record(self, lane: TerminalLane, line: str) -> None:
+        lane.tail.append(line)
+
     async def repaint(self) -> None:
         if self._paint is not None:
             try:
@@ -285,11 +288,18 @@ class AgentTerminalRoster:
             return f"Session listing failed — {reason}"
         self._discovered = rows
         if not rows:
+            self._record(lister, "[discover] no sessions involving you")
             return "The gateway lists no sessions involving you."
         lines = []
         for row in rows[:12]:
             label = row.get("label") or row.get("key") or "?"
             lines.append(f"• {label}")
+        # A listing IS terminal output: putting it in the tail is what lets
+        # the wearer READ their sessions on the lenses instead of having to
+        # remember what was just spoken.
+        self._record(lister, "[discover] " + ", ".join(
+            (row.get("label") or row.get("key") or "?") for row in rows[:6]
+        ))
         suffix = f"\n(+{len(rows) - 12} more)" if len(rows) > 12 else ""
         return "Your sessions on the gateway:\n" + "\n".join(lines) + suffix
 
@@ -453,6 +463,16 @@ class AgentTerminalCommands:
         self._roster = roster
 
     async def handle_command(self, text: str) -> str | None:
+        answer = await self._dispatch(text)
+        if answer is not None:
+            # Any claimed command can change what the lenses should show —
+            # focus, resume, cancel, a decision, a new send. Repainting once
+            # here beats sprinkling it through every branch and forgetting
+            # one, which is exactly what happened before.
+            await self._roster.repaint()
+        return answer
+
+    async def _dispatch(self, text: str) -> str | None:
         said = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
         if not said:
             return None
