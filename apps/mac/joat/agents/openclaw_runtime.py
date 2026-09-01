@@ -302,6 +302,9 @@ class OpenClawTerminalAgent:
     state_changed: Callable[[str, str], None] | None = None
     on_approval: Callable[[PendingApproval], None] | None = None
     _terminal: OpenClawAgentTerminal | None = field(default=None, init=False)
+    _resume_key: str | None = field(default=None, init=False)
+    """When set, initialize() ATTACHES to this listed session instead of
+    running the adopt-or-create dance on the lane's own namespace."""
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _closed: bool = field(default=False, init=False)
     _stream_task: asyncio.Task[object] | None = field(default=None, init=False)
@@ -321,6 +324,29 @@ class OpenClawTerminalAgent:
             await _safe_close(connection)
             raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
         recovery = OpenClawHistoryRecovery(client=self.client, policy=self.policy)
+        resume_key = self._resume_key
+        if resume_key is not None:
+            # A resumed session must be re-listed on THIS connection before
+            # it can be addressed — the enforcement layer holds the key set
+            # per connection, so reconnecting re-earns the authority rather
+            # than inheriting it. Listing first is what makes that true.
+            try:
+                await OpenClawAgentTerminal(
+                    connection=connection, agent_id=self.agent_id,
+                    session_key=resume_key, session_id="", policy=self.policy,
+                ).list_sessions()
+                self._terminal = await OpenClawAgentTerminal.attach(
+                    connection=connection,
+                    agent_id=self.agent_id,
+                    session_key=resume_key,
+                    policy=self.policy,
+                    recovery=recovery,
+                    on_approval=self.on_approval,
+                )
+            except BaseException:
+                await _safe_close(connection)
+                raise
+            return
         try:
             self._terminal = await OpenClawAgentTerminal.create(
                 connection=connection,
@@ -409,6 +435,23 @@ class OpenClawTerminalAgent:
             finally:
                 if self._stream_task is current_task:
                     self._stream_task = None
+
+    async def resume_session(self, session_key: str) -> None:
+        """Point this lane at a listed session; connects on the next send.
+
+        Dropping the current terminal is the honest move: the connection
+        that granted the old session's authority is not the one that will
+        grant this one, and the enforcement layer is per-connection.
+        """
+        if not self.policy.roster:
+            raise OpenClawGatewayError(
+                "Only an Agent Terminal roster lane may resume a listed session"
+            )
+        async with self._lock:
+            if self._closed:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            await self._invalidate_terminal()
+            self._resume_key = session_key
 
     async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]:
         """Enumerate the wearer's own sessions (roster lanes only)."""

@@ -285,9 +285,15 @@ def _enforce_agent_terminal_request_policy(
             and policy.owns_session_key(params.get("key"))
         )
     elif method == "sessions.messages.subscribe":
+        sub_key = params.get("key")
+        # Same provenance rule as send/abort: a roster lane may subscribe to
+        # a session the GATEWAY listed for this wearer on this connection.
+        sub_addressable = policy.owns_session_key(sub_key) or (
+            policy.roster and isinstance(sub_key, str) and sub_key in listed_keys
+        )
         plain = (
             set(params) == {"key", "agentId"}
-            and policy.owns_session_key(params.get("key"))
+            and sub_addressable
             and params.get("agentId") == policy.agent_id
         )
         # includeApprovals is the documented opt-in for session.approval
@@ -295,7 +301,7 @@ def _enforce_agent_terminal_request_policy(
         with_approvals = (
             policy.allows_approvals
             and set(params) == {"key", "agentId", "includeApprovals"}
-            and policy.owns_session_key(params.get("key"))
+            and sub_addressable
             and params.get("agentId") == policy.agent_id
             and params.get("includeApprovals") is True
         )
