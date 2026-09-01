@@ -6,7 +6,7 @@ from PIL import Image
 import pytest
 
 from joat.core.navigation import NavigationCandidate, NavigationPoint, NavigationPolicies
-from joat.navigation.map_image import _tone_curve
+from joat.navigation.map_image import MAP_TONE_CEILING, _tone_curve
 from joat.core.protocol import NavigationProgressPolicy
 from joat.navigation.mapbox import (
     DIRECTIONS_URL,
@@ -165,6 +165,41 @@ class TestToneCurve:
         toned = _tone_curve(image)
 
         assert list(toned.getdata()) == [0] * 100
+
+    def test_ground_plane_is_unlit_so_the_wearer_sees_the_real_street(self) -> None:
+        """Land is the MODE of a map tile, not its minimum.
+
+        A version of this applied a floor of level 3 to every pixel so that
+        land would "carry tone", which lit 93% of the panel: a glowing slab
+        over the wearer's view with the route lost inside it. On a
+        transparent lens the ground plane is the one thing they can already
+        see, so it must stay at zero however dense the streets get.
+        """
+        # 80% land at one tone, 20% brighter roads/labels over it.
+        image = Image.new("L", (10, 10), color=40)
+        for index in range(20):
+            image.putpixel((index % 10, index // 10), 210)
+
+        toned = _tone_curve(image)
+
+        levels = [value // 17 for value in toned.getdata()]
+        assert levels.count(0) == 80, "the ground plane must be clear glass"
+        assert all(level > 0 for level in levels[:20]), "streets must stay lit"
+
+    def test_map_never_spends_the_levels_reserved_for_joats_own_marks(self) -> None:
+        """The route has to be able to out-shine any road it crosses.
+
+        This cannot be checked from a simulator screenshot — that capture
+        path returns the same value for level 11 and level 14 — so the
+        headroom is pinned here, in the data, where it is real.
+        """
+        image = Image.new("L", (16, 16), color=0)
+        for index, value in enumerate(range(0, 256, 16)):  # a full ramp
+            image.putpixel((index, 0), value)
+
+        toned = _tone_curve(image)
+
+        assert max(toned.getdata()) // 17 <= MAP_TONE_CEILING
 
 
 class TestLongRouteHandling:

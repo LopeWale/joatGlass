@@ -12,7 +12,7 @@ import re
 
 import io
 
-from joat.core.protocol import BrainstormHudView
+from joat.core.protocol import AgentTerminalHudView, BrainstormHudView
 from joat.services.hud import HudWriter
 from joat.services.sinks import Broadcast, HudSink, TerminalSink
 
@@ -87,11 +87,8 @@ class TestHudSink:
         await sink.chunk("Use tabs with a formatter.")
         frame = transport.sent[-1]
         assert isinstance(frame, BrainstormHudView)
-        assert frame.screen == "brainstorm"
         assert frame.state == "running"
         assert frame.active_speaker == "openclaw"
-        assert frame.terminal_state == "ready"
-        assert frame.no_tools_checked is True
         assert frame.activity == "OPENCLAW > Use tabs with a formatter."
 
     async def test_the_answer_replaces_the_marker_and_later_chunks_join_exactly(self) -> None:
@@ -162,15 +159,18 @@ class TestHudSink:
         await sink.show_terminal()
 
         terminal = transport.sent[-1]
-        assert isinstance(terminal, BrainstormHudView)
-        assert terminal.screen == "agent_terminal"
+        # The handoff paints the TERMINAL's own frame now. It used to be a
+        # BrainstormHudView wearing screen="agent_terminal", which is the
+        # violation of SESSION_MODEL.md:74-75 this split removed.
+        assert isinstance(terminal, AgentTerminalHudView)
+        assert isinstance(terminal, AgentTerminalHudView)
         assert terminal.state == "running"
         assert terminal.activity == "HERMES > Thinking…"
 
         await sink.replay()
         restored = transport.sent[-1]
         assert isinstance(restored, BrainstormHudView)
-        assert restored.screen == "brainstorm"
+        assert isinstance(restored, BrainstormHudView)
         assert restored.state == "running"
         assert restored.active_speaker == "hermes"
 
@@ -471,22 +471,18 @@ class TestTheTranscriptFillsTheGlass:
         # One byte over: trimmed, and still a legal frame.
         trimmed = HudSink._bounded_transcript("y" + full)
         assert len(trimmed) <= BRAINSTORM_ACTIVITY_MAX
-        BrainstormHudView(
-            screen="brainstorm", state="running", topic="t",
-            collaborators=["codex"], activity=trimmed, terminal_state="ready",
-        ).to_wire()
+        BrainstormHudView(state="running", topic="t", collaborators=["codex"], activity=trimmed).to_wire()
 
     def test_a_full_transcript_survives_the_wire(self) -> None:
         """What the producer considers in-bounds must actually serialise."""
         from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
 
-        wire = BrainstormHudView(
-            screen="agent_terminal", state="running", topic="t",
-            collaborators=["hermes"],
+        wire = AgentTerminalHudView(
+             state="running", focus="t",
+            lanes=["hermes"],
             activity="z" * BRAINSTORM_ACTIVITY_MAX,
-            terminal_state="running",
         ).to_wire()
-        assert len(wire["brainstorm"]["activity"]) == BRAINSTORM_ACTIVITY_MAX
+        assert len(wire["terminal"]["activity"]) == BRAINSTORM_ACTIVITY_MAX
 
     def test_the_bound_holds_scrollback_beyond_the_renderer_window(self) -> None:
         """The wire now carries SCROLLBACK; the renderer windows it. The
@@ -495,6 +491,7 @@ class TestTheTranscriptFillsTheGlass:
         import re
         from pathlib import Path
         from joat.core.protocol import (
+    AgentTerminalHudView,
             BRAINSTORM_ACTIVITY_MAX, BRAINSTORM_ROW_COLUMNS,
             BRAINSTORM_SCROLLBACK_ROWS,
         )
@@ -798,15 +795,15 @@ class TestTheTerminalHandoffSurvivesStreaming:
         await sink.turn("codex (proposer)")
         await sink.chunk("GIST: first.")
         await sink.show_terminal()
-        assert transport.sent[-1].screen == "agent_terminal"
+        assert isinstance(transport.sent[-1], AgentTerminalHudView)
 
         await sink.chunk(" more words arrive")
-        assert transport.sent[-1].screen == "agent_terminal", (
+        assert isinstance(transport.sent[-1], AgentTerminalHudView), (
             "a streaming token stole the surface back from the terminal"
         )
 
         await sink.replay()
-        assert transport.sent[-1].screen == "brainstorm"
+        assert isinstance(transport.sent[-1], BrainstormHudView)
         assert "more words arrive" in transport.sent[-1].activity
 
     async def test_the_verdict_still_lands_while_handed_off(self) -> None:
@@ -818,7 +815,7 @@ class TestTheTerminalHandoffSurvivesStreaming:
         await sink.show_terminal()
         await sink.close("converged (agreement 0.90, round 1)")
 
-        assert transport.sent[-1].screen == "brainstorm"
+        assert isinstance(transport.sent[-1], BrainstormHudView)
         assert "converged" in transport.sent[-1].activity
 
 

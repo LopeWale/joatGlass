@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from joat.core.protocol import BrainstormAction, BrainstormHudView, Hello
+from joat.core.protocol import AgentTerminalHudView, BrainstormAction, BrainstormHudView, Hello
 from joat.services.brainstorm_acceptance import (
     G2GestureBrainstormAcceptanceSession,
     InAppBrainstormAcceptance,
@@ -57,7 +57,7 @@ class FakeTransport:
         event: dict[str, str] = {
             "type": "visual_frame",
             "kind": "brainstorm",
-            "surface": view.screen,
+            "surface": "brainstorm" if isinstance(view, BrainstormHudView) else "agent_terminal",
             "state": view.state,
             "sha256": digest,
         }
@@ -189,7 +189,7 @@ async def test_in_app_controller_streams_hermes_to_hud_but_retains_only_frame_ha
     assert all(view.state == "running" for view in streamed)
     transport.action("show_terminal", "brainstorm", "right")
     await _wait_for(lambda: len(transport.sent) == 6)
-    assert transport.sent[-1].screen == "agent_terminal"
+    assert isinstance(transport.sent[-1], AgentTerminalHudView)
     transport.action("show_brainstorm", "agent_terminal", "ring")
     await _wait_for(lambda: len(transport.sent) == 8)
     transport.emit_hello(new_connection=True)
@@ -809,6 +809,6 @@ async def test_a_spoken_stop_still_paints_the_cancelled_frame(
     with pytest.raises(asyncio.CancelledError):
         await run_task
     await _wait_for(lambda: any(
-        frame.screen == "brainstorm" and frame.state == "cancelled"
+        isinstance(frame, BrainstormHudView) and frame.state == "cancelled"
         for frame in transport.sent
     ))

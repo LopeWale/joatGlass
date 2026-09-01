@@ -324,12 +324,7 @@ class TestGlassesFirstTopicCapture:
         engine = FakeEngine("compare a home mini with this laptop")
         entered = asyncio.Event()
         topics: list[str] = []
-        capture = BrainstormHudView(
-            screen="brainstorm", state="topic_capture", topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity="Your next spoken phrase starts this Brainstorm.",
-            terminal_state="ready", no_tools_checked=True,
-        )
+        capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.")
         sessions = SessionManager(
             HudWriter(transport),
             lambda topic: topics.append(topic) or HeldTopicSession(entered),
@@ -358,12 +353,7 @@ class TestGlassesFirstTopicCapture:
         engine = FakeEngine("a phone-originated topic")
         entered = asyncio.Event()
         topics: list[str] = []
-        capture = BrainstormHudView(
-            screen="brainstorm", state="topic_capture", topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity="Your next spoken phrase starts this Brainstorm.",
-            terminal_state="ready", no_tools_checked=True,
-        )
+        capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.")
         sessions = SessionManager(
             HudWriter(transport),
             lambda topic: topics.append(topic) or HeldTopicSession(entered),

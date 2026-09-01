@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
-from joat.core.protocol import BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
+from joat.core.protocol import AgentTerminalHudView, BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
 from joat.channels.cards import Card, CardLog, Urgency
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
@@ -101,7 +101,7 @@ class TestDebateSession:
         ).run()
 
         frames = brainstorm_frames(transport)
-        assert frames[0].screen == "brainstorm"
+        assert isinstance(frames[0], BrainstormHudView)
         assert frames[0].state == "running"
         assert frames[0].topic == "plan the week"
         assert frames[0].collaborators == ["codex", "claude"]
@@ -336,16 +336,7 @@ class TestSessionManager:
 
     async def test_glasses_begin_action_arms_and_consumes_the_next_topic(self) -> None:
         transport = SinkTransport()
-        capture = BrainstormHudView(
-            screen="brainstorm",
-            state="topic_capture",
-            topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity="Your next spoken phrase starts this Brainstorm.",
-            terminal_state="ready",
-            endpoint_host="home-mac.example-tailnet.ts.net",
-            no_tools_checked=True,
-        )
+        capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.")
         entered = asyncio.Event()
         started: list[str] = []
 
@@ -360,15 +351,7 @@ class TestSessionManager:
         manager = SessionManager(
             HudWriter(transport),
             lambda topic: started.append(topic) or HeldSession(),
-            topic_capture_view=lambda armed: capture if armed else BrainstormHudView(
-                screen="brainstorm",
-                state="ready",
-                topic="Ready for a question",
-                collaborators=capture.collaborators,
-                activity="Tap to choose a question, then speak.",
-                terminal_state="ready",
-                no_tools_checked=True,
-            ),
+            topic_capture_view=lambda armed: capture if armed else BrainstormHudView(state="ready", topic="Ready for a question", collaborators=capture.collaborators, activity="Tap to choose a question, then speak."),
         )
 
         manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
@@ -385,24 +368,25 @@ class TestSessionManager:
         assert started == ["compare a hosted Mac brain with a local one"]
         await manager.close(timeout_s=0.1)
 
-    async def test_brainstorm_requires_hermes_and_recovers_on_the_terminal_surface(self) -> None:
+    async def test_an_unavailable_brainstorm_starts_nothing_by_voice_or_tap(self) -> None:
         """Neither a spoken command nor a tap may silently use local seats."""
         transport = SinkTransport()
-        terminal_recovery = BrainstormHudView(
-            screen="agent_terminal",
-            state="approval_required",
-            topic="Hermes Agent Terminal",
+        # A BRAINSTORM frame, naming the real blocker. This fixture used to
+        # be a terminal recovery card reading "Hermes is required for
+        # Brainstorm" — copy the next test exists to disprove. The subject
+        # here is brainstorm_available=False (a missing CLI seat), which has
+        # nothing to do with Hermes and must never route the wearer there.
+        unavailable = BrainstormHudView(
+            state="unavailable",
+            topic="Brainstorm",
             collaborators=[],
-            activity="Hermes is required for Brainstorm. Tap to retry.",
-            terminal_state="approval_required",
-            terminal_reason="Approve the JOAT device in OpenClaw, then tap retry.",
-            no_tools_checked=False,
+            activity="codex CLI missing on the Mac — install to enable.",
         )
         factory_topics: list[str] = []
         manager = SessionManager(
             HudWriter(transport),
             lambda topic: factory_topics.append(topic) or None,
-            topic_capture_view=lambda _armed: terminal_recovery,
+            topic_capture_view=lambda _armed: unavailable,
             brainstorm_available=lambda: False,
         )
 
@@ -413,13 +397,13 @@ class TestSessionManager:
         await asyncio.sleep(0)
         assert factory_topics == []
         assert not manager.topic_capture_armed
-        assert brainstorm_frames(transport) == [terminal_recovery]
+        assert brainstorm_frames(transport) == [unavailable]
 
         manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
         await asyncio.sleep(0)
         assert factory_topics == []
         assert not manager.topic_capture_armed
-        assert brainstorm_frames(transport) == [terminal_recovery, terminal_recovery]
+        assert brainstorm_frames(transport) == [unavailable, unavailable]
 
     async def test_brainstorm_menu_opens_regardless_of_hermes(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         """Brainstorm's seats are the Codex and Claude CLIs.
@@ -445,7 +429,6 @@ class TestSessionManager:
         await router.open("Brainstorm")
 
         [frame] = brainstorm_frames(transport)
-        assert frame.screen == "brainstorm"          # not a Hermes recovery card
         assert "Hermes" not in frame.activity
         assert frame.collaborators == ["Codex", "Claude"]
 
@@ -454,21 +437,13 @@ class TestSessionManager:
         await router.open("Brainstorm")
 
         running = brainstorm_frames(transport)[-1]
-        assert running.screen == "brainstorm"
+        assert isinstance(running, BrainstormHudView)
         assert "Hermes" not in running.activity
 
     async def test_topic_capture_deduplicates_taps_and_clears_on_cancel_or_reconnect(self) -> None:
         transport = SinkTransport()
-        capture = BrainstormHudView(
-            screen="brainstorm", state="topic_capture", topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.",
-            terminal_state="ready", no_tools_checked=True,
-        )
-        ready = BrainstormHudView(
-            screen="brainstorm", state="ready", topic="Ready for a question",
-            collaborators=capture.collaborators, activity="Tap to choose a question, then speak.",
-            terminal_state="ready", no_tools_checked=True,
-        )
+        capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.")
+        ready = BrainstormHudView(state="ready", topic="Ready for a question", collaborators=capture.collaborators, activity="Tap to choose a question, then speak.")
         manager = SessionManager(
             HudWriter(transport),
             lambda _topic: None,
@@ -491,21 +466,11 @@ class TestSessionManager:
 
     async def test_topic_capture_consumes_a_phrase_when_collaborators_cannot_start(self) -> None:
         transport = SinkTransport()
-        ready = BrainstormHudView(
-            screen="brainstorm", state="ready", topic="Ready for a question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity="Tap to choose a question, then speak.", terminal_state="unavailable",
-            no_tools_checked=True,
-        )
+        ready = BrainstormHudView(state="ready", topic="Ready for a question", collaborators=["Codex", "Claude", "Hermes"], activity="Tap to choose a question, then speak.")
         manager = SessionManager(
             HudWriter(transport),
             lambda _topic: None,
-            topic_capture_view=lambda armed: BrainstormHudView(
-                screen="brainstorm", state="topic_capture", topic="Speak your question",
-                collaborators=ready.collaborators,
-                activity="Your next spoken phrase starts this Brainstorm.",
-                terminal_state="unavailable", no_tools_checked=True,
-            ) if armed else ready,
+            topic_capture_view=lambda armed: BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=ready.collaborators, activity="Your next spoken phrase starts this Brainstorm.") if armed else ready,
         )
 
         manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
@@ -518,12 +483,7 @@ class TestSessionManager:
 
     async def test_topic_capture_keeps_its_promise_for_glasses_audio_only(self) -> None:
         transport = SinkTransport()
-        capture = BrainstormHudView(
-            screen="brainstorm", state="topic_capture", topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity="Your next spoken phrase starts this Brainstorm.",
-            terminal_state="ready", no_tools_checked=True,
-        )
+        capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.")
         started: list[str] = []
         manager = SessionManager(
             HudWriter(transport),

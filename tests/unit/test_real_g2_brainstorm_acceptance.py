@@ -295,21 +295,18 @@ async def test_capture_drives_the_real_gateway_action_sequence_without_content(
         }))
         initial = json.loads(await socket.recv())
         assert initial["kind"] == "brainstorm.view"
-        assert initial["brainstorm"]["screen"] == "brainstorm"
         await socket.send(json.dumps({"kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("a"))}))
         await socket.send(json.dumps({"kind": "brainstorm.action", "action": "show_terminal"}))
         await socket.send(json.dumps({"kind": "g2.diagnostic", "event": _action("show_terminal", "brainstorm")}))
 
         terminal = json.loads(await socket.recv())
-        assert terminal["kind"] == "brainstorm.view"
-        assert terminal["brainstorm"]["screen"] == "agent_terminal"
+        assert terminal["kind"] == "agent_terminal.view"
         await socket.send(json.dumps({"kind": "g2.diagnostic", "event": _frame("agent_terminal", _hash("b"))}))
         await socket.send(json.dumps({"kind": "brainstorm.action", "action": "show_brainstorm"}))
         await socket.send(json.dumps({"kind": "g2.diagnostic", "event": _action("show_brainstorm", "agent_terminal")}))
 
         returned = json.loads(await socket.recv())
         assert returned["kind"] == "brainstorm.view"
-        assert returned["brainstorm"]["screen"] == "brainstorm"
         await socket.send(json.dumps({"kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("c"))}))
         summary = await task
     finally:
@@ -421,7 +418,7 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         }))
 
         terminal = json.loads(await socket.recv())
-        assert terminal["brainstorm"]["screen"] == "agent_terminal"
+        assert terminal["kind"] == "agent_terminal.view"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("agent_terminal", _hash("f")),
         }))
@@ -431,7 +428,7 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         }))
 
         returned = json.loads(await socket.recv())
-        assert returned["brainstorm"]["screen"] == "brainstorm"
+        assert returned["kind"] == "brainstorm.view"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("0")),
         }))
