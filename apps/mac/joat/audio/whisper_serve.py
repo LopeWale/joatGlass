@@ -18,6 +18,7 @@ Probe-verified server facts this adapter depends on:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import io
 import json
 import logging
@@ -80,21 +81,51 @@ def _existing_model_dir(preferred: Path, model: str) -> Path:
     return preferred
 
 
+ECHO_RUN_CHARS = 24
+"""How much verbatim prompt an echo must carry to be called one."""
+
+ECHO_COVERAGE = 0.6
+"""...and how much of the TRANSCRIPT that run must account for."""
+
+
 def is_prompt_echo(text: str, prompt: str | None) -> bool:
     """True when STT 'heard' its own vocabulary-bias prompt.
 
     Whisper hallucinates its initial prompt on near-silent audio — observed
     live: the transcript 'The wearer addresses the assistant as JOAT.' is
-    OUR bias text, and the assistant then answered it. Normalized substring
-    match, gated to ≥15 chars so a genuine short utterance ('JOAT') — whose
-    words also appear in the prompt — is never eaten.
+    OUR bias text, and the assistant then answered it.
+
+    Matched on the longest run of prompt shared with the transcript, not on
+    whole-string containment. Containment failed the moment Whisper added a
+    word: "… as JOAT. Thank you." is not a substring of the prompt, and
+    "Thank you." is one of Whisper's most common hallucinations on the
+    near-silent audio that produces prompt echo in the first place. Such an
+    echo then WAKES the assistant, because our bias text contains the wake
+    word, and it answers its own prompt.
+
+    Two thresholds, both measured against real prompt text rather than
+    chosen: echoes share 34-47 characters with the prompt while genuine
+    wearer speech shares at most 16, so 24 separates them with room either
+    side. Coverage is what protects a long utterance that merely quotes
+    prompt-shaped English — the run must also account for most of what was
+    said, or it is speech that mentions the assistant, not the prompt
+    coming back.
     """
     if not prompt or not text:
         return False
+
     def norm(s: str) -> str:
-        return "".join(c for c in s.lower() if c.isalnum() or c == " ").strip()
-    t_norm = " ".join(norm(text).split())
-    return len(t_norm) >= 15 and t_norm in " ".join(norm(prompt).split())
+        return " ".join(
+            "".join(c for c in s.lower() if c.isalnum() or c == " ").split()
+        )
+
+    heard, bias = norm(text), norm(prompt)
+    if not heard or not bias:
+        return False
+    run = difflib.SequenceMatcher(None, heard, bias).find_longest_match(
+        0, len(heard), 0, len(bias)
+    ).size
+    return run >= ECHO_RUN_CHARS and run / len(heard) >= ECHO_COVERAGE
 
 
 def wav_bytes(pcm: bytes) -> bytes:

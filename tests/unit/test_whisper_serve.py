@@ -373,3 +373,65 @@ class TestWhereTheWeightsLive:
 
         assert ws._existing_model_dir(tmp_path / "prefer", "large-v3_turbo") \
             == tmp_path / "prefer"
+
+
+class TestPromptEchoSurvivesWhisperFiller:
+    """An echo that wakes the assistant is worse than a lost utterance.
+
+    Our bias text CONTAINS the wake word, so an undetected echo does not
+    merely pass through — it is treated as the wearer addressing JOAT,
+    and the assistant answers its own prompt. The docstring records that
+    happening live.
+
+    Whole-string containment caught the clean echo and nothing else. It
+    failed the moment Whisper added a word, and "Thank you." is among its
+    most common hallucinations on exactly the near-silent audio that
+    produces prompt echo.
+    """
+
+    PROMPT = "JOAT. The wearer addresses the assistant as JOAT."
+
+    def test_an_echo_with_whisper_filler_is_still_an_echo(self) -> None:
+        from joat.audio.whisper_serve import is_prompt_echo
+
+        for heard in (
+            "The wearer addresses the assistant as JOAT. Thank you.",
+            "Okay. The wearer addresses the assistant as JOAT.",
+            "The wearer addresses the assistant as JOAT and",
+            "Thanks for watching! The wearer addresses the assistant as JOAT.",
+        ):
+            assert is_prompt_echo(heard, self.PROMPT), heard
+
+    def test_the_clean_echo_is_still_caught(self) -> None:
+        from joat.audio.whisper_serve import is_prompt_echo
+
+        for heard in (
+            "The wearer addresses the assistant as JOAT.",
+            "the wearer addresses the assistant",
+            "JOAT. The wearer addresses the assistant as JOAT.",
+        ):
+            assert is_prompt_echo(heard, self.PROMPT), heard
+
+    def test_genuine_speech_is_never_eaten(self) -> None:
+        """Including speech that mentions the assistant, and one long
+        utterance that quotes prompt-shaped English on purpose — coverage
+        is what keeps that from being mistaken for the prompt returning."""
+        from joat.audio.whisper_serve import is_prompt_echo
+
+        for heard in (
+            "JOAT",
+            "JOAT what is the weather",
+            "JOAT the wearer needs a reminder",
+            "JOAT remind me to address the team",
+            "JOAT who is my assistant",
+            "JOAT the assistant should wait",
+            "JOAT tell the wearer addresses the assistant keeps for my "
+            "meeting tomorrow",
+        ):
+            assert not is_prompt_echo(heard, self.PROMPT), heard
+
+    def test_no_prompt_configured_eats_nothing(self) -> None:
+        from joat.audio.whisper_serve import is_prompt_echo
+
+        assert not is_prompt_echo("anything at all here", None)
+        assert not is_prompt_echo("", self.PROMPT)
