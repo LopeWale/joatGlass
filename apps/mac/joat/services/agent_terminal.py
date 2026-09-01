@@ -26,6 +26,24 @@ from typing import Protocol
 log = logging.getLogger(__name__)
 
 Announce = Callable[[str], Awaitable[None]]
+Paint = Callable[["TerminalFrame"], Awaitable[None]]
+
+HUD_LINES = 7
+"""Rows the glasses' terminal transcript area actually fits."""
+
+
+@dataclass(frozen=True)
+class TerminalFrame:
+    """What the lenses should show for the terminal, right now.
+
+    Deliberately just strings and a state word: the host decides how to
+    put it on the wire, so this module never learns the HUD protocol.
+    """
+
+    topic: str
+    state: str
+    lanes: list[str]
+    lines: list[str]
 
 
 class TerminalAgentLike(Protocol):
@@ -97,11 +115,13 @@ class AgentTerminalRoster:
         self,
         lanes: Sequence[tuple[str, TerminalAgentLike]],
         announce: Announce | None = None,
+        paint: Paint | None = None,
     ) -> None:
         self._lanes: dict[str, TerminalLane] = {
             name: TerminalLane(name=name, agent=agent) for name, agent in lanes
         }
         self._announce = announce
+        self._paint = paint
         self._focus: str | None = next(iter(self._lanes), None)
         self._discovered: list[dict[str, str]] = []
         """Rows from the last discover(); what 'resume <label>' can name."""
@@ -127,6 +147,41 @@ class AgentTerminalRoster:
                 if lane.approvals else ""
             rows.append(f"{mark} {lane.name}: {lane.state}{waiting} · {last}")
         return "\n".join(rows)
+
+    def frame(self) -> TerminalFrame:
+        """The dense terminal view: what is running, and its newest output.
+
+        Tail-anchored — the roadmap asks for a dense newest-first terminal
+        tail, and on a 7-row area the honest way to show "newest" is to
+        keep the bottom pinned to now.
+        """
+        lane = self._lanes.get(self._focus or "")
+        if lane is None:
+            return TerminalFrame(
+                topic="Agent Terminal", state="unavailable",
+                lanes=[], lines=["No terminal sessions on this Mac."],
+            )
+        header = f"{lane.name} · {lane.state}"
+        if lane.approvals:
+            header += f" · {len(lane.approvals)} waiting"
+        body = list(lane.tail)[-(HUD_LINES - 1):] or ["no output yet"]
+        state = (
+            "running" if lane.busy
+            else "approval_required" if lane.approvals
+            else "blocked" if lane.last_error
+            else "ready"
+        )
+        return TerminalFrame(
+            topic=header, state=state,
+            lanes=list(self._lanes)[:3], lines=body,
+        )
+
+    async def repaint(self) -> None:
+        if self._paint is not None:
+            try:
+                await self._paint(self.frame())
+            except Exception:  # a dead surface must not kill the work
+                pass
 
     def focus(self, name: str) -> bool:
         """Switch focus. Never touches any lane's running work."""
@@ -195,6 +250,9 @@ class AgentTerminalRoster:
             await self._narrate(lane, f"{lane.name} ▸ failed — {lane.last_error}")
 
     async def _narrate(self, lane: TerminalLane, line: str) -> None:
+        # Every narrated line is also a frame change: the glasses show the
+        # tail, not one sentence that scrolls away.
+        await self.repaint()
         if self._announce is not None and lane.name == self._focus:
             try:
                 await self._announce(line)
@@ -291,8 +349,11 @@ class AgentTerminalRoster:
         lane.approvals.append((approval_id, kind, summary))
         line = f"[approval] {kind}: {summary or approval_id} — say 'terminal approve' or 'terminal deny'"
         lane.tail.append(line)
+        loop = asyncio.get_running_loop()
         if self._announce is not None and lane.name == self._focus:
-            asyncio.get_running_loop().create_task(self._narrate(lane, line))
+            loop.create_task(self._narrate(lane, line))
+        else:
+            loop.create_task(self.repaint())
 
     def approvals_view(self) -> str:
         lane = self._lanes.get(self._focus or "")
