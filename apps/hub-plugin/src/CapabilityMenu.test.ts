@@ -528,7 +528,8 @@ describe('CapabilityMenu', () => {
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        containerName: 'capmenu', eventType: 0, selectedIndex: 6, selectedName: 'Agent Terminal',
+        // Agent Terminal is index 5 in the 8-row menu since Notifications left.
+        containerName: 'capmenu', eventType: 0, selectedIndex: 5, selectedName: 'Agent Terminal',
       },
     });
   });
