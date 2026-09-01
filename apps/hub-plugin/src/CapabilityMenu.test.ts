@@ -123,9 +123,10 @@ describe('CapabilityMenu', () => {
     const { menu, sidebars, lists, operations } = rig();
     await menu.toggle();
     expect(sidebars[0]).toEqual([
+      // Notifications is absent on purpose: the resting dashboard shows
+      // the cards themselves, so a page to re-read them is pure waste.
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
-      'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Settings',
+      'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
     ]);
     expect(lists).toEqual([]);
     expect(operations).toEqual(['sidebar']);
@@ -377,8 +378,9 @@ describe('CapabilityMenu', () => {
     try {
       const { menu, lists, listOptions } = rig();
       await menu.toggle();
-      for (let index = 0; index < 5; index += 1) {
-        menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // QuickNotes
+      // QuickNotes is row 4 now that Notifications is gone from the menu.
+      for (let index = 0; index < 4; index += 1) {
+        menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
       }
       menu.handleClick();
       await vi.advanceTimersByTimeAsync(0);
@@ -487,9 +489,10 @@ describe('CapabilityMenu', () => {
     await menu.toggle();
 
     expect(sidebars[0]).toEqual([
+      // Notifications is absent on purpose: the resting dashboard shows
+      // the cards themselves, so a page to re-read them is pure waste.
       'Messages', 'Planning', 'Navigation', 'Brainstorm',
-      'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-      'Settings',
+      'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
     ]);
     for (let index = 0; index < 2; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
@@ -513,10 +516,11 @@ describe('CapabilityMenu', () => {
   it('scrolls one continuous wearable list to Agent Terminal without a More submenu', async () => {
     const { menu, selections, lists, listOptions, sent } = rig();
     await menu.toggle();
-    for (let index = 0; index < 6; index += 1) {
+    // Agent Terminal moved up one row when Notifications left the menu.
+    for (let index = 0; index < 5; index += 1) {
       menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     }
-    expect(selections).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(selections).toEqual([1, 2, 3, 4, 5]);
     expect(menu.handleClick()).toBe(true);
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent agent terminal…']);

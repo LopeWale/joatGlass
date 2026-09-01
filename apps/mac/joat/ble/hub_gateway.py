@@ -203,6 +203,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self.device: Device | None = None
         self.hello: Hello | None = None
         self.location: Location | None = None
+        self._location_cbs: list[Callable[[Location], None]] = []
         self._location_received_at_s: float | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -343,6 +344,14 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
     def on_device(self, callback: DeviceCallback) -> None:
         self._device_cbs.append(callback)
+
+    def on_location(self, callback: Callable[[Location], None]) -> None:
+        """Observe wearer positions the phone already sends.
+
+        The dashboard's weather rides on this: the Even Hub SDK exposes no
+        weather API, so the Mac resolves conditions for this position.
+        """
+        self._location_cbs.append(callback)
 
     def on_imu(self, callback: ImuCallback) -> None:
         """Raw IMU samples — only flowing while trace mode is on."""
@@ -1065,6 +1074,14 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                         and not location_pending.future.done()
                     ):
                         location_pending.future.set_result(message)
+                # The resting dashboard's weather comes from here: the SDK
+                # has no weather API, so the Mac resolves it for the
+                # position the phone already sends.
+                for location_cb in self._location_cbs:
+                    try:
+                        location_cb(message)
+                    except Exception:
+                        log.warning("location observer failed", exc_info=False)
                 if first:
                     log.info("wearer location known (±%sm)",
                              int(message.accuracy) if message.accuracy else "?")

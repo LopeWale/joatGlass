@@ -1047,11 +1047,15 @@ class DebateSession(Session):
     async def _verify_visibly(self, label: str, text: str) -> tuple[bool, str]:
         assert self._gate is not None
         citations = parse_citations(text)
-        await self._sink.turn("VERIFIER")
         if not citations:
-            await self._sink.chunk("no sources cited\n")
+            # Silent. Most turns in a thinking session cite nothing — the
+            # wearer is working an idea out loud, not writing a paper — and
+            # painting "VERIFIER > no sources cited" under every one of them
+            # spent a row per turn to report that nothing happened. The
+            # summary still records it; the lens is for the discussion.
             self._verify_summary.append(f"{label}: no citations")
             return True, ""
+        await self._sink.turn("VERIFIER")
         verdict = await self._gate.verify(citations, prose=text)
         marks = {
             CitationStatus.VERIFIED: "OK",
@@ -1060,7 +1064,9 @@ class DebateSession(Session):
         }
         for cv in verdict.citations:
             await self._sink.chunk(f"[{cv.citation_id}] {marks[cv.status]} — {cv.reason}\n")
-        outcome = "PASS" if verdict.passed else "DENIED — repair requested"
+        # Words the wearer already uses. "DENIED — repair requested" is this
+        # codebase talking to itself; they asked what our vocabulary meant.
+        outcome = "sources check out" if verdict.passed else "sources don't hold up"
         await self._sink.chunk(outcome + "\n")
         self._verify_summary.append(f"{label}: {outcome} ({len(citations)} citation(s))")
         return verdict.passed, verdict.repair_request

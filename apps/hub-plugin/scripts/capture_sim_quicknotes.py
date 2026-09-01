@@ -34,6 +34,9 @@ STATES = [
     ("m2-messages-conversation", "messages-conversation"),
     ("m3-message-reader", "message-reader"),
     ("m4-messages-compose", "messages-compose"),
+    ("d1-overview-dashboard", "overview"),
+    ("d2-sidebar", "sidebar"),
+    ("n1-guidance-map", "nav-guidance"),
 ]
 
 
@@ -128,7 +131,6 @@ def run_gesture_smoke(out_dir: Path) -> None:
     time.sleep(2.5)
     composite(get("/api/screenshot/glasses"), out_dir / "8-smoke-after-tap.png")
     print("gesture smoke captured")
-    kill_simulator()
 
 
 def main() -> None:
@@ -138,6 +140,13 @@ def main() -> None:
     for name, state in STATES:
         run_state(f"{DEV}?joatVisual={state}", out_dir / f"sim-{name}.png", seen)
     run_gesture_smoke(out_dir)
+    # Leave the workstation in a WORKING state, not a black rectangle: the
+    # last thing a capture run does is put the simulator back on the live
+    # home screen. Killing the simulator (or the dev server behind it) at
+    # the end left the wearer's own window dead and looking broken.
+    launch(f"{DEV}?joatVisual=overview")
+    wait_for_frame()
+    print("simulator left running on the home dashboard")
 
 
 if __name__ == "__main__":

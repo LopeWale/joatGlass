@@ -27,9 +27,20 @@ from ..persistence.actions import (
 log = logging.getLogger(__name__)
 
 Confirm = Callable[..., Awaitable[bool | ConfirmationResult | None]]
-_REPLY = re.compile(r"^reply(?:\s+(?:saying|with))?\s+(?P<body>.+)$", re.IGNORECASE)
+# Whisper punctuates freely on short utterances ("Reply, saying on my way.").
+# Optional commas/colons around the verbs keep the grammar deaf-proof.
+_REPLY = re.compile(
+    r"^(?:reply|respond)[,:]?(?:\s+(?:saying|with)[,:]?)?\s+(?P<body>.+)$",
+    re.IGNORECASE,
+)
+# The conversation footer teaches exactly "say reply" — the bare verb must do
+# something: it arms a short two-turn flow whose next utterance is the body.
+_BARE_REPLY = re.compile(
+    r"^(?:reply|respond)(?:\s+(?:to\s+)?(?:this|that|them|him|her))?$",
+    re.IGNORECASE,
+)
 _NEW_MESSAGE = re.compile(
-    r"^message(?:\s+to)?\s+(?P<recipient>.+?)\s+(?:saying|with)\s+(?P<body>.+)$",
+    r"^message[,:]?(?:\s+to)?\s+(?P<recipient>.+?)[,:]?\s+(?:saying|with)[,:]?\s+(?P<body>.+)$",
     re.IGNORECASE,
 )
 ContactSearch = Callable[[str], list[tuple[str, str]]]
@@ -37,11 +48,21 @@ ContactSearch = Callable[[str], list[tuple[str, str]]]
 # frame is visible. The gateway envelope also has to include that BLE paint.
 CONFIRM_TRANSPORT_SECONDS = 12.0
 MESSAGE_SELECTION_TTL_SECONDS = 120.0
+# A bare "reply" prompt stays armed briefly; the wearer answers in one breath.
+REPLY_PROMPT_TTL_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
 class _MessageSelection:
     thread: MessageThread
+    trace_id: str
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingReply:
+    """A bare "reply" was spoken; the next utterance is the message body."""
+
     trace_id: str
     expires_at: float
 
@@ -77,6 +98,7 @@ class MessageReplyController:
         self._journal = journal
         self._selection_ttl_s = selection_ttl_s
         self._monotonic = monotonic
+        self._pending_reply: _PendingReply | None = None
         self._contact_search = contact_search or ContactResolver().search
         self._selection: _MessageSelection | None = None
         self._compose: _ComposeSelection | None = None
@@ -85,6 +107,7 @@ class MessageReplyController:
     def select(self, thread: MessageThread, trace_id: str) -> None:
         safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
         self._compose = None
+        self._pending_reply = None
         self._selection = _MessageSelection(
             thread=thread,
             trace_id=safe_trace,
@@ -99,6 +122,7 @@ class MessageReplyController:
     def begin_compose(self, trace_id: str) -> None:
         safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
         self._selection = None
+        self._pending_reply = None
         self._compose = _ComposeSelection(
             trace_id=safe_trace,
             expires_at=self._monotonic() + self._selection_ttl_s,
@@ -110,6 +134,7 @@ class MessageReplyController:
         compose = self._compose
         self._selection = None
         self._compose = None
+        self._pending_reply = None
         if selection is not None:
             log.info(
                 "message reply trace=%s stage=selection-cleared reason=%s",
@@ -124,9 +149,12 @@ class MessageReplyController:
             )
 
     async def handle_command(self, text: str) -> str | None:
-        command = text.strip()
-        match = _REPLY.match(command)
-        compose_match = _NEW_MESSAGE.match(command) if match is None else None
+        command = " ".join(text.strip().split())
+        # Terminal punctuation is STT noise for grammar matching; the body a
+        # match captures still keeps its own interior punctuation.
+        stripped = command.rstrip(".,!?").rstrip()
+        match = _REPLY.match(stripped)
+        compose_match = _NEW_MESSAGE.match(stripped) if match is None else None
         if self._draft_lock.locked():
             return "A message reply is already awaiting confirmation."
         async with self._draft_lock:
@@ -138,7 +166,13 @@ class MessageReplyController:
                 if compose_match is not None:
                     return await self._handle_new_message(compose_match)
                 return await self._handle_compose_turn(command)
+            if self._pending_reply is not None:
+                return await self._handle_pending_reply_turn(
+                    command, stripped, match,
+                )
             if match is None and compose_match is None:
+                if _BARE_REPLY.fullmatch(stripped) is not None:
+                    return self._arm_pending_reply()
                 return None
             if match is not None:
                 return await self._handle_reply(match)
@@ -146,7 +180,66 @@ class MessageReplyController:
             return await self._handle_new_message(compose_match)
 
     def is_compose_armed(self) -> bool:
-        return self._compose is not None
+        # A pending bare-reply prompt needs the same first refusal a compose
+        # draft gets: its body may be greeting-shaped ("Good morning").
+        return self._compose is not None or self._pending_reply is not None
+
+    def _arm_pending_reply(self) -> str:
+        """The wearer said exactly what the lens teaches: "reply"."""
+        selection = self._selection
+        if selection is None:
+            return "Select a Messages conversation first."
+        if self._monotonic() > selection.expires_at:
+            self.clear_selection("expired")
+            return (
+                "Message selection expired. "
+                "Open Messages and choose the conversation again."
+            )
+        self._pending_reply = _PendingReply(
+            trace_id=selection.trace_id,
+            expires_at=self._monotonic() + REPLY_PROMPT_TTL_SECONDS,
+        )
+        log.info(
+            "message reply trace=%s stage=reply-prompt-armed", selection.trace_id,
+        )
+        return "Say the reply."
+
+    async def _handle_pending_reply_turn(
+        self,
+        command: str,
+        stripped: str,
+        match: re.Match[str] | None,
+    ) -> str:
+        pending = self._pending_reply
+        assert pending is not None
+        self._pending_reply = None
+        if self._monotonic() > pending.expires_at:
+            return 'Reply prompt expired. Say "reply" again.'
+        if stripped.casefold() in {"cancel", "cancel reply", "never mind"}:
+            log.info(
+                "message reply trace=%s stage=reply-prompt-cancelled",
+                pending.trace_id,
+            )
+            return "Reply cancelled."
+        # A full command spoken while prompted wins over body capture.
+        if match is not None:
+            return await self._handle_reply(match)
+        if not stripped:
+            self._pending_reply = pending
+            return "Say the reply."
+        selection = self._selection
+        if selection is None or self._monotonic() > selection.expires_at:
+            self.clear_selection("expired")
+            return (
+                "Message selection expired. "
+                "Open Messages and choose the conversation again."
+            )
+        return await self._confirm_and_send(
+            selection.thread,
+            selection.trace_id,
+            command,
+            origin_kind="messages.selection",
+        )
 
     async def _handle_compose_turn(self, command: str) -> str:
         compose = self._compose

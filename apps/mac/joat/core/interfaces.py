@@ -94,7 +94,15 @@ class AudioFrameSource(ABC):
 
 
 class NavigationProvider(ABC):
-    """Search/routing boundary; concrete Mapbox/Apple adapters live elsewhere."""
+    """Search/routing boundary; concrete Mapbox/Apple adapters live elsewhere.
+
+    A provider that fails `route` SHOULD raise an exception carrying a
+    ``reason`` attribute — one of "no_route", "too_long", "incomplete", or
+    "unreachable" — whose message is bounded and free of credentials. The
+    session turns that reason into the wearer's next move and logs the
+    message; an exception without ``reason`` is logged by type only, because
+    an unbounded message (a raw HTTP error URL) can leak an access token.
+    """
 
     @abstractmethod
     async def search(

@@ -47,3 +47,4 @@ docs/design/**/joat-glasses-dashboard.html
 .playwright-mcp
 output/
 .claude/ralph-loop.local.md
+apps/hub-plugin/public/dev-map-sample.png

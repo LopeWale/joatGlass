@@ -1441,13 +1441,14 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
  * the status spine. Left of it belongs to the maneuver the wearer must act
  * on; a turn instruction and the shape of the road are different jobs. */
 export const NAVIGATION_MAP_PANEL = {
-  x: 300,
-  y: 52,
-  width: 248,
-  // Stops clear of the progress bar: the route must never look like it
-  // runs into the chrome underneath it.
-  height: 168,
-  padding: 12,
+  x: 296,
+  y: 46,
+  // As large as the frame allows, stopping clear of the progress bar. A
+  // bigger window is not decoration here: it is how many street names the
+  // wearer can actually read.
+  width: 264,
+  height: 194,
+  padding: 8,
 } as const;
 
 export interface NavigationMapProjection {
@@ -2951,11 +2952,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const projection = navigation.map && panel
       ? projectNavigationMapToPanel(navigation.map, panel)
       : undefined;
-    // Two panes, like a car's instrument cluster: the ACT column on the
-    // left (what to do, how far), the SEE column on the right (the shape of
-    // the road and where the wearer is on it). Half a lens of black next to
-    // a single line of text was the waste; the route itself fills it.
-    const actWidth = projection ? 250 : 504;
+    // Two panes: ACT on the left (what to do, how far, how much is left),
+    // SEE on the right (the streets and where the wearer is among them).
+    // Without real streets there is nothing worth splitting the frame for,
+    // so the instruction takes the whole width instead of sharing it with
+    // a bare line on black.
+    const actWidth = projection ? 244 : 504;
 
     context.textBaseline = 'middle';
     context.textAlign = 'left';
@@ -2966,7 +2968,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     this.drawManeuver(context, navigation.maneuver ?? 'continue', 62, 108, BRIGHT);
     context.fillStyle = gray(BRIGHT);
     context.font = `20px ${HUD_FONT}`;
-    context.textAlign = 'left';
     context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 100, 108);
 
     context.fillStyle = gray(BRIGHT);
@@ -2976,16 +2977,25 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `13px ${HUD_FONT}`;
     this.drawWrappedText(context, navigation.secondary, 36, 180, actWidth - 12, 17, 2);
 
-    // The next action stays in the act column whether or not a map exists;
-    // an empty band under the instruction is waste either way.
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, navigation.hint, 36, 214, actWidth - 12);
-    if (projection) this.drawNavigationMap(context, projection, panel);
+    this.fitText(context, navigation.hint, 36, 212, actWidth - 12);
 
+    // Remaining distance and ETA belong in the act column, on the band that
+    // used to sit empty under the instruction — not in a centred footer
+    // that had the whole width to itself for two short facts.
+    context.fillStyle = gray(SUPPORT);
+    context.font = `13px ${HUD_FONT}`;
+    this.fitText(
+      context,
+      `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`,
+      36,
+      238,
+      actWidth - 12,
+    );
+
+    if (projection) this.drawNavigationMap(context, projection, panel);
     this.drawNavigationProgress(context, navigation.progress ?? 0);
-    const footer = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
-    this.drawNavigationFooter(context, footer);
   }
 
   /** The route as a picture: a dim full polyline, a bright travelled-to
@@ -3145,10 +3155,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
   private drawNavigationProgress(context: CanvasRenderingContext2D, progress: number): void {
     const normalized = Math.max(0, Math.min(1, progress));
+    // Along the very bottom, where nothing else competes for the band.
     context.fillStyle = gray(HAIRLINE);
-    context.fillRect(36, 228, 504, 3);
+    context.fillRect(36, 262, 504, 3);
     context.fillStyle = gray(SUPPORT);
-    context.fillRect(36, 228, Math.round(504 * normalized), 3);
+    context.fillRect(36, 262, Math.round(504 * normalized), 3);
   }
 
   private drawWarningMark(
@@ -3354,12 +3365,34 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     } else if (last >= 0 && !lines[last]!.endsWith('Thinking…')) {
       this.thinkingKey = '';
     }
+    // Two-tone rows. Every line used to be drawn at one brightness, so a
+    // screen of discussion was a flat wall of text with no way in — the
+    // wearer reads this to THINK, and could not tell at a glance who was
+    // speaking or where an answer started. The speaker tag is dim and the
+    // words are bright, which is the whole hierarchy a monochrome lens
+    // has. Continuation rows carry no tag and stay bright, so a wrapped
+    // sentence reads as one block instead of restarting.
     lines.forEach((line, index) => {
-      // The SAME width the wrapper used. When the column widened to 548
-      // this literal stayed 504, so a row the wrapper legally filled to
-      // 548 was ellipsized by fitText at 504 — the exact mid-row "…"
-      // the wearer reported, reintroduced by a second copy of a number.
-      this.fitText(context, line, x, y + index * 14, width);
+      const baselineY = y + index * 14;
+      const split = /^([A-Z][A-Z ]{0,14}) > /.exec(line);
+      if (!split) {
+        context.fillStyle = gray(BRIGHT);
+        this.fitText(context, line, x, baselineY, width);
+        return;
+      }
+      const tag = `${split[1]} `;
+      context.fillStyle = gray(CHROME);
+      this.fitText(context, tag, x, baselineY, width);
+      const tagWidth = context.measureText(tag).width;
+      context.fillStyle = gray(BRIGHT);
+      // The SAME width the wrapper used, less the tag already drawn. When
+      // the column widened to 548 this was a literal 504, so a row the
+      // wrapper legally filled was ellipsized mid-word — the exact "…"
+      // the wearer reported, from a second copy of a number.
+      this.fitText(
+        context, line.slice(split[0].length), x + tagWidth, baselineY,
+        width - tagWidth,
+      );
     });
   }
 

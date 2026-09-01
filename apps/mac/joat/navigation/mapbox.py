@@ -32,7 +32,12 @@ from ..core.protocol import (
 
 SEARCH_URL = "https://api.mapbox.com/search/searchbox/v1/forward"
 DIRECTIONS_URL = "https://api.mapbox.com/directions/v5/mapbox"
+# The wire caps the polyline at 4096 points. A long walk legitimately
+# returns more, so the geometry is DOWNSAMPLED to fit rather than thrown
+# away — corridor tracking needs shape, not every vertex. Steps have no such
+# lossless reduction, so an over-long route is reported as too_long.
 MAX_ROUTE_COORDINATES = 4096
+MAX_ROUTE_STEPS = 512
 
 JsonObject = dict[str, object]
 HttpJsonGet = Callable[[str, Mapping[str, str]], Awaitable[JsonObject]]
@@ -42,8 +47,19 @@ NavigationManeuver = Literal[
 ]
 
 
+# Why a route request failed, in terms the wearer can act on. "Route
+# unavailable" for every cause taught the wearer nothing: a dead network, a
+# destination with no walking path, and a route too long for the HUD each
+# need a different next move.
+RouteFailureReason = Literal["no_route", "too_long", "incomplete", "unreachable"]
+
+
 class MapboxNavigationError(RuntimeError):
     """A bounded, token-free provider failure safe to surface internally."""
+
+    def __init__(self, message: str, reason: RouteFailureReason = "unreachable") -> None:
+        super().__init__(message)
+        self.reason: RouteFailureReason = reason
 
 
 class MapboxNavigationProvider(NavigationProvider):
@@ -118,13 +134,23 @@ class MapboxNavigationProvider(NavigationProvider):
         )
         routes = _objects(payload.get("routes"))
         if not routes:
-            raise MapboxNavigationError("Mapbox returned no route")
+            raise MapboxNavigationError(
+                f"Mapbox returned no {profile} route", "no_route",
+            )
         selected = routes[0]
         duration_s = _number(selected.get("duration"))
         geometry = _route_geometry(selected)
         steps = _route_steps(selected)
+        if steps and len(steps) > MAX_ROUTE_STEPS:
+            # Turn-by-turn beyond this is not a HUD experience; say so
+            # instead of failing as though the map service were broken.
+            raise MapboxNavigationError(
+                "Route has more steps than the HUD can carry", "too_long",
+            )
         if duration_s is None or duration_s < 0 or not geometry or not steps:
-            raise MapboxNavigationError("Mapbox returned an incomplete route")
+            raise MapboxNavigationError(
+                "Mapbox returned an incomplete route", "incomplete",
+            )
         digest = hashlib.sha256(
             json.dumps(
                 [[point.latitude, point.longitude] for point in geometry],
@@ -157,11 +183,13 @@ def _blocking_json_get(url: str, params: Mapping[str, str]) -> JsonObject:
         with urllib.request.urlopen(request, timeout=10.0) as response:
             value: object = json.load(response)
     except urllib.error.HTTPError as exc:
-        raise MapboxNavigationError(f"Mapbox HTTP failure ({exc.code})") from None
+        raise MapboxNavigationError(
+            f"Mapbox HTTP failure ({exc.code})", "unreachable",
+        ) from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        raise MapboxNavigationError("Mapbox request failed") from None
+        raise MapboxNavigationError("Mapbox request failed", "unreachable") from None
     if not isinstance(value, dict):
-        raise MapboxNavigationError("Mapbox returned invalid JSON")
+        raise MapboxNavigationError("Mapbox returned invalid JSON", "incomplete")
     return cast(JsonObject, value)
 
 
@@ -206,8 +234,10 @@ def _route_geometry(route: JsonObject) -> list[NavigationCoordinate]:
     if geometry is None or geometry.get("type") != "LineString":
         return []
     raw = geometry.get("coordinates")
-    if not isinstance(raw, list) or len(raw) < 2 or len(raw) > MAX_ROUTE_COORDINATES:
+    if not isinstance(raw, list) or len(raw) < 2:
         return []
+    if len(raw) > MAX_ROUTE_COORDINATES:
+        raw = _downsampled(raw, MAX_ROUTE_COORDINATES)
     points: list[NavigationCoordinate] = []
     for pair in raw:
         point = _coordinate_pair(pair)
@@ -218,6 +248,23 @@ def _route_geometry(route: JsonObject) -> list[NavigationCoordinate]:
             longitude=point.longitude,
         ))
     return points
+
+
+def _downsampled(points: list[object], limit: int) -> list[object]:
+    """Uniformly thin a polyline to `limit` points, keeping both endpoints.
+
+    The corridor tracker measures distance to the line, so an evenly spaced
+    subset preserves the route's shape; the exact vertex count does not
+    matter. Dropping the route entirely (the old behaviour) made every walk
+    longer than a few kilometres fail as "Route unavailable".
+    """
+    if limit < 2 or len(points) <= limit:
+        return points
+    last = len(points) - 1
+    stride = last / (limit - 1)
+    thinned = [points[min(last, round(index * stride))] for index in range(limit - 1)]
+    thinned.append(points[last])
+    return thinned
 
 
 def _route_steps(route: JsonObject) -> list[NavigationRouteStep]:

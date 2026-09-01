@@ -1,5 +1,9 @@
 import type { HudPresenter } from './HudPresenter';
-import type { NavigationHudModel } from './NavigationHud';
+import type {
+  NavigationHudModel,
+  NavigationMapPanelModel,
+  NavigationRoadsModel,
+} from './NavigationHud';
 import { formatNavigationDistance } from './NavigationHud';
 import {
   NavigationProgressTracker,
@@ -16,6 +20,22 @@ import type {
 
 type NavigationViewMessage = Extract<DownlinkMessage, { kind: 'navigation.view' }>;
 type NavigationRouteMessage = Extract<DownlinkMessage, { kind: 'navigation.route' }>;
+type NavigationMapMessage = Extract<DownlinkMessage, { kind: 'navigation.map' }>;
+type NavigationRoadsMessage = Extract<DownlinkMessage, { kind: 'navigation.roads' }>;
+
+/** Decode a Mac-rendered map tile. Isolated so a headless test can supply
+ * its own decoder, and so a host without `Image` degrades to no map rather
+ * than throwing inside the downlink handler. */
+async function decodePngDataUrl(source: string): Promise<CanvasImageSource> {
+  if (typeof Image === 'undefined') throw new Error('no image decoder');
+  const image = new Image();
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error('map decode failed'));
+    image.src = source;
+  });
+  return image;
+}
 type NavigationUplink = Extract<UplinkMessage, {
   kind: 'navigation.action' | 'navigation.route.ack' | 'navigation.state'
     | 'navigation.reroute.request' | 'navigation.origin'
@@ -50,6 +70,10 @@ interface ActiveRoute {
    */
   pendingProgress: Array<{ state: NavigationProgressState; fix: NavigationFix }>;
   progressRendering: boolean;
+  /** Mac-rendered street surroundings for this route, once decoded. */
+  mapPanel?: NavigationMapPanelModel;
+  /** The road network JOAT draws itself, names included. */
+  roads?: NavigationRoadsModel;
 }
 
 /**
@@ -59,6 +83,11 @@ interface ActiveRoute {
 export class NavigationController {
   private current?: NavigationViewMessage;
   private route?: ActiveRoute;
+  /** Streets that arrived before their route did: the Mac fetches the map
+   * as soon as it has an origin, which is before it has a route to send. */
+  private pendingMapPanel?: { sessionId: string; panel: NavigationMapPanelModel };
+  /** Roads that arrived before their route did. */
+  private pendingRoads?: { sessionId: string; roads: NavigationRoadsModel };
   private progressQueue: Promise<void> = Promise.resolve();
   private lifecycleEpoch = 0;
   private presentationOperation = 0;
@@ -151,6 +180,7 @@ export class NavigationController {
       this.sendRouteAck(message, 'rejected');
       return false;
     }
+    const pending = this.pendingMapPanel;
     const route: ActiveRoute = {
       message,
       tracker,
@@ -159,6 +189,10 @@ export class NavigationController {
       pausedForReroute: false,
       pendingProgress: [],
       progressRendering: false,
+      // Adopt streets that arrived while this route was still being fetched.
+      ...(pending?.sessionId === message.sessionId ? { mapPanel: pending.panel } : {}),
+      ...(this.pendingRoads?.sessionId === message.sessionId
+        ? { roads: this.pendingRoads.roads } : {}),
     };
     let started = false;
     try {
@@ -456,7 +490,7 @@ export class NavigationController {
         : state.kind;
     if (signature === route.lastSignature) return;
     if (route.pausedForReroute) return;
-    const navigation = this.progressModel(route, state);
+    const navigation = this.progressModel(route, state, fix);
     const painted = await this.hud.showNavigation(navigation);
     if (this.route !== route) return;
     this.recordCue(navigation.view, painted);
@@ -497,9 +531,72 @@ export class NavigationController {
     }
   }
 
+  /**
+   * Adopt the Mac-rendered surroundings for this session.
+   *
+   * Decoding happens once, here, rather than on every painted frame: the
+   * renderer runs inside the BLE frame budget and must never wait on an
+   * image decode. A failed decode is silent — guidance keeps working with
+   * the route's bare shape, which is strictly better than a black pane.
+   */
+  /** Adopt the road network around the wearer.
+   *
+   * Same ordering trap as the map panel: the Mac fetches these the moment
+   * it has an origin, before it has a route to attach them to, so an
+   * early arrival is held rather than dropped. */
+  installRoads(message: NavigationRoadsMessage): void {
+    const roads: NavigationRoadsModel = {
+      latitude: message.latitude,
+      longitude: message.longitude,
+      roads: message.roads.map((road) => ({
+        name: road.name,
+        weight: road.weight,
+        points: road.points,
+      })),
+    };
+    const route = this.route;
+    if (route && route.message.sessionId === message.sessionId) {
+      route.roads = roads;
+      return;
+    }
+    this.pendingRoads = { sessionId: message.sessionId, roads };
+  }
+
+  async installMapPanel(
+    message: NavigationMapMessage,
+    decode: (source: string) => Promise<CanvasImageSource> = decodePngDataUrl,
+  ): Promise<void> {
+    // The Mac fetches the streets as soon as it has the wearer's origin —
+    // which is BEFORE it has a route to send. Requiring an installed route
+    // here silently dropped almost every tile, so guidance kept falling
+    // back to the bare polyline. Hold it for the route that is coming.
+    let image: CanvasImageSource;
+    try {
+      image = await decode(`data:image/png;base64,${message.png}`);
+    } catch {
+      console.warn('[joat] navigation map panel failed to decode');
+      return;
+    }
+    const panel: NavigationMapPanelModel = {
+      latitude: message.latitude,
+      longitude: message.longitude,
+      zoom: message.zoom,
+      width: message.width,
+      height: message.height,
+      image,
+    };
+    const route = this.route;
+    if (route && route.message.sessionId === message.sessionId) {
+      route.mapPanel = panel;
+      return;
+    }
+    this.pendingMapPanel = { sessionId: message.sessionId, panel };
+  }
+
   private progressModel(
     route: ActiveRoute,
     state: NavigationProgressState,
+    fix?: NavigationFix,
   ): NavigationHudModel {
     const mode = route.message.plan.mode;
     const base = {
@@ -507,6 +604,15 @@ export class NavigationController {
       options: [] as readonly string[],
       selectedIndex: 0,
       mode,
+      // The polyline the Mac already sent is the map. Carrying it into the
+      // HUD model costs nothing on the wire and turns the guidance frame
+      // from a line of text into an actual picture of the route.
+      map: {
+        geometry: route.message.plan.geometry,
+        ...(fix ? { position: { latitude: fix.latitude, longitude: fix.longitude } } : {}),
+        ...(route.mapPanel ? { panel: route.mapPanel } : {}),
+        ...(route.roads ? { roads: route.roads } : {}),
+      },
     };
     if (state.kind === 'guidance') {
       const total = state.progressM + state.remainingDistanceM;

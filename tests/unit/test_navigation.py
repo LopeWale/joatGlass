@@ -807,3 +807,66 @@ class TestNavigationSession:
             if isinstance(message, NavigationRoute)
         ]) == 1
         assert isinstance(transport.sent[-1], NavigationStop)
+
+
+class _FailingProvider(FakeProvider):
+    """A provider whose route failures carry the documented reason code."""
+
+    def __init__(self, candidates: list[NavigationCandidate], reason: str) -> None:
+        super().__init__(candidates)
+        self._reason = reason
+
+    async def route(
+        self, origin: NavigationPoint, destination: NavigationCandidate,
+        mode: NavigationMode,
+    ) -> ProviderRoute:
+        error = RuntimeError("bounded provider failure")
+        setattr(error, "reason", self._reason)
+        raise error
+
+
+class TestRouteFailuresNameTheirCause:
+    """One blind "Route unavailable" taught the wearer nothing. Each cause
+    must name a different next move on the lens."""
+
+    @pytest.mark.parametrize(("reason", "primary", "secondary"), [
+        ("no_route", "No walking route from here", "Try cycling or a closer destination"),
+        ("too_long", "Route too long for the HUD", "Choose a closer destination"),
+        ("unreachable", "Can't reach the map service", "Check this Mac's internet, then retry"),
+        ("incomplete", "Route data was incomplete", "Try again or change destination"),
+    ])
+    async def test_each_failure_reason_gets_actionable_copy(
+        self, reason: str, primary: str, secondary: str,
+    ) -> None:
+        candidate = NavigationCandidate(
+            choice_id="place", label="Place", address="1 Main",
+            point=NavigationPoint(41.95, -87.60),
+        )
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Place", _FailingProvider([candidate], reason), transport,
+            session_id=f"nav-{reason}",
+        )
+        task = asyncio.create_task(session.run())
+        destination = await wait_for(transport, NavigationView)
+        assert isinstance(destination, NavigationView)
+        session.accept_action(action(destination, "confirm_destination"))
+        mode = await wait_for(transport, NavigationView, count=2)
+        assert isinstance(mode, NavigationView)
+        session.accept_action(action(mode, "select_mode", "walking"))
+        origin = await wait_for(transport, NavigationOriginRequest)
+        assert isinstance(origin, NavigationOriginRequest)
+        session.accept_origin(NavigationOrigin(
+            session_id=origin.session_id, request_id=origin.request_id,
+            generation=origin.generation, latitude=41.9, longitude=-87.65,
+        ))
+
+        error = await wait_for(transport, NavigationView, count=5)
+        assert isinstance(error, NavigationView)
+        assert error.navigation.view == "error"
+        assert error.navigation.primary == primary
+        assert error.navigation.secondary == secondary
+        # Every one stays recoverable without leaving the session.
+        assert error.navigation.hint == "tap/say retry · swipe cancel"
+        session.cancel()
+        await task

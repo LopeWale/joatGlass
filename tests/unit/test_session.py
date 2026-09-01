@@ -1164,13 +1164,14 @@ class TestVerifiedDebate:
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         # visible order: turn, verifier deny, repair turn, verifier pass
         assert joined.index("CODEX") < joined.index("FAIL — quote not found")
-        assert joined.index("DENIED") < joined.index("CODEX — repair 1")
+        assert joined.index("sources don't hold up") < joined.index("CODEX — repair 1")
         assert joined.index("CODEX — repair 1") < joined.index("[1] OK")
-        assert "PASS" in joined
+        assert "sources check out" in joined
         # the repair prompt carried the verifier's complaint
         assert any("DENIED — fix [1]" in p for p in prompts[1:])
-        # critic with no citations: verifier says so, does not deny
-        assert "no sources cited" in joined
+        # A cited turn earns a VERIFIER row because something was actually
+        # checked; the uncited critic gets none (see the next test).
+        assert "no sources cited" not in joined
         assert gate.calls == 2
 
     async def test_uncited_turns_flow_straight_through(self) -> None:
@@ -1182,12 +1183,15 @@ class TestVerifiedDebate:
         )
         await session.run()
         assert gate.calls == 0  # nothing to verify
-        # Every G2 paint is a complete rolling terminal tail, so combining
-        # all historical frames would count an earlier verifier row again on
-        # later paints. One live tail must still retain the two distinct
-        # verifier outcomes.
+        # …and the wearer is told NOTHING, because nothing happened. Most
+        # turns in a thinking session cite nothing — the wearer is working
+        # an idea out loud, not writing a paper — and a "VERIFIER > no
+        # sources cited" row under every one of them spent a line per turn
+        # to report a non-event, on the surface whose whole job is showing
+        # the discussion. The run still records it for the synthesis.
         visible_frames = [text for text, _a, _c in hud_texts(transport)]
-        assert max(frame.count("no sources cited") for frame in visible_frames) == 2
+        assert all("no sources cited" not in frame for frame in visible_frames)
+        assert all("VERIFIER" not in frame for frame in visible_frames)
 
 
 class ScriptedJudge(ReplyEngine):

@@ -72,10 +72,13 @@ function isPlanningAnchor(value: unknown): value is number {
 // list. Nothing is hidden behind a second "More" interaction: a wearer can
 // keep scrolling from Messages through every available glasses capability or
 // direct action. The renderer and G2 list limit both accept these 9 rows.
+// Notifications is deliberately NOT here. The resting dashboard already
+// shows the cards themselves — source, age, headline — so a menu row that
+// opens a page to re-read what is on the home screen is a page, a request,
+// and a round trip spent on nothing (the wearer's ruling).
 const CAPABILITIES = [
   'Messages', 'Planning', 'Navigation', 'Brainstorm',
-  'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-  'Settings',
+  'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
 ] as const;
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [

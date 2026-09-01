@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from PIL import Image
 import pytest
 
 from joat.core.navigation import NavigationCandidate, NavigationPoint, NavigationPolicies
+from joat.navigation.map_image import _tone_curve
 from joat.core.protocol import NavigationProgressPolicy
 from joat.navigation.mapbox import (
     DIRECTIONS_URL,
@@ -138,3 +140,77 @@ class TestMapboxNavigationProvider:
                 NavigationCandidate("place", "Place", "1 Main", NavigationPoint(2, 2)),
                 "cycling",
             )
+
+
+def _long_route(points: int, steps: int) -> dict[str, object]:
+    """A Mapbox route payload of arbitrary size, as a real long walk returns."""
+    return {"routes": [{
+        "duration": 4200.0,
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[-87.64 + index * 1e-5, 41.91] for index in range(points)],
+        },
+        "legs": [{"steps": [
+            {"distance": 12.0, "maneuver": {"type": "turn", "modifier": "left",
+                                            "instruction": f"Turn left {index}"}}
+            for index in range(steps)
+        ]}],
+    }]}
+
+
+class TestToneCurve:
+    def test_uniform_dark_tone_stays_black_instead_of_bleeding_to_white(self) -> None:
+        image = Image.new("L", (10, 10), color=200)
+
+        toned = _tone_curve(image)
+
+        assert list(toned.getdata()) == [0] * 100
+
+
+class TestLongRouteHandling:
+    """A real walk returns far more polyline vertices than the wire allows.
+    Throwing the route away made every longer route read "Route unavailable"."""
+
+    async def test_oversized_geometry_is_downsampled_instead_of_rejected(self) -> None:
+        http = FakeHttp([_long_route(9_000, 40)])
+        route = await provider(http).route(
+            NavigationPoint(41.90, -87.63),
+            NavigationCandidate(
+                choice_id="mbx-1", label="Somewhere far",
+                address="Far away", point=NavigationPoint(41.99, -87.50),
+            ),
+            "walking",
+        )
+        assert len(route.plan.geometry) == 4_096
+        # Both endpoints survive: the corridor must still start and end right.
+        assert route.plan.geometry[0].longitude == pytest.approx(-87.64)
+        assert route.plan.geometry[-1].longitude == pytest.approx(-87.64 + 8_999 * 1e-5)
+        # Monotonic along the original polyline — shape preserved, not shuffled.
+        longitudes = [point.longitude for point in route.plan.geometry]
+        assert longitudes == sorted(longitudes)
+
+    async def test_a_route_with_too_many_steps_says_so_precisely(self) -> None:
+        http = FakeHttp([_long_route(100, 600)])
+        with pytest.raises(MapboxNavigationError) as excinfo:
+            await provider(http).route(
+                NavigationPoint(41.90, -87.63),
+                NavigationCandidate(
+                    choice_id="mbx-1", label="Somewhere far",
+                    address="Far away", point=NavigationPoint(41.99, -87.50),
+                ),
+                "walking",
+            )
+        assert excinfo.value.reason == "too_long"
+
+    async def test_no_route_is_reported_as_its_own_reason(self) -> None:
+        http = FakeHttp([{"routes": []}])
+        with pytest.raises(MapboxNavigationError) as excinfo:
+            await provider(http).route(
+                NavigationPoint(41.90, -87.63),
+                NavigationCandidate(
+                    choice_id="mbx-1", label="Across water",
+                    address="No path", point=NavigationPoint(41.99, -87.50),
+                ),
+                "walking",
+            )
+        assert excinfo.value.reason == "no_route"
