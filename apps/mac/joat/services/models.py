@@ -94,9 +94,19 @@ class ModelRegistry:
         return list(self._slots)
 
     def slot(self, key: str) -> ModelSlot | None:
+        """A slot by any name the wearer could reasonably have heard.
+
+        Including its TITLE. `summary()` answers "which models are you
+        using" with "Codex seat: terra · Claude seat: default", so those
+        are the words the wearer has just been taught — and "switch the
+        claude seat to sonnet" was rejected, because only the key and the
+        aliases were matched. A surface that teaches one vocabulary and
+        accepts another sends the wearer away thinking the feature is
+        broken.
+        """
         want = key.strip().lower()
         for s in self._slots:
-            if s.key == want or want in s.aliases:
+            if s.key == want or want in s.aliases or s.title.lower() == want:
                 return s
         return None
 
