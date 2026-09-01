@@ -166,7 +166,6 @@ describe('selected visual geometry', () => {
       overviewMainX: 176,
       overviewTrayY: 168,
       sidebarWidth: 160,
-      sidebarBackdropOffsetX: 78,
       listContentX: 93,
     });
   });
