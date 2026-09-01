@@ -561,14 +561,11 @@ class CapabilityRouter:
             return
         thread = self._message_rows[index - 1]
         if not thread.replyable:
-            await self._send_list(HudList(
-                items=[
-                    "Group replies stay read-only for now.",
-                    "Open Messages on the Mac to reply.",
-                ],
-                title="MESSAGES · READ ONLY",
-                hint=BACK_HINT,
-            ))
+            # A refusal is a receipt: say it over the conversation list the
+            # wearer is reading instead of replacing it and charging them a
+            # Back to return.
+            await self._hud.assistant("Group thread · read-only for now.")
+            await self._hud.settle_assistant()
             return
         try:
             page = await asyncio.to_thread(
@@ -1540,14 +1537,14 @@ class CapabilityRouter:
         if not 0 <= index < len(self._activity_rows):
             return
         item = self._activity_rows[index]
-        await self._show_focus(
-            "ACTIVITY · DETAIL",
-            [
-                self._action_label(item.kind),
-                f"State · {item.state.replace('_', ' ').title()}",
-                f"Action ref · {item.action_id[:8]}",
-            ],
+        # The row already reads "{label} · {state}"; a whole page to repeat it
+        # plus a truncated action id is the page this list was meant to avoid.
+        await self._hud.assistant(
+            f"{self._action_label(item.kind)} · "
+            f"{item.state.replace('_', ' ').title()} · "
+            f"ref {item.action_id[:8]}",
         )
+        await self._hud.settle_assistant()
 
     @staticmethod
     def _action_label(kind: str) -> str:

@@ -5,7 +5,11 @@ import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import type { CapabilityMenu } from './CapabilityMenu';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
-import type { BrainstormAction, BrainstormHudScreen } from './types';
+import {
+  CAPABILITY_MENU_ID_BASE,
+  type BrainstormAction,
+  type BrainstormHudScreen,
+} from './types';
 
 type G2Gesture = Extract<G2TraceEvent, { type: 'gesture' }>['gesture'];
 type G2GestureDelivery = Extract<G2TraceEvent, { type: 'gesture' }>['delivery'];
@@ -491,6 +495,12 @@ export class EventRouter {
   }
 
   private handleMenu(itemID: number): void {
+    // The capability rows ARE the menu now; ids 1-5 below are the retired
+    // internal controls, still routed because a host may show a cached menu.
+    if (itemID >= CAPABILITY_MENU_ID_BASE) {
+      void this.menu.openFromContextualMenu(itemID - CAPABILITY_MENU_ID_BASE);
+      return;
+    }
     switch (itemID) {
       case 1: // Repeat last reply — the Mac holds it
         this.link.send({ kind: 'input', event: { containerName: 'sysmenu', selectedIndex: 1 } });

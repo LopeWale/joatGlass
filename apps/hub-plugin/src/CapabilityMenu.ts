@@ -5,6 +5,7 @@ import type { MacLink } from './MacLink';
 import { parsePlanningMonthTitle } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import {
+  CAPABILITIES,
   VOICE_REQUEST_PREFIX,
   type InputEventPayload,
   type PlanningGridCell,
@@ -72,14 +73,8 @@ function isPlanningAnchor(value: unknown): value is number {
 // list. Nothing is hidden behind a second "More" interaction: a wearer can
 // keep scrolling from Messages through every available glasses capability or
 // direct action. The renderer and G2 list limit both accept these 9 rows.
-// Notifications is deliberately NOT here. The resting dashboard already
-// shows the cards themselves — source, age, headline — so a menu row that
-// opens a page to re-read what is on the home screen is a page, a request,
-// and a round trip spent on nothing (the wearer's ruling).
-const CAPABILITIES = [
-  'Messages', 'Planning', 'Navigation', 'Brainstorm',
-  'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
-] as const;
+// CAPABILITIES now lives in types.ts: the firmware contextual menu offers the
+// same rows, and one list means the two can never drift apart.
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'auto', label: 'Resume mic: instantly' },
@@ -805,6 +800,19 @@ export class CapabilityMenu {
   private async reconnectToMac(): Promise<void> {
     this.link.connect();
     await this.close();
+  }
+
+  /** A row chosen in the firmware contextual menu — the platform's own menu
+   * mechanism, and the wearer's only one. Settings is a local page; every
+   * other row is the same Mac-backed open a menu tap performs. */
+  async openFromContextualMenu(index: number): Promise<void> {
+    const picked = CAPABILITIES[index];
+    if (picked === undefined) return;
+    if (picked === 'Settings') {
+      await this.openSettings();
+      return;
+    }
+    await this.openCapability(picked, index);
   }
 
   private async openCapability(

@@ -921,7 +921,10 @@ async def main() -> None:
         """
         terminal_commands.arm()
         await agent_terminal.repaint()
-        await hud.show("Speak your terminal instruction.")
+        # Must be the band: the repaint above owns the surface, and a plain
+        # HudText is DEFERRED behind a focus page, so this acknowledgement
+        # never reached the lenses at all.
+        await hud.assistant("Listening · speak your terminal instruction.")
 
     async def save_brainstorm_reply(who: str | None) -> str:
         """"Save Claude's reply as a note" — the discussion feeds the notes."""
