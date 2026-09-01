@@ -432,10 +432,15 @@ class TestFrameEconomy:
 
         return AgentTerminalRoster(list(lanes.items()), paint=paint), painted
 
-    async def test_a_background_lane_does_not_repaint_the_lenses(self) -> None:
+    async def test_a_background_lane_does_not_repaint_per_line(self) -> None:
         # An unfocused lane streaming its own output was repainting the
         # focused lane's UNCHANGED frame once per line — pure BLE traffic
         # on a link the wearer needs for what they are watching.
+        #
+        # It is bounded by STATE now, not silenced: the lane's chip may
+        # change (idle → run → ask → err) and the wearer asked to watch
+        # concurrent work, so those transitions must reach the strip. What
+        # must never happen is a frame per LINE.
         r, painted = self._counting(
             work=FakeAgent(gate=asyncio.Event()),
             other=FakeAgent(["one\n", "two\n", "three\n"]),
@@ -443,7 +448,9 @@ class TestFrameEconomy:
         await r.send("background job", name="other")
         await asyncio.sleep(0); await asyncio.sleep(0)
         assert "one" in r.tail("other")   # the work still happened…
-        assert painted == []             # …without touching the lenses
+        assert len(painted) <= 2, (       # …at the cost of transitions only
+            "a background lane may repaint on a state change, never per line"
+        )
 
     async def test_the_focused_lane_still_repaints_per_line(self) -> None:
         r, painted = self._counting(work=FakeAgent(["one\n", "two\n"]))
@@ -949,3 +956,62 @@ class TestReplyRouting:
         answer = await commands.handle_command(
             "terminal send codex's last answer")
         assert answer == "No reply from Codex to send yet."
+
+
+class TestWatchingConcurrentWork:
+    """The wearer's requirement, in their words: "watch concurrent work".
+
+    `_narrate` returned before `repaint()` for any unfocused lane, so a
+    background lane going idle → run → ask → err never repainted anything.
+    The LANES strip — which exists so one glance covers the roster — showed
+    whatever it happened to say when the FOCUSED lane last spoke.
+    """
+
+    def _roster(self):
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        painted: list[int] = []
+
+        async def paint(frame) -> None:
+            painted.append(len(frame.lanes))
+
+        roster = AgentTerminalRoster(
+            [("work", FakeAgent()), ("calendar", FakeAgent())], paint=paint,
+        )
+        return roster, painted
+
+    async def test_a_background_lane_repaints_when_its_state_changes(self) -> None:
+        roster, painted = self._roster()
+        background = roster._lanes["calendar"]
+        assert roster.focused == "work"
+
+        before = len(painted)
+        await roster._narrate(background, "starting up")
+        assert len(painted) > before, (
+            "a background lane's first output changes its chip from idle to "
+            "run, and the strip must show it"
+        )
+
+    async def test_a_background_lane_does_not_repaint_per_line(self) -> None:
+        """The reason the early return existed is still valid: streaming
+        output must not spend a frame per line on a link the wearer needs."""
+        roster, painted = self._roster()
+        background = roster._lanes["calendar"]
+
+        await roster._narrate(background, "first")     # idle -> its state
+        settled = len(painted)
+        for line in ("second", "third", "fourth", "fifth"):
+            await roster._narrate(background, line)
+        assert len(painted) == settled, "no repaint while the chip is unchanged"
+
+    async def test_an_approval_on_a_background_lane_reaches_the_strip(self) -> None:
+        roster, painted = self._roster()
+        background = roster._lanes["calendar"]
+        await roster._narrate(background, "working")
+        settled = len(painted)
+
+        background.approvals.append(("id", "tool", "write a file"))
+        await roster._narrate(background, "waiting")
+        assert len(painted) > settled, (
+            "run -> ask1 is exactly the transition the wearer must not miss"
+        )
