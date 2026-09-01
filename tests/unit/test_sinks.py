@@ -615,3 +615,32 @@ class TestFinishedTurnsCollapseToTheirGist:
             f"row is {len(collapsed)} columns, glass holds {HudSink.ROW_COLUMNS}"
         )
         assert collapsed.endswith("…")
+
+
+class TestTheSilentWaitIsCovered:
+    """A turn is almost entirely silent, so the clock is load-bearing.
+
+    Measured against the real CLIs: codex delivered a 380-character answer
+    in ONE chunk with the first byte at 9.7s of a 10.0s turn, and claude
+    845 characters in two chunks at 10.4s of 10.7s. The wearer spends
+    96-98% of every turn with nothing on the glass but this marker. Both
+    tools buffer; the streaming loop in subprocess_agent already yields
+    each line the moment it arrives.
+
+    Every other test here overrides WAIT_TICK_S to run fast, which leaves
+    the shipped value itself unguarded — and the shipped value is the one
+    the wearer actually experiences.
+    """
+
+    def test_the_tick_reassures_well_inside_one_turn(self) -> None:
+        from joat.services.sinks import HudSink
+
+        assert HudSink.WAIT_TICK_S <= 5.0, (
+            "turns run 10-18s and are silent for nearly all of it; a slower "
+            "tick leaves the wearer unable to tell working from hung, and "
+            "the only remedy they know is cancelling a healthy session"
+        )
+        assert HudSink.WAIT_TICK_S >= 1.0, (
+            "every tick is a BLE page write for a counter nobody reads that "
+            "closely"
+        )
