@@ -65,6 +65,7 @@ class HudSink:
         self._placeholder = ""
         self._wait_task: asyncio.Task[None] | None = None
         self._streaming = False
+        self._handed_to_terminal = False
         self._progress = ""
         self._state = "ready"
 
@@ -201,6 +202,12 @@ class HudSink:
 
     async def _paint(self, state: str) -> None:
         self._state = state
+        if self._handed_to_terminal and state == "running":
+            # The wearer tapped away to the terminal mid-session. The
+            # debate keeps streaming into the transcript, but it must not
+            # snatch the lenses back token by token; closing verdicts
+            # still land so a finished session is never hidden.
+            return
         terminal = self._terminal_status()
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="brainstorm",
@@ -313,6 +320,7 @@ class HudSink:
         footer, not a replacement.
         """
         self._stop_wait_clock()
+        self._handed_to_terminal = False
         # The last live turn is the SYNTHESIS — the thing the wearer sat
         # through the session for. Every other turn collapses; this one
         # stays whole.
@@ -329,12 +337,20 @@ class HudSink:
             await self._paint("settled")
 
     async def show_terminal(self) -> None:
-        """Show Hermes connection truth without stopping the live roundtable."""
+        """Hand the lenses to the terminal without stopping the roundtable.
+
+        Watched live in the simulator: the tap painted this view for ONE
+        frame, then the next streamed token repainted the Brainstorm over
+        it — a working handoff stomped by its own session. While the
+        wearer is looking at the terminal, streaming continues silently
+        and repaints are withheld; replay() is the way back.
+        """
+        self._handed_to_terminal = True
         terminal = self._terminal_status()
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="agent_terminal",
             state="running",
-            topic="Hermes Agent Terminal",
+            topic="hermes",
             collaborators=[],
             activity=self._activity or "JOAT > Brainstorm remains active. Tap to return to the room.",
             terminal_state=str(terminal["state"]),
@@ -344,7 +360,9 @@ class HudSink:
         ))
 
     async def replay(self) -> None:
-        """Repaint the exact last semantic frame after an authenticated reconnect."""
+        """Repaint the last semantic frame (reconnect, or back from the
+        terminal handoff)."""
+        self._handed_to_terminal = False
         if self._topic:
             await self._paint(self._state)
 

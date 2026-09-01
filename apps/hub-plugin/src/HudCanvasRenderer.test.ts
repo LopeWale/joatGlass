@@ -460,10 +460,10 @@ describe('Brainstorm wearable actions', () => {
     }))
       .toEqual({
         summary: 'HERMES > RUNNING · NO TOOLS CHECKED BEFORE SEND',
-        // Leaves a row for LANES between the summary and the divider.
-        dividerY: 127.5,
-        transcriptBaselineY: 148,
-        transcriptLineCapacity: 7,
+        // Dense: header + LANES in two tight rows, 12 transcript rows.
+        dividerY: 78.5,
+        transcriptBaselineY: 92,
+        transcriptLineCapacity: 12,
         showRecoveryDetails: false,
       });
   });
@@ -474,9 +474,9 @@ describe('Brainstorm wearable actions', () => {
     }))
       .toEqual({
         summary: 'HERMES > APPROVAL REQUIRED',
-        dividerY: 177.5,
-        transcriptBaselineY: 199,
-        transcriptLineCapacity: 4,
+        dividerY: 118.5,
+        transcriptBaselineY: 132,
+        transcriptLineCapacity: 9,
         showRecoveryDetails: true,
       });
   });
@@ -497,13 +497,13 @@ describe('Brainstorm wearable actions', () => {
     expect(agentTerminalFocusLabel('')).toBe('HERMES');
   });
 
-  it('discloses both physical cancellation gestures while a session is running', () => {
+  it('discloses scroll, terminal handoff and cancel while a session runs', () => {
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'running',
       terminalState: 'ready',
       noToolsChecked: true,
-    })).toBe('tap: Hermes · swipe down or left x2: cancel');
+    })).toBe('swipe: scroll · tap: terminal · left x2: cancel');
   });
 
   it('keeps the diagnostic test gesture off an ordinary ready Brainstorm', () => {

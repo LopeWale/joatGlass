@@ -18,8 +18,8 @@ import { agentTerminalTranscriptLayout } from './HudCanvasRenderer';
 import type { BrainstormHudModel } from './types';
 
 /** Baselines drawn on this surface, from drawBrainstorm. */
-const SUMMARY_Y = 98;      // 13px — "HERMES > RUNNING · …"
-const SECOND_ROW_Y = 117;  // 10px — LANES when running, HOST when recovering
+const SUMMARY_Y = 58;      // 11px — "HERMES > RUNNING · …"
+const SECOND_ROW_Y = 72;   // 9px — LANES when running, HOST when recovering
 const HINT_Y = 267;        // 9px  — the gesture footer, centred
 const LINE_HEIGHT = 14;    // drawBrainstormTranscript
 const CANVAS_HEIGHT = 288;
@@ -36,9 +36,9 @@ describe('Agent Terminal geometry', () => {
       const layout = layoutFor(state);
 
       // The second row must clear the summary above it, and the divider
-      // must clear that row's descender.
-      expect(SECOND_ROW_Y - SUMMARY_Y).toBeGreaterThanOrEqual(13);
-      expect(layout.dividerY - SECOND_ROW_Y).toBeGreaterThanOrEqual(10);
+      // must clear that row's descender. Dense, but never touching.
+      expect(SECOND_ROW_Y - SUMMARY_Y).toBeGreaterThanOrEqual(11);
+      expect(layout.dividerY - SECOND_ROW_Y).toBeGreaterThanOrEqual(5);
 
       // The transcript starts below the divider, with room for its own
       // ascender rather than sitting on the rule.
@@ -59,6 +59,14 @@ describe('Agent Terminal geometry', () => {
     // them on the conversation, which is the whole point of the surface.
     expect(layoutFor('running').transcriptLineCapacity)
       .toBeGreaterThan(layoutFor('blocked').transcriptLineCapacity);
+  });
+
+  it('spends most of the lens on transcript — the surface’s job', () => {
+    // The wearer's complaint, watching this live: "why are we not able to
+    // use the full screen?" Chrome above the divider must stay under a
+    // third of the canvas on every state that shows work.
+    expect(layoutFor('running').transcriptLineCapacity).toBeGreaterThanOrEqual(12);
+    expect(layoutFor('running').dividerY).toBeLessThan(96);
   });
 
   it('keeps the LANES row clear of the recovery detail it shares a line with', () => {

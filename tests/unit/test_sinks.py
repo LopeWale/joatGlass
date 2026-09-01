@@ -493,23 +493,26 @@ class TestTheTranscriptFillsTheGlass:
         ).to_wire()
         assert len(wire["brainstorm"]["activity"]) == BRAINSTORM_ACTIVITY_MAX
 
-    def test_the_bound_matches_the_renderer_it_was_derived_from(self) -> None:
-        """A number derived from geometry must be re-derived when the
-        geometry moves, so read the geometry from the renderer itself."""
+    def test_the_bound_holds_scrollback_beyond_the_renderer_window(self) -> None:
+        """The wire now carries SCROLLBACK; the renderer windows it. The
+        window must fit inside the bound with real room left to scroll —
+        a bound equal to the window is what made scrolling pointless."""
         import re
         from pathlib import Path
-        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+        from joat.core.protocol import (
+            BRAINSTORM_ACTIVITY_MAX, BRAINSTORM_SCROLLBACK_ROWS,
+        )
 
         renderer = (Path(__file__).resolve().parents[2]
                     / "apps/hub-plugin/src/HudCanvasRenderer.ts").read_text()
-        # The tallest surface: a running Agent Terminal.
         capacity = re.search(r"transcriptLineCapacity:\s*(\d+)", renderer)
         assert capacity is not None, "the transcript layout has moved"
-        lines = int(capacity.group(1))
-        # 504px column at 11px SF Mono (advance 1266/2048 em) = 74 columns.
-        # Rows, their columns, and the newlines between them.
-        assert BRAINSTORM_ACTIVITY_MAX == lines * 74 + (lines - 1), (
-            f"the renderer now draws {lines} lines; re-derive the bound"
+        window = int(capacity.group(1))
+        assert BRAINSTORM_ACTIVITY_MAX == (
+            BRAINSTORM_SCROLLBACK_ROWS * 74 + (BRAINSTORM_SCROLLBACK_ROWS - 1)
+        )
+        assert BRAINSTORM_SCROLLBACK_ROWS >= window * 3, (
+            "scrollback should hold several windows of history"
         )
 
 
@@ -765,3 +768,40 @@ class TestBlankRowsAreNotAffordable:
         rows = transport.sent[-1].activity.splitlines()
         assert "CODEX > said nothing" in rows, rows
         assert not any(r.rstrip().endswith(">") for r in rows), rows
+
+
+class TestTheTerminalHandoffSurvivesStreaming:
+    """Watched live: tapping to the terminal painted it for ONE frame,
+    then the next streamed token repainted the Brainstorm over it. While
+    the wearer is on the terminal view, running repaints are withheld;
+    the closing verdict still lands, and replay() returns to the room."""
+
+    async def test_a_streamed_chunk_does_not_snatch_the_lenses_back(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        await sink.turn("codex (proposer)")
+        await sink.chunk("GIST: first.")
+        await sink.show_terminal()
+        assert transport.sent[-1].screen == "agent_terminal"
+
+        await sink.chunk(" more words arrive")
+        assert transport.sent[-1].screen == "agent_terminal", (
+            "a streaming token stole the surface back from the terminal"
+        )
+
+        await sink.replay()
+        assert transport.sent[-1].screen == "brainstorm"
+        assert "more words arrive" in transport.sent[-1].activity
+
+    async def test_the_verdict_still_lands_while_handed_off(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        await sink.turn("joat (synthesis)")
+        await sink.chunk("AGREED\nShip it.")
+        await sink.show_terminal()
+        await sink.close("converged (agreement 0.90, round 1)")
+
+        assert transport.sent[-1].screen == "brainstorm"
+        assert "converged" in transport.sent[-1].activity

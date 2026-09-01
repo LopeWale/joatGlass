@@ -101,6 +101,7 @@ export class EventRouter {
     private readonly navigation?: NavigationInputOwner,
     private readonly brainstorm?: BrainstormInputOwner,
     private readonly assistantOverlay?: AssistantOverlayInputOwner,
+    private readonly transcriptScroll?: (direction: 'up' | 'down') => boolean,
   ) {}
 
   attach(): void {
@@ -229,17 +230,21 @@ export class EventRouter {
           return;
         }
       }
-      // The full-screen Brainstorm page has no scrollback. A downward swipe
-      // is therefore an explicit, source-independent cancellation fallback
-      // that the official simulator can exercise; left-double remains the
-      // physical shortcut. It is consumed before menu/list routing.
-      if (
-        this.brainstorm?.isActive()
-        && (event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT)
-          === OsEventTypeList.SCROLL_BOTTOM_EVENT
-        && this.brainstorm.handleCancel()
-      ) {
-        return;
+      // The Brainstorm/terminal page HAS scrollback now — the wearer asked
+      // for it in as many words, and a swipe that CANCELLED the session
+      // while they tried to re-read a reply was the harshest possible
+      // answer to "can I scroll?". Swipes page the transcript; cancel is
+      // the deliberate left double-press only.
+      if (this.brainstorm?.isActive()) {
+        const swipe = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
+        if (swipe === OsEventTypeList.SCROLL_TOP_EVENT) {
+          this.transcriptScroll?.('up');
+          return;
+        }
+        if (swipe === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+          this.transcriptScroll?.('down');
+          return;
+        }
       }
       const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
       // The image HUD's invisible capture surface normally receives taps as

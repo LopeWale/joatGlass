@@ -25,6 +25,7 @@ import {
   mergePairingTokens,
   migrateLegacyToken,
 } from './Pairing';
+import { onBackgroundRestore, setBackgroundState } from './BackgroundState';
 import { LocationSessionManager } from './LocationSessionManager';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
@@ -414,6 +415,7 @@ async function boot(): Promise<void> {
     navigation,
     brainstorm,
     hud,
+    (direction) => hud.scrollTranscript(direction),
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -713,6 +715,21 @@ async function boot(): Promise<void> {
   chrome.setMic(audio.isOpen);
   chrome.setBattery(device?.status?.batteryLevel, device?.status?.isCharging === true);
   chrome.start();
+
+  // Backgrounding the phone does not pause this page — the host snapshots it,
+  // builds a NEW headless WebView, reloads this same URL, and replays the
+  // snapshot. A plugin that registers nothing gets '{}' and reboots to its
+  // initial state on every pocket-and-return, dumping the wearer back on
+  // Overview mid-task. Register before the first restore can arrive.
+  setBackgroundState('joat.hud', () => hud.exportBackgroundState());
+  onBackgroundRestore('joat.hud', (saved) => {
+    if (!hud.importBackgroundState(saved)) return;
+    // Repaint ONCE, here — the reloaded page has already drawn its startup
+    // frame, and the restored surface is what the wearer was actually
+    // looking at before the phone went into their pocket.
+    void hud.repaintRestoredSurface();
+  });
+
   if (micStatus.includes('phone mic')) {
     await hud.showText('Using the phone mic — glasses mic unavailable.', ContainerId.Main);
   } else if (worn === false) {
