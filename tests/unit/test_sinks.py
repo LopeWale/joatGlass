@@ -725,3 +725,21 @@ class TestBlankRowsAreNotAffordable:
 
         rows = transport.sent[-1].activity.splitlines()
         assert len(rows) == 4, rows
+
+    async def test_the_synthesis_keeps_no_blank_row_either(self) -> None:
+        """The row that matters most was the one still wasting a row.
+
+        close() retires the last turn UNCOLLAPSED on purpose — it is the
+        answer, not a summary — so an earlier version of this fix, which
+        only cleaned the LIVE row, left a blank line inside the synthesis.
+        AGREED and OPEN are separated by one, so it was there every time.
+        """
+        sink, transport = await self._sink()
+        await sink.turn("joat (synthesis)")
+        await sink.chunk("AGREED\nMeasure before caching.\n\nOPEN\nEviction order.")
+        await sink.close("converged (agreement 0.92, round 2)")
+
+        rows = transport.sent[-1].activity.splitlines()
+        assert [r for r in rows if not r.strip()] == [], rows
+        assert "AGREED" in rows[0] and "OPEN" in rows[2], rows
+        assert rows[-1].startswith("JOAT > converged")

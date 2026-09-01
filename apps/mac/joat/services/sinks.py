@@ -136,17 +136,21 @@ class HudSink:
         """
         rows = list(self._done)
         if self._head or self._body:
-            # A blank line costs a whole row out of seven. Models separate
-            # their GIST from their argument with one, so nearly every live
-            # turn spent 14% of the glass showing nothing. Collapsed here at
-            # RENDER time rather than on the way in, because chunks arrive
-            # mid-sequence while streaming and "\n" + "\n" would slip past
-            # a per-chunk check. The stored transcript, the saved history
-            # and the Markdown export keep the wearer's paragraphs.
-            rows.append(f"{self._head}{_BLANK_LINES.sub(chr(10), self._body)}")
+            rows.append(f"{self._head}{self._body}")
         elif not rows and self._placeholder:
             rows.append(self._placeholder)
-        return self._bounded_transcript("\n".join(rows))
+        # A blank line costs a whole row out of seven. Models separate their
+        # GIST from their argument with one, and the SYNTHESIS separates
+        # AGREED from OPEN the same way — and the synthesis is retired
+        # uncollapsed on purpose, so an earlier version of this that only
+        # cleaned the live row left a blank row in the one piece of content
+        # the wearer sat through the session for.
+        #
+        # Applied to the whole rendering, at RENDER time: chunks arrive
+        # mid-sequence while streaming, so "\n" then "\n" would slip past
+        # any per-chunk check. The stored transcript, the saved history and
+        # the Markdown export keep the wearer's paragraphs.
+        return self._bounded_transcript(_BLANK_LINES.sub(chr(10), "\n".join(rows)))
 
     def _retire_live_turn(self, *, collapse: bool = True) -> None:
         """Move the live turn into the finished rows."""
