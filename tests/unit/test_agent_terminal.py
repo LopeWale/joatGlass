@@ -860,3 +860,27 @@ class TestTheFrameAlwaysFitsTheWire:
             "a tail entry rendered as more than one row"
         )
         assert len(frame.lines) <= HUD_LINES
+
+    def test_a_lane_chip_is_one_row_too(self) -> None:
+        """The neighbour of the transcript fix, and it survived it.
+
+        Lane names come from GATEWAY session keys, which we do not choose
+        — the same provenance that made bounding their width necessary.
+        A newline in one reached `collaborators`, a field the renderer
+        draws on a single line as the LANES row.
+        """
+        from joat.core.protocol import BrainstormHudView
+        from joat.services.agent_terminal import (
+            AgentTerminalRoster, HUD_LANE_COLUMNS,
+        )
+
+        r = AgentTerminalRoster([("agent:hermes:build\nsecond line", FakeAgent())])
+        frame = r.frame()
+
+        assert all("\n" not in chip for chip in frame.lanes), frame.lanes
+        assert all(len(chip) <= HUD_LANE_COLUMNS for chip in frame.lanes)
+        BrainstormHudView(
+            screen="agent_terminal", state="running", topic=frame.topic,
+            collaborators=frame.lanes, activity="\n".join(frame.lines),
+            terminal_state="running",
+        ).to_wire()
