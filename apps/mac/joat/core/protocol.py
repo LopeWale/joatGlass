@@ -603,35 +603,39 @@ discussion.
 
 @dataclass(frozen=True, slots=True)
 class BrainstormHudView:
-    """Bounded, non-secret state for the four-tile Brainstorm HUD."""
+    """Bounded, non-secret state for the Brainstorm conversation.
 
-    screen: Literal["brainstorm", "agent_terminal"]
+    Carries NO Agent Terminal, Hermes, OpenClaw, endpoint, approval or
+    tool-policy field. docs/SESSION_MODEL.md:74-75 states that as a
+    requirement, and this frame violated it for the whole life of the
+    feature by also being the Agent Terminal's frame — discriminated by a
+    `screen` field.
+
+    That was not a tidiness problem. One frame for two features is why the Agent
+    Terminal printed "JOAT · BRAINSTORM" across its spine, why a healthy
+    terminal spent four rows on connection chrome the wearer asked about
+    ("are all the fixed content like the mac mini tailscale needed there?"),
+    and why a tap on the terminal was gated on the BRAINSTORM lane's
+    readiness. See AgentTerminalHudView for the other half.
+    """
+
     state: str
     topic: str
     collaborators: list[str]
     activity: str
-    terminal_state: str
     active_speaker: str = ""
-    endpoint_host: str = ""
-    terminal_reason: str = ""
-    no_tools_checked: bool = False
     # The diagnostic acceptance gesture is never inferred from readiness.
     # It is an explicit local-Mac opt-in and contains no wearer content.
     acceptance_armed: bool = False
 
     def to_wire(self) -> dict[str, Any]:
-        if self.screen not in {"brainstorm", "agent_terminal"}:
-            raise ProtocolError("Brainstorm HUD screen is invalid")
         if self.state not in _BRAINSTORM_HUD_STATES:
             raise ProtocolError("Brainstorm HUD state is invalid")
-        if self.terminal_state not in _BRAINSTORM_HUD_STATES:
-            raise ProtocolError("Brainstorm terminal state is invalid")
         if len(self.collaborators) > 3:
             raise ProtocolError("Brainstorm HUD has too many collaborators")
         return {
             "kind": "brainstorm.view",
             "brainstorm": {
-                "screen": self.screen,
                 "state": self.state,
                 "topic": _brainstorm_text(self.topic, "topic", 96),
                 "collaborators": [
@@ -645,15 +649,52 @@ class BrainstormHudView:
                     self.activity, "activity", BRAINSTORM_ACTIVITY_MAX,
                     allow_empty=True,
                 ),
+                "acceptanceArmed": self.acceptance_armed,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTerminalHudView:
+    """Bounded, non-secret state for the Agent Terminal.
+
+    The connection host, the tool-policy attestation and the recovery reason
+    live HERE, on the only surface they describe, instead of riding every
+    Brainstorm frame.
+    """
+
+    state: str
+    focus: str
+    lanes: list[str]
+    activity: str
+    endpoint_host: str = ""
+    reason: str = ""
+    no_tools_checked: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.state not in _BRAINSTORM_HUD_STATES:
+            raise ProtocolError("Agent Terminal HUD state is invalid")
+        if len(self.lanes) > 3:
+            raise ProtocolError("Agent Terminal HUD has too many lanes")
+        return {
+            "kind": "agent_terminal.view",
+            "terminal": {
+                "state": self.state,
+                "focus": _brainstorm_text(self.focus, "focus", 96),
+                "lanes": [
+                    _brainstorm_text(item, "lane", 48) for item in self.lanes
+                ],
+                "activity": _brainstorm_text(
+                    self.activity, "activity", BRAINSTORM_ACTIVITY_MAX,
+                    allow_empty=True,
+                ),
                 "endpointHost": _brainstorm_text(
                     self.endpoint_host, "endpoint host", 253, allow_empty=True,
                 ),
-                "terminalState": self.terminal_state,
                 "terminalReason": _brainstorm_text(
-                    self.terminal_reason, "terminal reason", 64, allow_empty=True,
+                    self.reason, "terminal reason", 64, allow_empty=True,
                 ),
                 "noToolsChecked": self.no_tools_checked,
-                "acceptanceArmed": self.acceptance_armed,
             },
         }
 
@@ -959,60 +1000,6 @@ class NavigationRoute:
 
 
 @dataclass(frozen=True, slots=True)
-class NavigationRoadLine:
-    """One drawable road: name, importance, and shape."""
-
-    name: str
-    weight: int
-    #: Flattened [lat, lon, lat, lon, …]; halves the JSON of a point list.
-    points: tuple[float, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class NavigationRoads:
-    """The wearer's surroundings as GEOMETRY, not a picture of geometry.
-
-    A rendered map tile loses its street names when it is crushed to
-    sixteen levels of green — they are baked at a size nobody chose for
-    this display. Sending the roads themselves lets JOAT draw each line at
-    the weight it wants and set each NAME in the HUD's own font.
-    """
-
-    session_id: str
-    latitude: float
-    longitude: float
-    roads: tuple[NavigationRoadLine, ...]
-
-    def to_wire(self) -> dict[str, Any]:
-        if len(self.roads) > 160:
-            raise ProtocolError("navigation road payload is too large")
-        roads: list[dict[str, Any]] = []
-        for road in self.roads:
-            if len(road.points) < 4 or len(road.points) % 2 or len(road.points) > 200:
-                raise ProtocolError("navigation road geometry is invalid")
-            if not 1 <= road.weight <= 3:
-                raise ProtocolError("navigation road weight is invalid")
-            roads.append({
-                "name": _navigation_text(road.name, "roadName", 40, allow_empty=True),
-                "weight": road.weight,
-                # Five decimals is about a metre — far finer than one HUD
-                # pixel here, and it keeps the payload small.
-                "points": [round(value, 5) for value in road.points],
-            })
-        return {
-            "kind": "navigation.roads",
-            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
-            "latitude": _navigation_number(
-                self.latitude, "latitude", minimum=-90, maximum=90,
-            ),
-            "longitude": _navigation_number(
-                self.longitude, "longitude", minimum=-180, maximum=180,
-            ),
-            "roads": roads,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class HudAmbient:
     """The margin facts on the resting dashboard.
 
@@ -1155,6 +1142,7 @@ DownlinkMessage = (
     | HudRebuild
     | HudList
     | BrainstormHudView
+    | AgentTerminalHudView
     | ProductivityHudView
     | AudioControl
     | ImuControl
@@ -1166,7 +1154,6 @@ DownlinkMessage = (
     | NavigationOriginRequest
     | NavigationRoute
     | NavigationMapPanel
-    | NavigationRoads
     | HudAmbient
     | NavigationStop
     | ConfirmRequest
@@ -1266,14 +1253,8 @@ def _reminder_due_generation(value: Any) -> int:
     return value
 
 
-def _navigation_text(
-    value: Any, name: str, maximum: int, *, allow_empty: bool = False,
-) -> str:
-    """An unnamed road is still a road worth drawing, so callers may opt in
-    to an empty string rather than inventing a placeholder name for it."""
-    if not isinstance(value, str) or len(value) > maximum:
-        raise ProtocolError(f"navigation {name} is invalid")
-    if not value and not allow_empty:
+def _navigation_text(value: Any, name: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
         raise ProtocolError(f"navigation {name} is invalid")
     return value
 

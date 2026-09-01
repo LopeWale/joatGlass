@@ -54,7 +54,11 @@ export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
 export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
 export type NavigationRoutePlan = import('./NavigationProgress').NavigationRoutePlan;
 /** Safe projection of the live Brainstorm / Hermes terminal state. */
+/** Which surface a diagnostic gesture came from. This is receipt metadata
+ * ONLY — it is no longer a frame discriminator, because the two surfaces no
+ * longer share a frame (`docs/SESSION_MODEL.md:74-75`). */
 export type BrainstormHudScreen = 'brainstorm' | 'agent_terminal';
+
 export type BrainstormHudState =
   | 'unavailable'
   | 'approval_required'
@@ -66,21 +70,58 @@ export type BrainstormHudState =
   | 'cancelled'
   | 'failed'
   | 'blocked';
+/** The Brainstorm conversation. Deliberately carries NO Agent Terminal,
+ * Hermes, OpenClaw, endpoint, approval or tool-policy field —
+ * `docs/SESSION_MODEL.md:74-75` states that as a requirement, and the two
+ * surfaces shared one frame in violation of it until this split.
+ *
+ * That violation was not academic. It is why the Agent Terminal printed
+ * "JOAT · BRAINSTORM" across its spine, why a healthy terminal spent four
+ * rows on connection chrome, and why a tap on the terminal was gated on the
+ * BRAINSTORM lane's readiness. One frame, two features, three bugs. */
 export interface BrainstormHudModel {
-  screen: BrainstormHudScreen;
+  /** WHICH of the two surfaces this frame is. Brainstorm (Codex proposes,
+   * Claude critiques) and the Agent Terminal (Hermes and OpenClaw work) are
+   * two features that share a frame shape, not one screen with two moods.
+   * The renderer reads this to title the spine; without it the spine fell
+   * through to the link status and the Terminal was captured reading
+   * "JOAT · BRAINSTORM", which is exactly the confusion they are kept
+   * apart to prevent. This is a RENDER-side discriminator: the wire still
+   * carries `brainstorm.view` and `agent_terminal.view` separately. */
+  screen: 'brainstorm' | 'agent_terminal';
   state: BrainstormHudState;
   topic: string;
   collaborators: string[];
   activeSpeaker?: string;
   activity: string;
+  /** Where the dedicated session lives, shown so the wearer can tell a
+   * local session from a remote one without leaving the surface. */
   endpointHost?: string;
-  terminalState: BrainstormHudState;
+  /** Session readiness, which is not the same as `state`: the surface can be
+   * running while the session behind it is blocked. */
+  terminalState?: BrainstormHudState;
   terminalReason?: string;
-  /** Local preflight only; this is never an atomic remote guarantee. */
-  noToolsChecked: boolean;
+  /** Whether the no-tools policy was verified for this session. */
+  noToolsChecked?: boolean;
   /** Default-off Mac diagnostics arm. Only this explicit state may expose the
    * isolated G2 acceptance gesture; ordinary Brainstorm never does. */
   acceptanceArmed?: boolean;
+}
+
+/** The Agent Terminal: Hermes and OpenClaw work sessions. Its own frame,
+ * with the connection and tool-policy facts that belong to it and to no
+ * other surface. */
+export interface AgentTerminalHudModel {
+  state: BrainstormHudState;
+  /** The focused lane, in the roster's "<lane> · <state>" shape. */
+  focus: string;
+  /** Lane chips: every concurrent session, so one glance covers the roster. */
+  lanes: string[];
+  activity: string;
+  endpointHost?: string;
+  terminalReason?: string;
+  /** Local preflight only; this is never an atomic remote guarantee. */
+  noToolsChecked: boolean;
 }
 
 /**
@@ -307,6 +348,7 @@ export type DownlinkMessage =
     planningGrid?: PlanningGridCell[];
   }
   | { kind: 'brainstorm.view'; brainstorm: BrainstormHudModel }
+  | { kind: 'agent_terminal.view'; terminal: AgentTerminalHudModel }
   | { kind: 'productivity.view'; productivity: ProductivityHudModel }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
   | { kind: 'imu.control'; open: boolean; paceMs?: number }

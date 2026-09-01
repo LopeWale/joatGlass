@@ -30,6 +30,7 @@ from ..channels.cards import Card, CardLog
 from ..channels.imessage import IMessageStore, MessageEntry, MessageHistoryPage, MessageThread
 from ..core.protocol import (
     VOICE_REQUEST_PREFIX,
+    AgentTerminalHudView,
     BrainstormHudView,
     EventType,
     HudList,
@@ -460,7 +461,6 @@ class CapabilityRouter:
             if past:
                 rows = ["Recent:", *past]
         await self._hud.show_brainstorm(BrainstormHudView(
-            screen="brainstorm",
             state="settled" if rows else "ready",
             topic=(recap.topic[:40] if recap is not None and recap.topic
                    else "Ready for a question"),
@@ -468,10 +468,6 @@ class CapabilityRouter:
             else ["Codex", "Claude"],
             activity=("\n".join(rows) if rows
                       else 'Say “JOAT, brainstorm …” to begin.'),
-            terminal_state=str(terminal["state"]),
-            endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
-            no_tools_checked=bool(terminal["no_tools_checked"]),
             acceptance_armed=self._acceptance_armed,
         ))
 
@@ -489,20 +485,18 @@ class CapabilityRouter:
         terminal = self._status.agent_terminal_projection()
         state = str(terminal["state"])
         reason = str(terminal["reason"])
-        await self._hud.show_brainstorm(BrainstormHudView(
-            screen="agent_terminal",
+        await self._hud.show_agent_terminal(AgentTerminalHudView(
             state=state,
             # The lane name, in the same shape the roster sends
             # ("<lane> · <state>"): the renderer reads the first segment as
             # the summary spine's focus label. "Hermes Agent Terminal" put
             # HERMES AGENT TERMINAL > UNAVAILABLE under a screen already
             # titled Agent Terminal.
-            topic="hermes",
-            collaborators=[],
+            focus="hermes",
+            lanes=[],
             activity="No terminal sessions are configured on this Mac.",
-            terminal_state=state,
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=_agent_terminal_instruction(state, reason),
+            reason=_agent_terminal_instruction(state, reason),
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 

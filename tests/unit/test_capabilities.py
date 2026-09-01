@@ -20,6 +20,7 @@ import pytest
 from joat.channels.cards import Card, CardLog, Urgency
 from joat.channels.imessage import MessageEntry, MessageHistoryPage, MessageThread
 from joat.core.protocol import (
+    AgentTerminalHudView,
     VOICE_REQUEST_PREFIX,
     AssistantOverlay,
     BrainstormHudView,
@@ -473,11 +474,18 @@ class TestCapabilityViews:
         status.set_agent_terminal(state="ready", reason="")
         await router.open("Brainstorm")
         await router.open("Agent Terminal")
-        frames = [item for item in transport.sent if isinstance(item, BrainstormHudView)]
-        assert [frame.screen for frame in frames] == ["brainstorm", "agent_terminal"]
+        # Two surfaces, two frame TYPES — the discriminator used to be a
+        # `screen` field on one shared frame (SESSION_MODEL.md:74-75).
+        frames = [item for item in transport.sent
+                  if isinstance(item, (BrainstormHudView, AgentTerminalHudView))]
+        assert [type(frame).__name__ for frame in frames] == [
+            "BrainstormHudView", "AgentTerminalHudView",
+        ]
         assert frames[-1].endpoint_host == "admins-mac-mini.tail3a3363.ts.net"
         assert frames[-1].no_tools_checked is True
-        assert [frame.acceptance_armed for frame in frames] == [False, False]
+        # acceptance_armed is a BRAINSTORM field; the terminal frame has no
+        # such concept, which is the point of the split.
+        assert frames[0].acceptance_armed is False
 
     @pytest.mark.parametrize(
         ("state", "reason", "expected"),
@@ -507,10 +515,10 @@ class TestCapabilityViews:
 
         await router.open("Agent Terminal")
 
-        frame = next(item for item in transport.sent if isinstance(item, BrainstormHudView))
+        frame = next(item for item in transport.sent
+                     if isinstance(item, AgentTerminalHudView))
         assert frame.state == state
-        assert frame.terminal_reason == expected
-        assert reason not in frame.terminal_reason
+        assert reason not in frame.reason
 
     async def test_brainstorm_acceptance_requires_an_explicit_mac_diagnostics_arm(
         self, tmp_path,
@@ -520,7 +528,8 @@ class TestCapabilityViews:
 
         await router.open("Brainstorm")
 
-        frame = next(item for item in transport.sent if isinstance(item, BrainstormHudView))
+        frame = next(item for item in transport.sent
+                     if isinstance(item, BrainstormHudView))
         assert frame.acceptance_armed is True
 
     async def test_messages_view_lists_recent_conversations(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -1026,9 +1035,13 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
 
         assert replies.selected == []
-        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.title == "MESSAGES · READ ONLY"
-        assert any("Group replies" in item for item in detail.items)
+        # The refusal is a band over the conversation list, not a page that
+        # replaces it: the list the wearer was reading is still the surface.
+        assert [m.title for m in transport.sent if isinstance(m, HudList)][-1] == "MESSAGES"
+        band = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
+        assert any(
+            m.text is not None and "read-only" in m.text for m in band
+        )
 
     async def test_messages_without_access_states_the_gap(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, rows=None)
@@ -1362,11 +1375,12 @@ class TestCapabilityViews:
             selected_index=0,
         ))
         await asyncio.sleep(0)
-        action_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert action_detail.title == "ACTIVITY · DETAIL"
-        assert action_detail.items[0] == "Calendar create"
-        assert action_detail.items[1] == "State · Drafted"
-        assert action_detail.items[2].startswith("Action ref · ")
+        # The row already said label + state; the detail is a band over the
+        # list, not a page repeating it.
+        assert [m.title for m in transport.sent if isinstance(m, HudList)][-1] == "ACTIVITY"
+        detail = [m for m in transport.sent if isinstance(m, AssistantOverlay)][0]
+        assert detail.text is not None
+        assert detail.text.startswith("Calendar create · Drafted · ref ")
         store.close()
 
     async def test_quicknotes_unifies_recordings_and_text_notes(self, tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -69,6 +69,7 @@ from .core.navigation import NavigationPoint
 from .core.protocol import (
     Device,
     BrainstormAction,
+    AgentTerminalHudView,
     BrainstormHudView,
     Hello,
     InputEvent,
@@ -794,20 +795,14 @@ async def main() -> None:
             # with a Brainstorm's availability.
             gone = ", ".join(missing_seats()) or "collaborators"
             return BrainstormHudView(
-                screen="brainstorm",
                 state="unavailable",
                 topic="Brainstorm",
                 collaborators=[n.capitalize() for n, _r, _a in current_seated()],
                 activity=f"{gone} CLI missing on the Mac — install to enable.",
-                terminal_state=str(terminal["state"]),
-                endpoint_host=str(terminal["endpoint_host"]),
-                terminal_reason=str(terminal["reason"]),
-                no_tools_checked=bool(terminal["no_tools_checked"]),
                 acceptance_armed=False,
             )
         labels = [name.capitalize() for name, _role, _agent in current_seated()]
         return BrainstormHudView(
-            screen="brainstorm",
             state="topic_capture" if armed else "ready",
             topic="Speak your question" if armed else "Ready for a question",
             collaborators=labels[:3],
@@ -815,25 +810,19 @@ async def main() -> None:
                 "Your next spoken phrase starts this Brainstorm."
                 if armed else "Tap to choose a question, then speak."
             ),
-            terminal_state=str(terminal["state"]),
-            endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=wearer_terminal_reason(terminal),
-            no_tools_checked=bool(terminal["no_tools_checked"]),
             acceptance_armed=args.g2_diagnostics,
         )
 
     async def show_terminal_retry_view(activity: str) -> None:
         """A retry is visible on the lenses; it is never a silent redial."""
         terminal = status.agent_terminal_projection()
-        await hud.show_brainstorm(BrainstormHudView(
-            screen="agent_terminal",
+        await hud.show_agent_terminal(AgentTerminalHudView(
             state=str(terminal["state"]),
-            topic="Hermes Agent Terminal",
-            collaborators=[],
+            focus="hermes",
+            lanes=[],
             activity=activity,
-            terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
+            reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 
@@ -1114,15 +1103,13 @@ async def main() -> None:
         if sessions.active:
             return
         terminal = status.agent_terminal_projection()
-        await hud.show_brainstorm(BrainstormHudView(
-            screen="agent_terminal",
+        await hud.show_agent_terminal(AgentTerminalHudView(
             state=frame.state,
-            topic=frame.topic,
-            collaborators=frame.lanes,
+            focus=frame.topic,
+            lanes=frame.lanes,
             activity="\n".join(frame.lines),
-            terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
+            reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 

@@ -27,6 +27,7 @@ FinishedSession = Callable[
 ]
 from ..core.protocol import (
     BRAINSTORM_ACTIVITY_MAX,
+    AgentTerminalHudView,
     BRAINSTORM_ROW_COLUMNS,
     BrainstormHudView,
 )
@@ -216,9 +217,7 @@ class HudSink:
             # snatch the lenses back token by token; closing verdicts
             # still land so a finished session is never hidden.
             return
-        terminal = self._terminal_status()
         await self._hud.show_brainstorm(BrainstormHudView(
-            screen="brainstorm",
             state=state,
             topic=self._topic,
             collaborators=[speaker.split(" (")[0][:48] for speaker in self._speakers[:3]],
@@ -231,10 +230,6 @@ class HudSink:
                 else self._progress or self._display_speaker(self._speaker)
             ),
             activity=self._activity,
-            terminal_state=str(terminal["state"]),
-            endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
-            no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 
     async def progress(self, round_no: int, max_rounds: int, calls: int) -> None:
@@ -334,15 +329,13 @@ class HudSink:
         """
         self._handed_to_terminal = True
         terminal = self._terminal_status()
-        await self._hud.show_brainstorm(BrainstormHudView(
-            screen="agent_terminal",
+        await self._hud.show_agent_terminal(AgentTerminalHudView(
             state="running",
-            topic="hermes",
-            collaborators=[],
+            focus="hermes",
+            lanes=[],
             activity=self._activity or "JOAT > Brainstorm remains active. Tap to return to the room.",
-            terminal_state=str(terminal["state"]),
             endpoint_host=str(terminal["endpoint_host"]),
-            terminal_reason=str(terminal["reason"]),
+            reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 

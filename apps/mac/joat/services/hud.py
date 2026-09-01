@@ -10,7 +10,14 @@ and (later) surface arbitration in exactly one place.
 from __future__ import annotations
 
 from ..core.interfaces import GlassesTransport
-from ..core.protocol import AssistantOverlay, BrainstormHudView, ContainerId, HudRebuild, HudText
+from ..core.protocol import (
+    AgentTerminalHudView,
+    AssistantOverlay,
+    BrainstormHudView,
+    ContainerId,
+    HudRebuild,
+    HudText,
+)
 
 
 class HudWriter:
@@ -22,6 +29,11 @@ class HudWriter:
     async def begin_brainstorm(self) -> None:
         """Release any menu focus before the first live Brainstorm frame."""
         await self._transport.send(HudRebuild(reason="brainstorm"))
+
+    async def show_agent_terminal(self, view: AgentTerminalHudView) -> None:
+        """Paint the Agent Terminal, which is its own surface and its own
+        frame — not a `screen` variant of the Brainstorm one."""
+        await self._transport.send(view)
 
     async def show_brainstorm(self, view: BrainstormHudView) -> None:
         """Paint the dedicated production Brainstorm / Hermes surface."""

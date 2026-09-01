@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+from joat.core.protocol import AgentTerminalHudView
 from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster
 
 
@@ -640,7 +641,7 @@ class TestBrainstormRowIsNotGatedOnHermes:
         ), transport
 
     def _frames(self, transport):
-        from joat.core.protocol import BrainstormHudView  # noqa: F401
+        from joat.core.protocol import AgentTerminalHudView, BrainstormHudView  # noqa: F401
         return [m for m in transport.sent
                 if type(m).__name__ == "BrainstormHudView"]
 
@@ -650,7 +651,6 @@ class TestBrainstormRowIsNotGatedOnHermes:
         frames = self._frames(transport)
         assert frames, "Brainstorm did not open at all"
         frame = frames[-1]
-        assert frame.screen == "brainstorm"        # not the Hermes recovery card
         assert "Hermes" not in frame.activity
         assert "Hermes" not in frame.collaborators
 
@@ -783,10 +783,9 @@ class TestTheFrameAlwaysFitsTheWire:
 
         assert all(len(line) <= HUD_COLUMNS for line in frame.lines)
         # The exact construction __main__.terminal_paint performs.
-        BrainstormHudView(
-            screen="agent_terminal", state=frame.state, topic=frame.topic,
-            collaborators=frame.lanes, activity="\n".join(frame.lines),
-            terminal_state="running",
+        AgentTerminalHudView(
+             state=frame.state, focus=frame.topic,
+            lanes=frame.lanes, activity="\n".join(frame.lines),
         ).to_wire()
 
     def test_a_gateway_session_key_cannot_overflow_a_lane_chip(self) -> None:
@@ -802,10 +801,9 @@ class TestTheFrameAlwaysFitsTheWire:
 
         assert all(len(chip) <= HUD_LANE_COLUMNS for chip in frame.lanes)
         assert len(frame.topic) <= 96
-        BrainstormHudView(
-            screen="agent_terminal", state=frame.state, topic=frame.topic,
-            collaborators=frame.lanes, activity="\n".join(frame.lines),
-            terminal_state="running",
+        AgentTerminalHudView(
+             state=frame.state, focus=frame.topic,
+            lanes=frame.lanes, activity="\n".join(frame.lines),
         ).to_wire()
 
     def test_the_shipped_scrollback_fits_the_wire_bound(self) -> None:
@@ -833,10 +831,9 @@ class TestTheFrameAlwaysFitsTheWire:
         frame = r.frame()
 
         assert len(frame.lines) == HUD_LINES, "a transcript row went unused"
-        BrainstormHudView(
-            screen="agent_terminal", state="running", topic=frame.topic,
-            collaborators=frame.lanes, activity="\n".join(frame.lines),
-            terminal_state="running",
+        AgentTerminalHudView(
+             state="running", focus=frame.topic,
+            lanes=frame.lanes, activity="\n".join(frame.lines),
         ).to_wire()
 
     def test_a_multi_line_error_stays_one_row(self) -> None:
@@ -881,10 +878,9 @@ class TestTheFrameAlwaysFitsTheWire:
 
         assert all("\n" not in chip for chip in frame.lanes), frame.lanes
         assert all(len(chip) <= HUD_LANE_COLUMNS for chip in frame.lanes)
-        BrainstormHudView(
-            screen="agent_terminal", state="running", topic=frame.topic,
-            collaborators=frame.lanes, activity="\n".join(frame.lines),
-            terminal_state="running",
+        AgentTerminalHudView(
+             state="running", focus=frame.topic,
+            lanes=frame.lanes, activity="\n".join(frame.lines),
         ).to_wire()
 
 

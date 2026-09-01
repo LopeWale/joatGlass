@@ -22,10 +22,15 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, overload
 
 from ..ble.hub_gateway import HubGatewayTransport
-from ..core.protocol import BrainstormAction, BrainstormHudView, Hello
+from ..core.protocol import (
+    AgentTerminalHudView,
+    BrainstormAction,
+    BrainstormHudView,
+    Hello,
+)
 from ..services.g2_diagnostics import G2DiagnosticStore, TRACE_SCHEMA
 from ..services.hud import HudWriter
 from ..services.session import Session
@@ -332,16 +337,32 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _view(surface: str, *, state: str = "running", activity: str) -> BrainstormHudView:
+@overload
+def _view(
+    surface: Literal["brainstorm"], *, state: str = ..., activity: str,
+) -> BrainstormHudView: ...
+@overload
+def _view(
+    surface: Literal["agent_terminal"], *, state: str = ..., activity: str,
+) -> AgentTerminalHudView: ...
+def _view(
+    surface: str, *, state: str = "running", activity: str,
+) -> BrainstormHudView | AgentTerminalHudView:
+    """The two surfaces are two frames now, so this returns two types.
+
+    Note the acceptance run seats "Hermes" in a Brainstorm — which the
+    product forbids. Left as-is here ONLY because this is a content-free
+    diagnostic that never reaches a real round table; it is not a model of
+    how Brainstorm is seated.
+    """
     if surface == "brainstorm":
         return BrainstormHudView(
-            screen="brainstorm", state=state, topic="Acceptance run", collaborators=["Hermes"],
-            activity=activity, terminal_state="ready" if state != "cancelled" else "cancelled",
-            no_tools_checked=True,
+            state=state, topic="Acceptance run", collaborators=["Hermes"],
+            activity=activity,
         )
-    return BrainstormHudView(
-        screen="agent_terminal", state=state, topic="Hermes Agent Terminal", collaborators=[],
-        activity=activity, terminal_state="running", no_tools_checked=True,
+    return AgentTerminalHudView(
+        state=state, focus="hermes", lanes=[],
+        activity=activity, no_tools_checked=True,
     )
 
 
@@ -545,10 +566,21 @@ class InAppBrainstormAcceptance:
         if not self._is_isolated():
             raise RuntimeError("another wearer session is active")
 
-    async def _send(self, surface: str, *, state: str = "running", activity: str) -> None:
+    async def _send(
+        self,
+        surface: Literal["brainstorm", "agent_terminal"],
+        *,
+        state: str = "running",
+        activity: str,
+    ) -> None:
         self._require_isolated()
         before = len(self._events)
-        await self._transport.send(_view(surface, state=state, activity=activity))
+        view = (
+            _view("brainstorm", state=state, activity=activity)
+            if surface == "brainstorm"
+            else _view("agent_terminal", state=state, activity=activity)
+        )
+        await self._transport.send(view)
         self._require_isolated()
         await self._wait_for(
             lambda: any(

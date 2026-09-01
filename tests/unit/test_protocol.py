@@ -14,6 +14,8 @@ import pytest
 
 from joat.ble.hub_gateway import pack_pcm
 from joat.core.protocol import (
+    AgentTerminalHudView,
+    AgentTerminalHudView,
     Auth,
     AssistantOverlay,
     AuthAccepted,
@@ -663,54 +665,65 @@ class TestDownlinkWire:
         assert all("title" not in cell and "identifier" not in cell for cell in wire["planningGrid"])
 
     def test_brainstorm_view_is_bounded_and_has_no_terminal_payload(self) -> None:
+        """The name of this test is now enforceable.
+
+        docs/SESSION_MODEL.md:74-75 requires the Brainstorm model to carry
+        no Agent Terminal, Hermes, OpenClaw, endpoint, approval or
+        tool-policy field. It carried all of them, discriminated by a
+        `screen` key, and this test asserted that payload as correct. The
+        two surfaces are two frames now, so the absence is structural
+        rather than a promise.
+        """
         wire = BrainstormHudView(
-            screen="agent_terminal",
-            state="ready",
-            topic="Hermes Agent Terminal",
-            collaborators=[],
-            activity="Hermes joins Brainstorm.",
-            terminal_state="ready",
-            endpoint_host="admins-mac-mini.tail3a3363.ts.net",
-            terminal_reason="",
-            no_tools_checked=True,
+            state="running",
+            topic="cold-start latency",
+            collaborators=["Codex", "Claude"],
+            active_speaker="Claude · critic",
+            activity="CLAUDE > Key it on the generation too.",
         ).to_wire()
         assert wire["kind"] == "brainstorm.view"
         assert wire["brainstorm"] == {
-            "screen": "agent_terminal",
-            "state": "ready",
-            "topic": "Hermes Agent Terminal",
-            "collaborators": [],
-            "activeSpeaker": "",
-            "activity": "Hermes joins Brainstorm.",
-            "endpointHost": "admins-mac-mini.tail3a3363.ts.net",
-            "terminalState": "ready",
-            "terminalReason": "",
-            "noToolsChecked": True,
+            "state": "running",
+            "topic": "cold-start latency",
+            "collaborators": ["Codex", "Claude"],
+            "activeSpeaker": "Claude · critic",
+            "activity": "CLAUDE > Key it on the generation too.",
             "acceptanceArmed": False,
         }
+        # Structural, not aspirational: every forbidden field is simply
+        # absent from the dataclass, so no producer can reintroduce one.
+        for forbidden in ("screen", "terminalState", "endpointHost",
+                          "terminalReason", "noToolsChecked"):
+            assert forbidden not in wire["brainstorm"]
 
-        acceptance_ready = BrainstormHudView(
-            screen="brainstorm",
-            state="acceptance_ready",
-            topic="Acceptance run",
-            collaborators=["Hermes"],
-            activity="Tap to start the Hermes acceptance run",
-            terminal_state="ready",
+    def test_agent_terminal_view_owns_the_connection_facts(self) -> None:
+        """Its own frame, its own kind — and the fields that describe only
+        this surface live here instead of riding every Brainstorm frame."""
+        wire = AgentTerminalHudView(
+            state="ready",
+            focus="work · run",
+            lanes=["work·run", "calendar·ask1"],
+            activity="> run the http audit",
+            endpoint_host="admins-mac-mini.tail3a3363.ts.net",
+            reason="",
             no_tools_checked=True,
-            acceptance_armed=True,
         ).to_wire()
+        assert wire["kind"] == "agent_terminal.view"
+        assert wire["terminal"] == {
+            "state": "ready",
+            "focus": "work · run",
+            "lanes": ["work·run", "calendar·ask1"],
+            "activity": "> run the http audit",
+            "endpointHost": "admins-mac-mini.tail3a3363.ts.net",
+            "terminalReason": "",
+            "noToolsChecked": True,
+        }
+
+        acceptance_ready = BrainstormHudView(state="acceptance_ready", topic="Acceptance run", collaborators=["Hermes"], activity="Tap to start the Hermes acceptance run", acceptance_armed=True).to_wire()
         assert acceptance_ready["brainstorm"]["state"] == "acceptance_ready"
         assert acceptance_ready["brainstorm"]["acceptanceArmed"] is True
 
-        topic_capture = BrainstormHudView(
-            screen="brainstorm",
-            state="topic_capture",
-            topic="Speak your question",
-            collaborators=["Codex", "Claude", "Hermes"],
-            activity="Your next spoken phrase starts this Brainstorm.",
-            terminal_state="ready",
-            no_tools_checked=True,
-        ).to_wire()
+        topic_capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.").to_wire()
         assert topic_capture["brainstorm"]["state"] == "topic_capture"
 
     def test_productivity_view_is_typed_and_bounded(self) -> None:

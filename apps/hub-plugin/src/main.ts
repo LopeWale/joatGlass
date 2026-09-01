@@ -34,7 +34,12 @@ import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
-import { ContainerId, type DownlinkMessage, type ProductivityHudModel } from './types';
+import {
+  ContainerId,
+  type BrainstormHudModel,
+  type DownlinkMessage,
+  type ProductivityHudModel,
+} from './types';
 import {
   ASSISTANT_OVERLAY_VISUAL_TEXT,
   BrowserHudPreview,
@@ -474,6 +479,29 @@ async function boot(): Promise<void> {
           brainstorm.present(msg.brainstorm);
         }
         break;
+      case 'agent_terminal.view': {
+        // The WIRE is split — the Agent Terminal has its own frame kind and
+        // no longer rides the Brainstorm one, which docs/SESSION_MODEL.md:74-75
+        // forbids. The render model stays unified behind `screen`, so this
+        // adapts one to the other in a single place instead of duplicating
+        // the drawing code.
+        const model: BrainstormHudModel = {
+          screen: 'agent_terminal',
+          state: msg.terminal.state,
+          topic: msg.terminal.focus,
+          collaborators: msg.terminal.lanes,
+          activity: msg.terminal.activity,
+          endpointHost: msg.terminal.endpointHost,
+          terminalState: msg.terminal.state,
+          terminalReason: msg.terminal.terminalReason,
+          noToolsChecked: msg.terminal.noToolsChecked,
+        };
+        await awaitCurrent(menu.beginLiveSession('brainstorm'));
+        if (await awaitCurrent(hud.showBrainstorm(model))) {
+          brainstorm.present(model);
+        }
+        break;
+      }
       case 'productivity.view':
         brainstorm.clear();
         {

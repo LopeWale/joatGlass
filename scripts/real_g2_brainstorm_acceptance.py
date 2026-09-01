@@ -49,7 +49,7 @@ if str(_MAC_PACKAGE_ROOT) not in sys.path:
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.core.pairing import PairingStore
-from joat.core.protocol import BrainstormHudView
+from joat.core.protocol import AgentTerminalHudView, BrainstormHudView
 from joat.agents.openclaw_gateway import (
     BRAINSTORM_TERMINAL_POLICY,
     OpenClawGatewayClient,
@@ -558,22 +558,12 @@ def _view(
     activity: str = "HUD transition check",
 ) -> BrainstormHudView:
     if surface == "brainstorm":
-        return BrainstormHudView(
-            screen="brainstorm",
-            state=state,
-            topic="Acceptance run",
-            collaborators=[],
-            activity=activity,
-            terminal_state="ready" if state != "cancelled" else "cancelled",
-            no_tools_checked=True,
-        )
-    return BrainstormHudView(
-        screen="agent_terminal",
+        return BrainstormHudView(state=state, topic="Acceptance run", collaborators=[], activity=activity)
+    return AgentTerminalHudView(
         state=state,
-        topic="Agent Terminal",
-        collaborators=[],
+        focus="Agent Terminal",
+        lanes=[],
         activity=activity,
-        terminal_state="ready",
         no_tools_checked=True,
     )
 
