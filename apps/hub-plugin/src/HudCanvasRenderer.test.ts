@@ -71,8 +71,8 @@ describe('Messages full-text reader', () => {
     });
   });
 
-  it('reserves eight wrapped body lines before asking the wearer to page', () => {
-    expect(MESSAGES_READER_BODY_LINE_CAPACITY).toBe(8);
+  it('uses the band reclaimed from the title bar for two more body lines', () => {
+    expect(MESSAGES_READER_BODY_LINE_CAPACITY).toBe(10);
   });
 
   it('wraps the reader body by conservative visible columns, not the simulator width estimate', () => {
@@ -165,7 +165,9 @@ describe('selected visual geometry', () => {
       statusDividerY: 35.5,
       overviewMainX: 176,
       overviewTrayY: 168,
-      sidebarWidth: 160,
+      // The menu occupies the clock column exactly: no stranded gap
+      // between its edge and the content, and the content never moves.
+      sidebarWidth: 256,
       listContentX: 93,
     });
   });
@@ -216,18 +218,27 @@ describe('navigation error hierarchy', () => {
   });
 });
 
-describe('compact navigation decisions', () => {
-  it('uses dense optical rows with a selection rail instead of option cards', () => {
-    // Flat ruling: uniform dense rows, a slim rail, no separator lines.
+describe('navigation decisions', () => {
+  it('boxes the chosen row at a size readable in motion', () => {
+    // A route choice is read while walking, so it uses the legible face and
+    // an outline on the SELECTED row — not the dense reading size a
+    // stationary list can use, and not a box per row.
     expect(navigationDecisionRows(2)).toEqual([
-      { baselineY: 132, railTopY: 122, railHeight: 19, fontSize: 12 },
-      { baselineY: 152, railTopY: 142, railHeight: 19, fontSize: 12 },
+      { baselineY: 128, boxTopY: 113, boxHeight: 30, fontSize: 15 },
+      { baselineY: 162, boxTopY: 147, boxHeight: 30, fontSize: 15 },
     ]);
     expect(navigationDecisionRows(3)).toEqual([
-      { baselineY: 132, railTopY: 122, railHeight: 19, fontSize: 12 },
-      { baselineY: 152, railTopY: 142, railHeight: 19, fontSize: 12 },
-      { baselineY: 172, railTopY: 162, railHeight: 19, fontSize: 12 },
+      { baselineY: 128, boxTopY: 113, boxHeight: 30, fontSize: 15 },
+      { baselineY: 162, boxTopY: 147, boxHeight: 30, fontSize: 15 },
+      { baselineY: 196, boxTopY: 181, boxHeight: 30, fontSize: 15 },
     ]);
+    expect(navigationDecisionRows(0)).toEqual([]);
+  });
+
+  it('keeps every option and its box clear of the footer', () => {
+    const rows = navigationDecisionRows(3);
+    const last = rows[rows.length - 1]!;
+    expect(last.boxTopY + last.boxHeight).toBeLessThan(267);
   });
 });
 
@@ -240,28 +251,47 @@ describe('flat navigation entry', () => {
 });
 
 describe('compact focus list rows', () => {
-  it('gives a mixed Planning day six two-line agenda rows, no separators', () => {
+  it('gives a Planning day the same ten dense rows as every other list', () => {
+    // The two-line agenda variant existed only because a day row spelled out
+    // "16:30 · EVENT · Title". Rows now read "[16:30] \u25a1 Title", so they
+    // fit one line — and with the page name moved into the status spine,
+    // rows start at y60 instead of y84: ten entries per glance.
     expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 4)).toEqual([
-      { primaryBaselineY: 88, secondaryBaselineY: 101, railTopY: 77, railHeight: 27 },
-      { primaryBaselineY: 118, secondaryBaselineY: 131, railTopY: 107, railHeight: 27 },
-      { primaryBaselineY: 148, secondaryBaselineY: 161, railTopY: 137, railHeight: 27 },
-      { primaryBaselineY: 178, secondaryBaselineY: 191, railTopY: 167, railHeight: 27 },
+      { primaryBaselineY: 60, railTopY: 50, railHeight: 19 },
+      { primaryBaselineY: 80, railTopY: 70, railHeight: 19 },
+      { primaryBaselineY: 100, railTopY: 90, railHeight: 19 },
+      { primaryBaselineY: 120, railTopY: 110, railHeight: 19 },
     ]);
-    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 12)).toHaveLength(6);
+    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 12)).toHaveLength(10);
+    // No row carries a second line any more.
+    expect(
+      HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 4)[0]?.secondaryBaselineY,
+    ).toBeUndefined();
   });
 
-  it('uses the full vertical budget: nine one-line rows per glance', () => {
-    // Pitch divides rows; separator lines and dead bands are gone. The
-    // wearer's ruling: unused canvas on a content page is waste, not calm.
+  it('uses the full vertical budget: ten one-line rows per glance', () => {
+    // Pitch divides rows; separator lines, dead bands, and the in-body
+    // title are gone. The wearer's ruling: unused canvas on a content page
+    // is waste, not calm — and the page's name belongs in the spine.
     expect(HudCanvas.planningFocusRows('PLANNING · PLAN · AUG 31–SEP 6', 7)).toEqual([
-      { primaryBaselineY: 84, railTopY: 74, railHeight: 19 },
-      { primaryBaselineY: 104, railTopY: 94, railHeight: 19 },
-      { primaryBaselineY: 124, railTopY: 114, railHeight: 19 },
-      { primaryBaselineY: 144, railTopY: 134, railHeight: 19 },
-      { primaryBaselineY: 164, railTopY: 154, railHeight: 19 },
-      { primaryBaselineY: 184, railTopY: 174, railHeight: 19 },
-      { primaryBaselineY: 204, railTopY: 194, railHeight: 19 },
+      { primaryBaselineY: 60, railTopY: 50, railHeight: 19 },
+      { primaryBaselineY: 80, railTopY: 70, railHeight: 19 },
+      { primaryBaselineY: 100, railTopY: 90, railHeight: 19 },
+      { primaryBaselineY: 120, railTopY: 110, railHeight: 19 },
+      { primaryBaselineY: 140, railTopY: 130, railHeight: 19 },
+      { primaryBaselineY: 160, railTopY: 150, railHeight: 19 },
+      { primaryBaselineY: 180, railTopY: 170, railHeight: 19 },
     ]);
+  });
+
+  it('names the page in the status spine instead of a second title bar', () => {
+    expect(HudCanvas.hudSpinePageTitle({
+      kind: 'list', title: 'MESSAGES · CONVERSATION',
+    } as never)).toBe('Messages · Conversation');
+    expect(HudCanvas.hudSpinePageTitle({ kind: 'navigation' } as never)).toBe('Navigation');
+    // Home is JOAT: the spine keeps the assistant's own name there.
+    expect(HudCanvas.hudSpinePageTitle({ kind: 'overview' } as never)).toBe('');
+    expect(HudCanvas.hudSpinePageTitle({ kind: 'sidebar' } as never)).toBe('');
   });
 
   it('recognizes only the small semantic marker vocabulary', () => {
@@ -298,9 +328,9 @@ describe('compact focus list rows', () => {
 
   it('applies the one dense list language to every title', () => {
     expect(HudCanvas.planningFocusRows('MESSAGES', 4)).toHaveLength(4);
-    // An eleven-row note now fits nine rows on the first glance; the rest is
+    // An eleven-row note now fits ten rows on the first glance; the rest is
     // one swipe away, not three.
-    expect(HudCanvas.planningFocusRows('QUICKNOTES · NOTE', 11)).toHaveLength(9);
+    expect(HudCanvas.planningFocusRows('QUICKNOTES · NOTE', 11)).toHaveLength(10);
     expect(HudCanvas.planningFocusRows('QUICKNOTES', 4)).toHaveLength(4);
     expect(HudCanvas.planningFocusRows('QUICKNOTES · RECORDING', 3)).toHaveLength(3);
     expect(
@@ -739,7 +769,7 @@ describe('parseMessagesConversationRow', () => {
     ], 8);
 
     expect(transcript.rows.map(({ body }) => body)).toEqual([
-      'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+      'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
     ]);
   });
 });
@@ -796,5 +826,112 @@ describe('HUD text visibility', () => {
     expect(lines.length).toBeLessThanOrEqual(3);
     expect(lines.join(' ')).toBe(prompt);
     expect(lines.join('')).not.toContain('…');
+  });
+});
+
+describe('action pill outcomes', () => {
+  it('renders transient receipts as a strip and truth states as pages', () => {
+    // Wearer's ruling (2026-09-01): a save/delete receipt is a small wide
+    // pill like the platform's own listening indicator, not a page takeover.
+    for (const phase of ['verifying', 'saved', 'monitoring', 'completed',
+      'cancelled', 'not_saved'] as const) {
+      expect(HudCanvas.usesActionPillLayout(phase)).toBe(true);
+    }
+    // failed/check decide whether a retry is safe; due is an interactive
+    // alert with an acknowledged delivery. Those must be read, not glanced.
+    for (const phase of ['failed', 'check', 'due'] as const) {
+      expect(HudCanvas.usesActionPillLayout(phase)).toBe(false);
+    }
+  });
+
+  it('keeps the strip inside the content field, clear of spine and footer', () => {
+    expect(HudCanvas.ACTION_PILL.y).toBeGreaterThan(36);
+    expect(HudCanvas.ACTION_PILL.y + HudCanvas.ACTION_PILL.height).toBeLessThan(260);
+    expect(HudCanvas.ACTION_PILL.x + HudCanvas.ACTION_PILL.width).toBeLessThanOrEqual(576);
+  });
+});
+
+describe('home dashboard content', () => {
+  it('shows the notifications themselves, never a count', () => {
+    // The reference HUDs put the cards on the resting screen; a counter
+    // would only tell the wearer to open a page they should not need.
+    expect(HudCanvas.parseHudNotificationRows(
+      'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready',
+    )).toEqual([
+      { source: 'Calendar', age: '8m', headline: 'Design review moved to 4:30' },
+      { source: 'Mail', age: '23m', headline: 'Q3 plan is ready' },
+    ]);
+  });
+
+  it('keeps a headline that contains the separator intact', () => {
+    expect(HudCanvas.parseHudNotificationRows('Mail · 2m · Q3 · final draft')[0])
+      .toEqual({ source: 'Mail', age: '2m', headline: 'Q3 · final draft' });
+  });
+
+  it('treats an unstructured line as a plain headline', () => {
+    expect(HudCanvas.parseHudNotificationRows('Reminder monitoring armed'))
+      .toEqual([{ source: '', age: '', headline: 'Reminder monitoring armed' }]);
+    expect(HudCanvas.parseHudNotificationRows('')).toEqual([]);
+  });
+
+  it('reads the clock and date from the phone, not the Mac', () => {
+    expect(HudCanvas.hudClockParts('9:41')).toEqual({ hours: '09', minutes: '41' });
+    expect(HudCanvas.hudClockParts('')).toEqual({ hours: '--', minutes: '--' });
+    expect(HudCanvas.hudDateLabel(new Date(2026, 8, 1))).toBe('Tue 9/1');
+  });
+});
+
+describe('navigation map projection', () => {
+  const panel = {
+    latitude: 41.9147, longitude: -87.6379, zoom: 16,
+    width: 248, height: 168, image: {} as CanvasImageSource,
+  };
+
+  it('puts the panel centre exactly at the pane centre', () => {
+    const bounds = HudCanvas.NAVIGATION_MAP_PANEL;
+    const [x, y] = HudCanvas.projectMercatorPanel(
+      { latitude: panel.latitude, longitude: panel.longitude }, panel, bounds,
+    );
+    expect(x).toBeCloseTo(bounds.x + bounds.width / 2, 6);
+    expect(y).toBeCloseTo(bounds.y + bounds.height / 2, 6);
+  });
+
+  it('places north up and east right, at the Mapbox 512px tile scale', () => {
+    const bounds = HudCanvas.NAVIGATION_MAP_PANEL;
+    const north = HudCanvas.projectMercatorPanel(
+      { latitude: panel.latitude + 0.001, longitude: panel.longitude }, panel, bounds,
+    );
+    const east = HudCanvas.projectMercatorPanel(
+      { latitude: panel.latitude, longitude: panel.longitude + 0.001 }, panel, bounds,
+    );
+    expect(north[1]).toBeLessThan(bounds.y + bounds.height / 2);
+    expect(east[0]).toBeGreaterThan(bounds.x + bounds.width / 2);
+    // 512·2^16 px span 360°, so 0.001° of longitude is 93.2px — which is
+    // also what makes the 248px pane ≈220m wide. If this drifts, JOAT's
+    // route stops sitting on the roads the Mac drew.
+    expect(east[0] - (bounds.x + bounds.width / 2)).toBeCloseTo(93.2, 0);
+  });
+});
+
+describe('short spoken receipts are strips, not cards', () => {
+  it('pills a one-line acknowledgement and keeps the card for a real reply', () => {
+    // The same wearer ruling applied to Messages and note receipts: these
+    // arrive as command answers through the assistant overlay, and a
+    // 460x183 card for "Reply sent." is the productivity-page mistake again.
+    for (const text of [
+      'Reply sent.',
+      'Reply cancelled.',
+      'New message cancelled.',
+      'Saved QuickNote: Ship it today.',
+    ]) {
+      expect(HudCanvas.usesAssistantPillLayout(text)).toBe(true);
+    }
+    // A genuine assistant answer still earns the full card.
+    expect(HudCanvas.usesAssistantPillLayout(
+      'I checked the calendar and reminders. Your design review is next, '
+      + 'and reminder monitoring is armed for this evening.',
+    )).toBe(false);
+    expect(HudCanvas.usesAssistantPillLayout('line one\nline two')).toBe(false);
+    expect(HudCanvas.usesAssistantPillLayout('   ')).toBe(false);
   });
 });

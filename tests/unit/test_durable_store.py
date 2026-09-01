@@ -202,3 +202,23 @@ def test_schema_constraints_reject_cross_action_receipt_and_partial_origin(
                 ") VALUES ('receipt-wrong','a','attempt-b','ok','executor_accepted',?,3)",
                 (blob,),
             )
+
+
+def test_a_later_migration_can_retire_earlier_schema(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The manifest is the ORDERED result of the migrations, not the union of
+    every CREATE. Without this a mistake could never be retired: migration 8
+    created calendar_event_alerts for a poller that duplicated the platform,
+    and migration 10 drops it."""
+    from joat.persistence.store import DurableStore
+
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        # The dropped table is gone from the physical schema, and the
+        # manifest verifier (which runs on open) agrees rather than raising.
+        names = {
+            row[0] for row in store.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table'"
+            ).fetchall()
+        }
+        assert "calendar_event_alerts" not in names
+        # A table the migrations still create is untouched.
+        assert "notification_observations" in names
