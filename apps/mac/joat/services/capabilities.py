@@ -476,7 +476,12 @@ class CapabilityRouter:
         await self._hud.show_brainstorm(BrainstormHudView(
             screen="agent_terminal",
             state=state,
-            topic="Hermes Agent Terminal",
+            # The lane name, in the same shape the roster sends
+            # ("<lane> · <state>"): the renderer reads the first segment as
+            # the summary spine's focus label. "Hermes Agent Terminal" put
+            # HERMES AGENT TERMINAL > UNAVAILABLE under a screen already
+            # titled Agent Terminal.
+            topic="hermes",
             collaborators=[],
             activity="No terminal sessions are configured on this Mac.",
             terminal_state=state,
