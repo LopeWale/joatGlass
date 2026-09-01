@@ -836,3 +836,27 @@ class TestTheFrameAlwaysFitsTheWire:
             collaborators=frame.lanes, activity="\n".join(frame.lines),
             terminal_state="running",
         ).to_wire()
+
+    def test_a_multi_line_error_stays_one_row(self) -> None:
+        """`lane.last_error` is `str(exc)`, and exception messages carry
+        newlines — a traceback, a multi-line protocol complaint. Recorded
+        as `[!] <that>`, one tail entry rendered as several rows, so seven
+        entries could become fourteen and the renderer's tail trim would
+        quietly drop half the terminal."""
+        from joat.services.agent_terminal import AgentTerminalRoster, HUD_LINES
+
+        r = AgentTerminalRoster([("hermes", FakeAgent())])
+        lane = r._lanes["hermes"]
+        lane.last_error = "\n".join(
+            f"traceback frame {i} with explanatory detail" for i in range(14)
+        )
+        lane.tail.append(f"[!] {lane.last_error}")
+        for i in range(HUD_LINES):
+            lane.tail.append(f"line {i}\nsmuggled continuation {i}")
+        frame = r.frame()
+
+        rendered = "\n".join(frame.lines)
+        assert rendered.count("\n") + 1 == len(frame.lines), (
+            "a tail entry rendered as more than one row"
+        )
+        assert len(frame.lines) <= HUD_LINES

@@ -64,6 +64,23 @@ class TerminalFrame:
     lines: list[str]
 
 
+def _one_row(text: str, columns: int) -> str:
+    """One tail entry, guaranteed to render as exactly one row.
+
+    Agent output is split on newlines before it reaches the tail, so
+    entries are normally single lines. Errors are not: `lane.last_error`
+    is `str(exc)`, and an exception message can carry newlines of its own
+    — a traceback, a multi-line protocol complaint. Recorded as
+    `[!] <that>` it became one tail entry spanning several rows, so seven
+    entries could render as fourteen and the renderer's tail trim would
+    quietly drop half the terminal.
+
+    Only line breaks are folded. Other whitespace is CLI output the wearer
+    may be reading for its shape, and is left alone.
+    """
+    return text.replace("\r", " ").replace("\n", " ")[:columns]
+
+
 class TerminalAgentLike(Protocol):
     """What a lane needs from its runtime — the adapter already satisfies it."""
 
@@ -192,12 +209,12 @@ class AgentTerminalRoster:
         # dead surface cannot kill the work — so the terminal simply froze
         # on a stale frame with nothing logged, which is precisely the
         # "watch concurrent work" the roster exists to provide.
-        header = header[:HUD_TOPIC_COLUMNS]
+        header = _one_row(header, HUD_TOPIC_COLUMNS)
         # All HUD_LINES rows, not one fewer: the header is a separate
         # field drawn above the divider, so it never cost a transcript row.
         # Each line is bounded to exactly one row, so the row count is the
         # line count.
-        body = [line[:HUD_COLUMNS]
+        body = [_one_row(line, HUD_COLUMNS)
                 for line in list(lane.tail)[-HUD_LINES:]] or ["no output yet"]
         state = (
             "running" if lane.busy
