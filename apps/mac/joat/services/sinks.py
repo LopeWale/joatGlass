@@ -54,6 +54,7 @@ class HudSink:
         self._speaker = ""
         self._activity = ""
         self._wait_task: asyncio.Task[None] | None = None
+        self._streaming = False
         self._progress = ""
         self._state = "ready"
 
@@ -73,19 +74,22 @@ class HudSink:
         head, _, _ = self._activity.rpartition("\n")
         self._activity = self._bounded_transcript(f"{head}\n{row}" if head else row)
 
-    _WAIT_CLOCK = re.compile(r"(Thinking…) \d+:\d{2}$")
+    _WAIT_MARKER = re.compile(r"Thinking…(?: \d+:\d{2})?$")
 
-    def _strip_wait_clock(self) -> None:
-        """Drop the elapsed suffix before the answer lands on the same row.
+    def _retire_wait_marker(self) -> None:
+        """Take the silence marker off the row the answer is about to use.
 
-        Matched as a CLOCK, not as 'anything after Thinking…'. A looser
-        strip ate real answer text: a turn already reading 'Thinking…
-        first' lost its word when the next chunk arrived.
+        "Thinking…" is a claim that nothing has been produced yet. Leaving
+        it in front of the answer both states something false and spends
+        eleven of a row's ~48 readable columns saying it — on every turn of
+        every round.
+
+        Removes the whole marker, clock and all, and leaves the "NAME > "
+        prefix so the arriving text simply continues the row.
         """
         head, sep, last = self._activity.rpartition("\n")
-        trimmed = self._WAIT_CLOCK.sub(r"\1", last)
-        if trimmed != last:
-            self._activity = f"{head}{sep}{trimmed}" if sep else trimmed
+        trimmed = self._WAIT_MARKER.sub("", last)
+        self._activity = f"{head}{sep}{trimmed}" if sep else trimmed
 
     def _append_transcript(self, row: str) -> None:
         self._activity = self._bounded_transcript(
@@ -164,6 +168,7 @@ class HudSink:
         if self._activity == "JOAT > Preparing collaborators…":
             self._activity = ""
         self._append_transcript(f"{self._display_speaker(label).upper()} > Thinking…")
+        self._streaming = False
         await self._paint("running")
         self._start_wait_clock()
 
@@ -196,21 +201,22 @@ class HudSink:
             task.cancel()
 
     async def chunk(self, text: str) -> None:
-        # `turn()` paints a fixed progress marker before any model bytes
-        # arrive. The first token is usually lexical rather than whitespace,
-        # so concatenate it as readable prose once; later chunks must retain
-        # their exact boundaries because a streaming model may split a word.
-        # Tokens are arriving: the stream itself is the progress signal now.
-        # Strip the elapsed suffix FIRST — the separator test looks for a
-        # bare "Thinking…", and a ticked clock ends in "Thinking… 0:12",
-        # so checking before stripping silently skipped both.
+        # Tokens are arriving, so the stream is its own progress signal and
+        # the silence marker has done its job: the FIRST chunk retires it
+        # and takes its place on the row.
+        #
+        # Only the first chunk may rewrite the row. Every later chunk is
+        # appended byte for byte, because a streaming model splits words
+        # across chunks — an earlier version re-examined the whole row on
+        # each chunk and ate real text from a turn that opened with the
+        # word "first". Tracking whether the turn has begun makes that
+        # class of mistake unreachable rather than merely unlikely.
         self._stop_wait_clock()
-        self._strip_wait_clock()
-        needs_prefix_separator = (
-            self._activity.endswith("Thinking…") and text and not text[0].isspace()
-        )
-        separator = " " if needs_prefix_separator else ""
-        self._activity = self._bounded_transcript(self._activity + separator + text)
+        if not self._streaming:
+            self._streaming = True
+            self._retire_wait_marker()
+            text = text.lstrip()
+        self._activity = self._bounded_transcript(self._activity + text)
         await self._paint("running")
 
     async def close(self, verdict: str) -> None:

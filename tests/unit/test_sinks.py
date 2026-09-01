@@ -91,9 +91,16 @@ class TestHudSink:
         assert frame.active_speaker == "openclaw"
         assert frame.terminal_state == "ready"
         assert frame.no_tools_checked is True
-        assert frame.activity == "OPENCLAW > Thinking… Use tabs with a formatter."
+        assert frame.activity == "OPENCLAW > Use tabs with a formatter."
 
-    async def test_keeps_the_thinking_marker_readable_without_changing_later_chunk_joining(self) -> None:
+    async def test_the_answer_replaces_the_marker_and_later_chunks_join_exactly(self) -> None:
+        """The marker says "nothing yet"; the first token makes that false.
+
+        The word "first" is not incidental. An earlier implementation
+        re-scanned the row on every chunk to strip the marker, and this
+        turn — whose own first word is "first" — is the one it silently
+        ate. Only the opening chunk may rewrite the row.
+        """
         transport = HudTransport()
         sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
         await sink.open("topic", ["hermes"])
@@ -102,18 +109,22 @@ class TestHudSink:
         await sink.chunk("first")
         first = transport.sent[-1]
         assert isinstance(first, BrainstormHudView)
-        assert first.activity == "HERMES > Thinking… first"
+        assert first.activity == "HERMES > first"
 
         await sink.chunk("-chunk")
         second = transport.sent[-1]
         assert isinstance(second, BrainstormHudView)
-        assert second.activity == "HERMES > Thinking… first-chunk"
+        assert second.activity == "HERMES > first-chunk"
 
+        # A model that opens with whitespace must not push the answer off
+        # the "NAME > " prefix by a stray column.
         await sink.turn("hermes")
         await sink.chunk(" already spaced")
         naturally_spaced = transport.sent[-1]
         assert isinstance(naturally_spaced, BrainstormHudView)
-        assert naturally_spaced.activity == "HERMES > Thinking… first-chunk\nHERMES > Thinking… already spaced"
+        assert naturally_spaced.activity == (
+            "HERMES > first-chunk\nHERMES > already spaced"
+        )
 
     async def test_retains_recent_speaker_rows_for_the_wearable_terminal_tail(self) -> None:
         transport = HudTransport()
@@ -129,9 +140,9 @@ class TestHudSink:
         frame = transport.sent[-1]
         assert isinstance(frame, BrainstormHudView)
         assert frame.activity == (
-            "CODEX > Thinking… Keep the decision reversible.\n"
-            "CLAUDE > Thinking… Check the calendar first.\n"
-            "HERMES > Thinking… I can stage a safe next action."
+            "CODEX > Keep the decision reversible.\n"
+            "CLAUDE > Check the calendar first.\n"
+            "HERMES > I can stage a safe next action."
         )
 
     async def test_terminal_overlay_and_replay_keep_the_real_brainstorm_state(self) -> None:
