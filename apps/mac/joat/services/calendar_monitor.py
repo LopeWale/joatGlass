@@ -8,23 +8,31 @@ due-alert path with its own acknowledged delivery contract
 reminder twice and blur two things the wearer keeps separate: a schedule that
 starts, and a task that is due.
 
-It also stays on the ordinary notification seam (`SessionManager.notify`), so
-an event heads-up obeys the same coalescing, rate cap, and never-interrupt-a-
-session policy as any other card, rather than inventing a second way to seize
-the lenses.
+It also stays on the ordinary notification seam, so an event heads-up obeys the
+same coalescing, rate cap, and never-interrupt-a-session policy as any other
+card, rather than inventing a second way to seize the lenses. That means going
+through a `DeliveryPolicy` before delivery — reaching `SessionManager` directly
+would make calendar the one card kind exempt from the rate cap, and a poll that
+returned six qualifying events would paint six frames in one tick.
+
+Ordering matters here: the durable "already announced" cursor is committed only
+AFTER an awaited delivery reports the write completed. Committing it after a
+fire-and-forget hand-off would make a dropped card unrepeatable, because a
+marked event is never re-offered. Failing the other way costs at most a
+repeated announcement, and even that is bounded — an event leaves the lead
+window as soon as it starts.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, tzinfo
 from typing import Any, Protocol
 
-from ..channels.cards import Card, Urgency
+from ..channels.cards import Card, DeliveryPolicy, Urgency
 from ..persistence.calendar_alerts import CalendarAlertStore
 
 log = logging.getLogger(__name__)
@@ -36,6 +44,10 @@ DEFAULT_LEAD_S = 600.0
 # ten-minute warning is invisible, and this shares the native bridge with
 # everything else.
 DEFAULT_POLL_INTERVAL_S = 60.0
+# A card queued behind a live Brainstorm resolves only when that session ends.
+# Bound the wait so one long session cannot stall the poll loop indefinitely;
+# an undelivered event stays unmarked and is simply re-offered.
+DEFAULT_DELIVERY_TIMEOUT_S = 20.0
 
 _EVENT_QUERY_LIMIT = 100
 
@@ -44,7 +56,13 @@ class CalendarQueryClient(Protocol):
     async def call(self, method: str, params: dict[str, Any] | None = None) -> Any: ...
 
 
-def starting_soon_card(title: str, starts_at: datetime, minutes_away: int) -> Card:
+def starting_soon_card(
+    title: str,
+    starts_at: datetime,
+    minutes_away: int,
+    *,
+    origin_id: str | None = None,
+) -> Card:
     """Two lines, who then what — the card contract in `channels/cards.py`.
 
     NOTIFY, never URGENT: urgency in this codebase means corroborated
@@ -59,7 +77,9 @@ def starting_soon_card(title: str, starts_at: datetime, minutes_away: int) -> Ca
         summary=summary,
         urgency=Urgency.NOTIFY,
         event_class="calendar.starting_soon",
-        origin_id=None,
+        # The producing store's own identity for this occurrence, so history
+        # can tell two announcements apart the way every other producer can.
+        origin_id=origin_id,
     )
 
 
@@ -70,28 +90,57 @@ class CalendarMonitor:
         self,
         client: CalendarQueryClient,
         alerts: CalendarAlertStore,
-        notify: Callable[[Card], None | Awaitable[None]],
+        notify: Callable[[Card], Awaitable[None]],
         *,
-        zone: tzinfo,
+        connected: Callable[[], bool],
+        zone: tzinfo | None,
         lead_s: float = DEFAULT_LEAD_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        policy: DeliveryPolicy | None = None,
+        delivery_timeout_s: float = DEFAULT_DELIVERY_TIMEOUT_S,
     ) -> None:
         if lead_s <= 0:
             raise ValueError("lead must be positive")
         if poll_interval_s <= 0:
             raise ValueError("poll interval must be positive")
+        if delivery_timeout_s <= 0:
+            raise ValueError("delivery timeout must be positive")
         self._client = client
         self._alerts = alerts
         self._notify = notify
+        # Awaiting the HUD write is NOT proof the wearer saw anything: the
+        # transport logs and returns normally when no plugin is connected, so
+        # a normal return would otherwise commit the cursor for a frame that
+        # was discarded. This is guaranteed at every launch, because the poll
+        # loop starts before the gateway accepts its first client.
+        self._connected = connected
         self._zone = zone
         self._lead_s = lead_s
         self._interval = poll_interval_s
+        # The same admission RULES every other card passes — coalescing plus
+        # the per-minute cap — via this monitor's own policy instance. The
+        # budget is per-producer, not global: calendar and notifications can
+        # together exceed six frames/minute in a pathological burst. A truly
+        # global budget would mean sharing one DeliveryPolicy across
+        # subsystems; accepted as-is because each producer alone stays
+        # bounded, and admit() runs before delivery, so a failed delivery has
+        # already consumed budget and coalescing state (cost: a retried
+        # announcement may render with an inflated "(2)" count — cosmetic).
+        self._policy = policy or DeliveryPolicy()
+        self._delivery_timeout_s = delivery_timeout_s
         self._running = False
 
     async def run(self) -> None:
         self._running = True
         while self._running:
-            await self.run_once()
+            # The durable-store reads and writes inside run_once are not
+            # guarded there. An unguarded raise here would end the task for
+            # the rest of the process — silently, since nothing awaits it —
+            # so one sqlite hiccup would cost every future schedule alert.
+            try:
+                await self.run_once()
+            except Exception:
+                log.exception("calendar starting-soon poll failed; continuing")
             await asyncio.sleep(self._interval)
 
     def stop(self) -> None:
@@ -112,6 +161,12 @@ class CalendarMonitor:
         now_ms = int(time.time() * 1_000) if now_unix_ms is None else now_unix_ms
         stamp_us = int(time.time() * 1_000_000) if now_us is None else now_us
         window_end_ms = now_ms + int(self._lead_s * 1_000)
+        if not self._connected():
+            # Nothing can be announced, so nothing may be recorded as
+            # announced. Staying quiet here is what keeps the wearer's first
+            # meeting of the day from being consumed by the startup poll.
+            log.info("calendar starting-soon skipped: no glasses client connected")
+            return 0
         try:
             response = await self._client.call("calendar.query", {
                 "start_unix_ms": now_ms,
@@ -136,9 +191,35 @@ class CalendarMonitor:
             identifier, starts_ms, payload = card
             if self._alerts.already_alerted(identifier, starts_ms):
                 continue
-            delivery = self._notify(payload)
-            if inspect.isawaitable(delivery):
-                await delivery
+            admitted = self._policy.admit(payload)
+            if admitted is None:
+                # Rate-capped (admit never returns None for coalescing — a
+                # coalesced repeat comes back as a replacement card).
+                # Deliberately NOT marked: the wearer never saw it, so it
+                # stays eligible for the next tick.
+                log.info("calendar starting-soon suppressed by delivery policy")
+                continue
+            try:
+                async with asyncio.timeout(self._delivery_timeout_s):
+                    await self._notify(admitted)
+            # CancelledError is a BaseException and deliberately passes
+            # through, so shutdown still cancels the poll promptly.
+            except Exception as exc:
+                # An un-awaited hand-off would let a dropped card be marked and
+                # therefore never re-offered. Leave it unmarked instead: the
+                # cost is a possible repeat, bounded by the lead window.
+                log.info(
+                    "calendar starting-soon not delivered (%s); leaving it unannounced",
+                    type(exc).__name__,
+                )
+                continue
+            if not self._connected():
+                # The client dropped somewhere between the tick's gate and
+                # this write completing, so the "successful" paint may have
+                # been silently discarded. Prefer a possible duplicate next
+                # tick over recording an announcement nobody saw.
+                log.info("calendar starting-soon delivery raced a disconnect; not marking")
+                continue
             self._alerts.mark_alerted(identifier, starts_ms, now_us=stamp_us)
             announced += 1
         if announced:
@@ -159,8 +240,15 @@ class CalendarMonitor:
         if item.get("entity") == "reminder":
             return None
         # An all-day event has no meaningful "starts in N minutes"; it is
-        # already on the day's agenda.
-        if item.get("is_all_day") is True:
+        # already on the day's agenda. The bridge DTO always sends a real
+        # bool, so anything else means the payload cannot be trusted to say
+        # whether this is a timed event — and announcing "starts in 8 min"
+        # for an all-day item is worse than staying quiet.
+        all_day = item.get("is_all_day")
+        if not isinstance(all_day, bool):
+            log.info("calendar item skipped: is_all_day missing or not a bool")
+            return None
+        if all_day:
             return None
         start = item.get("start_unix_ms")
         identifier = item.get("calendar_item_identifier")
@@ -176,6 +264,10 @@ class CalendarMonitor:
             return None
         title = item.get("title")
         readable = title.strip() if isinstance(title, str) and title.strip() else "Untitled event"
+        # A None zone means system local time, resolved now rather than at
+        # construction, so the rendered clock time survives a DST change.
         starts_at = datetime.fromtimestamp(starts_ms / 1_000, self._zone)
         minutes_away = max(0, int((starts_ms - now_ms) // 60_000))
-        return identifier, starts_ms, starting_soon_card(readable, starts_at, minutes_away)
+        return identifier, starts_ms, starting_soon_card(
+            readable, starts_at, minutes_away, origin_id=f"{identifier}:{starts_ms}",
+        )

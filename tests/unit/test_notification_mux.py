@@ -33,6 +33,46 @@ def notification(rec_id: int, *, app: str, title: str, body: str) -> Notificatio
     )
 
 
+def test_prune_drops_settled_history_but_never_an_undelivered_notification(
+    tmp_path: Path,
+) -> None:
+    """Nothing pruned this table, and every poll queries it — so it made each
+    incoming notification a little slower than the last. Pruning must still
+    never drop something the wearer has not seen."""
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        observations = NotificationObservationStore(store)
+        observations.initialize_source(
+            source_id="messages-db",
+            coverage_scope="messages.incoming_text",
+            authority_level="authoritative",
+            baseline=0,
+            health="healthy_complete_for_scope",
+            now_us=1,
+        )
+        assert observations.commit_batch(
+            source_id="messages-db",
+            cursor_before=0,
+            cursor_after=3,
+            notifications=[
+                notification(1, app="Messages", title="Ada", body="settled"),
+                notification(2, app="Messages", title="Ada", body="still pending"),
+            ],
+            event_class="messages.incoming_text",
+            completeness="complete_for_scope",
+            observed_at_us=1_000,
+        ) == 2
+
+        settled, still_pending = observations.pending(limit=10)
+        observations.mark_enqueued(settled.observation_id, now_us=1_000)
+
+        # Horizon far in the future: age is not what protects the pending row.
+        assert observations.prune(before_us=10**18) == 1
+        remaining = observations.pending(limit=10)
+        assert [row.observation_id for row in remaining] == [
+            still_pending.observation_id
+        ]
+
+
 def test_batch_commit_retains_raw_observations_and_cursor_across_restart(tmp_path: Path) -> None:
     path = tmp_path / "joat.sqlite3"
     with DurableStore(path) as store:

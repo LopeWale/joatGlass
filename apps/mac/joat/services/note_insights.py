@@ -365,7 +365,10 @@ class NoteInsightCommandController:
         self._now = now or (lambda: datetime.now().astimezone())
 
     async def handle_command(self, text: str) -> str | None:
-        normalized = " ".join(text.strip().split())
+        # Whisper punctuates short utterances ("Summarize the last note.").
+        # Terminal punctuation is STT noise for a deterministic command; a
+        # trailing "?" on the ask-question capture is equally disposable.
+        normalized = " ".join(text.strip().split()).rstrip(".,!?").rstrip()
         summarize = _SUMMARIZE.fullmatch(normalized)
         if summarize is not None:
             engine = "claude" if summarize.group("claude") else "local"

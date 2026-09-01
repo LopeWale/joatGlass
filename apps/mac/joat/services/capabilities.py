@@ -562,9 +562,10 @@ class CapabilityRouter:
             return
         try:
             page = await asyncio.to_thread(
-                # 7 entries = exactly one conversation window on the lens, so
-                # a page turn is a screen turn — nothing half-hidden.
-                self._messages.thread_message_page, thread, limit=7,
+                # 8 entries = exactly one conversation window on the lens
+                # now that the page name moved into the status spine, so a
+                # page turn is a screen turn — nothing half-hidden.
+                self._messages.thread_message_page, thread, limit=8,
             )
         except (OSError, sqlite3.Error) as exc:
             log.warning("Messages history unavailable: %s", type(exc).__name__)
@@ -658,7 +659,7 @@ class CapabilityRouter:
                     older = await asyncio.to_thread(
                         self._messages.thread_message_page,
                         state.thread,
-                        limit=7,
+                        limit=8,
                         before_row_id=min(row_ids),
                     )
                 except (OSError, sqlite3.Error) as exc:
@@ -1132,8 +1133,20 @@ class CapabilityRouter:
         if not selected.entries:
             rows.append(_PlanningRow(label="Nothing planned", action="day", day=selected.day))
         for entry in selected.entries:
+            # Planning merges the two halves — calendar events and
+            # reminders/tasks — so a row must say WHICH it is. DESIGN.md:
+            # kind is a tiny aligned marker from the firmware-safe glyph set,
+            # "never by an icon badge or a spelled-out word". Spelling out
+            # "EVENT"/"REMINDER" cost ten characters of a 46-character line
+            # on every single row. The bracketed time reads as the same quiet
+            # leading chip QuickNotes uses, then the marker, then the title.
+            # A reminder is an open todo, which is exactly what □ means in
+            # that vocabulary. An event gets no marker rather than borrow ●,
+            # which means "demanding attention now" — the renderer reserves
+            # the marker column for the whole list, so titles still align.
+            marker = "□ " if entry.kind == "reminder" else ""
             rows.append(_PlanningRow(
-                label=f"{entry.time_label} · {entry.kind.upper()} · {entry.title}",
+                label=f"[{entry.time_label}] {marker}{entry.title}",
                 action="entry",
                 entry=entry,
             ))

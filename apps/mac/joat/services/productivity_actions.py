@@ -163,7 +163,9 @@ class ProductivityActionController:
         self._publish_status = publish_status
 
     async def handle_command(self, text: str) -> str | None:
-        normalized = " ".join(text.strip().split())
+        # Whisper punctuates short utterances ("Remind me to call at 5pm.").
+        # Terminal punctuation is STT noise for a deterministic command.
+        normalized = " ".join(text.strip().split()).rstrip(".,!?").rstrip()
         event = _EVENT.fullmatch(normalized)
         if event is not None:
             return await self._create_event(event)

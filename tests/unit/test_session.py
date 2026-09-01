@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from joat.core.interfaces import GlassesTransport, ReplyEngine
 from joat.core.protocol import BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
 from joat.channels.cards import Card, CardLog, Urgency
@@ -818,6 +820,88 @@ class TestSessionManager:
         await delivery
         assert len(transport.sent) == 1
 
+    async def test_history_records_each_card_including_a_drained_batch(self) -> None:
+        """The card_log write runs in production but was never exercised.
+
+        A drained batch paints ONE frame, so a log keyed off paints would
+        collapse several events into one unreadable entry; history keeps them
+        separate.
+        """
+        transport = SinkTransport()
+        card_log = CardLog()
+
+        class Held(Session):
+            def __init__(self) -> None:
+                self.gate = asyncio.Event()
+
+            async def run(self) -> None:
+                await self.gate.wait()
+
+            def cancel(self) -> None:
+                self.gate.set()
+
+        held = Held()
+        manager = SessionManager(
+            HudWriter(transport), lambda _topic: held, card_log=card_log,
+        )
+
+        manager.notify(Card(source="Ada", channel="Messages", summary="first"))
+        await asyncio.sleep(0)
+        assert [c.source for c in card_log.recent(5)] == ["Ada"]
+
+        assert manager.handle_transcript("debate something") is True
+        await asyncio.sleep(0)
+        manager.notify(Card(source="Dele", channel="Messages", summary="queued one"))
+        manager.notify(Card(source="Marcus", channel="Messages", summary="queued two"))
+        held.gate.set()
+        for _ in range(6):
+            await asyncio.sleep(0)
+
+        # One painted frame for the batch, but three distinct history entries.
+        assert [c.source for c in card_log.recent(5)] == ["Ada", "Dele", "Marcus"]
+
+    async def test_an_abandoned_queued_card_is_withdrawn_not_painted_later(self) -> None:
+        """A caller that gives up (bounded timeout, shutdown) must not have
+        its card surface minutes later when the session drains.
+
+        Leaving the entry queued paints an announcement the caller already
+        recorded as undelivered — so it is shown AND retried, i.e. twice.
+        """
+        transport = SinkTransport()
+
+        class Held(Session):
+            def __init__(self) -> None:
+                self.gate = asyncio.Event()
+
+            async def run(self) -> None:
+                await self.gate.wait()
+
+            def cancel(self) -> None:
+                self.gate.set()
+
+        held = Held()
+        manager = SessionManager(HudWriter(transport), lambda _topic: held)
+        assert manager.handle_transcript("debate something") is True
+        await asyncio.sleep(0)
+
+        card = Card(source="Design review", channel="Calendar", summary="Starts 16:30")
+        delivery = asyncio.create_task(manager.notify_and_wait(card))
+        await asyncio.sleep(0)
+        assert not delivery.done()
+
+        delivery.cancel()
+        try:
+            await delivery
+        except asyncio.CancelledError:
+            pass
+
+        held.gate.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        painted = [m for m in transport.sent if isinstance(m, HudText)]
+        assert not any("Design review" in m.text for m in painted)
+
     async def test_trigger_starts_and_consumes(self) -> None:
         transport = SinkTransport()
         started: list[str] = []
@@ -854,6 +938,146 @@ class TestSessionManager:
         await asyncio.sleep(0)
         assert not mgr.active
         assert mgr.handle_transcript("hello again") is False
+
+    async def test_a_wedged_session_releases_the_wearer_instead_of_trapping_them(
+        self,
+    ) -> None:
+        """While a session is active EVERY transcript is consumed, so a task
+        that ignores cancellation left the wearer with no working commands at
+        all. Refuse to stay hostage to it."""
+        from joat.services import session as session_module
+
+        transport = SinkTransport()
+
+        class Wedged(Session):
+            """Ignores the first cancellations, like a subprocess stuck in
+            uninterruptible I/O. Releasable so the test can clean up."""
+
+            def __init__(self) -> None:
+                self.release = asyncio.Event()
+
+            async def run(self) -> None:
+                while not self.release.is_set():
+                    try:
+                        await asyncio.wait_for(self.release.wait(), 0.005)
+                    except (TimeoutError, asyncio.CancelledError):
+                        continue
+
+            def cancel(self) -> None:
+                return None
+
+        wedged = Wedged()
+        mgr = SessionManager(HudWriter(transport), lambda _topic: wedged)
+        assert mgr.handle_transcript("brainstorm something") is True
+        await asyncio.sleep(0)
+        assert mgr.active
+
+        original = session_module.CANCEL_GRACE_S
+        session_module.CANCEL_GRACE_S = 0.01
+        try:
+            assert mgr.handle_transcript("stop") is True
+            async with asyncio.timeout(1.0):
+                while mgr.active:
+                    await asyncio.sleep(0.01)
+        finally:
+            session_module.CANCEL_GRACE_S = original
+
+        # Commands work again: the next transcript falls through to the
+        # default assistant flow instead of being swallowed.
+        assert mgr.handle_transcript("open planning") is False
+        wedged.release.set()
+        await asyncio.sleep(0.02)
+
+    async def test_queued_cards_stay_bounded_during_a_long_session(self) -> None:
+        """The queue was unbounded and only trimmed at drain, so a busy hour
+        accumulated an hour of cards nobody would read — and each waiting
+        producer stayed blocked for that whole hour."""
+        transport = SinkTransport()
+
+        class Held(Session):
+            def __init__(self) -> None:
+                self.gate = asyncio.Event()
+
+            async def run(self) -> None:
+                await self.gate.wait()
+
+            def cancel(self) -> None:
+                self.gate.set()
+
+        held = Held()
+        mgr = SessionManager(HudWriter(transport), lambda _topic: held)
+        assert mgr.handle_transcript("brainstorm something") is True
+        await asyncio.sleep(0)
+
+        waiters = [
+            asyncio.create_task(mgr.notify_and_wait(
+                Card(source=f"s{n}", channel="Messages", summary=f"m{n}"),
+            ))
+            for n in range(20)
+        ]
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+        # Displaced producers are told immediately, not at session end: the
+        # queue never holds more than one glance worth of cards.
+        assert len(mgr._pending_cards) == 6
+        displaced = [t for t in waiters if t.done()]
+        assert len(displaced) == 14
+        assert all(isinstance(t.exception(), RuntimeError) for t in displaced)
+
+        held.gate.set()
+        outcomes = await asyncio.gather(*waiters, return_exceptions=True)
+        # The six survivors were painted; the rest were rejected, not hung.
+        assert sum(1 for o in outcomes if o is None) == 6
+
+    async def test_natural_cancel_phrases_end_a_live_session(self) -> None:
+        """A live session consumes every transcript, so the escape hatch must
+        match how people say it — "JOAT, stop" and "stop it" failing left the
+        wearer with NO working commands until the session ended by itself."""
+        for phrase in ("JOAT, stop", "joat stop it", "Cancel that.", "Stop it!"):
+            transport = SinkTransport()
+
+            class Held(Session):
+                def __init__(self) -> None:
+                    self.gate = asyncio.Event()
+
+                async def run(self) -> None:
+                    await self.gate.wait()
+
+                def cancel(self) -> None:
+                    self.gate.set()
+
+            mgr = SessionManager(HudWriter(transport), lambda _topic: Held())
+            assert mgr.handle_transcript("brainstorm something") is True
+            await asyncio.sleep(0)
+            assert mgr.active
+            assert mgr.handle_transcript(phrase) is True
+            for _ in range(4):
+                await asyncio.sleep(0)
+            assert not mgr.active, f"{phrase!r} did not cancel"
+
+    async def test_a_sentence_containing_stop_does_not_cancel(self) -> None:
+        """Steering text mentioning "stop" must reach the session, not kill it."""
+        transport = SinkTransport()
+
+        class Held(Session):
+            def __init__(self) -> None:
+                self.gate = asyncio.Event()
+
+            async def run(self) -> None:
+                await self.gate.wait()
+
+            def cancel(self) -> None:
+                self.gate.set()
+
+        held = Held()
+        mgr = SessionManager(HudWriter(transport), lambda _topic: held)
+        assert mgr.handle_transcript("brainstorm something") is True
+        await asyncio.sleep(0)
+        assert mgr.handle_transcript("we should stop shipping on Fridays") is True
+        await asyncio.sleep(0)
+        assert mgr.active
+        held.gate.set()
 
     async def test_direction_reaches_the_session_without_cancelling_it(self) -> None:
         """Chairing the room is not an interruption. An earlier build treated

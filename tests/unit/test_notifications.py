@@ -66,6 +66,43 @@ class TestStore:
 
 
 class TestTriageParse:
+    def test_card_taxonomy_agrees_with_the_observation_store(self) -> None:
+        """Two names for one fact is worse than one imprecise name.
+
+        The card's event_class and the observation store's row describe the
+        SAME notification, and used to be derived independently — one from the
+        humanized channel, one from the raw bundle id — so they disagreed
+        (com.apple.iCal is not the substring "calendar", and an email was being
+        called an incoming text message). They now share one classifier; this
+        pins that they cannot drift apart again.
+        """
+        from joat.channels.event_taxonomy import classify_event_class
+        from joat.persistence.notifications import NotificationObservationStore
+
+        cases = [
+            ("com.apple.MobileSMS", "Dele", "messages.incoming_text"),
+            ("com.apple.mail", "Bank statement", "mail.banner"),
+            ("com.apple.iCal", "Standup", "calendar.banner"),
+            ("com.apple.reminders", "Milk", "reminders.banner"),
+            ("com.spam.deals", "50% off", "notifications.banner"),
+            # Deliberate: chat apps arrive as banners; incoming_text is
+            # reserved for the authoritative iMessage lane. Display still
+            # shows the sender via PERSON_CHANNELS — taxonomy and display
+            # are separate decisions.
+            ("com.tinyspeck.slackmacgap", "Adaeze", "notifications.banner"),
+            ("com.hnc.Discord", "Marcus", "notifications.banner"),
+        ]
+        for app, title, expected in cases:
+            notification = Notification(
+                rec_id=1, app=app, title=title, subtitle="", body="body",
+                delivered_unix=0.0,
+            )
+            assert classify_event_class(app, title) == expected
+            assert NotificationObservationStore.event_class(notification) == expected
+
+        # An email is not an incoming text message.
+        assert classify_event_class("com.apple.mail", "Bank") != "messages.incoming_text"
+
     def test_levels_and_summary(self) -> None:
         assert parse_triage("URGENT — Dele is waiting for a reply") == (
             Urgency.URGENT, "Dele is waiting for a reply")

@@ -31,6 +31,24 @@ async def test_take_note_saves_exact_visible_text_and_searches_locally(tmp_path:
     store.close()
 
 
+async def test_whisper_terminal_punctuation_does_not_kill_exact_commands(
+    tmp_path: Path,
+) -> None:
+    """Whisper emits "Export notes." — on hardware, the trailing period made
+    these commands do nothing at all. Note BODIES keep their punctuation."""
+    controller, store = rig(tmp_path)
+
+    assert await controller.handle_command("take a note Ship it today.") == (
+        "Saved QuickNote: Ship it today."
+    )
+    assert (await controller.handle_command("Export notes.")) is not None
+    assert (await controller.handle_command("Undo last note.")) is not None
+    assert (await controller.handle_command("Restore last note!")) is not None
+    saved = NoteStore(store).search("Ship")[0]
+    assert saved.text == "Ship it today."  # body punctuation untouched
+    store.close()
+
+
 async def test_undo_hides_last_note_and_restore_is_explicit(tmp_path: Path) -> None:
     controller, store = rig(tmp_path)
     await controller.handle_command("note first")

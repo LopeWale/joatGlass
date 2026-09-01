@@ -95,9 +95,14 @@ waste — its border, margins, and per-row chrome, not any single line). Only
 the moving navigation states (guidance, GPS-uncertain, wrong-way, off-route,
 rerouting) keep the live-session shell, alongside Brainstorm. Overview is sparse and
 icon-led. A left-temple double-click opens the
-transient 160px Sidebar while the current Overview stays visible at 24% intensity
-to preserve place. Selecting a row removes the rail and gives the destination
-the full frame. Presenter updates are serialized across all four image tiles,
+transient 160px Sidebar while the current Overview stays visible UNCHANGED
+behind it to preserve place. Unchanged is literal and load-bearing: the frame
+ships as four 288x144 tiles over a serialized BLE lane and the presenter skips
+tiles whose pixels did not change, so dimming or shifting the backdrop would
+move every lit pixel, dirty all four tiles, and make the wearer watch the top
+half of the menu arrive before the bottom (observed on hardware, 2026-08-31).
+Leaving the right half untouched sends only the two tiles carrying the rail.
+Selecting a row removes the rail and gives the destination the full frame. Presenter updates are serialized across all four image tiles,
 and pending frames coalesce to the newest complete state so token streams and
 countdowns cannot build a stale BLE backlog. A failed partial frame triggers
 one bounded page rebuild; a failed first Confirmation then actively restores
@@ -112,8 +117,11 @@ overflow a title or action strip.
 
 There is no shadow, blur, or simulated glass on the optical HUD. Hierarchy is
 intensity plus progressive disclosure. The Sidebar is the only split surface:
-its selected row uses a bright three-pixel leading edge over a black rail and a
-dimmed, still-recognizable Overview. Full-focus pages replace that split.
+its selected row uses a bright three-pixel leading edge over a black rail, set
+against the untouched Overview. The rail's own black field is what separates
+foreground from context; the backdrop is not dimmed, because re-tinting it
+would cost two extra tile transfers on every menu open. Full-focus pages
+replace that split.
 Confirmation preserves the status spine, removes competing content, and gives
 one bright question the wearer's full attention.
 
@@ -122,9 +130,13 @@ one bright question the wearer's full attention.
 The 20px rounded rule survives only where four tiles must read as one HUD
 (Overview, Sidebar, live sessions). List rows use ONE language everywhere:
 dense reading rows — a bright three-pixel selection rail on rows that accept a
-tap, NO separator lines, nine single-line rows per screen (six on two-line
-Planning day agendas). The former per-row card (icon badge, 56px pitch,
-rounded selection outline) is retired; it fit three rows where nine belong.
+tap, NO separator lines, nine single-line rows per screen, Planning days
+included. The former per-row card (icon badge, 56px pitch, rounded selection
+outline) is retired; it fit three rows where nine belong. Planning's two-line
+agenda variant is retired too: a day row spelled out "16:30 · EVENT · Title"
+and needed a second line to fit it, which cost three rows per glance for a
+word the marker already says. Rows read "[16:30] □ Buy filters" — quiet time
+chip, marker, title — so a day shows nine entries like every other list.
 There are no floating modal cards. Row KIND is indicated by a tiny aligned
 marker from the firmware-safe glyph set — ● the row demanding attention now
 (a live recording, an unread thread), □ an open todo, – a key point — never
@@ -142,6 +154,33 @@ page holds more rows than one window, a 2px hairline scrollbar at x=556
 shows position and proportion — words never announce overflow, and healthy
 metadata stays quiet ("2 transcript sections", not "… · 0 gaps").
 
+### The resting screen is a dashboard
+
+Home is not a sentence on an empty field. The left pane carries the date and
+a large two-row clock drawn from the PHONE's own time, so the lenses stay
+useful when the Mac is unreachable; a single hairline divides it from the
+right pane, which flows JOAT's current content — label, answer or next
+event, last query, and an ambient tray line anchored to the pane's bottom.
+The spine yields its small clock there: no screen prints the same fact
+twice.
+
+### The page's name lives in the status spine
+
+On a feature page the spine reads MESSAGES or PLANNING where it reads JOAT
+at home, and the body below it belongs entirely to that feature — no second
+title bar. That reclaimed band is worth a whole extra row of content (ten
+dense rows per list, ten reader lines, eight transcript rows). A degraded
+link outranks the label: if JOAT is not READY, the spine says so instead.
+
+### Guidance is two panes: act, then see
+
+Active navigation splits the canvas like an instrument cluster — maneuver
+glyph, distance, instruction and next action on the left; the real route
+polyline on the right, projected from the Mac-authored geometry with the
+wearer's position ringed on it. The road is drawn in chrome so the eye
+still lands on the maneuver first, and the map carries no border: the map
+IS the content.
+
 ## Components
 
 ### Foundational visual states
@@ -150,7 +189,8 @@ metadata stays quiet ("2 transcript sections", not "… · 0 gaps").
   the only resting state and never carries permanent navigation chrome.
 - **Transient Sidebar:** appears only after a left-temple double-click. Its five
   capability rows occupy the left 160px while the current Overview remains
-  visible and dimmed at right. Selecting a row removes the Sidebar immediately.
+  visible and pixel-identical at right, so only the two left tiles transfer.
+  Selecting a row removes the Sidebar immediately.
 - **Full-focus page:** a bright destination title, semantic Phosphor markers,
   primary and secondary row text, timestamps, and a quiet action hint use the
   whole canvas after selection. Messages may use a sender initial; Calendar,

@@ -33,6 +33,16 @@ log = logging.getLogger(__name__)
 # the lens; routine traffic sits one step down.
 _CARD_BRIGHTNESS = {Urgency.NOTIFY: 3, Urgency.URGENT: 4}
 
+# One glance can carry six cards; a session that runs for an hour must not
+# accumulate an hour of notifications to paint at the end of it. Trimming at
+# ENQUEUE rather than at drain also lets a waiting producer learn immediately
+# that its card was displaced, instead of blocking until the session ends.
+_QUEUED_CARD_LIMIT = 6
+
+# How long a cancelled session may take to actually die before the manager
+# stops waiting and hands the wearer their voice commands back.
+CANCEL_GRACE_S = 8.0
+
 _UNSET_ADDRESSED = "\x00joat-unset-addressed"
 """Sentinel: the caller did not evaluate address at all (tests, internal
 flows), as distinct from None, which means the wearer did NOT address JOAT."""
@@ -165,7 +175,7 @@ class SessionManager:
         shows the card now; an active session is never interrupted — cards
         queue and drain the moment it ends."""
         if self._active is not None:
-            self._pending_cards.append((card, None))
+            self._enqueue_card((card, None))
             log.info("card queued behind active session urgency=%s", card.urgency.name)
             return
         asyncio.get_running_loop().create_task(self._show_card(card))
@@ -181,14 +191,56 @@ class SessionManager:
             await self._show_card(card)
             return
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._pending_cards.append((card, future))
+        entry = (card, future)
+        self._enqueue_card(entry)
         log.info("card queued behind active session urgency=%s", card.urgency.name)
-        await future
+        try:
+            await future
+        except BaseException:
+            # The caller gave up — a bounded delivery timeout, or shutdown.
+            # Withdraw the card unless the drain already claimed it, so an
+            # abandoned announcement is not painted minutes later behind a
+            # caller that has already decided it was never delivered.
+            try:
+                self._pending_cards.remove(entry)
+            except ValueError:
+                pass
+            raise
 
     async def _show_card(self, card: Card) -> None:
         await self._paint(card.render(), card.urgency)
         if self._card_log is not None:
             self._card_log.add(card)
+            await self._publish_home_notifications()
+
+    async def _publish_home_notifications(self) -> None:
+        """Put the RECENT cards on the resting screen, not a count.
+
+        The newest card already owns the bright main region; these are the
+        ones behind it. Showing them here is what removes the need to open a
+        Notifications page to find out what happened.
+        """
+        if self._card_log is None:
+            return
+        recent = self._card_log.recent(3)
+        # The newest is the one just painted large; the rest stack below it.
+        previous = list(reversed(recent[:-1]))[:2]
+        await self._hud.tray("\n".join(card.home_row() for card in previous))
+
+    def _enqueue_card(self, entry: tuple[Card, asyncio.Future[None] | None]) -> None:
+        """Queue one card behind the active session, bounded.
+
+        The queue was unbounded and only trimmed when the session ended, so a
+        busy hour grew a list nobody would ever read — and every producer
+        waiting on a displaced card stayed blocked for that whole hour.
+        """
+        self._pending_cards.append(entry)
+        while len(self._pending_cards) > _QUEUED_CARD_LIMIT:
+            _card, future = self._pending_cards.pop(0)
+            if future is not None and not future.done():
+                future.set_exception(
+                    RuntimeError("notification queue overflowed before HUD write")
+                )
 
     async def _paint(self, rendered: str, urgency: Urgency) -> None:
         # Urgency gets BRIGHTNESS from the enum the triage layer already
@@ -248,7 +300,23 @@ class SessionManager:
         """
         lowered = text.lower().strip().rstrip(".!?")
         if self._active is not None:
-            if lowered in ("stop", "cancel", "stop the debate"):
+            # A live session consumes every transcript, so the escape hatch
+            # must match how people actually say it. "JOAT, stop" and
+            # "stop it" failing here left the wearer trapped until the
+            # session ended on its own (observed: no command worked at all
+            # while a session was live). Wake-word prefix and filler are
+            # stripped before the exact match; the vocabulary stays small so
+            # dictating a sentence CONTAINING "stop" cannot end a session.
+            escape = lowered
+            for wake in ("joat,", "joat"):
+                if escape.startswith(wake + " "):
+                    escape = escape[len(wake):].strip()
+                    break
+            if escape in (
+                "stop", "cancel", "stop it", "cancel that", "cancel it",
+                "stop the debate", "stop the brainstorm", "end the brainstorm",
+                "stop the session", "end the session", "never mind", "nevermind",
+            ):
                 log.info("wearer cancelled the active session")
                 self._cancel_active()
                 return True
@@ -431,6 +499,28 @@ class SessionManager:
             # A cooperative flag cannot wake an agent stream blocked in remote
             # I/O. The session's cancellation handler paints a final frame.
             task.cancel()
+            # ...and a subprocess wedged in uninterruptible I/O may not honour
+            # even that. While _active stays set, EVERY transcript is consumed
+            # and the wearer has no working voice commands at all, so refuse
+            # to stay hostage to a task that will not die.
+            asyncio.get_running_loop().create_task(self._force_release(task))
+
+    async def _force_release(self, task: asyncio.Task[None]) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), CANCEL_GRACE_S)
+        except (TimeoutError, asyncio.CancelledError, Exception):
+            pass
+        if self._task is not task:
+            return
+        log.warning(
+            "session did not end within %.0fs of cancel; releasing the wearer",
+            CANCEL_GRACE_S,
+        )
+        self._active = None
+        self._task = None
+        if self._on_state is not None:
+            self._on_state("cancelled")
+        self._drain_cards()
 
     def _start(self, topic: str) -> bool:
         if not self._brainstorm_is_available():
@@ -478,11 +568,15 @@ class SessionManager:
             else:
                 completion_state = session.completion_state
             finally:
-                self._active = None
-                self._task = None
-                if publish_state and self._on_state is not None:
-                    self._on_state(completion_state)
-                self._drain_cards()
+                # A force-release may already have handed ownership on. Only
+                # the owning runner clears the slot, or it would wipe a
+                # session the wearer has since started.
+                if self._task is asyncio.current_task():
+                    self._active = None
+                    self._task = None
+                    if publish_state and self._on_state is not None:
+                        self._on_state(completion_state)
+                    self._drain_cards()
 
         self._task = asyncio.get_running_loop().create_task(runner())
         return True
