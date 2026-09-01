@@ -30,6 +30,33 @@ inside this JOAT-owned conversation; neither is the interface or session owner.
 - Neither Codex nor Claude is permanently first. The wearer may direct either
   one to speak next; otherwise the session continues its recorded turn policy.
 
+## Round structure
+
+A round is one turn from every seated collaborator — an invariant, not a
+default: a mid-round voice redirect reorders the seats still owing a turn and
+can never make one speak twice. The starter design runs:
+
+1. **Independent** — round 1 withholds the transcript, so each seat answers
+   blind. Two uncontaminated views are worth more than one view and an echo.
+2. **Cross-review** — round 2 onward, every seat sees everything said.
+3. **Meta-review** — after each round the local judge scores agreement and
+   blocking objections; the session converges above threshold, otherwise the
+   room goes around again up to the configured maximum. An illegible judgment
+   fails closed and never green-lights convergence.
+4. **Synthesis** — JOAT streams the verified result: `AGREED` asserts only
+   claims the verifier passed or that need no citation, `OPEN` names the
+   unresolved disagreements and who holds them. It runs even when the judge
+   could not score, and never runs on fewer than two positions.
+
+Unverified claims return to the SAME collaborator for repair, streamed under
+its own header so a turn is never silently rewritten. A collaborator that
+fails is shown and then excluded from the transcript — a provider error is
+never quoted as a position.
+
+While a session runs, only the cancel words are heard without the wake word.
+Steering requires the wearer to address JOAT, so an overheard sentence can
+neither reorder the round table nor reach a collaborator.
+
 ## Conversation behavior
 
 The wearer can start, continue, steer, branch, stop, and later resume a
