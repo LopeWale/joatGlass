@@ -40,6 +40,12 @@ class SessionListerLike(Protocol):
     async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]: ...
 
 
+class SessionResumerLike(Protocol):
+    """The optional resume surface (roster lanes only)."""
+
+    async def resume_session(self, session_key: str) -> None: ...
+
+
 class ApprovalResolverLike(Protocol):
     """The optional approvals surface (work lane only)."""
 
@@ -97,6 +103,8 @@ class AgentTerminalRoster:
         }
         self._announce = announce
         self._focus: str | None = next(iter(self._lanes), None)
+        self._discovered: list[dict[str, str]] = []
+        """Rows from the last discover(); what 'resume <label>' can name."""
 
     # ── roster ───────────────────────────────────────────────────────────
 
@@ -217,6 +225,7 @@ class AgentTerminalRoster:
         except Exception as exc:
             reason = str(exc) or exc.__class__.__name__
             return f"Session listing failed — {reason}"
+        self._discovered = rows
         if not rows:
             return "The gateway lists no sessions involving you."
         lines = []
@@ -225,6 +234,46 @@ class AgentTerminalRoster:
             lines.append(f"• {label}")
         suffix = f"\n(+{len(rows) - 12} more)" if len(rows) > 12 else ""
         return "Your sessions on the gateway:\n" + "\n".join(lines) + suffix
+
+    async def resume(self, spoken: str) -> str:
+        """Point the enumerating lane at a discovered session, by name.
+
+        Only rows the gateway actually listed are namable — resuming is
+        choosing from what was seen, never typing a key by voice.
+        """
+        if not self._discovered:
+            return "Say 'terminal discover' first — nothing has been listed yet."
+        said = " ".join(spoken.lower().split())
+        match = None
+        for row in self._discovered:
+            label = (row.get("label") or "").lower()
+            if label and (label == said or said in label or label in said):
+                match = row
+                break
+        if match is None:
+            return f"No listed session matches '{spoken}'."
+        lane = next(
+            (lane for lane in self._lanes.values()
+             if hasattr(lane.agent, "resume_session")),
+            None,
+        )
+        if lane is None:
+            return "No terminal lane on this Mac can resume a session."
+        if lane.busy:
+            return f"{lane.name} is still working — cancel it before resuming."
+        try:
+            await lane.agent.resume_session(match["key"])  # type: ignore[attr-defined]
+        except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
+            lane.last_error = reason
+            return f"Could not resume — {reason}"
+        lane.last_error = ""
+        lane.approvals.clear()
+        lane.tail.clear()
+        label = match.get("label") or match["key"]
+        lane.tail.append(f"[resumed] {label}")
+        self._focus = lane.name
+        return f"{lane.name} ▸ resumed '{label}'. Speak to send into it."
 
     # ── approvals (T5) ───────────────────────────────────────────────────
 
@@ -322,6 +371,7 @@ class AgentTerminalRoster:
 # The word "terminal" is REQUIRED in every phrasing: an optional prefix
 # here once let plain "switch to decaf" get claimed by this grammar —
 # hijacked from the assistant and answered with a terminal error.
+_RESUME = re.compile(r"^terminal resume (?P<name>[a-z0-9 ]+)$")
 _DECIDE = re.compile(r"^terminal (?P<decision>approve|deny|reject)(?: (?P<index>\d{1,2}))?$")
 _SWITCH = re.compile(
     r"^(?:terminal switch to|switch terminal to|switch the terminal to)"
@@ -361,6 +411,9 @@ class AgentTerminalCommands:
         if said in ("terminal discover", "terminal refresh",
                     "terminal all sessions"):
             return await self._roster.discover()
+        resume_match = _RESUME.match(said)
+        if resume_match is not None:
+            return await self._roster.resume(resume_match.group("name"))
         decision_match = _DECIDE.match(said)
         if decision_match is not None:
             spoken = decision_match.group("decision")

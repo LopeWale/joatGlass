@@ -240,6 +240,59 @@ class OpenClawAgentTerminal:
         return terminal
 
     @classmethod
+    async def attach(
+        cls,
+        *,
+        connection: AgentTerminalConnection,
+        agent_id: str,
+        session_key: str,
+        policy: AgentTerminalPolicy,
+        recovery: AgentTerminalRecovery | None = None,
+        on_approval: Callable[[PendingApproval], None] | None = None,
+    ) -> OpenClawAgentTerminal:
+        """Bind to an EXISTING session the gateway listed for this wearer.
+
+        Resume, as distinct from create: no adopt-or-create dance and no
+        namespace claim — the key's authority is that the gateway named it,
+        which the connection re-checks on every request. Roster lanes only;
+        any other policy is refused before a byte leaves the Mac.
+        """
+        if not policy.roster:
+            raise OpenClawGatewayError(
+                "Only an Agent Terminal roster lane may attach to a listed session"
+            )
+        if agent_id != policy.agent_id:
+            raise ValueError("OpenClaw Agent Terminal agent does not match its policy")
+        _assert_connection_contract(
+            connection, require_write=True, approvals=policy.allows_approvals
+        )
+        terminal = cls(
+            connection=connection,
+            agent_id=agent_id,
+            session_key=session_key,
+            session_id="",
+            policy=policy,
+            recovery=recovery,
+            on_approval=on_approval,
+        )
+        subscribe_params: dict[str, object] = {"key": session_key, "agentId": agent_id}
+        if policy.allows_approvals:
+            subscribe_params["includeApprovals"] = True
+        subscribed = _record(await connection.request(
+            "sessions.messages.subscribe",
+            subscribe_params,
+        ))
+        if (
+            subscribed is None
+            or subscribed.get("subscribed") is not True
+            or subscribed.get("key") != session_key
+        ):
+            raise OpenClawGatewayError(
+                "OpenClaw did not confirm the resumed session subscription"
+            )
+        return terminal
+
+    @classmethod
     async def attest_existing(
         cls,
         *,

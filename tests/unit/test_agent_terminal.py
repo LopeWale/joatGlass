@@ -243,3 +243,67 @@ class TestDiscovery:
             [{"key": "agent:hermes:x1", "label": "nightly build", "sessionId": "s"}])))
         view = await c.handle_command("terminal discover")
         assert view is not None and "nightly build" in view
+
+
+class ResumingAgent(ListingAgent):
+    def __init__(self, rows: list[dict[str, str]], fail: str | None = None) -> None:
+        super().__init__(rows)
+        self.resumed: list[str] = []
+        self._resume_fail = fail
+
+    async def resume_session(self, session_key: str) -> None:
+        if self._resume_fail:
+            raise RuntimeError(self._resume_fail)
+        self.resumed.append(session_key)
+
+
+ROWS = [
+    {"key": "agent:hermes:k1", "label": "nightly build", "sessionId": "s1"},
+    {"key": "agent:hermes:k2", "label": "deploy pipeline", "sessionId": "s2"},
+]
+
+
+class TestResume:
+    async def test_resume_names_a_discovered_row(self) -> None:
+        agent = ResumingAgent(ROWS)
+        r = roster(work=agent)
+        await r.discover()
+        report = await r.resume("deploy pipeline")
+        assert agent.resumed == ["agent:hermes:k2"]
+        assert "resumed 'deploy pipeline'" in report
+        assert "[resumed] deploy pipeline" in r.tail()
+
+    async def test_resume_before_discover_says_so(self) -> None:
+        r = roster(work=ResumingAgent(ROWS))
+        assert "terminal discover" in await r.resume("anything")
+
+    async def test_an_unlisted_name_is_refused(self) -> None:
+        agent = ResumingAgent(ROWS)
+        r = roster(work=agent)
+        await r.discover()
+        assert "No listed session matches" in await r.resume("some other job")
+        assert agent.resumed == []      # never a key spoken into existence
+
+    async def test_a_failed_resume_keeps_the_reason(self) -> None:
+        agent = ResumingAgent(ROWS, fail="scope missing")
+        r = roster(work=agent)
+        await r.discover()
+        assert "scope missing" in await r.resume("nightly build")
+
+    async def test_resume_clears_the_previous_sessions_state(self) -> None:
+        agent = ResumingAgent(ROWS)
+        r = roster(work=agent)
+        await r.discover()
+        r.note_approval("work", "a1", "exec", "stale request")
+        await r.resume("nightly build")
+        # Approvals and output belonged to the OLD session; carrying them
+        # over would let the wearer answer the wrong session's question.
+        assert "approval(s) waiting" not in r.overview()
+        assert "stale request" not in r.tail()
+
+    async def test_grammar_routes_resume(self) -> None:
+        agent = ResumingAgent(ROWS)
+        c = AgentTerminalCommands(roster(work=agent))
+        await c.handle_command("terminal discover")
+        report = await c.handle_command("terminal resume nightly build")
+        assert report is not None and agent.resumed == ["agent:hermes:k1"]
