@@ -608,3 +608,70 @@ class TestSpokenCapabilityOpeners:
         for said in ("open the door", "show me the weather",
                      "navigate to the park", "open a new tab"):
             assert self._resolve(said) is None
+
+
+class TestBrainstormRowIsNotGatedOnHermes:
+    """Opening Brainstorm must not send the wearer to fix a daemon.
+
+    _show_brainstorm refused unless the Hermes terminal was ready and
+    seated Hermes beside Codex and Claude — both contradict the boundary.
+    Hermes/OpenClaw are Agent Terminal workers; they neither participate
+    in a Brainstorm nor gate one.
+    """
+
+    def _router(self, recap=None):
+        from joat.services.capabilities import CapabilityRouter
+        from joat.services.hud import HudWriter
+        from joat.channels.cards import CardLog
+        from tests.unit.test_session import SinkTransport
+
+        transport = SinkTransport()
+
+        class Status:
+            def agent_terminal_projection(self):
+                # The worst case: Hermes entirely unavailable.
+                return {"state": "unavailable", "reason": "endpoint_missing",
+                        "endpoint_host": "", "no_tools_checked": False}
+
+        return CapabilityRouter(
+            hud=HudWriter(transport), transport=transport, status=Status(),
+            messages=None, cards=CardLog(),
+            brainstorm_recap=recap,
+        ), transport
+
+    def _frames(self, transport):
+        from joat.core.protocol import BrainstormHudView  # noqa: F401
+        return [m for m in transport.sent
+                if type(m).__name__ == "BrainstormHudView"]
+
+    async def test_it_opens_even_with_hermes_unavailable(self) -> None:
+        router, transport = self._router()
+        await router.open("Brainstorm")
+        frames = self._frames(transport)
+        assert frames, "Brainstorm did not open at all"
+        frame = frames[-1]
+        assert frame.screen == "brainstorm"        # not the Hermes recovery card
+        assert "Hermes" not in frame.activity
+        assert "Hermes" not in frame.collaborators
+
+    async def test_the_seats_are_codex_and_claude(self) -> None:
+        router, transport = self._router()
+        await router.open("Brainstorm")
+        assert self._frames(transport)[-1].collaborators == ["Codex", "Claude"]
+
+    async def test_a_finished_session_is_re_readable(self) -> None:
+        from joat.services.sinks import DebateStateSink
+
+        sink = DebateStateSink()
+        await sink.open("cold-start latency", ["codex", "claude"])
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("keep the weights resident")
+        await sink.close("converged 0.91")
+
+        router, transport = self._router(recap=lambda: sink.snapshot)
+        await router.open("Brainstorm")
+        frame = self._frames(transport)[-1]
+        # The synthesis the wearer walked away with, still there.
+        assert "cold-start latency" in frame.topic
+        assert "keep the weights resident" in frame.activity
+        assert frame.state == "settled"

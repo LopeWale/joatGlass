@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .agents.builtin_tools import messages_tool, notifications_tool
 from .agents.grounding import (
@@ -88,6 +89,7 @@ from .native.bridge import (
     NativeBridgeUnavailable,
 )
 from .persistence.actions import ActionJournal
+from .persistence.calendar_alerts import CalendarAlertStore
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.store import DurableStore
@@ -101,6 +103,7 @@ from .services.brainstorm_acceptance import (
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
+from .services.calendar_monitor import CalendarMonitor
 from .services.capabilities import CapabilityOpenController, CapabilityRouter
 from .services.agent_terminal import (
     AgentTerminalCommands,
@@ -1209,6 +1212,10 @@ async def main() -> None:
         terminal_view=(
             agent_terminal.repaint if terminal_lanes else None
         ),
+        # Opening Brainstorm shows the LAST session, not an invitation the
+        # wearer has already accepted. The snapshot outlives the session
+        # for exactly this.
+        brainstorm_recap=lambda: debate_state.snapshot,
     )
     transport.on_input(capabilities.on_input)
 
@@ -1222,6 +1229,28 @@ async def main() -> None:
         card_log=card_log,
     )
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
+
+    # Calendar events only. Reminders keep their own due path above; this is
+    # the schedule half of Planning, and merging the two would announce a
+    # reminder twice.
+    calendar_monitor: CalendarMonitor | None = None
+    calendar_monitor_task: asyncio.Task[None] | None = None
+    if personal_data is not None:
+        zone_name = system_local_time_zone()
+        try:
+            calendar_zone = ZoneInfo(zone_name) if zone_name else None
+        except ZoneInfoNotFoundError:
+            calendar_zone = None
+        if calendar_zone is not None:
+            calendar_monitor = CalendarMonitor(
+                personal_data,
+                CalendarAlertStore(durable_store),
+                sessions.notify,
+                zone=calendar_zone,
+            )
+            calendar_monitor_task = asyncio.get_running_loop().create_task(
+                calendar_monitor.run()
+            )
 
     notif_task: asyncio.Task[None] | None = None
     notification_mux: NotificationMux | None = None
@@ -1282,6 +1311,9 @@ async def main() -> None:
         beat_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()
+        if calendar_monitor is not None and calendar_monitor_task is not None:
+            calendar_monitor.stop()
+            calendar_monitor_task.cancel()
         if llm_warm_task is not None:
             if not llm_warm_task.done():
                 llm_warm_task.cancel()
