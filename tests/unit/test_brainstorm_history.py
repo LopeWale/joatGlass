@@ -221,3 +221,55 @@ class TestSpokenLookup:
         for said in ("where is the nearest coffee shop",
                      "what is a brainstorm", "brainstorm heat pumps"):
             assert await commands.handle_command(said) is None
+
+
+class TestRecall:
+    """Recent was a list you could not act on.
+
+    The point of keeping sessions is coming back to the answer — which
+    means asking for it out loud, since the glasses are voice-first.
+    """
+
+    def _commands(self, tmp_path: Path):
+        from joat.services.brainstorm_history import BrainstormHistoryCommands
+
+        history = BrainstormHistory(path=tmp_path / "b.json",
+                                    export_dir=tmp_path / "exports")
+        history.record("cold-start latency", ("codex", "claude"), TURNS, "converged")
+        history.record("tabs or spaces", ("codex",),
+                       (("JOAT (synthesis)", "AGREED: tabs."),), "converged")
+        return BrainstormHistoryCommands(history), history
+
+    async def test_read_the_last_brainstorm(self, tmp_path: Path) -> None:
+        commands, _ = self._commands(tmp_path)
+        answer = await commands.handle_command("read the last brainstorm")
+        assert answer is not None
+        assert "tabs or spaces" in answer          # newest
+        assert "AGREED: tabs." in answer           # its synthesis
+
+    async def test_recall_by_topic(self, tmp_path: Path) -> None:
+        commands, _ = self._commands(tmp_path)
+        answer = await commands.handle_command(
+            "what did we decide about cold start latency")
+        assert answer is not None
+        assert "measure the gate" in answer
+
+    async def test_an_unknown_topic_says_so(self, tmp_path: Path) -> None:
+        commands, _ = self._commands(tmp_path)
+        answer = await commands.handle_command("what did we decide about pizza")
+        assert answer is not None and "No brainstorm about" in answer
+
+    async def test_find_matches_only_the_question_not_the_turns(
+        self, tmp_path: Path
+    ) -> None:
+        # Searching the collaborators' words for a half-remembered phrase
+        # reads far more of the wearer's conversation than answering needs.
+        _, history = self._commands(tmp_path)
+        assert history.find("cold-start latency") is not None
+        assert history.find("keep the weights resident") is None
+
+    async def test_ordinary_speech_is_left_alone(self, tmp_path: Path) -> None:
+        commands, _ = self._commands(tmp_path)
+        for said in ("read the last message", "what did we decide",
+                     "show me the weather"):
+            assert await commands.handle_command(said) is None
