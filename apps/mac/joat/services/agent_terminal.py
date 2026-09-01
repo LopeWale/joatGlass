@@ -478,8 +478,37 @@ class AgentTerminalCommands:
 
     def __init__(self, roster: AgentTerminalRoster) -> None:
         self._roster = roster
+        self._armed = False
+
+    def arm(self) -> None:
+        """A tap on the terminal promises the NEXT utterance as its input.
+
+        The promise is one utterance and it is explicit, so the phrase does
+        not need the 'terminal' prefix — the gesture already established
+        that this is terminal speech, which is exactly the consent the
+        prefix exists to obtain.
+        """
+        self._armed = True
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
 
     async def handle_command(self, text: str) -> str | None:
+        if self._armed:
+            self._armed = False
+            said = text.strip()
+            if not said:
+                return None
+            # Cancelling the promise must not become a command sent INTO
+            # the session — "never mind" is spoken to JOAT, not to Hermes.
+            if said.lower().rstrip(".!?") in ("stop", "cancel", "never mind",
+                                              "nevermind"):
+                await self._roster.repaint()
+                return "Terminal input cancelled."
+            sent = await self._roster.send(said)
+            await self._roster.repaint()
+            return sent
         answer = await self._dispatch(text)
         if answer is not None:
             # Any claimed command can change what the lenses should show —

@@ -82,7 +82,11 @@ export class BrainstormController {
     }
 
     if (model.state === 'running') return this.send('show_brainstorm');
-    if (model.terminalState === 'ready') return this.send('begin_topic_capture');
+    // A tap on the TERMINAL arms terminal input. It used to send
+    // begin_topic_capture — i.e. the Agent Terminal's primary gesture
+    // started a Brainstorm, a different feature with different
+    // collaborators.
+    if (model.terminalState === 'ready') return this.send('begin_terminal_input');
     if (
       model.terminalState === 'blocked'
       || model.terminalState === 'approval_required'

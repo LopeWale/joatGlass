@@ -910,10 +910,22 @@ async def main() -> None:
         seat_count=initial_count,
         phase="idle",
     )
+    async def arm_terminal_capture() -> None:
+        """A tap on the terminal arms ONE utterance as its input.
+
+        Deliberately not the Brainstorm topic-capture path: this feature
+        has different workers, and conflating them is what made the
+        terminal's own gesture start a Brainstorm.
+        """
+        terminal_commands.arm()
+        await agent_terminal.repaint()
+        await hud.show("Speak your terminal instruction.")
+
     sessions = SessionManager(
         hud,
         make_debate,
         card_log=card_log,
+        terminal_capture=arm_terminal_capture,
         on_state=publish_brainstorm_state,
         starters=[make_navigation],
         terminal_retry=retry_openclaw_terminal,
@@ -1090,6 +1102,7 @@ async def main() -> None:
         announce=terminal_announce,
         paint=terminal_paint,
     )
+    terminal_commands = AgentTerminalCommands(agent_terminal)
     # The capability router is composed later; the provider defers the
     # lookup to call time, when it is guaranteed to exist.
     capability_opens = CapabilityOpenController(lambda: capabilities)
@@ -1101,7 +1114,7 @@ async def main() -> None:
         voice_notes=voice_capture,
         note_insights=note_insight_commands,
         hermes=hermes_productivity,
-        terminal=AgentTerminalCommands(agent_terminal),
+        terminal=terminal_commands,
         capability_opens=capability_opens,
     )
     # The assistant's name is JOAT — plus mishearings observed LIVE from
@@ -1200,6 +1213,7 @@ async def main() -> None:
         task_occurrences,
         deliver_task_alert,
         evaluate=lambda occurrence: evaluate_reminder_occurrence(occurrence, personal_data),
+        card_log=card_log,
     )
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
 

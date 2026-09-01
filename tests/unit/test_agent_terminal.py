@@ -458,3 +458,48 @@ class TestFrameEconomy:
         assert r.focus("hermes") is True
         await r.discover()
         assert any("[discover]" in line for line in r.frame().lines)
+
+
+class TestTapToSpeak:
+    """A tap on the terminal arms ONE utterance as terminal input.
+
+    It used to send begin_topic_capture — the Agent Terminal's primary
+    gesture literally started a Brainstorm, a different feature with
+    different collaborators.
+    """
+
+    async def test_an_armed_utterance_needs_no_prefix(self) -> None:
+        agent = FakeAgent()
+        c = AgentTerminalCommands(roster(work=agent))
+        c.arm()
+        # The gesture already established this is terminal speech, which is
+        # the consent the 'terminal' prefix exists to obtain.
+        assert await c.handle_command("rerun the failing test") is not None
+        await asyncio.sleep(0)
+        assert agent.prompts == ["rerun the failing test"]
+
+    async def test_the_promise_is_exactly_one_utterance(self) -> None:
+        agent = FakeAgent()
+        c = AgentTerminalCommands(roster(work=agent))
+        c.arm()
+        await c.handle_command("first thing")
+        await asyncio.sleep(0)
+        assert c.armed is False
+        # The next sentence is ordinary speech again.
+        assert await c.handle_command("what is the weather") is None
+        assert agent.prompts == ["first thing"]
+
+    async def test_cancelling_the_promise_is_spoken_to_JOAT_not_hermes(self) -> None:
+        agent = FakeAgent()
+        c = AgentTerminalCommands(roster(work=agent))
+        c.arm()
+        answer = await c.handle_command("never mind")
+        assert answer == "Terminal input cancelled."
+        assert agent.prompts == []      # never sent INTO the session
+        assert c.armed is False
+
+    async def test_unarmed_speech_still_needs_the_prefix(self) -> None:
+        agent = FakeAgent()
+        c = AgentTerminalCommands(roster(work=agent))
+        assert await c.handle_command("rerun the failing test") is None
+        assert agent.prompts == []

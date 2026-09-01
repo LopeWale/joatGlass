@@ -46,3 +46,4 @@ docs/design/**/joat-glasses-dashboard.html
 !.codex/coordination/project.yaml
 .playwright-mcp
 output/
+.claude/ralph-loop.local.md

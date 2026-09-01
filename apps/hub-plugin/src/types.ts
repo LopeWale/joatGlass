@@ -91,6 +91,10 @@ export interface BrainstormHudModel {
 export type BrainstormAction =
   | 'begin_acceptance'
   | 'begin_topic_capture'
+  /** Arm ONE utterance as input to the focused Agent Terminal session.
+   * Distinct from begin_topic_capture: that starts a Brainstorm, which is
+   * a different feature with different collaborators. */
+  | 'begin_terminal_input'
   | 'show_terminal'
   | 'show_brainstorm'
   | 'cancel'
