@@ -4,6 +4,7 @@ import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
   NOTIFICATION_DISMISS_HINT,
   agentTerminalSafetyLabel,
+  agentTerminalFocusLabel,
   agentTerminalTranscriptLayout,
   assistantOverlayTextLayout,
   brainstormTranscriptLines,
@@ -455,18 +456,23 @@ describe('Brainstorm wearable actions', () => {
   });
 
   it('makes a running Agent Terminal a transcript-first surface', () => {
-    expect(agentTerminalTranscriptLayout({ state: 'running', noToolsChecked: true }))
+    expect(agentTerminalTranscriptLayout({
+      state: 'running', noToolsChecked: true, topic: 'hermes · running',
+    }))
       .toEqual({
         summary: 'HERMES > RUNNING · NO TOOLS CHECKED BEFORE SEND',
-        dividerY: 111.5,
-        transcriptBaselineY: 132,
+        // Leaves a row for LANES between the summary and the divider.
+        dividerY: 127.5,
+        transcriptBaselineY: 148,
         transcriptLineCapacity: 7,
         showRecoveryDetails: false,
       });
   });
 
   it('keeps connection and policy detail on a recoverable terminal state', () => {
-    expect(agentTerminalTranscriptLayout({ state: 'approval_required', noToolsChecked: false }))
+    expect(agentTerminalTranscriptLayout({
+      state: 'approval_required', noToolsChecked: false, topic: 'hermes · waiting',
+    }))
       .toEqual({
         summary: 'HERMES > APPROVAL REQUIRED',
         dividerY: 177.5,
@@ -474,6 +480,22 @@ describe('Brainstorm wearable actions', () => {
         transcriptLineCapacity: 4,
         showRecoveryDetails: true,
       });
+  });
+
+  it('names the lane the wearer is actually focused on', () => {
+    // The header was hardcoded HERMES, so a wearer on a calendar lane or a
+    // gateway session read someone else's name above their own output.
+    expect(agentTerminalTranscriptLayout({
+      state: 'running', noToolsChecked: false, topic: 'calendar · running · 2 waiting',
+    }).summary).toBe('CALENDAR > RUNNING · TOOL STATE NOT CLEARED');
+    expect(agentTerminalFocusLabel('agent:hermes:nightly · running'))
+      .toBe('AGENT:HERMES:NIGHTLY');
+    // A gateway key we do not choose must not run off the spine.
+    expect(agentTerminalFocusLabel(`${'x'.repeat(90)} · running`).length)
+      .toBeLessThanOrEqual(24);
+    // No lane named yet: the house default, not an empty prefix.
+    expect(agentTerminalFocusLabel(undefined)).toBe('HERMES');
+    expect(agentTerminalFocusLabel('')).toBe('HERMES');
   });
 
   it('discloses both physical cancellation gestures while a session is running', () => {
