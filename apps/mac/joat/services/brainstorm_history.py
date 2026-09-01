@@ -134,6 +134,29 @@ class BrainstormHistory:
             log.warning("brainstorm history not readable", exc_info=True)
             return []
 
+    def find(self, spoken: str) -> PastBrainstorm | None:
+        """The session the wearer means, by however they say the question.
+
+        Matched on the topic only. Searching the TURNS would mean scanning
+        the collaborators' words for a phrase the wearer half-remembers,
+        which reads far more of their conversation than answering the
+        question requires.
+        """
+        said = " ".join(spoken.lower().split()).strip()
+        if not said:
+            return None
+        history = self.recent(limit=self._keep)
+        for past in history:                       # newest first
+            topic = past.topic.lower()
+            if topic == said or said in topic or topic in said:
+                return past
+        words = [w for w in said.split() if len(w) > 3]
+        for past in history:
+            topic = past.topic.lower()
+            if words and all(word in topic for word in words):
+                return past
+        return None
+
     def rows(self, limit: int = 5, width: int = 46) -> list[str]:
         """Recent sessions as glance-sized rows for the HUD.
 
@@ -220,11 +243,24 @@ class BrainstormHistory:
             raise
 
 
+_READ_LAST = re.compile(
+    r"^(?:read|show|what was)(?: me)?(?: the| my)? "
+    r"(?:last|latest|previous) brainstorm$"
+)
+_RECALL = re.compile(
+    r"^what did (?:we|you|they) (?:decide|conclude|say) about (?P<topic>.+)$"
+)
 _WHERE = re.compile(
     r"^(?:where|what)(?: are| is)?(?: my| the)? "
     r"(?:brainstorms?|brainstorm (?:exports?|files?|notes?))"
     r"(?: saved| stored| kept| go)?$"
 )
+
+
+def _recite(past: PastBrainstorm) -> str:
+    """What the wearer came back for: the answer, then where it came from."""
+    body = past.synthesis or "nothing was concluded"
+    return f"“{past.title}”, {past.age()}:\n{body}"
 
 
 class BrainstormHistoryCommands:
@@ -239,6 +275,17 @@ class BrainstormHistoryCommands:
 
     async def handle_command(self, text: str) -> str | None:
         said = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+        if _READ_LAST.match(said):
+            recent = self._history.recent(1)
+            if not recent:
+                return "No brainstorms yet."
+            return self._recite(recent[0])
+        recall = _RECALL.match(said)
+        if recall is not None:
+            past = self._history.find(recall.group("topic"))
+            if past is None:
+                return f"No brainstorm about {recall.group('topic')}."
+            return self._recite(past)
         if not _WHERE.match(said):
             return None
         recent = self._history.recent(1)
@@ -246,3 +293,7 @@ class BrainstormHistoryCommands:
         if not recent:
             return f"No brainstorms yet. {where}"
         return f"{len(self._history.recent(99))} saved, newest “{recent[0].title}”. {where}"
+
+    @staticmethod
+    def _recite(past: PastBrainstorm) -> str:
+        return _recite(past)
