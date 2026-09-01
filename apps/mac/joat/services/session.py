@@ -689,9 +689,14 @@ class DebateSession(Session):
             positions = len(self._transcript) - self._wearer_turns
             if positions < 2:
                 spoke = positions
+                # The room is ending, so "rejoin" is not the advice: there
+                # is no next round to rejoin. Switching the model and
+                # asking again is what actually works from here.
+                remedy = " — switch its model, then ask again" if self._silenced else ""
                 await self._finish(
                     f"insufficient collaborators — {spoke} of {len(self._table)} spoke"
                     + (f" ({', '.join(self._silenced)} silent)" if self._silenced else "")
+                    + remedy
                 )
                 return
             if self._judge is None:

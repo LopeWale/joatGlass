@@ -1458,3 +1458,18 @@ class TestFailureIsActionable:
         emitted = "".join(chunks)
         assert emitted.count("use another model for the proposer") == 1
         assert emitted.count("use another model for the critic") == 1
+
+    async def test_an_ending_room_says_ask_again_not_rejoin(self) -> None:
+        # With two seats, one failure ends the session at the close of
+        # round 1 — so "so it can rejoin" would point at a next round that
+        # will never come. The advice has to match what is actually
+        # possible from here.
+        transport = SinkTransport()
+        seats = pair(
+            agent(["a real position"]),
+            agent(["[!] claude could not answer: exited 1"]),
+        )
+        await debate(transport, seats, OneShotJudge()).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "insufficient collaborators" in joined
+        assert "switch its model, then ask again" in joined
