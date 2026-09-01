@@ -28,7 +28,18 @@ PROTOCOL_VERSION = 4
 # identity, so it must advertise the ordinary canonical operator identity
 # instead of looking like the Gateway's own internal control-plane client.
 CLIENT_ID = "cli"
-CLIENT_MODE = "operator"
+CLIENT_MODE = "cli"
+"""What KIND of client this is — distinct from `role`, which is authority.
+
+`role` stays "operator" (control-plane authority). `mode` describes the
+client itself, and the Gateway's schema does not accept "operator" there:
+asked directly, it admits node / backend / cli and refuses operator, app,
+desktop and user. We are `client.id = "cli"`, dialing across a tailnet —
+`backend` is for trusted loopback `gateway-client`, `node` is a capability
+host — so `cli` is ours.
+
+This is signed material (build_device_auth_payload_v3), so it must match
+what the Gateway validates against, not merely what it will parse."""
 CLIENT_VERSION = "0.1.0"
 CLIENT_PLATFORM = "darwin"
 CLIENT_DEVICE_FAMILY = "mac"
