@@ -269,9 +269,24 @@ export function brainstormActionHint(
     }
     return 'left x2: menu · long-press: mic';
   }
-  if (model.state === 'running') return 'tap: return to Brainstorm · left x2: menu';
+  // The Agent Terminal surface. These must mirror handleClick(), which
+  // branches on terminalState — NOT state — once no lane is running.
+  //
+  // Two of these were lying. handleClick was corrected so a tap here arms
+  // TERMINAL INPUT ("it used to send begin_topic_capture — i.e. the Agent
+  // Terminal's primary gesture started a Brainstorm, a different feature")
+  // and this hint was never updated, so the glass still told the wearer
+  // that tapping the terminal begins a Brainstorm. And a lane waiting on
+  // an approval fell through to "tap: retry Hermes" — the wrong action,
+  // with the only useful one ("terminal approve") never shown at all.
+  if (model.state === 'approval_required') {
+    return 'say "terminal approve" or "terminal deny" · left x2: menu';
+  }
+  if (model.state === 'running') {
+    return 'tap: Brainstorm · say "terminal cancel" · left x2: menu';
+  }
   return model.terminalState === 'ready'
-    ? 'tap: begin Brainstorm · left x2: menu'
+    ? 'tap: speak to the terminal · left x2: menu'
     : 'tap: retry Hermes · left x2: menu';
 }
 
