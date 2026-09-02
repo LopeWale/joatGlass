@@ -60,3 +60,6 @@ apps/hub-plugin/public/__joat-dev-fixtures/
 
 # Packaged plugin artifacts (scripts/pack.sh output)
 build/
+
+# Simulator screenshots dropped in the CWD by evenhub-simulator
+glasses_*.png
