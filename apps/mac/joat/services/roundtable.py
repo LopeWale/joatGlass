@@ -86,6 +86,10 @@ class RoundTable:
         self._participants = list(participants)
         self._index = 0
         self._pending: list[Participant] = []
+        #: A seat the wearer named after it had already spoken this round —
+        #: it opens the NEXT round. Held apart from the rotation cursor,
+        #: which next_speaker() rewrites after every turn.
+        self._directed_opener: Participant | None = None
 
     def __len__(self) -> int:
         return len(self._participants)
@@ -131,7 +135,12 @@ class RoundTable:
         round. Now a redirect can only REORDER the seats still owing a
         turn — the count is structural.
         """
-        ordered = self._participants[self._index:] + self._participants[:self._index]
+        if self._directed_opener is not None:
+            opener = self._participants.index(self._directed_opener)
+            self._directed_opener = None
+        else:
+            opener = self._index
+        ordered = self._participants[opener:] + self._participants[:opener]
         self._pending = list(ordered)
 
     def direct(self, name: str) -> Participant | None:
@@ -149,7 +158,14 @@ class RoundTable:
             self._pending.remove(seat)
             self._pending.insert(0, seat)
         else:
-            self._index = self._participants.index(seat)
+            # Not the rotation cursor: next_speaker() overwrites that after
+            # every turn (cursor = last speaker + 1), so writing it here was
+            # a dead store the moment anyone else spoke — the redirect
+            # survived only at exactly two seats, where the +1 happens to
+            # wrap onto the seat the wearer named. Held separately, the
+            # promise "it opens the next round instead" is kept at any
+            # table size, and start_round() consumes it.
+            self._directed_opener = seat
         return seat
 
     def next_speaker(self) -> Participant:
@@ -165,6 +181,8 @@ class RoundTable:
     def peek(self) -> Participant:
         if self._pending:
             return self._pending[0]
+        if self._directed_opener is not None:
+            return self._directed_opener
         return self._participants[self._index % len(self._participants)]
 
 

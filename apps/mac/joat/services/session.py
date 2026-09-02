@@ -77,7 +77,18 @@ _MATERIAL_VERB = re.compile(
     r"fix|clean|polish|tidy|put|give|show|read|repeat|shorten|lengthen|"
     r"bullet|number|rank|group|sort|caption|quote)"
     r"\b.*?"
-    r"\b(?:that|it|this|the\s+(?:last\s+|latest\s+)?"
+    # The pronoun must actually BE the material — the object, not a
+    # subordinating conjunction or determiner. "explain that the cache is
+    # stale" and "check that the numbers add up" are remarks TO THE ROOM
+    # that happen to open with an imperative; matching their "that" hijacked
+    # them into transforms of the last reply. A pronoun is material only at
+    # the end of the utterance or before a closed set of continuations
+    # ("shorter", "into", "up", "as bullets"…), never before a clause.
+    r"\b(?:(?:that|it|this)"
+    r"(?=\s+(?:down|up|out|into|in|as|to|for|with|and|again|please|"
+    r"a|an|more|less|shorter|longer|simpler|plainer|tighter|better)\b"
+    r"|\s*$)"
+    r"|the\s+(?:last\s+|latest\s+)?"
     r"(?:reply|answer|response|message|point|turn))"
     r".*)$",
     re.IGNORECASE,
@@ -1559,9 +1570,22 @@ class DebateSession(Session):
                 outcome = f"converged (agreement {agreement:.2f}, round {round_no})"
                 break
             if agreement is None:
-                # An unparseable judgment must not spin the loop forever.
-                outcome = f"judge gave no score — stopped at round {round_no}"
-                break
+                # FAIL CLOSED — docs/BRAINSTORM.md:44-45: "an illegible
+                # judgment fails closed and never green-lights convergence."
+                # This broke the loop instead, which is the OPPOSITE
+                # failure: an unreadable judge ended the session at that
+                # round, indistinguishable on the glass from a converged
+                # one. Not-converged means the room goes around again;
+                # max_rounds is what bounds the loop, not the judge's
+                # legibility.
+                if round_no == self._max_rounds:
+                    outcome = (
+                        f"no convergence after {round_no} round(s) "
+                        "(judge unreadable)"
+                    )
+                    break
+                outcome = f"judge unreadable at round {round_no} — continuing"
+                continue
             if round_no == self._max_rounds:
                 outcome = f"no convergence after {round_no} round(s) (last {agreement:.2f})"
                 break
@@ -1763,7 +1787,11 @@ class DebateSession(Session):
             # summary still records it; the lens is for the discussion.
             self._verify_summary.append(f"{label}: no citations")
             return True, ""
-        await self._sink.turn("VERIFIER")
+        # VERIFY, exactly — docs/SESSION_MODEL.md:33 and BRAINSTORM.md:68 both
+        # name the five transcript prefixes as YOU / CODEX / CLAUDE / VERIFY /
+        # JOAT, and this emitted a sixth. Every durable record, export and
+        # painted turn carried a label the spec does not have.
+        await self._sink.turn("VERIFY")
         verdict = await self._gate.verify(citations, prose=text)
         marks = {
             CitationStatus.VERIFIED: "OK",
