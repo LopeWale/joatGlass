@@ -1,6 +1,6 @@
 {
   "name": "@joat/hub-plugin",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "private": true,
   "type": "module",
   "description": "Even Hub plugin \u2014 owns the G2 and relays audio/IMU/input to the Mac brain over WebSocket.",
