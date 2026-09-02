@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -36,6 +37,8 @@ from ..services.hud import HudWriter
 from ..services.session import Session
 from ..services.sinks import HudSink
 
+
+log = logging.getLogger(__name__)
 
 RUN_SCHEMA = "joat.g2-brainstorm-acceptance.v2"
 MAX_RETAINED_EVENTS = 16
@@ -327,6 +330,16 @@ def write_owner_only_json(path: Path, payload: dict[str, object]) -> None:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def _brainstorm_reason(message: str) -> str:
+    """A bounded, fixed description of why a receipt could not be built.
+
+    Never the wearer's content: these come from this module's own raises,
+    but the field is capped and stripped so a future raise that interpolates
+    something cannot widen what a receipt retains.
+    """
+    return " ".join(message.split())[:120]
 
 
 def file_sha256(path: Path) -> str:
@@ -750,9 +763,20 @@ class InAppBrainstormAcceptance:
                     stream_frame_sha256=tuple(self._stream_frame_sha256),
                     require_stream=True,
                 )
-            except ValueError:
+            except ValueError as exc:
                 # A malformed diagnostic trace cannot be made into a receipt.
+                #
+                # It must still SAY SO. This collapsed to an empty "fail"
+                # naming no cause, and a real run hit it: a device-side clock
+                # repainting once a second pushed the trace past
+                # MAX_RETAINED_EVENTS, so the receipt reported a failed
+                # acceptance when what had actually happened was too many
+                # frames. Hours went into the wrong question. The reason is
+                # cheap to keep and it is fixed vocabulary, not wearer
+                # content — the same bound every other retained field obeys.
+                log.warning("acceptance receipt could not be built: %s", exc)
                 summary = _summary("fail", [], None, hermes_run, g2_reconnect)
+                summary["failureReason"] = _brainstorm_reason(str(exc))
             summary["startedBy"] = {
                 "interface": "g2",
                 "modality": "gesture",

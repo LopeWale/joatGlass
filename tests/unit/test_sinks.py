@@ -647,18 +647,29 @@ class TestTheSilentWaitIsCovered:
         presenter = (Path(__file__).resolve().parents[2]
                      / "apps/hub-plugin/src/HudPresenter.ts").read_text()
         ticker = presenter[presenter.index("private armThinkingTicker"):]
-        rate = re.search(r"\}, (\d+)\);", ticker)
-        assert rate is not None, "the thinking ticker has moved; re-pin it"
-        seconds = int(rate.group(1)) / 1000
-        assert seconds <= 5.0, (
+        ticker = ticker[:ticker.index("\n  }")]
+        rates = sorted({int(m) / 1000 for m in re.findall(r"\b(\d{3,5})\b", ticker)})
+        assert rates, "the thinking ticker has moved; re-pin it"
+
+        fast = rates[0]
+        assert fast <= 5.0, (
             "turns run 10-18s and are silent for nearly all of it; a slower "
             "tick leaves the wearer unable to tell working from hung, and "
             "the only remedy they know is cancelling a healthy session"
         )
-        assert seconds >= 1.0, (
+        assert fast >= 1.0, (
             "the counter shows whole seconds — ticking faster than it can "
             "change is repaint for no new information"
         )
+        # …and it must NOT stay that fast forever. Measured: one bridge
+        # write per tick, against a whole frame every three seconds before,
+        # so 1Hz is 3x the writes. A hung collaborator would otherwise hold
+        # the link at that rate indefinitely.
+        assert len(rates) >= 2, (
+            "the counter needs a slower rate once the number stops being "
+            "worth reading — otherwise a hung turn ticks at 1Hz forever"
+        )
+        assert rates[-1] > fast
 
     async def test_a_turn_that_produced_nothing_says_so(self) -> None:
         """A silent turn must not be filed as "Thinking…" forever.
