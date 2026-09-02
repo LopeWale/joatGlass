@@ -1391,3 +1391,74 @@ class TestTwoSessionsTheWearerCannotOtherwiseTellApart:
         ]
         r = AgentTerminalRoster([("work", self.Lister(rows))])
         assert "same" in await r.discover()
+
+
+class TestInspectAsksTheRuntimeNotOurselves:
+    """AGENT_TERMINAL_ROADMAP.md:37-38 and :113 — inspect a session
+    "through its runtime's direct session API". "terminal history" was an
+    alias for "terminal tail", so it returned JOAT's own in-process deque:
+    for any session this engine did not personally run — a resumed one, or
+    anything from before a restart — that is empty or misleading, and the
+    operation answered a different question than the wearer asked.
+
+    tail and history are genuinely different: what scrolled past on my
+    screen, versus what this session contains.
+    """
+
+    class WithHistory:
+        def __init__(self) -> None:
+            self.asked: list[int] = []
+
+        async def stream(self, prompt: str):
+            yield "x"
+
+        async def history(self, limit: int = 10):
+            self.asked.append(limit)
+            return [("user", "run the audit"), ("assistant", "found 3 issues")]
+
+    class NoHistory:
+        async def stream(self, prompt: str):
+            yield "x"
+
+    class Broken:
+        async def stream(self, prompt: str):
+            yield "x"
+
+        async def history(self, limit: int = 10):
+            raise RuntimeError("gateway said no")
+
+    async def test_history_reads_the_runtime_and_tail_stays_local(self) -> None:
+        agent = self.WithHistory()
+        r = roster(work=agent)
+        r._lanes["work"].tail.append("only what JOAT relayed")
+
+        assert "only what JOAT relayed" in r.tail()
+        inspected = await r.history()
+        assert "run the audit" in inspected
+        assert "found 3 issues" in inspected
+        assert "only what JOAT relayed" not in inspected
+        assert agent.asked, "the runtime was never asked"
+
+    async def test_a_runtime_without_the_api_falls_back_and_says_which(self) -> None:
+        r = roster(work=self.NoHistory())
+        r._lanes["work"].tail.append("local only")
+        answer = await r.history()
+        assert "local only" in answer
+        assert "no history API" in answer, "it passed off a local tail as the record"
+
+    async def test_a_failing_runtime_reports_the_reason(self) -> None:
+        r = roster(work=self.Broken())
+        answer = await r.history()
+        assert "history unavailable" in answer
+        assert "gateway said no" in answer
+
+    async def test_the_spoken_commands_are_wired_to_the_right_source(self) -> None:
+        agent = self.WithHistory()
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r)
+        r._lanes["work"].tail.append("relayed line")
+
+        assert "relayed line" in (await c.handle_command("terminal tail") or "")
+        for phrase in ("terminal history", "terminal inspect", "terminal transcript"):
+            answer = await c.handle_command(phrase) or ""
+            assert "run the audit" in answer, phrase
