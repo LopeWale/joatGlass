@@ -1285,6 +1285,9 @@ async def main() -> None:
         # SESSION_MODEL.md:46 — opening the row during an active run
         # restores that conversation instead of declaring it finished.
         brainstorm_replay=sessions.replay_active_hud,
+        # SESSION_MODEL.md:47 — the idle row is a picker of real sessions.
+        brainstorm_sessions=lambda: brainstorm_history.sessions(6),
+        brainstorm_continue=sessions.resume_by_id,
         brainstorm_recent=brainstorm_history.rows,
     )
     transport.on_input(capabilities.on_input)
