@@ -57,6 +57,51 @@ Actions available: `up`, `down`, `click`, `double_click`, and (simulator ≥0.9.
 
 **Reading screenshots:** keep them RGBA. Background is `(0,255,0,α=0)`, lit pixels are `(0,255,0,α=255)` — converting to RGB makes both pure green and indistinguishable. Test lit-ness with `px[3] > 0`.
 
+### Tier 2b — the real engine behind the simulator
+
+The fixture lane (`?joatVisual=…`) proves the RENDERER. It cannot prove the
+wire, the engine's frame construction, or the gesture round trip, and three
+defects hid in exactly that gap — a Brainstorm frame whose `screen` field
+the wire had dropped, so every tap on that surface did nothing; a ready
+hint that stopped naming "tap: speak"; and an armed diagnostic that went
+invisible. All three were green in both suites.
+
+Standing the whole stack up locally:
+
+```bash
+# 1. An engine on its own store. The wearer's engine holds an exclusive
+#    writer lease, so a second one on the same store is REFUSED — point
+#    HOME at a scratch directory rather than stopping theirs.
+TESTHOME=/tmp/joat-audit
+mkdir -p "$TESTHOME/Library/Application Support/JOAT"
+
+#    It also dies with its supervisor, so a plain `cmd &` from a shell that
+#    exits takes it with it. Detach properly:
+HOME="$TESTHOME" python -c "import subprocess; subprocess.Popen(
+  ['.venv/bin/python','-m','joat','--port','8799','--no-llm','--no-notifications','-v'],
+  start_new_session=True)"
+
+# 2. The plugin, dialling THAT engine. The path is /glasses — without it
+#    the plugin sits on RECONNECTING and looks like a broken build.
+VITE_MAC_WS_URL="ws://127.0.0.1:8799/glasses" npm run dev -- --port 5193
+
+# 3. The simulator, with the menu opened by the DEV hook (it cannot inject
+#    the left-temple double press that normally opens it).
+evenhub-simulator "http://127.0.0.1:5193/?joatTestOpenMenu=1" \
+  --automation-port 9931 --aid coreaudio:BuiltInMicrophoneDevice
+```
+
+Then drive it: three `{"action":"down"}` and one `{"action":"click"}` on
+`/api/input` selects Brainstorm, and `/api/screenshot/glasses` shows what
+the wearer would see.
+
+A raw client is often faster than the simulator for wire questions —
+connect to `ws://127.0.0.1:8799/glasses`, send a `hello`, then send an
+`input` event with `containerName: "capmenu"` and read the frame that comes
+back. That is how the Brainstorm/Agent Terminal frame split
+(`docs/SESSION_MODEL.md:74-75`) was verified against a running engine
+rather than against a dataclass.
+
 ### The simulator's hard limit
 
 `POST /api/input` takes an **action only — no source field**, and (verified empirically,
