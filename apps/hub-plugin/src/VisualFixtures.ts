@@ -120,8 +120,13 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
           'JOAT > Round 3 — meta-review.',
           'CLAUDE > Thinking…',
         ].join('\n'),
-        endpointHost: terminalReady.endpointHost,
-        terminalState: 'running', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
+        // No endpointHost, terminalReason or noToolsChecked: the wire
+        // stopped carrying them on a Brainstorm frame when the two
+        // features were split (docs/SESSION_MODEL.md:74-75), so a fixture
+        // that sets them is drawing a screen the engine cannot produce.
+        // `screen` and `terminalState` stay because the RENDER model still
+        // uses them to pick the surface.
+        terminalState: 'running',
       };
     case 'agent-terminal-blocked':
       return {
