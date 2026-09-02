@@ -11,10 +11,23 @@ import navigationSvg from '@phosphor-icons/core/regular/navigation-arrow.svg?raw
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
 import weatherSvg from '@phosphor-icons/core/regular/cloud-sun.svg?raw';
+import newspaperSvg from '@phosphor-icons/core/regular/newspaper.svg?raw';
+import timerSvg from '@phosphor-icons/core/regular/timer.svg?raw';
+import magnifyingGlassSvg from '@phosphor-icons/core/regular/magnifying-glass.svg?raw';
+import {
+  formatCountdown,
+  formatMinutesLeft,
+  freshnessLabel,
+  pomodoroPhaseLabel,
+  pomodoroRemainingMs,
+  type PanelRailVisual,
+} from './PanelRail';
 import {
   CANVAS,
+  PANEL_TABS,
   type BrainstormHudModel,
   type HudContentKind,
+  type PanelTab,
   type PlanningGridCell,
   type ProductivityHudModel,
 } from './types';
@@ -160,15 +173,9 @@ export function assistantOverlayTextLayout(
  * Time and date come from the phone clock, so this pane stays truthful even
  * when the Mac is offline: the HUD is never a dead rectangle.
  */
-/** Every capability fits, so nothing hides behind a scroll. Nine rows from
- * y52 to y244 at a 24px pitch — the wearer's ruling: a menu that shows five
- * of nine options wastes the pane it is standing in. */
-export const SIDEBAR_ROW_CAPACITY = 9;
 /** The last baseline a notification headline may occupy before it would
  * collide with the footer hint. */
 export const OVERVIEW_TRAY_LAST_Y = 248;
-export const SIDEBAR_FIRST_ROW_Y = 60;
-export const SIDEBAR_ROW_PITCH = 24;
 
 export const OVERVIEW_DASHBOARD = {
   // The left column is ONE block — date, clock, conditions — centred both
@@ -177,14 +184,22 @@ export const OVERVIEW_DASHBOARD = {
   // ambient row closes 92 below.
   dateBaselineY: 60,
   clockX: 26,
+  /** The clock column is centred in the left half of the canvas. It used
+   * to centre on the divider, which now sits east of the tile seam. */
+  clockCenterX: 144,
   clockFontSize: 82,
   hoursBaselineY: 116,
   minutesBaselineY: 196,
-  dividerX: 256.5,
+  // The hairline is the right pane's LEFT EDGE, the way the platform's own
+  // dashboard frames its panel; the tab rail sits between the clock and it.
+  // Everything east of x=288 lives in the two right tiles, so a tab change
+  // repaints those two and leaves the clock's tiles untouched — the same
+  // economy the retired sidebar bought by leaving the right half alone.
+  dividerX: 308.5,
   dividerTopY: 46,
   dividerBottomY: 252,
-  paneX: 280,
-  paneWidth: 268,
+  paneX: 318,
+  paneWidth: 230,
   labelBaselineY: 62,
   mainTopBaselineY: 92,
   mainLineHeight: 21,
@@ -196,6 +211,37 @@ export const OVERVIEW_DASHBOARD = {
   //: them: what day it is, what it is like outside, what is waiting.
   ambientBaselineY: 246,
 } as const;
+
+/**
+ * The overview's tab rail: notifications, news, pomodoro, search, stacked
+ * on the outer-left edge of the right pane. Tabs sit OUTSIDE the pane so
+ * the content keeps its width — the wearer's ruling, from the platform's
+ * own dashboard — and east of the tile seam so a swipe costs two tiles.
+ */
+export const PANEL_RAIL = {
+  /** Icon left edge on the resting overview: just past the seam at 288. */
+  x: 290,
+  iconSize: 14,
+  /** Icon TOP for each of the four slots, evenly spaced between the spine
+   * and the footer; the icon's centre is 7px lower. */
+  slotY: [70, 118, 166, 214],
+  /** Icon left edge when a tab is expanded full-width; the list's own
+   * selection rail stays at x=36 and rows at x=52, untouched. */
+  expandedX: 12,
+} as const;
+
+/** What a swipe and a tap do on a panel tab. Truthful: both are wired. */
+export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs';
+export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · left x2: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · left x2: back';
+
+/** Only the two long-text pages read through the shared reader: an opened
+ * headline and an opened search result. Their families stay 'NEWS' and
+ * 'SEARCH' so CapabilityMenu's two-deep Back knows the parent list. */
+export function usesPanelReaderLayout(title: string): boolean {
+  const normalized = title.trim().toUpperCase();
+  return normalized === 'NEWS · ARTICLE' || normalized === 'SEARCH · RESULT';
+}
 
 export interface HudNotificationRow {
   source: string;
@@ -256,7 +302,6 @@ export const HUD_VISUAL_GEOMETRY = {
   overviewMainX: 176,
   overviewTrayY: 168,
   overviewContextY: 214,
-  sidebarWidth: 256,
   listContentX: 93,
 } as const;
 
@@ -336,7 +381,10 @@ export type HudIconName =
   | 'settings'
   | 'microphone'
   | 'battery'
-  | 'weather';
+  | 'weather'
+  | 'news'
+  | 'pomodoro'
+  | 'search';
 
 const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   messages: chatCircleSvg,
@@ -352,6 +400,9 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   microphone: microphoneSvg,
   battery: batteryHighSvg,
   weather: weatherSvg,
+  news: newspaperSvg,
+  pomodoro: timerSvg,
+  search: magnifyingGlassSvg,
 };
 
 /** A month is intentionally a real six-row grid on the lens, rather than a
@@ -633,25 +684,6 @@ export function canRenderPlanningMonthGrid(
     && selectedIndex >= 0
     && selectedIndex < 6
     && itemCount >= 6;
-}
-
-export function hudSidebarIconName(item: string): HudIconName {
-  const normalized = item.trim().toLowerCase();
-  const icons: Readonly<Record<string, HudIconName>> = {
-    messages: 'messages',
-    notifications: 'notifications',
-    planning: 'calendar',
-    calendar: 'calendar',
-    tasks: 'tasks',
-    navigation: 'navigation',
-    more: 'more',
-    quicknotes: 'quicknotes',
-    brainstorm: 'brainstorm',
-    'agent terminal': 'brainstorm',
-    debate: 'brainstorm',
-    activity: 'activity',
-  };
-  return icons[normalized] ?? 'settings';
 }
 
 /** Split Planning dashboard geometry: month grid left, day items right. */
@@ -1401,30 +1433,13 @@ export function visibleHudListItems(
   }));
 }
 
-/** The wearable sidebar has room for five rows, but the capability model is
- * one continuous scrollable list. Keep the selected row visible instead of
- * burying capabilities behind a second menu. */
-export function visibleHudSidebarItems(
-  items: readonly string[],
-  selectedIndex: number,
-  capacity = 5,
-): HudVisibleListItem[] {
-  const count = Math.max(1, capacity);
-  const maximumStart = Math.max(0, items.length - count);
-  const start = Math.min(Math.max(0, selectedIndex - count + 1), maximumStart);
-  return items.slice(start, start + count).map((item, offset) => ({
-    item,
-    index: start + offset,
-  }));
-}
-
 /**
  * What the status spine says on this frame, in place of "JOAT · READY".
  *
  * The wearer's ruling: a feature page must not repeat its own name in a
  * second title bar under the spine. The spine already has the wearer's eye,
  * so the page name lives there and the whole body belongs to the feature.
- * Home (overview/sidebar) keeps "JOAT" — that IS the page.
+ * Home (overview) keeps "JOAT" — that IS the page.
  */
 export function hudSpinePageTitle(frame: HudVisualFrame): string {
   switch (frame.kind) {
@@ -1596,11 +1611,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       case 'overview':
         this.drawOverview(context, frame, icons);
         break;
-      case 'sidebar':
-        this.drawSidebar(context, frame, icons);
-        break;
       case 'list':
-        this.drawList(context, frame);
+        this.drawList(context, frame, icons);
         break;
       case 'confirmation':
         this.drawConfirmation(context, frame, icons);
@@ -1628,7 +1640,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         frame.kind === 'list' ? frame.title : '',
         frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
-      frame.kind !== 'overview' && frame.kind !== 'sidebar',
+      frame.kind !== 'overview',
       hudSpinePageTitle(frame),
     );
     if (frame.actionOverlay) {
@@ -1769,21 +1781,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       tray: string;
       hint: string;
       ambient?: { temperature: string; condition: string; unread: number };
+      rail?: PanelRailVisual;
     },
     icons: Record<HudIconName, HTMLImageElement>,
-    opacity = 1,
-    offsetX = 0,
-    /** The Sidebar draws its own right-hand edge; painting the dashboard's
-     * divider as well left two parallel rules on one screen. */
-    showDivider = true,
-    /** Where the footer hint is centred. The Sidebar's black field covers
-     * the left half of the canvas, which clipped a canvas-centred hint to
-     * "ft x2 overview"; it centres the hint in the visible pane instead. */
-    hintCenterX = 288,
   ): void {
     context.save();
-    context.globalAlpha = opacity;
-    context.translate(offsetX, 0);
     const overview = resolveHudOverview(frame);
     const layout = OVERVIEW_DASHBOARD;
     const status = parseStatus(frame.status);
@@ -1795,7 +1797,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     // The left pane is one centred column — date, clock, conditions — so it
     // reads as a single object instead of text stranded against the edge.
-    const columnX = layout.dividerX / 2;
+    const columnX = layout.clockCenterX;
     context.textAlign = 'center';
     context.fillStyle = gray(SUPPORT);
     context.font = `13px ${HUD_FONT}`;
@@ -1840,18 +1842,31 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
 
     // One hairline divides the two panes. Not a card: a single frame edge.
-    if (showDivider) {
-      context.strokeStyle = gray(HAIRLINE);
-      context.lineWidth = 1;
-      context.beginPath();
-      context.moveTo(layout.dividerX, layout.dividerTopY);
-      context.lineTo(layout.dividerX, layout.dividerBottomY);
-      context.stroke();
-    }
+    context.strokeStyle = gray(HAIRLINE);
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(layout.dividerX, layout.dividerTopY);
+    context.lineTo(layout.dividerX, layout.dividerBottomY);
+    context.stroke();
 
     // ── Right pane: whatever JOAT currently has to say ───────────────────
     const paneX = layout.paneX;
     const paneWidth = layout.paneWidth;
+
+    // The tab rail, and the tab it has selected. Notifications IS the
+    // resting pane below; the other three draw their cached push instead.
+    if (frame.rail) {
+      this.drawTabRail(context, frame.rail.activeTab, icons, 'overview');
+      if (frame.rail.activeTab !== 'notifications') {
+        this.drawPanelPane(context, frame.rail, icons);
+        context.fillStyle = gray(QUIET);
+        context.font = `9px ${HUD_FONT}`;
+        context.textAlign = 'center';
+        context.fillText(PANEL_OVERVIEW_HINT, 288, 267);
+        context.restore();
+        return;
+      }
+    }
 
     if (overview.kind === 'empty') {
       context.fillStyle = gray(CHROME);
@@ -1872,7 +1887,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(QUIET);
       context.font = `9px ${HUD_FONT}`;
       context.textAlign = 'center';
-      context.fillText(overview.hint, hintCenterX - offsetX, 267);
+      context.fillText(overview.hint, 288, 267);
       context.restore();
       return;
     }
@@ -1954,71 +1969,293 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'center';
     context.fillText(
       frame.mainKind === 'notification' ? NOTIFICATION_DISMISS_HINT : frame.hint,
-      hintCenterX - offsetX,
+      288,
       267,
     );
     context.restore();
   }
 
-  private drawSidebar(
+  /**
+   * The tab rail. On the overview it stands between the clock and the
+   * pane's hairline, and the active tab reaches the hairline with a short
+   * bracket — the platform dashboard's own tab, drawn in JOAT's language.
+   * Expanded, it moves to the left margin so the wearer still sees where
+   * they are, with the same bright leading edge every selection uses.
+   */
+  private drawTabRail(
     context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'sidebar' }>,
+    activeTab: PanelTab,
+    icons: Record<HudIconName, HTMLImageElement>,
+    mode: 'overview' | 'expanded',
+  ): void {
+    const rail = PANEL_RAIL;
+    const x = mode === 'overview' ? rail.x : rail.expandedX;
+    const iconFor: Record<PanelTab, HTMLImageElement> = {
+      notifications: icons.notifications,
+      news: icons.news,
+      pomodoro: icons.pomodoro,
+      search: icons.search,
+    };
+    PANEL_TABS.forEach((tab, index) => {
+      const top = rail.slotY[index] ?? rail.slotY[0];
+      const active = tab === activeTab;
+      this.drawIcon(context, iconFor[tab], x, top, rail.iconSize, active ? BRIGHT : CHROME);
+      if (!active) return;
+      const centerY = top + rail.iconSize / 2;
+      context.fillStyle = gray(BRIGHT);
+      if (mode === 'overview') {
+        // The bracket: the lit tab attaches to the pane it opens.
+        context.fillRect(x + rail.iconSize + 2, Math.round(centerY) - 1, 6, 2);
+      } else {
+        context.fillRect(x - 7, Math.round(centerY) - 10, 3, 20);
+      }
+    });
+  }
+
+  /** The active tab's resting pane: what the Mac last pushed, at a glance.
+   * Three headlines, one timer, or the last lookup — never a count. */
+  private drawPanelPane(
+    context: CanvasRenderingContext2D,
+    rail: PanelRailVisual,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    // The backdrop is drawn EXACTLY as the Overview draws it — same
-    // intensity, same position. That is a transfer decision, not only a
-    // visual one: the frame ships as four 288x144 tiles over a serialized
-    // BLE lane, and the presenter skips any tile whose pixels are unchanged.
-    // Dimming or shifting the backdrop moves every lit pixel, so all four
-    // tiles go dirty and the wearer watches the top half arrive, then the
-    // bottom. Leaving the right half identical means only the two left tiles
-    // carrying the rail are sent, and the menu appears in half the transfers.
-    this.drawOverview(
-      context, frame, icons, 1, 0, false,
-      // Centre of the pane the menu leaves visible, not of the canvas.
-      (HUD_VISUAL_GEOMETRY.sidebarWidth + CANVAS.width) / 2,
-    );
-    context.fillStyle = '#000000';
-    context.fillRect(3, 38, HUD_VISUAL_GEOMETRY.sidebarWidth - 3, 246);
-    context.strokeStyle = gray(HAIRLINE);
-    context.beginPath();
-    context.moveTo(1.5, 38);
-    context.lineTo(1.5, 267);
-    context.stroke();
+    const layout = OVERVIEW_DASHBOARD;
+    const paneX = layout.paneX;
+    const paneWidth = layout.paneWidth;
+    const content = rail.content;
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
 
-    context.strokeStyle = gray(17);
-    context.beginPath();
-    context.moveTo(HUD_VISUAL_GEOMETRY.sidebarWidth + 0.5, 55);
-    context.lineTo(HUD_VISUAL_GEOMETRY.sidebarWidth + 0.5, 250);
-    context.stroke();
+    const label = (text: string): void => {
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      this.fitText(context, text, paneX, layout.labelBaselineY, paneWidth);
+    };
+    const quiet = (lines: string[], startY: number): void => {
+      context.fillStyle = gray(SUPPORT);
+      context.font = `12px ${HUD_FONT}`;
+      lines.forEach((line, index) => {
+        this.drawWrappedText(context, line, paneX, startY + index * 36, paneWidth, 16, 2, 'leading');
+      });
+    };
 
-    const visibleItems = visibleHudSidebarItems(
-      frame.items, frame.selectedIndex, SIDEBAR_ROW_CAPACITY,
-    );
-    visibleItems.forEach(({ item, index }, row) => {
-      const y = SIDEBAR_FIRST_ROW_Y + row * SIDEBAR_ROW_PITCH;
-      if (index === frame.selectedIndex) {
-        context.fillStyle = '#000000';
-        context.fillRect(12, y - 12, HUD_VISUAL_GEOMETRY.sidebarWidth - 14, 24);
-        context.fillStyle = gray(BRIGHT);
-        context.fillRect(12, y - 12, 3, 24);
+    if (rail.activeTab === 'pomodoro') {
+      label('POMODORO');
+      const pomodoro = content?.pomodoro;
+      if (!pomodoro) {
+        quiet(['Say “JOAT, start a pomodoro”'], layout.mainTopBaselineY);
+        return;
       }
-      const level = index === frame.selectedIndex ? BRIGHT : SUPPORT;
-      const icon = icons[hudSidebarIconName(item)];
-      this.drawIcon(context, icon, 24, y - 7, 15, level);
-      context.fillStyle = gray(level);
-      context.textAlign = 'left';
-      context.textBaseline = 'middle';
-      context.font = `13px ${HUD_FONT}`;
-      context.fillText(item, 48, y);
-    });
+      const now = Date.now();
+      if (pomodoro.phase === 'idle') {
+        context.fillStyle = gray(BRIGHT);
+        context.font = `21px ${HUD_FONT}`;
+        context.fillText('Ready', paneX, layout.mainTopBaselineY + 4);
+        quiet([`${Math.round(pomodoro.lengthMs / 60_000)} min focus · tap to start`], layout.mainTopBaselineY + 34);
+        return;
+      }
+      const remaining = pomodoroRemainingMs(pomodoro, now);
+      const minutes = formatMinutesLeft(remaining);
+      context.fillStyle = gray(BRIGHT);
+      context.font = `48px ${HUD_FONT}`;
+      const number = minutes.split(' ')[0] ?? '0';
+      context.fillText(number, paneX, layout.mainTopBaselineY + 22);
+      const numberWidth = context.measureText(number).width;
+      context.fillStyle = gray(SUPPORT);
+      context.font = `12px ${HUD_FONT}`;
+      context.fillText('min left', paneX + numberWidth + 8, layout.mainTopBaselineY + 30);
+      const block = pomodoro.phase === 'focus'
+        ? `Focus · block ${Math.min(4, pomodoro.completed + 1)} of 4`
+        : `${pomodoroPhaseLabel(pomodoro.phase)} · ${pomodoro.completed} of 4 done`;
+      context.fillStyle = gray(pomodoro.running ? SUPPORT : CHROME);
+      context.font = `11px ${HUD_FONT}`;
+      this.fitText(context, pomodoro.running ? block : `Paused · ${block}`, paneX, layout.mainTopBaselineY + 62, paneWidth);
+      context.fillStyle = gray(CHROME);
+      context.font = `12px ${HUD_FONT}`;
+      context.fillText(
+        Array.from({ length: 4 }, (_, index) => (index < pomodoro.completed ? '●' : '○')).join(' '),
+        paneX, layout.mainTopBaselineY + 84,
+      );
+      return;
+    }
 
+    if (rail.activeTab === 'search') {
+      label('SEARCH');
+      if (!content || (!content.headline && content.rows.length === 0)) {
+        quiet([content?.empty ?? 'Say “JOAT, look up …”'], layout.mainTopBaselineY);
+        return;
+      }
+      let y = layout.mainTopBaselineY;
+      if (content.headline) {
+        context.fillStyle = gray(BRIGHT);
+        context.font = `13px ${HUD_FONT}`;
+        y += (this.drawWrappedText(context, content.headline, paneX, y, paneWidth, 17, 2, 'leading') - 1) * 17 + 24;
+      }
+      for (const row of content.rows.slice(0, 3)) {
+        if (y > OVERVIEW_TRAY_LAST_Y - 14) break;
+        const parts = parseHudListItem(row);
+        context.fillStyle = gray(SUPPORT);
+        context.font = `12px ${HUD_FONT}`;
+        const lines = this.drawWrappedText(context, parts.primary || row, paneX, y, paneWidth, 16, 2, 'leading');
+        y += lines * 16;
+        if (parts.secondary) {
+          context.fillStyle = gray(CHROME);
+          context.font = `9px ${HUD_FONT}`;
+          this.fitText(context, parts.secondary, paneX, y - 2, paneWidth);
+          y += 12;
+        }
+        y += 6;
+      }
+      return;
+    }
+
+    // News: the headlines themselves, newest first, as many as fit.
+    label(content ? `NEWS · ${freshnessLabel(content.receivedAtMs, Date.now())}` : 'NEWS');
+    if (!content) {
+      quiet(['Waiting for JOAT on your Mac…'], layout.mainTopBaselineY);
+      return;
+    }
+    if (content.rows.length === 0) {
+      quiet([content.empty ?? 'No headlines yet.', 'Tap to open, then hold to refresh.'], layout.mainTopBaselineY);
+      return;
+    }
+    let y = layout.labelBaselineY + 22;
+    for (const row of content.rows) {
+      if (y > OVERVIEW_TRAY_LAST_Y - 16) break;
+      const parts = parseHudListItem(row);
+      this.drawIcon(context, icons.news, paneX, y - 7, 12, CHROME);
+      context.fillStyle = gray(CHROME);
+      context.font = `9px ${HUD_FONT}`;
+      const source = [parts.secondary, parts.age].filter(Boolean).join(' · ');
+      this.fitText(context, source || 'News', paneX + 16, y, paneWidth - 16);
+      y += 14;
+      context.fillStyle = gray(SUPPORT);
+      context.font = `12px ${HUD_FONT}`;
+      const lines = this.drawWrappedText(
+        context, parts.primary || row, paneX + 16, y, paneWidth - 16, 16, 2, 'leading',
+      );
+      y += lines * 16 + 10;
+    }
+  }
+
+  /**
+   * The expanded pomodoro. The countdown sits entirely inside the top-right
+   * tile — east of x=288, above y=144 — so a one-second tick uploads ONE
+   * tile. The bar is quantised to whole minutes for the same reason: it
+   * crosses into the top-left tile, and must not dirty it every second.
+   */
+  private drawPomodoroPage(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+  ): void {
+    const pomodoro = frame.rail?.content?.pomodoro;
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    if (!pomodoro) {
+      context.fillStyle = gray(SUPPORT);
+      context.font = `14px ${HUD_FONT}`;
+      context.fillText('Say “JOAT, start a pomodoro”', 52, 96);
+      context.fillStyle = gray(CHROME);
+      context.font = `11px ${HUD_FONT}`;
+      context.fillText('25 min focus, 5 min break, a long one after four.', 52, 120);
+    } else {
+      const now = Date.now();
+      const remaining = pomodoroRemainingMs(pomodoro, now);
+      const phase = pomodoroPhaseLabel(pomodoro.phase).toUpperCase();
+      const kicker = pomodoro.phase === 'idle'
+        ? `READY · ${Math.round(pomodoro.lengthMs / 60_000)} MIN FOCUS`
+        : pomodoro.phase === 'focus'
+          ? `${pomodoro.running ? '' : 'PAUSED · '}FOCUS · BLOCK ${Math.min(4, pomodoro.completed + 1)} OF 4`
+          : `${pomodoro.running ? '' : 'PAUSED · '}${phase} · ${pomodoro.completed} OF 4 DONE`;
+      context.fillStyle = gray(CHROME);
+      context.font = `10px ${HUD_FONT}`;
+      context.fillText(kicker, 52, 66);
+      context.fillStyle = gray(pomodoro.phase === 'idle' || !pomodoro.running ? SUPPORT : BRIGHT);
+      context.font = `56px ${HUD_FONT}`;
+      context.textAlign = 'right';
+      context.fillText(formatCountdown(remaining), 548, 108);
+      context.textAlign = 'left';
+      // Whole minutes only: the bar crosses the seam into the left tile.
+      const wholeMinutesLeft = Math.ceil(remaining / 60_000) * 60_000;
+      const fraction = pomodoro.lengthMs > 0
+        ? 1 - Math.min(1, wholeMinutesLeft / pomodoro.lengthMs)
+        : 0;
+      context.fillStyle = gray(QUIET);
+      context.fillRect(52, 135, 496, 2);
+      context.fillStyle = gray(CHROME);
+      context.fillRect(52, 135, Math.round(496 * fraction), 2);
+      context.fillStyle = gray(CHROME);
+      context.font = `12px ${HUD_FONT}`;
+      context.fillText(
+        Array.from({ length: 4 }, (_, index) => (index < pomodoro.completed ? '●' : '○')).join(' '),
+        52, 156,
+      );
+    }
+    // The controls are the list rows the Mac sent — Start, Pause, Reset —
+    // in the one dense row language, under the timer.
+    frame.items.forEach((item, index) => {
+      const baselineY = 184 + index * 20;
+      const selected = frame.selectable && index === frame.selectedIndex;
+      if (selected) {
+        context.fillStyle = gray(BRIGHT);
+        context.fillRect(36, baselineY - 10, 3, 19);
+      }
+      this.drawFocusListLine(context, item, baselineY, selected);
+    });
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText(frame.hint, 288, 267);
+    context.textAlign = 'left';
+  }
+
+  /** The full-text reader every long page shares: quiet metadata line, the
+   * body as the one bright thing, the footer naming the paging gestures. */
+  private drawTextReader(
+    context: CanvasRenderingContext2D,
+    metadata: string,
+    body: string,
+    hint: string,
+  ): void {
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(CHROME);
+    context.font = `10px ${HUD_FONT}`;
+    this.fitText(context, metadata, 36, 58, 504);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `14px ${HUD_FONT}`;
+    visibleHudLeadingLines(
+      messagesReaderBodyLines(body),
+      MESSAGES_READER_BODY_LINE_CAPACITY,
+    ).forEach((line, index) => {
+      this.fitText(context, line, 36, 84 + index * 17, 504);
+    });
+    context.fillStyle = gray(QUIET);
+    context.font = `9px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText(hint, 288, 267);
+    context.textAlign = 'left';
   }
 
   private drawList(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
+    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
+    // An expanded panel tab: the rail stays lit on the left, and two of the
+    // tabs have pages of their own — the timer, and the shared reader.
+    if (frame.rail) {
+      if (frame.title.trim().toUpperCase() === 'POMODORO') {
+        this.drawPomodoroPage(context, frame);
+      } else if (usesPanelReaderLayout(frame.title)) {
+        const detail = messagesFullTextContent(frame.items);
+        this.drawTextReader(context, detail.metadata, detail.body, frame.hint);
+      } else {
+        this.drawPlanningFocusList(context, frame);
+      }
+      this.drawTabRail(context, frame.rail.activeTab, icons, 'expanded');
+      return;
+    }
     const planningMonth = parsePlanningMonthTitle(frame.title);
     const planningGrid = planningMonth && planningGridMatchesMonth(
       planningMonth,
@@ -2257,21 +2494,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // MESSAGES · MESSAGE — the full-text reader. Metadata is quiet chrome;
     // the message body is the one bright thing on the page.
     const detail = messagesFullTextContent(frame.items);
-    context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, detail.metadata, 36, 58, 504);
-    context.fillStyle = gray(BRIGHT);
-    context.font = `14px ${HUD_FONT}`;
-    visibleHudLeadingLines(
-      messagesReaderBodyLines(detail.body),
-      MESSAGES_READER_BODY_LINE_CAPACITY,
-    ).forEach((line, index) => {
-      this.fitText(context, line, 36, 84 + index * 17, 504);
-    });
-    context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
-    context.textAlign = 'center';
-    context.fillText(frame.hint, 288, 267);
+    this.drawTextReader(context, detail.metadata, detail.body, frame.hint);
   }
 
   /**
@@ -3007,10 +3230,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // "Interior · Exterior · Climate · Sentry" line.
     this.drawNavigationProgress(context, navigation.progress ?? 0);
     const mode = navigation.mode === 'cycling' ? 'Cycling' : 'Walking';
-    this.drawNavigationFooter(
-      context,
-      `${mode} · ${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`,
-    );
+    const arrival = this.arrivalClock(navigation.etaMinutes);
+    const facts = `${mode} · ${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
+    this.drawNavigationFooter(context, arrival ? `${facts} · ${arrival}` : facts);
   }
 
   /** The route as a picture: a dim full polyline, a bright travelled-to
@@ -3182,6 +3404,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = `11px ${HUD_FONT}`;
     this.fitText(context, navigation.secondary, 36, 108, 504);
     this.drawNavigationFooter(context, navigation.hint);
+  }
+
+  /** "arrive 9:54" from a minutes-remaining figure, or '' when there isn't one.
+   *
+   * A duration answers "how much longer"; a CLOCK TIME answers "do I make
+   * the meeting", which is the question someone walking somewhere is
+   * actually asking, and it is the fact the reference drive HUD leads with
+   * that JOAT's fact line was missing. This is a presentation of
+   * `etaMinutes` — the renderer derives a wall-clock face from a number the
+   * Mac already sent; it does not invent a fact of its own. */
+  private arrivalClock(etaMinutes: number | undefined): string {
+    if (etaMinutes === undefined || !Number.isFinite(etaMinutes)) return '';
+    const arrival = new Date(Date.now() + etaMinutes * 60_000);
+    const hours = arrival.getHours() % 12 || 12;
+    return `arrive ${hours}:${String(arrival.getMinutes()).padStart(2, '0')}`;
   }
 
   private drawNavigationFooter(context: CanvasRenderingContext2D, copy: string): void {

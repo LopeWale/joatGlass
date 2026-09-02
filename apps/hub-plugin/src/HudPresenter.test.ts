@@ -743,26 +743,14 @@ describe('HudPresenter modal surfaces', () => {
     expect(hud.hasVisibleNotification()).toBe(false);
   });
 
-  it('renders the transient sidebar over a dim snapshot, then full-focus Messages restores the latest overview', async () => {
+  it('a full-focus list buffers overview content and Home restores the latest', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.showText('Next\nDesign review · 4:30', ContainerId.Main, 4);
-    await hud.showText('Last query  nearest coffee shop?', ContainerId.Context, 3);
-    await hud.showText('2 notifications', ContainerId.Tray, 2);
 
-    await hud.showSidebar(['Messages', 'Notifications', 'Calendar', 'Debate', 'Settings']);
-    const sidebar = rebuiltPages[0] as {
-      textObject?: Array<{ containerID?: number; content?: string }>;
-      listObject?: Array<{ width?: number }>;
-    };
-    expect(sidebar.listObject?.[0]?.width).toBe(160);
-    expect(sidebar.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
-      .toBe('Next\nDesign review · 4:30');
-
-    await hud.showText('Updated overview behind navigation', ContainerId.Main, 3);
     await hud.showList(['Loading recent messages…'], {
       title: 'MESSAGES', hint: 'left x2 overview',
     });
-    const messages = rebuiltPages[1] as {
+    const messages = rebuiltPages[0] as {
       textObject?: Array<{ containerID?: number; content?: string }>;
       listObject?: Array<{ width?: number }>;
     };
@@ -770,8 +758,10 @@ describe('HudPresenter modal surfaces', () => {
     expect(messages.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
       .toBe('MESSAGES');
 
+    // Content arriving behind the focus page must not be lost.
+    await hud.showText('Updated overview behind messages', ContainerId.Main, 3);
     await hud.showDefault();
-    expect(lastOf(mainPaints()).content).toBe('Updated overview behind navigation');
+    expect(lastOf(mainPaints()).content).toBe('Updated overview behind messages');
   });
 
   it('paints a named focus page with a persistent truthful action hint', async () => {

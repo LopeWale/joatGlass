@@ -2,16 +2,31 @@ import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import type { HudPresenter } from './HudPresenter';
 import type { Settings } from './Settings';
 import type { MacLink } from './MacLink';
-import { parsePlanningMonthTitle } from './HudCanvasRenderer';
+import {
+  PANEL_EXPANDED_HINT,
+  POMODORO_EXPANDED_HINT,
+  parsePlanningMonthTitle,
+} from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
+import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
 import {
   CAPABILITIES,
   VOICE_REQUEST_PREFIX,
   type InputEventPayload,
+  type PanelContentTab,
   type PlanningGridCell,
   type ProductivityHudModel,
   type ResumePolicy,
 } from './types';
+
+/** What an expanded tab says before the Mac has pushed anything for it.
+ * Truthful about the way in: news and search only fill by voice or by
+ * the Mac's own poll; the timer starts with a word. */
+const PANEL_EMPTY_COPY: Readonly<Record<PanelContentTab, string>> = {
+  news: 'No headlines yet — hold to refresh.',
+  pomodoro: 'Say “JOAT, start a pomodoro” to begin.',
+  search: 'Say “JOAT, look up …” to search.',
+};
 
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
@@ -56,25 +71,17 @@ function isPlanningAnchor(value: unknown): value is number {
 }
 
 /**
- * The control-center navigation from the approved dashboard design:
- * left double-tap opens the CAPABILITY menu — Messages, Planning,
- * Navigation, Brainstorm, and the remaining views and actions by
- * scroll. Data entries open a Mac-drawn view; direct actions retain their
- * existing local or gateway contracts. The
- * first build shipped only the old resume-policy list here, so the wearer
- * double-tapped into "a menu modal, but not the one we designed" (their
- * words, on hardware). Settings is a scroll-reachable first-level action.
+ * The capability views behind the wearer's ONE menu.
  *
- * View machine, and what double-tap means in each state:
- *   home ──double-tap──▶ caps ──pick row──▶ data view, settings, or direct action
- *   caps/settings/data ──double-tap──▶ home  (double-tap is BACK, always)
+ * That menu is the firmware contextual menu (tap, then long-press): the
+ * glasses draw it from the CAPABILITIES rows in types.ts, zero image tiles.
+ * This class no longer draws a menu of its own — it opens what the wearer
+ * picked and owns the pages beneath it.
+ *
+ * View machine, and what left double-tap means in each state:
+ *   home ──firmware menu──▶ data view, settings, or direct action
+ *   settings/data ──left double-tap──▶ home  (left double-tap is BACK, always)
  */
-// The visual sidebar shows five rows at a time and scrolls this one continuous
-// list. Nothing is hidden behind a second "More" interaction: a wearer can
-// keep scrolling from Messages through every available glasses capability or
-// direct action. The renderer and G2 list limit both accept these 9 rows.
-// CAPABILITIES now lives in types.ts: the firmware contextual menu offers the
-// same rows, and one list means the two can never drift apart.
 
 const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
   { policy: 'auto', label: 'Resume mic: instantly' },
@@ -100,7 +107,7 @@ export function isActionLifecycleTitle(title?: string): boolean {
 }
 
 export class CapabilityMenu {
-  private view: 'closed' | 'transition' | 'caps' | 'settings' | 'data' | 'productivity' = 'closed';
+  private view: 'closed' | 'transition' | 'settings' | 'data' | 'productivity' = 'closed';
   private selectedIndex = 0;
   private dataItemCount = 0;
   private dataRowsSelectable = false;
@@ -455,16 +462,12 @@ export class CapabilityMenu {
     return visible;
   }
 
-  /** Left double-tap. Closed: open the capability menu. Otherwise return one
-   * contextual level, preserving a list/detail parent where it exists. */
+  /** Left double-tap is BACK, and only back. The wearer's menu is the
+   * firmware contextual menu (tap, then long-press); this gesture never
+   * draws a second one. On the overview there is no level left to leave. */
   async toggle(): Promise<void> {
     if (this.view === 'closed') {
-      const transition = this.beginTransition();
-      this.selectedIndex = 0;
-      const shown = await this.hud.showSidebar([...CAPABILITIES], this.selectedIndex);
-      if (!this.isCurrentTransition(transition)) return;
-      if (shown) this.view = 'caps';
-      else await this.close();
+      return;
     } else if (this.view === 'productivity' && this.productivityReturn) {
       const capability = this.productivityReturn;
       await this.openCapability(
@@ -486,9 +489,9 @@ export class CapabilityMenu {
       await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
     } else if (this.view === 'data' && this.dataReturn) {
       await this.returnToDataSurface();
-    } else if (this.view === 'data' || this.view === 'settings') {
-      await this.returnToSidebar();
     } else {
+      // Data and settings leave to the overview: their parent used to be the
+      // tile sidebar, and the wearer's menu is the firmware's now.
       await this.close();
     }
   }
@@ -501,6 +504,10 @@ export class CapabilityMenu {
 
     if (this.view === 'data') {
       const eventType = list.eventType ?? 0;
+      if (eventType !== OsEventTypeList.CLICK_EVENT && this.canRequestPanelPage(eventType)) {
+        this.requestPanelPage(eventType);
+        return true;
+      }
       if (this.dashboard) {
         if (eventType === OsEventTypeList.CLICK_EVENT) return this.selectDataRow();
         this.dashboardScroll(
@@ -597,6 +604,10 @@ export class CapabilityMenu {
         this.dashboardScroll(delta);
         return true;
       }
+      if (this.canRequestPanelPage(eventType)) {
+        this.requestPanelPage(eventType);
+        return true;
+      }
       if (
         this.pendingTitle === 'MESSAGES'
         && (this.messagesScreen === 'conversation' || this.messagesScreen === 'message_detail')
@@ -614,9 +625,8 @@ export class CapabilityMenu {
       if (applied !== 0) void this.hud.moveSelection(applied);
       return true;
     }
-    const maximum = this.view === 'settings'
-      ? POLICY_ROWS.length + SETTINGS_ACTION_ROWS.length - 1
-      : CAPABILITIES.length - 1;
+    // Settings is the one remaining locally-selectable page.
+    const maximum = POLICY_ROWS.length + SETTINGS_ACTION_ROWS.length - 1;
     this.selectedIndex = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
     void this.hud.setSelection(this.selectedIndex);
     return true;
@@ -763,35 +773,18 @@ export class CapabilityMenu {
   }
 
   private select(index: number): boolean {
-    if (this.view === 'settings') {
-      const policy = POLICY_ROWS[index];
-      if (policy) {
-        this.settings.setResumePolicy(policy.policy);
-        this.link.send({ kind: 'policy', resume: policy.policy });
-        void this.close();
-        return true;
-      }
-      const action = SETTINGS_ACTION_ROWS[index - POLICY_ROWS.length];
-      if (action?.action === 'repeat') {
-        void this.repeatLastReply();
-      } else if (action?.action === 'reconnect') {
-        void this.reconnectToMac();
-      }
+    const policy = POLICY_ROWS[index];
+    if (policy) {
+      this.settings.setResumePolicy(policy.policy);
+      this.link.send({ kind: 'policy', resume: policy.policy });
+      void this.close();
       return true;
     }
-
-    const picked = CAPABILITIES[index];
-    if (picked) {
-      if (picked === 'Settings') {
-        // This is the persisted listening-resume settings surface, not an
-        // imitation static page. Its existing left-double return stays Home.
-        void this.openSettings();
-        return true;
-      }
-      // The data lives on the Mac; ask it to draw the view. The Mac answers
-      // with hud.list / hud.text, which lands in the 'data' state where
-      // double-tap still means back.
-      void this.openCapability(picked, index);
+    const action = SETTINGS_ACTION_ROWS[index - POLICY_ROWS.length];
+    if (action?.action === 'repeat') {
+      void this.repeatLastReply();
+    } else if (action?.action === 'reconnect') {
+      void this.reconnectToMac();
     }
     return true;
   }
@@ -839,6 +832,163 @@ export class CapabilityMenu {
    */
   async openNotifications(): Promise<void> {
     await this.openCapability('Notifications', CAPABILITIES.length);
+  }
+
+  /** A click on the resting overview opens whichever tab the rail has
+   * selected. Notifications still asks the Mac; the other three expand
+   * from the content the Mac last pushed, so the page paints once, with
+   * no "Loading…" frame in between. */
+  async openActiveTab(): Promise<void> {
+    const tab = this.hud.activeTab();
+    if (tab === 'notifications') {
+      await this.openNotifications();
+      return;
+    }
+    await this.openPanelTab(tab);
+  }
+
+  /**
+   * A swipe on the resting overview moves along the tab rail. Consumed at
+   * either end too: a swipe that changes nothing is still a swipe on the
+   * overview, not an input for the Mac. Returns false when no menu view is
+   * closed-and-resting, so every other surface keeps its own scroll.
+   */
+  handleOverviewSwipe(eventType: number): boolean {
+    if (this.view !== 'closed') return false;
+    const delta = eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+      ? 1
+      : eventType === OsEventTypeList.SCROLL_TOP_EVENT
+        ? -1
+        : 0;
+    if (delta === 0) return false;
+    void this.hud.stepTab(delta);
+    return true;
+  }
+
+  /** The top level of an expanded panel tab — where long press means
+   * refresh. Inside an opened article the gesture stays the mic's. */
+  isPanelExpanded(): boolean {
+    return this.view === 'data'
+      && panelTabForTitle(this.pendingTitle) !== undefined
+      && this.dataReturn === undefined;
+  }
+
+  /** Ask the Mac to re-fetch the expanded tab. The reply is an ordinary
+   * `hud.panel` push; presentPanelContent repaints this page from it. */
+  refreshPanel(): void {
+    const tab = panelTabForTitle(this.pendingTitle);
+    if (!this.isPanelExpanded() || tab === undefined) return;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'caprefresh',
+        selectedName: PANEL_TAB_TITLES[tab],
+        requestId: this.hud.rail.requestId(tab),
+      },
+    });
+  }
+
+  /**
+   * Expand a panel tab from the plugin's cache. This enters the same `data`
+   * state a Mac-served list does, so scroll, tap, the 12s retry state,
+   * two-deep Back, and reader paging all work unchanged: a row tap sends
+   * `capdata` carrying the cached revision, and the Mac answers an opened
+   * row with a `hud.list` titled "<TAB> · …" that presentList matches.
+   */
+  async openPanelTab(tab: PanelContentTab): Promise<void> {
+    this.dashboard = undefined;
+    this.clearResponseTimeout();
+    this.messagesRetry = false;
+    const transition = this.beginTransition();
+    const title = PANEL_TAB_TITLES[tab];
+    const content = this.hud.rail.content(tab);
+    const rows = content?.rows ?? [];
+    const items = rows.length > 0
+      ? rows
+      : [content?.empty ?? PANEL_EMPTY_COPY[tab]];
+    const selectable = rows.length > 0;
+    const hint = tab === 'pomodoro' ? POMODORO_EXPANDED_HINT : PANEL_EXPANDED_HINT;
+    const shown = await this.hud.showList(items, {
+      title, hint, selectable, railTab: tab,
+    });
+    if (!this.isCurrentTransition(transition)) return;
+    if (!shown) {
+      await this.close();
+      return;
+    }
+    this.view = 'data';
+    this.pendingTitle = title;
+    this.pendingRequestId = this.hud.rail.requestId(tab);
+    this.dataItemCount = items.length;
+    this.dataRowsSelectable = selectable;
+    this.dataSelectionPending = false;
+    this.dataSelectionUsesStaleNativeIndex = false;
+    this.messagesScreen = undefined;
+    this.dataHint = hint;
+    this.dataPagePending = false;
+    this.selectedIndex = 0;
+    this.dataSurface = {
+      title,
+      items: [...items],
+      selectable,
+      hint,
+      selectedIndex: 0,
+      messagesRetry: false,
+    };
+    this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
+  }
+
+  /**
+   * A fresh push for a tab whose page is on the glass: repaint it in place,
+   * keeping the wearer's row where it was. A push for any other tab, or
+   * while an opened row is showing, is only cached (HudPresenter did that)
+   * — Back will find the newer rows.
+   */
+  async presentPanelContent(tab: PanelContentTab): Promise<boolean> {
+    if (!this.isPanelExpanded() || panelTabForTitle(this.pendingTitle) !== tab) return false;
+    const keep = this.selectedIndex;
+    await this.openPanelTab(tab);
+    if (this.view !== 'data' || panelTabForTitle(this.pendingTitle) !== tab) return true;
+    const clamped = Math.max(0, Math.min(Math.max(0, this.dataItemCount - 1), keep));
+    if (clamped !== 0) {
+      this.selectedIndex = clamped;
+      if (this.dataSurface) this.dataSurface.selectedIndex = clamped;
+      void this.hud.setSelection(clamped);
+    }
+    return true;
+  }
+
+  /** The reader for an opened headline or result: the Mac owns the page
+   * cursor, and only a hint it authored ("down more", "up previous")
+   * makes a boundary swipe into a page request. */
+  private canRequestPanelPage(eventType: number): boolean {
+    if (this.view !== 'data' || this.dataPagePending || !this.pendingRequestId) return false;
+    if (panelTabForTitle(this.pendingTitle) === undefined || this.dataReturn === undefined) {
+      return false;
+    }
+    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+      return this.dataHint?.includes('up previous') === true;
+    }
+    if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      return this.dataHint?.includes('down more') === true;
+    }
+    return false;
+  }
+
+  private requestPanelPage(eventType: number): void {
+    if (!this.pendingRequestId || !this.pendingTitle) return;
+    this.dataPagePending = true;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'cappage',
+        selectedName: this.pendingTitle,
+        eventType,
+        requestId: this.pendingRequestId,
+      },
+    });
+    this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
   }
 
   private async openCapability(
@@ -1117,39 +1267,6 @@ export class CapabilityMenu {
         });
       }
     }
-  }
-
-  private async returnToSidebar(): Promise<void> {
-    const leavingMessages = this.pendingTitle === 'MESSAGES';
-    this.dashboard = undefined;
-    const activeIndex = this.pendingTitle
-      ? Math.max(0, CAPABILITIES.findIndex((item) => item.toUpperCase() === this.pendingTitle))
-      : this.view === 'settings' ? CAPABILITIES.indexOf('Settings') : 0;
-    this.clearResponseTimeout();
-    this.messagesRetry = false;
-    this.messagesScreen = undefined;
-    this.dataHint = undefined;
-    this.dataPagePending = false;
-    this.dataItemCount = 0;
-    this.dataRowsSelectable = false;
-    this.dataSelectionPending = false;
-    this.dataSurface = undefined;
-    this.dataReturn = undefined;
-    this.dataGrandparent = undefined;
-    this.pendingTitle = undefined;
-    this.pendingRequestId = undefined;
-    const transition = this.beginTransition();
-    this.selectedIndex = activeIndex;
-    if (leavingMessages) {
-      this.link.send({
-        kind: 'input',
-        event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
-      });
-    }
-    const shown = await this.hud.showSidebar([...CAPABILITIES], activeIndex);
-    if (!this.isCurrentTransition(transition)) return;
-    if (shown) this.view = 'caps';
-    else await this.close();
   }
 
   private scheduleProductivityReturn(phase: ProductivityHudModel['phase']): void {

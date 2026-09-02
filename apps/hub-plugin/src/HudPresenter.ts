@@ -1,15 +1,23 @@
 import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import type { HudPageBuilder, SidebarBackdrop } from './HudPageBuilder';
+import type { HudPageBuilder } from './HudPageBuilder';
 import type { AssistantOverlayVisual, HudFramePainter, HudVisualFrame } from './HudVisualSurface';
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import { usesActionPillLayout } from './HudCanvasRenderer';
 import type { NavigationHudModel } from './NavigationHud';
 import {
+  PanelRail,
+  pomodoroTickDelayMs,
+  type HudPanelMessage,
+  type PanelContent,
+} from './PanelRail';
+import {
   CONFIRM_PROMPT_MAX_UNITS,
   ContainerId,
   type BrainstormHudModel,
   type HudContentKind,
+  type PanelContentTab,
+  type PanelTab,
   type PlanningGridCell,
   type ProductivityHudDomain,
   type ProductivityHudModel,
@@ -119,6 +127,8 @@ export interface ListSurfaceOptions {
   selectable?: boolean;
   planningGrid?: readonly PlanningGridCell[];
   planningPane?: PlanningPaneState;
+  /** This list is an expanded panel tab: keep its rail lit on the left. */
+  railTab?: PanelContentTab;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -127,6 +137,7 @@ interface ResolvedListSurfaceOptions {
   selectable: boolean;
   planningGrid?: readonly PlanningGridCell[];
   planningPane?: PlanningPaneState;
+  railTab?: PanelContentTab;
 }
 
 interface HudContentState {
@@ -142,7 +153,6 @@ interface PresenterSnapshot extends HudContentState {
 
 type HudSurface =
   | { kind: 'default' }
-  | { kind: 'sidebar'; items: string[]; selectedIndex: number }
   | {
     kind: 'list';
     items: string[];
@@ -221,6 +231,11 @@ export class HudPresenter {
   private surface: HudSurface = { kind: 'default' };
   /** Margin facts (weather, unread) resolved by the Mac for the dashboard. */
   private ambient?: { temperature: string; condition: string; unread: number };
+  /** The right pane's tab rail: which tab is active, and what the Mac last
+   * pushed for each. Local state — a swipe between tabs never round-trips. */
+  readonly rail = new PanelRail();
+  /** Repaints the visible pomodoro when its next digit moves. */
+  private panelTicker?: ReturnType<typeof setTimeout>;
   private focusReturn?: HudContentState;
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
@@ -525,23 +540,6 @@ export class HudPresenter {
     return this.renderList(surface);
   }
 
-  async showSidebar(items: string[], selectedIndex = 0): Promise<boolean> {
-    const surface: HudSurface = { kind: 'sidebar', items: [...items], selectedIndex };
-    if (this.confirmation) {
-      this.confirmation.surface = surface;
-      return true;
-    }
-    if (this.surface.kind === 'default' && !this.focusReturn) {
-      this.focusReturn = {
-        streams: new Map(this.streams),
-        brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds),
-      };
-    }
-    this.clearActionOverlay();
-    return this.renderSidebar(surface);
-  }
-
   /** Paint a complete navigation snapshot. The Mac/session owns the state;
    * this presenter only gives it exclusive focus and exact restoration. */
   async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
@@ -789,10 +787,6 @@ export class HudPresenter {
     ) return false;
     const maximum = Math.max(0, this.surface.items.length - 1);
     const selectedIndex = Math.max(0, Math.min(maximum, index));
-    if (this.surface.kind === 'sidebar') {
-      const surface: HudSurface = { ...this.surface, selectedIndex };
-      return this.renderSidebar(surface);
-    }
     const surface: HudSurface = { ...this.surface, selectedIndex };
     return this.renderList(surface);
   }
@@ -836,62 +830,6 @@ export class HudPresenter {
     }
     this.recordPageTransition(from, 'navigation', 'show_navigation', painted ? 'success' : 'failed');
     return painted;
-  }
-
-  private async renderSidebar(
-    surface: Extract<HudSurface, { kind: 'sidebar' }>,
-    content: HudContentState = this.focusReturn ?? {
-      streams: this.streams,
-      brightness: this.brightness,
-      kinds: this.kinds,
-    },
-  ): Promise<boolean> {
-    const from = this.tracePage();
-    const liveStatus = this.captureLiveStatus();
-    const backdrop = this.sidebarBackdrop(content);
-    const ok = this.visual
-      ? true
-      : await this.client.require()
-        .rebuildPageContainer(this.layouts.sidebarLayout(surface.items, backdrop));
-    if (!ok) {
-      this.recordPageTransition(from, 'sidebar', 'show_sidebar', 'failed');
-      return false;
-    }
-    this.resetAll();
-    this.surface = surface;
-    this.streams.set(ContainerId.Main, backdrop.main ?? '');
-    const mainKind = content.kinds.get(ContainerId.Main);
-    if (mainKind) this.kinds.set(ContainerId.Main, mainKind);
-    this.streams.set(ContainerId.Context, backdrop.context ?? '');
-    this.streams.set(ContainerId.Tray, backdrop.tray ?? '');
-    this.streams.set(ContainerId.Hint, backdrop.hint ?? 'left x2 overview');
-    this.brightness.set(
-      ContainerId.Main,
-      content.brightness.get(ContainerId.Main) ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
-    );
-    this.brightness.set(
-      ContainerId.Context,
-      content.brightness.get(ContainerId.Context) ?? DEFAULT_BRIGHTNESS[ContainerId.Context]!,
-    );
-    this.brightness.set(
-      ContainerId.Tray,
-      content.brightness.get(ContainerId.Tray) ?? DEFAULT_BRIGHTNESS[ContainerId.Tray]!,
-    );
-    this.brightness.set(ContainerId.Hint, DEFAULT_BRIGHTNESS[ContainerId.Hint]!);
-    if (this.visual) {
-      if (liveStatus) {
-        this.streams.set(ContainerId.StatusBar, liveStatus.text);
-        if (liveStatus.brightness !== undefined) {
-          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-        }
-      }
-      const painted = await this.paintVisual();
-      this.recordPageTransition(from, 'sidebar', 'show_sidebar', painted ? 'success' : 'failed');
-      return painted;
-    }
-    const restored = await this.restoreLiveStatus(liveStatus);
-    this.recordPageTransition(from, 'sidebar', 'show_sidebar', restored ? 'success' : 'failed');
-    return restored;
   }
 
   private async renderList(surface: Extract<HudSurface, { kind: 'list' }>): Promise<boolean> {
@@ -940,9 +878,84 @@ export class HudPresenter {
     if (!changed) return true;
     // Only the resting screen wears these; repainting a feature page for a
     // temperature would cost BLE transfers the wearer never asked for.
-    if (this.surface.kind !== 'default' && this.surface.kind !== 'sidebar') return true;
+    if (this.surface.kind !== 'default') return true;
     if (!this.visual) return true;
     return this.paintVisual();
+  }
+
+  /** Which tab the overview's right pane shows. Local: the Mac never learns it. */
+  activeTab(): PanelTab {
+    return this.rail.active();
+  }
+
+  async setActiveTab(tab: PanelTab): Promise<boolean> {
+    if (!this.rail.setActive(tab)) return true;
+    return this.repaintRestingPane();
+  }
+
+  /** A swipe on the resting overview: one tab along the rail. Returns the
+   * tab now active, or undefined at either end of the rail. */
+  async stepTab(delta: number): Promise<PanelTab | undefined> {
+    const next = this.rail.step(delta);
+    if (next !== undefined) await this.repaintRestingPane();
+    return next;
+  }
+
+  /** Cache a Mac push. Repaints only when the pushed tab is on the glass;
+   * an expanded page for that tab is CapabilityMenu's to refresh. */
+  async acceptPanel(message: HudPanelMessage): Promise<PanelContent> {
+    const content = this.rail.accept(message);
+    if (this.rail.active() === message.tab) await this.repaintRestingPane();
+    return content;
+  }
+
+  /** Back to the first tab — what a fresh brain connection lands on. */
+  resetTab(): void {
+    this.rail.reset();
+  }
+
+  private async repaintRestingPane(): Promise<boolean> {
+    if (this.confirmation) return true;
+    if (this.surface.kind !== 'default') return true;
+    if (!this.visual) return true;
+    return this.paintVisual();
+  }
+
+  /**
+   * Repaint the visible pomodoro exactly when its next digit moves: every
+   * second on the expanded tab, every minute on the resting overview. A
+   * tick is a localTick — no new information from the Mac — so it is not a
+   * wearer-visible frame receipt, and it stops the moment the timer is not
+   * on the glass or not running.
+   */
+  private armPanelTicker(): void {
+    if (this.panelTicker !== undefined) return;
+    const delay = this.panelTickDelay();
+    if (delay === undefined) return;
+    this.panelTicker = setTimeout(() => {
+      this.panelTicker = undefined;
+      if (this.panelTickDelay() === undefined) return;
+      void this.paintVisual(true);
+    }, delay);
+  }
+
+  private panelTickDelay(): number | undefined {
+    const pomodoro = this.rail.content('pomodoro')?.pomodoro;
+    if (!pomodoro) return undefined;
+    const now = Date.now();
+    if (this.surface.kind === 'default' && this.rail.active() === 'pomodoro') {
+      return pomodoroTickDelayMs(pomodoro, now, 60_000);
+    }
+    if (this.surface.kind === 'list' && this.surface.options.railTab === 'pomodoro') {
+      return pomodoroTickDelayMs(pomodoro, now, 1000);
+    }
+    return undefined;
+  }
+
+  private clearPanelTicker(): void {
+    if (this.panelTicker === undefined) return;
+    clearTimeout(this.panelTicker);
+    this.panelTicker = undefined;
   }
 
   async showDefault(): Promise<boolean> {
@@ -1166,18 +1179,6 @@ export class HudPresenter {
       return result;
     }
 
-    if (prior.surface.kind === 'sidebar') {
-      this.focusReturn = {
-        streams: new Map(prior.streams),
-        brightness: new Map(prior.brightness),
-        kinds: new Map(prior.kinds),
-      };
-      const restored = await this.renderSidebar(prior.surface, prior);
-      const result = await this.repaintReplacementConfirmation(restored);
-      this.recordPageTransition('confirmation', 'sidebar', 'dismiss_confirmation', result ? 'success' : 'failed');
-      return result;
-    }
-
     if (prior.surface.kind === 'navigation') {
       this.focusReturn = {
         streams: new Map(prior.streams),
@@ -1303,15 +1304,7 @@ export class HudPresenter {
         ? this.layouts.confirmationLayout(this.confirmation.prompt)
         : this.surface.kind === 'list'
           ? this.layouts.listLayout(this.surface.items, this.surface.options)
-          : this.surface.kind === 'sidebar'
-            ? this.layouts.sidebarLayout(this.surface.items, this.sidebarBackdrop(
-              this.focusReturn ?? {
-                streams: this.streams,
-                brightness: this.brightness,
-                kinds: this.kinds,
-              },
-            ))
-            : this.layouts.defaultLayout();
+          : this.layouts.defaultLayout();
       const rebuilt = await this.client.require().rebuildPageContainer(layout);
       if (!rebuilt) {
         this.recordSelfHeal('abandoned', containerId);
@@ -1370,7 +1363,7 @@ export class HudPresenter {
   private recordPageTransition(
     from: G2TracePage,
     to: G2TracePage,
-    reason: 'show_sidebar' | 'show_list' | 'show_overview' | 'show_confirmation' | 'show_navigation' | 'dismiss_confirmation',
+    reason: 'show_list' | 'show_overview' | 'show_confirmation' | 'show_navigation' | 'dismiss_confirmation',
     outcome: 'success' | 'failed',
   ): void {
     if (from === to) return;
@@ -1475,21 +1468,13 @@ export class HudPresenter {
       title: (options.title?.trim() || DEFAULT_LIST_TITLE).slice(0, MAX_FOCUS_COPY_CHARS),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_COPY_CHARS),
       selectable: options.selectable ?? false,
+      ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
       // The pane rides only with a valid grid: hover state without dates
       // would put the renderer on the dashboard path with nothing to draw.
       ...(planningGrid && options.planningPane
         ? { planningPane: { ...options.planningPane } }
         : {}),
-    };
-  }
-
-  private sidebarBackdrop(content: HudContentState): SidebarBackdrop {
-    return {
-      main: content.streams.get(ContainerId.Main),
-      context: content.streams.get(ContainerId.Context),
-      tray: content.streams.get(ContainerId.Tray),
-      hint: 'left x2 overview',
     };
   }
 
@@ -1507,23 +1492,8 @@ export class HudPresenter {
           : {}),
       };
     }
-    if (this.surface.kind === 'sidebar') {
-      return this.withOverlays({
-        kind: 'sidebar',
-        status,
-        micOn: this.micOn,
-        mainBrightness: this.brightness.get(ContainerId.Main)
-          ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
-        items: [...this.surface.items],
-        selectedIndex: this.surface.selectedIndex,
-        main: this.streams.get(ContainerId.Main) ?? '',
-        mainKind: this.kinds.get(ContainerId.Main),
-        context: this.streams.get(ContainerId.Context) ?? '',
-        tray: this.streams.get(ContainerId.Tray) ?? '',
-        hint: this.streams.get(ContainerId.Hint) ?? '',
-      });
-    }
     if (this.surface.kind === 'list') {
+      const railTab = this.surface.options.railTab;
       return this.withOverlays({
         kind: 'list',
         status,
@@ -1535,6 +1505,7 @@ export class HudPresenter {
         hint: this.surface.options.hint,
         planningGrid: this.surface.options.planningGrid,
         planningPane: this.surface.options.planningPane,
+        ...(railTab ? { rail: this.rail.visualFor(railTab) } : {}),
       });
     }
     if (this.surface.kind === 'navigation') {
@@ -1573,6 +1544,7 @@ export class HudPresenter {
       context: this.streams.get(ContainerId.Context) ?? '',
       tray: this.streams.get(ContainerId.Tray) ?? '',
       hint: this.streams.get(ContainerId.Hint) ?? '',
+      rail: this.rail.visual(),
     });
   }
 
@@ -1604,6 +1576,7 @@ export class HudPresenter {
     const ok = await this.visual.paint(this.visualFrame(), localTick);
     // Keep the local elapsed counter moving between Mac frames.
     this.armThinkingTicker();
+    this.armPanelTicker();
     if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
     return ok;
   }
@@ -1618,11 +1591,6 @@ export class HudPresenter {
     }
     if (surface.kind === 'productivity') {
       return { kind: 'productivity', productivity: this.cloneProductivity(surface.productivity) };
-    }
-    if (surface.kind === 'sidebar') {
-      return {
-        kind: 'sidebar', items: [...surface.items], selectedIndex: surface.selectedIndex,
-      };
     }
     return {
       kind: 'list',
@@ -1660,6 +1628,7 @@ export class HudPresenter {
       brightness: Object.fromEntries(this.brightness),
       kinds: Object.fromEntries(this.kinds),
       micOn: this.micOn,
+      rail: this.rail.export(),
     };
   }
 
@@ -1683,6 +1652,9 @@ export class HudPresenter {
       (v): v is HudContentKind => typeof v === 'string',
     );
     if (typeof saved.micOn === 'boolean') this.micOn = saved.micOn;
+    if (typeof saved.rail === 'object' && saved.rail !== null) {
+      this.rail.import(saved.rail as Record<string, unknown>);
+    }
     return true;
   }
 
@@ -1729,6 +1701,7 @@ export class HudPresenter {
 
   private resetAll(): void {
     for (const id of this.pendingPaint.keys()) this.cancelPending(id);
+    this.clearPanelTicker();
     this.lastLength.clear();
     this.streams.clear();
     this.lastPaint.clear();

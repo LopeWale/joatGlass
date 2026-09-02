@@ -5,6 +5,7 @@ import {
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
+import type { PanelRailVisual } from './PanelRail';
 import {
   CANVAS,
   ContainerId,
@@ -47,20 +48,9 @@ type HudVisualBaseFrame =
     context: string;
     tray: string;
     hint: string;
-  }
-  | {
-    kind: 'sidebar';
-    status: string;
-    micOn: boolean;
-    ambient?: HudAmbientModel;
-    mainBrightness: number;
-    mainKind?: HudContentKind;
-    items: string[];
-    selectedIndex: number;
-    main: string;
-    context: string;
-    tray: string;
-    hint: string;
+    /** The right pane's tab rail and the active tab's cached content.
+     * Absent only in fixtures and tests that predate the rail. */
+    rail?: PanelRailVisual;
   }
   | {
     kind: 'list';
@@ -73,6 +63,9 @@ type HudVisualBaseFrame =
     hint: string;
     planningGrid?: readonly PlanningGridCell[];
     planningPane?: { dateIndex: number; focused: boolean; itemIndex: number };
+    /** Present when this list is an expanded panel tab: the rail stays on
+     * the left so the wearer can see where they are. */
+    rail?: PanelRailVisual;
   }
   | {
     kind: 'confirmation';

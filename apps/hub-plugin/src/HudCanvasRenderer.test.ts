@@ -13,7 +13,6 @@ import {
   brainstormStateLabel,
   hudBrightnessGray,
   hudDisplayTitle,
-  hudSidebarIconName,
   parseHudLabeledValue,
   parseHudListItem,
   parseMessagesConversationRow,
@@ -36,7 +35,6 @@ import {
   productivityPhaseProgress,
   resolveHudOverview,
   showNavigationSecondaryInHeader,
-  visibleHudSidebarItems,
   visibleHudListItems,
   visibleHudLeadingLines,
   visibleHudTailLines,
@@ -170,9 +168,6 @@ describe('selected visual geometry', () => {
       statusDividerY: 35.5,
       overviewMainX: 176,
       overviewTrayY: 168,
-      // The menu occupies the clock column exactly: no stranded gap
-      // between its edge and the content, and the content never moves.
-      sidebarWidth: 256,
       listContentX: 93,
     });
   });
@@ -200,22 +195,6 @@ describe('semantic HUD chrome', () => {
     expect(NOTIFICATION_DISMISS_HINT).toBe('tap: dismiss · left x2: menu');
   });
 
-  it('maps sidebar glyphs by capability name rather than stale row position', () => {
-    expect(hudSidebarIconName('Messages')).toBe('messages');
-    expect(hudSidebarIconName('Notifications')).toBe('notifications');
-    expect(hudSidebarIconName('Planning')).toBe('calendar');
-    expect(hudSidebarIconName('Calendar')).toBe('calendar');
-    expect(hudSidebarIconName('Tasks')).toBe('tasks');
-    expect(hudSidebarIconName('Navigation')).toBe('navigation');
-    expect(hudSidebarIconName('More')).toBe('more');
-    expect(hudSidebarIconName('QuickNotes')).toBe('quicknotes');
-    expect(hudSidebarIconName('Brainstorm')).toBe('brainstorm');
-    expect(hudSidebarIconName('Activity')).toBe('activity');
-  });
-
-});
-
-describe('navigation error hierarchy', () => {
   it('keeps the recovery instruction in the warning card instead of rendering it twice', () => {
     expect(showNavigationSecondaryInHeader('destination')).toBe(true);
     expect(showNavigationSecondaryInHeader('mode')).toBe(true);
@@ -296,7 +275,6 @@ describe('compact focus list rows', () => {
     expect(HudCanvas.hudSpinePageTitle({ kind: 'navigation' } as never)).toBe('Navigation');
     // Home is JOAT: the spine keeps the assistant's own name there.
     expect(HudCanvas.hudSpinePageTitle({ kind: 'overview' } as never)).toBe('');
-    expect(HudCanvas.hudSpinePageTitle({ kind: 'sidebar' } as never)).toBe('');
   });
 
   it('recognizes only the small semantic marker vocabulary', () => {
@@ -800,29 +778,6 @@ describe('visibleHudListItems', () => {
       { item: 'three', index: 2 },
       { item: 'four', index: 3 },
       { item: 'five', index: 4 },
-    ]);
-  });
-});
-
-describe('visibleHudSidebarItems', () => {
-  it('keeps the selected capability visible beyond the first five wearable rows', () => {
-    const items = [
-      'Messages', 'Planning', 'Navigation', 'Brainstorm', 'Notifications',
-      'QuickNotes', 'Agent Terminal', 'Activity',
-    ];
-    expect(visibleHudSidebarItems(items, 0)).toEqual([
-      { item: 'Messages', index: 0 },
-      { item: 'Planning', index: 1 },
-      { item: 'Navigation', index: 2 },
-      { item: 'Brainstorm', index: 3 },
-      { item: 'Notifications', index: 4 },
-    ]);
-    expect(visibleHudSidebarItems(items, 7)).toEqual([
-      { item: 'Brainstorm', index: 3 },
-      { item: 'Notifications', index: 4 },
-      { item: 'QuickNotes', index: 5 },
-      { item: 'Agent Terminal', index: 6 },
-      { item: 'Activity', index: 7 },
     ]);
   });
 });

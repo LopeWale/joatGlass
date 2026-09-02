@@ -1,4 +1,4 @@
-import { AudioInputSource, OsEventTypeList } from '@evenrealities/even_hub_sdk';
+import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
@@ -35,6 +35,7 @@ import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { CapabilityMenu } from './CapabilityMenu';
 import {
+  CAPABILITIES,
   ContainerId,
   type BrainstormHudModel,
   type DownlinkMessage,
@@ -101,8 +102,6 @@ function loadRememberedBrain(): string | null {
 
 type VisualState =
   | 'overview'
-  | 'sidebar'
-  | 'more'
   | 'confirmation'
   | 'assistant-overlay'
   | 'nav-receipt'
@@ -146,7 +145,7 @@ function isProductivityLifecycleVisualState(
 const VISUAL_STATE = ((): VisualState | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatVisual');
-  return requested === 'overview' || requested === 'sidebar' || requested === 'more'
+  return requested === 'overview'
     || requested === 'confirmation' || requested === 'assistant-overlay'
     || requested === 'nav-receipt'
     || isProductivityVisualState(requested)
@@ -559,6 +558,18 @@ async function boot(): Promise<void> {
           unread: msg.unread,
         }));
         break;
+      case 'hud.panel':
+        // Cache first, so a swipe onto this tab paints from memory. Then:
+        // a voice-initiated open expands the tab; a push for a tab whose
+        // page is already on the glass repaints that page in place.
+        await awaitCurrent(hud.acceptPanel(msg));
+        if (msg.activate) {
+          brainstorm.clear();
+          await awaitCurrent(menu.openPanelTab(msg.tab));
+        } else {
+          await awaitCurrent(menu.presentPanelContent(msg.tab));
+        }
+        break;
       case 'navigation.map':
         // Fire and forget: a map is an enhancement, and the downlink loop
         // must never wait on an image decode.
@@ -629,6 +640,9 @@ async function boot(): Promise<void> {
           await awaitCurrent(menu.beginLiveSession('brainstorm'));
         } else {
           brainstorm.clear();
+          // A fresh brain is a fresh start: the resting screen reopens on
+          // its first tab, the one that shows what that brain now says.
+          hud.resetTab();
           await awaitCurrent(hud.showDefault());
         }
         break;
@@ -832,7 +846,7 @@ async function boot(): Promise<void> {
   // strips this bounded acceptance-only delay from a package.
   if (LIVE_MENU_ACCEPTANCE) {
     await new Promise<void>((resolve) => setTimeout(resolve, 750));
-    await menu.toggle();
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
     console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
   }
 
@@ -1034,16 +1048,7 @@ async function renderVisualState(
     ContainerId.Tray, 2,
   );
   await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
-  await hud.showText('left x2 menu · long-press mic', ContainerId.Hint, 1);
-  if (state === 'sidebar') {
-    await menu.toggle();
-  } else if (state === 'more') {
-    await menu.toggle();
-    for (let index = 0; index < 4; index += 1) {
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    }
-    menu.handleClick();
-  }
+  await hud.showText('tap: notifications · long-press mic', ContainerId.Hint, 1);
 }
 
 function productivityLifecycleFixture(

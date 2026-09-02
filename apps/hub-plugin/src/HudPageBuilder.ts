@@ -16,12 +16,6 @@ import {
   VisualContainerName,
 } from './types';
 
-export interface SidebarBackdrop {
-  main?: string;
-  context?: string;
-  tray?: string;
-  hint?: string;
-}
 
 /**
  * Declares HUD layouts against the 576x288 canvas.
@@ -299,63 +293,6 @@ export class HudPageBuilder {
    * Navigation is progressive disclosure, not the application's resting shell.
    * Left double-click temporarily gives the left 160px to the firmware list;
    * the current overview remains visible, dimmed, in the remaining 412px.
-   */
-  sidebarLayout(items: string[], backdrop: SidebarBackdrop = {}): RebuildPageContainer {
-    const sidebarWidth = 160;
-    const contentX = 164;
-    const contentWidth = CANVAS.width - contentX;
-    // G2's list container owns scrolling. Preserve the complete, flat
-    // capability rail here: truncating after the five visible rows made the
-    // lower capabilities impossible to reach on text-fallback hardware.
-    const capped = items.slice(0, 20).map((s) => s.slice(0, 24));
-    return new RebuildPageContainer({
-      containerTotalNum: 6,
-      ...this.menuConfig(),
-      textObject: [
-        this.statusBar(),
-        this.main(128, 0, 2, backdrop.main ?? '', {
-          x: contentX, width: contentWidth,
-        }),
-        this.region(ContainerId.Context, 'context', 160, 64, 3, 1, backdrop.context ?? '', {
-          x: contentX, width: contentWidth,
-        }),
-        this.region(ContainerId.Tray, 'tray', 224, 32, 4, 1, backdrop.tray ?? '', {
-          x: contentX, width: contentWidth,
-        }),
-        this.region(
-          ContainerId.Hint, 'hint', 256, 32, 5, 1,
-          backdrop.hint ?? 'left x2 overview',
-          { x: contentX, width: contentWidth },
-        ),
-      ],
-      listObject: [
-        new ListContainerProperty({
-          containerID: ContainerId.List,
-          containerName: 'capabilities',
-          xPosition: 0,
-          yPosition: 32,
-          width: sidebarWidth,
-          height: CANVAS.height - 32,
-          paddingLength: 6,
-          borderWidth: 1,
-          borderColor: 15,
-          borderRadius: 0,
-          isEventCapture: 1,
-          zOrderIndex: 6,
-          itemContainer: new ListItemContainerProperty({
-            itemCount: capped.length,
-            itemWidth: 0,
-            isItemSelectBorderEn: 1,
-            itemName: capped,
-          }),
-        }),
-      ],
-    });
-  }
-
-  /**
-   * Full-canvas focus page: status + named title + rows + quiet action rail.
-   * The sidebar has disappeared by this point; content receives the canvas.
    */
   listLayout(
     items: string[],
