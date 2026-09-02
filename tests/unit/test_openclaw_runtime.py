@@ -737,3 +737,68 @@ async def test_terminal_agent_publishes_safety_block_reason() -> None:
     assert states == [("running", ""), ("blocked", "tools_enabled")]
     assert agent._terminal is None
     assert Terminal.connection.closed
+
+
+class TestAnsweringAnApprovalDuringItsOwnRun:
+    """The audit's AT-10 blocker, reproduced at the lock.
+
+    Approvals are raised from inside a run's event loop, the gateway holds
+    that run open until the approval is answered, and stream() holds the
+    agent lock across the entire run — so resolve_approval, which took the
+    same lock, waited on a holder that was waiting on this very answer.
+    "terminal approve" parked the voice pipeline forever. The connection
+    multiplexes by request id, so answering beside the live stream is the
+    transport's intended use.
+    """
+
+    class _LiveTerminal:
+        """A run in flight: first chunk arrives, then the run waits —
+        exactly the state a pending approval puts a session in."""
+
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.answered: list[tuple[str, str, str]] = []
+
+        async def stream(self, prompt: str):
+            yield "working…"
+            await self.release.wait()
+            yield "done"
+
+        async def resolve_approval(
+            self, approval_id: str, kind: str, decision: str
+        ) -> str:
+            self.answered.append((approval_id, kind, decision))
+            return decision
+
+        async def close(self) -> None:
+            return None
+
+    @pytest.mark.asyncio
+    async def test_the_answer_lands_while_the_run_holds_the_lock(self) -> None:
+        agent = OpenClawTerminalAgent(client=RuntimeFactory([]), agent_id="hermes")
+        terminal = self._LiveTerminal()
+        agent._terminal = terminal  # a live, subscribed terminal mid-run
+
+        first_chunk = asyncio.Event()
+        run_done = asyncio.Event()
+
+        async def run() -> None:
+            async for chunk in agent.stream("do the work"):
+                if chunk == "working…":
+                    first_chunk.set()
+            run_done.set()
+
+        task = asyncio.get_running_loop().create_task(run())
+        await asyncio.wait_for(first_chunk.wait(), 2.0)
+
+        # The run is in flight and the agent lock is held. Before the fix
+        # this wait_for timed out — the deadlock, surfaced as a hang.
+        recorded = await asyncio.wait_for(
+            agent.resolve_approval("appr-1", "exec", "approve"), timeout=1.0
+        )
+
+        assert recorded == "approve"
+        assert terminal.answered == [("appr-1", "exec", "approve")]
+        terminal.release.set()
+        await asyncio.wait_for(run_done.wait(), 2.0)
+        task.cancel()

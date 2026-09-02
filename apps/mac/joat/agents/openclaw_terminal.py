@@ -127,6 +127,17 @@ class OpenClawAgentTerminal:
     policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY
     recovery: AgentTerminalRecovery | None = None
     on_approval: Callable[[PendingApproval], None] | None = None
+    #: True when this terminal was bound to an EXISTING listed session via
+    #: attach() rather than created in the lane's own namespace. An
+    #: attached session is someone's real work: it has its own label, its
+    #: own lineage, and legitimately has tools — so the Brainstorm-grade
+    #: isolation preflight is a category error there, and running it
+    #: anyway refused EVERY send into a resumed session ("resume then
+    #: steer" was dead). What protects the wearer on this path is the
+    #: gateway's per-connection earned-key enforcement (a roster lane may
+    #: only address keys the gateway itself listed on this connection) and
+    #: the approval gate.
+    attached: bool = False
 
     @classmethod
     async def create(
@@ -274,6 +285,7 @@ class OpenClawAgentTerminal:
             policy=policy,
             recovery=recovery,
             on_approval=on_approval,
+            attached=True,
         )
         subscribe_params: dict[str, object] = {"key": session_key, "agentId": agent_id}
         if policy.allows_approvals:
@@ -352,8 +364,9 @@ class OpenClawAgentTerminal:
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         if not prompt or len(prompt) > 100_000:
             raise ValueError("OpenClaw Agent Terminal prompt is invalid")
-        await self._assert_isolated_session()
-        await self._assert_tools_disabled()
+        if not self.attached:
+            await self._assert_isolated_session()
+            await self._assert_tools_disabled()
         sent = _record(await self.connection.request(
             "sessions.send",
             {
@@ -536,8 +549,9 @@ class OpenClawAgentTerminal:
                 "OpenClaw recovered Agent Terminal text diverged"
             )
         self.connection = recovered.connection
-        await self._assert_isolated_session()
-        await self._assert_tools_disabled()
+        if not self.attached:
+            await self._assert_isolated_session()
+            await self._assert_tools_disabled()
         suffix = recovered.text[len(accumulated):]
         return suffix, recovered.text, recovered.complete
 
