@@ -235,15 +235,27 @@ _MODE_INSTRUCTION: dict[str, str] = {
 }
 
 
+#: The two instructions that make the same text a debate or a
+#: brainstorm. Audited against phrasings people reach for rather than the
+#: ones that happened to be listed first: "disagree with that", "add to
+#: that" and "extend that" were all silently unrecognised, and an
+#: unrecognised routing instruction does not fail — it becomes an ordinary
+#: cross-review turn, so the wearer sees a plausible answer to a question
+#: they did not ask.
 _CRITIQUE = re.compile(
     r"\b(tear (?:it|that) apart|pull (?:it|that) apart|critique (?:it|that|this)|"
     r"poke holes|find the (?:weak|weakest)|what.s wrong with (?:it|that)|"
-    r"push back(?: on (?:it|that))?|challenge (?:it|that))\b"
+    r"push back(?: on (?:it|that))?|challenge (?:it|that)|"
+    r"disagree with (?:it|that)|argue against (?:it|that)|"
+    r"attack (?:it|that)|stress test (?:it|that)|"
+    r"where does (?:it|that) break)\b"
 )
 _BUILD = re.compile(
     r"\b(build on (?:it|that|this)|expand on (?:it|that|this)|"
     r"run with (?:it|that)|take (?:it|that) further|"
-    r"develop (?:it|that)|go deeper(?: on (?:it|that))?)\b"
+    r"develop (?:it|that)|go deeper(?: on (?:it|that))?|"
+    r"add to (?:it|that)|extend (?:it|that)|"
+    r"keep going with (?:it|that)|flesh (?:it|that) out)\b"
 )
 
 

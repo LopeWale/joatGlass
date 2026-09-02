@@ -243,3 +243,43 @@ class TestRedirectingTheSpeakingOrder:
             "I think claude is right about the cache",
         ):
             assert parse_direction(said, table) is None, said
+
+
+class TestRoutingTheNextTurn:
+    """The two instructions that make identical text a debate or a
+    brainstorm — the wearer's own distinction.
+
+    An unrecognised routing instruction does not fail loudly. It falls
+    through to an ordinary cross-review turn, so the wearer sees a
+    plausible answer to a question they did not ask. "Disagree with that",
+    "add to that" and "extend that" were all silently unrecognised.
+    """
+
+    def test_critique_phrasings(self) -> None:
+        from joat.services.roundtable import parse_relay_mode
+
+        for said in ("Tear that apart.", "Push back on that.",
+                     "Poke holes in that.", "Challenge that.",
+                     "Disagree with that.", "Argue against that.",
+                     "Stress test it.", "Where does that break?",
+                     "What's wrong with that?", "Find the weak claim."):
+            assert parse_relay_mode(said) == "critique", said
+
+    def test_build_phrasings(self) -> None:
+        from joat.services.roundtable import parse_relay_mode
+
+        for said in ("Build on that.", "Expand on that.", "Extend that.",
+                     "Add to that.", "Take that further.", "Go deeper on that.",
+                     "Flesh that out.", "Keep going with that.",
+                     "Run with it.", "Develop that."):
+            assert parse_relay_mode(said) == "build", said
+
+    def test_ordinary_remarks_route_nothing(self) -> None:
+        """These are things said IN a discussion, not instructions about
+        it. Routing them would answer a question nobody asked."""
+        from joat.services.roundtable import parse_relay_mode
+
+        for said in ("I disagree.", "that adds up",
+                     "we should extend the deadline", "the build is broken",
+                     "I want to build a cache"):
+            assert parse_relay_mode(said) is None, said
