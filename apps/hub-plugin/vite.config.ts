@@ -1,6 +1,19 @@
 import { defineConfig } from 'vite';
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // DEV fixtures live in public/, and Vite copies publicDir verbatim into
+  // every bundle. pack.sh refuses any bundle carrying a `__joat-*` path — a
+  // deliberate tripwire — so a fixture merely PRESENT on disk failed the
+  // release, twice, mid-run. The tripwire was right both times; wiring the
+  // fixtures through the one directory that ships was wrong.
+  //
+  // Disabling publicDir for builds keeps them a dev-server concern and
+  // leaves the guard a real tripwire rather than a routine obstacle. It
+  // also means a build copies NOTHING from public/ — so pack.sh refuses a
+  // public/ entry that is not a `__joat-*` fixture, turning "your shippable
+  // asset silently vanished" into a loud refusal before the bundle exists.
+  publicDir: command === 'build' ? false : 'public',
+
   // Relative, not '/'. The Hub serves the packed plugin from a path we do not
   // control, so absolute asset URLs resolve against the wrong root and the
   // bundle silently fails to load.
@@ -37,4 +50,4 @@ export default defineConfig({
     // DEV visual fixtures must not be recoverable from a production map.
     sourcemap: false,
   },
-});
+}));
