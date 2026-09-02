@@ -3415,7 +3415,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // sentence reads as one block instead of restarting.
     lines.forEach((line, index) => {
       const baselineY = y + index * 14;
-      const split = /^([A-Z][A-Z ]{0,14}) > /.exec(line);
+      // Digits, em-dashes and dots belong in a tag: a REPAIR turn is
+      // labelled "CODEX — REPAIR 1", and it rendered flat — no dim tag, no
+      // bright body — on the one row where the split matters most, since a
+      // repair is the corrected version of a claim the verifier just
+      // rejected. The " > " delimiter is what makes this safe; prose does
+      // not contain it.
+      const split = /^([A-Z][A-Z0-9 .\u2014-]{0,22}) > /.exec(line);
       if (!split) {
         context.fillStyle = gray(BRIGHT);
         this.fitText(context, line, x, baselineY, width);
