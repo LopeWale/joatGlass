@@ -935,6 +935,13 @@ class SessionManager:
             return False
         if self._active is not None:
             return False
+        if not self._brainstorm_is_available():
+            # Say WHICH binary is missing, on the surface they tapped.
+            # "That session could not be reopened" is true and useless: the
+            # wearer cannot tell a missing CLI from a corrupted record, and
+            # only one of those is something they can fix.
+            self._show_topic_capture(armed=False)
+            return True
         session = self._continuation_factory(past.topic, tuple(past.turns))
         if session is None:
             return False

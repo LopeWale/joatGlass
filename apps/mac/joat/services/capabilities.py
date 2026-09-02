@@ -262,7 +262,8 @@ def _session_row(past: Any) -> str:
     Title first because that is what they scan for; the metadata is
     budgeted after it so a long question cannot push the age off the end.
     """
-    meta = f" · {len(past.turns)} turns · {past.age()}"
+    count = len(past.turns)
+    meta = f" · {count} turn{'' if count == 1 else 's'} · {past.age()}"
     room = max(8, 46 - len(meta))
     title = past.title
     if len(title) > room:

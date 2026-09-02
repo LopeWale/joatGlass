@@ -263,7 +263,8 @@ class BrainstormHistory:
         """
         rows: list[str] = []
         for past in self.recent(limit):
-            meta = f" · {len(past.turns)} turns · {past.age()}"
+            count = len(past.turns)
+            meta = f" · {count} turn{'' if count == 1 else 's'} · {past.age()}"
             room = max(8, width - len(meta))
             title = past.title
             if len(title) > room:

@@ -75,6 +75,12 @@ Standing the whole stack up locally:
 TESTHOME=/tmp/joat-audit
 mkdir -p "$TESTHOME/Library/Application Support/JOAT"
 
+#    WARNING: redirecting HOME makes the engine re-download everything it
+#    caches there — NLTK data and the MiniCheck judge weights. Two test
+#    engines cost 4.7 GB and filled the disk mid-run, which then breaks
+#    every tool that needs a temp file. Delete the scratch HOME when done,
+#    or point HF_HOME/NLTK_DATA at the real caches to reuse them.
+#
 #    It also dies with its supervisor, so a plain `cmd &` from a shell that
 #    exits takes it with it. Detach properly:
 HOME="$TESTHOME" python -c "import subprocess; subprocess.Popen(
