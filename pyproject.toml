@@ -7,6 +7,13 @@ dependencies = [
     "websockets>=13.0",
     # Street surroundings for the guidance HUD are rendered on this Mac.
     "pillow>=10.0",
+    # The News tab: free RSS/Atom feeds, parsed here, never on the glasses
+    # (the Even WebView enforces CORS; the publishers send no header).
+    "feedparser>=6.0",
+    # Readable article text for the reader, from the page the headline links.
+    "trafilatura>=2.0",
+    # "JOAT, look up …": key-free metasearch (DuckDuckGo, Brave, Bing).
+    "ddgs>=9.0",
 ]
 
 [project.optional-dependencies]
@@ -56,4 +63,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "nltk.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# feedparser and ddgs ship no stubs; trafilatura's are partial. The News
+# and Search services keep their use behind small typed wrappers.
+module = ["feedparser.*", "trafilatura.*", "ddgs.*"]
 ignore_missing_imports = true

@@ -62,6 +62,7 @@ from .planning import (
 )
 from .status import StatusPublisher
 from .message_reply import MessageReplyController
+from .panels import PanelPublisher
 
 log = logging.getLogger(__name__)
 
@@ -297,6 +298,7 @@ class CapabilityRouter:
         terminal_focus: Callable[[str], Awaitable[None]] | None = None,
         terminal_busy: Callable[[], bool] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
+        panels: PanelPublisher | None = None,
     ) -> None:
         self._hud = hud
         self._transport = transport
@@ -324,6 +326,10 @@ class CapabilityRouter:
         self._terminal_busy = terminal_busy
         self._terminal_row_names: list[str] = []
         self._brainstorm_recent = brainstorm_recent
+        # The overview's News / Pomodoro / Search tabs. Their rows are
+        # pushed, not requested, so their taps carry a content revision
+        # instead of one of this router's request generations.
+        self._panels = panels
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
         self._message_detail: _MessageDetailState | None = None
@@ -389,6 +395,24 @@ class CapabilityRouter:
                 event.trace_id or "hud",
                 event.request_id,
             ))
+        elif (
+            event.container_name == "caprefresh"
+            and self._panels is not None
+            and self._panels.owns(event.selected_name)
+        ):
+            # Long press at the top of an expanded tab: fetch it again.
+            asyncio.get_running_loop().create_task(
+                self._panels.refresh(event.selected_name, event.request_id)
+            )
+        elif (
+            event.container_name == "cappage"
+            and self._panels is not None
+            and self._panels.owns(event.selected_name)
+        ):
+            # A boundary swipe inside an opened headline or result.
+            asyncio.get_running_loop().create_task(
+                self._panels.page(event.selected_name, event.event_type, event.request_id)
+            )
         elif event.container_name == "cappage" and event.event_type is not None:
             if self._message_page_pending:
                 return
@@ -468,6 +492,11 @@ class CapabilityRouter:
                     await self._show_notes()
                 case "Activity":
                     await self._show_activity()
+                # The panel tabs are pushed, not drawn on request: a voice
+                # open publishes the tab with `activate` set, and the plugin
+                # switches to and expands it from that push.
+                case "News" | "Pomodoro" | "Search" if self._panels is not None:
+                    await self._panels.activate(name.lower())
                 case _:
                     log.info("unknown capability requested: %s", name)
         finally:
@@ -1022,6 +1051,11 @@ class CapabilityRouter:
         trace_id: str,
         request_id: str | None,
     ) -> None:
+        if self._panels is not None and self._panels.owns(name):
+            # A panel row tap is validated against the tab's content
+            # revision, not this router's request generation.
+            await self._panels.select(name, index, request_id)
+            return
         if (
             request_id != self._active_request_id
             or self._canonical_capability(name) != self._active_capability
