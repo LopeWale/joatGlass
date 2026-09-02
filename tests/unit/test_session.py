@@ -3400,3 +3400,43 @@ class TestTheTapOnABusyTerminalDoesSomething:
         assert replayed == [True]
         assert cycled == [], "it switched lanes instead of returning"
         await manager.close()
+
+
+class TestTheSeatSeesWhatWasAsked:
+    """P3's "ask Codex if that's true", end to end: the nomination routes
+    the floor AND the question lands in the transcript the next prompt is
+    built from. Verified through the real prompt builder, because the
+    defect was invisible anywhere else — the floor moved correctly and the
+    collaborator simply answered the wrong thing."""
+
+    async def test_the_question_reaches_the_next_prompt(self) -> None:
+        from joat.services.roundtable import build_prompt
+
+        async def seat(prompt: str):
+            yield "x"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 9"
+
+        table = pair(seat, seat)
+        session = debate(SinkTransport(), table, judge, topic="caching")
+        session._transcript.append(("CODEX (proposer)", "cache the synthesis"))
+
+        claimed = session.consume_transcript("ask Codex if that's true")
+        assert claimed is False, "the direction must still route to direct()"
+
+        turns = session.transcript()
+        assert ("YOU", "if that's true") in turns
+        prompt = build_prompt("caching", table._participants[0], turns)
+        assert "if that's true" in prompt
+
+    async def test_a_bare_nomination_adds_no_turn(self) -> None:
+        async def seat(prompt: str):
+            yield "x"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 9"
+
+        session = debate(SinkTransport(), pair(seat, seat), judge)
+        assert session.consume_transcript("codex, go") is False
+        assert session.transcript() == ()

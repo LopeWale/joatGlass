@@ -186,6 +186,47 @@ class RoundTable:
         return self._participants[self._index % len(self._participants)]
 
 
+def direction_tail(text: str, table: RoundTable) -> str:
+    """What the wearer said BEYOND naming a speaker.
+
+    "ask codex if that's true" nominates codex and asks a question. The
+    nomination was recognised and the question was thrown away: the seat
+    took the floor, the utterance was never recorded, and its prompt
+    carried only the prior turns plus "add what the others missed" — so
+    the collaborator answered a question nobody had asked. The wearer's
+    words for this feature are "take anything and do something I ask it to
+    do with it"; dropping the ask is the one thing it must not do.
+
+    Returns "" for a BARE nomination ("codex, go") and for one carrying
+    only a stage direction ("claude, tear that apart"), which
+    `parse_relay_mode` already routes.
+    """
+    # Only ever a tail of something parse_direction CLAIMED. Without this
+    # guard the bare-name fallback below reads "claude was wrong about the
+    # cache" — an ordinary remark about a seat, which parse_direction
+    # correctly declines — as a nomination carrying a question, and files
+    # the wearer's opinion as a prompt to the person they were describing.
+    if parse_direction(text, table) is None:
+        return ""
+    said = " ".join(re.sub(r"[^a-z0-9' ]+", " ", text.lower()).split())
+    if not said:
+        return ""
+    best = ""
+    for seat in table._participants:  # noqa: SLF001 - same module, one owner
+        n = seat.name
+        for phrasing in _direction_phrasings(n):
+            if said.startswith(phrasing) and len(phrasing) > len(best):
+                best = phrasing
+        if said.startswith(n + " ") and not best:
+            best = n
+    if not best:
+        return ""
+    tail = said[len(best):].strip(" ,.:;")
+    if not tail or _mode_at_start(tail) is not None:
+        return ""
+    return tail
+
+
 def parse_direction(text: str, table: RoundTable) -> Participant | None:
     """A spoken turn-direction, or None if the wearer said something else.
 
@@ -203,7 +244,25 @@ def parse_direction(text: str, table: RoundTable) -> Participant | None:
         return None
     for seat in table._participants:  # noqa: SLF001 - same module, one owner
         n = seat.name
-        for phrasing in (
+        for phrasing in _direction_phrasings(n):
+            if said.startswith(phrasing) or said == n:
+                return seat
+    # A seat name followed by a routing instruction is a nomination
+    # carrying its instruction: "claude, tear that apart". Without this,
+    # the utterance fell through to the relay-mode branch, which set the
+    # instruction and silently dropped the hand-over — the mode changed
+    # while the OTHER seat kept the floor.
+    for seat in table._participants:  # noqa: SLF001 - same module, one owner
+        n = seat.name
+        if said.startswith(n + " ") and _mode_at_start(said[len(n) + 1:]) is not None:
+            return seat
+    return None
+
+
+def _direction_phrasings(n: str) -> tuple[str, ...]:
+    """Every way the wearer nominates seat `n`. One source, because
+    `direction_tail` must strip exactly what `parse_direction` matched."""
+    return (
             f"{n} respond", f"{n} go", f"{n} first", f"{n} next",
             f"{n} your turn", f"ask {n}", f"{n} what do you think",
             f"let {n}", f"over to {n}", f"{n} please",
@@ -217,19 +276,7 @@ def parse_direction(text: str, table: RoundTable) -> Participant | None:
             f"{n} take it", f"{n} take this", f"{n} answer",
             f"{n} have a go", f"{n} weigh in", f"{n} thoughts",
             f"back to {n}", f"now {n}",
-        ):
-            if said.startswith(phrasing) or said == n:
-                return seat
-    # A seat name followed by a routing instruction is a nomination
-    # carrying its instruction: "claude, tear that apart". Without this,
-    # the utterance fell through to the relay-mode branch, which set the
-    # instruction and silently dropped the hand-over — the mode changed
-    # while the OTHER seat kept the floor.
-    for seat in table._participants:  # noqa: SLF001 - same module, one owner
-        n = seat.name
-        if said.startswith(n + " ") and _mode_at_start(said[len(n) + 1:]) is not None:
-            return seat
-    return None
+    )
 
 
 RelayMode = Literal["open", "cross", "critique", "build"]
