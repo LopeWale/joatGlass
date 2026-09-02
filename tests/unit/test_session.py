@@ -3524,3 +3524,53 @@ def test_every_emitted_phase_name_is_declared() -> None:
         f"emitted-only: {sorted(emitted - set(DebateSession.PHASES))}, "
         f"declared-only: {sorted(set(DebateSession.PHASES) - emitted)}"
     )
+
+
+class TestTheEscapeHatchBeatsAHungCollaborator:
+    """The wearer's safety valve, against the case that actually traps
+    them. A cooperative seat notices `_cancelled` between chunks; a HUNG
+    one never yields, so nothing in the session loop can observe the flag
+    — the release depends on the manager cancelling the task itself.
+
+    Worth its own test because the failure is indistinguishable from the
+    feature working until it happens: every cooperative-seat test passes
+    either way, and the wearer discovers it while trapped watching two
+    subscription CLIs bill.
+    """
+
+    @staticmethod
+    def _manager_with_hung_seats():
+        async def hung(prompt: str):
+            await asyncio.sleep(600)   # never answers
+            yield "never"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 0.9\nBLOCKING: no"
+
+        def factory(topic: str):
+            return debate(SinkTransport(), pair(hung, hung), judge, topic=topic)
+
+        return SessionManager(HudWriter(SinkTransport()), factory)
+
+    async def test_stop_releases_a_session_whose_seats_never_answer(self) -> None:
+        manager = self._manager_with_hung_seats()
+        assert manager.handle_transcript("brainstorm something")
+        await asyncio.sleep(0.05)
+        assert manager.active is True
+
+        assert manager.handle_transcript("stop")
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if not manager.active:
+                break
+        assert manager.active is False, "the wearer is trapped"
+        await manager.close()
+
+    async def test_close_releases_a_hung_session_too(self) -> None:
+        """Shutdown has the same problem: a hung seat must not hold the
+        engine open while transports are torn down."""
+        manager = self._manager_with_hung_seats()
+        assert manager.handle_transcript("brainstorm something")
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(manager.close(), timeout=10)
+        assert manager.active is False

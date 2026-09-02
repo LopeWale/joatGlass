@@ -388,8 +388,10 @@ class AgentTerminalRoster:
         the LANES strip already shows where it landed.
         """
         names = list(self._lanes)
+        if not names:
+            return "No terminal sessions are configured on this Mac."
         if len(names) < 2:
-            return f"{self._focus or 'terminal'} is the only session."
+            return f"{names[0]} is the only session."
         current = self._focus if self._focus in names else names[0]
         self._focus = names[(names.index(current) + 1) % len(names)]
         await self.repaint()
