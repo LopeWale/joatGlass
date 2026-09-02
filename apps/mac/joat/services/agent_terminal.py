@@ -412,7 +412,10 @@ class AgentTerminalRoster:
         """
         lane = self._lanes.get(name or self._focus or "")
         if lane is None:
-            return "No such terminal session."
+            return (
+                "No terminal sessions are configured on this Mac."
+                if not self._lanes else "No such terminal session."
+            )
         reader = getattr(lane.agent, "history", None)
         if reader is None:
             return f"{lane.name} (local tail — this runtime has no history API):\n{self.tail(name, lines)}"
@@ -432,7 +435,14 @@ class AgentTerminalRoster:
     def tail(self, name: str | None = None, lines: int = 6) -> str:
         lane = self._lanes.get(name or self._focus or "")
         if lane is None:
-            return "No such terminal session."
+            # "No such terminal session" reads as "you named one wrong"
+            # when the truth is that none exist — two different problems
+            # with two different next steps, and this surface already has
+            # the right words for the second one.
+            return (
+                "No terminal sessions are configured on this Mac."
+                if not self._lanes else "No such terminal session."
+            )
         if not lane.tail:
             return f"{lane.name}: no output yet."
         return "\n".join(list(lane.tail)[-lines:])

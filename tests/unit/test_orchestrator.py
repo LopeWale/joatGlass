@@ -1139,3 +1139,95 @@ class TestTheRestartGreetingGivesFOLLOWABLEAdvice:
         await asyncio.sleep(0.05)
         assert resumed == [title]
         await manager.close()
+
+
+class TestAVoiceTurnThatRaisesDoesNotVanish:
+    """The same bare-task silence as the capability dispatch and the
+    terminal retry — but on the MAIN VOICE PATH, where it costs most.
+
+    `_drain_utterances` was `try`/`finally` with no `except`, so any
+    handler that raised ended the turn as an unhandled task exception. The
+    last thing painted is the "listening" status from the start of the
+    turn, so the wearer is left watching a screen that says JOAT is
+    listening, forever, with no way to tell a dead turn from a long think.
+    The loop itself always survived; only the wearer was left out.
+    """
+
+    class Stt:
+        async def feed(self, pcm: bytes) -> None:
+            return None
+
+        async def flush(self):
+            from joat.core.interfaces import Transcript
+            return Transcript(
+                text="JOAT, brainstorm should we cache",
+                confidence=0.9, is_final=True,
+            )
+
+    class Exploding:
+        active = False
+        active_status = None
+        topic_capture_armed = False
+
+        def handle_transcript(self, text: str, **kw: object) -> bool:
+            raise RuntimeError("codex binary vanished")
+
+        def interrupted_session(self) -> None:
+            return None
+
+        async def replay_active_hud(self) -> bool:
+            return False
+
+    async def test_the_wearer_is_told_and_the_worker_survives(self) -> None:
+        from joat.core.protocol import AssistantOverlay
+
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport=transport, stt=self.Stt(), sessions=self.Exploding(),
+            stt_available=True, wake_words=("joat",),
+        )
+
+        # The real worker, the way the audio path creates it.
+        await orchestrator._drain_utterances(b"\x00" * 3200, None)
+
+        spoken = [
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        assert spoken, "the turn died silently"
+        assert "say it again" in spoken[-1].lower()
+        assert orchestrator._utterance_worker is None, (
+            "the worker did not release for the next utterance"
+        )
+
+    async def test_the_notice_carries_no_exception_text(self) -> None:
+        """The exception can carry a prompt, a transcript fragment or a
+        provider payload. None of that belongs on the lenses."""
+        from joat.core.protocol import AssistantOverlay
+
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport=transport, stt=self.Stt(), sessions=self.Exploding(),
+            stt_available=True, wake_words=("joat",),
+        )
+        await orchestrator._drain_utterances(b"\x00" * 3200, None)
+
+        spoken = " ".join(
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        )
+        assert "codex binary vanished" not in spoken
+
+    async def test_cancellation_still_cancels(self) -> None:
+        """Shutdown must not be swallowed as a failed turn."""
+        class Cancelling(self.Exploding):
+            def handle_transcript(self, text: str, **kw: object) -> bool:
+                raise asyncio.CancelledError
+
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport=transport, stt=self.Stt(), sessions=Cancelling(),
+            stt_available=True, wake_words=("joat",),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await orchestrator._drain_utterances(b"\x00" * 3200, None)
