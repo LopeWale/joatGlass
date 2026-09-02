@@ -24,7 +24,7 @@ from ..channels.cards import Card, CardLog, Urgency
 from .hud import HudWriter
 from .roundtable import (
     FAILURE_MARK, Participant, RelayMode, RoundTable, build_prompt, is_failure,
-    parse_direction, parse_relay_mode,
+    _mode_at_start, parse_direction, parse_relay_mode,
 )
 from .sinks import TranscriptSink
 
@@ -423,7 +423,18 @@ class SessionManager:
             # stripped before the exact match; the vocabulary stays small so
             # dictating a sentence CONTAINING "stop" cannot end a session.
             if self._pending_topic:
-                verdict = self._resolve_pending_topic(text)
+                # ADDRESSED speech only. This resolved from the raw
+                # transcript, so with the question on the glass an overheard
+                # bystander's "yes" — or the wearer agreeing with someone in
+                # the room — cancelled the live session and started the
+                # replacement. The same address gate every other live-path
+                # action stands behind applies here, where the cost of an
+                # accident is highest.
+                spoken = text if addressed is _UNSET_ADDRESSED else addressed
+                verdict = (
+                    self._resolve_pending_topic(spoken)
+                    if spoken else None
+                )
                 if verdict is True:
                     topic, self._pending_topic = self._pending_topic, ""
                     log.info("wearer replaced the live session")
@@ -1049,6 +1060,11 @@ class SessionManager:
                 if self._task is asyncio.current_task():
                     self._active = None
                     self._task = None
+                    # The replacement question dies with the session it was
+                    # about. Left set, the next session's first "yes" — an
+                    # answer to anything — replaced it with a topic offered
+                    # to a conversation that no longer exists.
+                    self._pending_topic = ""
                     if publish_state and self._on_state is not None:
                         self._on_state(completion_state)
                     self._drain_cards()
@@ -1218,7 +1234,15 @@ class DebateSession(Session):
         if mode is not None:
             self._next_mode = mode
             log.info("wearer routed the next turn: %s", mode)
-            return True
+            # A stage direction with a substantial tail is a direction AND
+            # a remark — "tear that apart, especially the latency claim" —
+            # and dropping the tail swallows the wearer's contribution.
+            # The bare direction stays unquoted, as before.
+            normal = " ".join(re.sub(r"[^a-z0-9' ]+", " ", said.lower()).split())
+            hit = _mode_at_start(normal)
+            tail = normal[hit[1]:].strip() if hit is not None else ""
+            if len(tail.split()) <= 3:
+                return True
         self._transcript.append((self.WEARER_LABEL, said))
         self._wearer_turns += 1
         asyncio.get_running_loop().create_task(self._show_wearer_turn(said))
@@ -1288,7 +1312,7 @@ class DebateSession(Session):
         anyone speaks.
         """
         seat = parse_direction(text, self._table)
-        mode = parse_relay_mode(text)
+        mode = parse_relay_mode(text, self._table)
         if seat is None and mode is not None:
             # "claude, tear that apart" is not one of the nomination
             # phrasings, but naming a seat beside an instruction is
