@@ -2469,3 +2469,39 @@ class TestInstructionsSurviveTheSessionEnding:
         await asyncio.sleep(0)
         assert acted == []
         await manager.close()
+
+
+class TestBranchReadsARealSession:
+    """The branch tests use a fake session that exposes exactly what
+    _branch_here wants. A real DebateSession is where the shapes actually
+    have to line up: `transcript` is a METHOD, `topic` is a PROPERTY, and
+    reading either wrongly would fork an empty conversation in silence.
+    """
+
+    async def test_the_accessors_have_the_shapes_branch_expects(self) -> None:
+        from joat.services.roundtable import Participant, RoundTable
+
+        def seat(name: str):
+            async def stream(_prompt: str):
+                yield f"{name} said a thing"
+            return stream
+
+        table = RoundTable([Participant("codex", "proposer", seat("codex")),
+                            Participant("claude", "critic", seat("claude"))])
+        session = debate(
+            SinkTransport(), table, None,
+            topic="the original question",
+            prior=(("CODEX", "an older turn"),),
+        )
+        await session.run()
+
+        # Exactly what _branch_here reads.
+        turns = getattr(session, "transcript", None)
+        assert callable(turns), "transcript is a method, not a property"
+        carried = tuple(turns())
+        assert getattr(session, "topic", "") == "the original question"
+
+        # A branch of a branch keeps the WHOLE thread, not just the newest
+        # fork: the earlier conversation and this run both come forward.
+        assert ("CODEX", "an older turn") in carried
+        assert any("said a thing" in text for _label, text in carried)
