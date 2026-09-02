@@ -183,6 +183,7 @@ class SessionManager:
         save_reply: Callable[[str | None], Awaitable[str]] | None = None,
         history: Any | None = None,
         terminal_decide: Callable[[str], Awaitable[str]] | None = None,
+        last_reply: Callable[[str | None], tuple[str, str] | None] | None = None,
         transform: Callable[[str, str], Awaitable[str]] | None = None,
         continuation_factory: Callable[
             [str, tuple[tuple[str, str], ...]], Session | None] | None = None,
@@ -212,6 +213,8 @@ class SessionManager:
         self._history = history
         # Answers the tool request a work session is blocked on.
         self._terminal_decide = terminal_decide
+        # Resolves the last reply once the session has ended.
+        self._last_reply = last_reply
         #: Whether "branch this" is available (needs a factory).
         self._branch = continuation_factory is not None
         # JOAT acting ON the material, rather than routing it elsewhere.
@@ -460,54 +463,8 @@ class SessionManager:
             # Hermes" is an instruction TO JOAT about another surface, not
             # a redirection of who speaks next — the wearer thinks WITH the
             # collaborators here and hands the useful parts to the workers.
-            normalized = " ".join(
-                re.sub(r"[^a-z0-9]+", " ", steer.lower()).split()
-            )
-            route = parse_reply_route(normalized)
-            if route is not None and self._route_reply is not None:
-                router = self._route_reply
-
-                async def run_route() -> None:
-                    try:
-                        receipt = await router(*route)
-                        log.info("reply routed: %s", receipt)
-                    except Exception:
-                        log.exception("reply routing failed")
-
-                asyncio.get_running_loop().create_task(run_route())
+            if self._handle_instruction(steer):
                 return True
-            if self._branch and _BRANCH.match(steer.strip().rstrip(".!?")):
-                # docs/SESSION_MODEL.md:51 — "branch this: fork the
-                # selected transcript into a new child lineage." The wearer
-                # is taking the conversation somewhere else without losing
-                # where it came from.
-                asyncio.get_running_loop().create_task(self._branch_here())
-                return True
-            instruction = _MATERIAL_VERB.match(steer.strip().rstrip("."))
-            if (
-                instruction is not None
-                and self._transform is not None
-                and self._save_reply is not None      # implies a snapshot exists
-            ):
-                asked = instruction.group("instruction").strip()
-                asyncio.get_running_loop().create_task(
-                    self._act_on_material(asked)
-                )
-                return True
-            save = _SAVE_REPLY.match(normalized)
-            if save is not None and self._save_reply is not None:
-                saver, who = self._save_reply, save.group("who")
-
-                async def run_save() -> None:
-                    try:
-                        receipt = await saver(who)
-                        log.info("reply saved: %s", receipt)
-                    except Exception:
-                        log.exception("reply save failed")
-
-                asyncio.get_running_loop().create_task(run_save())
-                return True
-
             # …and only now does the session get it as a REMARK. This order
             # is load-bearing and was wrong: consume_transcript ran first,
             # and production's DebateSession.consume_transcript returns True
@@ -577,6 +534,13 @@ class SessionManager:
         # say words that could not work. Accept sentence punctuation after
         # the trigger; the word boundary still keeps "brainstorming …" from
         # becoming an invocation.
+        # An instruction about the last reply, with no session running.
+        # This is the common case, not an edge one: the wearer reads the
+        # synthesis, the room closes, and THEN they decide what to do with
+        # the answer. Requires address, like every other steering path.
+        if addressed is not _UNSET_ADDRESSED and addressed:
+            if self._handle_instruction(addressed):
+                return True
         request = text.strip().rstrip(".!?")
         resumed = _CONTINUE.match(request)
         if resumed is not None and self._resume(resumed.group("title").strip()):
@@ -603,6 +567,67 @@ class SessionManager:
             )
         except Exception:
             log.warning("replacement question not painted", exc_info=True)
+
+    def _handle_instruction(self, steer: str) -> bool:
+        """An instruction ABOUT a reply, rather than a remark in the room.
+
+        Runs whether or not a session is live. It used to sit inside the
+        live branch, so the moment a synthesis settled every one of these
+        went dead — and that is exactly when the wearer reads the answer
+        and wants to send it somewhere. "Send that to Hermes" after the
+        room finished did nothing at all.
+
+        The material outlives the session: DebateStateSink keeps the
+        snapshot precisely so a finished answer can still be re-read.
+        """
+        normalized = " ".join(
+            re.sub(r"[^a-z0-9]+", " ", steer.lower()).split()
+        )
+        route = parse_reply_route(normalized)
+        if route is not None and self._route_reply is not None:
+            router = self._route_reply
+
+            async def run_route() -> None:
+                try:
+                    receipt = await router(*route)
+                    log.info("reply routed: %s", receipt)
+                except Exception:
+                    log.exception("reply routing failed")
+
+            asyncio.get_running_loop().create_task(run_route())
+            return True
+        if self._branch and _BRANCH.match(steer.strip().rstrip(".!?")):
+            # docs/SESSION_MODEL.md:51 — "branch this: fork the
+            # selected transcript into a new child lineage." The wearer
+            # is taking the conversation somewhere else without losing
+            # where it came from.
+            asyncio.get_running_loop().create_task(self._branch_here())
+            return True
+        instruction = _MATERIAL_VERB.match(steer.strip().rstrip("."))
+        if (
+            instruction is not None
+            and self._transform is not None
+            and self._save_reply is not None      # implies a snapshot exists
+        ):
+            asked = instruction.group("instruction").strip()
+            asyncio.get_running_loop().create_task(
+                self._act_on_material(asked)
+            )
+            return True
+        save = _SAVE_REPLY.match(normalized)
+        if save is not None and self._save_reply is not None:
+            saver, who = self._save_reply, save.group("who")
+
+            async def run_save() -> None:
+                try:
+                    receipt = await saver(who)
+                    log.info("reply saved: %s", receipt)
+                except Exception:
+                    log.exception("reply save failed")
+
+            asyncio.get_running_loop().create_task(run_save())
+            return True
+        return False
 
     async def _act_on_material(self, instruction: str) -> None:
         """Do what the wearer asked WITH the last reply.
@@ -634,11 +659,22 @@ class SessionManager:
             log.warning("instruction result not painted", exc_info=True)
 
     def _material(self) -> str:
-        """The text "that" refers to: the newest usable reply."""
+        """The text "that" refers to: the newest usable reply.
+
+        The live session first, then the snapshot. A finished session is
+        the LIKELIEST moment for an instruction — the wearer has just read
+        the synthesis — and reading only from `_active` meant every verb
+        went dead the instant the room closed.
+        """
         active = self._active
         found = getattr(active, "last_reply", None)
         if callable(found):
             reply = found()
+            if reply:
+                return str(reply[1])
+        recall = self._last_reply
+        if recall is not None:
+            reply = recall(None)
             if reply:
                 return str(reply[1])
         return ""
