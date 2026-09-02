@@ -815,8 +815,22 @@ export class CapabilityMenu {
     await this.openCapability(picked, index);
   }
 
+  /**
+   * A single click on the resting overview opens the tray it is already
+   * showing.
+   *
+   * Notifications is deliberately not a menu row: the dashboard shows the
+   * cards themselves, so a row that opens a page to re-read the home screen
+   * costs a page and a round trip for nothing. This is the drill-in for what
+   * is already on the glass — the same gesture the wearer knows from the
+   * platform's own readers.
+   */
+  async openNotifications(): Promise<void> {
+    await this.openCapability('Notifications', CAPABILITIES.length);
+  }
+
   private async openCapability(
-    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'>,
+    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'> | 'Notifications',
     index: number,
     planningAnchorUnixMs?: number,
   ): Promise<void> {
