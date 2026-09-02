@@ -1102,3 +1102,72 @@ class TestTheTerminalReportsItsOwnLane:
         roster = AgentTerminalRoster([("work", FakeAgent())])
         roster.note_approval("work", "id-1", "tool", "write a file")
         assert roster.frame().state == "approval_required"
+
+
+class TestAReplyReachesHermesForReal:
+    """The wearer's headline: "take the last response from claude or codex
+    and send it to the hermes in the Agent Terminal".
+
+    Covered until now with a fake snapshot on one end and a fake agent on
+    the other. Fakes on both ends is how the routing shipped broken once
+    already — consume_transcript returning False where every real session
+    returns True.
+    """
+
+    async def test_the_whole_reply_arrives_in_the_lane(self) -> None:
+        from joat.services.agent_terminal import (
+            AgentTerminalCommands, AgentTerminalRoster,
+        )
+        from joat.services.sinks import DebateStateSink
+
+        reply = ("Key the cache on the session id AND the generation, or a "
+                 "lens handoff replays a round the wearer already read.")
+
+        # A real settled session through the real sink.
+        snapshot = DebateStateSink()
+        await snapshot.open("caching", ["codex (proposer)", "claude (critic)"])
+        await snapshot.turn("CODEX (proposer)")
+        await snapshot.chunk("cache on session id")
+        await snapshot.turn("CLAUDE (critic)")
+        await snapshot.chunk(reply)
+        await snapshot.close("done — converged")
+
+        seen: list[str] = []
+
+        class Recording:
+            async def stream(self, prompt: str):
+                seen.append(prompt)
+                yield "acknowledged\n"
+
+        roster = AgentTerminalRoster([("hermes", Recording())])
+        commands = AgentTerminalCommands(
+            roster, last_reply=lambda who: snapshot.snapshot.last_reply(who))
+
+        receipt = await commands.route_reply("claude", None)
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if seen:
+                break
+
+        assert "CLAUDE" in receipt
+        assert seen, "the reply must actually reach the lane"
+        # The WHOLE answer, not the collapsed row the panel draws.
+        assert reply in seen[0]
+
+    async def test_a_seat_that_never_spoke_routes_nothing(self) -> None:
+        from joat.services.agent_terminal import (
+            AgentTerminalCommands, AgentTerminalRoster,
+        )
+        from joat.services.sinks import DebateStateSink
+
+        snapshot = DebateStateSink()
+        await snapshot.open("caching", ["codex (proposer)"])
+        await snapshot.turn("CODEX (proposer)")
+        await snapshot.chunk("only codex spoke")
+        await snapshot.close("done")
+
+        roster = AgentTerminalRoster([("hermes", FakeAgent())])
+        commands = AgentTerminalCommands(
+            roster, last_reply=lambda who: snapshot.snapshot.last_reply(who))
+        answer = await commands.route_reply("claude", None)
+        assert "No reply from Claude" in answer
