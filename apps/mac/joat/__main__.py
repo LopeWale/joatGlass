@@ -109,6 +109,12 @@ from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.voice_latency import VoiceLatencyStore
 from .services.ambient import AmbientPublisher
+from .agents.panel_tools import news_headlines_tool, pomodoro_status_tool, web_search_tool
+from .services.news import NewsService
+from .services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
+from .services.panels import PanelPublisher
+from .services.pomodoro import PomodoroService
+from .services.search import SearchService
 from .services.capabilities import CapabilityOpenController, CapabilityRouter
 from .services.agent_terminal import (
     AgentTerminalCommands,
@@ -337,6 +343,20 @@ async def main() -> None:
     # Cards shown on the HUD are remembered here so "what did I miss?" has a
     # real source instead of a model with no record.
     card_log = CardLog()
+    # The overview's tabbed panel: news, pomodoro, search. Each keeps its
+    # own truth here and pushes it to the glass proactively; the plugin
+    # caches every push so a swipe between tabs never waits on this Mac.
+    news = NewsService()
+    search = SearchService()
+    pomodoro = PomodoroService(
+        # Late-bound on purpose: the publisher and the session manager are
+        # composed below, and the timer cannot fire before the loop runs.
+        on_change=lambda: panels.publish("pomodoro"),
+        notify=lambda card: sessions.notify(card),
+    )
+    panels = PanelPublisher(
+        transport, {"news": news, "pomodoro": pomodoro, "search": search},
+    )
     imessage = IMessageStore()
 
     def wearer_coords() -> tuple[float, float] | None:
@@ -394,6 +414,12 @@ async def main() -> None:
                 mapbox_provider.search if mapbox_provider is not None else None,
             ),
             notifications_tool(card_log),
+            # The panel tabs, for the questions the exact verbs miss: "is
+            # there anything about Apple in the news", "how long until my
+            # break", "who won last night". Cache reads and one bounded fetch.
+            news_headlines_tool(news),
+            web_search_tool(search, panels),
+            pomodoro_status_tool(pomodoro),
         ]
         if imessage.available:
             belt_tools.append(messages_tool(imessage))
@@ -1196,6 +1222,9 @@ async def main() -> None:
         terminal=terminal_commands,
         brainstorm_history=BrainstormHistoryCommands(brainstorm_history),
         capability_opens=capability_opens,
+        news=NewsCommands(news, panels),
+        pomodoro=PomodoroCommands(pomodoro, panels),
+        search=SearchCommands(search, panels),
     )
     # The assistant's name is JOAT — plus mishearings observed LIVE from
     # whisper on short utterances: a one-word utterance gives the model no
@@ -1235,6 +1264,9 @@ async def main() -> None:
             active.cancel()
         capabilities.on_disconnect()
         asyncio.get_running_loop().create_task(orchestrator.on_connect())
+        # A plugin that just connected has an empty tab cache. Fill it now
+        # so its first swipe onto News paints from memory.
+        asyncio.get_running_loop().create_task(panels.publish_all())
 
     transport.on_hello(greet)
 
@@ -1308,6 +1340,8 @@ async def main() -> None:
         terminal_focus=focus_terminal_lane,
         terminal_busy=lambda: agent_terminal.busy,
         brainstorm_recent=brainstorm_history.rows,
+        # The News / Pomodoro / Search tabs answer their own taps.
+        panels=panels,
     )
     transport.on_input(capabilities.on_input)
 
@@ -1332,6 +1366,12 @@ async def main() -> None:
         card_log=card_log,
     )
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
+    # The feeds are polled on the wearer's cadence (news.json, default every
+    # fifteen minutes) and pushed after every pass; the first pass is what
+    # fills the News tab before anyone asks.
+    news_task = asyncio.get_running_loop().create_task(
+        news.run(on_refreshed=lambda: panels.publish("news")),
+    )
 
     # NOT started: macOS already owns calendar alerting. An event carries its
     # own EKAlarm(s) (EKCalendarItem.alarms, with relativeOffset/absoluteDate),
@@ -1401,6 +1441,8 @@ async def main() -> None:
         beat_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()
+        news.stop()
+        news_task.cancel()
         if llm_warm_task is not None:
             if not llm_warm_task.done():
                 llm_warm_task.cancel()

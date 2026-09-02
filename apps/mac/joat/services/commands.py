@@ -50,6 +50,9 @@ class VoiceCommandRouter:
         terminal: CommandController | None = None,
         capability_opens: CapabilityOpenCommandController | None = None,
         brainstorm_history: CommandController | None = None,
+        news: CommandController | None = None,
+        pomodoro: CommandController | None = None,
+        search: CommandController | None = None,
     ) -> None:
         self._message_replies = message_replies
         self._models = models
@@ -61,6 +64,9 @@ class VoiceCommandRouter:
         self._terminal = terminal
         self._capability_opens = capability_opens
         self._brainstorm_history = brainstorm_history
+        self._news = news
+        self._pomodoro = pomodoro
+        self._search = search
 
     async def __call__(self, text: str) -> str | None:
         # New Message is an explicit, short-lived wearer flow. It gets first
@@ -82,6 +88,15 @@ class VoiceCommandRouter:
             open_result = await self._capability_opens.handle_command(text)
             if open_result is not None:
                 return open_result
+        # The panel tabs: exact verbs with exact effects ("start a pomodoro",
+        # "refresh the news", "look up …"). They answer from a cache or run
+        # one bounded lookup, so they never need — or wait for — the model.
+        for panel in (self._news, self._pomodoro, self._search):
+            if panel is None:
+                continue
+            panel_result = await panel.handle_command(text)
+            if panel_result is not None:
+                return panel_result
         if self._voice_notes is not None:
             voice_note_result = await self._voice_notes.handle_command(text)
             if voice_note_result is not None:
