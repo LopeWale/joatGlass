@@ -995,6 +995,46 @@ describe('the footer never names a gesture the router will not perform', () => {
   });
 });
 
+describe('the spine\'s left slot', () => {
+  /** drawShell with the icon and fitText helpers stubbed, so the assertion
+   * is about the slot's TEXT and not about canvas image compositing. */
+  function shell(showTime: boolean): string[] {
+    const texts: string[] = [];
+    const context = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
+      measureText: (value: string) => ({ width: value.length * 5.18 }),
+      save() {}, restore() {}, beginPath() {}, stroke() {},
+      moveTo() {}, lineTo() {}, arcTo() {}, closePath() {},
+      fillText(text: string) { texts.push(text); },
+    } as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    const stub = renderer as never as {
+      drawIcon(): void;
+      fitText(c: CanvasRenderingContext2D, t: string): void;
+      drawShell(
+        c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
+        f: boolean, showTime: boolean, title: string,
+      ): void;
+    };
+    stub.drawIcon = () => {};
+    stub.fitText = (c, t) => { c.fillText(t, 0, 0); };
+    stub.drawShell(
+      context, '9:41  JOAT ready  bat 87%', false, {} as unknown, true, showTime, '',
+    );
+    return texts;
+  }
+
+  it('carries the clock on a feature page and the DATE on the overview', () => {
+    // The dashboard already prints the time at full size, so its spine
+    // yields the small clock — and that slot would otherwise sit empty,
+    // which is why the date used to be stacked on top of the big clock.
+    expect(shell(true)[0]).toBe('9:41');
+    expect(shell(false)[0]).toBe(HudCanvas.hudDateLabel(new Date()));
+    // Never both: one screen must not set the same fact twice.
+    expect(shell(false)).not.toContain('9:41');
+  });
+});
+
 describe('the scrollback marker keeps the two-tone split', () => {
   // S6 from the audit's counter-pass: windowHudTailLines prepends '…' to
   // the first visible row whenever older rows are hidden, and '…CODEX > '

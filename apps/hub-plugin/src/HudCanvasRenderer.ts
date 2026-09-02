@@ -186,11 +186,11 @@ export function assistantOverlayTextLayout(
 export const OVERVIEW_TRAY_LAST_Y = 248;
 
 export const OVERVIEW_DASHBOARD = {
-  // The left column is ONE block — date, clock, conditions — centred both
-  // ways in the pane between the spine (y44) and the hint (y267). Centre
-  // 152: date sits 92 above it, the two clock rows straddle it, and the
-  // ambient row closes 92 below.
-  dateBaselineY: 60,
+  // The left column is ONE block — clock, then conditions — centred both
+  // ways in the pane between the spine (y44) and the hint (y267). The date
+  // used to open it at y60, balancing the ambient row 92 below the centre;
+  // it now lives in the spine's left slot, so the two clock rows straddle
+  // 156 and the ambient row closes the column.
   clockX: 26,
   /** The clock column is centred in the left half of the canvas. It used
    * to centre on the divider, which now sits east of the tile seam. */
@@ -1699,7 +1699,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     icons: Record<HudIconName, HTMLImageElement>,
     flat: boolean,
     /** The dashboard prints the time at full size; a designer never sets
-     * the same fact twice on one screen, so the spine yields its clock. */
+     * the same fact twice on one screen, so the spine yields its clock —
+     * and carries the DATE in that slot instead, where a banner normally
+     * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
     /** On a feature page the spine carries the page's name where "JOAT"
      * sits on the home screen, so the body below the spine belongs
@@ -1718,13 +1720,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(SUPPORT);
     context.font = `12px ${HUD_FONT}`;
     context.textAlign = 'left';
-    if (showTime) {
-      context.fillText(
-        status.time || '--:--',
-        30,
-        HUD_VISUAL_GEOMETRY.statusBaselineY,
-      );
-    }
+    context.fillText(
+      showTime ? (status.time || '--:--') : hudDateLabel(new Date()),
+      30,
+      HUD_VISUAL_GEOMETRY.statusBaselineY,
+    );
     context.textAlign = 'center';
     context.font = `10px ${HUD_FONT}`;
     // A degraded link outranks navigation: if JOAT is not READY the wearer
@@ -1826,14 +1826,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Mac is unreachable.
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    // The left pane is one centred column — date, clock, conditions — so it
+    // The left pane is one centred column — clock, then conditions — so it
     // reads as a single object instead of text stranded against the edge.
     const columnX = layout.clockCenterX;
     context.textAlign = 'center';
-    context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
-    context.fillText(hudDateLabel(new Date()), columnX, layout.dateBaselineY);
 
+    // The date used to sit here, stacked directly on the clock. It reads as
+    // banner chrome, not as a headline fact, so it moved to the spine's
+    // left slot — which this screen leaves empty anyway, having yielded its
+    // small clock to the big one below.
     const clock = hudClockParts(status.time);
     context.fillStyle = gray(BRIGHT);
     context.font = `${layout.clockFontSize}px ${HUD_FONT}`;
