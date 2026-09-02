@@ -3690,3 +3690,94 @@ class TestEveryVerbTellsTheWearerWhatHappened:
         ]
         assert overlays and all(m.answers_wearer for m in overlays)
         await manager.close()
+
+
+class TestEveryGlassActionTellsTheWearerWhatHappened:
+    """The gesture half of the same defect, found by gridding it.
+
+    Eight actions, eight silences. The worst is approve: the gateway is
+    first-answer-wins, so a wearer who taps approve can have their choice
+    recorded as the OPPOSITE by another controller — and the code's own
+    comment already claimed they "are told that rather than shown a
+    fiction". They were told nothing. Retry was worse than silent: it
+    raised into a bare task, so a failed retry surfaced only as "Task
+    exception was never retrieved" in a log nobody reads.
+    """
+
+    @staticmethod
+    def _spoken(transport) -> str:
+        said = [
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        return said[-1] if said else ""
+
+    async def _act(self, action: str, **kw) -> str:
+        transport = SinkTransport()
+        manager = SessionManager(HudWriter(transport), lambda topic: None, **kw)
+        manager.handle_brainstorm_action(
+            BrainstormAction(action=action, surface="agent_terminal")
+        )
+        await asyncio.sleep(0.05)
+        spoken = self._spoken(transport)
+        await manager.close()
+        return spoken
+
+    async def test_an_answer_recorded_as_asked_is_confirmed(self) -> None:
+        async def decide(verdict: str) -> str:
+            return "approve"
+
+        assert "approve" in await self._act(
+            "approve_terminal", terminal_decide=decide,
+        )
+
+    async def test_being_overruled_by_another_controller_is_reported(self) -> None:
+        """First answer wins. The wearer taps approve, someone else already
+        denied — believing you approved a tool that was denied is exactly
+        the fiction the comment promised not to show."""
+        async def decide(verdict: str) -> str:
+            return "deny"
+
+        spoken = await self._act("approve_terminal", terminal_decide=decide)
+        assert "deny" in spoken
+        assert "first" in spoken.lower()
+
+    async def test_a_missing_receipt_is_not_dressed_up_as_success(self) -> None:
+        async def decide(verdict: str) -> None:
+            return None
+
+        assert "no receipt" in (
+            await self._act("approve_terminal", terminal_decide=decide)
+        ).lower()
+
+    async def test_a_refused_answer_names_the_reason(self) -> None:
+        async def decide(verdict: str) -> str:
+            raise RuntimeError("gateway refused")
+
+        assert "gateway refused" in await self._act(
+            "approve_terminal", terminal_decide=decide,
+        )
+
+    async def test_a_failed_retry_is_caught_and_reported(self) -> None:
+        async def retry() -> None:
+            raise RuntimeError("hermes is down")
+
+        assert "hermes is down" in await self._act(
+            "retry_terminal", terminal_retry=retry,
+        )
+
+    async def test_the_switch_says_where_focus_landed(self) -> None:
+        async def cycle() -> str:
+            return "calendar · idle"
+
+        assert "calendar" in await self._act(
+            "show_brainstorm", terminal_cycle=cycle,
+        )
+
+    async def test_the_switch_says_when_it_landed_nowhere(self) -> None:
+        async def cycle() -> str:
+            return "No terminal sessions are configured on this Mac."
+
+        assert "No terminal sessions" in await self._act(
+            "show_brainstorm", terminal_cycle=cycle,
+        )

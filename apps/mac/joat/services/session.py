@@ -935,11 +935,31 @@ class SessionManager:
                 )
 
                 async def run_decision() -> None:
+                    # The receipt is the POINT here, and it only reached
+                    # the log. First answer wins on the gateway, so a
+                    # wearer who taps approve may have their choice
+                    # recorded as the opposite by another controller — and
+                    # the comment above already claimed they "are told
+                    # that rather than shown a fiction". They were not.
                     try:
                         receipt = await decide(verdict)
                         log.info("terminal approval answered: %s", receipt)
-                    except Exception:
+                    except Exception as exc:
+                        reason = str(exc) or exc.__class__.__name__
                         log.exception("terminal approval failed")
+                        await self._say(f"Could not answer that — {reason}")
+                        return
+                    if not receipt:
+                        await self._say(
+                            "The gateway gave no receipt for that answer."
+                        )
+                    elif receipt != verdict:
+                        await self._say(
+                            f"Recorded as {receipt} — another controller "
+                            "answered first."
+                        )
+                    else:
+                        await self._say(f"Recorded: {receipt}.")
 
                 asyncio.get_running_loop().create_task(run_decision())
             return
@@ -947,7 +967,16 @@ class SessionManager:
             retry = self._terminal_retry
             if retry is not None:
                 async def run_retry() -> None:
-                    await retry()
+                    # Unguarded, this raised into a bare task: the wearer
+                    # tapped retry, the daemon was still down, and the only
+                    # trace was "Task exception was never retrieved" in a
+                    # log they will never read.
+                    try:
+                        await retry()
+                    except Exception as exc:
+                        reason = str(exc) or exc.__class__.__name__
+                        log.exception("terminal retry failed")
+                        await self._say(f"Could not reach it — {reason}")
                 asyncio.get_running_loop().create_task(run_retry())
             return
         active = self._active
@@ -962,9 +991,17 @@ class SessionManager:
             if cycle is not None:
                 async def run_cycle() -> None:
                     try:
-                        log.info("terminal focus cycled: %s", await cycle())
-                    except Exception:
+                        moved = await cycle()
+                    except Exception as exc:
+                        reason = str(exc) or exc.__class__.__name__
                         log.exception("terminal focus cycle failed")
+                        await self._say(f"Could not switch — {reason}")
+                        return
+                    log.info("terminal focus cycled: %s", moved)
+                    # A gesture whose effect is a one-chip change on the
+                    # lane strip needs to say where it landed, and needs to
+                    # say when it landed NOWHERE (a single-lane Mac).
+                    await self._say(moved)
 
                 asyncio.get_running_loop().create_task(run_cycle())
             return
