@@ -6,7 +6,7 @@ import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
-import type { ProductivityHudModel } from './types';
+import { CAPABILITIES, type ProductivityHudModel } from './types';
 
 /**
  * The wearer's report from hardware: double-tap opened "a menu modal, but
@@ -18,12 +18,10 @@ import type { ProductivityHudModel } from './types';
 type PaintResult = boolean | Promise<boolean>;
 
 function rig(
-  sidebarResult: boolean | boolean[] = true,
   listResult: PaintResult | PaintResult[] = true,
   productivityResult: PaintResult | PaintResult[] = true,
   productivityVisible = true,
 ) {
-  const sidebars: string[][] = [];
   const lists: string[][] = [];
   const listOptions: Array<{ title?: string; hint?: string; selectable?: boolean } | undefined> = [];
   const statuses: string[] = [];
@@ -34,19 +32,9 @@ function rig(
   const moves: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
-  let sidebarCall = 0;
   let listCall = 0;
   let productivityCall = 0;
   const hud = {
-    showSidebar: vi.fn(async (items: string[]) => {
-      operations.push('sidebar');
-      sidebars.push(items);
-      const result = Array.isArray(sidebarResult)
-        ? (sidebarResult[sidebarCall] ?? true)
-        : sidebarResult;
-      sidebarCall += 1;
-      return result;
-    }),
     showList: vi.fn(async (
       items: string[], options?: { title?: string; hint?: string; selectable?: boolean },
     ) => {
@@ -92,7 +80,7 @@ function rig(
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
-    menu, sidebars, lists, listOptions, operations, productivities,
+    menu, lists, listOptions, operations, productivities,
     deferredProductivityVisibleCallbacks, selections, moves, statuses, sent,
     defaultsCount: () => defaults,
   };
@@ -121,34 +109,22 @@ describe('CapabilityMenu', () => {
     expect(isActionLifecycleTitle('ACTIVITY')).toBe(false);
   });
 
-  it('double-tap from home exposes one unified Planning entry in the wearable sidebar', async () => {
-    const { menu, sidebars, lists, operations } = rig();
+  it('left double-tap at home is a no-op — the firmware menu is the only menu', async () => {
+    const { menu, lists, operations, defaultsCount } = rig();
     await menu.toggle();
-    expect(sidebars[0]).toEqual([
-      // Notifications is absent on purpose: the resting dashboard shows
-      // the cards themselves, so a page to re-read them is pure waste.
-      'Messages', 'Planning', 'Navigation', 'Brainstorm',
-      'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
-    ]);
-    expect(lists).toEqual([]);
-    expect(operations).toEqual(['sidebar']);
-  });
-
-  it('stays closed when the firmware rejects the sidebar rebuild', async () => {
-    const { menu, sidebars } = rig(false);
-    await menu.toggle();
-    expect(sidebars).toHaveLength(1);
     expect(menu.isOpen()).toBe(false);
+    expect(lists).toHaveLength(0);
+    expect(operations).toEqual([]);
+    expect(defaultsCount()).toBe(0);
   });
 
-  it('picking Messages removes the sidebar into a full-focus loading screen before asking the Mac', async () => {
+  it('picking Messages opens a full-focus loading screen before asking the Mac', async () => {
     const { menu, lists, listOptions, operations, sent } = rig();
-    await menu.toggle();
-    expect(menu.handleList(clickRow0())).toBe(true); // protobuf zero-drop: row 0
+    await menu.openFromContextualMenu(0); // Messages, via the firmware menu
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
     expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back' });
-    expect(operations).toEqual(['sidebar', 'list']);
+    expect(operations).toEqual(['list']);
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: { containerName: 'capmenu', eventType: 0, selectedIndex: 0, selectedName: 'Messages' },
@@ -160,37 +136,11 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(1);
   });
 
-  it('moves the custom sidebar selection with text-capture scrolls and opens that row on click', async () => {
-    const { menu, selections, lists, listOptions } = rig();
-    await menu.toggle();
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(selections).toEqual([1]);
-    expect(menu.handleClick()).toBe(true);
-    await vi.waitFor(() => expect(lists).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent planning…']);
-    expect(listOptions[0]?.title).toBe('PLANNING');
-  });
-
-  it('uses the mirrored visual sidebar row when a host reports a stale native list index', async () => {
-    const { menu, lists, listOptions } = rig();
-    await menu.toggle();
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
-
-    // Some firmware emits a list click from the invisible event-capture
-    // layer. Its native list index is still zero even though JOAT visibly
-    // moved the custom sidebar highlight to Planning.
-    expect(menu.handleList(clickRow0())).toBe(true);
-    await vi.waitFor(() => expect(lists).toHaveLength(1));
-    expect(listOptions[0]?.title).toBe('PLANNING');
-  });
-
   it('replaces a missing Planning response with retry guidance, then accepts its late matching response', async () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.toggle();
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      menu.handleClick();
+      await menu.openFromContextualMenu(1); // Planning
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
       expect(requestId).toMatch(/^hud-request-/);
@@ -217,8 +167,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.toggle();
-      menu.handleList(clickRow0());
+      await menu.openFromContextualMenu(0); // Messages
       await vi.advanceTimersByTimeAsync(0);
       const firstRequestId = latestRequestId(sent);
 
@@ -243,8 +192,7 @@ describe('CapabilityMenu', () => {
 
   it('turns Messages access guidance into a real retry action after Mac recovery', async () => {
     const { menu, sent, listOptions, moves } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const firstRequestId = latestRequestId(sent);
 
@@ -297,8 +245,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.toggle();
-      menu.handleList(clickRow0());
+      await menu.openFromContextualMenu(0); // Messages
       await vi.advanceTimersByTimeAsync(0);
       const firstRequestId = latestRequestId(sent);
       expect(await menu.presentList('MESSAGES', rows(2), firstRequestId, true)).toBe(true);
@@ -334,10 +281,8 @@ describe('CapabilityMenu', () => {
     try {
       let finishRetryPaint: ((shown: boolean) => void) | undefined;
       const retryPaint = new Promise<boolean>((resolve) => { finishRetryPaint = resolve; });
-      const { menu, sent } = rig(true, [true, retryPaint, true]);
-      await menu.toggle();
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      menu.handleClick();
+      const { menu, sent } = rig([true, retryPaint, true]);
+      await menu.openFromContextualMenu(1); // Planning
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
 
@@ -357,9 +302,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, sent } = rig();
-      await menu.toggle();
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      menu.handleClick();
+      await menu.openFromContextualMenu(1); // Planning
       await vi.advanceTimersByTimeAsync(0);
       expect(await menu.presentList(
         'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
@@ -379,12 +322,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions } = rig();
-      await menu.toggle();
-      // QuickNotes is row 4 now that Notifications is gone from the menu.
-      for (let index = 0; index < 4; index += 1) {
-        menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      }
-      menu.handleClick();
+      await menu.openFromContextualMenu(4); // via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       expect(listOptions[0]?.title).toBe('QUICKNOTES');
 
@@ -407,9 +345,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.toggle();
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
-      menu.handleClick();
+      await menu.openFromContextualMenu(1); // Planning, via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
       expect(await menu.presentList(
@@ -449,9 +385,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, sent, defaultsCount } = rig();
-      await menu.toggle();
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
-      menu.handleClick();
+      await menu.openFromContextualMenu(1); // Planning, via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       expect(lists).toHaveLength(1);
       expect(menu.isOpen()).toBe(true);
@@ -474,8 +408,7 @@ describe('CapabilityMenu', () => {
 
   it('releaseToLiveSession away from Messages retires the Mac-side reply consent', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
 
@@ -486,44 +419,21 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it('keeps Navigation visible in the first-level wearable sidebar and opens its destination handoff', async () => {
-    const { menu, sidebars, selections, lists, listOptions, sent } = rig();
-    await menu.toggle();
-
-    expect(sidebars[0]).toEqual([
-      // Notifications is absent on purpose: the resting dashboard shows
-      // the cards themselves, so a page to re-read them is pure waste.
-      'Messages', 'Planning', 'Navigation', 'Brainstorm',
-      'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
-    ]);
-    for (let index = 0; index < 2; index += 1) {
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    }
-    expect(selections).toEqual([1, 2]);
-    expect(menu.handleClick()).toBe(true);
-
+  it('Navigation opens from the firmware menu into its destination handoff', async () => {
+    const { menu, lists, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(2); // Navigation
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent navigation…']);
-    expect(listOptions[0]).toEqual({ title: 'NAVIGATION', hint: 'left x2: back' });
+    expect(listOptions[0]?.title).toBe('NAVIGATION');
     expect(sent[0]).toMatchObject({
       kind: 'input',
-      event: {
-        containerName: 'capmenu',
-        selectedIndex: 2,
-        selectedName: 'Navigation',
-      },
+      event: { containerName: 'capmenu', eventType: 0, selectedIndex: 2, selectedName: 'Navigation' },
     });
   });
 
-  it('scrolls one continuous wearable list to Agent Terminal without a More submenu', async () => {
-    const { menu, selections, lists, listOptions, sent } = rig();
-    await menu.toggle();
-    // Agent Terminal moved up one row when Notifications left the menu.
-    for (let index = 0; index < 5; index += 1) {
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    }
-    expect(selections).toEqual([1, 2, 3, 4, 5]);
-    expect(menu.handleClick()).toBe(true);
+  it('Agent Terminal opens from the firmware menu without a More submenu', async () => {
+    const { menu, lists, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(5); // Agent Terminal
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent agent terminal…']);
     expect(listOptions[0]?.title).toBe('AGENT TERMINAL');
@@ -535,11 +445,9 @@ describe('CapabilityMenu', () => {
       },
     });
   });
-
   it('keeps rows four and five reachable after the Mac replaces the loading view', async () => {
     const { menu, moves, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.presentList('MESSAGES', rows(5), latestRequestId(sent), true);
 
@@ -550,8 +458,7 @@ describe('CapabilityMenu', () => {
   it('clicking a selected Messages row emits one traced reply-selection event', async () => {
     const { menu, sent } = rig();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'MESSAGES', rows(3), latestRequestId(sent), true,
@@ -579,8 +486,7 @@ describe('CapabilityMenu', () => {
   it('routes a physical listEvent selection through the owned Messages request', async () => {
     const { menu, sent } = rig();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
@@ -605,8 +511,7 @@ describe('CapabilityMenu', () => {
 
   it('keeps a Messages picker selection when a native scroll reports its stale zero index', async () => {
     const { menu, selections, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
@@ -633,8 +538,7 @@ describe('CapabilityMenu', () => {
   it('suppresses repeated physical message selections until the Mac replaces the frame', async () => {
     const { menu, sent } = rig();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
@@ -653,8 +557,7 @@ describe('CapabilityMenu', () => {
   it('routes a selected transcript line to the Mac-owned full-message reader', async () => {
     const { menu, sent } = rig();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
@@ -708,8 +611,7 @@ describe('CapabilityMenu', () => {
 
   it('returns from full text to the live conversation before clearing its reply target', async () => {
     const { menu, lists, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     const conversations = ['New message', 'Dele · Preview'];
@@ -743,8 +645,7 @@ describe('CapabilityMenu', () => {
 
   it('requests older and newer conversation pages only at scroll boundaries', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
@@ -790,8 +691,7 @@ describe('CapabilityMenu', () => {
 
   it('forwards native list scroll boundary events for a paged conversation', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
@@ -819,9 +719,7 @@ describe('CapabilityMenu', () => {
 
   it('routes non-Messages data clicks as capability detail selections', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    menu.handleClick(); // Planning capability
+    await menu.openFromContextualMenu(1); // Planning // Planning capability
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'PLANNING', rows(2), latestRequestId(sent), true,
@@ -840,9 +738,7 @@ describe('CapabilityMenu', () => {
 
   it('returns a Planning drill-down to the live planner instead of Home', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    menu.handleClick();
+    await menu.openFromContextualMenu(1); // Planning
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.presentList('PLANNING', rows(2), latestRequestId(sent), true);
 
@@ -862,9 +758,7 @@ describe('CapabilityMenu', () => {
 
   it('keeps setup and action lifecycle lists read-only', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    menu.handleClick();
+    await menu.openFromContextualMenu(1); // Planning
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'PLANNING · PLAN · SETUP', rows(2), latestRequestId(sent), false,
@@ -933,11 +827,11 @@ describe('CapabilityMenu', () => {
       reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
       reminderDueGeneration: 7,
     };
-    expect(await rig(true, true, false).menu.presentProductivity(due)).toBe(false);
+    expect(await rig(true, false).menu.presentProductivity(due)).toBe(false);
 
     let resolveFirst: (value: boolean) => void = () => undefined;
     const firstPaint = new Promise<boolean>((resolve) => { resolveFirst = resolve; });
-    const { menu } = rig(true, true, [firstPaint, true]);
+    const { menu } = rig(true, [firstPaint, true]);
     const stale = menu.presentProductivity(due);
     await Promise.resolve();
     expect(await menu.presentProductivity({ ...due, reminderDueAttemptId: '9b38eafb-6fda-4d4c-bb6e-80b9365854b5' })).toBe(true);
@@ -946,7 +840,7 @@ describe('CapabilityMenu', () => {
   });
 
   it('hands a deferred due acknowledgement to the presenter without sending it early', async () => {
-    const { menu, deferredProductivityVisibleCallbacks } = rig(true, true, true, false);
+    const { menu, deferredProductivityVisibleCallbacks } = rig(true, true, false);
     const due: ProductivityHudModel = {
       domain: 'reminders', phase: 'due', title: 'Private reminder',
       primary: 'Due now', secondary: 'Still incomplete', hint: 'left x2 Planning',
@@ -965,7 +859,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, deferredProductivityVisibleCallbacks, sent } = rig(
-        true, true, true, false,
+        true, true, false,
       );
       expect(await menu.presentProductivity({
         domain: 'calendar',
@@ -1198,8 +1092,7 @@ describe('CapabilityMenu', () => {
 
   it('the armed reply instructions cannot be reinterpreted as message rows', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
@@ -1213,10 +1106,9 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(2); // no second/stale conversation selection
   });
 
-  it('walks Messages detail back to its cached conversation list, then sidebar, then Home', async () => {
-    const { menu, sidebars, lists, sent, defaultsCount } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+  it('walks Messages detail back to its cached conversation list, then Home', async () => {
+    const { menu, lists, sent, defaultsCount } = rig();
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     const conversationRows = ['New message · voice recipient + text', '[now] Adele · Good morning'];
@@ -1236,26 +1128,21 @@ describe('CapabilityMenu', () => {
     });
 
     await menu.toggle();
-    expect(sidebars).toHaveLength(2);
-    expect(menu.isOpen()).toBe(true);
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(1);
     expect(sent[3]).toEqual({
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
     });
-
-    await menu.toggle();
-    expect(menu.isOpen()).toBe(false);
-    expect(defaultsCount()).toBe(1);
   });
 
-  it('double-tap from the Messages root returns to the sidebar and clears Mac-private Messages state', async () => {
+  it('double-tap from the Messages root returns Home and clears Mac-private Messages state', async () => {
     const { menu, sent, defaultsCount } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.toggle();          // back
-    expect(menu.isOpen()).toBe(true);
-    expect(defaultsCount()).toBe(0);
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(1);
     expect(sent).toHaveLength(2);
     expect(sent[1]).toEqual({
       kind: 'input',
@@ -1268,11 +1155,7 @@ describe('CapabilityMenu', () => {
 
   it('a live Brainstorm atomically releases its instruction page and menu input', async () => {
     const { menu, sent, defaultsCount } = rig();
-    await menu.toggle();
-    for (let index = 0; index < 3; index += 1) {
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    }
-    expect(menu.handleClick()).toBe(true); // scrollable first-level Brainstorm
+    await menu.openFromContextualMenu(3); // via the firmware menu // scrollable first-level Brainstorm
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'BRAINSTORM',
@@ -1290,8 +1173,7 @@ describe('CapabilityMenu', () => {
 
   it('rejects a delayed capability response after the wearer returns home', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(1), requestId, true)).toBe(true);
@@ -1301,15 +1183,12 @@ describe('CapabilityMenu', () => {
 
   it('accepts only the newest capability response, including its setup suffix', async () => {
     const { menu, sent } = rig();
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const oldRequest = latestRequestId(sent);
-    await menu.toggle();
-    await menu.toggle();
-    await menu.toggle();
-    menu.handleList(click(1));
-    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    await menu.toggle(); // back: data -> Home (also retires reply consent)
+    await menu.openFromContextualMenu(1); // Planning, a NEW generation
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
     const newRequest = latestRequestId(sent);
 
     expect(newRequest).not.toBe(oldRequest);
@@ -1322,7 +1201,7 @@ describe('CapabilityMenu', () => {
   });
 
   it('does not expose settings controls when their focus page fails to paint', async () => {
-    const { menu, sent, defaultsCount } = rig(true, false);
+    const { menu, sent, defaultsCount } = rig(false);
 
     await menu.openSettings();
 
@@ -1333,13 +1212,8 @@ describe('CapabilityMenu', () => {
   });
 
   it('closes instead of entering an invisible scrolled capability after a paint failure', async () => {
-    const { menu, defaultsCount } = rig(true, false);
-    await menu.toggle();
-    for (let index = 0; index < 4; index += 1) {
-      menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    }
-
-    menu.handleClick();
+    const { menu, defaultsCount } = rig(false);
+    await menu.openFromContextualMenu(4); // via the firmware menu
     await vi.waitFor(() => expect(menu.isOpen()).toBe(false));
 
     expect(defaultsCount()).toBe(1);
@@ -1347,10 +1221,8 @@ describe('CapabilityMenu', () => {
   });
 
   it('does not request Mac data when the loading page fails to paint', async () => {
-    const { menu, sent, defaultsCount } = rig(true, false);
-    await menu.toggle();
-
-    menu.handleList(clickRow0());
+    const { menu, sent, defaultsCount } = rig(false);
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(menu.isOpen()).toBe(false));
 
     expect(sent).toEqual([]);
@@ -1362,9 +1234,8 @@ describe('CapabilityMenu', () => {
     const responsePaint = new Promise<boolean>((resolve) => {
       finishResponsePaint = resolve;
     });
-    const { menu, sent, lists, defaultsCount } = rig(true, [true, responsePaint]);
-    await menu.toggle();
-    menu.handleList(clickRow0());
+    const { menu, sent, lists, defaultsCount } = rig([true, responsePaint]);
+    await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
 
     const presenting = menu.presentList(
@@ -1428,9 +1299,10 @@ describe('CapabilityMenu', () => {
     expect(lists).toHaveLength(0);
   });
 
-  it('double-tap from the capability list is back, not deeper', async () => {
+  it('double-tap from Settings is back to Home, not deeper', async () => {
     const { menu, defaultsCount } = rig();
-    await menu.toggle();
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Settings'));
+    expect(menu.isOpen()).toBe(true);
     await menu.toggle();
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(1);
@@ -1503,9 +1375,7 @@ describe('Planning split dashboard', () => {
   async function openDashboard() {
     const rigParts = dashboardRig();
     const { menu, sent } = rigParts;
-    await menu.toggle();
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // Planning
-    menu.handleClick();
+    await menu.openFromContextualMenu(1); // Planning, via the firmware menu
     await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList(

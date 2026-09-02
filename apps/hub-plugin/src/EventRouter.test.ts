@@ -8,7 +8,7 @@ import type { ImuMonitor } from './ImuMonitor';
 import { CapabilityMenu } from './CapabilityMenu';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
-import type { UplinkMessage } from './types';
+import { CAPABILITY_MENU_ID_BASE, type UplinkMessage } from './types';
 
 function make(
   menuConsumesLists = false,
@@ -18,6 +18,8 @@ function make(
   assistantOverlayVisible = false,
   notificationVisible = false,
   brainstormAcceptanceArmed = false,
+  panelSwipeOwned = false,
+  panelExpanded = false,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -45,6 +47,14 @@ function make(
     // exactly when the overview click-to-notifications drill-in must NOT fire.
     isOpen: vi.fn(() => menuConsumesLists),
     openNotifications: vi.fn(async () => {}),
+    openActiveTab: vi.fn(async () => {}),
+    // The overview's tab rail: a resting swipe is consumed only when the
+    // menu is closed, and long-press-release refreshes only inside an
+    // expanded tab. Both default to "not owning" so every other test keeps
+    // its established relay and mic behaviour.
+    handleOverviewSwipe: vi.fn(() => !menuConsumesLists && panelSwipeOwned),
+    isPanelExpanded: vi.fn(() => panelExpanded),
+    refreshPanel: vi.fn(),
     openFromContextualMenu: vi.fn(async () => {}),
   };
   const navigation = {
@@ -179,22 +189,39 @@ describe('EventRouter — confirm gestures', () => {
     expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
   });
 
-  it('a non-decision temple press opens the tray the overview is showing', () => {
+  it('a non-decision temple press opens the tab the overview rail has selected', () => {
     const { fire, imu, menu, sent } = make();
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
     expect(imu.confirmByTap).not.toHaveBeenCalled();
     expect(imu.declineByTap).not.toHaveBeenCalled();
-    // Consumed locally: this is the drill-in for the cards already on the
+    // Consumed locally: this is the drill-in for what is already on the
     // glass. The old relay carried no containerName, so the Mac dropped it.
-    expect(menu.openNotifications).toHaveBeenCalledTimes(1);
+    expect(menu.openActiveTab).toHaveBeenCalledTimes(1);
     expect(sent).toEqual([]);
   });
 
   it('leaves a click alone while a menu view already owns input', () => {
     const { fire, menu } = make(true);
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
-    expect(menu.openNotifications).not.toHaveBeenCalled();
+    expect(menu.openActiveTab).not.toHaveBeenCalled();
     expect(menu.handleClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('a swipe on the resting overview moves along the tab rail and never reaches the Mac', () => {
+    const { fire, menu, sent } = make(false, undefined, false, false, false, false, false, true);
+    fire({ textEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    fire({ textEvent: { eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
+    expect(menu.handleOverviewSwipe).toHaveBeenCalledTimes(2);
+    expect(sent).toEqual([]);
+  });
+
+  it('a live navigation keeps its swipes even when the rail would take them', () => {
+    const { fire, menu, navigation } = make(
+      false, undefined, true, false, false, false, false, true,
+    );
+    fire({ textEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(navigation.handleScroll).toHaveBeenCalledWith('down');
+    expect(menu.handleOverviewSwipe).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -544,20 +571,21 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
-  it('opens the menu from a live Brainstorm without ending it', () => {
-    // The only way out of a running session used to be left DOUBLE press,
-    // which is cancel — so checking Messages mid-session meant killing the
-    // conversation. Left-single was the one free gesture on this surface.
-    const { fire, menu, brainstorm } = make(false, undefined, false, true);
+  it('a left single on a live Brainstorm neither opens a menu nor ends it', () => {
+    // Mid-session menu access is the firmware contextual menu (tap, then
+    // long-press), registered on every page. A plain left single must not
+    // cancel, must not open anything, and must not drill into notifications.
+    const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
     fire({
       sysEvent: {
         eventType: OsEventTypeList.CLICK_EVENT,
         eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
       },
     });
-    expect(menu.toggle).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(menu.openNotifications).not.toHaveBeenCalled();
     expect(brainstorm.handleCancel).not.toHaveBeenCalled();
-    expect(brainstorm.handleClick).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1); // relayed, the Mac decides
   });
 
   it('keeps cancel on the left double press', () => {
@@ -700,6 +728,25 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
   });
 
+  it('refreshes an expanded panel tab instead of muting — the one carve-out', () => {
+    // Menu open (a data view owns input) AND that view is a panel tab's top
+    // level: the wearer's ruling is that long press re-fetches it there.
+    const r = make(true, undefined, false, false, false, false, false, false, true);
+    r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
+    r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
+    expect(r.menu.refreshPanel).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.sent).toEqual([]);
+  });
+
+  it('keeps the mic on long press inside an opened article, and on the overview', () => {
+    const r = make(true);
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    expect(r.menu.refreshPanel).not.toHaveBeenCalled();
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('toggles the mic from a textEvent — the relay must not swallow it', () => {
     const r = make();
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
@@ -801,12 +848,7 @@ describe('EventRouter — production Messages menu composition', () => {
   it('routes physical menu and list events into the bound Mac request, then walks back to Home', async () => {
     let dispatch: (event: EvenHubEvent) => void = () => {};
     const sent: UplinkMessage[] = [];
-    const sidebars: string[][] = [];
     const hud = {
-      showSidebar: vi.fn(async (items: string[]) => {
-        sidebars.push(items);
-        return true;
-      }),
       showList: vi.fn(async () => true),
       showDefault: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),
@@ -841,14 +883,10 @@ describe('EventRouter — production Messages menu composition', () => {
     } as unknown as ImuMonitor;
     new EventRouter(client, link, audio, imu, menu).attach();
 
-    dispatch({ sysEvent: {
-      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
-      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    // The wearer picks Messages in the firmware contextual menu.
+    dispatch({ menuItemClickEvent: {
+      itemID: CAPABILITY_MENU_ID_BASE,
     } } as EvenHubEvent);
-    await vi.waitFor(() => expect(sidebars).toHaveLength(1));
-    expect(sidebars[0]?.[0]).toBe('Messages');
-
-    dispatch(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R) as EvenHubEvent);
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const request = sent[0] as Extract<UplinkMessage, { kind: 'input' }>;
     expect(request.event).toMatchObject({
@@ -887,11 +925,6 @@ describe('EventRouter — production Messages menu composition', () => {
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
     } } as EvenHubEvent);
     await vi.waitFor(() => expect(hud.showList).toHaveBeenCalledTimes(4));
-    dispatch({ sysEvent: {
-      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
-      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
-    } } as EvenHubEvent);
-    await vi.waitFor(() => expect(sidebars).toHaveLength(2));
     dispatch({ sysEvent: {
       eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,

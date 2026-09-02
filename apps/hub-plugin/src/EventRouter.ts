@@ -136,6 +136,15 @@ export class EventRouter {
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
+      if (toggleMic && this.menu.isPanelExpanded()) {
+        // The one carve-out from "long press is the mic": inside an
+        // expanded panel tab it re-fetches that tab (the wearer's ruling,
+        // 2026-09-02). Everywhere else — the resting overview included —
+        // the privacy control keeps the gesture.
+        console.info(`[EventRouter] long-press via ${via} — refreshing panel`);
+        this.menu.refreshPanel();
+        return true;
+      }
       if (toggleMic) {
         console.info(`[EventRouter] long-press via ${via} — toggling mic`);
         this.toggleMic();
@@ -260,7 +269,7 @@ export class EventRouter {
       const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
       // The image HUD's invisible capture surface normally receives taps as
       // sysEvent, but some hosts send a textEvent with CLICK omitted by the
-      // protobuf encoder. If our own sidebar owns that surface, select its
+      // protobuf encoder. If a menu view owns that surface, select its
       // highlighted row rather than consuming the input as a zero-distance
       // scroll. Closed menus still relay the event unchanged.
       if (
@@ -268,6 +277,14 @@ export class EventRouter {
         && this.menu.handleClick()
       ) return;
       if (this.menu.handleScroll(eventType)) return;
+      // On the resting overview a swipe moves along the tab rail. Local:
+      // the Mac never learns which tab is up, and nothing else owns this
+      // gesture there (it used to relay to a Mac that dropped it).
+      if (
+        !this.navigation?.isActive()
+        && !this.brainstorm?.isActive()
+        && this.menu.handleOverviewSwipe(eventType)
+      ) return;
       // Scrolls and otherwise unowned text clicks relay to the Mac.
       this.link.send({
         kind: 'input',
@@ -425,13 +442,11 @@ export class EventRouter {
     if (this.dismissVisibleNotificationFor(type)) return;
 
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      // Left temple: the transient capability sidebar. Consumed locally,
-      // never relayed to the Mac or confused with the OS exit gesture.
+      // Left temple double: BACK. Consumed locally, never relayed to the
+      // Mac or confused with the OS exit gesture.
       if (this.isBackSource(source)) {
-        // Navigation owns the wearer surface as a single interaction. Do not
-        // paint a sidebar over an active route while tap/swipe continue to
-        // target the hidden navigation frame. The same deliberate gesture
-        // becomes the visible navigation stop/recovery action.
+        // Navigation owns the wearer surface as a single interaction; the
+        // same deliberate gesture becomes its stop/recovery action.
         if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
         // A live Brainstorm owns the same stop gesture. This check is after
         // navigation so one active surface always has deterministic priority.
@@ -486,29 +501,16 @@ export class EventRouter {
       return;
     }
 
-    // LEFT single press on a live Brainstorm opens the capability menu.
-    //
-    // Before this, the only way out of a running session was left DOUBLE
-    // press — which is cancel. So a wearer who wanted to check Messages
-    // mid-session had exactly one gesture available and it ended their
-    // conversation. Left-single was the one genuinely free gesture left on
-    // this surface (the brainstorm click predicate above accepts only
-    // right/ring, and the fallback relay carries no containerName, so the
-    // Mac drops it); long-press is globally claimed by the mic control.
-    // Cancel stays on left-double, unchanged.
-    if (
-      type === OsEventTypeList.CLICK_EVENT
-      && source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
-      && this.brainstorm?.isActive()
-    ) {
-      void this.menu.toggle();
-      return;
-    }
+    // Checking Messages mid-Brainstorm no longer needs a plugin gesture: the
+    // firmware contextual menu (tap, then long-press) is registered on every
+    // page, including this one, and cancel stays on left-double.
 
-    // On the resting overview a click drills into the tray already on the
-    // glass: the notifications become a focused, scrollable page, and the
-    // next click opens the one the wearer stopped on. Any visible card was
-    // already dismissed above, so this only fires on a settled overview.
+    // On the resting overview a click drills into the tab the rail has
+    // selected: notifications become a focused, scrollable page (the Mac
+    // already serves them), and the other tabs expand from the content the
+    // Mac last pushed. The next click opens the row the wearer stopped on.
+    // Any visible card was already dismissed above, so this only fires on
+    // a settled overview.
     if (
       type === OsEventTypeList.CLICK_EVENT
       && this.isLocalTapSource(source)
@@ -516,7 +518,7 @@ export class EventRouter {
       && !this.navigation?.isActive()
       && !this.brainstorm?.isActive()
     ) {
-      void this.menu.openNotifications();
+      void this.menu.openActiveTab();
       return;
     }
 
@@ -553,7 +555,7 @@ export class EventRouter {
       case 3: // Global Refresh: re-open the real bridge/gateway link.
         this.link.connect();
         return;
-      case 4: // Five sidebar rows are spoken for; settings lives here.
+      case 4: // Retired row id from a cached host menu; settings still opens.
         void this.menu.openSettings();
         return;
       case 5: // Non-destructive escape from visual safe-write outcomes.

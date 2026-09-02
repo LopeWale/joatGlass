@@ -86,11 +86,13 @@ Comparing `eventType === CLICK_EVENT` (i.e. `=== 0`) therefore **never matches**
 
 Every app is expected to offer an exit via the glasses. The canonical pattern is double-press → `shutDownPageContainer(1)` (confirmation dialog; mode `0` exits immediately with no warning). Do **not** tear down before calling it — the wearer can still cancel. Clean up in the `SYSTEM_EXIT_EVENT` (7) handler instead.
 
-We use **left**-temple double-press for the capability sidebar (Settings is
-a row inside it) and **right**-temple double-press for the exit dialog. On
-a live Brainstorm the left double press CANCELS the session, and left
-SINGLE press opens the sidebar — so the wearer can reach the menu without
-ending what they are watching.
+The wearer's menu is the **firmware contextual menu** (tap, then
+long-press) carrying the CAPABILITIES rows — see "The three ways to draw a
+menu, measured". **Left**-temple double-press is BACK (a no-op on the
+overview), **right**-temple double-press is the exit dialog, and a left
+SINGLE press on the resting overview drills into the notifications tray.
+On a live Brainstorm the left double press CANCELS the session; the
+firmware menu remains reachable mid-session for everything else.
 
 ### Lifecycle events (all `sysEvent`)
 

@@ -54,7 +54,6 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
   ['compatibility', builder.compatibilityLayout() as Page],
   ['dashboard-compatibility', builder.dashboardCompatibilityLayout() as Page],
   ['default', builder.defaultLayout() as Page],
-  ['sidebar', builder.sidebarLayout(['a', 'b', 'c'], {}) as Page],
   ['list', builder.listLayout(['a', 'b', 'c']) as Page],
   ['confirmation', builder.confirmationLayout('Send reply?') as Page],
   ['visual-startup', builder.visualStartup() as Page],
@@ -100,7 +99,6 @@ describe('HudPageBuilder invariants', () => {
     const compatible = builder.withContextualMenu(false);
     const pages: Page[] = [
       compatible.defaultLayout() as Page,
-      compatible.sidebarLayout(['a'], {}) as Page,
       compatible.listLayout(['a']) as Page,
       compatible.confirmationLayout('confirm') as Page,
       compatible.visualLayout() as Page,
@@ -189,46 +187,6 @@ describe('HudPageBuilder invariants', () => {
     expect(hint).toMatchObject({ yPosition: 256, height: 32, textColor: 1 });
     expect(hint?.content).toBe('SWIPE move · TAP open · LEFT x2 back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
-  });
-
-  it('sidebar layout confines navigation to the left and preserves a dim overview on the right', () => {
-    const page = builder.sidebarLayout(
-      ['Messages', 'Notifications', 'Calendar', 'Debate', 'Settings'],
-      {
-        main: 'Next\nDesign review · 4:30',
-        context: 'Last query  nearest coffee shop?',
-        tray: '2 notifications',
-      },
-    ) as Page;
-    const list = page.listObject?.[0];
-    const main = page.textObject?.find((c) => c.containerID === ContainerId.Main);
-    const context = page.textObject?.find((c) => c.containerID === ContainerId.Context);
-
-    expect(page.containerTotalNum).toBe(6);
-    expect(list).toMatchObject({
-      xPosition: 0, yPosition: 32, width: 160, height: 256,
-      borderWidth: 1, borderColor: 15, isEventCapture: 1,
-    });
-    expect(list?.itemContainer).toMatchObject({ itemCount: 5 });
-    expect(main).toMatchObject({
-      xPosition: 164, yPosition: 32, width: 412, height: 128,
-      textColor: 2, content: 'Next\nDesign review · 4:30', isEventCapture: 0,
-    });
-    expect(context).toMatchObject({ xPosition: 164, width: 412, textColor: 1 });
-    expect(containers(page).filter((c) => c.isEventCapture === 1)).toHaveLength(1);
-  });
-
-  it('sidebar preserves every flat capability for native list scrolling', () => {
-    const items = [
-      'Messages', 'Calendar', 'Tasks', 'Navigation', 'Brainstorm',
-      'Notifications', 'QuickNotes', 'Agent Terminal', 'Activity',
-    ];
-    const page = builder.sidebarLayout(items) as Page;
-
-    expect(page.listObject?.[0]?.itemContainer).toMatchObject({
-      itemCount: items.length,
-      itemName: items,
-    });
   });
 
   it('confirmation is a dedicated full-screen decision surface with no list or button chrome', () => {

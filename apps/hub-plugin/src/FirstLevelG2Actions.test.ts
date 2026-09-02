@@ -7,6 +7,7 @@ import {
 import { CapabilityMenu } from './CapabilityMenu';
 import { EventRouter } from './EventRouter';
 import { Settings } from './Settings';
+import { CAPABILITIES, CAPABILITY_MENU_ID_BASE } from './types';
 import type { AudioStreamer } from './AudioStreamer';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPresenter } from './HudPresenter';
@@ -143,15 +144,15 @@ function scrollDown() {
   } as EvenHubEvent;
 }
 
-async function openAndScrollTo(
+async function openSettingsFromFirmwareMenu(
   harness: ReturnType<typeof rig>,
-  label: 'Settings',
 ): Promise<void> {
-  harness.fire(leftDoublePress());
-  await vi.waitFor(() => expect(harness.sidebars).toHaveLength(1));
-  const index = harness.sidebars[0]?.indexOf(label) ?? -1;
-  expect(index).toBeGreaterThanOrEqual(0);
-  for (let current = 0; current < index; current += 1) harness.fire(scrollDown());
+  // The wearer's menu is the firmware contextual menu; picking Settings
+  // arrives as its OS -> APP action item click event.
+  harness.fire({ menuItemClickEvent: {
+    itemID: CAPABILITY_MENU_ID_BASE + CAPABILITIES.indexOf('Settings'),
+  } } as EvenHubEvent);
+  await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
 }
 
 describe('wearer G2 actions through Settings', () => {
@@ -161,9 +162,7 @@ describe('wearer G2 actions through Settings', () => {
     sockets[0]?.open();
     sockets[0]?.receive({ kind: 'auth.accepted' });
 
-    await openAndScrollTo(harness, 'Settings');
-    harness.fire(rightPress());
-    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+    await openSettingsFromFirmwareMenu(harness);
     for (let index = 0; index < 3; index += 1) harness.fire(scrollDown());
     harness.fire(rightPress());
 
@@ -174,7 +173,6 @@ describe('wearer G2 actions through Settings', () => {
         event: { containerName: 'sysmenu', selectedIndex: 1 },
       }),
     ]));
-    expect(harness.sidebars).toHaveLength(1);
   });
 
   it('routes Reconnect from Settings through the real link recovery entry point', async () => {
@@ -183,9 +181,7 @@ describe('wearer G2 actions through Settings', () => {
     sockets[0]?.open();
     sockets[0]?.receive({ kind: 'auth.accepted' });
 
-    await openAndScrollTo(harness, 'Settings');
-    harness.fire(rightPress());
-    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+    await openSettingsFromFirmwareMenu(harness);
     for (let index = 0; index < 4; index += 1) harness.fire(scrollDown());
     harness.fire(rightPress());
 
@@ -196,15 +192,12 @@ describe('wearer G2 actions through Settings', () => {
     expect(harness.link.linkState).toBe('connecting');
     sockets[1]?.receive({ kind: 'auth.accepted' });
     expect(harness.link.linkState).toBe('connected');
-    expect(harness.sidebars).toHaveLength(1);
   });
 
-  it('opens the persisted listening Settings surface and returns to the sidebar on left-double', async () => {
+  it('opens the persisted listening Settings surface and returns Home on left-double', async () => {
     const harness = rig();
 
-    await openAndScrollTo(harness, 'Settings');
-    harness.fire(rightPress());
-    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+    await openSettingsFromFirmwareMenu(harness);
     expect(harness.lists[0]?.items.map((item) => item.replace('*', ' '))).toEqual([
       '  Resume mic: instantly',
       '  Resume mic: Mac decides',
@@ -217,17 +210,14 @@ describe('wearer G2 actions through Settings', () => {
     });
 
     harness.fire(leftDoublePress());
-    await vi.waitFor(() => expect(harness.sidebars).toHaveLength(2));
-    expect(harness.hud.showDefault).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(harness.hud.showDefault).toHaveBeenCalledTimes(1));
     expect(sockets).toEqual([]);
   });
 
   it('scrolls and applies the visibly highlighted Settings policy through EventRouter', async () => {
     const harness = rig();
 
-    await openAndScrollTo(harness, 'Settings');
-    harness.fire(rightPress());
-    await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
+    await openSettingsFromFirmwareMenu(harness);
 
     harness.fire(scrollDown());
     await vi.waitFor(() => expect(harness.hud.setSelection).toHaveBeenCalledWith(1));
