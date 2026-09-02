@@ -36,8 +36,8 @@ class FakeAgent:
             await self._gate.wait()
 
 
-def roster(**lanes: FakeAgent) -> AgentTerminalRoster:
-    return AgentTerminalRoster(list(lanes.items()))
+def roster(paint=None, **lanes: FakeAgent) -> AgentTerminalRoster:
+    return AgentTerminalRoster(list(lanes.items()), paint=paint)
 
 
 class TestRoster:
@@ -65,13 +65,43 @@ class TestRoster:
         assert "> rebuild the index" in tail       # input is part of history
         assert "build ok" in tail and "3 warnings" in tail
 
-    async def test_one_in_flight_turn_per_lane_is_refused_not_queued(self) -> None:
+    async def test_a_second_utterance_queues_and_lands_when_the_turn_settles(self) -> None:
+        """AGENT_TERMINAL_ROADMAP.md:32 — the wearer steers a RUNNING
+        session. Refusing while busy left cancel as the only verb; the
+        honest shape is a terminal's type-ahead: one queued line, newest
+        wins, landed the moment the turn settles, receipt saying so."""
         gate = asyncio.Event()
-        r = roster(hermes=FakeAgent(gate=gate))
+        agent = FakeAgent(gate=gate)
+        r = roster(hermes=agent)
         await r.send("first")
         await asyncio.sleep(0)
-        refusal = await r.send("second")
-        assert "still working" in refusal
+
+        receipt = await r.send("second")
+        assert "queued" in receipt
+        assert agent.prompts == ["first"], "it interleaved instead of queueing"
+
+        replaced = await r.send("third")
+        assert "replaces" in replaced
+
+        gate.set()
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if "third" in agent.prompts:
+                break
+        assert agent.prompts == ["first", "third"], "newest wins, once"
+
+    async def test_cancel_drops_the_queued_line(self) -> None:
+        """A line landing after a cancel is a surprise, not a service."""
+        gate = asyncio.Event()
+        agent = FakeAgent(gate=gate)
+        r = roster(hermes=agent)
+        await r.send("first")
+        await asyncio.sleep(0)
+        await r.send("second")
+        await r.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        assert agent.prompts == ["first"], "the queued line landed after cancel"
         gate.set()
 
     async def test_two_lanes_work_concurrently_and_focus_never_stops_work(self) -> None:
@@ -85,6 +115,32 @@ class TestRoster:
         assert "done" in r.tail("calendar")
         assert slow.prompts == ["long job"]  # still running, untouched
         gate.set()
+
+    async def test_a_background_lane_repaints_when_its_run_settles(self) -> None:
+        """The run→idle transition happens AFTER the last narrated line —
+        inside the task, lane.busy is still True, so the chip said "run"
+        through the narration and nothing fired at completion. The strip
+        showed stale state until the focused lane happened to speak."""
+        frames: list[object] = []
+
+        async def paint(frame: object) -> None:
+            frames.append(frame)
+
+        gate = asyncio.Event()
+        slow = FakeAgent(gate=gate)
+        r = roster(hermes=FakeAgent(["focused\n"]), calendar=slow, paint=paint)
+        await r.send("background job", "calendar")   # calendar, unfocused
+        await asyncio.sleep(0)
+        gate.set()
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if not r._lanes["calendar"].busy:
+                break
+        await asyncio.sleep(0.05)                    # the settle callback
+        assert frames, "the finish never repainted the strip"
+        last = frames[-1]
+        lanes = getattr(last, "lanes", [])
+        assert any("calendar" in row and "idle" in row for row in lanes), lanes
 
     async def test_cancel_is_honest_about_recovery(self) -> None:
         gate = asyncio.Event()

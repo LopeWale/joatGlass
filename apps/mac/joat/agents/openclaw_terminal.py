@@ -636,6 +636,53 @@ class OpenClawAgentTerminal:
             })
         return rows
 
+    async def history(self, limit: int = 12) -> list[tuple[str, str]]:
+        """The session's own recent (role, text) rows, oldest first.
+
+        The runtime's direct session API, not JOAT's in-process echo —
+        AGENT_TERMINAL_ROADMAP.md:113 requires "read bounded history", and
+        until this existed 'terminal tail' could only show what JOAT
+        itself had relayed, which for a freshly resumed session is
+        nothing. Malformed rows are skipped, never guessed at.
+        """
+        if not 1 <= limit <= 50:
+            raise ValueError("OpenClaw Agent Terminal history limit is invalid")
+        payload = _record(await self.connection.request(
+            "chat.history",
+            {"sessionKey": self.session_key},
+        ))
+        messages = payload.get("messages") if payload else None
+        if not isinstance(messages, list):
+            raise OpenClawGatewayError(
+                "OpenClaw returned invalid Agent Terminal history"
+            )
+        rows: list[tuple[str, str]] = []
+        for raw in messages:
+            message = _record(raw)
+            if message is None:
+                continue
+            role = message.get("role")
+            if not isinstance(role, str) or not role:
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    block = _record(item)
+                    if block is not None and block.get("type") == "text":
+                        piece = block.get("text")
+                        if isinstance(piece, str):
+                            parts.append(piece)
+                text = "".join(parts)
+            else:
+                continue
+            if not text.strip():
+                continue
+            rows.append((role, text.strip()))
+        return rows[-limit:]
+
     async def resolve_approval(
         self, approval_id: str, kind: str, decision: str
     ) -> str | None:

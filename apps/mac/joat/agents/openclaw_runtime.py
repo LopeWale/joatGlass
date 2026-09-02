@@ -464,6 +464,17 @@ class OpenClawTerminalAgent:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
             return await terminal.list_sessions(limit)
 
+    async def history(self, limit: int = 12) -> list[tuple[str, str]]:
+        """Bounded (role, text) rows from the session's own record."""
+        async with self._lock:
+            if self._closed:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            await self.initialize()
+            terminal = self._terminal
+            if terminal is None:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
+            return await terminal.history(limit)
+
     async def resolve_approval(
         self, approval_id: str, kind: str, decision: str
     ) -> str | None:

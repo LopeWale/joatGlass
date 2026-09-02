@@ -153,6 +153,11 @@ class TerminalLane:
     store (the runtime, not JOAT, owns full history)."""
     task: asyncio.Task[None] | None = None
     last_error: str = ""
+    #: One queued instruction, newest wins — a terminal's type-ahead.
+    #: Landed automatically when the in-flight turn settles; dropped by
+    #: 'terminal cancel', because a line landing after a cancel is a
+    #: surprise, not a service.
+    queued: str = ""
     approvals: list[tuple[str, str, str]] = field(default_factory=list)
     """Pending (id, kind, summary) — tool calls waiting on the wearer."""
 
@@ -364,14 +369,53 @@ class AgentTerminalRoster:
         if lane is None:
             return "No terminal session is focused."
         if lane.busy:
-            return (f"{lane.name} is still working — say 'terminal cancel' "
-                    "or wait for it to finish.")
+            # AGENT_TERMINAL_ROADMAP.md:32 — "speak ordinary instructions
+            # to steer the focused session". Refusing while a turn was in
+            # flight meant a running session could not be steered at all;
+            # the wearer's only verb was cancel. The runtime serializes
+            # turns, so the honest shape is a terminal's type-ahead: ONE
+            # queued line, newest wins, landed the moment the turn
+            # settles — and the receipt says which of those happened.
+            replaced = bool(lane.queued)
+            lane.queued = text
+            lane.tail.append(f"> {text} (queued)")
+            await self.repaint()
+            return (
+                f"{lane.name} ▸ queued — replaces the earlier queued line."
+                if replaced
+                else f"{lane.name} ▸ queued — lands when this turn finishes."
+            )
         lane.last_error = ""
         lane.tail.append(f"> {text}")
-        lane.task = asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             self._run_send(lane, text), name=f"terminal-{lane.name}"
         )
+        lane.task = task
+
+        def _schedule_settled(_task: asyncio.Task[None]) -> None:
+            asyncio.get_running_loop().create_task(self._lane_settled(lane))
+
+        task.add_done_callback(_schedule_settled)
         return f"{lane.name} ▸ sent."
+
+    async def _lane_settled(self, lane: TerminalLane) -> None:
+        """The run→idle / run→err transition, which nothing else can see.
+
+        The last _narrate of a turn executes INSIDE the still-running task,
+        where lane.busy is still True — so the strip's chip said "run"
+        through the narration and then nothing fired when the task actually
+        completed. A background lane therefore never repainted its own
+        finish, and "watch concurrent work" showed stale state until the
+        focused lane happened to speak. This runs after the task is done.
+        """
+        mark = self._mark(lane)
+        if self._marks.get(lane.name) != mark:
+            self._marks[lane.name] = mark
+            await self.repaint()
+        queued, lane.queued = lane.queued, ""
+        if queued and not lane.busy:
+            receipt = await self.send(queued, lane.name)
+            await self._narrate(lane, receipt)
 
     async def _run_send(self, lane: TerminalLane, text: str) -> None:
         pending = ""
@@ -514,6 +558,21 @@ class AgentTerminalRoster:
         lane.tail.clear()
         label = match.get("label") or match["key"]
         lane.tail.append(f"[resumed] {label}")
+        # The session's OWN recent history, from the runtime's direct API
+        # (AGENT_TERMINAL_ROADMAP.md:113) — not JOAT's in-process echo,
+        # which for a freshly resumed session is empty. Best-effort: a
+        # session with unreadable history is still resumed and steerable.
+        reader = getattr(lane.agent, "history", None)
+        if reader is not None:
+            try:
+                for role, text in await reader(10):
+                    prefix = "> " if role == "user" else ""
+                    first_line = text.split("\n", 1)[0][:200]
+                    lane.tail.append(f"{prefix}{first_line}")
+            except Exception as exc:
+                lane.tail.append(
+                    f"[history unavailable — {str(exc) or exc.__class__.__name__}]"
+                )
         self._focus = lane.name
         return f"{lane.name} ▸ resumed '{label}'. Speak to send into it."
 
@@ -612,6 +671,7 @@ class AgentTerminalRoster:
             return "No terminal session is focused."
         if not lane.busy or lane.task is None:
             return f"{lane.name} has nothing running."
+        lane.queued = ""
         lane.task.cancel()
         try:
             await lane.task
