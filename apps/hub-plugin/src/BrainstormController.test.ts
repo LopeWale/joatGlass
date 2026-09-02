@@ -191,3 +191,41 @@ describe('swipe ownership by state', () => {
     expect(sent).toHaveLength(1);
   });
 });
+
+
+describe('answering a blocked work session', () => {
+  // Both fields carry the lane's state, as main.ts builds it from the
+  // AgentTerminalHudView. `state: 'running'` would mean a BRAINSTORM is
+  // live behind this frame, in which case a tap returns to the room —
+  // a different, correct behaviour.
+  const terminal = (state: string) => ({
+    screen: 'agent_terminal', state, topic: 'work · ask1',
+    collaborators: [], activity: '> run the audit',
+    terminalState: state, noToolsChecked: true,
+  });
+
+  it('taps to approve and swipes to deny', () => {
+    const { controller, sent } = make();
+    controller.present(terminal('approval_required') as never);
+    expect(controller.handleClick()).toBe(true);
+    expect(controller.handleSwipe()).toBe(true);
+    expect(sent.map((m) => (m as { action: string }).action))
+      .toEqual(['approve_terminal', 'deny_terminal']);
+  });
+
+  it('still retries the daemon when the daemon is what is broken', () => {
+    // approval_required and unavailable are different problems. A tap used
+    // to send retry_terminal for BOTH, so the wearer retried a connection
+    // when what was waiting was a tool request.
+    const { controller, sent } = make();
+    controller.present(terminal('unavailable') as never);
+    expect(controller.handleClick()).toBe(true);
+    expect((sent[0] as { action: string }).action).toBe('retry_terminal');
+  });
+
+  it('does not claim a swipe on an ordinary terminal', () => {
+    const { controller } = make();
+    controller.present(terminal('ready') as never);
+    expect(controller.handleSwipe()).toBe(false);
+  });
+});

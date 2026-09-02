@@ -435,6 +435,12 @@ export function brainstormActionHint(
     // unavailable — different fields, and they disagree — and telling the
     // wearer to approve into a dead link is advice that cannot be followed,
     // which is the same defect as the "tap: retry Hermes" this replaced.
+    // The gestures answer the approval only when the LANE is the thing
+    // waiting. Ordering matters: a lane can hold a pending approval while
+    // the connection is dead, and there the tap still retries the daemon.
+    if (model.terminalState === 'approval_required') {
+      return 'tap: approve · swipe: deny · left x2: menu';
+    }
     if (model.terminalState === 'ready') {
       return 'say "terminal approve" or "terminal deny" · left x2: menu';
     }

@@ -132,3 +132,17 @@ describe('Agent Terminal action hints', () => {
     }
   });
 });
+
+describe('answering an approval by gesture', () => {
+  it('names the gestures when the lane itself is what is waiting', () => {
+    // The hint must always match the tap. A pending approval on a DEAD
+    // connection still taps to retry_terminal, so only the case where the
+    // lane can carry the answer may advertise approve/deny.
+    const waiting = terminal({
+      state: 'approval_required', terminalState: 'approval_required',
+    });
+    expect(brainstormActionHint(waiting)).toContain('tap: approve');
+    expect(brainstormActionHint(waiting)).toContain('swipe: deny');
+    expect(tapAction(waiting)).toBe('approve_terminal');
+  });
+});

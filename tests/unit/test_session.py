@@ -2287,3 +2287,54 @@ class TestRoundOneRunsConcurrently:
         transport = SinkTransport()
         await debate(transport, pair(broken, agent(["never"])), None).run()
         assert brainstorm_frames(transport)[-1].state == "blocked"
+
+
+class TestApprovalsAreAnsweredOnTheGlass:
+    """A work session blocked on a tool request is the decision in front of
+    the wearer, and the only way to answer it was to remember the words
+    "terminal approve". The tap they DID have sent `retry_terminal` —
+    retrying the daemon when what was waiting was a tool request.
+    """
+
+    def _manager(self):
+        answered: list[str] = []
+
+        async def decide(verdict: str) -> str:
+            answered.append(verdict)
+            return f"recorded {verdict}"
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            terminal_decide=decide,
+        )
+        return manager, answered
+
+    async def test_a_tap_approves(self) -> None:
+        manager, answered = self._manager()
+        manager.handle_brainstorm_action(BrainstormAction("approve_terminal"))
+        await asyncio.sleep(0)
+        assert answered == ["approve"]
+
+    async def test_a_swipe_denies(self) -> None:
+        manager, answered = self._manager()
+        manager.handle_brainstorm_action(BrainstormAction("deny_terminal"))
+        await asyncio.sleep(0)
+        assert answered == ["deny"]
+
+    async def test_answering_never_starts_or_cancels_a_session(self) -> None:
+        """The approval belongs to a work lane. It must not touch the
+        wearer's Brainstorm, which is a different feature entirely."""
+        started: list[str] = []
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda t: started.append(t) or None,
+            terminal_decide=lambda v: _noop(),
+        )
+        manager.handle_brainstorm_action(BrainstormAction("approve_terminal"))
+        await asyncio.sleep(0)
+        assert started == []
+        assert manager.active is False
+
+
+async def _noop() -> str:
+    return "recorded"
