@@ -317,7 +317,11 @@ Calendar/Planning, Messages, Notifications, Tasks, Navigation, QuickNotes,
 Brainstorm, Agent Terminal, Activity, Settings,
 microphone, and battery use one stroke family and are rasterized with the
 surrounding frame. Short text labels remain mandatory; icons never carry
-meaning alone.
+meaning alone — with one deliberate exception. The overview's tab rail is
+four icons without labels: four fixed positions in a fixed order, learned
+once, on a rail the wearer swipes through in seconds, and the tab's name
+appears in the status spine the moment it is expanded. A label per tab
+would cost the pane the width the rail exists to preserve.
 
 ### Motion
 

@@ -23,6 +23,8 @@ function rig(activeTab: PanelTab = 'notifications') {
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
   let listResult = true;
+  /** Runs while a paint is in flight — how a push lands mid-transition. */
+  let duringPaint: (() => void) | undefined;
   const hud = {
     rail,
     activeTab: () => rail.active(),
@@ -32,6 +34,9 @@ function rig(activeTab: PanelTab = 'notifications') {
     }),
     showList: vi.fn(async (items: string[], options?: Record<string, unknown>) => {
       lists.push({ items: [...items], options });
+      const hook = duringPaint;
+      duringPaint = undefined;
+      hook?.();
       return listResult;
     }),
     setSelection: vi.fn(async (index: number) => {
@@ -48,6 +53,7 @@ function rig(activeTab: PanelTab = 'notifications') {
     menu, rail, lists, steps, selections, sent,
     defaults: () => defaults,
     failNextList: () => { listResult = false; },
+    whilePainting: (hook: () => void) => { duringPaint = hook; },
   };
 }
 
@@ -186,6 +192,43 @@ describe('CapabilityMenu — the overview tab rail', () => {
     expect(selections[selections.length - 1]).toBe(1); // clamped from row 2
     // A push for a tab that is not on the glass is cache-only.
     expect(await menu.presentPanelContent('search')).toBe(false);
+  });
+
+  it('a push that lands while the page paints is painted, not paired with old rows', async () => {
+    const { menu, rail, lists, sent, whilePainting } = rig('news');
+    rail.accept(newsPush(7, ['[2m] Old · BBC']));
+    whilePainting(() => rail.accept(newsPush(8, ['[0m] New · NPR', '[2m] Old · BBC'])));
+    await menu.openPanelTab('news');
+    const page = lists[lists.length - 1]!;
+    expect(page.items).toEqual(['[0m] New · NPR', '[2m] Old · BBC']);
+    menu.handleClick();
+    const tap = sent.find((m) => (m.event as { containerName?: string }).containerName === 'capdata');
+    expect(tap?.event).toMatchObject({ requestId: 'panel-news-8', selectedIndex: 0 });
+  });
+
+  it('Back from an article lands on the rows the Mac pushed meanwhile, keeping the row', async () => {
+    const { menu, rail, lists, sent, selections } = rig('news');
+    rail.accept(newsPush(2, ['[2m] A · BBC', '[3m] B · BBC', '[4m] C · BBC']));
+    await menu.openPanelTab('news');
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick();
+    await menu.presentList('NEWS · ARTICLE', ['C', 'body'], 'panel-news-2', false, 'left x2: back');
+    // The poller pushes while the wearer reads: cached only, the reader stays.
+    rail.accept(newsPush(3, ['[0m] Fresh · NPR', '[3m] A · BBC']));
+    expect(await menu.presentPanelContent('news')).toBe(false);
+    expect(lists[lists.length - 1]?.options?.title).toBe('NEWS · ARTICLE');
+
+    await menu.toggle();
+    const back = lists[lists.length - 1]!;
+    expect(back.options).toMatchObject({ title: 'NEWS', railTab: 'news' });
+    expect(back.items).toEqual(['[0m] Fresh · NPR', '[3m] A · BBC']);
+    expect(selections[selections.length - 1]).toBe(1); // row 2 clamped to the new list
+    sent.length = 0;
+    menu.handleClick();
+    expect((sent[0]?.event as { requestId?: string }).requestId).toBe('panel-news-3');
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false);
   });
 
   it('a failed paint closes back to the overview instead of trapping input', async () => {

@@ -157,8 +157,12 @@ class PomodoroCommands:
         return None
 
 
+# "google" only as a verb with its preposition: bare "google …" swallowed
+# every sentence that merely began with the company's name ("Google Maps
+# is not working") and sent it to a search engine instead of to JOAT.
 _SEARCH = re.compile(
-    r"^(?:look up|search(?: the web)?(?: for)?|google|web search(?: for)?|find out about|what does the internet say about) (?P<query>.{2,120})$"
+    r"^(?:look up|search(?: the web)?(?: for)?|google (?:for|search for)|web search(?: for)?|"
+    r"find out about|what does the internet say about) (?P<query>.{2,120})$"
 )
 _SEARCH_OPEN_NTH = re.compile(rf"^(?:open|read)(?: me)? (?:the )?{_ORDINAL} (?:result|link|hit)$")
 _SEARCH_OPEN = re.compile(r"^(?:open|show)(?: me)? (?:the |my )?(?:search|search results|results)$")

@@ -34,7 +34,10 @@ struct NewsConfig: Codable, Equatable {
     var customFeeds: [String] = []
     var refreshMinutes: Int = 15
 
-    /// The engine clamps too; clamping here keeps the file honest.
+    /// The engine clamps too; clamping here keeps the file honest. One
+    /// rule is mirrored on purpose: nothing selected and no feed of your
+    /// own is the DEFAULT set, not an empty tab — the engine substitutes
+    /// the defaults for that file, so the app must show what it will do.
     var normalized: NewsConfig {
         var copy = self
         let known = Set(NewsConfig.categories.map(\.id))
@@ -42,6 +45,9 @@ struct NewsConfig: Codable, Equatable {
         copy.customFeeds = customFeeds
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.hasPrefix("https://") || $0.hasPrefix("http://") }
+        if copy.categories.isEmpty && copy.customFeeds.isEmpty {
+            copy.categories = NewsConfig.defaultCategories
+        }
         copy.refreshMinutes = min(
             NewsConfig.maximumRefreshMinutes,
             max(NewsConfig.minimumRefreshMinutes, refreshMinutes)

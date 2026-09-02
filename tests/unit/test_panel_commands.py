@@ -148,8 +148,11 @@ class TestSearch:
         assert queries == ["Even Realities G2"]
         assert reply == "For Even Realities G2, 1. Result One, one.example: About one."
         assert activated(transport) == ["search"]
-        assert await commands.handle_command("google the weather in Lagos") is not None
+        assert await commands.handle_command("google for the weather in Lagos") is not None
         assert queries[-1] == "the weather in Lagos"
+        # The company's name is not a verb: this sentence is for JOAT, not a
+        # search engine (it used to become a query for "maps is not working").
+        assert await commands.handle_command("Google Maps is not working") is None
 
     async def test_open_the_first_result_reads_the_page(self, rig) -> None:
         commands, transport, _ = rig

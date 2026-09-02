@@ -18,9 +18,7 @@ Two rules keep the glasses fast:
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 from typing import Protocol
 
@@ -75,6 +73,10 @@ class Reader:
     metadata: str
     pages: tuple[str, ...]
     index: int = 0
+    #: The tab revision this reader was opened under. A background refresh
+    #: bumps the tab's revision without closing the reader, so its page
+    #: requests keep echoing THIS one and are answered, not refused.
+    revision: int = 0
 
 
 def paginate(text: str, page_characters: int = READER_PAGE_CHARACTERS) -> tuple[str, ...]:
@@ -222,7 +224,7 @@ class PanelPublisher:
             return
         state = self._tabs[tab]
         reader = state.reader
-        if reader is None or parse_panel_request_id(request_id) != (tab, state.revision):
+        if reader is None or parse_panel_request_id(request_id) != (tab, reader.revision):
             return
         if event_type == EventType.SCROLL_TOP and reader.index > 0:
             reader.index -= 1
@@ -249,6 +251,7 @@ class PanelPublisher:
             # snapshot is the receipt.
             await self.publish(tab)
             return None
+        reader.revision = state.revision
         state.reader = reader
         await self._send_reader(tab, reader)
         return reader
@@ -263,7 +266,9 @@ class PanelPublisher:
             items=[metadata[:64], *_chunks(page)],
             title=reader.title,
             hint=reader_hint(reader.index, total),
-            request_id=self.request_id(tab),
+            # The plugin matches this against the id it opened the reader
+            # under; a refresh since then must not orphan the page.
+            request_id=panel_request_id(tab, reader.revision),
             selectable=False,
         ))
 
@@ -292,19 +297,6 @@ def _chunks(text: str) -> list[str]:
     return chunks[:19] or ["No text is available for this page."]
 
 
-#: The signature a periodic provider's publish hook has.
-PublishHook = Callable[[], Awaitable[None]]
-
-
-async def run_publisher(hook: PublishHook) -> None:
-    """Await a publish hook, containing failures: a poller must outlive a
-    transport hiccup."""
-    try:
-        await hook()
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        log.warning("panel publish failed", exc_info=True)
 
 
 __all__ = [
@@ -315,8 +307,4 @@ __all__ = [
     "Reader",
     "paginate",
     "reader_hint",
-    "run_publisher",
 ]
-
-# Keep `field` referenced for slots dataclasses that grow defaults later.
-_ = field
