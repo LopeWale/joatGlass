@@ -1171,3 +1171,41 @@ class TestAReplyReachesHermesForReal:
             roster, last_reply=lambda who: snapshot.snapshot.last_reply(who))
         answer = await commands.route_reply("claude", None)
         assert "No reply from Claude" in answer
+
+
+class TestTheTerminalVocabularies:
+    """Routing and switching, phrased the way people say them out loud."""
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        import re
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+    def test_routing_hears_more_than_send(self) -> None:
+        from joat.services.agent_terminal import parse_reply_route
+
+        for said in ("send that to hermes", "give that to hermes",
+                     "pass that to hermes", "hand that to hermes",
+                     "push that to hermes", "forward that to hermes",
+                     "send Claude's last reply to hermes"):
+            assert parse_reply_route(self._norm(said)), said
+
+    def test_switching_hears_the_surface_named_either_way(self) -> None:
+        from joat.services.agent_terminal import _SWITCH
+
+        for said, lane in (("switch terminal to work", "work"),
+                           ("go to the work terminal", "work"),
+                           ("open the calendar terminal", "calendar")):
+            m = _SWITCH.match(self._norm(said))
+            assert m is not None, said
+            assert (m.group("name") or m.group("named")).strip() == lane
+
+    def test_the_word_terminal_is_still_required(self) -> None:
+        """An optional prefix once let a plain "switch to decaf" get claimed
+        by this grammar — hijacked from the assistant and answered with a
+        terminal error."""
+        from joat.services.agent_terminal import _SWITCH
+
+        for said in ("switch to decaf", "switch to work", "go to bed",
+                     "open the door"):
+            assert _SWITCH.match(self._norm(said)) is None, said

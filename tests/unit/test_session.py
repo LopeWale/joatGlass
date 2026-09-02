@@ -2745,3 +2745,57 @@ class TestTheEscapeHatchHearsRealEndings:
                      "we are done with the first round but not the session",
                      "the abort path is broken"):
             assert not await self._cancels(said), said
+
+
+class TestTheInstructionVocabularies:
+    """Audited against phrasings people reach for, not the ones listed
+    first. Every spoken vocabulary in this feature had the same defect —
+    the opener, the steering, the routing, the escape hatch, and these.
+
+    The failure mode is silence: an unrecognised instruction becomes an
+    ordinary YOU turn, so the wearer's request is filed as a remark instead
+    of executed, with nothing on the glass saying so.
+    """
+
+    def test_the_verb_layer_hears_ordinary_edits(self) -> None:
+        from joat.services.session import _MATERIAL_VERB
+
+        for said in ("make that shorter", "rewrite that as bullets",
+                     "summarise that", "turn that into a spec",
+                     "explain the last reply", "tighten that up",
+                     "fix the grammar in that", "clean that up",
+                     "polish that", "put that in plain english",
+                     "give me the gist of that"):
+            assert _MATERIAL_VERB.match(said), said
+
+    def test_the_verb_layer_still_ignores_remarks(self) -> None:
+        from joat.services.session import _MATERIAL_VERB
+
+        for said in ("that seems short", "I think that is wrong",
+                     "the cache is the wrong layer", "make me a sandwich"):
+            assert not _MATERIAL_VERB.match(said), said
+
+    def test_saving_hears_ordinary_phrasings(self) -> None:
+        import re
+
+        from joat.services.session import _SAVE_REPLY
+
+        def norm(t: str) -> str:
+            return " ".join(re.sub(r"[^a-z0-9]+", " ", t.lower()).split())
+
+        for said in ("note that", "save that", "keep that", "remember that",
+                     "write that down", "jot that down", "record that",
+                     "add that to my notes", "save Claude's last reply"):
+            assert _SAVE_REPLY.match(norm(said)), said
+
+    def test_saving_ignores_ordinary_speech(self) -> None:
+        import re
+
+        from joat.services.session import _SAVE_REPLY
+
+        def norm(t: str) -> str:
+            return " ".join(re.sub(r"[^a-z0-9]+", " ", t.lower()).split())
+
+        for said in ("write the tests first", "add a cache layer",
+                     "note the difference between them", "keep going"):
+            assert not _SAVE_REPLY.match(norm(said)), said

@@ -66,7 +66,15 @@ _MATERIAL_VERB = re.compile(
     r"^(?P<instruction>"
     r"(?:make|turn|rewrite|reword|shorten|trim|summarise|summarize|expand|"
     r"elaborate|explain|simplify|clarify|translate|convert|tighten|"
-    r"compare|extract|list|outline|draft|title|name|critique|check)"
+    r"compare|extract|list|outline|draft|title|name|critique|check|"
+    # Audited against phrasings people reach for, not the ones listed
+    # first: "clean that up", "polish that", "fix the grammar in that",
+    # "put that in plain english" and "give me the gist of that" were all
+    # silently unrecognised, and an unrecognised instruction here becomes
+    # an ordinary YOU turn — the wearer's request quietly filed as a
+    # remark instead of executed.
+    r"fix|clean|polish|tidy|put|give|show|read|repeat|shorten|lengthen|"
+    r"bullet|number|rank|group|sort|caption|quote)"
     r"\b.*?"
     r"\b(?:that|it|this|the\s+(?:last\s+|latest\s+)?"
     r"(?:reply|answer|response|message|point|turn))"
@@ -95,7 +103,10 @@ from .agent_terminal import parse_reply_route
 # ("note that the cache is stale") still lands as a YOU turn — only the
 # closed phrasings below are claimed as actions.
 _SAVE_REPLY = re.compile(
-    r"^(?:save|note|keep) (?:the )?"
+    # Bare verbs: the material sits BETWEEN the verb and any particle —
+    # "write that down", not "write down that" — and the optional " down"
+    # suffix below already absorbs the tail.
+    r"^(?:save|note|keep|remember|record|log|write|jot|add) (?:the )?"
     r"(?:(?P<who>codex|claude)(?: ?s)? )?"
     r"(?:last |latest )?(?:reply|response|answer|that|this|it)"
     r"(?: down| as a note| to (?:my )?notes)?$"

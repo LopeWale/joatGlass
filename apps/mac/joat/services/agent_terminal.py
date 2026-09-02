@@ -627,8 +627,14 @@ class AgentTerminalRoster:
 _RESUME = re.compile(r"^terminal resume (?P<name>[a-z0-9 ]+)$")
 _DECIDE = re.compile(r"^terminal (?P<decision>approve|deny|reject)(?: (?P<index>\d{1,2}))?$")
 _SWITCH = re.compile(
+    # The word "terminal" stays REQUIRED in every phrasing. An optional
+    # prefix here once let a plain "switch to decaf" get claimed by this
+    # grammar — hijacked from the assistant and answered with a terminal
+    # error. "go to the work terminal" is safe because it names the
+    # surface; "switch to work" deliberately is not.
     r"^(?:terminal switch to|switch terminal to|switch the terminal to)"
     r" (?P<name>[a-z0-9 ]+)$"
+    r"|^(?:go to|open|show) (?:the )?(?P<named>[a-z0-9 ]+?) terminal$"
 )
 
 # Cross-surface routing: JOAT is the glue between Brainstorm and this
@@ -639,7 +645,9 @@ _SWITCH = re.compile(
 # it". Matched against the normalized transcript, where "Claude's"
 # arrives as "claude s".
 _ROUTE_REPLY = re.compile(
-    r"^send (?:the )?(?:(?P<who>codex|claude)(?: ?s)? )?"
+    # "give/pass/hand/push that to hermes" are how people say this out
+    # loud; only "send" was recognised.
+    r"^(?:send|give|pass|hand|push|forward|route) (?:the )?(?:(?P<who>codex|claude)(?: ?s)? )?"
     r"(?:last |latest )?(?:reply|response|answer|message|that)"
     r"(?: to (?:the )?(?P<lane>[a-z0-9 ]+?))?$"
 )
@@ -762,7 +770,9 @@ class AgentTerminalCommands:
             return self._roster.overview()
         m = _SWITCH.match(said)
         if m is not None:
-            name = m.group("name").strip()
+            # Two alternations, two groups: "switch terminal to work" and
+            # "go to the work terminal" name the lane in different places.
+            name = (m.group("name") or m.group("named") or "").strip()
             if self._roster.focus(name):
                 return f"Focused on {self._roster.focused}."
             return f"No terminal session called {name}. " + self._roster.overview()
