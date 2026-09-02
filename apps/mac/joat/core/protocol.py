@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import IntEnum
 import math
+import re
 from typing import Any, Literal
 from uuid import UUID
 
@@ -1056,6 +1057,109 @@ class HudAmbient:
         }
 
 
+#: The tabs whose content the Mac pushes. Rail order on the glass is
+#: notifications, news, pomodoro, search; notifications is not a push because
+#: that tab reads the overview's own Main/Context/Tray streams.
+#: Plugin counterpart: PANEL_TABS in apps/hub-plugin/src/types.ts.
+PANEL_TABS: tuple[str, ...] = ("news", "pomodoro", "search")
+POMODORO_PHASES = frozenset({"idle", "focus", "break", "long_break"})
+#: SDK caps carried over from HudList: a panel is a list the plugin caches.
+PANEL_ROW_LIMIT = 20
+PANEL_ROW_CHARACTERS = 64
+_PANEL_REQUEST_ID = re.compile(r"^panel-(news|pomodoro|search)-(\d{1,9})$")
+
+
+def panel_request_id(tab: str, revision: int) -> str:
+    """The id a panel row tap echoes: which tab, and which content revision.
+
+    A tap that arrives after a refresh carries the OLD revision and is
+    dropped rather than opening whatever now sits at that row.
+    """
+    return f"panel-{tab}-{revision}"
+
+
+def parse_panel_request_id(request_id: str | None) -> tuple[str, int] | None:
+    match = _PANEL_REQUEST_ID.match(request_id or "")
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
+
+
+@dataclass(frozen=True, slots=True)
+class HudPanelPomodoro:
+    """The timer as the Mac knows it; the plugin counts down locally."""
+
+    phase: str
+    running: bool
+    remaining_ms: int
+    length_ms: int
+    completed: int
+    ends_at_unix_ms: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.phase not in POMODORO_PHASES:
+            raise ProtocolError(f"unknown pomodoro phase {self.phase!r}")
+        if not 0 <= self.remaining_ms <= self.length_ms <= 24 * 3_600_000:
+            raise ProtocolError("pomodoro remaining/length out of range")
+        if not 0 <= self.completed <= 4:
+            raise ProtocolError("pomodoro completed count out of range")
+        wire: dict[str, Any] = {
+            "phase": self.phase,
+            "running": self.running,
+            "remainingMs": self.remaining_ms,
+            "lengthMs": self.length_ms,
+            "completed": self.completed,
+        }
+        if self.ends_at_unix_ms is not None:
+            if self.ends_at_unix_ms < 0:
+                raise ProtocolError("pomodoro end instant is negative")
+            wire["endsAtUnixMs"] = self.ends_at_unix_ms
+        return wire
+
+
+@dataclass(frozen=True, slots=True)
+class HudPanel:
+    """One tab of the overview's right panel, pushed proactively.
+
+    Like HudAmbient this carries no request id of its own: the plugin caches
+    the newest push per tab so a swipe between tabs never waits on the Mac.
+    `revision` is what a later row tap echoes (panel_request_id), so a tap on
+    stale rows is refused instead of opening the wrong story.
+    """
+
+    tab: str
+    revision: int
+    rows: tuple[str, ...] = ()
+    headline: str | None = None
+    empty: str | None = None
+    pomodoro: HudPanelPomodoro | None = None
+    #: A voice-initiated open: the plugin switches to and expands this tab.
+    activate: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.tab not in PANEL_TABS:
+            raise ProtocolError(f"unknown panel tab {self.tab!r}")
+        if not 0 <= self.revision <= 999_999_999:
+            raise ProtocolError("panel revision out of range")
+        wire: dict[str, Any] = {
+            "kind": "hud.panel",
+            "tab": self.tab,
+            "revision": self.revision,
+            "rows": [
+                row[:PANEL_ROW_CHARACTERS] for row in self.rows[:PANEL_ROW_LIMIT]
+            ],
+        }
+        if self.headline is not None:
+            wire["headline"] = self.headline[:PANEL_ROW_CHARACTERS]
+        if self.empty is not None:
+            wire["empty"] = self.empty[:PANEL_ROW_CHARACTERS]
+        if self.pomodoro is not None:
+            wire["pomodoro"] = self.pomodoro.to_wire()
+        if self.activate:
+            wire["activate"] = True
+        return wire
+
+
 @dataclass(frozen=True, slots=True)
 class NavigationMapPanel:
     """Street surroundings for the guidance HUD, as prepared pixels.
@@ -1185,6 +1289,7 @@ DownlinkMessage = (
     | NavigationRoute
     | NavigationMapPanel
     | HudAmbient
+    | HudPanel
     | NavigationStop
     | ConfirmRequest
     | PolicySet
