@@ -36,6 +36,7 @@ describe('MacG2DiagnosticTrace', () => {
 
     expect(() => trace.record({
       type: 'tile_upload', frame: 1, order: 0, containerId: 4, outcome: 'success',
+      durationMs: 700, bytes: 4096,
     })).not.toThrow();
   });
 

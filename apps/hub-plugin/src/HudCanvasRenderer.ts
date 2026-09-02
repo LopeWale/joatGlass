@@ -310,6 +310,21 @@ export function hudDateLabel(now: Date): string {
 
 /** Measured from the selected 576×288 reference panels. Keeping the major
  * anchors together makes visual drift obvious in review and in tests. */
+/**
+ * Where the spine's voice chrome sits. Everything here must END west of the
+ * tile seam at x=288: the four 288x144 G2 image tiles are the unit of BLE
+ * cost (0.5-2 s each), and this row is the one that changes on every voice
+ * turn. The clock or date at x=30 ends by ~85 ("Wed 12/31" at 12px); the
+ * state word takes the middle; the microphone closes the row at ~271. The
+ * battery, which changes on its own slow clock, keeps the top-right tile.
+ */
+export const SPINE_VOICE_CHROME = {
+  labelX: 92,
+  labelMaxWidth: 134,
+  micIconX: 236,
+  micLabelX: 254,
+} as const;
+
 export const HUD_VISUAL_GEOMETRY = {
   statusBaselineY: 20,
   statusDividerY: 35.5,
@@ -1725,18 +1740,35 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       30,
       HUD_VISUAL_GEOMETRY.statusBaselineY,
     );
-    context.textAlign = 'center';
+    // ── The voice chrome lives in ONE tile ──────────────────────────────
+    // The state word and the microphone sit with the clock, west of the
+    // tile seam at x=288, so "listening" → "hearing you…" → a reply costs
+    // one 288x144 image write per change instead of two. They used to
+    // straddle it — the word centred ON x=288, the microphone at x=410 —
+    // so every word the Mac said about a voice turn shipped both top tiles
+    // over BLE, at 0.5-2 s a tile: the slowest thing the wearer could
+    // watch. The battery, on its own slow clock, keeps the top-right tile.
+    context.textAlign = 'left';
     context.font = `10px ${HUD_FONT}`;
     // A degraded link outranks navigation: if JOAT is not READY the wearer
     // must see that, whatever page they are standing on.
     const spineLabel = pageTitle && status.state.endsWith('READY')
       ? pageTitle.toUpperCase()
       : status.state;
-    this.fitText(context, spineLabel, 288, HUD_VISUAL_GEOMETRY.statusBaselineY, 300);
+    this.fitText(
+      context,
+      spineLabel,
+      SPINE_VOICE_CHROME.labelX,
+      HUD_VISUAL_GEOMETRY.statusBaselineY,
+      SPINE_VOICE_CHROME.labelMaxWidth,
+    );
 
-    this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
-    context.textAlign = 'left';
-    context.fillText(micOn ? 'ON' : 'OFF', 428, HUD_VISUAL_GEOMETRY.statusBaselineY);
+    this.drawIcon(
+      context, icons.microphone, SPINE_VOICE_CHROME.micIconX, 12, 15, micOn ? SUPPORT : QUIET,
+    );
+    context.fillText(
+      micOn ? 'ON' : 'OFF', SPINE_VOICE_CHROME.micLabelX, HUD_VISUAL_GEOMETRY.statusBaselineY,
+    );
     if (status.battery) {
       context.textAlign = 'right';
       context.fillText(`${status.battery}%`, 531, HUD_VISUAL_GEOMETRY.statusBaselineY);
@@ -1919,7 +1951,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(QUIET);
       context.font = `9px ${HUD_FONT}`;
       context.textAlign = 'center';
-      context.fillText(overview.hint, 288, 267);
+      context.fillText(frame.rail ? PANEL_OVERVIEW_HINT : overview.hint, 288, 267);
       context.restore();
       return;
     }
@@ -2005,8 +2037,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
     context.textAlign = 'center';
+    // One footer for every resting tab. The hint is centred on the tile
+    // seam, so a footer that differed between the notifications tab and
+    // the other three made a swipe repaint the bottom-left tile as well —
+    // three image writes where the rail and the pane need two.
     context.fillText(
-      frame.mainKind === 'notification' ? NOTIFICATION_DISMISS_HINT : frame.hint,
+      frame.mainKind === 'notification'
+        ? NOTIFICATION_DISMISS_HINT
+        : frame.rail ? PANEL_OVERVIEW_HINT : frame.hint,
       288,
       267,
     );

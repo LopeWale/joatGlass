@@ -1600,8 +1600,13 @@ def _trace_cadence_bucket(value: Any) -> str:
     return "gt30s"
 
 
-def _trace_shape(payload: dict[str, Any], expected: set[str]) -> None:
-    if set(payload) != expected:
+def _trace_shape(
+    payload: dict[str, Any],
+    expected: set[str],
+    optional: frozenset[str] = frozenset(),
+) -> None:
+    present = set(payload)
+    if not expected <= present or not present <= expected | optional:
         raise ProtocolError("g2 diagnostic has unsupported fields")
 
 
@@ -1635,14 +1640,31 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "delivery": _trace_enum(event["delivery"], "delivery", ("sys", "text", "list", "menu")),
         }
     if event_type == "tile_upload":
-        _trace_shape(event, {"type", "frame", "order", "containerId", "outcome"})
-        return {
+        _trace_shape(
+            event,
+            {"type", "frame", "order", "containerId", "outcome"},
+            optional=frozenset({"durationMs", "bytes"}),
+        )
+        tile_upload: dict[str, str | int] = {
             "type": "tile_upload",
             "frame": _trace_int(event["frame"], "frame", minimum=1, maximum=2_147_483_647),
             "order": _trace_int(event["order"], "order", minimum=0, maximum=3),
             "containerId": _trace_tile_container(event["containerId"]),
             "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed", "error")),
         }
+        # Plugin 0.1.72+: the bridge round trip and the encoded size of each
+        # tile — the numbers that say whether the HUD is slow on the phone
+        # or on the BLE hop. Sizes and durations only, never pixels; older
+        # plugins simply omit them.
+        if "durationMs" in event:
+            tile_upload["durationMs"] = _trace_int(
+                event["durationMs"], "durationMs", minimum=0, maximum=3_600_000,
+            )
+        if "bytes" in event:
+            tile_upload["bytes"] = _trace_int(
+                event["bytes"], "bytes", minimum=0, maximum=16_777_216,
+            )
+        return tile_upload
     if event_type == "hud_surface":
         _trace_shape(event, {"type", "stage", "surface", "outcome"})
         return {
