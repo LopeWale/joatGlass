@@ -538,9 +538,14 @@ class CapabilityRouter:
         # now, so these are real rows on the same selectable surface every
         # other data view uses — no new frame, no new gesture to learn.
         history = self._brainstorm_sessions() if self._brainstorm_sessions else []
-        recap = self._brainstorm_recap() if self._brainstorm_recap else None
-        rows = recap.rows() if recap is not None else []
-        if not rows and history:
+        if history:
+            # The picker, WHENEVER idle — docs/SESSION_MODEL.md:47 has no
+            # other condition. This was gated on the in-process recap
+            # having zero rows, so the moment any session closed in this
+            # process the idle view became that session's dead text and
+            # the picker was unreachable until a restart. The last session
+            # is not lost: it is the top row, and tapping it reopens the
+            # real conversation instead of a snapshot.
             self._brainstorm_rows = list(history)
             await self._show_focus(
                 "BRAINSTORM",
@@ -549,6 +554,8 @@ class CapabilityRouter:
                 selectable=True,
             )
             return
+        recap = self._brainstorm_recap() if self._brainstorm_recap else None
+        rows = recap.rows() if recap is not None else []
         if not rows and self._brainstorm_recent is not None:
             past = self._brainstorm_recent(4)
             if past:

@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from joat.core.interfaces import GlassesTransport, ReplyEngine
-from joat.core.protocol import AgentTerminalHudView, BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
+from joat.core.protocol import AgentTerminalHudView, AssistantOverlay, BrainstormAction, BrainstormHudView, ContainerId, DownlinkMessage, HudText
 from joat.channels.cards import Card, CardLog, Urgency
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
@@ -2915,6 +2915,107 @@ class TestTheInstructionVocabularies:
         for said in ("write the tests first", "add a cache layer",
                      "note the difference between them", "keep going"):
             assert not _SAVE_REPLY.match(norm(said)), said
+
+
+class TestContinueAsksOnAmbiguity:
+    """docs/SESSION_MODEL.md:49 — "continue <title> → Resume the matching
+    durable session; ASK on ambiguity." find() silently took the newest
+    match, so two sessions titled around "caching" meant the wearer could
+    never reach the older one by voice — and never learned it existed.
+    """
+
+    class Past:
+        def __init__(self, sid: str, topic: str) -> None:
+            self.session_id, self.topic = sid, topic
+            self.turns = (("CODEX", "said"),)
+            self.parent_id = ""
+            self.root_id = sid
+            self.title = topic
+
+        def age(self) -> str:
+            return "2h ago"
+
+    class History:
+        def __init__(self, matches):
+            self._matches = matches
+            self.loaded: list[str] = []
+
+        def find_all(self, spoken: str):
+            return list(self._matches)
+
+        def load(self, session_id: str):
+            self.loaded.append(session_id)
+            return next(
+                (p for p in self._matches if p.session_id == session_id), None
+            )
+
+    def _manager(self, matches):
+        started: list[str] = []
+
+        def continuation(topic, prior):
+            started.append(topic)
+
+            class Live(Session):
+                async def run(self) -> None:
+                    await asyncio.sleep(0)
+
+                def cancel(self) -> None: ...
+
+                def consume_transcript(self, text: str) -> bool:
+                    return True
+
+                def direct(self, text: str) -> str | None:
+                    return None
+
+            return Live()
+
+        history = self.History(matches)
+        transport = SinkTransport()
+        manager = SessionManager(
+            HudWriter(transport), lambda t: None,
+            history=history, continuation_factory=continuation,
+            brainstorm_available=lambda: True,
+        )
+        return manager, history, started, transport
+
+    async def test_one_match_resumes_without_a_question(self) -> None:
+        manager, _h, started, _t = self._manager(
+            [self.Past("aaa", "cold-start latency")]
+        )
+        assert manager.handle_transcript("continue cold start")
+        await asyncio.sleep(0.05)
+        assert started == ["cold-start latency"]
+        await manager.close()
+
+    async def test_two_matches_ask_and_the_answer_opens_the_right_one(self) -> None:
+        manager, history, started, transport = self._manager([
+            self.Past("aaa", "caching the model"),
+            self.Past("bbb", "caching build artifacts"),
+        ])
+        assert manager.handle_transcript("continue caching")
+        await asyncio.sleep(0.05)
+        assert started == [], "it guessed instead of asking"
+        asked = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
+        assert asked and "2 sessions match" in (asked[-1].text or "")
+
+        assert manager.handle_transcript("JOAT, second", addressed="second")
+        await asyncio.sleep(0.05)
+        assert history.loaded == ["bbb"]
+        assert started == ["caching build artifacts"]
+        await manager.close()
+
+    async def test_an_unaddressed_answer_does_not_choose(self) -> None:
+        manager, history, started, _t = self._manager([
+            self.Past("aaa", "caching the model"),
+            self.Past("bbb", "caching build artifacts"),
+        ])
+        assert manager.handle_transcript("continue caching")
+        await asyncio.sleep(0.05)
+        assert manager.handle_transcript("second", addressed=None) is False
+        await asyncio.sleep(0.05)
+        assert history.loaded == []
+        assert started == []
+        await manager.close()
 
 
 class TestTheDurableRecordCarriesRealIdentity:

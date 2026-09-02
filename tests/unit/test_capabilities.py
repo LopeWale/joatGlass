@@ -439,6 +439,7 @@ def make_router(
     voice_capture=None,
     actions=None,
     acceptance_armed=False,
+    brainstorm_recap=None,
     brainstorm_replay=None,
     brainstorm_sessions=None,
     brainstorm_continue=None,
@@ -465,6 +466,7 @@ def make_router(
         voice_capture=voice_capture,
         actions=actions,
         acceptance_armed=acceptance_armed,
+        brainstorm_recap=brainstorm_recap,
         brainstorm_replay=brainstorm_replay,
         brainstorm_sessions=brainstorm_sessions,
         brainstorm_continue=brainstorm_continue,
@@ -1702,6 +1704,33 @@ class TestTheSessionPicker:
         assert "cold-start latency" in items[1]
         assert "2 turns" in items[2]
         assert lists[-1].to_wire()["selectable"] is True
+
+    async def test_the_picker_survives_a_session_closing_in_process(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The audit's BSI-03: the picker was gated on the in-process recap
+        having ZERO rows, so the moment any session closed in this process
+        the idle view became that session's dead text and the picker was
+        unreachable until a restart. Idle means picker, unconditionally —
+        docs/SESSION_MODEL.md:47 has no other clause."""
+        rows = self._rows()
+
+        class Recap:
+            topic = "tabs or spaces"
+            speakers = ("codex", "claude")
+
+            def rows(self, *a: object, **k: object) -> list[str]:
+                return ["CLAUDE — y", "JOAT — z"]   # a session HAS closed
+
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows,
+            brainstorm_recap=lambda: Recap())
+        await router.open("Brainstorm")
+
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert lists, "the recap text hid the picker"
+        items = lists[-1].to_wire()["items"]
+        assert items[0] == "+ New brainstorm"
 
     async def test_tapping_a_row_opens_that_session(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         rows = self._rows()
