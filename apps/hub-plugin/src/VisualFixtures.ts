@@ -1,6 +1,12 @@
 import type { HudPresenter } from './HudPresenter';
 import type { ImuMonitor } from './ImuMonitor';
-import { CANVAS, ContainerId, type BrainstormHudModel } from './types';
+import {
+  CANVAS,
+  ContainerId,
+  type BrainstormHudModel,
+  type PanelContentTab,
+} from './types';
+import type { HudPanelMessage } from './PanelRail';
 import type {
   HudFramePainter,
   HudFrameRenderer,
@@ -444,4 +450,108 @@ export async function runVisualConfirmationFixture(
   if (visible) imu.activate(VISUAL_CONFIRMATION_ID, 8000);
   else imu.cancel(VISUAL_CONFIRMATION_ID);
   return visible;
+}
+
+// ── The overview's tab rail ──────────────────────────────────────────────
+
+/** Development-only lenses for the panel tabs: each resting tab, each
+ * expanded tab, and an opened article. Every string here is shaped by the
+ * REAL producer — `Headline.row`, `SearchResult.row`, `HudPanelPomodoro`
+ * and `PanelPublisher._send_reader` in apps/mac/joat/services — so the
+ * simulator proves a screen the Mac actually sends, not an invented one. */
+export const PANEL_VISUAL_STATES = [
+  'panel-news',
+  'panel-pomodoro',
+  'panel-search',
+  'panel-news-expanded',
+  'panel-pomodoro-expanded',
+  'panel-search-expanded',
+  'panel-article',
+] as const;
+
+export type PanelVisualState = (typeof PANEL_VISUAL_STATES)[number];
+
+export function isPanelVisualState(value: string | null): value is PanelVisualState {
+  return PANEL_VISUAL_STATES.some((state) => state === value);
+}
+
+export function panelVisualTab(state: PanelVisualState): PanelContentTab {
+  if (state.startsWith('panel-pomodoro')) return 'pomodoro';
+  if (state.startsWith('panel-search')) return 'search';
+  return 'news';
+}
+
+/** The three pushes a connected Mac would have made, content-free. News
+ * rows follow "[age] title · source" within HudList's 64-character cap;
+ * twelve of them, so the expanded page shows its scrollbar. */
+export function panelVisualPushes(nowMs = Date.now()): HudPanelMessage[] {
+  const focusLeftMs = 14 * 60_000 + 37_000;
+  return [
+    {
+      kind: 'hud.panel',
+      tab: 'news',
+      revision: 1,
+      rows: [
+        '[12m] Consumer sentiment rises to 48.9 after four months… · BBC',
+        '[25m] Apple announces price rises on MacBooks and iPads · NPR',
+        '[1h] NASA telescope finds clues to ancient comets · Reuters',
+        '[2h] Rates held as inflation cools for a third month · BBC',
+        '[3h] Rover lands in Jezero crater after seven months · NPR',
+        '[4h] Council approves the riverfront transit plan · Guardian',
+        '[5h] Chip makers report record quarter on AI demand · Reuters',
+        '[6h] Storm season opens with two named systems at sea · NPR',
+        '[7h] Startup unveils a foldable e-ink reader for outdoors · BBC',
+        '[9h] Museum reopens with a restored Renaissance wing · Guardian',
+        '[11h] Local library extends weekend hours through winter · NPR',
+        '[13h] Electric ferry begins service across the harbour · BBC',
+      ],
+    },
+    {
+      kind: 'hud.panel',
+      tab: 'pomodoro',
+      revision: 1,
+      rows: ['Pause', 'Skip to break', 'Reset'],
+      pomodoro: {
+        phase: 'focus',
+        running: true,
+        remainingMs: focusLeftMs,
+        lengthMs: 1_500_000,
+        completed: 1,
+        endsAtUnixMs: nowMs + focusLeftMs,
+      },
+    },
+    {
+      kind: 'hud.panel',
+      tab: 'search',
+      revision: 1,
+      headline: 'Even Realities G2 review',
+      rows: [
+        'Even Realities G2 review: subtle, useful, pricey · theverge.com',
+        'G2 smart glasses — Even Realities · evenrealities.com',
+        'What do you think of the G2? · reddit.com',
+        'Even Realities G2 vs Meta Ray-Ban Display · tomsguide.com',
+      ],
+    },
+  ];
+}
+
+/** An opened headline, as PanelPublisher sends it: a metadata line with
+ * the page position, then the page as word-bounded chunks the plugin
+ * re-wraps, under a hint that names only the pages that exist. */
+export function panelArticleFixture(): { title: string; items: string[]; hint: string } {
+  return {
+    title: 'NEWS · ARTICLE',
+    items: [
+      'BBC · 12m · Consumer sentiment rises to 48.9 · 1/3',
+      'Consumer sentiment in the US rose slightly this month,',
+      'reaching 48.9 after four consecutive months of decline,',
+      'according to a survey published on Tuesday. The reading',
+      'remains well below its long-run average, and respondents',
+      'continued to cite prices and borrowing costs as their main',
+      'concerns. Economists said the small improvement was',
+      'consistent with a labour market that is cooling without',
+      'breaking, and with fuel prices that have eased.',
+    ],
+    hint: 'down more · left x2: back',
+  };
 }

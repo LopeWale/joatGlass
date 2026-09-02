@@ -1906,9 +1906,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(mainLevel);
       if (main.structured) {
         // A calendar/reminder value is one short fact — give it size, but
-        // not a whole band: what is BELOW it is content too.
+        // not a whole band: what is BELOW it is content too. The pane is
+        // narrower since the rail; a fact that no longer fits at 21px drops
+        // to 18px before it is ever truncated ("Design review · 4…" is not
+        // a time the wearer can act on).
         cursorY += 28;
         context.font = `21px ${HUD_FONT}`;
+        if (context.measureText(main.value).width > paneWidth) {
+          context.font = `18px ${HUD_FONT}`;
+        }
         this.fitText(context, main.value, paneX, cursorY, paneWidth);
         cursorY += 10;
       } else {

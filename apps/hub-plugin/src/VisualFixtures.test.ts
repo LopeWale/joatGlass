@@ -120,3 +120,35 @@ describe('visual fixtures', () => {
     expect(hud.dismissConfirmation).toHaveBeenCalledWith('visual-confirmation');
   });
 });
+
+describe('panel visual fixtures', () => {
+  it('shape every row the way the Mac producers do, within the wire caps', async () => {
+    const { PANEL_VISUAL_STATES, isPanelVisualState, panelArticleFixture, panelVisualPushes, panelVisualTab } = await import('./VisualFixtures');
+    const pushes = panelVisualPushes(1_000_000);
+    expect(pushes.map((push) => push.tab)).toEqual(['news', 'pomodoro', 'search']);
+    for (const push of pushes) {
+      expect(push.rows.length).toBeLessThanOrEqual(20);
+      for (const row of push.rows) expect(row.length).toBeLessThanOrEqual(64);
+    }
+    const news = pushes[0]!;
+    expect(news.rows.length).toBeGreaterThan(10); // the expanded page must scroll
+    for (const row of news.rows) expect(row).toMatch(/^\[\d+[mh]\] .+ · .+$/);
+    const pomodoro = pushes[1]!.pomodoro!;
+    expect(pomodoro.endsAtUnixMs).toBe(1_000_000 + pomodoro.remainingMs);
+    expect(pomodoro.remainingMs).toBeLessThanOrEqual(pomodoro.lengthMs);
+    const article = panelArticleFixture();
+    expect(article.items.length).toBeLessThanOrEqual(20);
+    for (const item of article.items) expect(item.length).toBeLessThanOrEqual(64);
+    expect(article.hint).toContain('down more');
+    expect(PANEL_VISUAL_STATES.every(isPanelVisualState)).toBe(true);
+    expect(isPanelVisualState('overview')).toBe(false);
+    expect(panelVisualTab('panel-search-expanded')).toBe('search');
+    expect(panelVisualTab('panel-article')).toBe('news');
+  });
+
+  it('keeps the fixture content free of anyone real', async () => {
+    const { panelArticleFixture, panelVisualPushes } = await import('./VisualFixtures');
+    const text = JSON.stringify([panelVisualPushes(), panelArticleFixture()]);
+    expect(text).not.toMatch(/Adele|Dele|Marcus|Adaeze/);
+  });
+});

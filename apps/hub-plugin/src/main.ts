@@ -47,9 +47,14 @@ import {
   VISUAL_CONFIRMATION_PROMPT,
   brainstormVisualFixture,
   isBrainstormVisualState,
+  isPanelVisualState,
   isProductivityVisualState,
+  panelArticleFixture,
+  panelVisualPushes,
+  panelVisualTab,
   runVisualConfirmationFixture,
   visualListFixture,
+  type PanelVisualState,
   type ProductivityVisualState,
   type BrainstormVisualState,
 } from './VisualFixtures';
@@ -108,6 +113,7 @@ type VisualState =
   | ProductivityVisualState
   | ProductivityLifecycleVisualState
   | BrainstormVisualState
+  | PanelVisualState
   | NavigationVisualState;
 
 /** Development-only lenses gate for the native Calendar/Reminders screens.
@@ -151,6 +157,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
     || isProductivityVisualState(requested)
     || isProductivityLifecycleVisualState(requested)
     || isBrainstormVisualState(requested)
+    || isPanelVisualState(requested)
     || (requested !== null && isNavigationVisualState(requested))
     ? requested
     : undefined;
@@ -958,6 +965,35 @@ async function renderVisualState(
 
   await hud.showText('9:41       JOAT ready       bat 87%', ContainerId.StatusBar, 2);
 
+  if (isPanelVisualState(state)) {
+    // The resting overview underneath, exactly as the 'overview' fixture
+    // draws it, then the three pushes a connected Mac would have made.
+    await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
+    await hud.showText(
+      'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
+    );
+    await hud.showText(
+      'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
+      ContainerId.Tray, 2,
+    );
+    await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
+    for (const push of panelVisualPushes()) await hud.acceptPanel(push);
+    const tab = panelVisualTab(state);
+    if (state.endsWith('-expanded') || state === 'panel-article') {
+      // Through the REAL drill-in, so simulator gestures drive the page.
+      await menu.openPanelTab(tab);
+      if (state === 'panel-article') {
+        const article = panelArticleFixture();
+        await menu.presentList(
+          article.title, article.items, hud.rail.requestId('news'), false, article.hint,
+        );
+      }
+      return;
+    }
+    await hud.setActiveTab(tab);
+    return;
+  }
+
   if (isProductivityLifecycleVisualState(state)) {
     if (state === 'calendar-review') {
       await hud.showConfirmation(
@@ -1048,7 +1084,7 @@ async function renderVisualState(
     ContainerId.Tray, 2,
   );
   await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
-  await hud.showText('tap: notifications · long-press mic', ContainerId.Hint, 1);
+  await hud.showText('tap: open · swipe: tabs · hold: mic', ContainerId.Hint, 1);
 }
 
 function productivityLifecycleFixture(

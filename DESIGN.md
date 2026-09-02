@@ -164,6 +164,25 @@ event, last query, and an ambient tray line anchored to the pane's bottom.
 The spine yields its small clock there: no screen prints the same fact
 twice.
 
+### The right pane is a rail of tabs
+
+Between the clock and the pane's hairline stands a vertical rail of four
+icons — notifications, news, pomodoro, search — the platform dashboard's
+own idiom, drawn in JOAT's: tabs OUTSIDE the pane so the content keeps its
+width, the lit tab attached to the hairline by a short bracket. A swipe on
+the resting overview moves along the rail; a tap expands the lit tab
+full-width, with the rail moved to the left margin so the wearer still
+sees where they are; inside, swipe scrolls rows, tap opens one, left
+double steps back one level. Long press refreshes ONLY at the top of an
+expanded tab; everywhere else it stays the microphone.
+
+The rail, the hairline and the pane all sit east of x=288. That is a
+latency rule, not a taste: the frame ships as four tiles and only changed
+tiles are uploaded, so a tab change costs the two right tiles, and the
+pomodoro's second hand — drawn inside the top-right tile — costs one.
+Notifications is the resting pane itself. The other three tabs paint from
+what the Mac last pushed; nothing on the glass ever fetches.
+
 ### The page's name lives in the status spine
 
 On a feature page the spine reads MESSAGES or PLANNING where it reads JOAT
