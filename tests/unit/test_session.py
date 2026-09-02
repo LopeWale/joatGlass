@@ -2413,3 +2413,59 @@ class TestBranchingALiveConversation:
         await asyncio.sleep(0.05)
         assert forked == []
         await manager.close()
+
+
+class TestInstructionsSurviveTheSessionEnding:
+    """The likeliest moment for an instruction is AFTER the room closes:
+    the wearer has just read the synthesis and decides what to do with it.
+
+    Every verb was dead there. The whole instruction block sat inside
+    `if self._active is not None:`, so "send that to Hermes" spoken at the
+    one moment it is most useful did nothing and said nothing.
+    """
+
+    def _idle(self):
+        acted: list[tuple] = []
+
+        async def transform(instruction, material):
+            acted.append(("transform", instruction, material))
+            return "shorter"
+
+        async def route(who, lane):
+            acted.append(("route", who, lane))
+            return "sent"
+
+        async def save(who):
+            acted.append(("save", who))
+            return "saved"
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            transform=transform, route_reply=route, save_reply=save,
+            last_reply=lambda who: ("CLAUDE (critic)", "the settled answer"),
+        )
+        return manager, acted
+
+    async def test_every_verb_still_works_with_no_session_running(self) -> None:
+        manager, acted = self._idle()
+        assert manager.active is False
+
+        for said in ("make that shorter", "send that to hermes", "note that"):
+            assert manager.handle_transcript(f"JOAT, {said}", addressed=said), said
+            await asyncio.sleep(0)
+
+        assert [a[0] for a in acted] == ["transform", "route", "save"]
+        # …and it acted on the SNAPSHOT's reply, which outlives the session.
+        assert acted[0][2] == "the settled answer"
+        await manager.close()
+
+    async def test_unaddressed_speech_is_still_ignored_when_idle(self) -> None:
+        """Address is what separates an instruction from overheard talk.
+        Relaxing it here would let a room conversation act on the wearer's
+        last Brainstorm."""
+        manager, acted = self._idle()
+        assert manager.handle_transcript(
+            "make that shorter", addressed=None) is False
+        await asyncio.sleep(0)
+        assert acted == []
+        await manager.close()

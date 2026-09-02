@@ -996,6 +996,9 @@ async def main() -> None:
         history=brainstorm_history,
         # A tap approves, a swipe denies — see BrainstormController.
         terminal_decide=lambda verdict: agent_terminal.decide(verdict, None),
+        # Resolves "that" once the room has closed. The snapshot outlives
+        # the session precisely so a finished answer can still be acted on.
+        last_reply=lambda who: debate_state.snapshot.last_reply(who),
         transform=joat_transform,
         continuation_factory=make_continuation,
     )
