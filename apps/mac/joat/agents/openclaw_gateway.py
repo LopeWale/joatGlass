@@ -358,9 +358,23 @@ def _enforce_agent_terminal_request_policy(
             and params.get("agentId") == policy.agent_id
         )
     elif method == "chat.history":
+        history_key = params.get("sessionKey")
+        # Same provenance rule as send/abort/subscribe: a roster lane may
+        # read the bounded history of a session the GATEWAY listed for this
+        # wearer on this connection. Without it, "resume then inspect" was
+        # a policy error — the roadmap's own contract (:113 "read bounded
+        # history") was unreachable for exactly the sessions resume exists
+        # to reach.
         permitted = (
             set(params) == {"sessionKey"}
-            and policy.owns_session_key(params.get("sessionKey"))
+            and (
+                policy.owns_session_key(history_key)
+                or (
+                    policy.roster
+                    and isinstance(history_key, str)
+                    and history_key in listed_keys
+                )
+            )
         )
     elif method == "approval.resolve":
         decision = params.get("decision")
