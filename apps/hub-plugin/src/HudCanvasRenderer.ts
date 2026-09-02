@@ -400,7 +400,12 @@ export function brainstormActionHint(
       // "tap: Hermes" described a different feature, and a downward swipe
       // used to CANCEL — the wearer asked to scroll, so swipes scroll and
       // cancel is the deliberate left double-press only.
-      return 'swipe: scroll · tap: terminal · left x2: cancel';
+      // Names the verb layer, because an open-ended capability nobody
+      // knows about is not a capability. A menu screen would have been the
+      // obvious place and the wrong one: it replaces the transcript the
+      // wearer is reading to make the choice. The footer had 378 of its
+      // 548 pixels unused — measured — so this costs no row.
+      return 'swipe: scroll · tap: terminal · say “send that to hermes” · left x2: cancel';
     }
     if (model.state === 'acceptance_ready') {
       return 'tap: start test · left x2: menu';
