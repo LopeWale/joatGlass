@@ -991,6 +991,42 @@ class SessionManager:
         active = self._active
         return await active.replay_hud() if active is not None else False
 
+    def interrupted_session(self) -> object | None:
+        """The newest durable record still marked `active` — crash evidence.
+
+        A record is written `active` at open and settled at close; an
+        engine that died mid-session leaves it standing. The reconnect
+        greeting names it so the wearer learns the way back — the audit
+        left BSD-08 unresolved on exactly this: the replay source was
+        process memory, so after a restart there was nothing to replay
+        FROM and the glass painted an empty Ready as if no conversation
+        had ever been happening."""
+        if self.active or self._history is None:
+            return None
+        lister = getattr(self._history, "sessions", None)
+        if lister is None:
+            return None
+        try:
+            rows = list(lister(5))
+        except Exception:
+            return None
+        for past in rows:
+            if getattr(past, "status", "") == "active":
+                return past  # type: ignore[no-any-return]
+        return None
+
+    def terminal_owns_hud(self) -> bool:
+        """True while a live session has handed the lenses to the terminal.
+
+        The terminal's own paint gate needs this: gating on `active` alone
+        silenced the terminal EXACTLY when the wearer tapped away to it
+        mid-Brainstorm — the view they switched to was a frozen snapshot,
+        new lane output and approvals never painting until the session
+        ended."""
+        active = self._active
+        probe = getattr(active, "terminal_owns_hud", None) if active else None
+        return bool(probe()) if callable(probe) else False
+
     def _cancel_active(self) -> None:
         active = self._active
         if active is None:
@@ -1325,7 +1361,16 @@ class DebateSession(Session):
         # collaborators — 1 of 2 spoke"), and seeding it would make that
         # guard pass on borrowed history while nobody present said a word.
         # Context for the prompts, evidence for nothing.
-        self._prior: tuple[tuple[str, str], ...] = tuple(prior)
+        # Failures filtered HERE, not only in-run: the in-run exclusion
+        # keeps a dead seat out of _transcript, but a resumed or branched
+        # session inherits `prior` from the durable record, whose turns
+        # are the sink's UNFILTERED stream — so a provider's own error
+        # text ("You're out of usage credits") rode back in as a quoted
+        # position, exactly what BRAINSTORM.md:53-54 forbids. History
+        # keeps the failure (it happened); prompts never see it.
+        self._prior: tuple[tuple[str, str], ...] = tuple(
+            (label, text) for label, text in prior if not is_failure(text)
+        )
         self._transcript: list[tuple[str, str]] = []
         self._silenced: list[str] = []
         self._wearer_turns = 0
@@ -1477,6 +1522,10 @@ class DebateSession(Session):
             return False
         await callback()
         return True
+
+    def terminal_owns_hud(self) -> bool:
+        callback = getattr(self._sink, "terminal_owns_hud", None)
+        return bool(callback()) if callable(callback) else False
 
     async def run(self) -> None:
         try:

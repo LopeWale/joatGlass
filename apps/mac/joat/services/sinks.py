@@ -348,6 +348,10 @@ class HudSink:
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 
+    def terminal_owns_hud(self) -> bool:
+        """True while the wearer has tapped away to the terminal."""
+        return self._handed_to_terminal
+
     async def replay(self) -> None:
         """Repaint the last semantic frame (reconnect, or back from the
         terminal handoff)."""
@@ -445,6 +449,13 @@ class Broadcast:
             callback = getattr(sink, "replay", None)
             if callback is not None:
                 await callback()
+
+    def terminal_owns_hud(self) -> bool:
+        for sink in self._sinks:
+            callback = getattr(sink, "terminal_owns_hud", None)
+            if callback is not None and callback():
+                return True
+        return False
 
 
 @dataclass

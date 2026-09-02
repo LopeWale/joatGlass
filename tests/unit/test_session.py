@@ -3051,6 +3051,147 @@ class TestContinueAsksOnAmbiguity:
         await manager.close()
 
 
+class TestACrashLeavesAWayBack:
+    """BSD-08, the audit's one unresolved dispute, settled by building the
+    missing half: replay was process memory, so an engine restart painted
+    the empty Ready surface as if no conversation had ever been happening.
+    The durable record now opens `active` and settles at close — so a row
+    still `active` with no live session is crash evidence."""
+
+    class History:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def sessions(self, limit: int = 5):
+            return self._rows[:limit]
+
+    class Past:
+        def __init__(self, status: str, title: str) -> None:
+            self.status, self.title = status, title
+            self.session_id = "aaaa"
+
+    def test_an_active_record_with_no_live_session_is_reported(self) -> None:
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            history=self.History([self.Past("active", "cold starts")]),
+        )
+        found = manager.interrupted_session()
+        assert found is not None and found.title == "cold starts"
+
+    def test_settled_records_are_not_crash_evidence(self) -> None:
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            history=self.History([self.Past("settled", "done one")]),
+        )
+        assert manager.interrupted_session() is None
+
+
+class TestCancelWordsMeetThePendingQuestion:
+    """S1 from the audit's counter-pass: three cancel words — "cancel
+    that", "never mind", "nevermind" — are also replacement-question NOs,
+    and the question is resolved first. That order is a decision, pinned
+    here: while the question is up those words decline the NEW topic and
+    keep the session; the bare escape words are in neither list, so "stop"
+    still ends everything even mid-question. Failing toward the session
+    surviving is the cheap direction — a kept session costs a repeat of
+    "stop"; a killed one costs the conversation.
+    """
+
+    class Live(Session):
+        def __init__(self):
+            self.cancelled = False
+
+        async def run(self) -> None:
+            while not self.cancelled:
+                await asyncio.sleep(0.01)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+    def _with_question(self):
+        first = self.Live()
+        manager = SessionManager(
+            HudWriter(SinkTransport()),
+            lambda t: first if t == "the first question" else self.Live(),
+        )
+        assert manager.handle_transcript("brainstorm the first question")
+        assert manager.handle_transcript(
+            "JOAT, brainstorm something else",
+            addressed="brainstorm something else",
+        )
+        return manager, first
+
+    async def test_never_mind_declines_the_new_topic_and_keeps_the_session(self) -> None:
+        manager, first = self._with_question()
+        assert manager.handle_transcript("JOAT, never mind", addressed="never mind")
+        await asyncio.sleep(0.05)
+        assert not first.cancelled
+        assert manager._pending_topic == ""
+        await manager.close()
+
+    async def test_bare_stop_still_cancels_even_mid_question(self) -> None:
+        manager, first = self._with_question()
+        assert manager.handle_transcript("stop")
+        await asyncio.sleep(0.05)
+        assert first.cancelled
+        await manager.close()
+
+
+class TestFailuresNeverRideBackInAsPositions:
+    """S3: the in-run exclusion kept a dead seat out of _transcript, but a
+    resumed or branched session inherits `prior` from the durable record —
+    the sink's UNFILTERED stream — so a provider's own error text rode
+    back in as a quoted position (BRAINSTORM.md:53-54 forbids exactly
+    that). History keeps the failure; prompts never see it."""
+
+    async def test_a_failure_turn_in_prior_is_dropped_from_context(self) -> None:
+        from joat.services.roundtable import is_failure
+
+        from joat.services.roundtable import FAILURE_MARK
+        failure = f"{FAILURE_MARK} claude — You're out of usage credits"
+        assert is_failure(failure), "fixture must be a real failure shape"
+
+        async def seat(prompt: str):
+            yield "x"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 9"
+
+        session = debate(
+            SinkTransport(), pair(seat, seat), judge,
+            prior=(("CODEX (proposer)", "a real position"),
+                   ("CLAUDE (critic)", failure)),
+        )
+        carried = session.transcript()
+        assert ("CODEX (proposer)", "a real position") in carried
+        assert all(not is_failure(text) for _l, text in carried)
+
+
+class TestTheTerminalPaintsDuringTheHandoff:
+    """S5: the terminal's paint gate keyed on `sessions.active` alone, so
+    tapping away to the terminal MID-Brainstorm froze the very view the
+    wearer switched to — new lane output and approvals never painted until
+    the session ended."""
+
+    async def test_ownership_follows_the_handoff(self) -> None:
+        from joat.services.sinks import Broadcast, HudSink
+
+        sink = HudSink(HudWriter(SinkTransport()))
+        broadcast = Broadcast([sink])
+        await broadcast.open("topic", ["codex", "claude"])
+        assert broadcast.terminal_owns_hud() is False
+        await broadcast.show_terminal()
+        assert broadcast.terminal_owns_hud() is True
+        await broadcast.replay()
+        assert broadcast.terminal_owns_hud() is False
+
+
 class TestTheDurableRecordCarriesRealIdentity:
     """The audit's BSI-08/BSD-03/BSD-06 cluster, one root cause: the record
     API accepted session_id/parent_id/root_id/verified and the ONE

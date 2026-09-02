@@ -9,6 +9,7 @@ import {
   assistantOverlayTextLayout,
   brainstormTranscriptLines,
   brainstormTranscriptRowCount,
+  HudCanvasRenderer,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
   brainstormStateLabel,
@@ -989,5 +990,55 @@ describe('the footer never names a gesture the router will not perform', () => {
   it('a busy lane with no approval still invites scrolling', () => {
     const hint = brainstormActionHint({ ...base, approvals: 0 });
     expect(hint).toContain('swipe: scroll');
+  });
+});
+
+describe('the scrollback marker keeps the two-tone split', () => {
+  // S6 from the audit's counter-pass: windowHudTailLines prepends '…' to
+  // the first visible row whenever older rows are hidden, and '…CODEX > '
+  // matched no tag — so the topmost row drew wholly bright on every
+  // scrolled frame, the one row a scrolling reader looks at first.
+  function record(): { context: CanvasRenderingContext2D; calls: Array<{ style: string; text: string }> } {
+    const calls: Array<{ style: string; text: string }> = [];
+    const context = {
+      fillStyle: '',
+      font: '',
+      textAlign: 'left',
+      measureText: (value: string) => ({ width: value.length * 5.18 }),
+      fillText(this: { fillStyle: string }, text: string) {
+        calls.push({ style: String(this.fillStyle), text });
+      },
+    } as unknown as CanvasRenderingContext2D;
+    return { context, calls };
+  }
+
+  it('the marked first row still draws a dim tag and bright words', () => {
+    const { context, calls } = record();
+    const renderer = Object.create(
+      HudCanvasRenderer.prototype,
+    ) as HudCanvasRenderer;
+    const transcript = Array.from(
+      { length: 20 }, (_v, index) => `CODEX > position number ${index}`,
+    ).join('\n');
+    (renderer as never as {
+      drawBrainstormTranscript(
+        c: CanvasRenderingContext2D, t: string, x: number, y: number,
+        m: number, s: { offset: number; rows: number; visible: number },
+      ): void;
+    }).drawBrainstormTranscript(
+      context, transcript, 14, 82, 13,
+      { offset: 0, rows: 0, visible: 0 },
+    );
+    // The FIRST ROW must produce two draw calls: the dim '…CODEX ' tag,
+    // then the bright words — not one flat call of the whole line. (An
+    // earlier version compared call 0 to call 1 without checking they
+    // belonged to the same row, and the unfixed code passed it: row one
+    // drew flat-bright in one call and row TWO's dim tag supplied the
+    // differing style. A mutation check caught the vacuity.)
+    const first = calls[0]!;
+    const second = calls[1]!;
+    expect(first.text).toBe('…CODEX ');
+    expect(second.text.startsWith('position')).toBe(true);
+    expect(first.style).not.toBe(second.style);
   });
 });

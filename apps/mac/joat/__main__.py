@@ -1167,7 +1167,7 @@ async def main() -> None:
         # The SessionManager owns the HUD while a session runs; terminal
         # narration must never fight a live Brainstorm for the lenses. The
         # line still lands in the lane's tail either way.
-        if not sessions.active:
+        if not sessions.active or sessions.terminal_owns_hud():
             await hud.show(line)
 
     async def terminal_paint(frame: TerminalFrame) -> None:
@@ -1178,7 +1178,10 @@ async def main() -> None:
         wearer could HEAR their sessions but not SEE them. Same wire, same
         frame kind — the rows were simply never filled.
         """
-        if sessions.active:
+        # A live Brainstorm owns the lenses — EXCEPT while the wearer has
+        # tapped away to the terminal, which is precisely when these frames
+        # are the screen they are looking at.
+        if sessions.active and not sessions.terminal_owns_hud():
             return
         terminal = status.agent_terminal_projection()
         await hud.show_agent_terminal(AgentTerminalHudView(
