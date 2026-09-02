@@ -155,6 +155,18 @@ export class CapabilityMenu {
   /** A live session owns the overview, not the menu page that launched it.
    * Clear input ownership synchronously before rebuilding so the first
    * streamed frame cannot remain trapped behind the Brainstorm instructions. */
+  /** True while a wearer tap is waiting on the Mac to answer it.
+   *
+   * A live Brainstorm frame arriving in this window IS that answer — the
+   * wearer asked to go back into the room (docs/SESSION_MODEL.md:46), so it
+   * takes the screen. One arriving OUTSIDE the window is an ordinary
+   * streamed turn, which must not snatch the lenses away from a menu the
+   * wearer just opened. Without this, making left-double open the menu
+   * would achieve nothing: the next turn would repaint over it. */
+  isAwaitingResponse(): boolean {
+    return this.pendingRequestId !== undefined;
+  }
+
   async beginLiveSession(session: 'brainstorm'): Promise<void> {
     void session;
     this.clearResponseTimeout();
