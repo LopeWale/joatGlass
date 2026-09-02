@@ -170,3 +170,30 @@ describe('the ready Brainstorm tells you how to start one', () => {
     expect(brainstormActionHint(ready() as never)).not.toContain('test');
   });
 });
+
+describe('the switch gesture is only promised where it works', () => {
+  // Caught on a real simulator render: the footer advertised "tap: next
+  // session" under a strip reading "LANES > one session", where the tap
+  // answers "the only session". A hint naming an effect the code does not
+  // produce is the exact defect this file exists to prevent — and I had
+  // just introduced a fresh one while fixing the others.
+  const lanes = (...names: string[]) => terminal({
+    state: 'running', collaborators: names,
+  });
+
+  it('names the tap when there is somewhere to cycle to', () => {
+    expect(brainstormActionHint(lanes('work·run', 'hermes·idle')))
+      .toContain('tap: next session');
+  });
+
+  it('says nothing about it on a one-lane Mac', () => {
+    const hint = brainstormActionHint(lanes('work·run'));
+    expect(hint).not.toContain('next session');
+    expect(hint).toContain('swipe: scroll');
+  });
+
+  it('says nothing about it when the frame carries no lanes at all', () => {
+    expect(brainstormActionHint(terminal({ state: 'running' })))
+      .not.toContain('next session');
+  });
+});

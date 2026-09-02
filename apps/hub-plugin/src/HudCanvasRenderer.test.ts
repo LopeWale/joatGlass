@@ -979,6 +979,8 @@ describe('the footer never names a gesture the router will not perform', () => {
     state: 'running' as const,
     noToolsChecked: true,
     acceptanceArmed: false,
+    // Two lanes: the tap only cycles where there is somewhere to cycle to.
+    collaborators: ['work·run', 'hermes·idle'],
   };
 
   it('a busy lane with a pending approval names approve/deny, not scroll', () => {

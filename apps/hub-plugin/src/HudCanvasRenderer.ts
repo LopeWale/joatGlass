@@ -452,7 +452,10 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals'>,
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals'>
+    // The lane chips, used only to decide whether the switch gesture has
+    // anywhere to go. Optional so every existing caller stays valid.
+    & { collaborators?: readonly string[] },
 ): string {
   if (model.screen === 'brainstorm') {
     if (model.state === 'running') {
@@ -516,14 +519,19 @@ export function brainstormActionHint(
     return 'tap: retry Hermes, then approve · left x2: menu';
   }
   if (model.state === 'running') {
-    // The tap is NAMED now. It sends show_brainstorm, which on a busy
-    // terminal with no Brainstorm to return to used to reach a bare
-    // `return` and do nothing — a dead gesture on the surface where the
-    // wearer most wants control, never mentioned by this hint. It cycles
-    // the focused lane there: "switch among sessions" without speaking,
-    // which is the complaint that produced the picker in the first place
-    // ("why do I have to say something to choose a work session?").
-    return 'tap: next session · swipe: scroll · say "terminal cancel"';
+    // The tap is NAMED now — but only where it does something. It cycles
+    // the focused lane ("switch among sessions" without speaking, the
+    // complaint that produced the picker), and on a ONE-LANE Mac there is
+    // nothing to cycle to: the roster answers "the only session". Naming
+    // it there would be the same defect this surface was just cleaned of,
+    // a hint promising an effect the code does not produce — caught on a
+    // real simulator render showing "LANES > one session" under a footer
+    // advertising the switch. The lane chips ride `collaborators` on the
+    // terminal frame, so their count is the honest test.
+    const lanes = model.collaborators?.length ?? 0;
+    return lanes > 1
+      ? 'tap: next session · swipe: scroll · say "terminal cancel"'
+      : 'swipe: scroll · say "terminal cancel" · left x2: menu';
   }
   return model.state === 'ready'
     ? 'tap: speak to the terminal · left x2: menu'
