@@ -472,7 +472,23 @@ class OpenClawTerminalAgent:
         First answer wins on the gateway, so the receipt may differ from
         what we sent — the caller reports what was recorded, never what it
         merely asked for.
+
+        LOCK-FREE while a terminal is live, and that is the whole point.
+        Approvals are raised from inside a run's event loop, the gateway
+        holds that run open until the approval is answered, and stream()
+        holds self._lock across the entire run — so taking the lock here
+        waited on a holder that was waiting on this very answer. The wearer
+        said "terminal approve" and the voice pipeline parked forever.
+        The connection multiplexes by request id, so answering on the live
+        terminal beside its own stream is the transport's intended use;
+        the lock is only for the idle path, where initialize() must not
+        race a concurrent turn.
         """
+        if self._closed:
+            raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+        terminal = self._terminal
+        if terminal is not None:
+            return await terminal.resolve_approval(approval_id, kind, decision)
         async with self._lock:
             if self._closed:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")

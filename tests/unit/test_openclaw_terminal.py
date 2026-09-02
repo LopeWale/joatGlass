@@ -853,3 +853,88 @@ async def test_terminal_aborts_an_owned_tool_event() -> None:
             "agentId": "hermes",
         },
     )
+
+
+class TestAResumedSessionCanActuallyBeUsed:
+    """The audit's AT-03/AT-04 blocker: stream() ran the Brainstorm-grade
+    isolation preflight on EVERY session — including one bound to an
+    existing listed session via attach(). An attached session is someone's
+    real work: its own label, its own lineage, legitimately has tools. The
+    describe never matched, so every send into a resumed session was
+    refused by JOAT's own policy layer and "resume then steer" was dead.
+
+    What protects the wearer on the attach path is the gateway's
+    per-connection earned-key enforcement plus the approval gate — not an
+    isolation assert that can only ever describe the lane's own session.
+    """
+
+    @staticmethod
+    def _work_connection() -> FakeConnection:
+        from joat.agents.openclaw_gateway import WORK_TERMINAL_POLICY
+
+        connection = FakeConnection(policy=WORK_TERMINAL_POLICY)
+        connection.granted_scopes = (
+            "operator.read", "operator.write", "operator.approvals",
+        )
+        connection.advertised_methods = REQUIRED_METHODS | {"approval.resolve"}
+        connection.advertised_events = (
+            connection.advertised_events | {"session.approval"}
+        )
+        # The fake echoes back whatever key it was configured with; an
+        # attach subscribes to the FOREIGN key, so echo that one.
+        connection.subscription_key = "agent:other:their-work-1"
+        return connection
+
+    @pytest.mark.asyncio
+    async def test_attach_streams_without_the_isolation_preflight(self) -> None:
+        from joat.agents.openclaw_gateway import WORK_TERMINAL_POLICY
+
+        connection = self._work_connection()
+        connection.events = deque([
+            {"event": "chat", "payload": {
+                "runId": "run-1", "sessionKey": "agent:other:their-work-1",
+                "seq": 1, "state": "final",
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "done"}]}}},
+        ])
+        terminal = await OpenClawAgentTerminal.attach(
+            connection=connection,
+            agent_id="hermes",
+            session_key="agent:other:their-work-1",
+            policy=WORK_TERMINAL_POLICY,
+        )
+        assert terminal.attached is True
+
+        chunks = [chunk async for chunk in terminal.stream("carry on")]
+
+        assert chunks == ["done"]
+        methods = [method for method, _ in connection.calls]
+        # The send went straight out; no describe, no tools inventory —
+        # the preflights that refused every resumed-session send.
+        assert "sessions.send" in methods
+        assert "sessions.describe" not in methods
+        assert "tools.effective" not in methods
+
+    @pytest.mark.asyncio
+    async def test_a_created_terminal_still_runs_both_preflights(self) -> None:
+        """The gate is scoped to attach, not removed: the lane's own
+        dedicated session keeps its Brainstorm-grade tripwire."""
+        connection = FakeConnection()
+        terminal = await OpenClawAgentTerminal.create(
+            connection=connection, agent_id="hermes",
+        )
+        assert terminal.attached is False
+        connection.calls.clear()
+        connection.events = deque([
+            {"event": "chat", "payload": {
+                "runId": "run-1", "sessionKey": terminal.session_key,
+                "seq": 1, "state": "final",
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "ok"}]}}},
+        ])
+
+        _ = [chunk async for chunk in terminal.stream("hello")]
+
+        methods = [method for method, _ in connection.calls]
+        assert "sessions.describe" in methods
+        assert "tools.effective" in methods
