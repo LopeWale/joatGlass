@@ -49,7 +49,7 @@ payloads.
 | `continue <title>` | Resume the matching durable session; ask on ambiguity |
 | Tap a row in the idle picker | Open that session by id — no title matching |
 | `new Brainstorm` | Start an explicit new lineage — **not implemented** |
-| `branch this` | Fork the selected transcript into a child lineage — **not implemented** |
+| `branch this` | Fork the live transcript into a child lineage; the parent yields the slot only once the fork is built |
 | A clearly unrelated replacement request | Ask before replacing context; never guess or silently reset |
 | A new topic spoken during a live run | Held, and the wearer is asked — yes cancels and starts it, no keeps going |
 | `stop` / `cancel` | Cancel the active run and persist the cancelled state |
