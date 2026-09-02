@@ -881,3 +881,123 @@ class TestTheSnapshotQuotesWholeReplies:
         found = snapshot.last_reply(None)
         assert found is not None and found[0] == "CODEX (proposer)"
         assert snapshot.last_reply("claude") is None
+
+
+class TestTheRecordKeepsTheVerificationStory:
+    """SESSION_MODEL.md:33 lists VERIFY among the five turn kinds the
+    durable record contains, and BRAINSTORM.md:51-52 requires a repair to
+    stream "under its own header so a turn is never silently rewritten".
+
+    Both hold — and this test exists because I nearly "fixed" them after
+    reading DebateSession._transcript, which is the PROMPT CONTEXT and
+    deliberately carries only each speaker's final text (re-feeding a
+    withdrawn claim to the room would be a defect of its own). The record
+    is built from the SINK stream, which sees every turn. Two structures,
+    different jobs; checking the wrong one invents a defect that is not
+    there, and the fix would have polluted collaborator prompts with
+    verifier output.
+    """
+
+    async def _run_a_session_with_one_repair(self):
+        from joat.services.roundtable import Participant, RoundTable
+        from joat.services.session import DebateSession
+        from joat.services.sinks import Broadcast, DebateStateSink, HudSink
+        from joat.verifier.gate import VerifierGate
+
+        from tests.unit.test_session import SinkTransport
+
+        state = DebateStateSink()
+
+        def make(texts):
+            iterator = iter(texts)
+
+            async def seat(prompt: str):
+                yield next(iterator, "GIST: nothing more")
+
+            return seat
+
+        seats = RoundTable([
+            Participant("codex", "proposer", make([
+                'GIST: cache it\nSOURCES:\n[1] https://example.invalid :: "q"',
+                "GIST: WITHDRAWN — the repaired position",
+            ])),
+            Participant("claude", "critic", make(["GIST: disagree"])),
+        ])
+
+        async def unfetchable(url: str) -> str:
+            return ""
+
+        class Judge:
+            async def stream(self, prompt: str):
+                yield "AGREEMENT: 0.95\nBLOCKING: no"
+
+        session = DebateSession(
+            "caching", seats,
+            Broadcast([HudSink(HudWriter(SinkTransport())), state]),
+            Judge(), gate=VerifierGate(unfetchable, unfetchable),
+            max_rounds=1, max_repairs=1,
+        )
+        await session.run()
+        return state.snapshot
+
+    async def test_the_verifier_turn_is_in_the_record(self) -> None:
+        snapshot = await self._run_a_session_with_one_repair()
+        labels = [label for label, _text in snapshot.turns]
+        assert any("VERIFY" in label.upper() for label in labels), labels
+
+    async def test_the_repair_carries_its_own_header(self) -> None:
+        snapshot = await self._run_a_session_with_one_repair()
+        labels = [label for label, _text in snapshot.turns]
+        assert any("repair" in label.lower() for label in labels), labels
+
+    async def test_the_withdrawn_claim_is_not_erased(self) -> None:
+        """"Never silently rewritten" is about the record a wearer opens
+        later: a repair that overwrote its original would show a clean
+        claim with no sign it had been challenged and withdrawn."""
+        snapshot = await self._run_a_session_with_one_repair()
+        joined = " ".join(text for _label, text in snapshot.turns)
+        assert "GIST: cache it" in joined, "the original was overwritten"
+        assert "the repaired position" in joined
+
+    async def test_the_prompt_context_carries_only_the_repaired_text(self) -> None:
+        """The other half of the same design: collaborators must NOT be
+        re-prompted with a claim the verifier already rejected."""
+        from joat.services.roundtable import Participant, RoundTable
+        from joat.services.session import DebateSession
+        from joat.verifier.gate import VerifierGate
+        from tests.unit.test_session import SinkTransport
+
+        def make(texts):
+            iterator = iter(texts)
+
+            async def seat(prompt: str):
+                yield next(iterator, "GIST: nothing more")
+
+            return seat
+
+        seats = RoundTable([
+            Participant("codex", "proposer", make([
+                'GIST: cache it\nSOURCES:\n[1] https://example.invalid :: "q"',
+                "GIST: WITHDRAWN — the repaired position",
+            ])),
+            Participant("claude", "critic", make(["GIST: disagree"])),
+        ])
+
+        async def unfetchable(url: str) -> str:
+            return ""
+
+        class Judge:
+            async def stream(self, prompt: str):
+                yield "AGREEMENT: 0.95\nBLOCKING: no"
+
+        session = DebateSession(
+            "caching", seats, HudSink(HudWriter(SinkTransport())), Judge(),
+            gate=VerifierGate(unfetchable, unfetchable),
+            max_rounds=1, max_repairs=1,
+        )
+        await session.run()
+        joined = " ".join(text for _label, text in session.transcript())
+        assert "the repaired position" in joined
+        assert "GIST: cache it" not in joined, (
+            "a rejected claim was re-fed to the room"
+        )
