@@ -442,6 +442,9 @@ def make_router(
     brainstorm_replay=None,
     brainstorm_sessions=None,
     brainstorm_continue=None,
+    terminal_rows=None,
+    terminal_focus=None,
+    terminal_view=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -464,6 +467,9 @@ def make_router(
         brainstorm_replay=brainstorm_replay,
         brainstorm_sessions=brainstorm_sessions,
         brainstorm_continue=brainstorm_continue,
+        terminal_rows=terminal_rows,
+        terminal_focus=terminal_focus,
+        terminal_view=terminal_view,
     )
     return router, transport, status
 
@@ -1731,3 +1737,55 @@ class TestTheSessionPicker:
 
         await router._select_brainstorm(2)
         assert opened == ["bbb"], "resolved against what was DRAWN"
+
+
+class TestTheTerminalShowsItsSessions:
+    """The idle terminal said: Say "terminal sessions" to choose a work
+    session. The wearer's response: "why do I have to say something to
+    choose a work session? WHAT DOES THAT EVEN MEAN?"
+
+    A chooser that requires you to already know the words is not a chooser.
+    """
+
+    async def test_opening_it_lists_the_sessions(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        rows = [("work", "▸ work · idle"),
+                ("calendar", "  calendar · working · 2 waiting")]
+        router, transport, _ = make_router(tmp_path, terminal_rows=lambda: rows)
+        await router.open("Agent Terminal")
+
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert lists, "the sessions must be rows you can tap, not a phrase"
+        items = lists[-1].to_wire()["items"]
+        assert "work" in items[0] and "calendar" in items[1]
+        assert lists[-1].to_wire()["selectable"] is True
+
+    async def test_tapping_a_row_focuses_that_session(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        focused: list[str] = []
+
+        async def focus(name: str) -> None:
+            focused.append(name)
+
+        rows = [("work", "▸ work · idle"), ("calendar", "  calendar · idle")]
+        router, _t, _s = make_router(
+            tmp_path, terminal_rows=lambda: rows, terminal_focus=focus)
+        await router.open("Agent Terminal")
+        await router._select_terminal(1)
+        assert focused == ["calendar"]
+
+    async def test_live_output_is_never_hidden_behind_a_picker(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The wearer opened the terminal to WATCH work. A chooser drawn
+        over a running session hides the thing they came for."""
+        painted: list[str] = []
+
+        async def view() -> None:
+            painted.append("live")
+
+        rows = [("work", "▸ work · running")]
+        router, transport, _ = make_router(
+            tmp_path, terminal_rows=lambda: rows, terminal_view=view)
+        await router.open("Agent Terminal")
+
+        assert painted == ["live"]
+        assert not [m for m in transport.sent if isinstance(m, HudList)]

@@ -200,6 +200,28 @@ class AgentTerminalRoster:
     def names(self) -> list[str]:
         return list(self._lanes)
 
+    def picker_rows(self) -> list[tuple[str, str]]:
+        """(lane name, row text) for every session, newest state first.
+
+        The idle terminal used to say: Say "terminal sessions" to choose a
+        work session. That is not a chooser, it is homework — the wearer
+        asked what it even meant. A list of the sessions that exist, that
+        you tap, is the chooser; the spoken phrase stays for hands-busy.
+        """
+        rows: list[tuple[str, str]] = []
+        for lane in self._lanes.values():
+            mark = "▸ " if lane.name == self._focus else "  "
+            last = (lane.tail[-1] if lane.tail else "").strip()
+            waiting = (f" · {len(lane.approvals)} waiting"
+                       if lane.approvals else "")
+            detail = f" · {last}" if last else ""
+            rows.append((
+                lane.name,
+                _one_row(f"{mark}{lane.name} · {lane.state}{waiting}{detail}",
+                         HUD_COLUMNS),
+            ))
+        return rows
+
     def overview(self) -> str:
         """One line per session — the spoken (and later HUD) roster."""
         if not self._lanes:
