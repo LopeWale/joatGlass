@@ -2338,3 +2338,78 @@ class TestApprovalsAreAnsweredOnTheGlass:
 
 async def _noop() -> str:
     return "recorded"
+
+
+class TestBranchingALiveConversation:
+    """docs/SESSION_MODEL.md:51 — "branch this: fork the selected transcript
+    into a new child lineage." The wearer takes the conversation somewhere
+    else without losing where it came from.
+    """
+
+    class Talking(Session):
+        def __init__(self, topic="the original question"):
+            self._topic = topic
+            self.cancelled = False
+
+        async def run(self) -> None:
+            while not self.cancelled:
+                await asyncio.sleep(0.01)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+        @property
+        def topic(self) -> str:
+            return self._topic
+
+        def transcript(self):
+            return (("CODEX", "cache it"), ("CLAUDE", "not on handoff"))
+
+    def _manager(self):
+        forked: list[tuple[str, tuple]] = []
+        live = self.Talking()
+
+        def continuation(topic, prior):
+            forked.append((topic, prior))
+            return self.Talking("the branch")
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: live,
+            continuation_factory=continuation,
+        )
+        assert manager.handle_transcript("brainstorm the original question")
+        return manager, live, forked
+
+    async def test_branch_carries_the_conversation_into_a_child(self) -> None:
+        manager, live, forked = self._manager()
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript(
+            "JOAT, branch this", addressed="branch this")
+        for _ in range(80):
+            await asyncio.sleep(0.02)
+            if forked:
+                break
+
+        assert forked == [("the original question",
+                           (("CODEX", "cache it"), ("CLAUDE", "not on handoff")))]
+        assert live.cancelled, "the parent yields the slot to its child"
+        await manager.close()
+
+    async def test_branch_is_not_ordinary_speech(self) -> None:
+        """"branch" needs to be the whole utterance — a sentence merely
+        containing the word is a remark about branching, not a command."""
+        manager, _live, forked = self._manager()
+        await asyncio.sleep(0)
+        assert manager.handle_transcript(
+            "JOAT, I think we should branch the cache key by generation",
+            addressed="I think we should branch the cache key by generation")
+        await asyncio.sleep(0.05)
+        assert forked == []
+        await manager.close()

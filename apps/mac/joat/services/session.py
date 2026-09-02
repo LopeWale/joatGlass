@@ -212,6 +212,8 @@ class SessionManager:
         self._history = history
         # Answers the tool request a work session is blocked on.
         self._terminal_decide = terminal_decide
+        #: Whether "branch this" is available (needs a factory).
+        self._branch = continuation_factory is not None
         # JOAT acting ON the material, rather than routing it elsewhere.
         self._transform = transform
         self._continuation_factory = continuation_factory
@@ -474,6 +476,13 @@ class SessionManager:
 
                 asyncio.get_running_loop().create_task(run_route())
                 return True
+            if self._branch and _BRANCH.match(steer.strip().rstrip(".!?")):
+                # docs/SESSION_MODEL.md:51 — "branch this: fork the
+                # selected transcript into a new child lineage." The wearer
+                # is taking the conversation somewhere else without losing
+                # where it came from.
+                asyncio.get_running_loop().create_task(self._branch_here())
+                return True
             instruction = _MATERIAL_VERB.match(steer.strip().rstrip("."))
             if (
                 instruction is not None
@@ -633,6 +642,34 @@ class SessionManager:
             if reply:
                 return str(reply[1])
         return ""
+
+    async def _branch_here(self) -> None:
+        """Fork the live conversation, keeping its turns as context.
+
+        The parent keeps running until the fork is ready to take the slot,
+        so a branch that cannot start leaves the wearer where they were
+        rather than with nothing.
+        """
+        active = self._active
+        turns = getattr(active, "transcript", None)
+        prior = tuple(turns() if callable(turns) else ())
+        topic = getattr(active, "topic", "") or ""
+        if self._continuation_factory is None or not prior:
+            log.info("nothing to branch from yet")
+            return
+        session = self._continuation_factory(topic, prior)
+        if session is None:
+            log.warning("branch requested but agents unavailable")
+            return
+        self._cancel_active()
+        deadline = time.monotonic() + CANCEL_GRACE_S + 1.0
+        while self._active is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        if self._active is not None:
+            log.warning("previous session would not release; branch dropped")
+            return
+        log.info("branched a live brainstorm (%d prior turns)", len(prior))
+        self.try_start_session(session, publish_state=True)
 
     async def _replace_with(self, topic: str) -> None:
         """End the running session, then start the one they asked for.
@@ -1082,6 +1119,19 @@ class DebateSession(Session):
         asyncio.get_running_loop().create_task(self._show_wearer_turn(said))
         log.info("wearer added a turn chars=%d", len(said))
         return True
+
+    def transcript(self) -> tuple[tuple[str, str], ...]:
+        """This session's turns, for a branch to carry forward.
+
+        Includes the earlier conversation when this session is itself a
+        continuation, so a branch of a branch keeps the whole thread rather
+        than only the newest fork.
+        """
+        return (*self._prior, *self._transcript)
+
+    @property
+    def topic(self) -> str:
+        return self._topic
 
     def last_reply(self) -> tuple[str, str] | None:
         """The newest collaborator turn — what "that" refers to.
