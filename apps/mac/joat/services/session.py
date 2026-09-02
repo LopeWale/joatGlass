@@ -546,9 +546,16 @@ class SessionManager:
         # This is the common case, not an edge one: the wearer reads the
         # synthesis, the room closes, and THEN they decide what to do with
         # the answer. Requires address, like every other steering path.
-        if addressed is not _UNSET_ADDRESSED and addressed:
-            if self._handle_instruction(addressed):
-                return True
+        # The SAME rule the live branch uses. An omitted `addressed` means
+        # "already addressed" — the orchestrator strips the wake word and
+        # then calls handle_transcript(query) with no keyword at all
+        # (orchestrator.py, the idle path). Requiring the keyword here made
+        # every instruction after a session ended dead in PRODUCTION while
+        # every test passed, because the tests supplied an argument the
+        # real caller does not.
+        spoken = text if addressed is _UNSET_ADDRESSED else addressed
+        if spoken and self._handle_instruction(spoken):
+            return True
         request = text.strip().rstrip(".!?")
         fresh_topic = _NEW_LINEAGE.match(request)
         if fresh_topic is not None:
