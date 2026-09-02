@@ -49,9 +49,19 @@ can never make one speak twice. The starter design runs:
    could not score, and never runs on fewer than two positions.
 
 Unverified claims return to the SAME collaborator for repair, streamed under
-its own header so a turn is never silently rewritten. A collaborator that
+its own header so a turn is never silently rewritten. Two structures with
+opposite jobs make that work, and confusing them invents a defect: the
+DURABLE RECORD (built from the sink stream) keeps the original, the VERIFY
+turn and the `— repair N` header, because that is the story the wearer
+opens later; the PROMPT CONTEXT (`DebateSession.transcript()`) carries only
+each speaker's final text, because re-feeding the room a claim the verifier
+just rejected would be a defect of its own. A collaborator that
 fails is shown and then excluded from the transcript — a provider error is
 never quoted as a position.
+
+A nomination may carry the question it is asking — "ask Codex if that's
+true" hands over the floor AND records the question, so the seat is
+prompted with it rather than answering something nobody asked.
 
 While a session runs, only the cancel words are heard without the wake word.
 Steering requires the wearer to address JOAT, so an overheard sentence can

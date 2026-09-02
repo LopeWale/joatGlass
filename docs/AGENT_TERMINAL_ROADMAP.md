@@ -33,9 +33,19 @@ the glasses interface.
    focused session immediately. The tail is **oldest-first, bottom-anchored**
    — "keep the bottom pinned to now", like every terminal — which is what
    the implementation does and what this line used to contradict.
+   Steering a session that is ALREADY RUNNING queues one line, newest
+   wins, landed when the turn settles: the runtime serializes turns, and
+   refusing outright left cancel as the wearer's only mid-run verb.
+   `terminal tail` shows what scrolled past here; `terminal history` asks
+   the runtime what the session actually contains, which is the only
+   useful answer for a session this engine did not itself run.
 4. Leave other sessions running while another one is focused.
 5. Cancel, resume, or inspect a session through its runtime's direct session
-   API. Host names appear only when two rows otherwise cannot be distinguished.
+   API. Host names appear only when two rows otherwise cannot be distinguished
+   — which means they DO appear when a label repeats: two real sessions can
+   share a name, and showing neither made them one session, with
+   `terminal resume <label>` silently taking the first. A spoken name that
+   still matches more than one names the candidates rather than guessing.
 
 The interaction should feel like a glasses-scale Claude Code or Codex CLI:
 speaker/tool/system-prefixed lines, minimal chrome, no cards, and no separate
@@ -51,10 +61,12 @@ against the live gateway; the operations below are not yet.
 | Capability | Where | Spoken as |
 |---|---|---|
 | Session roster with focus | `services/agent_terminal.py` | `terminal sessions` |
-| Switch focus, work continues | same | `switch terminal to <lane>` |
+| Switch focus, work continues | same | `switch terminal to <lane>`, or TAP a busy terminal |
 | Voice becomes terminal input | same | `terminal <instruction>` |
+| Steer a RUNNING session | same (one queued line, newest wins) | `terminal <instruction>` while busy |
 | Cancel with honest recovery wording | same | `terminal cancel` |
-| Bounded per-lane output tail | same (deque, 200) | `terminal tail` |
+| Bounded per-lane output tail | same (deque, 200) | `terminal tail`, `terminal output` |
+| Read the session's OWN history | `agents/openclaw_terminal.py` | `terminal history`, `terminal inspect` |
 | Enumerate the wearer's sessions | `agents/openclaw_terminal.py` | `terminal discover` |
 | Resume a listed session | `agents/openclaw_runtime.py` | `terminal resume <label>` |
 | Approvals: receive, list, answer | `agents/openclaw_terminal.py` | `terminal approve/deny [N]` |
