@@ -180,6 +180,51 @@ async function completedVisualFrameReceipt(
   };
 }
 
+/**
+ * Frames that land within this window of the first queued one render as ONE
+ * frame. A voice turn's chrome reaches the plugin as a burst of separate Mac
+ * messages — the microphone state, then the state word — and rendering the
+ * first the instant it arrives ships the spine's tile twice, at 0.5-2 s a
+ * tile over BLE (Even's own figure). Against that hop the wait is invisible.
+ * Opt-in through the constructor: the presenter's tests pin the synchronous
+ * start, and production (main.ts) passes this value.
+ */
+export const PAINT_COALESCE_MS = 40;
+
+/**
+ * A tile write that outlives this has not merely been slow: the host has
+ * dropped it. Every later frame queues behind the one paint lane, so a
+ * promise that never settles is a HUD that never changes again —
+ * notifications stop arriving, the menu stops opening — with nothing
+ * logged. Fail the frame instead, forget the delivered tiles, and let the
+ * lane drain.
+ */
+export const TILE_UPLOAD_TIMEOUT_MS = 15_000;
+
+export interface HudVisualSurfaceOptions {
+  /** Burst window in ms; 0 (the default) renders the moment a frame lands. */
+  coalesceMs?: number;
+  /** Per-tile bridge deadline in ms; 0 waits forever. */
+  uploadTimeoutMs?: number;
+}
+
+function now(): number {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function elapsedSince(startedAt: number): number {
+  return Math.max(0, Math.round(now() - startedAt));
+}
+
+/** Resolve with `work`, or reject once `ms` have passed without it settling. */
+function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
 interface PendingPaint {
   frame: HudVisualFrame;
   localTick: boolean;
@@ -256,13 +301,19 @@ export class HudVisualSurface implements HudFramePainter {
   private readonly queue: PendingPaint[] = [];
   private readonly deliveredTiles = new Map<number, Uint8Array>();
   private frameNumber = 0;
+  private readonly coalesceMs: number;
+  private readonly uploadTimeoutMs: number;
 
   constructor(
     private readonly client: BridgeClient,
     private readonly renderer: HudFrameRenderer,
     private readonly diagnostics?: G2DiagnosticTrace,
     private readonly imageEncoder: HudImageEncoder = async (tile) => tile.pixels,
-  ) {}
+    options: HudVisualSurfaceOptions = {},
+  ) {
+    this.coalesceMs = Math.max(0, options.coalesceMs ?? 0);
+    this.uploadTimeoutMs = Math.max(0, options.uploadTimeoutMs ?? TILE_UPLOAD_TIMEOUT_MS);
+  }
 
   scrollTranscript(direction: 'up' | 'down'): boolean {
     return this.renderer.scrollTranscript?.(direction) ?? false;
@@ -274,11 +325,6 @@ export class HudVisualSurface implements HudFramePainter {
 
   paint(frame: HudVisualFrame, localTick = false): Promise<boolean> {
     return new Promise((resolve) => {
-      if (!this.painting) {
-        this.painting = true;
-        void this.drain({ frame, localTick, resolve: [resolve] });
-        return;
-      }
       const pending = this.queue[this.queue.length - 1];
       if (pending && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation') {
         // A full frame supersedes every older not-yet-started frame. Keeping
@@ -294,22 +340,31 @@ export class HudVisualSurface implements HudFramePainter {
       } else {
         this.queue.push({ frame, localTick, resolve: [resolve] });
       }
+      if (!this.painting) {
+        this.painting = true;
+        void this.drain();
+      }
     });
   }
 
-  private async drain(current: PendingPaint): Promise<void> {
-    let next: PendingPaint | undefined = current;
-    while (next) {
+  private async drain(): Promise<void> {
+    for (;;) {
+      // The window stays open while the frame is still queued: whatever
+      // lands during it supersedes that frame instead of following it.
+      if (this.coalesceMs > 0) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, this.coalesceMs); });
+      }
+      const next = this.queue.shift();
+      if (!next) break;
       const painted = await this.paintNow(next.frame, next.localTick);
       next.resolve.forEach((resolve) => resolve(painted));
-      next = this.queue.shift();
     }
     this.painting = false;
   }
 
   private async paintNow(frame: HudVisualFrame, localTick = false): Promise<boolean> {
     const frameNumber = ++this.frameNumber;
-    let current: { order: number; tile: HudImageTile } | undefined;
+    let current: { order: number; tile: HudImageTile; startedAt: number; bytes: number } | undefined;
     try {
       const tiles = await this.renderer.render(frame);
       // Navigation acknowledges an exact route generation only after four
@@ -317,7 +372,7 @@ export class HudVisualSurface implements HudFramePainter {
       // never inherit a quadrant from the page beneath it.
       const requiresCompleteTransfer = frame.kind === 'confirmation' || frame.kind === 'navigation';
       for (const [order, tile] of tiles.entries()) {
-        current = { order, tile };
+        current = { order, tile, startedAt: now(), bytes: 0 };
         if (
           !requiresCompleteTransfer
           && pixelsEqual(this.deliveredTiles.get(tile.containerId), tile.pixels)
@@ -325,7 +380,11 @@ export class HudVisualSurface implements HudFramePainter {
         const containerName = VisualContainerName[tile.containerId];
         if (!containerName) throw new Error(`unknown visual container ${tile.containerId}`);
         const imageData = await this.imageEncoder(tile);
-        const result = await this.client.require().updateImageRawData(
+        current.bytes = imageData.length;
+        // Timed from the bridge call, not the encode: the phone's LZ4 and
+        // the BLE hop are what the number has to expose.
+        current.startedAt = now();
+        const upload = this.client.require().updateImageRawData(
           new ImageRawDataUpdate({
             containerID: tile.containerId,
             containerName,
@@ -335,6 +394,9 @@ export class HudVisualSurface implements HudFramePainter {
             imageData: Array.from(imageData),
           }),
         );
+        const result = this.uploadTimeoutMs > 0
+          ? await settleWithin(upload, this.uploadTimeoutMs, `${containerName} upload`)
+          : await upload;
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';
         this.diagnostics?.record({
           type: 'tile_upload',
@@ -342,6 +404,8 @@ export class HudVisualSurface implements HudFramePainter {
           order,
           containerId: tile.containerId as 4 | 8 | 9 | 10,
           outcome,
+          durationMs: elapsedSince(current.startedAt),
+          bytes: current.bytes,
         });
         if (outcome === 'failed') {
           this.deliveredTiles.clear();
@@ -363,7 +427,7 @@ export class HudVisualSurface implements HudFramePainter {
         .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })
         .catch(() => undefined);
       return true;
-    } catch {
+    } catch (error) {
       this.deliveredTiles.clear();
       if (current) {
         this.diagnostics?.record({
@@ -372,9 +436,14 @@ export class HudVisualSurface implements HudFramePainter {
           order: current.order,
           containerId: current.tile.containerId as 4 | 8 | 9 | 10,
           outcome: 'error',
+          durationMs: elapsedSince(current.startedAt),
+          bytes: current.bytes,
         });
       }
-      console.error('[HudVisualSurface] frame paint failed');
+      console.error(
+        '[HudVisualSurface] frame paint failed:',
+        error instanceof Error ? error.message : 'unknown error',
+      );
       return false;
     }
   }

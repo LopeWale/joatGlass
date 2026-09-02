@@ -161,7 +161,10 @@ describe('MacLink diagnostic delivery', () => {
     for (let frame = 1; frame <= 400; frame += 1) {
       link.sendDiagnostic({
         kind: 'g2.diagnostic',
-        event: { type: 'tile_upload', frame, order: 0, containerId: 4, outcome: 'success' },
+        event: {
+          type: 'tile_upload', frame, order: 0, containerId: 4, outcome: 'success',
+          durationMs: 900, bytes: 4096,
+        },
       });
     }
 

@@ -222,7 +222,7 @@ describe('HudVisualSurface', () => {
     };
 
     expect(await new HudVisualSurface(client, renderer).paint(frame)).toBe(false);
-    expect(error).toHaveBeenCalledWith('[HudVisualSurface] frame paint failed');
+    expect(error).toHaveBeenCalledWith('[HudVisualSurface] frame paint failed:', 'missing icon');
     error.mockRestore();
   });
 
@@ -320,12 +320,134 @@ describe('HudVisualSurface', () => {
       record: (event) => events.push(event),
     }).paint(frame);
 
+    // Each receipt carries the bridge round trip and the encoded size —
+    // the two numbers that locate a slow HUD on the phone or on the BLE
+    // hop — and never the pixels themselves.
     expect(events).toEqual([
-      { type: 'tile_upload', frame: 1, order: 0, containerId: 4, outcome: 'success' },
-      { type: 'tile_upload', frame: 1, order: 1, containerId: 8, outcome: 'success' },
-      { type: 'tile_upload', frame: 1, order: 2, containerId: 9, outcome: 'success' },
-      { type: 'tile_upload', frame: 1, order: 3, containerId: 10, outcome: 'success' },
+      { type: 'tile_upload', frame: 1, order: 0, containerId: 4, outcome: 'success', durationMs: expect.any(Number), bytes: 3 },
+      { type: 'tile_upload', frame: 1, order: 1, containerId: 8, outcome: 'success', durationMs: expect.any(Number), bytes: 1 },
+      { type: 'tile_upload', frame: 1, order: 2, containerId: 9, outcome: 'success', durationMs: expect.any(Number), bytes: 1 },
+      { type: 'tile_upload', frame: 1, order: 3, containerId: 10, outcome: 'success', durationMs: expect.any(Number), bytes: 1 },
     ]);
+    for (const event of events as Array<{ durationMs: number }>) {
+      expect(event.durationMs).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('renders a burst of frames as one frame inside the coalescing window', async () => {
+    // A voice turn's chrome arrives as separate Mac messages a few ms
+    // apart. Rendering the first the instant it lands would ship the
+    // spine's tile twice, at 0.5-2 s a tile over BLE.
+    const rendered: string[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => ImageRawDataUpdateResult.success,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async (frame) => {
+        rendered.push(frame.kind === 'overview' ? frame.main : frame.kind);
+        return [
+          { containerId: ContainerId.Image, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(4) },
+        ];
+      },
+    };
+    const frame = (main: string): HudVisualFrame => ({
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main, context: '', tray: '', hint: '',
+    });
+    const surface = new HudVisualSurface(client, renderer, undefined, undefined, { coalesceMs: 20 });
+
+    const first = surface.paint(frame('mic on'));
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+    const second = surface.paint(frame('hearing you'));
+    expect(await Promise.all([first, second])).toEqual([true, true]);
+    expect(rendered).toEqual(['hearing you']);
+
+    // The window is per burst, never extended: a frame after it is its own.
+    expect(await surface.paint(frame('reply'))).toBe(true);
+    expect(rendered).toEqual(['hearing you', 'reply']);
+  });
+
+  it('keeps navigation frames apart even inside the coalescing window', async () => {
+    const rendered: string[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => ImageRawDataUpdateResult.success,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async (candidate) => {
+        if (candidate.kind === 'navigation') rendered.push(candidate.navigation.primary);
+        return [
+          { containerId: ContainerId.Image, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(4) },
+          { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(4) },
+        ];
+      },
+    };
+    const frame = (primary: string): HudVisualFrame => ({
+      kind: 'navigation', status: '', micOn: false,
+      navigation: {
+        view: 'guidance', primary, secondary: 'onto Test Ave', hint: 'continue',
+        interaction: 'none', options: [], selectedIndex: 0,
+      },
+    });
+    const surface = new HudVisualSurface(client, renderer, undefined, undefined, { coalesceMs: 20 });
+
+    expect(await Promise.all([
+      surface.paint(frame('first')),
+      surface.paint(frame('latest')),
+    ])).toEqual([true, true]);
+    expect(rendered).toEqual(['first', 'latest']);
+  });
+
+  it('fails a frame whose tile upload never settles, so the lane drains', async () => {
+    // A dropped bridge promise used to wedge the single paint lane: every
+    // later frame queued behind it forever and the HUD simply stopped.
+    const events: Array<{ outcome: string; durationMs?: number }> = [];
+    let calls = 0;
+    const client = {
+      require: () => ({
+        updateImageRawData: () => {
+          calls += 1;
+          if (calls === 1) return new Promise<ImageRawDataUpdateResult>(() => undefined);
+          return Promise.resolve(ImageRawDataUpdateResult.success);
+        },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([1]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([2]) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([3]) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
+      ],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    const surface = new HudVisualSurface(
+      client,
+      renderer,
+      { record: (event) => { if (event.type === 'tile_upload') events.push(event); } },
+      undefined,
+      { uploadTimeoutMs: 15 },
+    );
+
+    expect(await surface.paint(frame)).toBe(false);
+    expect(events).toEqual([expect.objectContaining({ outcome: 'error', order: 0 })]);
+    expect(events[0]?.durationMs).toBeGreaterThanOrEqual(10);
+
+    // The lane is free, and nothing is remembered as delivered: the next
+    // frame ships all four tiles again.
+    expect(await surface.paint(frame)).toBe(true);
+    expect(calls).toBe(5);
   });
 
   it('records a completed Brainstorm raster only as a fixed-state SHA-256 receipt', async () => {

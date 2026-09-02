@@ -1035,6 +1035,118 @@ describe('the spine\'s left slot', () => {
   });
 });
 
+describe('the spine\'s voice chrome fits one image tile', () => {
+  // Every word the Mac says about a voice turn ("hearing you…"), and the
+  // microphone state beside it, repaints the 288x144 tile it sits in — at
+  // 0.5-2 s a tile over BLE. Centred on the seam at x=288 it cost two.
+  const SEAM = 288;
+  const PX_PER_CHAR = 5.18;
+
+  function spine(): { texts: Array<{ text: string; x: number }>; icons: number[] } {
+    const texts: Array<{ text: string; x: number }> = [];
+    const icons: number[] = [];
+    const context = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
+      measureText: (value: string) => ({ width: value.length * PX_PER_CHAR }),
+      save() {}, restore() {}, beginPath() {}, stroke() {},
+      moveTo() {}, lineTo() {}, arcTo() {}, closePath() {},
+      fillText(text: string, x: number) { texts.push({ text, x }); },
+    } as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    const stub = renderer as never as {
+      drawIcon(c: unknown, i: unknown, x: number): void;
+      drawShell(
+        c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
+        f: boolean, showTime: boolean, title: string,
+      ): void;
+    };
+    stub.drawIcon = (_c, _i, x) => { icons.push(x); };
+    stub.drawShell(
+      context, '9:41  JOAT hearing you…  bat 87%', true, {} as unknown, true, true, '',
+    );
+    return { texts, icons };
+  }
+
+  function drawn(texts: Array<{ text: string; x: number }>, match: (text: string) => boolean) {
+    const found = texts.find((entry) => match(entry.text));
+    if (!found) throw new Error('spine text not drawn');
+    return found;
+  }
+
+  it('keeps the clock, the state word and the microphone west of the seam', () => {
+    const { texts, icons } = spine();
+    const label = drawn(texts, (text) => text.startsWith('JOAT'));
+    expect(label.text).toBe('JOAT · HEARING YOU…');
+    expect(label.x + label.text.length * PX_PER_CHAR).toBeLessThan(SEAM);
+    const mic = drawn(texts, (text) => text === 'ON');
+    expect(mic.x + 'OFF'.length * PX_PER_CHAR).toBeLessThan(SEAM);
+    const [micIcon, batteryIcon] = icons;
+    expect(micIcon).toBeDefined();
+    expect((micIcon ?? 0) + 15).toBeLessThan(SEAM);
+    expect(drawn(texts, (text) => text === '9:41').x).toBeLessThan(SEAM);
+    // The battery keeps the other tile: it changes on its own slow clock,
+    // never with a voice turn.
+    expect(drawn(texts, (text) => text === '87%').x).toBeGreaterThanOrEqual(SEAM);
+    expect(batteryIcon).toBeGreaterThanOrEqual(SEAM);
+  });
+
+  it('gives the state word room for the longest spine labels without a seam crossing', () => {
+    // fitText ellipsises past labelMaxWidth; the budget must still hold a
+    // real page title, and label + microphone must never overlap.
+    const { labelX, labelMaxWidth, micIconX } = HudCanvas.SPINE_VOICE_CHROME;
+    expect(labelX + labelMaxWidth).toBeLessThan(micIconX);
+    expect('MESSAGES · CONVERSATION'.length * PX_PER_CHAR).toBeLessThanOrEqual(labelMaxWidth);
+  });
+});
+
+describe('the resting overview wears one footer on every tab', () => {
+  // The footer is centred on the tile seam, so a footer that differed
+  // between the notifications tab and the other three made a swipe repaint
+  // the bottom-left tile too: three image writes where the rail and the
+  // pane need two.
+  function overviewFooter(rail: boolean): string {
+    const texts: string[] = [];
+    const context = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
+      lineWidth: 1, strokeStyle: '', globalAlpha: 1,
+      measureText: (value: string) => ({ width: value.length * 5.18 }),
+      save() {}, restore() {}, beginPath() {}, stroke() {}, fill() {},
+      moveTo() {}, lineTo() {}, arcTo() {}, closePath() {}, fillRect() {},
+      fillText(text: string) { texts.push(text); },
+    } as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    const stub = renderer as never as {
+      drawIcon(): void;
+      drawTabRail(): void;
+      drawPanelPane(): void;
+      drawOverview(c: CanvasRenderingContext2D, frame: unknown, icons: unknown): void;
+    };
+    stub.drawIcon = () => {};
+    stub.drawTabRail = () => {};
+    stub.drawPanelPane = () => {};
+    stub.drawOverview(context, {
+      status: '9:41  JOAT ready  bat 87%',
+      main: 'Nothing new.',
+      mainBrightness: 4,
+      context: '',
+      tray: '',
+      hint: 'tap: open · swipe: tabs · hold: mic · “JOAT …”',
+      ...(rail ? { rail: { activeTab: 'notifications' } } : {}),
+    }, {});
+    const footer = texts[texts.length - 1];
+    if (footer === undefined) throw new Error('no footer drawn');
+    return footer;
+  }
+
+  it('draws the shared rail hint on the notifications tab, not the chrome hint', () => {
+    expect(overviewFooter(true)).toBe(HudCanvas.PANEL_OVERVIEW_HINT);
+  });
+
+  it('keeps the chrome hint where there is no rail to swipe', () => {
+    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · hold: mic · “JOAT …”');
+  });
+});
+
 describe('the scrollback marker keeps the two-tone split', () => {
   // S6 from the audit's counter-pass: windowHudTailLines prepends '…' to
   // the first visible row whenever older rows are hidden, and '…CODEX > '

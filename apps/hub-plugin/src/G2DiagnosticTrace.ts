@@ -51,6 +51,13 @@ export type G2TraceEvent =
     order: number;
     containerId: 4 | 8 | 9 | 10;
     outcome: 'success' | 'failed' | 'error';
+    /** Wall time of the bridge round trip for this tile, whole ms. The BLE
+     * hop is the HUD's entire cost model (0.5-2 s a tile, per Even's own
+     * guidance); without this number a slow link cannot be told from a
+     * slow renderer, and no optimisation can be checked on hardware. */
+    durationMs: number;
+    /** Encoded bytes handed to the bridge — a size, never a pixel. */
+    bytes: number;
   }
   /**
    * A content-free first-light receipt. It identifies only whether the real

@@ -153,6 +153,64 @@ default registration", so the OS shows its own menu instead of ours.
 The resting-page design and the pages the wearer moves between live in
 [HUD_DASHBOARD.md](HUD_DASHBOARD.md).
 
+### The rendering cost model, measured (2026-09-02)
+
+Every page is one 576x288 canvas, split into the SDK's four maximum-size
+image containers (288x144 each) and shipped with `updateImageRawData`, one
+tile at a time, only for tiles whose pixels changed. Probing the installed
+SDK (0.0.14) with a stubbed host showed what one tile costs on each hop:
+
+| Hop | What crosses it | Cost |
+|---|---|---|
+| WebView → phone (`flutter_inappwebview`) | a JSON *number array* of the PNG bytes — ~3.6 text bytes per byte (74 KB of JSON for a 20 KB tile) | milliseconds |
+| Phone → glasses (BLE) | the tile as packed Gray4, LZ4-compressed by the host | **0.5-2 s per tile** — Even's own figure in the `glasses-ui` skill; there is no delta encoding |
+| Native text (`textContainerUpgrade`) | a few bytes | "much faster than image updates — use text for anything that needs to feel instant" (same skill) |
+
+So the HUD's speed IS the number of tiles an interaction dirties, and the
+seam at x=288 is the whole game: anything drawn across it costs two tiles.
+Until 0.1.72 the state word was centred ON the seam and the microphone sat
+at x=410, so "listening → hearing you… → reply" shipped both top tiles per
+change; the resting footer differed between the notifications tab and the
+other three, so a swipe shipped three tiles.
+
+| Interaction | Tiles before | Tiles after |
+|---|---|---|
+| Mac state word ("hearing you…"), mic on/off | 2 | **1** (top-left) |
+| Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
+| Tap into a tab, any page change | 4 | 4 — a new page is new pixels |
+| Assistant overlay show, then dismiss | 4 + 4 | 4 + 4 |
+| Clock minute tick on a feature page | 1 | 1 |
+
+Two pipeline rules landed with it, in `HudVisualSurface`: frames that
+arrive within `PAINT_COALESCE_MS` (40 ms) of each other render as ONE
+frame, so a burst of Mac messages about one voice turn cannot ship the
+spine twice; and a tile write that has not settled within
+`TILE_UPLOAD_TIMEOUT_MS` (15 s) fails the frame instead of wedging the
+single paint lane forever — a wedged lane looks exactly like
+"notifications stopped showing and the menu stopped opening".
+
+**Measure before the next change.** With `--g2-diagnostics` on the Mac,
+every `tile_upload` receipt in
+`~/Library/Application Support/JOAT/g2-diagnostics.json` carries
+`durationMs` (the bridge round trip, from the call to the host's answer)
+and `bytes` (the encoded PNG handed to the bridge). Read the per-tile
+duration off real hardware before touching the pipeline again; the
+simulator has no BLE and proves nothing about speed.
+
+The levers that remain are design decisions, not code:
+
+- **Native text for the spine word and the footer hint** — text containers
+  layered over the tiles with `zOrderIndex`, updated with
+  `textContainerUpgrade`. A voice-state change would then cost zero tiles.
+  The price: the firmware's proportional font at a fixed 27 px line height
+  (see the `font-measurement` skill), not the 10-12 px canvas type.
+- **A native list for news and search** — the firmware scrolls it itself,
+  which is why Even's own news feels smooth. Rejected once for density
+  (above); the trade is the same today.
+- **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
+  Quantising to four levels would shrink each tile's BLE payload, but the
+  gain is unmeasured until `durationMs` is read from hardware.
+
 ### The startup page is one-shot PER HOST SESSION
 
 `createStartUpPageContainer` succeeds once per HOST session, not per page

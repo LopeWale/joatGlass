@@ -327,6 +327,37 @@ class TestParseUplink:
             "containerId": 9, "outcome": "success",
         })
 
+    def test_g2_diagnostic_tile_upload_carries_its_bridge_timing(self) -> None:
+        # The plugin times every tile's bridge round trip and reports the
+        # encoded size; both are optional so an older plugin still parses.
+        message = parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "tile_upload", "frame": 4, "order": 2, "containerId": 9,
+                "outcome": "success", "durationMs": 1375, "bytes": 6120,
+            },
+        })
+        assert message == G2Diagnostic(event={
+            "type": "tile_upload", "frame": 4, "order": 2, "containerId": 9,
+            "outcome": "success", "durationMs": 1375, "bytes": 6120,
+        })
+        with pytest.raises(ProtocolError, match="durationMs is invalid"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "tile_upload", "frame": 4, "order": 2, "containerId": 9,
+                    "outcome": "success", "durationMs": -1,
+                },
+            })
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "tile_upload", "frame": 4, "order": 2, "containerId": 9,
+                    "outcome": "success", "pixels": [0, 1, 2],
+                },
+            })
+
     def test_g2_diagnostic_accepts_content_free_navigation_page_transition(self) -> None:
         assert parse_uplink({
             "kind": "g2.diagnostic",

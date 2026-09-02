@@ -5,7 +5,7 @@ import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
 import { phoneTimeZone } from './PhoneTimeZone';
 import { HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
-import { encodeGray8TilePng, HudVisualSurface } from './HudVisualSurface';
+import { encodeGray8TilePng, HudVisualSurface, PAINT_COALESCE_MS } from './HudVisualSurface';
 import {
   activateVisualHudPage,
   initializeHudPage,
@@ -344,7 +344,15 @@ async function boot(): Promise<void> {
     createVisual: () => new HudPresenter(
       client,
       activeLayouts,
-      new HudVisualSurface(client, new HudCanvasRenderer(), g2Diagnostics, encodeGray8TilePng),
+      new HudVisualSurface(
+        client,
+        new HudCanvasRenderer(),
+        g2Diagnostics,
+        encodeGray8TilePng,
+        // A voice turn's chrome arrives as a burst of Mac messages; one
+        // window renders them as one frame instead of shipping a tile twice.
+        { coalesceMs: PAINT_COALESCE_MS },
+      ),
       g2Diagnostics,
     ),
     createText: () => new HudPresenter(client, activeLayouts, undefined, g2Diagnostics),
