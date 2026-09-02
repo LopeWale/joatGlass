@@ -121,6 +121,35 @@ class ApprovalResolverLike(Protocol):
     ) -> str | None: ...
 
 
+def _session_host(key: object) -> str:
+    """The agent segment of a gateway session key, or "" if unreadable.
+
+    Keys are "agent:<agentId>:<namespace><suffix>", so the agentId is the
+    field that tells two same-labelled sessions apart. Read defensively:
+    a malformed key disambiguates nothing rather than raising.
+    """
+    if not isinstance(key, str):
+        return ""
+    parts = key.split(":")
+    return parts[1] if len(parts) >= 3 and parts[1] else ""
+
+
+def _listed_name(row: dict[str, str], rows: Sequence[dict[str, str]]) -> str:
+    """How one discovered session is NAMED to the wearer.
+
+    Bare label when it is unique — the roadmap is explicit that host names
+    appear ONLY when two rows otherwise cannot be distinguished, and a host
+    on every row is chrome on a surface that cannot afford it. When a label
+    repeats, every row carrying it gains its host, because showing it on
+    one and not the other would be worse than showing neither.
+    """
+    label = row.get("label") or row.get("key") or "?"
+    if sum(1 for other in rows if (other.get("label") or "") == row.get("label")) < 2:
+        return label
+    host = _session_host(row.get("key"))
+    return f"{label} ({host})" if host else label
+
+
 def _is_roster_lane(lane: "TerminalLane") -> bool:
     """Can this lane enumerate and adopt the wearer's other sessions?
 
@@ -531,8 +560,7 @@ class AgentTerminalRoster:
             return "The gateway lists no sessions involving you."
         lines = []
         for row in rows[:12]:
-            label = row.get("label") or row.get("key") or "?"
-            lines.append(f"• {label}")
+            lines.append(f"• {_listed_name(row, rows)}")
         # A listing IS terminal output: putting it in the tail is what lets
         # the wearer READ their sessions on the lenses instead of having to
         # remember what was just spoken.
@@ -551,14 +579,25 @@ class AgentTerminalRoster:
         if not self._discovered:
             return "Say 'terminal discover' first — nothing has been listed yet."
         said = " ".join(spoken.lower().split())
-        match = None
-        for row in self._discovered:
-            label = (row.get("label") or "").lower()
-            if label and (label == said or said in label or label in said):
-                match = row
-                break
-        if match is None:
+        matches = [
+            row for row in self._discovered
+            if (name := _listed_name(row, self._discovered).lower())
+            and (name == said or said in name or name in said)
+        ]
+        if not matches:
             return f"No listed session matches '{spoken}'."
+        if len(matches) > 1:
+            # AGENT_TERMINAL_ROADMAP.md:37-38 — "host names appear only
+            # when two rows otherwise cannot be distinguished." Two real
+            # sessions can share a label; this took the FIRST silently, so
+            # the second was unreachable by voice and the wearer was never
+            # told a choice existed. Same rule as `continue <title>`: name
+            # the candidates, do not guess.
+            named = " · ".join(
+                _listed_name(row, self._discovered) for row in matches[:3]
+            )
+            return f"{len(matches)} sessions match — say one exactly: {named}"
+        match = matches[0]
         lane = next(
             (lane for lane in self._lanes.values() if _is_roster_lane(lane)),
             None,

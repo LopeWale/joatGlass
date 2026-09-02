@@ -1317,3 +1317,77 @@ class TestSwitchingSessionsByGesture:
         await r.focus_next()
         assert frames, "the wearer cannot see where focus landed"
         assert getattr(frames[-1], "topic", "").startswith("hermes")
+
+
+class TestTwoSessionsTheWearerCannotOtherwiseTellApart:
+    """AGENT_TERMINAL_ROADMAP.md:37-38 — "Host names appear only when two
+    rows otherwise cannot be distinguished."
+
+    That was satisfied vacuously: the host was discarded from every row, so
+    it never appeared and the rule was trivially true — while the thing it
+    protects failed completely. Two real sessions sharing a label rendered
+    as two IDENTICAL bullets, and resuming by name silently took the first,
+    so the second was unreachable by voice with no sign a choice existed.
+    """
+
+    class Lister:
+        from joat.agents.openclaw_gateway import WORK_TERMINAL_POLICY as _p
+        policy = _p
+
+        def __init__(self, rows):
+            self._rows = rows
+            self.resumed: str | None = None
+
+        async def list_sessions(self, limit: int = 20):
+            return self._rows
+
+        async def stream(self, prompt: str):
+            yield "x"
+
+        async def resume_session(self, key: str) -> None:
+            self.resumed = key
+
+    _DUP = [
+        {"key": "agent:alpha:work-1", "label": "build the parser", "sessionId": "s1"},
+        {"key": "agent:beta:work-2", "label": "build the parser", "sessionId": "s2"},
+    ]
+    _UNIQUE = [
+        {"key": "agent:alpha:work-1", "label": "build the parser", "sessionId": "s1"},
+        {"key": "agent:beta:work-2", "label": "fix the tests", "sessionId": "s2"},
+    ]
+
+    async def test_colliding_labels_gain_their_host(self) -> None:
+        r = AgentTerminalRoster([("work", self.Lister(self._DUP))])
+        listing = await r.discover()
+        assert "build the parser (alpha)" in listing
+        assert "build the parser (beta)" in listing
+
+    async def test_unique_labels_carry_no_host_chrome(self) -> None:
+        """The other half of the rule: a host on every row is chrome on a
+        surface that cannot afford it."""
+        r = AgentTerminalRoster([("work", self.Lister(self._UNIQUE))])
+        listing = await r.discover()
+        assert "(alpha)" not in listing and "(beta)" not in listing
+
+    async def test_an_ambiguous_name_asks_instead_of_guessing(self) -> None:
+        agent = self.Lister(self._DUP)
+        r = AgentTerminalRoster([("work", agent)])
+        await r.discover()
+        answer = await r.resume("build the parser")
+        assert "2 sessions match" in answer
+        assert agent.resumed is None, "it resumed one anyway"
+
+    async def test_the_disambiguated_name_reaches_the_second_session(self) -> None:
+        agent = self.Lister(self._DUP)
+        r = AgentTerminalRoster([("work", agent)])
+        await r.discover()
+        assert "resumed" in await r.resume("build the parser (beta)")
+        assert agent.resumed == "agent:beta:work-2"
+
+    async def test_a_malformed_key_disambiguates_nothing_rather_than_raising(self) -> None:
+        rows = [
+            {"key": "nonsense", "label": "same", "sessionId": "s1"},
+            {"key": "", "label": "same", "sessionId": "s2"},
+        ]
+        r = AgentTerminalRoster([("work", self.Lister(rows))])
+        assert "same" in await r.discover()
