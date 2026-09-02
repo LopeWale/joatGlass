@@ -2212,11 +2212,48 @@ class TestRoundOneRunsConcurrently:
             if len(started) == 2:
                 break
         assert started == ["codex", "claude"], (
-            "both first-round turns must be in flight; serial execution "
-            "would show only the first until it completed"
+            "the second seat must already be in flight while the first is "
+            "on screen; serial execution would show only the first until "
+            "it had completely finished"
         )
         release.set()
         await run
+
+    async def test_the_visible_turn_keeps_what_it_reached_when_cancelled(
+        self,
+    ) -> None:
+        """The seat ON SCREEN streams live, never buffered.
+
+        A buffered producer runs ahead of the display, so tokens generated
+        before the wearer said stop would be discarded unshown — work
+        already paid for, thrown away at exactly the moment they are
+        deciding whether it was worth it.
+        """
+        from joat.services.roundtable import Participant, RoundTable
+
+        holder: dict[str, object] = {}
+
+        async def interrupted(_prompt: str):
+            yield "a partial thought"
+            holder["s"].cancel()          # type: ignore[union-attr]
+            yield " never reaches the glass"
+
+        async def other(_prompt: str):
+            yield "unused"
+
+        table = RoundTable([
+            Participant("codex", "proposer", interrupted),
+            Participant("claude", "critic", other),
+        ])
+        transport = SinkTransport()
+        session = debate(transport, table, None)
+        holder["s"] = session
+        await session.run()
+
+        final = brainstorm_frames(transport)[-1]
+        assert final.state == "cancelled"
+        assert "a partial thought" in final.activity
+        assert "never reaches the glass" not in final.activity
 
     async def test_the_wearer_still_sees_one_turn_at_a_time_in_order(self) -> None:
         """Concurrency is about the WAITING, not the watching. The surface's
