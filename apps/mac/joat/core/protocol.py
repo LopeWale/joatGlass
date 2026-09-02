@@ -425,6 +425,16 @@ class AssistantOverlay:
     text: str = ""
     operation: Literal["replace", "append", "settle", "dismiss"] = "replace"
     dismiss_after_ms: int | None = None
+    #: This overlay ANSWERS something the wearer just asked on the surface
+    #: they are looking at.
+    #:
+    #: The plugin refuses ordinary overlays over a Brainstorm, for good
+    #: reason: a queued reply once drained the instant a session settled
+    #: and stamped "REPLY — Using the phone mic…" across the synthesis.
+    #: But that rule also silenced the answers — "make that shorter", and
+    #: the question asked before replacing a live session — which are not
+    #: interruptions, they are the reply to what was just said.
+    answers_wearer: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         if self.operation not in {"replace", "append", "settle", "dismiss"}:
@@ -444,6 +454,8 @@ class AssistantOverlay:
             message["text"] = self.text
         if self.dismiss_after_ms is not None:
             message["dismissAfterMs"] = self.dismiss_after_ms
+        if self.answers_wearer:
+            message["answersWearer"] = True
         return message
 
 

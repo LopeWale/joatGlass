@@ -352,6 +352,11 @@ export type DownlinkMessage =
     operation: AssistantOverlayOperation;
     text?: string;
     dismissAfterMs?: number;
+    /** This overlay ANSWERS something the wearer just asked on the surface
+     * they are looking at, so the Brainstorm refusal does not apply. That
+     * refusal exists to stop unrelated queued chatter stamping itself over
+     * a synthesis — not to silence the reply to an instruction. */
+    answersWearer?: boolean;
   }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
   | {

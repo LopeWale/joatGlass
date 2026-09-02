@@ -583,9 +583,13 @@ async function boot(): Promise<void> {
         break;
       case 'assistant.overlay':
         if (msg.operation === 'replace' && msg.text) {
-          await awaitCurrent(hud.showAssistantOverlay(msg.text));
+          await awaitCurrent(hud.showAssistantOverlay(
+            msg.text, false, msg.answersWearer === true,
+          ));
         } else if (msg.operation === 'append' && msg.text) {
-          await awaitCurrent(hud.showAssistantOverlay(msg.text, true));
+          await awaitCurrent(hud.showAssistantOverlay(
+            msg.text, true, msg.answersWearer === true,
+          ));
         } else if (msg.operation === 'settle' && msg.dismissAfterMs !== undefined) {
           hud.settleAssistantOverlay(msg.dismissAfterMs);
         } else if (msg.operation === 'dismiss') {

@@ -1214,3 +1214,42 @@ describe('HudPresenter background migration', () => {
     expect(out.streams).toEqual({ 2: 'kept' });
   });
 });
+
+describe('an answer is not an interruption', () => {
+  const room = () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    } as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    return { hud, frames };
+  };
+
+  const session = {
+    state: 'settled' as const, topic: 'cold-start latency',
+    collaborators: ['Codex', 'Claude'], activity: 'JOAT > AGREED: cache it',
+  };
+
+  it('refuses unrelated chatter over a Brainstorm', async () => {
+    // A queued reply once drained the instant a session settled and
+    // painted "REPLY — Using the phone mic…" across the synthesis.
+    const { hud } = room();
+    await hud.showBrainstorm(session as never);
+    expect(await hud.showAssistantOverlay('REPLY — using the phone mic'))
+      .toBe(false);
+  });
+
+  it('shows the reply to something the wearer just asked there', async () => {
+    // The rule was written as "never", which also silenced the answers TO
+    // the wearer: "make that shorter" produced its result into nothing,
+    // and the question asked before replacing a live session was never
+    // seen — so they were waiting on a prompt that did not exist.
+    const { hud, frames } = room();
+    await hud.showBrainstorm(session as never);
+    expect(await hud.showAssistantOverlay('shorter version', false, true))
+      .toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      assistantOverlay: { text: 'shorter version' },
+    });
+  });
+});
