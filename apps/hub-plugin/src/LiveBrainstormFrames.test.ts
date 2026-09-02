@@ -14,20 +14,27 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  HUD_TEXT_MEAN_ADVANCE_PX,
   brainstormTranscriptLines,
   wrapHudText,
 } from './HudCanvasRenderer';
 import frames from './fixtures/live-brainstorm-frames.json';
 
-/** The transcript column, from drawBrainstormTranscript. */
-const COLUMN_PX = 504;
-/** SF Mono at 11px: advance 1266/2048 em. */
-const CHAR_PX = 11 * (1266 / 2048);
+/** The transcript column: HUD_CONTENT_WIDTH, x=14..562. All three
+ * constants here were stale for a full release — a 504px column, an SF
+ * Mono advance, and a 524-character bound — surviving from the old narrow
+ * monospace design while the shipped surface drew 548px of proportional
+ * type against a 4239-character scrollback. A "live frames" test measured
+ * against a renderer that no longer existed. */
+const COLUMN_PX = 576 - 14 * 2;
+/** Proportional Helvetica Neue at 11px, measured on the real simulator. */
+const CHAR_PX = HUD_TEXT_MEAN_ADVANCE_PX;
 const measure = (value: string): number => value.length * CHAR_PX;
 
-/** What the Mac's BRAINSTORM_ACTIVITY_MAX allows: 7 rows of 74, plus the
- * six newlines that separate them. Keep in step with protocol.py. */
-const ACTIVITY_MAX = 74 * 7 + 6;
+/** What the Mac's BRAINSTORM_ACTIVITY_MAX allows: 40 scrollback rows of
+ * 105, plus the 39 newlines separating them. Keep in step with
+ * protocol.py — tests/unit/test_sinks.py re-derives this equality. */
+const ACTIVITY_MAX = 105 * 40 + 39;
 
 describe('live Brainstorm frames', () => {
   it('captured something worth testing', () => {

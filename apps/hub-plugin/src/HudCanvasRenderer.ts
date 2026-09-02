@@ -78,6 +78,13 @@ const HUD_TEXT_FONT = '"Helvetica Neue", "SF Pro Text", Arial, sans-serif';
  * than one that never reached it. Everything between is content. */
 const HUD_EDGE = 14;
 const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
+/** Measured mean advance of HUD_TEXT_FONT at 11px: a 63-character row
+ * rendered by the REAL simulator spans 326px → 5.18 px per character.
+ * Exported as code, not prose, because the wire's column budget
+ * (`BRAINSTORM_ROW_COLUMNS` in core/protocol.py) is derived from it and a
+ * cross-language test re-derives the equality — a number living only in a
+ * comment cannot fail a build when the font changes. */
+export const HUD_TEXT_MEAN_ADVANCE_PX = 5.18;
 const HUD_CONTENT_RIGHT = 576 - HUD_EDGE;       // 562
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
 export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
@@ -445,7 +452,7 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals'>,
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals'>,
 ): string {
   if (model.screen === 'brainstorm') {
     if (model.state === 'running') {
@@ -489,27 +496,29 @@ export function brainstormActionHint(
   // that tapping the terminal begins a Brainstorm. And a lane waiting on
   // an approval fell through to "tap: retry Hermes" — the wrong action,
   // with the only useful one ("terminal approve") never shown at all.
+  // A pending tool request outranks every state, because that is the
+  // CONTROLLER's order: handleClick answers the approval and handleSwipe
+  // denies it whenever approvals > 0, whatever the connection looks like.
+  // The hint's job is to promise what the gesture actually does — a hint
+  // keyed on state alone said 'swipe: scroll' on a busy lane holding an
+  // approval, where the swipe in fact DENIES a tool. The one state where
+  // a wrong hint performs a consequential action is the one it must never
+  // be wrong in.
+  if ((model.approvals ?? 0) > 0) {
+    return 'tap: approve · swipe: deny · left x2: menu';
+  }
   if (model.state === 'approval_required') {
-    // Only worth saying while the gateway can actually carry the answer.
-    // A lane can hold a pending approval while the CONNECTION is blocked or
-    // unavailable — different fields, and they disagree — and telling the
-    // wearer to approve into a dead link is advice that cannot be followed,
-    // which is the same defect as the "tap: retry Hermes" this replaced.
-    // The gestures answer the approval only when the LANE is the thing
-    // waiting. Ordering matters: a lane can hold a pending approval while
-    // the connection is dead, and there the tap still retries the daemon.
-    if ((model.approvals ?? 0) > 0) {
-      return 'tap: approve · swipe: deny · left x2: menu';
-    }
-    if (model.terminalState === 'ready') {
-      return 'say "terminal approve" or "terminal deny" · left x2: menu';
-    }
+    // No pending tool request, so approval_required means the CONNECTION
+    // is waiting on device approval in OpenClaw — remedy: retry. (A
+    // branch keyed on the render model's old `terminalState` twin claimed
+    // a voice-only wording here; that twin mirrored `state`, making the
+    // branch statically unreachable — it never showed once.)
     return 'tap: retry Hermes, then approve · left x2: menu';
   }
   if (model.state === 'running') {
     return 'swipe: scroll · say "terminal cancel" · left x2: menu';
   }
-  return model.terminalState === 'ready'
+  return model.state === 'ready'
     ? 'tap: speak to the terminal · left x2: menu'
     : 'tap: retry Hermes · left x2: menu';
 }
@@ -3020,7 +3029,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       );
     }
     const actionHint = scroll.offset > 0
-      ? `▼ ${scroll.offset} newer — swipe down · left x2: ${model.state === 'running' ? 'cancel' : 'menu'}`
+      // Cancel is a Brainstorm fact: handleCancel refuses every
+      // agent_terminal frame (left-double opens the menu there), so this
+      // override — keyed on state alone — promised a cancel the router
+      // would never perform on the terminal.
+      ? `▼ ${scroll.offset} newer — swipe down · left x2: ${
+        model.screen === 'brainstorm' && model.state === 'running' ? 'cancel' : 'menu'
+      }`
       : brainstormActionHint(model);
     context.fillStyle = gray(QUIET);
     context.font = `400 9px ${HUD_TEXT_FONT}`;
@@ -3617,8 +3632,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
     scroll.rows = total;
     scroll.visible = maximumLines;
+    // The SAME width everywhere: total above, wrap here, draw below. This
+    // was a literal 504 while total counted at 548 — so every row wrapped
+    // ~44px early (the dead right margin the wearer keeps pointing at) and
+    // the scroll arithmetic disagreed with the rows actually shown.
     const lines = brainstormTranscriptLines(
-      transcript, 504, maximumLines, measure, scroll.offset,
+      transcript, width, maximumLines, measure, scroll.offset,
     );
     // Elapsed-while-thinking is DEVICE time. It used to be computed on
     // the Mac and re-shipped as a whole frame over BLE every three

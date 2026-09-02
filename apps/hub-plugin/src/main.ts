@@ -516,7 +516,6 @@ async function boot(): Promise<void> {
           collaborators: msg.terminal.lanes,
           activity: msg.terminal.activity,
           endpointHost: msg.terminal.endpointHost,
-          terminalState: msg.terminal.state,
           terminalReason: msg.terminal.terminalReason,
           noToolsChecked: msg.terminal.noToolsChecked,
           approvals: msg.terminal.approvals,

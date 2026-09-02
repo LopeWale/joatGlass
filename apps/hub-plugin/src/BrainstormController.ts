@@ -117,30 +117,33 @@ export class BrainstormController {
       return false;
     }
 
+    // A waiting APPROVAL is the decision in front of the wearer, so the
+    // tap answers it — before ANY state branch, matching handleSwipe,
+    // which already denies whenever approvals > 0. Checked after
+    // `running`, a busy lane holding a pending tool request had swipe
+    // DENY and tap bounce to the Brainstorm: two gestures on one frame,
+    // one answering the approval and one leaving the screen. The approval
+    // blocks the very run the wearer is watching; it outranks the state.
+    if ((model.approvals ?? 0) > 0) {
+      return this.send('approve_terminal');
+    }
     if (model.state === 'running') return this.send('show_brainstorm');
     // A tap on the TERMINAL arms terminal input. It used to send
     // begin_topic_capture — i.e. the Agent Terminal's primary gesture
     // started a Brainstorm, a different feature with different
     // collaborators.
-    if (model.terminalState === 'ready') return this.send('begin_terminal_input');
-    // A waiting APPROVAL is the decision in front of the wearer, so the tap
-    // answers it. This used to send retry_terminal — retrying the daemon
-    // when what was blocked was a tool request — and the only real way to
-    // answer was to remember the words "terminal approve".
-    // A pending TOOL request, not a connection waiting on device approval
-    // in OpenClaw. Both once read `approval_required`, and the remedies are
-    // opposite: approve the tool, or retry the daemon.
-    if ((model.approvals ?? 0) > 0) {
-      return this.send('approve_terminal');
-    }
+    // `state`, not the render model's old `terminalState` twin: main.ts
+    // set that field from the SAME wire value, so the distinction was
+    // fictional on every real frame and the twin has been removed.
+    if (model.state === 'ready') return this.send('begin_terminal_input');
     // approval_required stays here. With no pending tool request it means
     // the CONNECTION is waiting on device approval in OpenClaw, and the
     // remedy is still a retry — dropping it from this list made that state
     // do nothing at all, which the acceptance flow caught.
     if (
-      model.terminalState === 'blocked'
-      || model.terminalState === 'approval_required'
-      || model.terminalState === 'unavailable'
+      model.state === 'blocked'
+      || model.state === 'approval_required'
+      || model.state === 'unavailable'
     ) {
       return this.send('retry_terminal');
     }

@@ -79,6 +79,28 @@ export type BrainstormHudState =
  * "JOAT · BRAINSTORM" across its spine, why a healthy terminal spent four
  * rows on connection chrome, and why a tap on the terminal was gated on the
  * BRAINSTORM lane's readiness. One frame, two features, three bugs. */
+/** The `brainstorm.view` WIRE payload — exactly the six fields
+ * `core/protocol.py`'s BrainstormHudView.to_wire() emits, and nothing
+ * else. docs/SESSION_MODEL.md:84-88: the Brainstorm frame "contains no
+ * Agent Terminal, Hermes, OpenClaw, endpoint, approval, or tool-policy
+ * fields." The engine held that; THIS file still declared the payload as
+ * the render-side union below, so the plugin's half of the duplicated
+ * protocol claimed fields the wire forbids — and the two protocol files
+ * disagreed about the frame they both describe. */
+export interface BrainstormViewPayload {
+  state: BrainstormHudState;
+  topic: string;
+  collaborators: string[];
+  activeSpeaker?: string;
+  activity: string;
+  /** Default-off Mac diagnostics arm — a Brainstorm fact, not a terminal
+   * one: it gates the isolated G2 acceptance gesture. */
+  acceptanceArmed?: boolean;
+}
+
+/** RENDER model, not a wire frame: the union one renderer draws. Built in
+ * main.ts from whichever of the two wire payloads arrived, plus the
+ * `screen` discriminator that exists only on this side. */
 export interface BrainstormHudModel {
   /** WHICH of the two surfaces this frame is. Brainstorm (Codex proposes,
    * Claude critiques) and the Agent Terminal (Hermes and OpenClaw work) are
@@ -97,9 +119,6 @@ export interface BrainstormHudModel {
   /** Where the dedicated session lives, shown so the wearer can tell a
    * local session from a remote one without leaving the surface. */
   endpointHost?: string;
-  /** Session readiness, which is not the same as `state`: the surface can be
-   * running while the session behind it is blocked. */
-  terminalState?: BrainstormHudState;
   terminalReason?: string;
   /** Whether the no-tools policy was verified for this session. */
   noToolsChecked?: boolean;
@@ -368,7 +387,7 @@ export type DownlinkMessage =
     selectable?: boolean;
     planningGrid?: PlanningGridCell[];
   }
-  | { kind: 'brainstorm.view'; brainstorm: BrainstormHudModel }
+  | { kind: 'brainstorm.view'; brainstorm: BrainstormViewPayload }
   | { kind: 'agent_terminal.view'; terminal: AgentTerminalHudModel }
   | { kind: 'productivity.view'; productivity: ProductivityHudModel }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }

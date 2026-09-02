@@ -8,6 +8,7 @@ import {
   agentTerminalTranscriptLayout,
   assistantOverlayTextLayout,
   brainstormTranscriptLines,
+  brainstormTranscriptRowCount,
   HUD_VISUAL_GEOMETRY,
   brainstormActionHint,
   brainstormStateLabel,
@@ -516,7 +517,6 @@ describe('Brainstorm wearable actions', () => {
     const hint = brainstormActionHint({
       screen: 'brainstorm',
       state: 'running',
-      terminalState: 'ready',
       noToolsChecked: true,
     });
     expect(hint).toContain('swipe: scroll');
@@ -532,7 +532,6 @@ describe('Brainstorm wearable actions', () => {
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
-      terminalState: 'ready',
       noToolsChecked: true,
     })).toBe('tap: speak · left x2: menu');
   });
@@ -541,27 +540,23 @@ describe('Brainstorm wearable actions', () => {
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
-      terminalState: 'ready',
       noToolsChecked: true,
       acceptanceArmed: true,
     } as Parameters<typeof brainstormActionHint>[0])).toBe('tap: speak · right/ring x2: test · left x2: menu');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
-      terminalState: 'blocked',
       noToolsChecked: false,
     })).not.toContain('test');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'acceptance_ready',
-      terminalState: 'ready',
       noToolsChecked: true,
     })).toBe('tap: start test · left x2: menu');
     expect(brainstormStateLabel('acceptance_ready')).toBe('TEST READY');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'topic_capture',
-      terminalState: 'ready',
       noToolsChecked: true,
     })).toBe('speak your question · left x2: cancel');
     expect(brainstormStateLabel('topic_capture')).toBe('SPEAK NOW');
@@ -935,5 +930,64 @@ describe('every speaker row splits dim tag from bright words', () => {
     ]) {
       expect(TAG.test(row), row).toBe(false);
     }
+  });
+});
+
+describe('the transcript wraps at the width it draws', () => {
+  // The audit's HUD-03/WIRE-03 pair: drawBrainstormTranscript counted rows
+  // at 548px (576 - HUD_EDGE*2) but WRAPPED them at a literal 504 — a
+  // second copy of a number from the old narrow column. Every row broke
+  // ~44px early (the dead right margin the wearer keeps pointing at) and
+  // the scroll arithmetic disagreed with the rows actually drawn.
+  it('brainstormTranscriptLines at the drawn width matches the row count', () => {
+    const measure = (value: string) => value.length * 5.18;
+    const width = 576 - 14 * 2;
+    const transcript = [
+      'CODEX > ' + 'a long position statement about caching '.repeat(4),
+      'CLAUDE > shorter reply',
+    ].join('\n');
+    const total = brainstormTranscriptRowCount(transcript, width, measure);
+    const lines = brainstormTranscriptLines(transcript, width, 40, measure, 0);
+    expect(lines.length).toBe(total);
+  });
+
+  it('no drawn row is narrower than the column minus one word', () => {
+    // A wrapper feeding a narrower width than the draw shows up as rows
+    // that all end well short of the column. With one width, a row only
+    // ends early because the NEXT word would not fit.
+    const measure = (value: string) => value.length * 5.18;
+    const width = 576 - 14 * 2;
+    const words = 'reasonably sized words repeated over and over again ';
+    const lines = brainstormTranscriptLines(
+      'CODEX > ' + words.repeat(6), width, 40, measure, 0,
+    );
+    for (let index = 0; index < lines.length - 1; index += 1) {
+      const row = lines[index]!;
+      const next = (lines[index + 1] ?? '').split(' ')[0] ?? '';
+      expect(measure(row + ' ' + next)).toBeGreaterThan(width);
+    }
+  });
+});
+
+describe('the footer never names a gesture the router will not perform', () => {
+  // HUD-08 (audit blocker): a BUSY lane holding a pending approval reports
+  // state 'running', and there handleSwipe DENIES the tool. The old hint
+  // said 'swipe: scroll' — a reading gesture that actually refused a tool.
+  const base = {
+    screen: 'agent_terminal' as const,
+    state: 'running' as const,
+    noToolsChecked: true,
+    acceptanceArmed: false,
+  };
+
+  it('a busy lane with a pending approval names approve/deny, not scroll', () => {
+    const hint = brainstormActionHint({ ...base, approvals: 2 });
+    expect(hint).toContain('swipe: deny');
+    expect(hint).not.toContain('swipe: scroll');
+  });
+
+  it('a busy lane with no approval still invites scrolling', () => {
+    const hint = brainstormActionHint({ ...base, approvals: 0 });
+    expect(hint).toContain('swipe: scroll');
   });
 });

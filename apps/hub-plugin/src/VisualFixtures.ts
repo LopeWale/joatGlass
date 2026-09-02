@@ -84,7 +84,6 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
     // terminal shows the sessions now, and this is the empty case.
     activity: 'No work sessions yet. Say “terminal <instruction>” to start one.',
     endpointHost: 'home-mac.example-tailnet.ts.net',
-    terminalState: 'ready' as const,
     terminalReason: 'Dedicated JOAT session',
     noToolsChecked: true,
   };
@@ -94,7 +93,6 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
         screen: 'brainstorm', state: 'ready', topic: 'How should JOAT plan today?',
         collaborators: ['Codex · proposer', 'Claude · critic'],
         activity: 'Say “JOAT, brainstorm …” to begin.',
-        terminalState: 'ready', terminalReason: 'Dedicated JOAT session', noToolsChecked: true,
       };
     case 'brainstorm-live':
       return {
@@ -126,18 +124,18 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
           'JOAT > Round 3 — meta-review.',
           'CLAUDE > Thinking…',
         ].join('\n'),
-        // No endpointHost, terminalReason or noToolsChecked: the wire
-        // stopped carrying them on a Brainstorm frame when the two
-        // features were split (docs/SESSION_MODEL.md:74-75), so a fixture
-        // that sets them is drawing a screen the engine cannot produce.
-        // `screen` and `terminalState` stay because the RENDER model still
-        // uses them to pick the surface.
-        terminalState: 'running',
+        // No endpointHost, terminalReason, noToolsChecked — or
+        // terminalState, which is gone from the render model entirely
+        // (it always mirrored `state` on real frames): the wire stopped
+        // carrying them on a Brainstorm frame when the two features were
+        // split (docs/SESSION_MODEL.md:74-75), so a fixture that sets
+        // them is drawing a screen the engine cannot produce. `screen`
+        // stays: the RENDER model uses it to pick the surface.
       };
     case 'agent-terminal-blocked':
       return {
         ...terminalReady,
-        state: 'blocked', terminalState: 'blocked', noToolsChecked: false,
+        state: 'blocked', noToolsChecked: false,
         terminalReason: 'Dedicated session is not ready.',
       };
     case 'agent-terminal-ready':

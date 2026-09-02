@@ -346,8 +346,8 @@ describe('HudVisualSurface', () => {
     const frame: HudVisualFrame = {
       kind: 'brainstorm', status: '', micOn: false,
       brainstorm: {
-        screen: 'agent_terminal', state: 'running', topic: 'not retained', collaborators: [],
-        activity: 'not retained', terminalState: 'ready', noToolsChecked: true,
+        screen: 'agent_terminal', state: 'running', topic: 'not retained',
+        collaborators: [], activity: 'not retained',
       },
     };
 
