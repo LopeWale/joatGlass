@@ -25,7 +25,7 @@ from ..channels.cards import Card, CardLog, Urgency
 from .hud import HudWriter
 from .roundtable import (
     FAILURE_MARK, Participant, RelayMode, RoundTable, build_prompt, is_failure,
-    _mode_at_start, parse_direction, parse_relay_mode,
+    _mode_at_start, direction_tail, parse_direction, parse_relay_mode,
 )
 from .sinks import TranscriptSink
 
@@ -1423,6 +1423,22 @@ class DebateSession(Session):
         if not said or self._cancelled:
             return False
         if parse_direction(said, self._table) is not None:
+            # The nomination is routed by the manager (direct()), but
+            # anything the wearer asked ALONGSIDE it has to reach the seat
+            # — "ask codex if that's true" gave codex the floor and threw
+            # the question away, so it was prompted with the prior turns
+            # and "add what the others missed" and answered a question
+            # nobody had asked. Recording the tail as the YOU turn puts it
+            # in the transcript the next prompt is built from. Still
+            # returns False: the direction itself is not consumed here.
+            tail = direction_tail(said, self._table)
+            if tail:
+                self._transcript.append((self.WEARER_LABEL, tail))
+                self._wearer_turns += 1
+                asyncio.get_running_loop().create_task(
+                    self._show_wearer_turn(tail)
+                )
+                log.info("nomination carried a question chars=%d", len(tail))
             return False
         # "tear that apart" / "build on that" ROUTE the next turn; they are
         # instructions about the relay, not remarks to be answered. Quoting

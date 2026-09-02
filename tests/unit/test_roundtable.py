@@ -387,3 +387,51 @@ class TestARedirectToASpokenSeatSurvivesTheRound:
         table.next_speaker()                  # claude
         table.start_round()
         assert table.next_speaker().name == "codex"
+
+
+class TestANominationCanCarryAQuestion:
+    """The plan's P3 acceptance list included "ask Codex if that's true",
+    and it did not work: the nomination was recognised, the seat took the
+    floor, and the QUESTION was discarded — so the collaborator was
+    prompted with the prior turns plus "add what the others missed" and
+    answered something nobody had asked. The wearer's words for this
+    feature are "take anything and do something I ask it to do with it".
+    """
+
+    @staticmethod
+    def _table():
+        async def _s(prompt: str):
+            yield "x"
+        from joat.services.roundtable import Participant, RoundTable
+        return RoundTable([
+            Participant("codex", "proposer", _s),
+            Participant("claude", "critic", _s),
+        ])
+
+    def test_the_question_is_returned_as_the_tail(self) -> None:
+        from joat.services.roundtable import direction_tail
+        table = self._table()
+        assert direction_tail("ask Codex if that's true", table) == "if that's true"
+        assert direction_tail(
+            "codex what do you think about the latency claim", table,
+        ) == "about the latency claim"
+
+    def test_a_bare_nomination_carries_nothing(self) -> None:
+        from joat.services.roundtable import direction_tail
+        table = self._table()
+        for said in ("codex, go", "claude your turn", "over to codex", "codex"):
+            assert direction_tail(said, table) == "", said
+
+    def test_a_stage_direction_is_not_a_question(self) -> None:
+        """parse_relay_mode already routes "tear that apart"; recording it
+        as a YOU turn too would make the room discuss the wearer's stage
+        direction."""
+        from joat.services.roundtable import direction_tail
+        table = self._table()
+        for said in ("claude, tear that apart", "codex build on that"):
+            assert direction_tail(said, table) == "", said
+
+    def test_a_remark_that_merely_names_a_seat_carries_nothing(self) -> None:
+        from joat.services.roundtable import direction_tail
+        table = self._table()
+        assert direction_tail("claude was wrong about the cache", table) == ""
