@@ -65,6 +65,22 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 node scripts/release_manifest.mjs "$JOAT_RELEASE_WS_URLS" app.json "$release_manifest"
+
+# A release build sets publicDir=false, so NOTHING in public/ is copied.
+# That is what keeps DEV fixtures out of the bundle (see vite.config.ts) —
+# and it means a genuinely shippable asset dropped into public/ would go
+# missing from the package without a word. Refuse instead: everything in
+# public/ must be a __joat-* fixture, or this is not a release-safe layout.
+if [[ -d public ]]; then
+  stray=("${(@f)$(find public -mindepth 1 -maxdepth 1 ! -name '__joat-*' 2>/dev/null)}")
+  if [[ -n "${stray[1]}" ]]; then
+    print -u2 "public/ holds assets a release build will NOT copy:"
+    print -u2 -- "${(F)stray}"
+    print -u2 "a release sets publicDir=false; import them from src/ instead."
+    exit 1
+  fi
+fi
+
 npm run typecheck
 VITE_MAC_WS_URL="$JOAT_RELEASE_WS_URLS" ./node_modules/.bin/vite build --outDir "$pack_stage" --emptyOutDir
 
