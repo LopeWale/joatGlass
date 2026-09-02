@@ -60,7 +60,7 @@ import {
   type NavigationVisualState,
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
-import { BrainstormController } from './BrainstormController';
+import { BrainstormController, liveFrameMayTakeScreen } from './BrainstormController';
 import { reminderDueAckFor } from './ReminderDueReceipt';
 import { productivityViewAckFor } from './ProductivityViewReceipt';
 import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
@@ -485,6 +485,12 @@ async function boot(): Promise<void> {
           ...msg.brainstorm,
           screen: 'brainstorm',
         };
+        // Left-single already opens the menu mid-session; beginLiveSession
+        // below closes it again, so that escape hatch lasted exactly until
+        // the next streamed token. See liveFrameMayTakeScreen.
+        if (!liveFrameMayTakeScreen(
+          menu.isOpen(), menu.isAwaitingResponse(), model.state,
+        )) break;
         await awaitCurrent(menu.beginLiveSession('brainstorm'));
         if (await awaitCurrent(hud.showBrainstorm(model))) {
           brainstorm.present(model);

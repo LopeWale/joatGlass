@@ -13,6 +13,33 @@ export interface AcceptedBrainstormAction {
  * on the lenses. Rendering remains in HudPresenter; this class makes the
  * gesture → bounded-Mac-action edge explicit and reconnect-safe.
  */
+/** May an incoming live Brainstorm frame TAKE the screen?
+ *
+ * Left-single press already opens the capability menu during a live run
+ * (EventRouter) — deliberately, so the wearer can check Messages without
+ * left-DOUBLE ending their session. But every arriving frame calls
+ * `beginLiveSession`, which closes the menu outright, so the menu the
+ * wearer just opened survived only until the next streamed token. The
+ * escape hatch existed and was unusable.
+ *
+ * The engine already draws this line for the terminal handoff and draws it
+ * in exactly one place — sinks.py withholds a repaint only while
+ * `state == "running"`, so "closing verdicts still land and a finished
+ * session is never hidden". This mirrors that rule rather than inventing a
+ * second one: a STREAMING turn yields to the menu, a settled / cancelled /
+ * blocked one still lands, and anything answering the wearer's own pending
+ * tap lands too — that tap is how they asked to come back
+ * (docs/SESSION_MODEL.md:46).
+ */
+export function liveFrameMayTakeScreen(
+  menuOpen: boolean,
+  awaitingResponse: boolean,
+  state: string,
+): boolean {
+  if (!menuOpen || awaitingResponse) return true;
+  return state !== 'running';
+}
+
 export class BrainstormController {
   private model?: BrainstormHudModel;
   private acceptedAction?: AcceptedBrainstormAction;
