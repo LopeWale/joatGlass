@@ -29,8 +29,10 @@ the glasses interface.
    Tailscale Macs.
 2. Focus any existing running, waiting, completed, or approval-blocked session,
    or start a new runtime session when that runtime supports it.
-3. Read a dense newest-first terminal tail and speak ordinary instructions to
-   steer the focused session immediately.
+3. Read a dense terminal tail and speak ordinary instructions to steer the
+   focused session immediately. The tail is **oldest-first, bottom-anchored**
+   — "keep the bottom pinned to now", like every terminal — which is what
+   the implementation does and what this line used to contradict.
 4. Leave other sessions running while another one is focused.
 5. Cancel, resume, or inspect a session through its runtime's direct session
    API. Host names appear only when two rows otherwise cannot be distinguished.
@@ -57,6 +59,7 @@ against the live gateway; the operations below are not yet.
 | Resume a listed session | `agents/openclaw_runtime.py` | `terminal resume <label>` |
 | Approvals: receive, list, answer | `agents/openclaw_terminal.py` | `terminal approve/deny [N]` |
 | Dense terminal view on the lenses | `services/agent_terminal.py` | (repaints on change) |
+| Background lane state on the lane strip | same | (repaints on transition) |
 
 Two rules the implementation holds, both load-bearing:
 

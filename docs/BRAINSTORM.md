@@ -72,24 +72,49 @@ never turns a missing citation or provider failure into a verified synthesis.
 
 ## G2 layout
 
-The 576x288 optical surface keeps the required JOAT status spine, then uses a
-flat title/state row, a TOPIC/SEATS/LIVE block, a hairline divider, the
-transcript, and a truthful gesture footer. Session rows use a selection rail,
-not cards.
+The 576x288 optical surface keeps the required JOAT status spine, then a
+flat title/state row, a hairline divider, the transcript, and a truthful
+gesture footer. Session rows use a selection rail, not cards.
 
-The transcript is **six rows** on Brainstorm and **seven** on a running Agent
-Terminal (`agentTerminalTranscriptLayout`), each holding **74 characters**:
-HudCanvasRenderer draws it at 11px in the `"SF Mono", …, Menlo, monospace`
-stack across a 504px column, and SF Mono's advance is 1266/2048 em, so
-504 / 6.80 = 74. Seven rows plus the newlines between them is the wire's
-bound on `activity` (`BRAINSTORM_ACTIVITY_MAX`), and a test re-derives that
-equality from the renderer so the two cannot drift.
+There is no TOPIC/SEATS/LIVE block and no outer frame. Both were removed on
+the wearer's ruling — "stop wasting so much place on things that does not
+affect functionality" — after they measured the waste by eye: the content
+column ran x=36..540 of a 576px lens, and the longest transcript row ended
+at x=362. Header rows that restate what the spine already says, and a
+decorative border, are exactly the chrome this surface cannot afford.
 
-Those rows hold about one 120-word turn, so a FINISHED turn collapses to the
-one-line `GIST:` its speaker is instructed to open with, and only the live
-turn keeps its prose. The synthesis is never collapsed. Without that the
-glass showed a single turn and the wearer could not follow who had said
-what — which is the whole point of watching.
+The transcript is **13 rows** on Brainstorm and **12** on a running Agent
+Terminal (`agentTerminalTranscriptLayout`), drawn from y=82 at 14px
+spacing. Each row holds roughly **105 characters**: HudCanvasRenderer sets
+it in `HUD_TEXT_FONT` — `"Helvetica Neue", "SF Pro Text", Arial,
+sans-serif` — at 11px across `HUD_CONTENT_WIDTH` (548px, x=14 to x=562).
+The advance is MEASURED, not assumed: a 63-character row rendered by the
+real simulator spans 326px, so 5.18px per character.
+
+That column used to be 504px (x=36 to x=540) in a monospace face at 74
+columns, and this paragraph said so for a release after the face changed —
+which is what the wearer saw: "why are some words being cut off when there
+is obviously room on the right". Both numbers move together. If the font
+or the column changes again, **this paragraph is wrong until it is
+re-derived**, and `BRAINSTORM_ROW_COLUMNS` in `core/protocol.py` carries
+the derivation next to the constant.
+
+Proportional type has no true column count — 105 is an average. The
+renderer measures each row with the canvas and wraps on the measurement
+(`brainstormTranscriptRowCount`); the constant only sizes the wire budget
+(`BRAINSTORM_ACTIVITY_MAX`), which carries 40 rows of scrollback, not one
+screenful. A test re-derives that equality from the renderer so the two
+cannot drift apart.
+
+Those rows hold about one 120-word turn, so a FINISHED turn collapses to
+the one-line `GIST:` its speaker is instructed to open with, and only the
+live turn keeps its prose. The synthesis is never collapsed. Without that
+the glass showed a single turn and the wearer could not follow who had
+said what — which is the whole point of watching.
+
+The speaker tag is drawn dim and the words bright. One brightness for
+everything made a screen of discussion a flat wall with no way in, on the
+surface whose entire job is being read.
 
 No card borders, boxed panels, oversized topic title, permanent collaborator
 row, decorative empty space, or fake waveform is permitted. A recording dot is

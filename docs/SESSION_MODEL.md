@@ -47,13 +47,25 @@ payloads.
 | Open Brainstorm while idle | Show recent sessions plus `NEW` |
 | Ordinary speech in a selected Brainstorm | Append the next user move to that context |
 | `continue <title>` | Resume the matching durable session; ask on ambiguity |
-| `new Brainstorm` | Start an explicit new lineage |
-| `branch this` | Fork the selected transcript into a new child lineage |
+| Tap a row in the idle picker | Open that session by id — no title matching |
+| `new Brainstorm` | Start an explicit new lineage — **not implemented** |
+| `branch this` | Fork the selected transcript into a child lineage — **not implemented** |
 | A clearly unrelated replacement request | Ask before replacing context; never guess or silently reset |
+| A new topic spoken during a live run | Held, and the wearer is asked — yes cancels and starts it, no keeps going |
 | `stop` / `cancel` | Cancel the active run and persist the cancelled state |
 
-While Codex or Claude is responding, contextual speech queues as the next user
-move. Participant-directed speech chooses which collaborator speaks next; it
+An INSTRUCTION about the last reply is executed rather than absorbed:
+"send that to Hermes", "save that", "make that shorter", "turn that into a
+spec". It must open with an imperative AND name the material, so a remark
+that merely contains a verb stays a `YOU` turn — being wrong in that
+direction costs a line in the transcript, being wrong the other way
+silently eats the wearer's contribution. These checks run BEFORE the
+session absorbs the utterance; that order is load-bearing, because
+`DebateSession.consume_transcript` returns True for essentially any
+addressed text and would otherwise swallow every instruction.
+
+While Codex or Claude is responding, other contextual speech queues as the
+next user move. Participant-directed speech chooses which collaborator speaks next; it
 does not open Agent Terminal. Neither Codex nor Claude has a permanent first
 slot. Without an explicit direction, the session continues its recorded turn
 policy and the HUD shows the actual order. A stopped or failed collaborator
@@ -69,10 +81,26 @@ YOU -> wearer-directed or session-selected CODEX / CLAUDE turns
 The invariant is visibility of the actual turn order, not a fixed provider
 order. Follow-up rounds may start with either collaborator.
 
-The G2 model carries only the current bounded viewport: Brainstorm view/state,
-session title/ID, up to twelve speaker-prefixed lines, recent-session rows,
-selection/scroll metadata, and the real voice-composer state. It contains no
-Agent Terminal, Hermes, OpenClaw, endpoint, approval, or tool-policy fields.
+The G2 model carries only the current bounded viewport: Brainstorm
+view/state, session title/ID, the speaker-prefixed transcript rows,
+recent-session rows, selection/scroll metadata, and the real voice-composer
+state. It contains no Agent Terminal, Hermes, OpenClaw, endpoint, approval,
+or tool-policy fields.
+
+That last sentence was violated for the whole life of the feature:
+`BrainstormHudView` carried `terminal_state`, `endpoint_host`,
+`terminal_reason` and `no_tools_checked`, plus a `screen` discriminator
+that made both surfaces literally one frame. It is why the Agent Terminal
+printed "JOAT · BRAINSTORM" across its spine, why a healthy terminal spent
+four rows on connection chrome, and why a tap on the terminal was gated on
+the BRAINSTORM lane's readiness. There are two frames now
+(`BrainstormHudView`, `AgentTerminalHudView`) and two wire kinds, so the
+absence is structural rather than a promise.
+
+The row count is a RENDERER fact, not a wire one: 13 on Brainstorm and 12
+on a running terminal, derived in docs/BRAINSTORM.md from the drawn font
+and column. The wire carries 40 rows of scrollback and the renderer
+windows it.
 
 ## HUD ownership and other events
 

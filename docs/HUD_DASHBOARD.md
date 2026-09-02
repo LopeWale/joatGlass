@@ -352,7 +352,28 @@ not the current interaction contract; use [DESIGN.md](../DESIGN.md) and
 `EventRouter.test.ts` for shipped gestures. In particular, card/inbox actions
 below remain future work.
 
-The important finding: **left-temple single press is free today.** `EventRouter.ts:142-147` treats only ring and right temple as confirm; a left single (source 3, type 0) falls through to the bare relay at line 151, and the Mac registers no `on_input` callback at all (only `on_hello` at `__main__.py:148`). So navigation can have its own gesture instead of time-slicing the confirm gesture — which would have been a safety hazard under `RULES.md:15`.
+**This section is stale exploration and is corrected below.** It was
+written before the gestures were bound and several of its claims now
+contradict the code and the installed SDK typings. Read `EventRouter.ts`
+for the truth; what follows is kept for the reasoning, not the facts.
+
+Corrections, verified against the source and `node_modules/@evenrealities/even_hub_sdk/dist/index.d.ts`:
+
+- **Left-temple single press is no longer free.** It opens the capability
+  menu while a Brainstorm is live, which is what lets the wearer reach the
+  menu without cancelling their session (cancel is left DOUBLE press).
+- **Confirmation accepts left as a confirm source**, not "only ring and
+  right temple".
+- **The Mac does register `on_input`** (`__main__.py`,
+  `capabilities.on_input`). The bare relay is ignored because it carries no
+  `containerName` and that handler has no else branch — a different reason
+  with the same effect.
+- **Long press does not "relay with no wiring".** It is consumed for the
+  microphone control on every event class and never reaches the Mac.
+- **Left temple double opens the capability sidebar**, not Settings.
+  Settings is a row inside it, or contextual-menu item 4.
+- **Clicks can arrive as `textEvent`**: some hosts omit CLICK in the
+  protobuf encoder, and `EventRouter` handles exactly that.
 
 | Gesture | Arrives as | DASH | CARD | REPLY / DEBATE | INBOX |
 |---|---|---|---|---|---|
@@ -365,7 +386,7 @@ The important finding: **left-temple single press is free today.** `EventRouter.
 | Right temple double | `sysEvent` t3 s1 | `shutDownPageContainer(1)` | same | same | same |
 | OS contextual menu | `menuItemClickEvent` | Mic on/off · Inbox · Repeat · Settings | — | — | — |
 
-Sources per `protocol.py:34-40` (LEFT is 3, RING is 2). Long-press 9/10 exists in the enum (`index.d.ts:880-883`) and already relays with no wiring (`docs/HUB_PLUGIN.md:355`). Menu items: ≤10, 32-byte labels, non-zero unique ids (`index.d.ts:514-532`).
+Sources per `protocol.py:34-40` (LEFT is 3, RING is 2). Long-press 9/10 exists in the enum (`index.d.ts:880-883`) and is CONSUMED for the microphone control — it does not relay. Note `eventSource` exists only on `sysEvent` (`index.d.ts:989`): swipes and list events are source-blind by SDK design, so no left/right distinction is possible for them. Menu items: ≤10, 32-byte labels, non-zero unique ids (`index.d.ts:514-532`).
 
 Three traps to encode as tests, not comments:
 
