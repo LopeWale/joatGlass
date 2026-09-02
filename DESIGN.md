@@ -174,7 +174,12 @@ the resting overview moves along the rail; a tap expands the lit tab
 full-width, with the rail moved to the left margin so the wearer still
 sees where they are; inside, swipe scrolls rows, tap opens one, left
 double steps back one level. Long press refreshes ONLY at the top of an
-expanded tab; everywhere else it stays the microphone.
+expanded NEWS or SEARCH tab — the two whose rows come from a feed that can
+have moved. Everywhere else it stays the microphone, the pomodoro page
+included: that tab has nothing to re-fetch, since the Mac pushes on every
+phase transition and the plugin ticks the countdown locally, so routing
+the hold there bought an invisible repaint and cost the wearer the mic on
+one page. Every footer names the hold it actually performs.
 
 The rail, the hairline and the pane all sit east of x=288. That is a
 latency rule, not a taste: the frame ships as four tiles and only changed

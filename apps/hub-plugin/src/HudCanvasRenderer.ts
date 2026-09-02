@@ -238,10 +238,16 @@ export const PANEL_RAIL = {
   expandedX: 12,
 } as const;
 
-/** What a swipe and a tap do on a panel tab. Truthful: both are wired. */
-export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs';
+/** What a swipe, a tap and a hold do on a panel tab. Truthful: all wired.
+ *
+ * The resting hints name the mic because long press IS still the mic on
+ * every resting tab — swiping off notifications used to drop the
+ * affordance from the footer while it kept working. The pomodoro page
+ * names it too: that tab is excluded from the refresh carve-out
+ * (CapabilityMenu.isPanelRefreshable), so a hold there opens the mic. */
+export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · hold: mic';
 export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · left x2: back';
-export const POMODORO_EXPANDED_HINT = 'tap: choose · left x2: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · hold: mic · left x2: back';
 
 /** Only the two long-text pages read through the shared reader: an opened
  * headline and an opened search result. Their families stay 'NEWS' and

@@ -873,19 +873,32 @@ export class CapabilityMenu {
     return true;
   }
 
-  /** The top level of an expanded panel tab — where long press means
-   * refresh. Inside an opened article the gesture stays the mic's. */
+  /** The top level of an expanded panel tab. Structural only — ask
+   * `isPanelRefreshable` before reading a gesture off this. */
   isPanelExpanded(): boolean {
     return this.view === 'data'
       && panelTabForTitle(this.pendingTitle) !== undefined
       && this.dataReturn === undefined;
   }
 
+  /** Where long press means refresh rather than the mic: the top level of
+   * news or search, whose rows come from a feed that can have moved.
+   *
+   * POMODORO is excluded. Its page has nothing to re-fetch — the Mac
+   * pushes on every phase transition and the plugin ticks the countdown
+   * locally — so routing the hold there bought a repaint the wearer
+   * cannot see and cost them the mic on that one page, with the hint
+   * naming neither. Found by the simulator sweep, 2026-09-02.
+   */
+  isPanelRefreshable(): boolean {
+    return this.isPanelExpanded() && panelTabForTitle(this.pendingTitle) !== 'pomodoro';
+  }
+
   /** Ask the Mac to re-fetch the expanded tab. The reply is an ordinary
    * `hud.panel` push; presentPanelContent repaints this page from it. */
   refreshPanel(): void {
     const tab = panelTabForTitle(this.pendingTitle);
-    if (!this.isPanelExpanded() || tab === undefined) return;
+    if (!this.isPanelRefreshable() || tab === undefined) return;
     this.link.send({
       kind: 'input',
       event: {

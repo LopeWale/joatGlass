@@ -136,10 +136,11 @@ export class EventRouter {
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
-      if (toggleMic && this.menu.isPanelExpanded()) {
-        // The one carve-out from "long press is the mic": inside an
-        // expanded panel tab it re-fetches that tab (the wearer's ruling,
-        // 2026-09-02). Everywhere else — the resting overview included —
+      if (toggleMic && this.menu.isPanelRefreshable()) {
+        // The one carve-out from "long press is the mic": on the top level
+        // of news or search it re-fetches that tab (the wearer's ruling,
+        // 2026-09-02). Everywhere else — the resting overview, an opened
+        // article, and the pomodoro page, which has nothing to re-fetch —
         // the privacy control keeps the gesture.
         console.info(`[EventRouter] long-press via ${via} — refreshing panel`);
         this.menu.refreshPanel();
