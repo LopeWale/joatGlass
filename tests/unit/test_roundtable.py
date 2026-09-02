@@ -283,3 +283,61 @@ class TestRoutingTheNextTurn:
                      "we should extend the deadline", "the build is broken",
                      "I want to build a cache"):
             assert parse_relay_mode(said) is None, said
+
+
+class TestStageDirectionsAreAnchored:
+    """Two defects from a blind-pair audit, one root: `parse_relay_mode`
+    ran an UNANCHORED search over closed phrase lists.
+
+    First (BSI-14): any remark merely CONTAINING a phrase mid-sentence was
+    claimed as a stage direction and the wearer's actual thought discarded
+    without a trace — no YOU turn, no paint, nothing for the next speaker
+    to answer. Second (BSI-15): "claude, tear that apart" set the mode but
+    never handed over the floor — parse_direction's phrasing list did not
+    know it, so the OTHER seat spoke with the new instruction.
+    """
+
+    @staticmethod
+    def _table():
+        async def _s(prompt: str):
+            yield "x"
+        from joat.services.roundtable import Participant, RoundTable
+        return RoundTable([
+            Participant("codex", "proposer", _s),
+            Participant("claude", "critic", _s),
+        ])
+
+    def test_a_remark_containing_a_phrase_is_not_a_direction(self) -> None:
+        from joat.services.roundtable import parse_relay_mode
+        for said in (
+            "I think we should add to that list of requirements",
+            "someone needs to push back on the vendor timeline",
+            "the way you tear that apart matters less than the data",
+        ):
+            assert parse_relay_mode(said) is None, said
+
+    def test_a_direction_still_opens_the_utterance(self) -> None:
+        from joat.services.roundtable import parse_relay_mode
+        for said, mode in (
+            ("Tear that apart.", "critique"),
+            ("please push back on that", "critique"),
+            ("Now build on that.", "build"),
+            ("okay add to that", "build"),
+        ):
+            assert parse_relay_mode(said) == mode, said
+
+    def test_a_nomination_carrying_its_instruction_hands_over_the_floor(self) -> None:
+        from joat.services.roundtable import parse_direction, parse_relay_mode
+        table = self._table()
+        for said, seat, mode in (
+            ("claude, tear that apart", "claude", "critique"),
+            ("Codex, build on that.", "codex", "build"),
+        ):
+            direction = parse_direction(said, table)
+            assert direction is not None and direction.name == seat, said
+            assert parse_relay_mode(said, table) == mode, said
+
+    def test_a_bare_seat_remark_is_still_not_a_nomination(self) -> None:
+        from joat.services.roundtable import parse_direction
+        table = self._table()
+        assert parse_direction("claude was wrong about the cache", table) is None

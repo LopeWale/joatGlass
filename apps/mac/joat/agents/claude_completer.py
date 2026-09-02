@@ -37,7 +37,16 @@ class ClaudeCompleter:
         del max_tokens
         if not text.strip() or not system.strip():
             return None
-        env = dict(os.environ)
+        # The same billing/auth boundary the Brainstorm seats hold
+        # (docs/BRAINSTORM.md:27-28): an ambient API key must never reach the
+        # official CLI, or "uses the user's subscription" silently becomes
+        # "bills the project's API key". SubprocessAgent strips these on every
+        # launch; this second shipping launch path passed the whole ambient
+        # environment through.
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+        }
         env["OTEL_SDK_DISABLED"] = "true"
         try:
             proc = await asyncio.create_subprocess_exec(

@@ -202,6 +202,15 @@ def parse_direction(text: str, table: RoundTable) -> Participant | None:
         ):
             if said.startswith(phrasing) or said == n:
                 return seat
+    # A seat name followed by a routing instruction is a nomination
+    # carrying its instruction: "claude, tear that apart". Without this,
+    # the utterance fell through to the relay-mode branch, which set the
+    # instruction and silently dropped the hand-over — the mode changed
+    # while the OTHER seat kept the floor.
+    for seat in table._participants:  # noqa: SLF001 - same module, one owner
+        n = seat.name
+        if said.startswith(n + " ") and _mode_at_start(said[len(n) + 1:]) is not None:
+            return seat
     return None
 
 
@@ -259,19 +268,49 @@ _BUILD = re.compile(
 )
 
 
-def parse_relay_mode(text: str) -> RelayMode | None:
-    """How the wearer wants this turn routed, or None if they didn't say.
+#: Words a stage direction may open with before the instruction proper.
+_STAGE_FILLER = re.compile(r"^(?:please|now|ok|okay|and|then|so)\s+")
 
-    Recognised alongside a nomination, so "claude, tear that apart" both
-    hands over the floor and sets the instruction — which is how a person
-    actually says it, rather than two separate commands.
+
+def _mode_at_start(said: str) -> tuple[RelayMode, int] | None:
+    """The routing instruction OPENING this utterance, with where it ends.
+
+    Anchored on purpose. These were unanchored searches, so any remark
+    merely CONTAINING a phrase mid-sentence — "I think we should add to
+    that list of requirements" — was claimed as a stage direction and the
+    wearer's actual thought was discarded without a trace: no YOU turn, no
+    paint, nothing for the next speaker to answer. An instruction opens the
+    utterance; a phrase buried in one is part of a remark.
+    """
+    consumed = 0
+    while (filler := _STAGE_FILLER.match(said)) is not None:
+        said = said[filler.end():]
+        consumed += filler.end()
+    for pattern, mode in ((_CRITIQUE, "critique"), (_BUILD, "build")):
+        hit = pattern.match(said)
+        if hit is not None:
+            return mode, consumed + hit.end()
+    return None
+
+
+def parse_relay_mode(
+    text: str, table: RoundTable | None = None
+) -> RelayMode | None:
+    """How the wearer routed this turn, or None if they didn't say.
+
+    With ``table``, a leading seat name is stripped first so a nomination
+    carrying its instruction — "claude, tear that apart" — resolves the
+    instruction half; ``parse_direction`` resolves the seat half of the
+    same utterance. One breath, both effects.
     """
     said = " ".join(re.sub(r"[^a-z0-9' ]+", " ", text.lower()).split())
-    if _CRITIQUE.search(said):
-        return "critique"
-    if _BUILD.search(said):
-        return "build"
-    return None
+    if table is not None:
+        for seat in table._participants:  # noqa: SLF001 - same module
+            if said.startswith(seat.name + " "):
+                said = said[len(seat.name) + 1:].lstrip(" ,")
+                break
+    hit = _mode_at_start(said)
+    return hit[0] if hit is not None else None
 
 
 def build_prompt(topic: str, speaker: Participant, transcript: Sequence[tuple[str, str]],

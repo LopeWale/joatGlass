@@ -2586,6 +2586,122 @@ class TestAnExplicitNewLineage:
         await manager.close()
 
 
+class TestAStageDirectionNeverSwallowsARemark:
+    """BSI-14's second half: a direction with a substantial tail — "tear
+    that apart, especially the latency claim" — is a direction AND a
+    remark. Setting the mode and dropping the words swallowed the wearer's
+    contribution; the bare direction stays unquoted as before."""
+
+    @staticmethod
+    def _session():
+        async def _s(prompt: str):
+            yield "x"
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 9"
+        return debate(SinkTransport(), pair(_s, _s), judge)
+
+    async def test_the_bare_direction_stays_unquoted(self) -> None:
+        session = self._session()
+        assert session.consume_transcript("tear that apart")
+        assert session._next_mode == "critique"
+        assert session._transcript == []
+
+    async def test_the_tail_survives_as_a_you_turn(self) -> None:
+        session = self._session()
+        assert session.consume_transcript(
+            "tear that apart, especially the latency claim about cold starts"
+        )
+        assert session._next_mode == "critique"
+        assert len(session._transcript) == 1
+        label, said = session._transcript[0]
+        assert label == "YOU"
+        assert "latency claim" in said
+
+
+class TestTheReplacementQuestionIsTheWearers:
+    """docs/SESSION_MODEL.md:54 — a new topic during a live run is held and
+    THE WEARER is asked. The answer therefore has to come from addressed
+    speech: this resolved from the raw transcript, so with the question on
+    the glass an overheard bystander's "yes" — or the wearer agreeing with
+    someone in the room — cancelled the live session and started the
+    replacement. Found by a blind-pair audit (BSI-10); no test had ever
+    exercised the answer path at all.
+    """
+
+    class Live(Session):
+        def __init__(self):
+            self.cancelled = False
+
+        async def run(self) -> None:
+            while not self.cancelled:
+                await asyncio.sleep(0.01)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+    def _live_with_question(self):
+        started: list[str] = []
+        first = self.Live()
+
+        def factory(topic: str):
+            started.append(topic)
+            return first if len(started) == 1 else self.Live()
+
+        manager = SessionManager(HudWriter(SinkTransport()), factory)
+        assert manager.handle_transcript("brainstorm the first question")
+        assert manager.handle_transcript(
+            "JOAT, brainstorm something else",
+            addressed="brainstorm something else",
+        )
+        return manager, started, first
+
+    async def test_an_unaddressed_yes_does_not_answer_it(self) -> None:
+        manager, started, first = self._live_with_question()
+        # The exact call shape of the live microphone path for speech that
+        # did not address JOAT: addressed=None.
+        assert manager.handle_transcript("yes", addressed=None)
+        await asyncio.sleep(0.05)
+        assert not first.cancelled, "a bystander's yes replaced the session"
+        assert started == ["the first question"]
+        await manager.close()
+
+    async def test_the_wearers_addressed_yes_still_works(self) -> None:
+        manager, started, first = self._live_with_question()
+        assert manager.handle_transcript("JOAT, yes", addressed="yes")
+        for _ in range(80):
+            await asyncio.sleep(0.02)
+            if len(started) > 1:
+                break
+        assert first.cancelled
+        assert started == ["the first question", "something else"]
+        await manager.close()
+
+    async def test_the_question_dies_with_its_session(self) -> None:
+        """An unanswered question must not lie in wait: the next session's
+        first addressed "yes" would replace IT with a topic offered to a
+        conversation that no longer exists."""
+        manager, started, first = self._live_with_question()
+        first.cancelled = True  # the session ends on its own
+        for _ in range(80):
+            await asyncio.sleep(0.02)
+            if manager._task is None:
+                break
+        assert manager.handle_transcript("brainstorm a fresh start")
+        await asyncio.sleep(0.05)
+        assert manager.handle_transcript("JOAT, yes", addressed="yes")
+        await asyncio.sleep(0.1)
+        assert started == ["the first question", "a fresh start"], (
+            "the stale held topic replaced the fresh session"
+        )
+        await manager.close()
+
+
 class TestReopeningSaysWhyItCannot:
     """"That session could not be reopened" is true and useless.
 
