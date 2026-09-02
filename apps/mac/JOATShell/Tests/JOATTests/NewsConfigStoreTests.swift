@@ -39,6 +39,15 @@ final class NewsConfigStoreTests: XCTestCase {
         ))
     }
 
+    func testNothingSelectedMirrorsTheEnginesDefaultFallback() throws {
+        // services/news.py substitutes the defaults for an empty selection
+        // with no custom feed; the app must show the same, not "0 feeds".
+        XCTAssertEqual(NewsConfig(categories: []).normalized.categories, NewsConfig.defaultCategories)
+        XCTAssertEqual(
+            NewsConfig(categories: [], customFeeds: ["https://a/b"]).normalized.categories, []
+        )
+    }
+
     func testAHandEditedFileKeepsDefaultsForMissingKeys() throws {
         let store = temporaryStore()
         try FileManager.default.createDirectory(

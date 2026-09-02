@@ -106,6 +106,24 @@ export function pomodoroPhaseLabel(phase: PomodoroPhase): string {
   }
 }
 
+/** "Focus · block 2 of 4", "Break · 1 of 4 done", "Ready · 25 min focus";
+ * a paused timer says so first. One string for both the resting pane and
+ * the expanded page, so the two can never disagree about where you are. */
+export function pomodoroBlockLabel(pomodoro: HudPanelPomodoro): string {
+  if (pomodoro.phase === 'idle') {
+    return `Ready · ${Math.round(pomodoro.lengthMs / 60_000)} min focus`;
+  }
+  const block = pomodoro.phase === 'focus'
+    ? `Focus · block ${Math.min(4, pomodoro.completed + 1)} of 4`
+    : `${pomodoroPhaseLabel(pomodoro.phase)} · ${pomodoro.completed} of 4 done`;
+  return pomodoro.running ? block : `Paused · ${block}`;
+}
+
+/** "● ● ○ ○" — the set of four, from the firmware-safe glyph set. */
+export function pomodoroCycleDots(completed: number): string {
+  return Array.from({ length: 4 }, (_, index) => (index < completed ? '●' : '○')).join(' ');
+}
+
 /** Milliseconds until the countdown's next visible change at the given
  * granularity, so the local ticker repaints exactly when a digit moves. */
 export function pomodoroTickDelayMs(

@@ -194,13 +194,13 @@ class Headline:
 
     def row(self, now: float | None = None) -> str:
         """"[3m] Headline · BBC" — the dense-row grammar the glass parses."""
-        age = _age(self.published_at, now)
+        age = relative_age(self.published_at, now)
         suffix = f" · {self.source}" if self.source else ""
         budget = ROW_CHARACTERS - len(f"[{age}] ") - len(suffix)
-        return f"[{age}] {_shorten(self.title, max(12, budget))}{suffix}"
+        return f"[{age}] {shorten(self.title, max(12, budget))}{suffix}"
 
 
-def _age(at: float, now: float | None = None) -> str:
+def relative_age(at: float, now: float | None = None) -> str:
     elapsed = max(0.0, (now if now is not None else time.time()) - at)
     if elapsed < 60:
         return "now"
@@ -211,7 +211,7 @@ def _age(at: float, now: float | None = None) -> str:
     return f"{int(elapsed // 86_400)}d"
 
 
-def _shorten(text: str, limit: int) -> str:
+def shorten(text: str, limit: int) -> str:
     """At most `limit` characters, ellipsis included, cut on a word."""
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= limit:
@@ -230,7 +230,7 @@ def _source_name(feed_title: str, entry_source: str) -> str:
             return name
     # "BBC News - Technology" → "BBC News"; keep the first clause short.
     head = re.split(r"\s+[-–|:]\s+", candidate, maxsplit=1)[0].strip()
-    return _shorten(head, 18)
+    return shorten(head, 18)
 
 
 def _get(url: str, *, accept: str) -> bytes:
@@ -441,8 +441,8 @@ class NewsService:
             "The article text could not be read on the Mac. "
             f"Headline: {headline.title}"
         )
-        metadata = f"{headline.source} · {_age(headline.published_at, self._clock())}"
-        shown_title = _shorten(title or headline.title, 40)
+        metadata = f"{headline.source} · {relative_age(headline.published_at, self._clock())}"
+        shown_title = shorten(title or headline.title, 40)
         return Reader(
             tab=self.tab,
             title="NEWS · ARTICLE",

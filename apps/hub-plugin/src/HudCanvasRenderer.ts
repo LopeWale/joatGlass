@@ -18,7 +18,8 @@ import {
   formatCountdown,
   formatMinutesLeft,
   freshnessLabel,
-  pomodoroPhaseLabel,
+  pomodoroBlockLabel,
+  pomodoroCycleDots,
   pomodoroRemainingMs,
   type PanelRailVisual,
 } from './PanelRail';
@@ -2070,18 +2071,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(SUPPORT);
       context.font = `12px ${HUD_FONT}`;
       context.fillText('min left', paneX + numberWidth + 8, layout.mainTopBaselineY + 30);
-      const block = pomodoro.phase === 'focus'
-        ? `Focus · block ${Math.min(4, pomodoro.completed + 1)} of 4`
-        : `${pomodoroPhaseLabel(pomodoro.phase)} · ${pomodoro.completed} of 4 done`;
       context.fillStyle = gray(pomodoro.running ? SUPPORT : CHROME);
       context.font = `11px ${HUD_FONT}`;
-      this.fitText(context, pomodoro.running ? block : `Paused · ${block}`, paneX, layout.mainTopBaselineY + 62, paneWidth);
+      this.fitText(context, pomodoroBlockLabel(pomodoro), paneX, layout.mainTopBaselineY + 62, paneWidth);
       context.fillStyle = gray(CHROME);
       context.font = `12px ${HUD_FONT}`;
-      context.fillText(
-        Array.from({ length: 4 }, (_, index) => (index < pomodoro.completed ? '●' : '○')).join(' '),
-        paneX, layout.mainTopBaselineY + 84,
-      );
+      context.fillText(pomodoroCycleDots(pomodoro.completed), paneX, layout.mainTopBaselineY + 84);
       return;
     }
 
@@ -2167,15 +2162,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     } else {
       const now = Date.now();
       const remaining = pomodoroRemainingMs(pomodoro, now);
-      const phase = pomodoroPhaseLabel(pomodoro.phase).toUpperCase();
-      const kicker = pomodoro.phase === 'idle'
-        ? `READY · ${Math.round(pomodoro.lengthMs / 60_000)} MIN FOCUS`
-        : pomodoro.phase === 'focus'
-          ? `${pomodoro.running ? '' : 'PAUSED · '}FOCUS · BLOCK ${Math.min(4, pomodoro.completed + 1)} OF 4`
-          : `${pomodoro.running ? '' : 'PAUSED · '}${phase} · ${pomodoro.completed} OF 4 DONE`;
       context.fillStyle = gray(CHROME);
       context.font = `10px ${HUD_FONT}`;
-      context.fillText(kicker, 52, 66);
+      context.fillText(pomodoroBlockLabel(pomodoro).toUpperCase(), 52, 66);
       context.fillStyle = gray(pomodoro.phase === 'idle' || !pomodoro.running ? SUPPORT : BRIGHT);
       context.font = `56px ${HUD_FONT}`;
       context.textAlign = 'right';
@@ -2192,10 +2181,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillRect(52, 135, Math.round(496 * fraction), 2);
       context.fillStyle = gray(CHROME);
       context.font = `12px ${HUD_FONT}`;
-      context.fillText(
-        Array.from({ length: 4 }, (_, index) => (index < pomodoro.completed ? '●' : '○')).join(' '),
-        52, 156,
-      );
+      context.fillText(pomodoroCycleDots(pomodoro.completed), 52, 156);
     }
     // The controls are the list rows the Mac sent — Start, Pause, Reset —
     // in the one dense row language, under the timer.

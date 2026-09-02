@@ -910,6 +910,10 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     const title = PANEL_TAB_TITLES[tab];
     const content = this.hud.rail.content(tab);
+    // Rows and revision are read together, BEFORE the paint: a push that
+    // lands while the page paints must not pair the rows the wearer sees
+    // with a revision the Mac would honour for a different list.
+    const requestId = this.hud.rail.requestId(tab);
     const rows = content?.rows ?? [];
     const items = rows.length > 0
       ? rows
@@ -924,9 +928,14 @@ export class CapabilityMenu {
       await this.close();
       return;
     }
+    if (this.hud.rail.requestId(tab) !== requestId) {
+      // The cache moved on while the page painted; what is on the glass is
+      // already stale. Paint once more from the new cache.
+      return this.openPanelTab(tab);
+    }
     this.view = 'data';
     this.pendingTitle = title;
-    this.pendingRequestId = this.hud.rail.requestId(tab);
+    this.pendingRequestId = requestId;
     this.dataItemCount = items.length;
     this.dataRowsSelectable = selectable;
     this.dataSelectionPending = false;
@@ -958,14 +967,19 @@ export class CapabilityMenu {
     if (!this.isPanelExpanded() || panelTabForTitle(this.pendingTitle) !== tab) return false;
     const keep = this.selectedIndex;
     await this.openPanelTab(tab);
-    if (this.view !== 'data' || panelTabForTitle(this.pendingTitle) !== tab) return true;
-    const clamped = Math.max(0, Math.min(Math.max(0, this.dataItemCount - 1), keep));
-    if (clamped !== 0) {
-      this.selectedIndex = clamped;
-      if (this.dataSurface) this.dataSurface.selectedIndex = clamped;
-      void this.hud.setSelection(clamped);
-    }
+    this.restorePanelSelection(tab, keep);
     return true;
+  }
+
+  /** After a repaint from the cache, put the wearer's row back, clamped
+   * to the rows that exist now. */
+  private restorePanelSelection(tab: PanelContentTab, keep: number): void {
+    if (this.view !== 'data' || panelTabForTitle(this.pendingTitle) !== tab) return;
+    const clamped = Math.max(0, Math.min(Math.max(0, this.dataItemCount - 1), keep));
+    if (clamped === 0) return;
+    this.selectedIndex = clamped;
+    if (this.dataSurface) this.dataSurface.selectedIndex = clamped;
+    void this.hud.setSelection(clamped);
   }
 
   /** The reader for an opened headline or result: the Mac owns the page
@@ -976,6 +990,12 @@ export class CapabilityMenu {
     if (panelTabForTitle(this.pendingTitle) === undefined || this.dataReturn === undefined) {
       return false;
     }
+    return this.hintOffersPage(eventType);
+  }
+
+  /** Every reader shares one contract: the Mac's own footer says which
+   * neighbouring page exists, and only that swipe becomes a request. */
+  private hintOffersPage(eventType: number): boolean {
     if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
       return this.dataHint?.includes('up previous') === true;
     }
@@ -1160,15 +1180,7 @@ export class CapabilityMenu {
     if (this.dataPagePending || !this.pendingRequestId) return false;
     const isReader = this.messagesScreen === 'message_detail';
     if (this.messagesScreen !== 'conversation' && !isReader) return false;
-    if (isReader) {
-      if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-        return this.dataHint?.includes('up previous') === true;
-      }
-      if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-        return this.dataHint?.includes('down more') === true;
-      }
-      return false;
-    }
+    if (isReader) return this.hintOffersPage(eventType);
     const atTop = this.selectedIndex === 0;
     const atBottom = this.selectedIndex === Math.max(0, this.dataItemCount - 1);
     if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -1226,6 +1238,17 @@ export class CapabilityMenu {
   private async returnToDataSurface(): Promise<void> {
     const parent = this.dataReturn;
     if (!parent) return;
+    if (parent.railTab) {
+      // Back from an opened row lands on the tab's CURRENT rows. The Mac
+      // pushes every poll, so the list the wearer left may have moved on
+      // while they read; a snapshot of it would tap rows the Mac refuses.
+      const keep = parent.selectedIndex;
+      this.dataReturn = undefined;
+      this.dataGrandparent = undefined;
+      await this.openPanelTab(parent.railTab);
+      this.restorePanelSelection(parent.railTab, keep);
+      return;
+    }
     this.dataReturn = this.dataGrandparent;
     this.dataGrandparent = undefined;
     this.clearResponseTimeout();

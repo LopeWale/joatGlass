@@ -229,3 +229,34 @@ class TestPagination:
         wire = last_list(transport).to_wire()
         assert len(wire["items"]) <= 20
         assert all(len(item) <= 64 for item in wire["items"])
+
+
+class TestReaderSurvivesABackgroundRefresh:
+    """The news poller bumps the tab's revision every pass. A wearer mid-
+    article must keep paging; the reader answers under the revision it was
+    opened with, and only a voice open (activate) closes it."""
+
+    async def test_paging_keeps_working_after_a_routine_push(self) -> None:
+        transport = Transport()
+        publisher, _ = panels(transport)
+        await publisher.publish("news")            # revision 1
+        await publisher.select("NEWS", 0, "panel-news-1")
+        await publisher.publish("news")            # the poller: revision 2
+        assert last_panel(transport).revision == 2
+        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
+        page = last_list(transport)
+        assert page.items[1:] == ["page two words"]
+        assert page.request_id == "panel-news-1"  # what the plugin opened under
+        # A tap on the OLD list after that push is still refused: the rows moved.
+        await publisher.select("NEWS", 0, "panel-news-1")
+        assert isinstance(transport.sent[-1], HudList)  # nothing new was opened
+
+    async def test_a_voice_open_closes_the_reader(self) -> None:
+        transport = Transport()
+        publisher, _ = panels(transport)
+        await publisher.publish("news")
+        await publisher.select("NEWS", 0, "panel-news-1")
+        await publisher.activate("news")
+        sent = len(transport.sent)
+        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
+        assert len(transport.sent) == sent

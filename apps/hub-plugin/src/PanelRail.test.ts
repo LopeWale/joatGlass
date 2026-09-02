@@ -131,3 +131,17 @@ describe('pomodoro time on the plugin clock', () => {
     expect(freshnessLabel(0, 2 * 3_600_000)).toBe('updated 2h ago');
   });
 });
+
+describe('pomodoro labels shared by the pane and the page', () => {
+  it('names the block, the break, the paused state, and the idle offer', async () => {
+    const { pomodoroBlockLabel, pomodoroCycleDots } = await import('./PanelRail');
+    const base = { running: true, remainingMs: 1, lengthMs: 1_500_000, completed: 1 };
+    expect(pomodoroBlockLabel({ ...base, phase: 'focus' })).toBe('Focus · block 2 of 4');
+    expect(pomodoroBlockLabel({ ...base, phase: 'focus', completed: 4 })).toBe('Focus · block 4 of 4');
+    expect(pomodoroBlockLabel({ ...base, phase: 'break' })).toBe('Break · 1 of 4 done');
+    expect(pomodoroBlockLabel({ ...base, phase: 'long_break', running: false })).toBe('Paused · Long break · 1 of 4 done');
+    expect(pomodoroBlockLabel({ ...base, phase: 'idle', running: false })).toBe('Ready · 25 min focus');
+    expect(pomodoroCycleDots(0)).toBe('○ ○ ○ ○');
+    expect(pomodoroCycleDots(3)).toBe('● ● ● ○');
+  });
+});

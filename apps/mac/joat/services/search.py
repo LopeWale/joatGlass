@@ -19,9 +19,8 @@ import logging
 import time
 from typing import Any
 import urllib.error
-import urllib.parse
 
-from .news import ROW_CHARACTERS, _shorten, article_domain, fetch_article_text
+from .news import ROW_CHARACTERS, article_domain, fetch_article_text, shorten
 from .panels import PanelSnapshot, Reader, paginate
 
 log = logging.getLogger(__name__)
@@ -44,7 +43,7 @@ class SearchResult:
     def row(self) -> str:
         """"Title · domain" — the dense-row grammar the glass parses."""
         suffix = f" · {self.domain}" if self.domain else ""
-        return f"{_shorten(self.title, max(12, ROW_CHARACTERS - len(suffix)))}{suffix}"
+        return f"{shorten(self.title, max(12, ROW_CHARACTERS - len(suffix)))}{suffix}"
 
 
 def ddgs_search(query: str, max_results: int = MAX_RESULTS) -> list[SearchResult]:
@@ -128,7 +127,7 @@ class SearchService:
             return f"I found nothing for {self._query}."
         parts = []
         for number, result in enumerate(self._results[:limit], start=1):
-            detail = f": {_shorten(result.snippet, 140)}" if result.snippet else ""
+            detail = f": {shorten(result.snippet, 140)}" if result.snippet else ""
             parts.append(f"{number}. {result.title}, {result.domain}{detail}.")
         return f"For {self._query}, " + " ".join(parts)
 
@@ -166,13 +165,10 @@ class SearchService:
         return Reader(
             tab=self.tab,
             title="SEARCH · RESULT",
-            metadata=f"{result.domain} · {_shorten(title or result.title, 44)}",
+            metadata=f"{result.domain} · {shorten(title or result.title, 44)}",
             pages=paginate(body),
         )
 
     def result_at(self, index: int) -> SearchResult | None:
         return self._results[index] if 0 <= index < len(self._results) else None
 
-
-def encode_query(query: str) -> str:
-    return urllib.parse.quote_plus(query)
