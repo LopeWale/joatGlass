@@ -94,6 +94,15 @@ class RoundTable:
     def names(self) -> list[str]:
         return [p.name for p in self._participants]
 
+    @property
+    def seats(self) -> list[Participant]:
+        """Everyone at the table, in their seated order.
+
+        Distinct from the SPEAKING order, which a wearer redirect can
+        reshuffle. Used to launch round 1's independent turns together.
+        """
+        return list(self._participants)
+
     def find(self, name: str) -> Participant | None:
         """Resolve a spoken name to a seat, tolerantly.
 

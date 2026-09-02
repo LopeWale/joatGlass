@@ -2174,3 +2174,79 @@ class TestInstructionsOutrankAbsorption:
         assert saved == [None]
         assert session.consumed == []
         await manager.close()
+
+
+class TestRoundOneRunsConcurrently:
+    """Measured against both real binaries: ~7.3s of process spawn and
+    subscription auth before a single token, then 12-40s of generation.
+
+    Round 1 is INDEPENDENT by construction — neither seat sees the other's
+    answer — so running the seats one after another spends that wait twice
+    for no reason. The wearer sat through all of Codex before Claude had
+    even been launched.
+    """
+
+    async def test_both_seats_are_launched_before_either_finishes(self) -> None:
+        started: list[str] = []
+        release = asyncio.Event()
+
+        def seat(name: str):
+            async def stream(_prompt: str):
+                started.append(name)
+                await release.wait()
+                yield f"{name} says something"
+            return stream
+
+        from joat.services.roundtable import Participant, RoundTable
+
+        table = RoundTable([
+            Participant("codex", "proposer", seat("codex")),
+            Participant("claude", "critic", seat("claude")),
+        ])
+        transport = SinkTransport()
+        session = debate(transport, table, None)
+        run = asyncio.create_task(session.run())
+
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if len(started) == 2:
+                break
+        assert started == ["codex", "claude"], (
+            "both first-round turns must be in flight; serial execution "
+            "would show only the first until it completed"
+        )
+        release.set()
+        await run
+
+    async def test_the_wearer_still_sees_one_turn_at_a_time_in_order(self) -> None:
+        """Concurrency is about the WAITING, not the watching. The surface's
+        whole job is showing who said what, in the order it happened."""
+        from joat.services.roundtable import Participant, RoundTable
+
+        def seat(name: str):
+            async def stream(_prompt: str):
+                yield f"{name} answer"
+            return stream
+
+        table = RoundTable([
+            Participant("codex", "proposer", seat("codex")),
+            Participant("claude", "critic", seat("claude")),
+        ])
+        transport = SinkTransport()
+        await debate(transport, table, None).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert joined.index("codex answer") < joined.index("claude answer")
+
+    async def test_a_disconnect_still_blocks_rather_than_reading_as_bad_text(
+        self,
+    ) -> None:
+        """Draining eagerly must not downgrade a disconnected collaborator
+        into a turn that merely produced failure text — blocked has its own
+        wearer-visible recovery."""
+        async def broken(_prompt: str) -> AsyncIterator[str]:
+            raise ConnectionError("remote closed")
+            yield "unreachable"
+
+        transport = SinkTransport()
+        await debate(transport, pair(broken, agent(["never"])), None).run()
+        assert brainstorm_frames(transport)[-1].state == "blocked"
