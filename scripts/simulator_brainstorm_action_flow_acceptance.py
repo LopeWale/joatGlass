@@ -555,6 +555,17 @@ async def _capture(
 ) -> tuple[str, str, str]:
     previous: str | None = None
     stable_since = 0.0
+    # Why the wait ended, for the failure message. "did not visibly settle"
+    # has two OPPOSITE causes — a frame that never changed from the last
+    # phase (the action did nothing) and one that never stopped changing
+    # (something is repainting) — and the bare wording named neither. This
+    # gate is what a release is verified against, so a run that fails
+    # intermittently must say which it hit: read as a flake, a real
+    # regression gets waved through; read as a regression, a slow simulator
+    # blocks a good build.
+    unchanged_polls = 0
+    changes = 0
+    reachable = False
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         try:
@@ -565,13 +576,16 @@ async def _capture(
         except (OSError, urllib.error.URLError):
             await asyncio.sleep(0.1)
             continue
+        reachable = True
         digest = hashlib.sha256(raw).hexdigest()
         if prior is not None and digest == prior:
+            unchanged_polls += 1
             await asyncio.sleep(0.1)
             continue
         now = time.monotonic()
         if digest != previous:
             previous, stable_since = digest, now
+            changes += 1
         elif now - stable_since >= 0.8:
             raw_path = output / f"{name}.rgba.png"
             raw_path.write_bytes(raw)
@@ -579,7 +593,20 @@ async def _capture(
             optical = _optical_preview(raw_path)
             return digest, raw_path.name, optical.name
         await asyncio.sleep(0.1)
-    raise BrainstormActionFlowError(f"{name}: framebuffer did not visibly settle")
+    if not reachable:
+        why = "the simulator never answered /api/screenshot/glasses"
+    elif changes == 0:
+        why = (
+            f"the frame never changed from the previous phase "
+            f"({unchanged_polls} identical polls) — the action produced no "
+            f"visible effect"
+        )
+    else:
+        why = (
+            f"the frame never held still for 0.8s ({changes} distinct frames) "
+            f"— something is still repainting"
+        )
+    raise BrainstormActionFlowError(f"{name}: framebuffer did not visibly settle: {why}")
 
 
 async def _input(automation_base: str, action: str) -> None:
