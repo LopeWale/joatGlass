@@ -214,6 +214,7 @@ class SessionManager:
         save_reply: Callable[[str | None], Awaitable[str]] | None = None,
         history: Any | None = None,
         terminal_decide: Callable[[str], Awaitable[str]] | None = None,
+        terminal_cycle: Callable[[], Awaitable[str]] | None = None,
         last_reply: Callable[[str | None], tuple[str, str] | None] | None = None,
         transform: Callable[[str, str], Awaitable[str]] | None = None,
         continuation_factory: Callable[
@@ -248,6 +249,7 @@ class SessionManager:
         self._history = history
         # Answers the tool request a work session is blocked on.
         self._terminal_decide = terminal_decide
+        self._terminal_cycle = terminal_cycle
         # Resolves the last reply once the session has ended.
         self._last_reply = last_reply
         #: Whether "branch this" is available (needs a factory).
@@ -914,6 +916,23 @@ class SessionManager:
                 asyncio.get_running_loop().create_task(run_retry())
             return
         active = self._active
+        if action.action == "show_brainstorm" and active is None:
+            # A tap on a BUSY terminal used to send this, reach the
+            # `active is None` return below, and do nothing at all — a
+            # dead gesture on the surface where the wearer most wants
+            # control, and one the running footer never even named. With
+            # no Brainstorm to go back to, the useful move is the one they
+            # asked for and could otherwise only SPEAK: switch sessions.
+            cycle = self._terminal_cycle
+            if cycle is not None:
+                async def run_cycle() -> None:
+                    try:
+                        log.info("terminal focus cycled: %s", await cycle())
+                    except Exception:
+                        log.exception("terminal focus cycle failed")
+
+                asyncio.get_running_loop().create_task(run_cycle())
+            return
         if action.action == "begin_terminal_input" and active is None:
             # One utterance, into the focused terminal session. Symmetrical
             # with topic capture and deliberately separate from it: this

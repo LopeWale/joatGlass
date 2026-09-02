@@ -1022,6 +1022,9 @@ async def main() -> None:
         history=brainstorm_history,
         # A tap approves, a swipe denies — see BrainstormController.
         terminal_decide=lambda verdict: agent_terminal.decide(verdict, None),
+        # A tap on a busy terminal with no Brainstorm to return to cycles
+        # the focused lane: "switch among sessions" without speaking.
+        terminal_cycle=lambda: agent_terminal.focus_next(),
         # Resolves "that" once the room has closed. The snapshot outlives
         # the session precisely so a finished answer can still be acted on.
         last_reply=lambda who: debate_state.snapshot.last_reply(who),

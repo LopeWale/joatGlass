@@ -347,6 +347,26 @@ class AgentTerminalRoster:
                 return True
         return False
 
+    async def focus_next(self) -> str:
+        """Move focus to the next lane and repaint — the gesture switch.
+
+        AGENT_TERMINAL_ROADMAP.md:36 wants other sessions left running
+        while another is focused, and the wearer asked to "switch among
+        sessions". Both had voice ("switch terminal to <lane>") and the
+        idle picker, and NEITHER is reachable while work is running: the
+        picker deliberately yields to live output, which is exactly when
+        switching matters. Cycling is the terminal-multiplexer gesture and
+        the LANES strip already shows where it landed.
+        """
+        names = list(self._lanes)
+        if len(names) < 2:
+            return f"{self._focus or 'terminal'} is the only session."
+        current = self._focus if self._focus in names else names[0]
+        self._focus = names[(names.index(current) + 1) % len(names)]
+        await self.repaint()
+        lane = self._lanes[self._focus]
+        return f"{self._focus} · {lane.state}"
+
     def tail(self, name: str | None = None, lines: int = 6) -> str:
         lane = self._lanes.get(name or self._focus or "")
         if lane is None:

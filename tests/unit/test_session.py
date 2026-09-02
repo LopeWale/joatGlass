@@ -3320,3 +3320,83 @@ class TestTheDurableRecordCarriesRealIdentity:
         assert captured and captured[0].session_id == "eeee"
         assert captured[0].root_id == "eeee"
         await manager.close()
+
+
+class TestTheTapOnABusyTerminalDoesSomething:
+    """The dead-gesture half of the switch. handle_brainstorm_action
+    reached `if active is None: return` for show_brainstorm, so a tap on a
+    busy Agent Terminal with no Brainstorm running produced NOTHING — on
+    the one surface whose whole job is control. Verified through the
+    production manager, not the roster in isolation.
+    """
+
+    async def test_it_cycles_the_terminal_when_no_brainstorm_is_live(self) -> None:
+        cycled: list[str] = []
+
+        async def cycle() -> str:
+            cycled.append("next")
+            return "hermes · idle"
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            terminal_cycle=cycle,
+        )
+        assert manager.active is False
+        manager.handle_brainstorm_action(
+            BrainstormAction(action="show_brainstorm", surface="agent_terminal")
+        )
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if cycled:
+                break
+        assert cycled == ["next"], "the tap did nothing, as before"
+        await manager.close()
+
+    async def test_a_live_brainstorm_still_wins_the_tap(self) -> None:
+        """With a session to go back to, the tap means what it always
+        meant — returning to the room, not switching lanes."""
+        cycled: list[str] = []
+
+        async def cycle() -> str:
+            cycled.append("next")
+            return "hermes"
+
+        replayed: list[bool] = []
+
+        class Live(Session):
+            async def run(self) -> None:
+                await asyncio.sleep(0.5)
+
+            def cancel(self) -> None: ...
+
+            def consume_transcript(self, text: str) -> bool:
+                return True
+
+            def direct(self, text: str) -> str | None:
+                return None
+
+            async def replay_hud(self) -> bool:
+                replayed.append(True)
+                return True
+
+            async def handle_brainstorm_action(self, action) -> bool:
+                if action.action == "show_brainstorm":
+                    return await self.replay_hud()
+                return False
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: Live(),
+            terminal_cycle=cycle,
+        )
+        assert manager.handle_transcript("brainstorm a live one")
+        await asyncio.sleep(0.02)
+        manager.handle_brainstorm_action(
+            BrainstormAction(action="show_brainstorm", surface="agent_terminal")
+        )
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if replayed:
+                break
+        assert replayed == [True]
+        assert cycled == [], "it switched lanes instead of returning"
+        await manager.close()
