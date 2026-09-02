@@ -2584,3 +2584,51 @@ class TestAnExplicitNewLineage:
         assert not first.cancelled
         assert started == ["the first question"]
         await manager.close()
+
+
+class TestReopeningSaysWhyItCannot:
+    """"That session could not be reopened" is true and useless.
+
+    Found on a live engine: tapping a stored session with no Claude CLI
+    installed produced exactly that, and the wearer cannot tell a missing
+    binary from a corrupted record — only one of which they can fix.
+    """
+
+    class Past:
+        session_id, topic = "aaa", "cold-start latency"
+        turns = (("CODEX", "cache it"),)
+
+    class FakeHistory:
+        def __init__(self, past): self._past = past
+        def load(self, sid): return self._past if sid == "aaa" else None
+
+    async def test_a_missing_seat_paints_the_unavailable_frame(self) -> None:
+        transport = SinkTransport()
+        unavailable = BrainstormHudView(
+            state="unavailable", topic="Brainstorm", collaborators=[],
+            activity="claude CLI missing on the Mac — install to enable.",
+        )
+        manager = SessionManager(
+            HudWriter(transport), lambda t: None,
+            history=self.FakeHistory(self.Past()),
+            continuation_factory=lambda topic, prior: None,
+            topic_capture_view=lambda _armed: unavailable,
+            brainstorm_available=lambda: False,
+        )
+
+        # Consumed — the wearer's tap is answered, not dropped.
+        assert await manager.resume_by_id("aaa") is True
+        await asyncio.sleep(0)          # the paint is a task
+        frames = brainstorm_frames(transport)
+        assert frames and frames[-1].state == "unavailable"
+        assert "claude" in frames[-1].activity.lower()
+        await manager.close()
+
+    async def test_an_unknown_id_still_refuses_quietly(self) -> None:
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            history=self.FakeHistory(self.Past()),
+            continuation_factory=lambda topic, prior: None,
+        )
+        assert await manager.resume_by_id("does-not-exist") is False
+        await manager.close()
