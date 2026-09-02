@@ -710,11 +710,21 @@ class SessionManager:
             router = self._route_reply
 
             async def run_route() -> None:
+                # The receipt goes to the GLASS, not just the log. This
+                # only logged, so the wearer's headline verb — "send that
+                # to Hermes" — produced nothing visible whether it worked,
+                # hit a lane that does not exist, or failed at the
+                # gateway. An action whose result is invisible is
+                # indistinguishable from one that did not happen, and this
+                # is the verb the whole feature was asked for.
                 try:
                     receipt = await router(*route)
                     log.info("reply routed: %s", receipt)
-                except Exception:
+                except Exception as exc:
+                    reason = str(exc) or exc.__class__.__name__
                     log.exception("reply routing failed")
+                    receipt = f"Could not send that — {reason}"
+                await self._say(receipt)
 
             asyncio.get_running_loop().create_task(run_route())
             return True
@@ -750,12 +760,30 @@ class SessionManager:
                 try:
                     receipt = await saver(who)
                     log.info("reply saved: %s", receipt)
-                except Exception:
+                except Exception as exc:
+                    reason = str(exc) or exc.__class__.__name__
                     log.exception("reply save failed")
+                    receipt = f"Could not save that — {reason}"
+                await self._say(receipt)
 
             asyncio.get_running_loop().create_task(run_save())
             return True
         return False
+
+    async def _say(self, text: str) -> None:
+        """Tell the wearer what a verb did, on the surface they are on.
+
+        `answers_wearer` matters: the plugin refuses ordinary overlays over
+        a live Brainstorm, so without it every receipt for an instruction
+        given ON that surface would be silently dropped — which is the
+        failure this exists to end, reappearing one layer down.
+        """
+        if not text:
+            return
+        try:
+            await self._hud.assistant(text, answers_wearer=True)
+        except Exception:
+            log.warning("verb receipt not painted", exc_info=True)
 
     async def _act_on_material(self, instruction: str) -> None:
         """Do what the wearer asked WITH the last reply.
@@ -773,13 +801,20 @@ class SessionManager:
         material = self._material()
         if not material:
             log.info("nothing to act on yet")
+            await self._say(
+                "There is no answer to work with yet — ask something first."
+            )
             return
         try:
             answer = await self._transform(instruction, material)  # type: ignore[misc]
-        except Exception:
+        except Exception as exc:
             log.exception("instruction on the last reply failed")
+            await self._say(
+                f"I could not do that — {str(exc) or exc.__class__.__name__}"
+            )
             return
         if not answer:
+            await self._say("I had nothing useful to say about that.")
             return
         try:
             # answers_wearer: the plugin refuses ordinary overlays over a

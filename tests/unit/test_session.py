@@ -3574,3 +3574,119 @@ class TestTheEscapeHatchBeatsAHungCollaborator:
         await asyncio.sleep(0.05)
         await asyncio.wait_for(manager.close(), timeout=10)
         assert manager.active is False
+
+
+class TestEveryVerbTellsTheWearerWhatHappened:
+    """The wearer's headline verb produced NOTHING on the glass.
+
+    "send that to Hermes" resolved the material, reached the lane, got a
+    receipt back — and logged it. Success, a lane that does not exist, and
+    a gateway failure were indistinguishable from the outside: all three
+    were silence. Same for "save that". An action whose result is
+    invisible cannot be told apart from one that never ran, and this is
+    the verb the whole feature was asked for.
+
+    Enumerated as a GRID rather than a couple of cases, because the
+    asymmetry is what hid it: transform painted on success and went silent
+    on failure, so a spot check of the happy path found nothing wrong.
+    """
+
+    class Roster:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str | None, str | None]] = []
+
+        async def route(self, who: str | None, lane: str | None) -> str:
+            self.sent.append((who, lane))
+            return f"{who or 'the last reply'} → {lane or 'hermes'} ▸ sent."
+
+    @staticmethod
+    def _manager(transport, *, reply, route=None, transform=None, save=None):
+        async def default_route(who, lane):
+            return "sent."
+
+        async def default_transform(instruction, material):
+            return "a shorter version"
+
+        async def default_save(who):
+            return "saved to QuickNote"
+
+        return SessionManager(
+            HudWriter(transport), lambda topic: None,
+            route_reply=route or default_route,
+            transform=transform or default_transform,
+            save_reply=save or default_save,
+            last_reply=reply,
+        )
+
+    @staticmethod
+    def _spoken(transport) -> str:
+        said = [
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        return said[-1] if said else ""
+
+    async def _run(self, said: str, **kw) -> str:
+        transport = SinkTransport()
+        manager = self._manager(transport, **kw)
+        manager.handle_transcript(said, addressed=said)
+        await asyncio.sleep(0.05)
+        spoken = self._spoken(transport)
+        await manager.close()
+        return spoken
+
+    _HAVE = staticmethod(lambda who: ("CLAUDE (critic)", "the answer"))
+    _NONE = staticmethod(lambda who: None)
+
+    async def test_success_is_confirmed_for_every_verb(self) -> None:
+        for said in ("send that to hermes", "save that", "make that shorter"):
+            spoken = await self._run(said, reply=self._HAVE)
+            assert spoken, f"{said!r} succeeded silently"
+
+    async def test_a_verb_with_no_material_says_so(self) -> None:
+        for said in ("send that to hermes", "make that shorter"):
+            spoken = await self._run(said, reply=self._NONE)
+            assert spoken, f"{said!r} failed silently"
+
+    async def test_a_failing_verb_names_the_reason(self) -> None:
+        async def boom(instruction: str, material: str) -> str:
+            raise RuntimeError("the local model is not loaded")
+
+        spoken = await self._run(
+            "make that shorter", reply=self._HAVE, transform=boom,
+        )
+        assert "the local model is not loaded" in spoken
+
+    async def test_a_routing_failure_reaches_the_glass(self) -> None:
+        async def refuse(who, lane):
+            raise RuntimeError("gateway said no")
+
+        spoken = await self._run(
+            "send that to hermes", reply=self._HAVE, route=refuse,
+        )
+        assert "gateway said no" in spoken
+
+    async def test_a_save_failure_reaches_the_glass(self) -> None:
+        async def refuse(who):
+            raise RuntimeError("the notes store is read-only")
+
+        spoken = await self._run("save that", reply=self._HAVE, save=refuse)
+        assert "read-only" in spoken
+
+    async def test_the_receipt_is_marked_as_answering_the_wearer(self) -> None:
+        """Without answers_wearer the plugin refuses overlays over a live
+        Brainstorm — so every receipt for an instruction given ON that
+        surface would be dropped, which is the same silence one layer
+        down."""
+        transport = SinkTransport()
+        manager = self._manager(transport, reply=self._HAVE)
+        manager.handle_transcript(
+            "send that to hermes", addressed="send that to hermes",
+        )
+        await asyncio.sleep(0.05)
+        overlays = [
+            m for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        assert overlays and all(m.answers_wearer for m in overlays)
+        await manager.close()
