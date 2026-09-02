@@ -13,6 +13,33 @@ container diagrams are the architecture record, not the current render path.
 The canonical contract is [DESIGN.md](../DESIGN.md), with visual acceptance in
 [design-qa.md](../design-qa.md) and official Even Hub simulator captures.
 
+### The right pane is a rail of tabs (2026-09-02)
+
+The overview's right pane carries a vertical rail — notifications, news,
+pomodoro, search — on its outer-left edge (`PANEL_RAIL` in
+`HudCanvasRenderer.ts`: icons at x=290, one slot per tab at y=70/118/166/214,
+the pane's hairline at x=308.5, content from x=318). Everything a tab
+change can alter lives east of the tile seam at x=288, so a swipe uploads
+the two right tiles only; the expanded pomodoro's countdown sits inside the
+top-right tile so a one-second tick uploads one.
+
+| Gesture | Resting overview | Expanded tab | Opened row (reader) |
+|---|---|---|---|
+| swipe | move along the rail (local) | move the row | page, when the Mac's hint offers it |
+| tap | expand the lit tab | open the row (`capdata`, echoing `panel-<tab>-<revision>`) | — |
+| left double | — | back to the overview | back to the tab |
+| long press | mic | refresh the tab (`caprefresh`) | mic |
+
+Which tab is up is plugin state (`PanelRail.ts`); the Mac never learns it.
+What the Mac owns is pushed as `hud.panel` — one message per tab, up to 20
+rows in the dense-row grammar, a revision, and for the timer its phase and
+end instant — cached by the plugin so a swipe never round-trips. A row tap
+that echoes an older revision is refused. Notifications is not a push: it
+is the overview's own Main/Context/Tray streams, and its tap still asks the
+Mac for the `NOTIFICATIONS` page. Mac side: `services/panels.py` publishes
+and answers taps; `news.py`, `pomodoro.py`, `search.py` are the providers;
+`panel_commands.py` is the voice; the Mac app writes `news.json`.
+
 ### Current visual container map
 
 | id | role | x,y,w,h | z | capture |

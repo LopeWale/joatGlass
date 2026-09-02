@@ -11,6 +11,11 @@ struct MainWindowView: View {
     @State private var logTail = ""
     @State private var messagesAccess: MessagesAccessState = .blocked
     @State private var notesAutomation: NotesAutomationState = .notDetermined
+    // The glasses' News tab: which free feeds the engine polls. Saved on
+    // every change; the engine re-reads the file on its next pass.
+    @State private var newsConfig = NewsConfigStore().load()
+    @State private var newFeedURL = ""
+    @State private var newsNotice: String?
 
     private let messagesAccessProbe = MessagesAccessProbe()
     private let notesAutomationProbe = NotesAutomationProbe()
@@ -127,6 +132,8 @@ struct MainWindowView: View {
                     .padding(4)
                 }
 
+                newsSection
+
                 Divider()
 
                 HStack {
@@ -181,6 +188,104 @@ struct MainWindowView: View {
             notesAutomation = notesAutomationProbe.state()
         }
         .onReceive(tick) { _ in refresh() }
+    }
+
+    /// The News tab on the glasses reads free RSS feeds the engine polls.
+    /// This is the one place the wearer chooses which: a toggle per
+    /// category, any feed of their own, and how often to look.
+    private var newsSection: some View {
+        GroupBox("News on the glasses") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Free feeds only — BBC, NPR and Google News per category, plus any RSS or Atom link you add. Fetched on this Mac; the glasses never fetch.")
+                    .font(.caption).foregroundStyle(.secondary)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), alignment: .leading)], alignment: .leading, spacing: 4) {
+                    ForEach(NewsConfig.categories) { category in
+                        Toggle(category.label, isOn: Binding(
+                            get: { newsConfig.categories.contains(category.id) },
+                            set: { on in setCategory(category.id, enabled: on) }
+                        ))
+                        .toggleStyle(.checkbox)
+                    }
+                }
+                if !newsConfig.customFeeds.isEmpty {
+                    ForEach(newsConfig.customFeeds, id: \.self) { feed in
+                        HStack(spacing: 6) {
+                            Text(feed).font(.caption).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button("Remove") { removeFeed(feed) }.font(.caption)
+                        }
+                    }
+                }
+                HStack(spacing: 6) {
+                    TextField("https://example.com/feed.xml", text: $newFeedURL)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addFeed)
+                    Button("Add feed", action: addFeed)
+                        .disabled(!(newFeedURL.hasPrefix("https://") || newFeedURL.hasPrefix("http://")))
+                    Stepper(
+                        "Every \(newsConfig.refreshMinutes) min",
+                        value: Binding(
+                            get: { newsConfig.refreshMinutes },
+                            set: { setRefresh($0) }
+                        ),
+                        in: NewsConfig.minimumRefreshMinutes...NewsConfig.maximumRefreshMinutes,
+                        step: 5
+                    )
+                    .font(.caption)
+                }
+                if let notice = newsNotice {
+                    Text(notice).font(.caption)
+                        .foregroundStyle(notice.hasPrefix("Could not save") ? .red : .secondary)
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func setCategory(_ id: String, enabled: Bool) {
+        var next = newsConfig
+        next.categories.removeAll { $0 == id }
+        if enabled {
+            // Keep the engine's listing order so the file reads the way the
+            // toggles do, rather than the order the wearer clicked them.
+            next.categories.append(id)
+            let order = NewsConfig.categories.map(\.id)
+            next.categories.sort { (order.firstIndex(of: $0) ?? 0) < (order.firstIndex(of: $1) ?? 0) }
+        }
+        saveNews(next)
+    }
+
+    private func addFeed() {
+        let url = newFeedURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard url.hasPrefix("https://") || url.hasPrefix("http://") else { return }
+        var next = newsConfig
+        if !next.customFeeds.contains(url) { next.customFeeds.append(url) }
+        newFeedURL = ""
+        saveNews(next)
+    }
+
+    private func removeFeed(_ feed: String) {
+        var next = newsConfig
+        next.customFeeds.removeAll { $0 == feed }
+        saveNews(next)
+    }
+
+    private func setRefresh(_ minutes: Int) {
+        var next = newsConfig
+        next.refreshMinutes = minutes
+        saveNews(next)
+    }
+
+    private func saveNews(_ next: NewsConfig) {
+        let normalized = next.normalized
+        newsConfig = normalized
+        do {
+            try NewsConfigStore().save(normalized)
+            let feeds = normalized.categories.count * 3 + normalized.customFeeds.count
+            newsNotice = "Saved. The engine polls \(feeds) feeds every \(normalized.refreshMinutes) minutes; the glasses update on its next pass."
+        } catch {
+            newsNotice = "Could not save news.json: \(error.localizedDescription)"
+        }
     }
 
     private var header: some View {

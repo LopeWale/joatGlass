@@ -132,10 +132,16 @@ describe('CapabilityMenu — the overview tab rail', () => {
     menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
     expect(sent).toEqual([]);
 
+    // The reader keeps the tab's rail lit…
+    const reader = lists[lists.length - 1]!;
+    expect(reader.options).toMatchObject({ title: 'NEWS · ARTICLE', railTab: 'news' });
+
     await menu.toggle();
     const back = lists[lists.length - 1]!;
     expect(back.options?.title).toBe('NEWS');
     expect(back.items).toHaveLength(2);
+    // …and so does the list Back restores — it vanished here once.
+    expect(back.options).toMatchObject({ railTab: 'news' });
     expect(menu.isPanelExpanded()).toBe(true);
     await menu.toggle();
     expect(menu.isOpen()).toBe(false);

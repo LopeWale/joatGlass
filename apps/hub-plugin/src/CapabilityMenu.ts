@@ -40,6 +40,9 @@ interface DataSurfaceSnapshot {
   selectedIndex: number;
   messagesRetry: boolean;
   messagesScreen?: MessagesScreen;
+  /** An expanded panel tab keeps its rail lit, on the page and on the
+   * list Back restores; without this the rail vanished on return. */
+  railTab?: PanelContentTab;
 }
 
 const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
@@ -333,12 +336,16 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
+    // An opened headline or result is still inside its tab: the rail
+    // stays on the reader so the wearer sees where they are.
+    const railTab = panelTabForTitle(this.pendingTitle);
     const shown = await this.hud.showList(items, {
       title,
       hint: effectiveHint,
       selectable: effectiveSelectable,
       planningGrid,
       planningPane: this.dashboardPane(),
+      ...(railTab ? { railTab } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -368,6 +375,7 @@ export class CapabilityMenu {
       selectedIndex: 0,
       messagesRetry: this.messagesRetry,
       messagesScreen: this.messagesScreen,
+      ...(railTab ? { railTab } : {}),
     };
     return true;
   }
@@ -934,6 +942,7 @@ export class CapabilityMenu {
       hint,
       selectedIndex: 0,
       messagesRetry: false,
+      railTab: tab,
     };
     this.dataReturn = undefined;
     this.dataGrandparent = undefined;
@@ -1237,6 +1246,7 @@ export class CapabilityMenu {
       selectable: parent.selectable,
       planningGrid: parent.planningGrid,
       planningPane: this.dashboardPane(),
+      ...(parent.railTab ? { railTab: parent.railTab } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
