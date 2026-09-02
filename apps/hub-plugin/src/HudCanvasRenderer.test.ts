@@ -534,13 +534,20 @@ describe('Brainstorm wearable actions', () => {
     expect(agentTerminalFocusLabel('')).toBe('HERMES');
   });
 
-  it('discloses scroll, terminal handoff and cancel while a session runs', () => {
-    expect(brainstormActionHint({
+  it('discloses scroll, terminal handoff, the verb layer, and cancel', () => {
+    const hint = brainstormActionHint({
       screen: 'brainstorm',
       state: 'running',
       terminalState: 'ready',
       noToolsChecked: true,
-    })).toBe('swipe: scroll · tap: terminal · left x2: cancel');
+    });
+    expect(hint).toContain('swipe: scroll');
+    expect(hint).toContain('tap: terminal');
+    expect(hint).toContain('left x2: cancel');
+    // An open-ended capability nobody knows about is not a capability.
+    // JOAT can act on any reply — "make that shorter", "send that to
+    // hermes" — and nothing on the glass said so.
+    expect(hint).toContain('send that to hermes');
   });
 
   it('keeps the diagnostic test gesture off an ordinary ready Brainstorm', () => {
