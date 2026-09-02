@@ -202,6 +202,9 @@ describe('answering a blocked work session', () => {
     screen: 'agent_terminal', state, topic: 'work · ask1',
     collaborators: [], activity: '> run the audit',
     terminalState: state, noToolsChecked: true,
+    // A pending TOOL request. A connection awaiting device approval in
+    // OpenClaw reads the same state with zero here, and taps to retry.
+    approvals: state === 'approval_required' ? 1 : 0,
   });
 
   it('taps to approve and swipes to deny', () => {
@@ -227,5 +230,35 @@ describe('answering a blocked work session', () => {
     const { controller } = make();
     controller.present(terminal('ready') as never);
     expect(controller.handleSwipe()).toBe(false);
+  });
+});
+
+describe('approval_required means two different things', () => {
+  const base = {
+    screen: 'agent_terminal' as const, topic: 'work', collaborators: [],
+    activity: '>', noToolsChecked: true,
+  };
+
+  it('retries when the CONNECTION is waiting on device approval', () => {
+    // No pending tool request: OpenClaw has not approved this device, and
+    // the remedy is a retry. Dropping this case while adding the approve
+    // gesture made the state do nothing at all.
+    const { controller, sent } = make();
+    controller.present({
+      ...base, state: 'approval_required',
+      terminalState: 'approval_required', approvals: 0,
+    } as never);
+    expect(controller.handleClick()).toBe(true);
+    expect((sent[0] as { action: string }).action).toBe('retry_terminal');
+  });
+
+  it('approves when a LANE is waiting on a tool request', () => {
+    const { controller, sent } = make();
+    controller.present({
+      ...base, state: 'approval_required',
+      terminalState: 'approval_required', approvals: 2,
+    } as never);
+    expect(controller.handleClick()).toBe(true);
+    expect((sent[0] as { action: string }).action).toBe('approve_terminal');
   });
 });

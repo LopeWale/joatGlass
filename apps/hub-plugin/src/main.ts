@@ -473,12 +473,24 @@ async function boot(): Promise<void> {
         menu.releaseToLiveSession();
         await awaitCurrent(navigation.present(msg, undefined, context.signal));
         break;
-      case 'brainstorm.view':
+      case 'brainstorm.view': {
+        // The WIRE dropped `screen` when the two features were split, but
+        // the render model still keys on it — and every gesture check in
+        // BrainstormController starts with `model.screen === 'brainstorm'`.
+        // Passing the wire frame straight through left it undefined, so a
+        // tap matched neither branch and did nothing at all. The
+        // acceptance flow caught it; no unit test did, because they all
+        // build the render model directly.
+        const model: BrainstormHudModel = {
+          ...msg.brainstorm,
+          screen: 'brainstorm',
+        };
         await awaitCurrent(menu.beginLiveSession('brainstorm'));
-        if (await awaitCurrent(hud.showBrainstorm(msg.brainstorm))) {
-          brainstorm.present(msg.brainstorm);
+        if (await awaitCurrent(hud.showBrainstorm(model))) {
+          brainstorm.present(model);
         }
         break;
+      }
       case 'agent_terminal.view': {
         // The WIRE is split — the Agent Terminal has its own frame kind and
         // no longer rides the Brainstorm one, which docs/SESSION_MODEL.md:74-75
@@ -495,6 +507,7 @@ async function boot(): Promise<void> {
           terminalState: msg.terminal.state,
           terminalReason: msg.terminal.terminalReason,
           noToolsChecked: msg.terminal.noToolsChecked,
+          approvals: msg.terminal.approvals,
         };
         await awaitCurrent(menu.beginLiveSession('brainstorm'));
         if (await awaitCurrent(hud.showBrainstorm(model))) {

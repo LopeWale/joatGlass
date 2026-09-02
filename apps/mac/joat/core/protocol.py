@@ -677,10 +677,20 @@ class AgentTerminalHudView:
     endpoint_host: str = ""
     reason: str = ""
     no_tools_checked: bool = False
+    #: Tool requests the focused lane is blocked on.
+    #:
+    #: Distinct from state="approval_required", which ALSO describes a
+    #: connection whose device has not been approved in OpenClaw — a
+    #: different problem with a different remedy (retry, not approve).
+    #: Overloading one field for both made a tap ambiguous: approve the
+    #: tool, or retry the daemon? The count answers it.
+    approvals: int = 0
 
     def to_wire(self) -> dict[str, Any]:
         if self.state not in _BRAINSTORM_HUD_STATES:
             raise ProtocolError("Agent Terminal HUD state is invalid")
+        if self.approvals < 0:
+            raise ProtocolError("Agent Terminal approval count is invalid")
         if len(self.lanes) > 3:
             raise ProtocolError("Agent Terminal HUD has too many lanes")
         return {
@@ -702,6 +712,7 @@ class AgentTerminalHudView:
                     self.reason, "terminal reason", 64, allow_empty=True,
                 ),
                 "noToolsChecked": self.no_tools_checked,
+                "approvals": self.approvals,
             },
         }
 

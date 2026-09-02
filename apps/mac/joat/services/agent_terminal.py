@@ -70,6 +70,12 @@ class TerminalFrame:
     state: str
     lanes: list[str]
     lines: list[str]
+    #: Tool requests the FOCUSED lane is blocked on. Not the same thing as
+    #: state == "approval_required", which ALSO describes a connection
+    #: whose device is unapproved in OpenClaw — opposite remedies (approve
+    #: the tool vs retry the daemon), so a gesture keys on this count
+    #: rather than on the overloaded state word.
+    approvals: int = 0
 
 
 def _one_row(text: str, columns: int) -> str:
@@ -275,6 +281,7 @@ class AgentTerminalRoster:
             else "ready"
         )
         return TerminalFrame(
+            approvals=len(lane.approvals),
             topic=header, state=state,
             # Names alone made 'watch concurrent work' impossible: a
             # background lane could finish, block, or start waiting on an

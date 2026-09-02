@@ -270,8 +270,21 @@ def validate_flow(
     digests = [item.framebuffer_sha256 for item in receipts]
     if any(not _is_sha256(digest) for digest in digests):
         raise BrainstormActionFlowError("simulator receipt contains an invalid frame digest")
-    if len(set(digests)) != len(digests):
-        raise BrainstormActionFlowError("simulator flow did not produce distinct visible frames")
+    # CONSECUTIVE difference, not global uniqueness. Every step must change
+    # the glass — that is the property worth having, and _capture already
+    # waits for it. Global uniqueness additionally forbids ever RETURNING to
+    # a state, which is wrong: reopening Brainstorm after a detour is
+    # supposed to look exactly like opening it, and demanding otherwise
+    # would push a cosmetic difference into the product to satisfy a test.
+    repeated = [
+        (a.name, b.name)
+        for a, b in zip(receipts, receipts[1:])
+        if a.framebuffer_sha256 == b.framebuffer_sha256
+    ]
+    if repeated:
+        raise BrainstormActionFlowError(
+            f"these steps did not change the glass: {repeated!r}"
+        )
 
     if acceptance.get("schema") != RUN_SCHEMA:
         raise BrainstormActionFlowError("acceptance receipt has the wrong schema")
@@ -605,17 +618,27 @@ async def _start_official_simulator(
     return simulator
 
 
+def _screen_of(message: object) -> str:
+    """Which surface a frame belongs to.
+
+    The two features no longer share a frame with a `screen` field
+    (docs/SESSION_MODEL.md:74-75), so the TYPE is the discriminator.
+    """
+    return ("agent_terminal" if isinstance(message, AgentTerminalHudView)
+            else "brainstorm")
+
+
 def _last_brainstorm(
     gateway: RecordingGateway,
     *,
     after: int = 0,
     screen: str | None = None,
     state: str | None = None,
-) -> BrainstormHudView | None:
+) -> BrainstormHudView | AgentTerminalHudView | None:
     for message in reversed(gateway.sent[after:]):
-        if not isinstance(message, BrainstormHudView):
+        if not isinstance(message, (BrainstormHudView, AgentTerminalHudView)):
             continue
-        if screen is not None and message.screen != screen:
+        if screen is not None and _screen_of(message) != screen:
             continue
         if state is not None and message.state != state:
             continue
@@ -860,11 +883,22 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 "Brainstorm seated someone besides the two CLI collaborators: "
                 f"{ungated.collaborators!r}"
             )
-        if ungated.terminal_state == "ready":
+        # The Brainstorm frame cannot report terminal readiness any more —
+        # it carries no Agent Terminal field at all, which is the boundary
+        # docs/SESSION_MODEL.md:74-75 requires and this run now proves
+        # structurally. What still needs asserting is that the harness has
+        # the terminal genuinely UNREADY, or the open proves nothing.
+        if str(status.agent_terminal_projection()["state"]) == "ready":
             raise BrainstormActionFlowError(
                 "harness error: the terminal was already ready, so this run "
                 "proved nothing about the removed Hermes gate"
             )
+        for forbidden in ("terminal_state", "endpoint_host", "no_tools_checked"):
+            if hasattr(ungated, forbidden):
+                raise BrainstormActionFlowError(
+                    f"the Brainstorm frame carries {forbidden}, which "
+                    "SESSION_MODEL.md:74-75 forbids"
+                )
         digest, raw, optical = await _capture(
             automation_base,
             output,
@@ -873,8 +907,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "brainstorm-ungated", None, None,
-            ungated.screen, ungated.state,
-            ungated.acceptance_armed, digest,
+            _screen_of(ungated), ungated.state,
+            getattr(ungated, 'acceptance_armed', False), digest,
         ))
         artifacts["brainstorm-ungated"] = {"raw": raw, "optical": optical}
 
@@ -900,8 +934,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "terminal-hermes-required", None, None,
-            terminal_approval.screen, terminal_approval.state,
-            terminal_approval.acceptance_armed, digest,
+            _screen_of(terminal_approval), terminal_approval.state,
+            getattr(terminal_approval, 'acceptance_armed', False), digest,
         ))
         artifacts["terminal-hermes-required"] = {"raw": raw, "optical": optical}
 
@@ -933,8 +967,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "terminal-retry-ready", "click", retry_action.action,
-            terminal_ready.screen, terminal_ready.state,
-            terminal_ready.acceptance_armed, digest,
+            _screen_of(terminal_ready), terminal_ready.state,
+            getattr(terminal_ready, 'acceptance_armed', False), digest,
         ))
         artifacts["terminal-retry-ready"] = {"raw": raw, "optical": optical}
 
@@ -966,8 +1000,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "brainstorm-reopened", None, None,
-            reopened.screen, reopened.state,
-            reopened.acceptance_armed, digest,
+            _screen_of(reopened), reopened.state,
+            getattr(reopened, 'acceptance_armed', False), digest,
         ))
         artifacts["brainstorm-reopened"] = {"raw": raw, "optical": optical}
 
@@ -1005,8 +1039,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "daily-topic-capture", "click", topic_capture.action,
-            capture_view.screen, capture_view.state,
-            capture_view.acceptance_armed, digest,
+            _screen_of(capture_view), capture_view.state,
+            getattr(capture_view, 'acceptance_armed', False), digest,
         ))
         artifacts["daily-topic-capture"] = {"raw": raw, "optical": optical}
 
@@ -1033,8 +1067,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "daily-topic-capture-cancelled", "down", clear_capture.action,
-            cleared_view.screen, cleared_view.state,
-            cleared_view.acceptance_armed, digest,
+            _screen_of(cleared_view), cleared_view.state,
+            getattr(cleared_view, 'acceptance_armed', False), digest,
         ))
         artifacts["daily-topic-capture-cancelled"] = {"raw": raw, "optical": optical}
 
@@ -1066,8 +1100,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         receipts.append(ScreenReceipt(
             "diagnostic-ready", None, None,
-            diagnostic_ready.screen, diagnostic_ready.state,
-            diagnostic_ready.acceptance_armed, digest,
+            _screen_of(diagnostic_ready), diagnostic_ready.state,
+            getattr(diagnostic_ready, 'acceptance_armed', False), digest,
         ))
         artifacts["diagnostic-ready"] = {"raw": raw, "optical": optical}
 
@@ -1099,9 +1133,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "acceptance-ready",
             "double_click",
             trigger.action,
-            acceptance_ready.screen,
+            _screen_of(acceptance_ready),
             acceptance_ready.state,
-            acceptance_ready.acceptance_armed,
+            getattr(acceptance_ready, 'acceptance_armed', False),
             digest,
         ))
         artifacts["acceptance-ready"] = {"raw": raw, "optical": optical}
@@ -1127,8 +1161,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         await asyncio.sleep(1.0)
         digest, raw, optical = await _capture(automation_base, output, "09-running", digest)
         receipts.append(ScreenReceipt(
-            "running", "click", begin.action, running.screen, running.state,
-            running.acceptance_armed, digest,
+            "running", "click", begin.action, _screen_of(running), running.state,
+            getattr(running, 'acceptance_armed', False), digest,
         ))
         artifacts["running"] = {"raw": raw, "optical": optical}
 
@@ -1155,9 +1189,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "terminal",
             "click",
             show_terminal.action,
-            terminal_view.screen,
+            _screen_of(terminal_view),
             terminal_view.state,
-            terminal_view.acceptance_armed,
+            getattr(terminal_view, 'acceptance_armed', False),
             digest,
         ))
         artifacts["terminal"] = {"raw": raw, "optical": optical}
@@ -1185,9 +1219,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "returned",
             "click",
             show_brainstorm.action,
-            returned.screen,
+            _screen_of(returned),
             returned.state,
-            returned.acceptance_armed,
+            getattr(returned, 'acceptance_armed', False),
             digest,
         ))
         artifacts["returned"] = {"raw": raw, "optical": optical}
@@ -1230,9 +1264,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "reconnected",
             None,
             "authenticated_replay",
-            replayed.screen,
+            _screen_of(replayed),
             replayed.state,
-            replayed.acceptance_armed,
+            getattr(replayed, 'acceptance_armed', False),
             digest,
         ))
         artifacts["reconnected"] = {"raw": raw, "optical": optical}
@@ -1281,9 +1315,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "cancelled",
             None,
             "cancel",
-            cancelled.screen,
+            _screen_of(cancelled),
             cancelled.state,
-            cancelled.acceptance_armed,
+            getattr(cancelled, 'acceptance_armed', False),
             digest,
         ))
         artifacts["cancelled"] = {"raw": raw, "optical": optical}
@@ -1364,10 +1398,24 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             ),
             label="Brainstorm open while the terminal streams",
         )
-        if busy.terminal_state != "running":
+        # This used to require the Brainstorm frame to CARRY the terminal's
+        # state. It cannot any more, and must not: docs/SESSION_MODEL.md:74-75
+        # forbids the Brainstorm model containing any Agent Terminal field,
+        # and that coupling is what put "JOAT · BRAINSTORM" on the terminal
+        # spine. What matters here is unchanged — a busy terminal does not
+        # gate Brainstorm — and the frame proves it structurally by opening
+        # ready while the status projection says the terminal is running.
+        if str(status.agent_terminal_projection()["state"]) != "running":
             raise BrainstormActionFlowError(
-                "the frame hid the busy terminal instead of carrying it"
+                "harness error: the terminal was not busy, so this proved "
+                "nothing about a busy terminal gating Brainstorm"
             )
+        for forbidden in ("terminal_state", "endpoint_host", "no_tools_checked"):
+            if hasattr(busy, forbidden):
+                raise BrainstormActionFlowError(
+                    f"the Brainstorm frame carries {forbidden}, which "
+                    "SESSION_MODEL.md:74-75 forbids"
+                )
         digest, raw, optical = await _capture(
             automation_base,
             output,
@@ -1438,9 +1486,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "voice-direct-running",
             "synthetic_mic",
             "start_brainstorm",
-            voice_running.screen,
+            _screen_of(voice_running),
             voice_running.state,
-            voice_running.acceptance_armed,
+            getattr(voice_running, 'acceptance_armed', False),
             digest,
         ))
         artifacts["voice-direct-running"] = {"raw": raw, "optical": optical}

@@ -140,9 +140,30 @@ describe('answering an approval by gesture', () => {
     // lane can carry the answer may advertise approve/deny.
     const waiting = terminal({
       state: 'approval_required', terminalState: 'approval_required',
+      approvals: 1,
     });
     expect(brainstormActionHint(waiting)).toContain('tap: approve');
     expect(brainstormActionHint(waiting)).toContain('swipe: deny');
     expect(tapAction(waiting)).toBe('approve_terminal');
+  });
+});
+
+describe('the ready Brainstorm tells you how to start one', () => {
+  const ready = (extra: Record<string, unknown> = {}) => ({
+    screen: 'brainstorm' as const, state: 'ready' as const,
+    noToolsChecked: true, ...extra,
+  });
+
+  it('says tap to speak, with no terminal field in sight', () => {
+    // This gated on terminalState === 'ready' && noToolsChecked, which a
+    // Brainstorm frame no longer carries. It fell through to the generic
+    // hint and stopped naming the one action the screen exists for.
+    expect(brainstormActionHint(ready() as never)).toContain('tap: speak');
+  });
+
+  it('shows the diagnostic gesture only when the Mac armed it', () => {
+    expect(brainstormActionHint(ready({ acceptanceArmed: true }) as never))
+      .toContain('test');
+    expect(brainstormActionHint(ready() as never)).not.toContain('test');
   });
 });

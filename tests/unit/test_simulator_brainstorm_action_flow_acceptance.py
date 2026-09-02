@@ -161,7 +161,11 @@ def test_flow_rejects_duplicate_visible_frames_and_content_fields() -> None:
         frames[-1].diagnostic_armed,
         frames[-2].framebuffer_sha256,
     )
-    with pytest.raises(BrainstormActionFlowError, match="distinct visible"):
+    # The fixture duplicates CONSECUTIVE frames, which is the real defect:
+    # a step that changed nothing on the glass. Returning to an EARLIER
+    # state is fine and expected — reopening Brainstorm after a detour is
+    # supposed to look exactly like opening it.
+    with pytest.raises(BrainstormActionFlowError, match="did not change the glass"):
         validate_flow(frames, _acceptance())
 
     leaked = _acceptance()
