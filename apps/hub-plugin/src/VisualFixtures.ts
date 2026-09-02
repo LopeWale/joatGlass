@@ -59,8 +59,15 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
   const terminalReady = {
     screen: 'agent_terminal' as const,
     state: 'ready' as const,
-    topic: 'Hermes Agent Terminal',
-    collaborators: [],
+    // The LANE, in the roster's "<lane> · <state>" shape — which is what
+    // AgentTerminalRoster.frame() actually sends. This fixture said
+    // "Hermes Agent Terminal", so the header rendered
+    // "HERMES AGENT TERMINAL > READY · NO TOOLS CHECKED BEFOR…" and I was
+    // reading a truncation that production never produces.
+    topic: 'work · ready',
+    // Lane chips: every concurrent session, so one glance covers the
+    // roster. Empty here meant the strip could not be seen at all.
+    collaborators: ['work·idle', 'calendar·run', 'gateway·idle'],
     activity: 'Say “terminal sessions” to choose a work session.',
     endpointHost: 'home-mac.example-tailnet.ts.net',
     terminalState: 'ready' as const,
