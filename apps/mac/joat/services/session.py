@@ -1349,7 +1349,16 @@ class DebateSession(Session):
         """
         started: dict[str, AsyncIterator[str]] = {}
         prior = [t for t in self._transcript if t[0] == self.WEARER_LABEL]
+        # NOT the seat about to speak. The visible turn streams live, as it
+        # always has, because a cancel mid-turn must keep what already
+        # reached the glass — and a buffered producer runs ahead of the
+        # display, so chunks generated before the wearer said stop would be
+        # discarded unshown. Everyone BEHIND the current speaker is started
+        # early, which is where the waiting actually was.
+        speaking = self._table.peek()
         for seat in self._table.seats:
+            if speaking is not None and seat.name == speaking.name:
+                continue
             prompt = build_prompt(
                 self._topic, seat, [*self._prior, *prior],
                 self.SOURCES_CONTRACT, mode="open",
