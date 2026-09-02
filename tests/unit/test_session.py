@@ -2632,3 +2632,59 @@ class TestReopeningSaysWhyItCannot:
         )
         assert await manager.resume_by_id("does-not-exist") is False
         await manager.close()
+
+
+class TestTheOrchestratorsActualCallShape:
+    """The idle path calls `handle_transcript(query)` — positionally, with
+    NO `addressed` keyword (orchestrator.py). It has already stripped the
+    wake word, so an omitted argument MEANS addressed.
+
+    Every idle-instruction test passed `addressed=` explicitly, which the
+    real caller never does, so the whole path was dead in production while
+    the suite was green. Same shape as the consume_transcript double that
+    returned False where every real session returns True.
+    """
+
+    def _idle(self):
+        acted: list[tuple] = []
+
+        async def transform(instruction, material):
+            acted.append(("transform", instruction))
+            return "shorter"
+
+        async def route(who, lane):
+            acted.append(("route", who, lane))
+            return "sent"
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            transform=transform, route_reply=route,
+            save_reply=lambda who: _noop(),
+            last_reply=lambda who: ("CLAUDE", "the settled answer"),
+        )
+        return manager, acted
+
+    async def test_an_instruction_works_with_no_addressed_keyword(self) -> None:
+        manager, acted = self._idle()
+        # EXACTLY how orchestrator.py calls it on the idle path.
+        assert manager.handle_transcript("make that shorter") is True
+        await asyncio.sleep(0)
+        assert acted == [("transform", "make that shorter")]
+        await manager.close()
+
+    async def test_routing_works_with_no_addressed_keyword(self) -> None:
+        manager, acted = self._idle()
+        assert manager.handle_transcript("send that to hermes") is True
+        await asyncio.sleep(0)
+        assert acted == [("route", None, "hermes")]
+        await manager.close()
+
+    async def test_explicitly_unaddressed_speech_is_still_ignored(self) -> None:
+        """addressed=None is the live-microphone path saying the wearer did
+        NOT address JOAT. That must still be refused."""
+        manager, acted = self._idle()
+        assert manager.handle_transcript(
+            "make that shorter", addressed=None) is False
+        await asyncio.sleep(0)
+        assert acted == []
+        await manager.close()
