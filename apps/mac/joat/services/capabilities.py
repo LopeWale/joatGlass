@@ -555,7 +555,10 @@ class CapabilityRouter:
             await self._show_focus(
                 "AGENT TERMINAL",
                 [row for _name, row in rows],
-                hint="tap: open · say “terminal <instruction>” to send",
+                # Short enough to RENDER. The longer form
+                # ("terminal <instruction>") was cut mid-word on the lens —
+                # a hint that does not fit teaches nothing.
+                hint="tap: open · say “terminal …” to send",
                 selectable=True,
             )
             return
