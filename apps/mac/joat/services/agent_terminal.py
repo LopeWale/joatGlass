@@ -396,6 +396,37 @@ class AgentTerminalRoster:
         lane = self._lanes[self._focus]
         return f"{self._focus} · {lane.state}"
 
+    async def history(self, name: str | None = None, lines: int = 10) -> str:
+        """What this SESSION contains, from the runtime's own record.
+
+        Distinct from `tail`, which is what scrolled past on JOAT's screen.
+        For any session JOAT did not personally run — a resumed one, or
+        anything from before this engine started — the local deque is empty
+        or misleading, and "inspect a session through its runtime's direct
+        session API" (AGENT_TERMINAL_ROADMAP.md:37-38, :113) is the whole
+        point of the operation. Falls back to the local tail rather than
+        failing: an adapter without the surface still answers something
+        true, and says which it gave.
+        """
+        lane = self._lanes.get(name or self._focus or "")
+        if lane is None:
+            return "No such terminal session."
+        reader = getattr(lane.agent, "history", None)
+        if reader is None:
+            return f"{lane.name} (local tail — this runtime has no history API):\n{self.tail(name, lines)}"
+        try:
+            rows = await reader(lines)
+        except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
+            return f"{lane.name}: history unavailable — {reason}"
+        if not rows:
+            return f"{lane.name}: the runtime reports no history yet."
+        out = []
+        for role, text in rows:
+            prefix = "> " if role == "user" else ""
+            out.append(f"{prefix}{text.splitlines()[0][:160]}")
+        return "\n".join(out)
+
     def tail(self, name: str | None = None, lines: int = 6) -> str:
         lane = self._lanes.get(name or self._focus or "")
         if lane is None:
@@ -913,8 +944,13 @@ class AgentTerminalCommands:
                 "approve" if spoken == "approve" else "deny",  # 'reject' → deny
                 int(index) if index else None,
             )
-        if said in ("terminal tail", "terminal output", "terminal history"):
+        if said in ("terminal tail", "terminal output"):
             return self._roster.tail()
+        if said in ("terminal history", "terminal inspect", "terminal transcript"):
+            # The RUNTIME's record, not JOAT's echo. These were the same
+            # command, so "inspect" showed only what this engine happened
+            # to relay — nothing at all for a session it did not run.
+            return await self._roster.history()
         if said.startswith("terminal "):
             route = parse_reply_route(said[len("terminal "):])
             if route is not None:
