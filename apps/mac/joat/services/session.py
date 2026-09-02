@@ -563,7 +563,8 @@ class SessionManager:
         try:
             await self._hud.assistant(
                 f"Start a new Brainstorm on “{topic[:48]}”? "
-                "The current one is still running — say yes or no."
+                "The current one is still running — say yes or no.",
+                answers_wearer=True,
             )
         except Exception:
             log.warning("replacement question not painted", exc_info=True)
@@ -654,7 +655,10 @@ class SessionManager:
         if not answer:
             return
         try:
-            await self._hud.assistant(answer)
+            # answers_wearer: the plugin refuses ordinary overlays over a
+            # Brainstorm, and would otherwise swallow the reply to the
+            # instruction the wearer just gave on that very surface.
+            await self._hud.assistant(answer, answers_wearer=True)
         except Exception:
             log.warning("instruction result not painted", exc_info=True)
 
@@ -723,7 +727,8 @@ class SessionManager:
             log.warning("previous session would not release; new topic dropped")
             try:
                 await self._hud.assistant(
-                    "The previous Brainstorm did not stop — say it again."
+                    "The previous Brainstorm did not stop — say it again.",
+                    answers_wearer=True,
                 )
             except Exception:
                 log.warning("replacement failure not painted", exc_info=True)

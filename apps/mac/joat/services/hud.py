@@ -43,11 +43,14 @@ class HudWriter:
         """Status bar line (top 32px)."""
         await self._transport.send(HudText(text=text, container_id=ContainerId.STATUS_BAR))
 
-    async def assistant(self, text: str, *, append: bool = False) -> None:
+    async def assistant(
+        self, text: str, *, append: bool = False, answers_wearer: bool = False,
+    ) -> None:
         """Show JOAT above the active feature without replacing its surface."""
         await self._transport.send(AssistantOverlay(
             text=text,
             operation="append" if append else "replace",
+            answers_wearer=answers_wearer,
         ))
 
     async def settle_assistant(self, dismiss_after_ms: int = 6_000) -> None:

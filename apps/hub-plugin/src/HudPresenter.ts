@@ -338,13 +338,22 @@ export class HudPresenter {
    * leaves the current Messages/Navigation/Brainstorm/Hermes surface intact;
    * only a consent confirmation remains visually exclusive.
    */
-  async showAssistantOverlay(text: string, append = false): Promise<boolean> {
-    // Never over a brainstorm/terminal page. Seen live in the simulator:
-    // a queued reply drained the instant a session settled and painted
-    // "REPLY — Using the phone mic…" across the synthesis — default-layout
-    // text stamped over a full-frame surface. The session's answer owns
-    // that screen; the assistant can speak once the wearer leaves it.
-    if (this.surface.kind === 'brainstorm') return false;
+  async showAssistantOverlay(
+    text: string, append = false, answersWearer = false,
+  ): Promise<boolean> {
+    // Not over a brainstorm/terminal page — UNLESS it answers something
+    // the wearer just asked there. Seen live in the simulator: a queued
+    // reply drained the instant a session settled and painted "REPLY —
+    // Using the phone mic…" across the synthesis, default-layout text
+    // stamped over a full-frame surface. The session's answer owns that
+    // screen and unrelated chatter must wait.
+    //
+    // But the rule was written as "never", and that silenced the replies
+    // TO the wearer: "make that shorter" produced its answer into nothing,
+    // and the question asked before replacing a live session was never
+    // seen — so the wearer was waiting on a prompt that did not exist.
+    // An answer is not an interruption.
+    if (this.surface.kind === 'brainstorm' && !answersWearer) return false;
     if (!this.visual || !text) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
