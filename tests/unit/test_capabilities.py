@@ -1789,3 +1789,93 @@ class TestTheTerminalShowsItsSessions:
 
         assert painted == ["live"]
         assert not [m for m in transport.sent if isinstance(m, HudList)]
+
+
+class TestARowTapCrossesTheRealGuards:
+    """The picker tests call _select_* directly, which skips the request-id
+    and capability checks a genuine tap goes through. Those guards drop
+    stale selections — and would drop a real one just as quietly, with the
+    wearer seeing a tap that did nothing.
+    """
+
+    class Past:
+        def __init__(self, sid, topic, turns):
+            self.session_id, self.topic, self.turns = sid, topic, turns
+
+        @property
+        def title(self):
+            return self.topic
+
+        def age(self):
+            return "2m ago"
+
+    async def test_a_brainstorm_row_tap_opens_that_session(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        opened: list[str] = []
+
+        async def continue_it(session_id: str) -> bool:
+            opened.append(session_id)
+            return True
+
+        rows = [self.Past("aaa", "cold-start latency", (("CODEX", "x"),)),
+                self.Past("bbb", "tabs or spaces", (("CLAUDE", "y"),))]
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows,
+            brainstorm_continue=continue_it)
+        await router.open("Brainstorm")
+
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        router.on_input(InputEvent(
+            container_name="capdata", selected_index=2,
+            selected_name="BRAINSTORM",
+            request_id=getattr(lists[-1], "request_id", None), trace_id="hud",
+        ))
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if opened:
+                break
+        assert opened == ["bbb"], "row 0 is NEW, so index 2 is the second session"
+
+    async def test_a_stale_tap_is_dropped(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        opened: list[str] = []
+
+        async def continue_it(session_id: str) -> bool:
+            opened.append(session_id)
+            return True
+
+        rows = [self.Past("aaa", "t", (("CODEX", "x"),))]
+        router, _t, _s = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows,
+            brainstorm_continue=continue_it)
+        await router.open("Brainstorm")
+        router.on_input(InputEvent(
+            container_name="capdata", selected_index=1,
+            selected_name="BRAINSTORM", request_id="a-request-that-moved-on",
+            trace_id="hud",
+        ))
+        await asyncio.sleep(0.05)
+        assert opened == []
+
+    async def test_a_terminal_row_tap_focuses_that_lane(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        focused: list[str] = []
+
+        async def focus(name: str) -> None:
+            focused.append(name)
+
+        router, transport, _ = make_router(
+            tmp_path,
+            terminal_rows=lambda: [("work", "▸ work · idle"),
+                                   ("calendar", "  calendar · idle")],
+            terminal_focus=focus)
+        await router.open("Agent Terminal")
+
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        router.on_input(InputEvent(
+            container_name="capdata", selected_index=1,
+            selected_name="AGENT TERMINAL",
+            request_id=getattr(lists[-1], "request_id", None), trace_id="hud",
+        ))
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if focused:
+                break
+        assert focused == ["calendar"]
