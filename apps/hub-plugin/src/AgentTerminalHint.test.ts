@@ -27,7 +27,6 @@ function terminal(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudMod
     topic: 'hermes · ready',
     collaborators: ['hermes·idle'],
     activity: 'HERMES > no output yet',
-    terminalState: 'ready',
     noToolsChecked: true,
     ...overrides,
   };
@@ -47,11 +46,18 @@ function tapAction(model: BrainstormHudModel): string | undefined {
 
 describe('Agent Terminal action hints', () => {
   it('tells the wearer how to answer a pending approval', () => {
-    const hint = brainstormActionHint(terminal({ state: 'approval_required' }));
-    expect(hint).toContain('terminal approve');
-    expect(hint).toContain('terminal deny');
-    // The old hint sent them to retry a gateway that is working fine.
+    // On the wire, a pending TOOL request is the approvals count; a frame
+    // in approval_required with zero is a CONNECTION waiting on device
+    // approval in OpenClaw (retry). The old assertion here wanted a
+    // voice-only wording from a branch keyed on the render model's
+    // terminalState twin — which mirrored state on every real frame, so
+    // that wording never showed once.
+    const waiting = terminal({ state: 'approval_required', approvals: 1 });
+    const hint = brainstormActionHint(waiting);
+    expect(hint).toContain('tap: approve');
+    expect(hint).toContain('swipe: deny');
     expect(hint).not.toContain('retry');
+    expect(tapAction(waiting)).toBe('approve_terminal');
   });
 
   it('never claims a tap on the terminal begins a Brainstorm', () => {
@@ -70,7 +76,7 @@ describe('Agent Terminal action hints', () => {
       says: string;
     }> = [
       {
-        model: terminal({ terminalState: 'ready' }),
+        model: terminal({ state: 'ready' }),
         action: 'begin_terminal_input',
         says: 'speak to the terminal',
       },
@@ -80,12 +86,12 @@ describe('Agent Terminal action hints', () => {
         says: 'scroll',
       },
       {
-        model: terminal({ state: 'blocked', terminalState: 'blocked' }),
+        model: terminal({ state: 'blocked' }),
         action: 'retry_terminal',
         says: 'retry Hermes',
       },
       {
-        model: terminal({ state: 'unavailable', terminalState: 'unavailable' }),
+        model: terminal({ state: 'unavailable' }),
         action: 'retry_terminal',
         says: 'retry Hermes',
       },
@@ -96,26 +102,26 @@ describe('Agent Terminal action hints', () => {
     }
   });
 
-  it('does not offer an approval the gateway cannot carry', () => {
-    // A lane can hold a pending approval while the CONNECTION is down —
-    // model.state and model.terminalState are different fields. Saying
-    // "terminal approve" into a dead link is advice that cannot be
-    // followed, which is the defect this whole file exists to prevent.
-    for (const terminalState of ['blocked', 'unavailable'] as const) {
-      const hint = brainstormActionHint(
-        terminal({ state: 'approval_required', terminalState }),
-      );
-      expect(hint).toContain('retry Hermes');
-      expect(hint).toContain('approve');       // still names the goal
-      expect(tapAction(terminal({ state: 'approval_required', terminalState })))
-        .toBe('retry_terminal');               // and matches the tap
+  it('a device-approval wait retries; hint and tap agree', () => {
+    // approval_required with NO pending tool request is the connection
+    // waiting on device approval in OpenClaw — remedy: retry.
+    const waiting = terminal({ state: 'approval_required', approvals: 0 });
+    expect(brainstormActionHint(waiting)).toContain('retry Hermes');
+    expect(tapAction(waiting)).toBe('retry_terminal');
+  });
+
+  it('a pending approval outranks a broken state, in hint AND tap', () => {
+    // The controller answers the approval whenever approvals > 0 — that
+    // is its branch order — so the hint must promise the same, even on a
+    // blocked frame. Keyed on state alone it said 'retry Hermes' while
+    // the tap sent approve_terminal: a hint promising one action and the
+    // gesture performing another, on the exact frame where the action is
+    // consequential.
+    for (const state of ['blocked', 'unavailable', 'running'] as const) {
+      const waiting = terminal({ state, approvals: 1 });
+      expect(brainstormActionHint(waiting)).toContain('tap: approve');
+      expect(tapAction(waiting)).toBe('approve_terminal');
     }
-    // Healthy gateway: the approval words are the useful ones.
-    const healthy = brainstormActionHint(
-      terminal({ state: 'approval_required', terminalState: 'ready' }),
-    );
-    expect(healthy).toContain('terminal approve');
-    expect(healthy).not.toContain('retry');
   });
 
   it('keeps every hint inside the row it is drawn in', () => {
@@ -125,8 +131,8 @@ describe('Agent Terminal action hints', () => {
       'settled', 'cancelled', 'failed',
     ];
     for (const state of states) {
-      for (const terminalState of ['ready', 'blocked', 'unavailable'] as const) {
-        const hint = brainstormActionHint(terminal({ state, terminalState }));
+      for (const approvals of [0, 1]) {
+        const hint = brainstormActionHint(terminal({ state, approvals }));
         expect(hint.length).toBeLessThanOrEqual(89);
       }
     }
@@ -138,10 +144,7 @@ describe('answering an approval by gesture', () => {
     // The hint must always match the tap. A pending approval on a DEAD
     // connection still taps to retry_terminal, so only the case where the
     // lane can carry the answer may advertise approve/deny.
-    const waiting = terminal({
-      state: 'approval_required', terminalState: 'approval_required',
-      approvals: 1,
-    });
+    const waiting = terminal({ state: 'approval_required', approvals: 1 });
     expect(brainstormActionHint(waiting)).toContain('tap: approve');
     expect(brainstormActionHint(waiting)).toContain('swipe: deny');
     expect(tapAction(waiting)).toBe('approve_terminal');

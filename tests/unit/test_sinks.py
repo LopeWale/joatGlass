@@ -505,15 +505,23 @@ class TestTheTranscriptFillsTheGlass:
             BRAINSTORM_SCROLLBACK_ROWS * BRAINSTORM_ROW_COLUMNS
             + (BRAINSTORM_SCROLLBACK_ROWS - 1)
         )
-        # A literal here is how the bound went stale: it stayed 74 (the
-        # old monospace column) for a release after the transcript became
-        # proportional, and the wearer saw the truncation before any test
-        # did. Pinning the ARITHMETIC catches a row/column change; only
-        # reading the renderer catches a font change, which the column
-        # count's own docstring is responsible for.
-        assert BRAINSTORM_ROW_COLUMNS == 105, (
-            "re-derive from HudCanvasRenderer's HUD_TEXT_FONT before editing"
+        # RE-DERIVED, not pinned. A literal here is how the bound went
+        # stale once (74 survived a font change), and a pinned 105 would
+        # only repeat that: the renderer could change its column or its
+        # measured advance and this test would keep agreeing with itself.
+        # Both inputs come from the renderer source — the same file the
+        # window came from — so a one-sided edit fails the build.
+        edge = re.search(r"HUD_EDGE\s*=\s*(\d+)", renderer)
+        advance = re.search(
+            r"HUD_TEXT_MEAN_ADVANCE_PX\s*=\s*([0-9.]+)", renderer
         )
+        assert edge is not None and advance is not None, (
+            "the renderer's column geometry has moved"
+        )
+        column_px = 576 - int(edge.group(1)) * 2
+        assert BRAINSTORM_ROW_COLUMNS == int(
+            column_px / float(advance.group(1))
+        ), "protocol.py's column budget drifted from the renderer's geometry"
         assert BRAINSTORM_SCROLLBACK_ROWS >= window * 3, (
             "scrollback should hold several windows of history"
         )

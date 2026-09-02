@@ -11,7 +11,6 @@ function model(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudModel 
     // fixture for as long as the engine wrongly seated it in production.
     collaborators: ['Codex', 'Claude'],
     activity: 'Say “JOAT, brainstorm …” to begin.',
-    terminalState: 'ready',
     noToolsChecked: true,
     ...overrides,
   };
@@ -86,7 +85,7 @@ describe('BrainstormController', () => {
     const { controller, sent } = make();
     for (const unsafe of [
       model({ state: 'running' }),
-      model({ terminalState: 'blocked' }),
+      model({ state: 'blocked' }),
       model({ noToolsChecked: false }),
       model({ screen: 'agent_terminal' }),
     ]) {
@@ -144,7 +143,6 @@ describe('BrainstormController', () => {
     controller.present(model({
       screen: 'agent_terminal',
       state: 'blocked',
-      terminalState: 'blocked',
       noToolsChecked: false,
     }));
 
@@ -157,7 +155,6 @@ describe('BrainstormController', () => {
     controller.present(model({
       screen: 'agent_terminal',
       state: 'running',
-      terminalState: 'ready',
     }));
 
     expect(controller.handleClick()).toBe(true);
@@ -201,7 +198,6 @@ describe('answering a blocked work session', () => {
   const terminal = (state: string) => ({
     screen: 'agent_terminal', state, topic: 'work · ask1',
     collaborators: [], activity: '> run the audit',
-    terminalState: state, noToolsChecked: true,
     // A pending TOOL request. A connection awaiting device approval in
     // OpenClaw reads the same state with zero here, and taps to retry.
     approvals: state === 'approval_required' ? 1 : 0,
@@ -245,8 +241,7 @@ describe('approval_required means two different things', () => {
     // gesture made the state do nothing at all.
     const { controller, sent } = make();
     controller.present({
-      ...base, state: 'approval_required',
-      terminalState: 'approval_required', approvals: 0,
+      ...base, state: 'approval_required', approvals: 0,
     } as never);
     expect(controller.handleClick()).toBe(true);
     expect((sent[0] as { action: string }).action).toBe('retry_terminal');
@@ -255,8 +250,7 @@ describe('approval_required means two different things', () => {
   it('approves when a LANE is waiting on a tool request', () => {
     const { controller, sent } = make();
     controller.present({
-      ...base, state: 'approval_required',
-      terminalState: 'approval_required', approvals: 2,
+      ...base, state: 'approval_required', approvals: 2,
     } as never);
     expect(controller.handleClick()).toBe(true);
     expect((sent[0] as { action: string }).action).toBe('approve_terminal');
