@@ -370,3 +370,114 @@ async def test_personal_data_bridge_state_never_retains_eventkit_error_detail() 
     assert await personal_data_bridge_state(access_missing) == "authorization_required"
     assert await personal_data_bridge_state(unavailable) == "unavailable"
     assert await personal_data_bridge_state(protocol_error) == "protocol_error"
+
+
+LONDON = ZoneInfo("Europe/London")
+
+
+def all_day_event(title: str, day: date, authored_in: ZoneInfo) -> dict[str, object]:
+    """EventKit hands an all-day event as midnight in the CALENDAR's zone."""
+    start = datetime(day.year, day.month, day.day, tzinfo=authored_in)
+    end = datetime(day.year, day.month, day.day, tzinfo=authored_in)
+    return {
+        "title": title,
+        "calendar_item_identifier": f"all-day-{title}",
+        "start_unix_ms": int(start.timestamp() * 1_000),
+        "end_unix_ms": int(end.timestamp() * 1_000) + 86_400_000,
+        "is_all_day": True,
+    }
+
+
+def _titles(projection: object, day: date) -> list[str]:
+    for planning_day in projection.days:  # type: ignore[attr-defined]
+        if planning_day.day == day:
+            return [entry.title for entry in planning_day.entries]
+    return []
+
+
+class TestTheWearersZone:
+    """What travelling must and must not change.
+
+    A timed event is an INSTANT: render it where it will be read. An all-day
+    event is a DATE: converting its authored midnight into another zone
+    slides it across midnight and moves it a whole day.
+    """
+
+    def test_a_timed_event_is_shown_in_the_wearers_zone(self) -> None:
+        # 09:30 in Chicago is 15:30 in London, and a wearer in London
+        # checking "how long until" must read it against a London clock.
+        projection = project_planning(
+            selected_day=date(2026, 9, 1),
+            scope=PlanningScope.DAY,
+            zone=LONDON,
+            events=[event("Design review", datetime(2026, 9, 1, 9, 30, tzinfo=CHICAGO))],
+            reminders=[],
+            all_day_zone=CHICAGO,
+        )
+        labels = [
+            entry.time_label
+            for planning_day in projection.days
+            if planning_day.day == date(2026, 9, 1)
+            for entry in planning_day.entries
+        ]
+        assert labels == ["15:30"]
+
+    def test_an_all_day_event_does_not_move_when_the_wearer_does(self) -> None:
+        # Chicago midnight on Sep 1 is 06:00 London — same day. But midnight
+        # viewed from Tokyo (UTC+9) is 14:00 on Sep 1, and from Honolulu
+        # (UTC-10) it is 19:00 on AUG 31. Bucketing in the authoring zone is
+        # what keeps "Conference, Sep 1" on Sep 1 wherever the wearer stands.
+        conference = all_day_event("Conference", date(2026, 9, 1), CHICAGO)
+        for elsewhere in ("Pacific/Honolulu", "Asia/Tokyo", "Europe/London"):
+            projection = project_planning(
+                selected_day=date(2026, 9, 1),
+                scope=PlanningScope.WEEK,
+                zone=ZoneInfo(elsewhere),
+                events=[conference],
+                reminders=[],
+                all_day_zone=CHICAGO,
+            )
+            assert "Conference" in _titles(projection, date(2026, 9, 1)), elsewhere
+            assert "Conference" not in _titles(projection, date(2026, 8, 31)), elsewhere
+
+    def test_the_all_day_guard_is_what_holds_it(self) -> None:
+        # Without the authoring zone the same event lands on Aug 31 from
+        # Honolulu — the exact silent day-shift the guard exists to stop.
+        projection = project_planning(
+            selected_day=date(2026, 9, 1),
+            scope=PlanningScope.WEEK,
+            zone=ZoneInfo("Pacific/Honolulu"),
+            events=[all_day_event("Conference", date(2026, 9, 1), CHICAGO)],
+            reminders=[],
+        )
+        assert "Conference" in _titles(projection, date(2026, 8, 31))
+
+    def test_a_date_only_reminder_stays_on_its_date(self) -> None:
+        # Same trap, different store: a due date with no time is a date.
+        projection = project_planning(
+            selected_day=date(2026, 9, 1),
+            scope=PlanningScope.WEEK,
+            zone=ZoneInfo("Pacific/Honolulu"),
+            events=[],
+            reminders=[
+                reminder("Book dentist", year=2026, month=9, day=1,
+                         time_zone_id="America/Chicago"),
+            ],
+        )
+        assert "Book dentist" in _titles(projection, date(2026, 9, 1))
+        assert "Book dentist" not in _titles(projection, date(2026, 8, 31))
+
+    def test_a_timed_reminder_still_converts(self) -> None:
+        # 18:00 Chicago is 00:00 the next day in London, and that IS when it
+        # is due where the wearer is standing.
+        projection = project_planning(
+            selected_day=date(2026, 9, 1),
+            scope=PlanningScope.WEEK,
+            zone=LONDON,
+            events=[],
+            reminders=[
+                reminder("Buy filters", year=2026, month=9, day=1, hour=18, minute=0,
+                         time_zone_id="America/Chicago"),
+            ],
+        )
+        assert "Buy filters" in _titles(projection, date(2026, 9, 2))

@@ -1,6 +1,22 @@
 import { AppLocationAccuracy, type AppLocation } from '@evenrealities/even_hub_sdk';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocationSessionManager } from './LocationSessionManager';
+
+// The zone rides along with every fix (that is the self-healing path for a
+// wearer who lands mid-session), so pin what the host reports: otherwise
+// these exact-match assertions would depend on the machine running them.
+//
+// Must be re-applied after vi.useFakeTimers(): fake timers replace
+// Intl.DateTimeFormat as well as Date (so that locale formatting stays
+// deterministic), which silently discards this spy. The symptom is a
+// MISSING timeZone rather than a wrong one, so it fails as an absent field.
+function pinHostZone(): void {
+  vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
+    () => ({ resolvedOptions: () => ({ timeZone: 'America/Chicago' }) }) as never,
+  );
+}
+
+beforeEach(pinHostZone);
 
 function harness(first: AppLocation | null = null) {
   let onLocation: ((location: AppLocation) => void) | undefined;
@@ -64,12 +80,13 @@ describe('LocationSessionManager', () => {
     });
     expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
       kind: 'location', latitude: 35.2, longitude: -97.4, accuracy: 12,
-      timestamp: expect.any(Number),
+      timestamp: expect.any(Number), timeZone: 'America/Chicago',
     });
   });
 
   it('stamps an SDK location without a timestamp at phone receipt time', async () => {
     vi.useFakeTimers();
+    pinHostZone();
     vi.setSystemTime(new Date('2026-08-30T22:31:00.000Z'));
     const h = harness({ latitude: 35.2, longitude: -97.4, accuracy: 12 });
 
@@ -82,6 +99,7 @@ describe('LocationSessionManager', () => {
       longitude: -97.4,
       accuracy: 12,
       timestamp: Date.now(),
+      timeZone: 'America/Chicago',
     });
   });
 
@@ -104,7 +122,7 @@ describe('LocationSessionManager', () => {
     h.emit({ latitude: 41.9, longitude: -87.65, accuracy: 6 });
     expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
       kind: 'location', latitude: 41.9, longitude: -87.65, accuracy: 6,
-      timestamp: expect.any(Number),
+      timestamp: expect.any(Number), timeZone: 'America/Chicago',
     });
 
     resolveInitial?.(null);
@@ -322,6 +340,7 @@ describe('LocationSessionManager', () => {
       accuracy: 6,
       timestamp: 1_725_000_000_123,
       refreshId: 'location-refresh-1',
+      timeZone: 'America/Chicago',
     });
   });
 

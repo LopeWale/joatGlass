@@ -166,6 +166,7 @@ def project_planning(
     zone: tzinfo,
     events: list[dict[str, Any]],
     reminders: list[dict[str, Any]],
+    all_day_zone: tzinfo | None = None,
 ) -> PlanningProjection:
     """Merge native EventKit DTOs into a bounded local-time schedule.
 
@@ -180,7 +181,7 @@ def project_planning(
     entries_by_day: dict[date, list[PlanningEntry]] = {day: [] for day in range_days}
 
     for item in events:
-        for entry_day, event_entry in _event_entries(item, zone):
+        for entry_day, event_entry in _event_entries(item, zone, all_day_zone):
             if lower <= entry_day <= upper:
                 entries_by_day[entry_day].append(event_entry)
 
@@ -214,6 +215,7 @@ async def load_native_planning(
     selected_day: date,
     scope: PlanningScope,
     zone: tzinfo,
+    all_day_zone: tzinfo | None = None,
 ) -> PlanningProjection:
     """Load one bounded planning range from both native authoritative stores.
 
@@ -234,6 +236,7 @@ async def load_native_planning(
                 selected_day=selected_day,
                 scope=scope,
                 zone=zone,
+                all_day_zone=all_day_zone,
             )
         except _PlanningSnapshotChanged:
             continue
@@ -248,6 +251,7 @@ async def _load_native_planning_once(
     selected_day: date,
     scope: PlanningScope,
     zone: tzinfo,
+    all_day_zone: tzinfo | None = None,
 ) -> PlanningProjection:
     status = await client.call("authorization.status")
     snapshot = _planning_snapshot_identity(status)
@@ -291,6 +295,7 @@ async def _load_native_planning_once(
         zone=zone,
         events=events,
         reminders=reminders,
+        all_day_zone=all_day_zone,
     )
 
 
@@ -360,8 +365,19 @@ def _title_for_scope(
     return f"PLAN · {start.strftime('%b').upper()} {start.day}–{end.strftime('%b').upper()} {end.day}"
 
 
-def _event_entries(item: dict[str, Any], zone: tzinfo) -> tuple[tuple[date, PlanningEntry], ...]:
-    """Project a timed or all-day event into every local day it overlaps."""
+def _event_entries(
+    item: dict[str, Any], zone: tzinfo, all_day_zone: tzinfo | None = None,
+) -> tuple[tuple[date, PlanningEntry], ...]:
+    """Project a timed or all-day event into every local day it overlaps.
+
+    ``zone`` is where the WEARER is; a timed event is an instant and should
+    be read where it will be read. ``all_day_zone`` is where the event was
+    AUTHORED — EventKit hands an all-day event as midnight in the calendar's
+    own zone, so converting that instant into a different zone slides it
+    across midnight and silently moves the event a whole day. An all-day
+    event is a date, not an instant. Defaults to ``zone``, which is the
+    behaviour from before the wearer's zone and the Mac's could differ.
+    """
 
     # ``calendar.query`` is a typed EKEvent bridge call.  Keep this defensive
     # guard anyway: Calendar.app can project Scheduled Reminders alongside
@@ -373,16 +389,19 @@ def _event_entries(item: dict[str, Any], zone: tzinfo) -> tuple[tuple[date, Plan
     native_identifier = item.get("calendar_item_identifier")
     if not isinstance(start, (int, float)) or not isinstance(native_identifier, str) or not native_identifier:
         return ()
-    starts_at = datetime.fromtimestamp(start / 1_000, zone)
+    is_all_day = item.get("is_all_day") is True
+    # Chosen BEFORE the instants are resolved: the zone decides which civil
+    # day each one falls in, which is the whole question for an all-day row.
+    bucket_zone = (all_day_zone or zone) if is_all_day else zone
+    starts_at = datetime.fromtimestamp(start / 1_000, bucket_zone)
     end = item.get("end_unix_ms")
     ends_at = (
-        datetime.fromtimestamp(end / 1_000, zone)
+        datetime.fromtimestamp(end / 1_000, bucket_zone)
         if isinstance(end, (int, float))
         else starts_at
     )
     if ends_at < starts_at:
         ends_at = starts_at
-    is_all_day = item.get("is_all_day") is True
     first_day = starts_at.date()
     # EventKit end dates are exclusive.  An event ending exactly at midnight
     # therefore belongs to the preceding day, not a phantom zero-length next
@@ -400,7 +419,7 @@ def _event_entries(item: dict[str, Any], zone: tzinfo) -> tuple[tuple[date, Plan
             else "CONTINUES"
         )
         sort_at = (
-            datetime.combine(current_day, time.min, tzinfo=zone)
+            datetime.combine(current_day, time.min, tzinfo=bucket_zone)
             if is_all_day or not begins_here
             else starts_at
         )
@@ -447,14 +466,17 @@ def _reminder_entry(item: dict[str, Any], zone: tzinfo) -> PlanningEntry | None:
     elif zone_name is not None:
         return None
     try:
-        sort_at = datetime(
-            year,
-            month,
-            day,
-            resolved_hour,
-            resolved_minute,
-            tzinfo=due_zone,
-        ).astimezone(zone)
+        if is_timed:
+            sort_at = datetime(
+                year, month, day, resolved_hour, resolved_minute, tzinfo=due_zone,
+            ).astimezone(zone)
+        else:
+            # A date-only reminder is a DATE, not an instant. Resolving its
+            # midnight in the authoring zone and converting into the
+            # wearer's slides it onto the previous or next day whenever the
+            # two differ — the reminder would silently move while the wearer
+            # travelled. Anchor it on the day it was written for.
+            sort_at = datetime(year, month, day, tzinfo=zone)
     except ValueError:
         return None
     return PlanningEntry(

@@ -17,10 +17,13 @@ touching the reply engine.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
-from typing import Any
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import time
+from typing import Any
+
+from ..core.wearer_zone import WearerZone
 
 FactSource = Callable[[], str | None]
 
@@ -60,21 +63,44 @@ class Grounding:
         return ", ".join(self.unknowns)
 
 
-def local_clock(now: Callable[[], float] = time.time) -> FactSource:
-    """Date and time in the Mac's local zone — recomputed per reply.
+def local_clock(
+    now: Callable[[], float] = time.time,
+    wearer_zone: WearerZone | None = None,
+) -> FactSource:
+    """Date and time where the WEARER is — recomputed per reply.
 
     Per reply, not per launch: a clock captured at startup is wrong by
     however long the engine has been up, which is the same failure wearing
     a different mask.
+
+    The zone matters as much as the moment. This used to read the Mac's
+    ``localtime`` while the HUD banner showed the phone's — so moving the
+    SCREEN to the wearer's zone without moving this would have had JOAT
+    speak one time and display another, an incoherence worse than the
+    original because there is no second clock on screen to catch it. When
+    the two zones differ, the model is told both: a wearer who asks "what
+    time is it back home?" is asking something answerable, and a model that
+    silently knows only one zone will invent the other.
     """
 
     def source() -> str:
-        stamp = time.localtime(now())
-        zone = time.strftime("%Z", stamp)
-        return (
-            f"Current date and time: {time.strftime('%A, %-d %B %Y, %-I:%M %p', stamp)}"
-            f"{f' {zone}' if zone else ''}"
+        moment = datetime.fromtimestamp(now(), tz=timezone.utc)
+        zone = wearer_zone.current() if wearer_zone is not None else None
+        here = moment.astimezone(zone) if zone is not None else moment.astimezone()
+        label = here.strftime("%Z") or ""
+        line = (
+            f"Current date and time: {here.strftime('%A, %-d %B %Y, %-I:%M %p')}"
+            f"{f' {label}' if label else ''}"
         )
+        if wearer_zone is not None and wearer_zone.travelling():
+            back = moment.astimezone(wearer_zone.home())
+            home_label = back.strftime("%Z") or ""
+            line += (
+                f" (the wearer is travelling; the Mac's own clock reads "
+                f"{back.strftime('%A, %-d %B %Y, %-I:%M %p')}"
+                f"{f' {home_label}' if home_label else ''})"
+            )
+        return line
 
     return source
 

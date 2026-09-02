@@ -1153,6 +1153,42 @@ class TestLocationAndIdentity:
         assert isinstance(bare, Hello)
         assert bare.user_name == ""
 
+    def test_hello_carries_the_phones_time_zone(self) -> None:
+        msg = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",
+                            "launchSource": "x", "timeZone": "America/Chicago"})
+        assert isinstance(msg, Hello)
+        assert msg.time_zone == "America/Chicago"
+        bare = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",
+                             "launchSource": "x"})
+        assert isinstance(bare, Hello)
+        assert bare.time_zone == ""
+
+    def test_location_carries_the_phones_time_zone(self) -> None:
+        # The self-healing path: a wearer who lands mid-session moves zone
+        # without reconnecting, so the fix that reports the new position
+        # carries the new zone with it.
+        msg = parse_uplink({"kind": "location", "latitude": 51.5, "longitude": -0.12,
+                            "timeZone": "Europe/London"})
+        assert isinstance(msg, Location)
+        assert msg.time_zone == "Europe/London"
+        bare = parse_uplink({"kind": "location", "latitude": 51.5, "longitude": -0.12})
+        assert isinstance(bare, Location)
+        assert bare.time_zone is None
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "   ", "Not A Zone", "../../etc/passwd", "A" * 65, 42, None, ["Europe/London"]],
+    )
+    def test_a_malformed_time_zone_is_dropped_not_fatal(self, value: object) -> None:
+        # Deliberately not a ProtocolError: this frame also carries the fix
+        # that powers weather and grounding, and losing all of that over a
+        # cosmetic string would trade a small problem for a real one.
+        msg = parse_uplink({"kind": "location", "latitude": 1.0, "longitude": 2.0,
+                            "timeZone": value})
+        assert isinstance(msg, Location)
+        assert msg.time_zone is None
+        assert msg.latitude == 1.0
+
     def test_audio_speaker_is_optional(self) -> None:
         msg = parse_uplink({"kind": "audio", "source": "glasses", "seq": 1,
                             "pcm": [], "speaker": "other"})

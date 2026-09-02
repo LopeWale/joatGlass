@@ -259,7 +259,12 @@ export type NavigationAction =
 export type UplinkMessage =
   /** First application frame on every socket. Credentials never belong in a URL. */
   | { kind: 'auth'; token: string | null }
-  | { kind: 'hello'; sn: string; model: string; launchSource: string; userName?: string }
+  | {
+    kind: 'hello'; sn: string; model: string; launchSource: string; userName?: string;
+    /** The PHONE's IANA zone. The Mac formats every time the wearer reads,
+     * and its own zone is only right by coincidence — see phoneTimeZone. */
+    timeZone?: string;
+  }
   | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string }
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
@@ -273,6 +278,10 @@ export type UplinkMessage =
     timestamp?: number;
     /** Present only when replying to a one-shot location.refresh request. */
     refreshId?: string;
+    /** The phone's IANA zone, resent with every fix so LANDING somewhere
+     * corrects the HUD without waiting for a reconnect. Same value as the
+     * one on `hello`; this is the self-healing path, not a second source. */
+    timeZone?: string;
   }
   /** Confirms a freshly issued pairing token was PERSISTED (not merely received). */
   | { kind: 'pairing'; token: string }

@@ -73,6 +73,7 @@ from .core.protocol import (
     BrainstormHudView,
     Hello,
     InputEvent,
+    Location,
     NavigationAction,
     NavigationOrigin,
     NavigationOriginFailure,
@@ -115,7 +116,12 @@ from .services.panel_commands import NewsCommands, PomodoroCommands, SearchComma
 from .services.panels import PanelPublisher
 from .services.pomodoro import PomodoroService
 from .services.search import SearchService
-from .services.capabilities import CapabilityOpenController, CapabilityRouter
+from .core.wearer_zone import WearerZone
+from .services.capabilities import (
+    CapabilityOpenController,
+    CapabilityRouter,
+    system_home_zone,
+)
 from .services.agent_terminal import (
     AgentTerminalCommands,
     AgentTerminalRoster,
@@ -359,6 +365,11 @@ async def main() -> None:
     )
     imessage = IMessageStore()
 
+    # Where the WEARER is. The phone supplies an IANA name on hello and with
+    # every position fix; until one arrives this reads as the Mac's own zone,
+    # which is what every time string used unconditionally before.
+    wearer_zone = WearerZone(system_home_zone)
+
     def wearer_coords() -> tuple[float, float] | None:
         """Return a connected phone's fresh fix without exposing it to the model."""
         loc = transport.fresh_location()
@@ -392,7 +403,7 @@ async def main() -> None:
         # Facts the model cannot know, refreshed per reply. Without this it
         # confabulates them — it answered "2:47 PM" at 4:44 PM.
         grounding = Grounding(
-            sources=[local_clock(), device_facts(transport),
+            sources=[local_clock(wearer_zone=wearer_zone), device_facts(transport),
                      location_facts(transport)],
             # Named explicitly, not merely absent: a small model asked to
             # infer "it is not listed, so I should decline" does not — it
@@ -1258,6 +1269,7 @@ async def main() -> None:
         if hello.user_name and not named["done"] and replier is not None:
             grounding.add(static_fact(f"The wearer's name is {hello.user_name}"))
             named["done"] = True
+        wearer_zone.accept(hello.time_zone)
         status.set(glasses="connected", device=f"{hello.model} / {hello.sn}")
         # A topic armed on a replaced Hub connection is no longer an action
         # from the current wearer surface. The new G2 must tap again.
@@ -1348,6 +1360,7 @@ async def main() -> None:
         brainstorm_recent=brainstorm_history.rows,
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
+        wearer_zone=wearer_zone,
     )
     transport.on_input(capabilities.on_input)
 
@@ -1358,9 +1371,15 @@ async def main() -> None:
         transport,
         unread_count=lambda: len(card_log.recent(99)),
     )
-    transport.on_location(
-        lambda fix: ambient.accept_position(fix.latitude, fix.longitude)
-    )
+
+    def on_location(fix: Location) -> None:
+        ambient.accept_position(fix.latitude, fix.longitude)
+        # Landing somewhere new IS a position change, so the correction
+        # rides the message that already reports it. Without this the zone
+        # would stay wrong until the link happened to drop and re-hello.
+        wearer_zone.accept(fix.time_zone)
+
+    transport.on_location(on_location)
 
     async def deliver_task_alert(alert: ProductivityHudView) -> bool:
         return await transport.request_reminder_due_ack(alert)

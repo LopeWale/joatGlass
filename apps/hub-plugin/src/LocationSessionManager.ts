@@ -7,6 +7,7 @@ import {
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace, G2TraceCadence } from './G2DiagnosticTrace';
 import type { MacLink } from './MacLink';
+import { phoneTimeZone } from './PhoneTimeZone';
 
 type LocationProfile = 'ambient' | 'probe' | 'navigation';
 type NavigationLocationConsumer = (location: AppLocation, receivedAt: number) => void;
@@ -479,6 +480,9 @@ export class LocationSessionManager {
       ...(Number.isFinite(accuracy) ? { accuracy } : {}),
       ...(timestamp !== undefined ? { timestamp } : {}),
       ...(refreshId !== undefined ? { refreshId } : {}),
+      // The self-healing half: a wearer who lands mid-session moves zone
+      // without reconnecting, and the next fix carries the correction.
+      ...(phoneTimeZone() ? { timeZone: phoneTimeZone() } : {}),
     });
     return true;
   }

@@ -3,6 +3,7 @@ import { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
+import { phoneTimeZone } from './PhoneTimeZone';
 import { HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
 import { encodeGray8TilePng, HudVisualSurface } from './HudVisualSurface';
 import {
@@ -764,6 +765,10 @@ async function boot(): Promise<void> {
       model: device?.model ?? 'unknown',
       launchSource: client.getLaunchSource() ?? 'unknown',
       ...(user?.name ? { userName: user.name } : {}),
+      // Read at announce time, not at module load: `announce` fires again on
+      // every reconnect, so a wearer who landed while the link was down is
+      // corrected by the reconnect itself.
+      ...(phoneTimeZone() ? { timeZone: phoneTimeZone() } : {}),
     });
     // Announce the persisted policy so the Mac's session logic starts in sync.
     link.send({ kind: 'policy', resume: settings.resumePolicy });

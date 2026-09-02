@@ -52,6 +52,7 @@ from ..persistence.voice_notes import VoiceNote, VoiceNoteStore
 from .hud import HudWriter
 from .sinks import DebateSnapshot
 from .voice_note_capture import VoiceNoteCaptureSnapshot
+from ..core.wearer_zone import WearerZone
 from .hermes_productivity import system_local_time_zone
 from .planning import (
     PlanningAuthorizationError,
@@ -273,6 +274,25 @@ def _session_row(past: Any) -> str:
     return f"{title}{meta}"
 
 
+def system_home_zone() -> tzinfo:
+    """This Mac's zone, as a real IANA ZoneInfo where the OS exposes one.
+
+    A fixed UTC offset from ``datetime.now().astimezone()`` looks usable
+    today but shifts future dates into the wrong civil day at a DST
+    transition.  The same resolver that validates Calendar proposals
+    returns a real ``ZoneInfo`` on macOS; the fallback is only for hosts
+    without an IANA ``/etc/localtime`` symlink.
+    """
+
+    zone_name = system_local_time_zone()
+    if zone_name is not None:
+        try:
+            return ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError:
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
 class CapabilityRouter:
     """Glasses gesture in, drawn view out."""
 
@@ -300,8 +320,12 @@ class CapabilityRouter:
         terminal_busy: Callable[[], bool] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
         panels: PanelPublisher | None = None,
+        wearer_zone: WearerZone | None = None,
     ) -> None:
         self._hud = hud
+        # Defaults to this Mac's zone, which is exactly the pre-wearer-zone
+        # behaviour for any construction that does not inject one.
+        self._wearer_zone = wearer_zone or WearerZone(system_home_zone)
         self._transport = transport
         self._status = status
         self._messages = messages
@@ -1170,6 +1194,7 @@ class CapabilityRouter:
                 selected_day=self._planning_selected_day,
                 scope=self._planning_scope,
                 zone=self._planning_zone(),
+                all_day_zone=self._planning_home_zone(),
             )
         except PlanningAuthorizationError:
             if not self._request_is_current():
@@ -1443,6 +1468,7 @@ class CapabilityRouter:
                     selected_day=selected_day,
                     scope=PlanningScope.DAY,
                     zone=self._planning_zone(),
+                    all_day_zone=self._planning_home_zone(),
                 )
             except (PlanningAuthorizationError, NativeBridgeError):
                 # The month view stays on screen; a failed drill-down must
@@ -1504,24 +1530,21 @@ class CapabilityRouter:
         self._planning_selected_day = selected
         self._planning_scope = PlanningScope.DAY
 
-    @staticmethod
-    def _planning_zone() -> tzinfo:
-        """Resolve an IANA zone when the local OS exposes one.
+    def _planning_zone(self) -> tzinfo:
+        """Where the WEARER is — the phone's zone, else this Mac's.
 
-        A fixed UTC offset from ``datetime.now().astimezone()`` looks usable
-        today but shifts future dates into the wrong civil day at a DST
-        transition.  The same resolver that validates Calendar proposals
-        returns a real ``ZoneInfo`` on macOS; the fallback is only for hosts
-        without an IANA ``/etc/localtime`` symlink.
+        Formerly the Mac's zone unconditionally, which was never a decision:
+        it is what Python hands you when nothing says otherwise. The HUD's
+        own banner clock is the phone's, so a Mac-formatted event time was
+        unreadable against it the moment the two diverged.
         """
 
-        zone_name = system_local_time_zone()
-        if zone_name is not None:
-            try:
-                return ZoneInfo(zone_name)
-            except ZoneInfoNotFoundError:
-                pass
-        return datetime.now().astimezone().tzinfo or timezone.utc
+        return self._wearer_zone.current()
+
+    def _planning_home_zone(self) -> tzinfo:
+        """Where the calendar's all-day events were authored — this Mac."""
+
+        return self._wearer_zone.home()
 
     async def _show_notes(self) -> None:
         """One QuickNotes surface: live recording controls, else all notes.
