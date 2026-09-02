@@ -139,7 +139,12 @@ export type BrainstormAction =
   | 'show_terminal'
   | 'show_brainstorm'
   | 'cancel'
-  | 'retry_terminal';
+  | 'retry_terminal'
+  /** Answer the tool request the focused work session is blocked on.
+   * Voice ("terminal approve") was the only way, so a wearer looking at a
+   * blocked session had no gesture for the decision in front of them. */
+  | 'approve_terminal'
+  | 'deny_terminal';
 
 /** A bounded lifecycle page for native Calendar and Reminders actions.
  * The interactive preview remains a separate `confirm.request` frame; this
