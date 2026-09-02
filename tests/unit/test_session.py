@@ -2505,3 +2505,82 @@ class TestBranchReadsARealSession:
         # fork: the earlier conversation and this run both come forward.
         assert ("CODEX", "an older turn") in carried
         assert any("said a thing" in text for _label, text in carried)
+
+
+class TestAnExplicitNewLineage:
+    """docs/SESSION_MODEL.md:50 — "new Brainstorm: start an explicit new
+    lineage."
+
+    Being explicit is what removes the ambiguity. :52 requires asking
+    before replacing context for a request that MIGHT be a replacement —
+    and the wearer saying "new" has just said it is, so this does not ask.
+    """
+
+    class Live(Session):
+        def __init__(self):
+            self.cancelled = False
+
+        async def run(self) -> None:
+            while not self.cancelled:
+                await asyncio.sleep(0.01)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+    def _manager(self):
+        started: list[str] = []
+        first = self.Live()
+
+        def factory(topic: str):
+            started.append(topic)
+            return first if len(started) == 1 else self.Live()
+
+        return SessionManager(HudWriter(SinkTransport()), factory), started, first
+
+    async def test_it_starts_a_session_when_idle(self) -> None:
+        manager, started, _f = self._manager()
+        assert manager.handle_transcript("New brainstorm. Should we cache?")
+        await asyncio.sleep(0)
+        # Terminal punctuation is stripped before matching, exactly as the
+        # plain "brainstorm <topic>" trigger does — Whisper adds it to every
+        # utterance, so it is transcriber noise rather than the wearer's.
+        assert started == ["Should we cache"]
+        await manager.close()
+
+    async def test_it_replaces_a_live_session_without_asking(self) -> None:
+        manager, started, first = self._manager()
+        assert manager.handle_transcript("brainstorm the first question")
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript(
+            "JOAT, new brainstorm the second question",
+            addressed="new brainstorm the second question",
+        )
+        for _ in range(80):
+            await asyncio.sleep(0.02)
+            if len(started) > 1:
+                break
+        assert first.cancelled
+        assert started == ["the first question", "the second question"]
+        await manager.close()
+
+    async def test_a_bare_topic_still_asks(self) -> None:
+        """Without the word "new" it is ambiguous, and :52 forbids guessing."""
+        manager, started, first = self._manager()
+        assert manager.handle_transcript("brainstorm the first question")
+        await asyncio.sleep(0)
+
+        assert manager.handle_transcript(
+            "JOAT, brainstorm something else",
+            addressed="brainstorm something else",
+        )
+        await asyncio.sleep(0.05)
+        assert not first.cancelled
+        assert started == ["the first question"]
+        await manager.close()

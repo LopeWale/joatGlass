@@ -36,6 +36,14 @@ _CONTINUE = re.compile(
     r"^continue(?:\s+(?:the\s+)?(?:brainstorm\s+)?(?:about\s+|on\s+)?)(?P<title>.+)$",
     re.IGNORECASE,
 )
+#: docs/SESSION_MODEL.md:50 — "new Brainstorm: start an explicit new
+#: lineage." Being explicit is what removes the ambiguity, so this does NOT
+#: ask before replacing a live session: :52 requires the question for a
+#: request that MIGHT be a replacement, and the wearer has just said it is.
+_NEW_LINEAGE = re.compile(
+    r"^new\s+(?:brainstorm|debate)(?:\s*[.:,!?\u2014-]\s*|\s+)(?P<topic>.+)$",
+    re.IGNORECASE,
+)
 _BRANCH = re.compile(r"^branch(?:\s+(?:this|it|that))?$", re.IGNORECASE)
 
 #: The open-ended verb layer. The wearer's own framing: "the JOAT
@@ -542,6 +550,9 @@ class SessionManager:
             if self._handle_instruction(addressed):
                 return True
         request = text.strip().rstrip(".!?")
+        fresh_topic = _NEW_LINEAGE.match(request)
+        if fresh_topic is not None:
+            return self._start(fresh_topic.group("topic").strip())
         resumed = _CONTINUE.match(request)
         if resumed is not None and self._resume(resumed.group("title").strip()):
             return True
@@ -596,6 +607,12 @@ class SessionManager:
                     log.exception("reply routing failed")
 
             asyncio.get_running_loop().create_task(run_route())
+            return True
+        fresh = _NEW_LINEAGE.match(steer.strip().rstrip(".!?"))
+        if fresh is not None and self._active is not None:
+            topic = fresh.group("topic").strip()
+            log.info("wearer asked for an explicit new lineage")
+            asyncio.get_running_loop().create_task(self._replace_with(topic))
             return True
         if self._branch and _BRANCH.match(steer.strip().rstrip(".!?")):
             # docs/SESSION_MODEL.md:51 — "branch this: fork the
