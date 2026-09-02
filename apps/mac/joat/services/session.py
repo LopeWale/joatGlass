@@ -23,7 +23,7 @@ from ..verifier.gate import CitationStatus, VerifierGate
 from ..channels.cards import Card, CardLog, Urgency
 from .hud import HudWriter
 from .roundtable import (
-    Participant, RelayMode, RoundTable, build_prompt, is_failure,
+    FAILURE_MARK, Participant, RelayMode, RoundTable, build_prompt, is_failure,
     parse_direction, parse_relay_mode,
 )
 from .sinks import TranscriptSink
@@ -906,6 +906,58 @@ class SessionManager:
             await asyncio.gather(task, return_exceptions=True)
 
 
+def _eager(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Start consuming a model stream NOW, buffering until someone reads.
+
+    A collaborator's turn costs ~7.3s of fixed overhead before a single
+    token — process spawn plus subscription auth, measured against both
+    real binaries — and then 12-40s of generation. Round 1 is INDEPENDENT
+    by construction (neither seat sees the other's answer), so running the
+    seats one after another spends that twice for no reason: the wearer
+    waits through the whole of Codex before Claude has even been launched.
+
+    Draining eagerly lets the second seat's turn run WHILE the first is on
+    screen, so the round costs about as long as its slowest seat instead of
+    the sum of both. Display order is unchanged — the wearer still watches
+    one turn at a time, in order, which is the point of the surface.
+    """
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    failure: list[BaseException] = []
+
+    async def drain() -> None:
+        try:
+            async for chunk in stream:
+                await queue.put(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Held, not converted. A collaborator that DISCONNECTS is a
+            # blocked session with its own wearer-visible recovery — not a
+            # turn that produced bad text. Draining eagerly must not
+            # downgrade one into the other, so the reader re-raises it at
+            # the point the caller would have seen it anyway.
+            failure.append(exc)
+        finally:
+            await queue.put(None)
+
+    task = asyncio.get_running_loop().create_task(drain())
+
+    async def replay() -> AsyncIterator[str]:
+        try:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+            if failure:
+                raise failure[0]
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return replay()
+
+
 class DebateSession(Session):
     """One debate, streamed turn by turn — the wearer watches it happen.
 
@@ -964,6 +1016,8 @@ class DebateSession(Session):
         self._wearer_turns = 0
         self._next_mode: RelayMode | None = None
         self._calls = 0
+        #: Round-1 turns already in flight, by seat name.
+        self._prefetch: dict[str, AsyncIterator[str]] = {}
         self._speaking_label = ""
         self._interrupted = False
         self._cancelled = False
@@ -1122,6 +1176,15 @@ class DebateSession(Session):
             # seats still owing a turn instead of recounting them.
             self._table.start_round()
             await self._report_progress(round_no)
+            # Round 1 only: every seat is independent, so start them all
+            # now and show them in order. Measured, both real binaries:
+            # ~7.3s of spawn-and-auth before a token, then 12-40s of
+            # generation. Serial, that is paid once per seat; concurrent,
+            # the round costs about its slowest seat. The wearer still
+            # watches one turn at a time — only the waiting is shared.
+            self._prefetch = (
+                self._prefetch_round_one() if round_no == 1 else {}
+            )
             for _ in range(len(self._table)):
                 speaker = self._table.next_speaker()
                 said = await self._verified_turn(speaker, round_no)
@@ -1276,6 +1339,24 @@ class DebateSession(Session):
         turns = [*self._prior, *self._transcript]
         return "\n\n".join(f"[{label}]\n{text}" for label, text in turns)
 
+    def _prefetch_round_one(self) -> dict[str, AsyncIterator[str]]:
+        """Launch every seat's independent first turn at once.
+
+        Only round 1: from round 2 a seat's prompt contains what the others
+        said, so there is nothing to start early — and starting it anyway
+        would ask a collaborator to cross-review a transcript that does not
+        exist yet.
+        """
+        started: dict[str, AsyncIterator[str]] = {}
+        prior = [t for t in self._transcript if t[0] == self.WEARER_LABEL]
+        for seat in self._table.seats:
+            prompt = build_prompt(
+                self._topic, seat, [*self._prior, *prior],
+                self.SOURCES_CONTRACT, mode="open",
+            )
+            started[seat.name] = _eager(seat.stream(prompt))
+        return started
+
     async def _verified_turn(self, speaker: Participant, round_no: int) -> str:
         """One speaker's turn plus its visible verification (and one repair).
 
@@ -1312,7 +1393,10 @@ class DebateSession(Session):
         prompt = build_prompt(self._topic, speaker, prior,
                               self.SOURCES_CONTRACT, mode=mode)
         self._calls += 1
-        text = await self._stream_turn(label, speaker.stream(prompt))
+        started = self._prefetch.pop(speaker.name, None)
+        text = await self._stream_turn(
+            label, started if started is not None else speaker.stream(prompt),
+        )
         if self._gate is None or self._cancelled or is_failure(text):
             return text
         for attempt in range(self._max_repairs + 1):
