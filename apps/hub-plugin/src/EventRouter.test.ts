@@ -20,6 +20,9 @@ function make(
   brainstormAcceptanceArmed = false,
   panelSwipeOwned = false,
   panelExpanded = false,
+  // Refreshable implies expanded, never the reverse: the pomodoro page is
+  // expanded but excluded from the carve-out, so it keeps the mic.
+  panelRefreshable = panelExpanded,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -54,6 +57,7 @@ function make(
     // its established relay and mic behaviour.
     handleOverviewSwipe: vi.fn(() => !menuConsumesLists && panelSwipeOwned),
     isPanelExpanded: vi.fn(() => panelExpanded),
+    isPanelRefreshable: vi.fn(() => panelRefreshable),
     refreshPanel: vi.fn(),
     openFromContextualMenu: vi.fn(async () => {}),
   };
@@ -737,6 +741,17 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.menu.refreshPanel).toHaveBeenCalledTimes(1);
     expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.sent).toEqual([]);
+  });
+
+  it('keeps the mic on the pomodoro page — expanded, but nothing to re-fetch', () => {
+    // The defect the simulator sweep surfaced: POMODORO satisfies
+    // isPanelExpanded, so the hold used to fire a refresh the wearer could
+    // not see and swallow the mic, with the hint naming neither.
+    const r = make(true, undefined, false, false, false, false, false, false, true, false);
+    r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
+    r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
+    expect(r.menu.refreshPanel).not.toHaveBeenCalled();
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the mic on long press inside an opened article, and on the overview', () => {

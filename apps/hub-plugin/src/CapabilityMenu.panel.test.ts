@@ -61,6 +61,15 @@ const newsPush = (revision: number, rows: string[]) => ({
   kind: 'hud.panel' as const, tab: 'news' as const, revision, rows,
 });
 
+const pomodoroPush = (revision: number) => ({
+  kind: 'hud.panel' as const, tab: 'pomodoro' as const, revision,
+  rows: ['Pause', 'Skip to break', 'Reset'],
+  pomodoro: {
+    phase: 'focus' as const, running: true, remainingMs: 877_000,
+    lengthMs: 1_500_000, completed: 1, endsAtUnixMs: Date.now() + 877_000,
+  },
+});
+
 describe('CapabilityMenu — the overview tab rail', () => {
   it('a resting swipe moves the rail and is consumed even at the ends', () => {
     const { menu, steps } = rig();
@@ -175,6 +184,20 @@ describe('CapabilityMenu — the overview tab rail', () => {
     menu.handleClick();
     await menu.presentList('NEWS · ARTICLE', ['Rates hold', 'body'], 'panel-news-2', false);
     sent.length = 0;
+    menu.refreshPanel();
+    expect(sent).toEqual([]);
+  });
+
+  it('the pomodoro page is expanded but not refreshable — the hold stays the mic', async () => {
+    const { menu, rail, sent } = rig('pomodoro');
+    rail.accept(pomodoroPush(4));
+    await menu.openPanelTab('pomodoro');
+    sent.length = 0;
+    // Structurally a panel top level…
+    expect(menu.isPanelExpanded()).toBe(true);
+    // …but there is nothing to re-fetch: the Mac pushes every transition
+    // and the countdown ticks locally, so the gesture belongs to the mic.
+    expect(menu.isPanelRefreshable()).toBe(false);
     menu.refreshPanel();
     expect(sent).toEqual([]);
   });

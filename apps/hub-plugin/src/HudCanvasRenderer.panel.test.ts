@@ -48,8 +48,13 @@ describe('panel page copy', () => {
       expect(hint.length).toBeLessThanOrEqual(46);
     }
     expect(PANEL_OVERVIEW_HINT).toContain('swipe');
-    expect(PANEL_EXPANDED_HINT).toContain('hold');
-    expect(POMODORO_EXPANDED_HINT).not.toContain('hold');
+    expect(PANEL_EXPANDED_HINT).toContain('hold: refresh');
+    // Long press is the mic on every resting tab and on the pomodoro page
+    // (excluded from the refresh carve-out), so both must say so. The
+    // pomodoro hint must NOT promise a refresh it will never send.
+    expect(PANEL_OVERVIEW_HINT).toContain('hold: mic');
+    expect(POMODORO_EXPANDED_HINT).toContain('hold: mic');
+    expect(POMODORO_EXPANDED_HINT).not.toContain('refresh');
   });
 
   it('routes only an opened headline or result through the shared reader', () => {

@@ -28,7 +28,7 @@ top-right tile so a one-second tick uploads one.
 | swipe | move along the rail (local) | move the row | page, when the Mac's hint offers it |
 | tap | expand the lit tab | open the row (`capdata`, echoing `panel-<tab>-<revision>`) | — |
 | left double | — | back to the overview | back to the tab |
-| long press | mic | refresh the tab (`caprefresh`) | mic |
+| long press | mic | refresh the tab (`caprefresh`) — news and search only; pomodoro keeps the mic | mic |
 
 Which tab is up is plugin state (`PanelRail.ts`); the Mac never learns it.
 What the Mac owns is pushed as `hud.panel` — one message per tab, up to 20
