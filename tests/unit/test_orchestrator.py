@@ -6,6 +6,8 @@ import asyncio
 import logging
 import struct
 
+import pytest
+
 from joat.audio.vad import RmsVad
 from joat.core.interfaces import (
     AudioFrame,
@@ -1020,3 +1022,120 @@ class TestOrdinaryEnglishWakeWordsMustOpenTheUtterance:
                       "I was wondering JOAT what is next",
                       "okay so anyway JOAT what is on my calendar"):
             assert await self._addressed(heard) is not None, heard
+
+
+class TestTheRestartGreetingGivesFOLLOWABLEAdvice:
+    """After an engine restart mid-Brainstorm the greeting names the
+    interrupted session and tells the wearer what to SAY to get back to
+    it. That sentence is a promise, and nothing checked the code could
+    keep it: the title is interpolated verbatim, so a title format or a
+    `continue` grammar change turns the greeting into instructions that
+    do nothing — the exact "advice that cannot be followed" this codebase
+    keeps having to remove.
+
+    So the test does not hard-code the phrasing. It reads the command out
+    of the greeting the orchestrator actually paints and feeds it to the
+    session manager the way the orchestrator feeds real speech.
+    """
+
+    class Past:
+        status = "active"
+        session_id = "aaaa"
+
+        def __init__(self, title: str) -> None:
+            self.title = title
+            self.topic = title
+            self.turns = ()
+            self.parent_id = ""
+            self.root_id = "aaaa"
+
+    class Stt:
+        async def transcribe(self, pcm: bytes) -> None:
+            return None
+
+    @staticmethod
+    def _spoken_command(painted: str) -> str:
+        """The words between the curly quotes after "Say"."""
+        import re
+
+        found = re.search(r"Say\s+[“\"']([^”\"']+)[”\"']", painted)
+        assert found is not None, f"the greeting stopped naming a command: {painted}"
+        return found.group(1)
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "cold-start latency",          # a hyphen
+            "tabs or spaces",              # plain words
+            "should we cache the synthesis?",   # punctuation
+            "GPT-5 vs Claude: which critic",    # colon and digits
+        ],
+    )
+    async def test_the_named_command_actually_resumes_that_session(
+        self, title: str,
+    ) -> None:
+        from joat.core.protocol import HudText
+        from joat.services.hud import HudWriter
+        from joat.services.session import Session, SessionManager
+
+        past = self.Past(title)
+
+        class History:
+            def sessions(self, limit: int = 5):
+                return [past]
+
+            def find_all(self, spoken: str):
+                said = " ".join(spoken.lower().split())
+                topic = past.topic.lower()
+                return [past] if (said in topic or topic in said) else []
+
+            def load(self, session_id: str):
+                return past if session_id == past.session_id else None
+
+        resumed: list[str] = []
+
+        class Live(Session):
+            session_id = parent_id = root_id = ""
+
+            async def run(self) -> None:
+                await asyncio.sleep(0.01)
+
+            def cancel(self) -> None: ...
+
+            def consume_transcript(self, text: str) -> bool:
+                return True
+
+            def direct(self, text: str) -> str | None:
+                return None
+
+        def continuation(topic: str, prior):
+            resumed.append(topic)
+            return Live()
+
+        transport = FakeTransport()
+        manager = SessionManager(
+            HudWriter(transport), lambda t: None,
+            history=History(), continuation_factory=continuation,
+            brainstorm_available=lambda: True,
+        )
+        orchestrator = VoiceOrchestrator(
+            transport=transport, stt=self.Stt(), sessions=manager,
+            stt_available=True,
+        )
+        await orchestrator.on_connect()
+
+        painted = " ".join(
+            m.text for m in transport.sent
+            if isinstance(m, HudText) and "interrupted" in m.text
+        )
+        assert painted, "no interrupted-session greeting was painted"
+
+        # Exactly what the orchestrator strips before calling: the wake
+        # word is already gone by the time a trigger phrase is matched.
+        command = self._spoken_command(painted)
+        assert manager.handle_transcript(command) is True, (
+            f"the greeting said {command!r} and the manager ignored it"
+        )
+        await asyncio.sleep(0.05)
+        assert resumed == [title]
+        await manager.close()
