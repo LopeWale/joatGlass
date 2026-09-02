@@ -294,6 +294,7 @@ class CapabilityRouter:
         brainstorm_continue: Callable[[str], Awaitable[bool]] | None = None,
         terminal_rows: Callable[[], list[tuple[str, str]]] | None = None,
         terminal_focus: Callable[[str], Awaitable[None]] | None = None,
+        terminal_busy: Callable[[], bool] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
     ) -> None:
         self._hud = hud
@@ -319,6 +320,7 @@ class CapabilityRouter:
         self._brainstorm_rows: list[Any] = []
         self._terminal_rows = terminal_rows
         self._terminal_focus = terminal_focus
+        self._terminal_busy = terminal_busy
         self._terminal_row_names: list[str] = []
         self._brainstorm_recent = brainstorm_recent
         self._message_rows: list[MessageThread] = []
@@ -550,7 +552,8 @@ class CapabilityRouter:
         # lenses — the wearer opened the terminal to watch work, and a
         # picker over the top of it would hide the thing they came for.
         rows = self._terminal_rows() if self._terminal_rows else []
-        if rows and not any(" · running" in row for _name, row in rows):
+        working = self._terminal_busy() if self._terminal_busy else False
+        if rows and not working:
             self._terminal_row_names = [name for name, _row in rows]
             await self._show_focus(
                 "AGENT TERMINAL",
