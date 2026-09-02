@@ -189,6 +189,16 @@ def parse_direction(text: str, table: RoundTable) -> Participant | None:
             f"{n} respond", f"{n} go", f"{n} first", f"{n} next",
             f"{n} your turn", f"ask {n}", f"{n} what do you think",
             f"let {n}", f"over to {n}", f"{n} please",
+            # "your turn" was recognised and "you next" was not, which is
+            # the kind of gap that makes a voice feature feel broken rather
+            # than limited: the wearer says a natural variant, nothing
+            # happens, and there is no way to tell why. Still narrow —
+            # every phrasing here nominates a speaker and cannot be an
+            # ordinary remark about one.
+            f"{n} you next", f"{n} you re next", f"{n} youre next",
+            f"{n} take it", f"{n} take this", f"{n} answer",
+            f"{n} have a go", f"{n} weigh in", f"{n} thoughts",
+            f"back to {n}", f"now {n}",
         ):
             if said.startswith(phrasing) or said == n:
                 return seat
