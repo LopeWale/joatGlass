@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import {
+  afterEach, beforeEach, describe, expect, it, vi,
+} from 'vitest';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
 import { Settings } from './Settings';
@@ -1436,6 +1438,24 @@ describe('CapabilityMenu', () => {
 });
 
 describe('Planning split dashboard', () => {
+  // The hover start reads the WALL CLOCK ("today when the month shows it,
+  // else the first in-month day"). Left unpinned, these tests silently
+  // change meaning on 1 September: they passed for a year by exercising the
+  // fallback, then broke the day the calendar walked into the fixture's own
+  // month. Pin it, and cover both branches on purpose instead.
+  //
+  // A LOCAL date — the code compares against toLocaleDateString('en-CA'),
+  // so a UTC midnight would resolve to the previous day west of Greenwich.
+  const OUTSIDE_THE_GRID = new Date(2026, 5, 17, 12, 0, 0); // 17 Jun 2026
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(OUTSIDE_THE_GRID);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   function dashboardRig() {
     const panes: Array<{ dateIndex: number; focused: boolean; itemIndex: number }> = [];
     const sent: Array<Record<string, unknown>> = [];
@@ -1504,8 +1524,8 @@ describe('Planning split dashboard', () => {
     expect(sent.length).toBe(before);
     expect(panes[panes.length - 1]).toMatchObject({ focused: false });
 
-    // Return to Sep 1 (hover starts on the first in-month day, index 1,
-    // when today is outside this month; the scroll above moved to 2).
+    // Return to Sep 1. Today is pinned outside this month, so hover starts
+    // on the first in-month day, index 1; the scroll above moved it to 2.
     menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
     expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: false });
 
@@ -1521,6 +1541,16 @@ describe('Planning split dashboard', () => {
     expect(grid.event.selectedIndex).toBe(1);
     expect(grid.event.requestId).toBe(requestId);
     expect(typeof grid.event.planningAnchorUnixMs).toBe('number');
+  });
+
+  it('hover starts on today when the shown month contains it', async () => {
+    // The other branch of the same line of code. Sep 1 is index 1 in this
+    // grid (Mon 31 Aug leads), and it is the only day carrying entries — so
+    // landing there is observable through the pane, not just the index.
+    vi.setSystemTime(new Date(2026, 8, 1, 9, 0, 0)); // 1 Sep 2026, local
+    const { menu, panes } = await openDashboard();
+    menu.handleClick(); // the pane takes focus only if today has entries
+    expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: true });
   });
 
   it('Back walks pane to grid before leaving the dashboard', async () => {
