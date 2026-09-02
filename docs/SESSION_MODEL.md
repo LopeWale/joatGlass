@@ -48,7 +48,7 @@ payloads.
 | Ordinary speech in a selected Brainstorm | Append the next user move to that context |
 | `continue <title>` | Resume the matching durable session; ask on ambiguity |
 | Tap a row in the idle picker | Open that session by id — no title matching |
-| `new Brainstorm` | Start an explicit new lineage — **not implemented** |
+| `new Brainstorm <topic>` | Start an explicit new lineage; replaces a live session WITHOUT asking, because saying "new" is what removes the ambiguity |
 | `branch this` | Fork the live transcript into a child lineage; the parent yields the slot only once the fork is built |
 | A clearly unrelated replacement request | Ask before replacing context; never guess or silently reset |
 | A new topic spoken during a live run | Held, and the wearer is asked — yes cancels and starts it, no keeps going |
