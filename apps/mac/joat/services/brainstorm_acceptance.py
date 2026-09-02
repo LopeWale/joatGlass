@@ -363,14 +363,18 @@ def _view(
 ) -> BrainstormHudView | AgentTerminalHudView:
     """The two surfaces are two frames now, so this returns two types.
 
-    Note the acceptance run seats "Hermes" in a Brainstorm — which the
-    product forbids. Left as-is here ONLY because this is a content-free
-    diagnostic that never reaches a real round table; it is not a model of
-    how Brainstorm is seated.
+    NOBODY is seated. This seated "Hermes" as a Brainstorm collaborator —
+    and the rejection views reach real wearers on the ordinary gesture
+    path whenever the diagnostic is not armed, so the glass showed Hermes
+    at the round table, the one thing the two surfaces are defined
+    against each other by (SESSION_MODEL.md:15-16: "never Brainstorm
+    seats"). The 'content-free diagnostic' excuse covered the armed run
+    and not the refusals, and it was wrong for both: a frame that cannot
+    happen is not a model, but the wearer cannot tell.
     """
     if surface == "brainstorm":
         return BrainstormHudView(
-            state=state, topic="Acceptance run", collaborators=["Hermes"],
+            state=state, topic="Acceptance run", collaborators=[],
             activity=activity,
         )
     return AgentTerminalHudView(

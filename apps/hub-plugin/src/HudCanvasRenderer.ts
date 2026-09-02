@@ -3669,13 +3669,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       // repair is the corrected version of a claim the verifier just
       // rejected. The " > " delimiter is what makes this safe; prose does
       // not contain it.
-      const split = /^([A-Z][A-Z0-9 .\u2014-]{0,22}) > /.exec(line);
+      // The scrollback marker rides the FIRST visible row whenever older
+      // rows are hidden (windowHudTailLines prepends '…'), and it defeated
+      // this split: '…CODEX > …' matches no tag, so the topmost row drew
+      // wholly bright on every scrolled frame — the one row a scrolling
+      // reader looks at first. Peel the marker, draw it dim, split the rest.
+      const marker = line.startsWith('…') ? '…' : '';
+      const body = marker ? line.slice(1) : line;
+      const split = /^([A-Z][A-Z0-9 .\u2014-]{0,22}) > /.exec(body);
       if (!split) {
         context.fillStyle = gray(BRIGHT);
         this.fitText(context, line, x, baselineY, width);
         return;
       }
-      const tag = `${split[1]} `;
+      const tag = `${marker}${split[1]} `;
       context.fillStyle = gray(CHROME);
       this.fitText(context, tag, x, baselineY, width);
       const tagWidth = context.measureText(tag).width;
@@ -3685,7 +3692,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       // wrapper legally filled was ellipsized mid-word — the exact "…"
       // the wearer reported, from a second copy of a number.
       this.fitText(
-        context, line.slice(split[0].length), x + tagWidth, baselineY,
+        context, body.slice(split[0].length), x + tagWidth, baselineY,
         width - tagWidth,
       );
     });

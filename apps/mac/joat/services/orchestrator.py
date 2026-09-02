@@ -197,6 +197,19 @@ class VoiceOrchestrator:
             await self._transport.send(
                 HudText(text="Install whisperkit-cli on the Mac to enable transcription.")
             )
+        if active_status is None and self._sessions is not None:
+            # An engine restart mid-Brainstorm used to paint the empty
+            # Ready surface as if no conversation had ever been happening.
+            # The durable record knows better: a row still marked `active`
+            # is crash evidence, and the wearer deserves the way back.
+            probe = getattr(self._sessions, "interrupted_session", None)
+            interrupted = probe() if callable(probe) else None
+            if interrupted is not None:
+                title = getattr(interrupted, "title", "") or "untitled"
+                await self._transport.send(HudText(
+                    text=(f"A Brainstorm was interrupted — “{title[:40]}”. "
+                          f"Say “continue {title[:40]}” to pick it up."),
+                ))
         # Request ears: an earlier session (or doff) may have left the mic off,
         # and a brain that cannot hear is indistinguishable from none.
         await self._transport.send(AudioControl(open=True))
