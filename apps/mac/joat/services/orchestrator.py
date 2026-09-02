@@ -303,11 +303,45 @@ class VoiceOrchestrator:
         current: tuple[bytes, AudioSource | None] | None = (utterance, source)
         try:
             while current is not None:
-                await self._handle_utterance(*current)
+                try:
+                    await self._handle_utterance(*current)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # A voice turn must not die into a bare task. This was
+                    # `try/finally` with no `except`, so ANY handler that
+                    # raised — a session factory whose binary vanished, a
+                    # command, the reply engine — ended the turn as an
+                    # unhandled task exception. The last thing painted is
+                    # the "listening" status from the start of the turn, so
+                    # the wearer is left looking at a screen that says JOAT
+                    # is listening, forever, unable to tell a failure from
+                    # a long think. The loop already survives (the queue
+                    # drains, the next utterance is served); only the
+                    # wearer was left out.
+                    log.exception("voice turn failed")
+                    await self._say_turn_failed()
                 current = self._pending_utterance
                 self._pending_utterance = None
         finally:
             self._utterance_worker = None
+
+    async def _say_turn_failed(self) -> None:
+        """Tell the wearer the turn died, on the surface they are watching.
+
+        Deliberately vague about the cause and specific about the remedy:
+        the exception text can carry a prompt, a transcript fragment or a
+        provider payload, none of which belongs on the lenses or in a log
+        the wearer reads aloud.
+        """
+        try:
+            await self._hud.assistant(
+                "Something went wrong with that — say it again.",
+                answers_wearer=True,
+            )
+            await self._hud.settle_assistant(4_000)
+        except Exception:
+            log.warning("turn-failure notice not painted", exc_info=True)
 
     async def _handle_utterance(
         self,
