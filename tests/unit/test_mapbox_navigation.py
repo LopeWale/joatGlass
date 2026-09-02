@@ -7,8 +7,7 @@ import pytest
 
 from joat.core.navigation import NavigationCandidate, NavigationPoint, NavigationPolicies
 from joat.navigation.map_image import (
-    MAP_GROUND_LEVEL,
-    MAP_SHADOW_FLOOR,
+    MAP_TONE_FLOOR,
     MAP_TONE_CEILING,
     _tone_curve,
 )
@@ -171,28 +170,30 @@ class TestToneCurve:
 
         assert list(toned.getdata()) == [0] * 100
 
-    def test_three_bands_survive_around_the_ground_tone(self) -> None:
-        """Buildings darker than the ground, roads brighter, in one tile.
+    def test_bare_land_is_unlit_and_the_ink_is_ranked_above_it(self) -> None:
+        """Land dark, everything drawn on it separated across the band.
 
-        This is the structure the reference HUD uses, and collapsing it to
-        two bands is the failure this module has now shipped twice — once
-        as a wireframe (ground thresholded to black) and once as a slab
-        (a floor applied to every pixel, lighting 93% of the panel). Both
-        read as "the map is broken" for the same underlying reason, so the
-        ordering is pinned rather than left to a curve to preserve.
+        Lighting the ground was tried, to give blocks "area", and it cost
+        the one thing the wearer reads most: Mapbox draws street NAMES as
+        the brightest ink in the tile, so on a lit ground they invert into
+        dark glyphs on a bright field — the lowest-contrast pairing this
+        panel can produce — and the names became unreadable.
         """
-        image = Image.new("L", (10, 10), color=120)  # ground: the mode
-        for x in range(3):  # buildings/labels: darker than the ground
-            image.putpixel((x, 0), 60)
-        for x in range(3, 6):  # roads: brighter than the ground
-            image.putpixel((x, 0), 230)
+        image = Image.new("L", (10, 10), color=20)  # bare land: the mode
+        for x in range(3):  # buildings: a little above the land
+            image.putpixel((x, 0), 90)
+        for x in range(3, 6):  # roads
+            image.putpixel((x, 0), 160)
+        for x in range(6, 9):  # labels: the brightest ink
+            image.putpixel((x, 0), 240)
 
         levels = [value // 17 for value in _tone_curve(image).getdata()]
-        shadow, road, ground = levels[0], levels[3], levels[9]
+        building, road, label, land = levels[0], levels[3], levels[6], levels[9]
 
-        assert shadow < ground < road, "the tile must keep all three bands"
-        assert shadow >= MAP_SHADOW_FLOOR, "shapes must not fall to pure black"
-        assert ground == MAP_GROUND_LEVEL, "the ground anchors on the mode"
+        assert land == 0, "bare land must stay clear glass"
+        assert building < road < label, "the ink must land on separate steps"
+        assert building >= MAP_TONE_FLOOR, "drawn shapes must stay lit"
+        assert label <= MAP_TONE_CEILING, "the map must not spend JOAT's levels"
 
     def test_map_never_spends_the_levels_reserved_for_joats_own_marks(self) -> None:
         """The route has to be able to out-shine any road it crosses.
