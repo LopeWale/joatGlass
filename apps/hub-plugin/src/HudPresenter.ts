@@ -573,16 +573,39 @@ export class HudPresenter {
    * sight: "it's only changing every three seconds … we're doing it the
    * difficult way." Device-local animation is smooth and costs the link
    * nothing. */
+  /** How long the counter has been ticking, so it can slow down. */
+  private thinkingTicks = 0;
+
+  /** Whole seconds of silence after which the counter stops needing to be
+   * precise. A turn measured against the real CLIs runs 12-40s, so a
+   * minute of silence means something is wrong, not slow — and past that
+   * the wearer is deciding whether to cancel, not reading digits. */
+  private static readonly THINKING_PRECISE_S = 60;
+
   private armThinkingTicker(): void {
     if (this.thinkingTicker !== undefined) return;
     if (this.surface.kind !== 'brainstorm') return;
-    if (!(this.visual?.transcriptIsThinking?.() ?? false)) return;
+    if (!(this.visual?.transcriptIsThinking?.() ?? false)) {
+      this.thinkingTicks = 0;
+      return;
+    }
+    // Measured, not assumed: this costs ONE bridge write per tick. The
+    // engine's old version shipped a whole frame every three seconds, so
+    // at 1Hz this is 3x the writes — cheaper per update, more often, and
+    // unbounded for as long as a turn stays silent. A hung collaborator
+    // could hold the link at 1Hz indefinitely. So: one second while the
+    // number is worth reading, five after that.
+    this.thinkingTicks += 1;
+    const interval = this.thinkingTicks < HudPresenter.THINKING_PRECISE_S
+      ? 1000
+      : 5000;
     this.thinkingTicker = setTimeout(() => {
       this.thinkingTicker = undefined;
       if (this.surface.kind !== 'brainstorm') return;
-      // localTick: only the counter's digits moved.
+      // localTick: only the counter's digits moved, so this repaint is
+      // NOT recorded as a wearer-visible frame receipt.
       void this.paintVisual(true);
-    }, 1000);
+    }, interval);
   }
 
   /** Swipe on the brainstorm/terminal surface pages through history. */
