@@ -94,12 +94,17 @@ schema errors settled in seconds what the prose had wrong.
   adapter seam: it was `client.mode` in the connect envelope, before any
   session operation could run. The documented `approve`/`deny` literals are
   still unconfirmed against the deployment, and now reachable to confirm.
-- **Its own HUD surface.** The terminal still renders as a `screen` variant of
-  the Brainstorm frame — one model, one controller, one wire kind. Splitting it
-  touches `types.ts` and `core/protocol.py` in the same commit. It is no longer
-  a bare variant: the surface now draws its own LANES row (each lane's state,
-  so concurrent work is legible at a glance) and names the focused lane in its
-  spine instead of always saying HERMES.
+- ~~**Its own HUD surface.**~~ DONE — and this bullet said otherwise for a
+  release after the split landed, directly contradicting SESSION_MODEL.md's
+  account of the same wire; a blind-pair audit had to file the pair as a
+  spec conflict (DOC-FRAME-01) because two normative documents disagreed
+  about the CURRENT state of the code. The facts: `core/protocol.py`
+  defines two frozen frames (`BrainstormHudView`, `AgentTerminalHudView`)
+  emitting two wire kinds, and `types.ts` types each payload separately
+  (`BrainstormViewPayload` carries no terminal, endpoint, approval or
+  tool-policy field, so a cross-surface read no longer compiles). The
+  RENDER model behind one shared renderer keeps a `screen` discriminator;
+  that is a plugin-internal drawing detail, not the wire.
 - **Concurrency beyond the configured lanes.** Lanes are fixed at boot; a
   resumed session replaces a lane's target rather than adding a row.
 - **A2A.** Unchanged, unenabled, and still not the terminal transport.

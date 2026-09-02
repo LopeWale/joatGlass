@@ -45,7 +45,7 @@ payloads.
 | `JOAT, brainstorm <topic>` while no context is selected | Create and open a new session |
 | Open Brainstorm during an active run | Restore the current conversation |
 | Open Brainstorm while idle | Show recent sessions plus `NEW` |
-| Ordinary speech in a selected Brainstorm | Append the next user move to that context |
+| Ordinary ADDRESSED speech in a selected Brainstorm | Append the next user move to that context |
 | `continue <title>` | Resume the matching durable session; ask on ambiguity |
 | Tap a row in the idle picker | Open that session by id — no title matching |
 | `new Brainstorm <topic>` | Start an explicit new lineage; replaces a live session WITHOUT asking, because saying "new" is what removes the ambiguity |
@@ -64,8 +64,15 @@ session absorbs the utterance; that order is load-bearing, because
 `DebateSession.consume_transcript` returns True for essentially any
 addressed text and would otherwise swallow every instruction.
 
-While Codex or Claude is responding, other contextual speech queues as the
-next user move. Participant-directed speech chooses which collaborator speaks next; it
+"Ordinary speech" throughout this table means speech ADDRESSED to JOAT —
+the wake-word rule in docs/BRAINSTORM.md ("only the cancel words are heard
+without the wake word") governs, and unaddressed room conversation is
+ignored entirely, never absorbed. A blind-pair audit filed the old wording
+as a spec conflict (DOC-WAKE-01): read alone, it permitted a session to
+transcribe bystanders.
+
+While Codex or Claude is responding, other contextual ADDRESSED speech
+queues as the next user move. Participant-directed speech chooses which collaborator speaks next; it
 does not open Agent Terminal. Neither Codex nor Claude has a permanent first
 slot. Without an explicit direction, the session continues its recorded turn
 policy and the HUD shows the actual order. A stopped or failed collaborator
