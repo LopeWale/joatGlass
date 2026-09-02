@@ -386,6 +386,21 @@ class BrainstormHistory:
         self._export_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(OSError):
             self._export_dir.chmod(0o700)
+        # Exports written BEFORE this mode was set are still 0644. Closing
+        # the directory hides them from other accounts today, which is why
+        # the first pass looked complete — but the files themselves stay
+        # world-readable, so the exposure returns the moment one is copied,
+        # synced, or the directory is loosened. Tighten what is already
+        # here, once, on the next export.
+        #
+        # Content is never touched, and nothing readable by the wearer
+        # becomes unreadable: every file in this directory is JOAT's own
+        # output, and the directory is already 0700, so a deliberately
+        # "shared" file inside it is unreachable by anyone else regardless.
+        with contextlib.suppress(OSError):
+            for existing in self._export_dir.glob("*.md"):
+                if existing.stat().st_mode & 0o077:
+                    existing.chmod(0o600)
         stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(entry.at))
         slug = re.sub(r"[^a-z0-9]+", "-", entry.topic.lower()).strip("-")[:48]
         target = self._export_dir / f"{stamp}-{slug or 'brainstorm'}.md"

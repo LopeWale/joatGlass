@@ -411,6 +411,47 @@ class TestTheExportIsAsPrivateAsTheStore:
         assert store_mode == 0o600
         assert export_mode == store_mode, "the export is world-readable"
 
+    def test_exports_written_before_the_fix_are_tightened_too(self, tmp_path) -> None:
+        """The first pass hardened only NEW writes. Closing the directory
+        hid the old ones from other accounts, which is why it looked
+        complete — but the files stayed 0644, so the exposure returns the
+        moment one is copied, synced, or the directory is loosened."""
+        import os
+        import stat
+
+        exports = tmp_path / "exports"
+        exports.mkdir(mode=0o755)
+        stale = exports / "2026-08-01-1200-an-older-session.md"
+        stale.write_text("# an older session\n\n## CODEX\n\nprivate thinking")
+        os.chmod(stale, 0o644)
+
+        history = BrainstormHistory(
+            path=tmp_path / "store.json", export_dir=exports
+        )
+        history.record("a new one", ("codex",), (("CODEX", "x"),), "done")
+
+        assert stat.S_IMODE(stale.stat().st_mode) == 0o600
+        assert stale.read_text().startswith("# an older session"), (
+            "the sweep altered content"
+        )
+
+    def test_the_sweep_leaves_files_that_are_not_ours_alone(self, tmp_path) -> None:
+        import os
+        import stat
+
+        exports = tmp_path / "exports"
+        exports.mkdir(mode=0o755)
+        foreign = exports / "notes.txt"
+        foreign.write_text("not a brainstorm export")
+        os.chmod(foreign, 0o644)
+
+        history = BrainstormHistory(
+            path=tmp_path / "store.json", export_dir=exports
+        )
+        history.record("a new one", ("codex",), (("CODEX", "x"),), "done")
+
+        assert stat.S_IMODE(foreign.stat().st_mode) == 0o644
+
     def test_the_export_directory_is_private_too(self, tmp_path) -> None:
         """Its NAMES are the session topics, so the directory listing is
         itself wearer content."""
