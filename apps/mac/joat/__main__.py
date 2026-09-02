@@ -1167,6 +1167,11 @@ async def main() -> None:
         announce=terminal_announce,
         paint=terminal_paint,
     )
+    async def focus_terminal_lane(name: str) -> None:
+        """Focus a lane from a row tap, then show it — the tap IS the choice."""
+        agent_terminal.focus(name)
+        await agent_terminal.repaint()
+
     terminal_commands = AgentTerminalCommands(
         agent_terminal,
         # The Brainstorm snapshot answers "what did Claude just say?" with
@@ -1290,6 +1295,9 @@ async def main() -> None:
         # SESSION_MODEL.md:47 — the idle row is a picker of real sessions.
         brainstorm_sessions=lambda: brainstorm_history.sessions(6),
         brainstorm_continue=sessions.resume_by_id,
+        # Tap a work session instead of reciting "terminal sessions".
+        terminal_rows=agent_terminal.picker_rows,
+        terminal_focus=focus_terminal_lane,
         brainstorm_recent=brainstorm_history.rows,
     )
     transport.on_input(capabilities.on_input)

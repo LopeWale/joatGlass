@@ -68,7 +68,10 @@ export function brainstormVisualFixture(state: BrainstormVisualState): Brainstor
     // Lane chips: every concurrent session, so one glance covers the
     // roster. Empty here meant the strip could not be seen at all.
     collaborators: ['work·idle', 'calendar·run', 'gateway·idle'],
-    activity: 'Say “terminal sessions” to choose a work session.',
+    // Not an instruction to recite a phrase. The wearer asked what "say
+    // terminal sessions to choose a work session" even meant — opening the
+    // terminal shows the sessions now, and this is the empty case.
+    activity: 'No work sessions yet. Say “terminal <instruction>” to start one.',
     endpointHost: 'home-mac.example-tailnet.ts.net',
     terminalState: 'ready' as const,
     terminalReason: 'Dedicated JOAT session',

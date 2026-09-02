@@ -292,6 +292,8 @@ class CapabilityRouter:
         brainstorm_replay: Callable[[], Awaitable[bool]] | None = None,
         brainstorm_sessions: Callable[[], list[Any]] | None = None,
         brainstorm_continue: Callable[[str], Awaitable[bool]] | None = None,
+        terminal_rows: Callable[[], list[tuple[str, str]]] | None = None,
+        terminal_focus: Callable[[str], Awaitable[None]] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
     ) -> None:
         self._hud = hud
@@ -315,6 +317,9 @@ class CapabilityRouter:
         #: What the picker last drew, so a row tap resolves to a
         #: session id rather than to a row number that may have moved.
         self._brainstorm_rows: list[Any] = []
+        self._terminal_rows = terminal_rows
+        self._terminal_focus = terminal_focus
+        self._terminal_row_names: list[str] = []
         self._brainstorm_recent = brainstorm_recent
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
@@ -535,6 +540,25 @@ class CapabilityRouter:
         does this fall back to the readiness/recovery card, which is all
         this surface used to show.
         """
+        # Sessions you can SEE and tap, not a phrase to memorise. The idle
+        # terminal said: Say "terminal sessions" to choose a work session —
+        # and the wearer's response was "why do I have to say something to
+        # choose a work session? WHAT DOES THAT EVEN MEAN?" Fair: a chooser
+        # that requires you to already know the words is not a chooser.
+        #
+        # Only when nothing is running. A lane with live output owns the
+        # lenses — the wearer opened the terminal to watch work, and a
+        # picker over the top of it would hide the thing they came for.
+        rows = self._terminal_rows() if self._terminal_rows else []
+        if rows and not any(" · running" in row for _name, row in rows):
+            self._terminal_row_names = [name for name, _row in rows]
+            await self._show_focus(
+                "AGENT TERMINAL",
+                [row for _name, row in rows],
+                hint="tap: open · say “terminal <instruction>” to send",
+                selectable=True,
+            )
+            return
         if self._terminal_view is not None:
             await self._terminal_view()
             return
@@ -594,6 +618,14 @@ class CapabilityRouter:
             hint="tap: select · left x2: back",
             selectable=True,
         ))
+
+    async def _select_terminal(self, index: int) -> None:
+        """Focus the work session the wearer tapped, and show it."""
+        names = self._terminal_row_names
+        if not 0 <= index < len(names) or self._terminal_focus is None:
+            log.info("terminal row %d is no longer on screen", index)
+            return
+        await self._terminal_focus(names[index])
 
     async def _select_brainstorm(self, index: int) -> None:
         """Open the session the wearer picked.
@@ -994,6 +1026,8 @@ class CapabilityRouter:
             match name:
                 case "BRAINSTORM":
                     await self._select_brainstorm(index)
+                case "AGENT TERMINAL":
+                    await self._select_terminal(index)
                 case "MESSAGES":
                     await self._select_message(index, trace_id)
                 case "NOTIFICATIONS":
