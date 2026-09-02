@@ -1306,6 +1306,7 @@ async def main() -> None:
         # Tap a work session instead of reciting "terminal sessions".
         terminal_rows=agent_terminal.picker_rows,
         terminal_focus=focus_terminal_lane,
+        terminal_busy=lambda: agent_terminal.busy,
         brainstorm_recent=brainstorm_history.rows,
     )
     transport.on_input(capabilities.on_input)

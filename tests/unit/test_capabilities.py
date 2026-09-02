@@ -445,6 +445,7 @@ def make_router(
     terminal_rows=None,
     terminal_focus=None,
     terminal_view=None,
+    terminal_busy=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -470,6 +471,7 @@ def make_router(
         terminal_rows=terminal_rows,
         terminal_focus=terminal_focus,
         terminal_view=terminal_view,
+        terminal_busy=terminal_busy,
     )
     return router, transport, status
 
@@ -1782,9 +1784,15 @@ class TestTheTerminalShowsItsSessions:
         async def view() -> None:
             painted.append("live")
 
-        rows = [("work", "▸ work · running")]
+        # The roster is ASKED, not parsed. This test used to pass
+        # "▸ work · running" and match on the word — but the state word the
+        # roster emits is "working", so the guard never fired and the
+        # picker would have drawn straight over live output. A fixture that
+        # invents a string production never sends proves nothing.
+        rows = [("work", "▸ work · working · run the audit")]
         router, transport, _ = make_router(
-            tmp_path, terminal_rows=lambda: rows, terminal_view=view)
+            tmp_path, terminal_rows=lambda: rows, terminal_view=view,
+            terminal_busy=lambda: True)
         await router.open("Agent Terminal")
 
         assert painted == ["live"]
@@ -1879,3 +1887,37 @@ class TestARowTapCrossesTheRealGuards:
             if focused:
                 break
         assert focused == ["calendar"]
+
+
+class TestTheBusySignalComesFromTheRoster:
+    """Not from parsing rendered row text.
+
+    The picker guard matched " · running" against the drawn rows. The word
+    AgentTerminalRoster emits is "working", so the guard never fired once —
+    it would have drawn the chooser over a lane that was mid-run, hiding
+    the work the wearer opened the terminal to watch. The test that claimed
+    to prevent it supplied a row string production never sends.
+    """
+
+    async def test_the_real_roster_reports_busy(self) -> None:
+        from joat.services.agent_terminal import AgentTerminalRoster
+
+        class Slow:
+            def __init__(self, gate): self._gate = gate
+            async def stream(self, prompt):
+                await self._gate.wait()
+                yield "done"
+
+        gate = asyncio.Event()
+        roster = AgentTerminalRoster([("work", Slow(gate))])
+        assert roster.busy is False
+
+        await roster.send("run the audit")
+        assert roster.busy is True, (
+            "a lane mid-run must report busy, whatever word its row happens "
+            "to render"
+        )
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert roster.busy is False

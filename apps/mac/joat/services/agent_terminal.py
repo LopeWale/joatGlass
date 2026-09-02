@@ -206,6 +206,17 @@ class AgentTerminalRoster:
     def names(self) -> list[str]:
         return list(self._lanes)
 
+    @property
+    def busy(self) -> bool:
+        """Is any lane doing work right now?
+
+        Asked directly rather than inferred from the rendered row text: a
+        caller that string-matched " · running" found nothing, because the
+        word this roster emits is "working". A picker keyed on that guard
+        would have drawn over live output — the one thing it must not do.
+        """
+        return any(lane.busy for lane in self._lanes.values())
+
     def picker_rows(self) -> list[tuple[str, str]]:
         """(lane name, row text) for every session, newest state first.
 
