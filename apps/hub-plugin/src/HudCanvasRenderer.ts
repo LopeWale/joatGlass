@@ -393,7 +393,7 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState' | 'noToolsChecked' | 'acceptanceArmed'>,
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'terminalState' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals'>,
 ): string {
   if (model.screen === 'brainstorm') {
     if (model.state === 'running') {
@@ -413,11 +413,14 @@ export function brainstormActionHint(
     if (model.state === 'topic_capture') {
       return 'speak your question · left x2: cancel';
     }
-    if (
-      model.state === 'ready'
-      && model.terminalState === 'ready'
-      && model.noToolsChecked
-    ) {
+    // Brainstorm facts only. This also required terminalState === 'ready'
+    // and noToolsChecked — fields a Brainstorm frame no longer carries
+    // (docs/SESSION_MODEL.md:74-75) — so after the split it fell through
+    // to the generic hint and stopped telling the wearer they can TAP TO
+    // SPEAK, on the ready screen whose only purpose is starting one. The
+    // armed diagnostic went invisible the same way. Caught by the
+    // acceptance flow, which noticed three captures were pixel-identical.
+    if (model.state === 'ready') {
       return model.acceptanceArmed === true
         ? 'tap: speak · right/ring x2: test · left x2: menu'
         : 'tap: speak · left x2: menu';
@@ -443,7 +446,7 @@ export function brainstormActionHint(
     // The gestures answer the approval only when the LANE is the thing
     // waiting. Ordering matters: a lane can hold a pending approval while
     // the connection is dead, and there the tap still retries the daemon.
-    if (model.terminalState === 'approval_required') {
+    if ((model.approvals ?? 0) > 0) {
       return 'tap: approve · swipe: deny · left x2: menu';
     }
     if (model.terminalState === 'ready') {

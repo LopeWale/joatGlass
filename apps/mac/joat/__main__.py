@@ -1160,6 +1160,7 @@ async def main() -> None:
             endpoint_host=str(terminal["endpoint_host"]),
             reason=str(terminal["reason"]),
             no_tools_checked=bool(terminal["no_tools_checked"]),
+            approvals=frame.approvals,
         ))
 
     agent_terminal = AgentTerminalRoster(

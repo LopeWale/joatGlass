@@ -717,6 +717,10 @@ class TestDownlinkWire:
             "endpointHost": "home-mac.example-tailnet.ts.net",
             "terminalReason": "",
             "noToolsChecked": True,
+            # Distinct from state="approval_required", which ALSO describes
+            # a connection whose device is unapproved. Opposite remedies,
+            # so a gesture keys on the count, not the state word.
+            "approvals": 0,
         }
 
         acceptance_ready = BrainstormHudView(state="acceptance_ready", topic="Acceptance run", collaborators=["Hermes"], activity="Tap to start the Hermes acceptance run", acceptance_armed=True).to_wire()

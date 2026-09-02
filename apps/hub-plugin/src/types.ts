@@ -103,6 +103,10 @@ export interface BrainstormHudModel {
   terminalReason?: string;
   /** Whether the no-tools policy was verified for this session. */
   noToolsChecked?: boolean;
+  /** Tool requests the focused lane is blocked on — see
+   * AgentTerminalHudModel. A connection awaiting device approval is a
+   * different problem with the opposite remedy, so the tap keys on this. */
+  approvals?: number;
   /** Default-off Mac diagnostics arm. Only this explicit state may expose the
    * isolated G2 acceptance gesture; ordinary Brainstorm never does. */
   acceptanceArmed?: boolean;
@@ -122,6 +126,13 @@ export interface AgentTerminalHudModel {
   terminalReason?: string;
   /** Local preflight only; this is never an atomic remote guarantee. */
   noToolsChecked: boolean;
+  /** Tool requests the focused lane is blocked on.
+   *
+   * Distinct from `state === 'approval_required'`, which also describes a
+   * CONNECTION whose device has not been approved in OpenClaw — a
+   * different problem whose remedy is retry, not approve. A tap needs to
+   * know which, and only this count says so. */
+  approvals?: number;
 }
 
 /**

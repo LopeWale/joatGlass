@@ -44,11 +44,20 @@ export class BrainstormController {
    * hidden right/ring acceptance gesture. */
   isAcceptanceArmed(): boolean {
     const model = this.model;
+    // Brainstorm facts only. This also required terminalState === 'ready'
+    // and noToolsChecked — fields a Brainstorm frame no longer carries,
+    // because gating a Brainstorm arm on TERMINAL readiness is exactly the
+    // coupling docs/SESSION_MODEL.md:74-75 forbids. Reading them off a
+    // split frame silently disarmed the diagnostic: the double press did
+    // nothing and said nothing, which the acceptance flow caught.
+    //
+    // The Mac remains the authority. `acceptanceArmed` is an explicit
+    // local opt-in that is off by default, and the acceptance controller
+    // refuses its own run when the terminal cannot carry it — the check
+    // belongs there, where the terminal's state actually lives.
     return model?.acceptanceArmed === true
       && model.screen === 'brainstorm'
-      && model.state === 'ready'
-      && model.terminalState === 'ready'
-      && model.noToolsChecked === true;
+      && model.state === 'ready';
   }
 
   /** Read once after the exact fixed action was handed to the live MacLink.
@@ -91,11 +100,19 @@ export class BrainstormController {
     // answers it. This used to send retry_terminal — retrying the daemon
     // when what was blocked was a tool request — and the only real way to
     // answer was to remember the words "terminal approve".
-    if (model.terminalState === 'approval_required') {
+    // A pending TOOL request, not a connection waiting on device approval
+    // in OpenClaw. Both once read `approval_required`, and the remedies are
+    // opposite: approve the tool, or retry the daemon.
+    if ((model.approvals ?? 0) > 0) {
       return this.send('approve_terminal');
     }
+    // approval_required stays here. With no pending tool request it means
+    // the CONNECTION is waiting on device approval in OpenClaw, and the
+    // remedy is still a retry — dropping it from this list made that state
+    // do nothing at all, which the acceptance flow caught.
     if (
       model.terminalState === 'blocked'
+      || model.terminalState === 'approval_required'
       || model.terminalState === 'unavailable'
     ) {
       return this.send('retry_terminal');
@@ -118,7 +135,7 @@ export class BrainstormController {
     // nothing new to learn at the moment it matters most.
     if (
       this.model?.screen === 'agent_terminal'
-      && this.model.terminalState === 'approval_required'
+      && (this.model.approvals ?? 0) > 0
     ) {
       return this.send('deny_terminal');
     }
