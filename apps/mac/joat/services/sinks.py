@@ -21,10 +21,6 @@ from collections.abc import Callable
 from typing import Protocol, TextIO
 
 from .hud import HudWriter
-
-FinishedSession = Callable[
-    [str, tuple[str, ...], tuple[tuple[str, str], ...], str], None
-]
 from ..core.protocol import (
     BRAINSTORM_ACTIVITY_MAX,
     AgentTerminalHudView,
@@ -32,6 +28,19 @@ from ..core.protocol import (
     BrainstormHudView,
 )
 from .roundtable import is_failure
+
+FinishedSession = Callable[
+    [str, tuple[str, ...], tuple[tuple[str, str], ...], str], None
+]
+
+
+class BrainstormHistoryLike(Protocol):
+    """What the durable store offers this sink — the begin/finish pair."""
+
+    def begin(self, topic: str, speakers: tuple[str, ...], *, session_id: str,
+              parent_id: str = "", root_id: str = "") -> None: ...
+    def finish(self, session_id: str, turns: tuple[tuple[str, str], ...],
+               verdict: str, *, verified: bool | None = None) -> None: ...
 
 
 class TranscriptSink(Protocol):
@@ -411,6 +420,20 @@ class Broadcast:
                 # The debate is the product; a surface is not.
                 pass
 
+    def adopt_identity(
+        self, session_id: str, parent_id: str, root_id: str
+    ) -> None:
+        for sink in self._sinks:
+            callback = getattr(sink, "adopt_identity", None)
+            if callback is not None:
+                callback(session_id, parent_id, root_id)
+
+    def adopt_verification(self, verified: bool | None) -> None:
+        for sink in self._sinks:
+            callback = getattr(sink, "adopt_verification", None)
+            if callback is not None:
+                callback(verified)
+
     async def show_terminal(self) -> None:
         for sink in self._sinks:
             callback = getattr(sink, "show_terminal", None)
@@ -500,17 +523,52 @@ class DebateStateSink:
     it and the debate that fills it stay independent.
     """
 
-    def __init__(self, on_finished: FinishedSession | None = None) -> None:
+    def __init__(
+        self,
+        on_finished: FinishedSession | None = None,
+        history: "BrainstormHistoryLike | None" = None,
+    ) -> None:
         self.snapshot = DebateSnapshot()
         self._current: list[str] = []
         # Called once when a session closes, so the answer outlives the
         # process that produced it.
         self._on_finished = on_finished
+        # The durable store, when the richer contract is wanted: an
+        # ``active`` record at open, updated in place at close, with the
+        # identity and verification state SESSION_MODEL.md:30-35 lists.
+        # ``on_finished`` alone silently dropped all of that — the record
+        # API accepted session_id/parent_id/root_id/verified and the one
+        # production caller passed four positional arguments, so every
+        # field the picker and lineage were built on was minted fresh at
+        # close and the real identity thrown away.
+        self._history = history
+        self._identity: tuple[str, str, str] = ("", "", "")
+        self._verified: bool | None = None
+
+    def adopt_identity(
+        self, session_id: str, parent_id: str, root_id: str
+    ) -> None:
+        """Identity arrives from the session that owns it, before open()."""
+        self._identity = (session_id, parent_id, root_id)
+
+    def adopt_verification(self, verified: bool | None) -> None:
+        """The verifier's overall outcome, before close()."""
+        self._verified = verified
 
     async def open(self, topic: str, speakers: list[str]) -> None:
         self.snapshot = DebateSnapshot(topic=topic, speakers=tuple(speakers),
                                        running=True)
         self._current = []
+        self._verified = None
+        session_id, parent_id, root_id = self._identity
+        if self._history is not None and session_id:
+            try:
+                self._history.begin(
+                    topic, tuple(speakers), session_id=session_id,
+                    parent_id=parent_id, root_id=root_id,
+                )
+            except Exception:
+                pass
 
     async def turn(self, label: str) -> None:
         self._flush()
@@ -524,9 +582,20 @@ class DebateStateSink:
         self.snapshot.speaking = ""
         self.snapshot.verdict = verdict
         self.snapshot.running = False
+        session_id = self._identity[0]
+        self._identity = ("", "", "")
+        # Never let persistence failure take down the session that
+        # just produced the answer — the wearer already has it.
+        if self._history is not None and session_id:
+            try:
+                self._history.finish(
+                    session_id, self.snapshot.turns, verdict,
+                    verified=self._verified,
+                )
+            except Exception:
+                pass
+            return
         if self._on_finished is not None:
-            # Never let persistence failure take down the session that
-            # just produced the answer — the wearer already has it.
             try:
                 self._on_finished(
                     self.snapshot.topic, self.snapshot.speakers,

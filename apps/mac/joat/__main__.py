@@ -718,7 +718,7 @@ async def main() -> None:
     # Finished sessions outlive the process: the synthesis the wearer
     # walked away with survives a restart, and Recent has a source.
     brainstorm_history = BrainstormHistory()
-    debate_state = DebateStateSink(on_finished=brainstorm_history.record)
+    debate_state = DebateStateSink(history=brainstorm_history)
 
     navigation_provider: NavigationProvider | None = mapbox_provider
     if navigation_provider is not None:

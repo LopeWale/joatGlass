@@ -2915,3 +2915,133 @@ class TestTheInstructionVocabularies:
         for said in ("write the tests first", "add a cache layer",
                      "note the difference between them", "keep going"):
             assert not _SAVE_REPLY.match(norm(said)), said
+
+
+class TestTheDurableRecordCarriesRealIdentity:
+    """The audit's BSI-08/BSD-03/BSD-06 cluster, one root cause: the record
+    API accepted session_id/parent_id/root_id/verified and the ONE
+    production caller (DebateStateSink.close) passed four positional
+    arguments — so every stored id was minted AFTER the fact, "branch this"
+    produced children no record could trace, no record was ever `active`,
+    and verified was null on every row. These run the REAL sink against the
+    REAL history in a temp store and read the file back.
+    """
+
+    @staticmethod
+    def _rig(tmp_path):
+        from joat.services.brainstorm_history import BrainstormHistory
+        from joat.services.sinks import DebateStateSink
+
+        history = BrainstormHistory(
+            path=tmp_path / "store.json", export_dir=tmp_path / "exports"
+        )
+        return history, DebateStateSink(history=history)
+
+    async def test_the_record_is_active_from_open_and_settles_at_close(
+        self, tmp_path
+    ) -> None:
+        history, sink = self._rig(tmp_path)
+        sink.adopt_identity("aaaa", "", "")
+        await sink.open("cold starts", ["codex", "claude"])
+
+        live = history.load("aaaa")
+        assert live is not None and live.status == "active"
+
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("cache it")
+        sink.adopt_verification(True)
+        await sink.close("done — converged")
+
+        settled = history.load("aaaa")
+        assert settled is not None
+        assert settled.status == "settled"
+        assert settled.verified is True
+        assert settled.turns == (("CODEX (proposer)", "cache it"),)
+        assert settled.root_id == "aaaa"
+
+    async def test_a_cancelled_empty_session_leaves_no_husk(self, tmp_path) -> None:
+        """An active record with no turns cannot be reopened into anything;
+        settling it would put an untitled ghost in the picker."""
+        history, sink = self._rig(tmp_path)
+        sink.adopt_identity("bbbb", "", "")
+        await sink.open("never spoke", ["codex", "claude"])
+        await sink.close("cancelled")
+        assert history.load("bbbb") is None
+
+    async def test_a_branch_traces_to_its_parent(self, tmp_path) -> None:
+        history, sink = self._rig(tmp_path)
+        sink.adopt_identity("cccc", "aaaa", "aaaa")
+        await sink.open("branched question", ["codex", "claude"])
+        await sink.turn("CLAUDE (critic)")
+        await sink.chunk("but why")
+        await sink.close("done — converged")
+
+        child = history.load("cccc")
+        assert child is not None
+        assert child.parent_id == "aaaa"
+        assert child.root_id == "aaaa"
+
+    async def test_the_session_hands_the_sink_its_own_identity(self) -> None:
+        """End to end through DebateSession: the id the session was born
+        with is the id the sink is told, not a stranger minted at close."""
+        adopted: list[tuple[str, str, str]] = []
+
+        class Spy:
+            def adopt_identity(self, sid: str, pid: str, rid: str) -> None:
+                adopted.append((sid, pid, rid))
+
+            def adopt_verification(self, verified: bool | None) -> None:
+                self.verified = verified
+
+            async def open(self, topic, speakers): ...
+            async def turn(self, label): ...
+            async def chunk(self, text): ...
+            async def close(self, verdict): ...
+
+        async def seat(prompt: str):
+            yield "a position"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 9"
+
+        session = DebateSession(
+            "t", pair(seat, seat), Spy(), judge,
+            session_id="dddd", parent_id="pppp", root_id="rrrr",
+        )
+        await session.run()
+        assert adopted == [("dddd", "pppp", "rrrr")]
+
+    async def test_resume_continues_the_same_record(self, tmp_path) -> None:
+        """docs/SESSION_MODEL.md:49 — resume, not replay-into-a-stranger.
+        The continuation adopts the STORED id, so its close updates the
+        original record instead of appending a duplicate."""
+        from joat.services.brainstorm_history import BrainstormHistory
+
+        history = BrainstormHistory(
+            path=tmp_path / "store.json", export_dir=tmp_path / "exports"
+        )
+        history.record(
+            "cold starts", ("codex",), (("CODEX (proposer)", "cache"),),
+            "done", session_id="eeee",
+        )
+
+        captured: list[DebateSession] = []
+
+        def continuation(topic, prior):
+            async def seat(prompt: str):
+                yield "x"
+            async def judge(prompt: str) -> str:
+                return "AGREEMENT: 9"
+            session = debate(SinkTransport(), pair(seat, seat), judge, topic=topic)
+            captured.append(session)
+            return session
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            history=history, continuation_factory=continuation,
+            brainstorm_available=lambda: True,
+        )
+        assert await manager.resume_by_id("eeee")
+        assert captured and captured[0].session_id == "eeee"
+        assert captured[0].root_id == "eeee"
+        await manager.close()

@@ -197,6 +197,95 @@ class BrainstormHistory:
         except Exception:
             log.warning("brainstorm not exported", exc_info=True)
 
+    def begin(
+        self,
+        topic: str,
+        speakers: tuple[str, ...],
+        *,
+        session_id: str,
+        parent_id: str = "",
+        root_id: str = "",
+    ) -> None:
+        """Open the durable record the moment the session starts.
+
+        docs/SESSION_MODEL.md:35 lists an ``active`` status, and no record
+        was ever written with it — the only writer ran at close, so a
+        session that crashed or a Mac that lost power left no trace that a
+        conversation had ever been happening. Identity is durable from
+        birth; ``finish`` updates this row rather than appending a second.
+        Never raises.
+        """
+        if not session_id:
+            return
+        now = time.time()
+        entry = PastBrainstorm(
+            topic=topic, speakers=tuple(speakers), turns=(),
+            verdict="", created_at=now, updated_at=now,
+            session_id=session_id,
+            root_id=root_id or session_id, parent_id=parent_id,
+            status="active",
+        )
+        try:
+            kept = [p for p in self._load() if p.session_id != session_id]
+            self._write([*kept, entry][-self._keep:])
+        except Exception:
+            log.warning("brainstorm begin not written", exc_info=True)
+
+    def finish(
+        self,
+        session_id: str,
+        turns: tuple[tuple[str, str], ...],
+        verdict: str,
+        *,
+        verified: bool | None = None,
+    ) -> None:
+        """Settle the active record ``begin`` opened. Never raises.
+
+        Falls back to appending a fresh row when the begin was never
+        written (a full disk at open, an old caller), so the answer the
+        wearer walked away with is kept either way. A session with no
+        turns is DELETED rather than settled: an empty record cannot be
+        reopened into anything.
+        """
+        try:
+            kept = self._load()
+        except Exception:
+            log.warning("brainstorm history not readable at finish", exc_info=True)
+            return
+        existing = next(
+            (p for p in kept if session_id and p.session_id == session_id), None
+        )
+        if not turns:
+            if existing is not None:
+                try:
+                    self._write([p for p in kept if p.session_id != session_id])
+                except Exception:
+                    log.warning("empty brainstorm not removed", exc_info=True)
+            return
+        if existing is None:
+            self.record(
+                "untitled", (), turns, verdict,
+                session_id=session_id, verified=verified,
+            )
+            return
+        entry = PastBrainstorm(
+            topic=existing.topic, speakers=existing.speakers,
+            turns=tuple(turns), verdict=verdict,
+            created_at=existing.created_at, updated_at=time.time(),
+            session_id=existing.session_id,
+            root_id=existing.root_id, parent_id=existing.parent_id,
+            status=_status_from_verdict(verdict), verified=verified,
+        )
+        try:
+            self._write([entry if p.session_id == session_id else p for p in kept])
+        except Exception:
+            log.warning("brainstorm finish not written", exc_info=True)
+        try:
+            written = self._export(entry)
+            log.info("brainstorm exported: %s", written.name)
+        except Exception:
+            log.warning("brainstorm not exported", exc_info=True)
+
     def recent(self, limit: int = 5) -> list[PastBrainstorm]:
         """Newest first — the wearer is looking for what they just did."""
         try:

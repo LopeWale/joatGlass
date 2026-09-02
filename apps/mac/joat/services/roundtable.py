@@ -286,7 +286,10 @@ def _mode_at_start(said: str) -> tuple[RelayMode, int] | None:
     while (filler := _STAGE_FILLER.match(said)) is not None:
         said = said[filler.end():]
         consumed += filler.end()
-    for pattern, mode in ((_CRITIQUE, "critique"), (_BUILD, "build")):
+    checks: tuple[tuple[re.Pattern[str], RelayMode], ...] = (
+        (_CRITIQUE, "critique"), (_BUILD, "build"),
+    )
+    for pattern, mode in checks:
         hit = pattern.match(said)
         if hit is not None:
             return mode, consumed + hit.end()
