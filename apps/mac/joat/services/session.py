@@ -1373,6 +1373,10 @@ class DebateSession(Session):
         self._max_rounds = max_rounds
         self._agreement_threshold = agreement_threshold
         self._on_phase = on_phase
+        #: Where a session's wall-clock actually went, by fixed phase name.
+        self._phase_seconds: dict[str, float] = {}
+        self._phase_name = ""
+        self._phase_started: float | None = None
         self._verify_summary: list[str] = []
         # A CONTINUATION's earlier turns. Deliberately not seeded into
         # `_transcript`: that list is also how this session counts how many
@@ -1933,14 +1937,55 @@ class DebateSession(Session):
 
     async def _finish(self, status: str) -> None:
         self._set_phase("closing")
+        # One line the wearer's own log can be searched for after a slow
+        # session, instead of "it felt slow".
+        if self._phase_seconds:
+            log.info(
+                "brainstorm phases: %s",
+                ", ".join(
+                    f"{name} {seconds:.1f}s"
+                    for name, seconds in self._phase_seconds.items()
+                ),
+            )
         adopt = getattr(self._sink, "adopt_verification", None)
         if adopt is not None:
             adopt(self._verified_overall())
         await self._sink.close(status)
 
     def _set_phase(self, phase: str) -> None:
+        # Time each phase as it closes. "JOAT is fucking slow" was about
+        # THESE seconds — two subscription CLIs, a verifier and a judge per
+        # round — and nothing measured them: voice_latency.py covers
+        # endpointing/STT/first-reply, and a Brainstorm turn was timed once,
+        # by hand, in a session that is now history. An unmeasured cost
+        # regresses silently.
+        #
+        # Content-free by construction, matching the evidence boundary
+        # (docs/BRAINSTORM.md:125-128): a FIXED phase name and an elapsed
+        # float. No topic, no turn, no provider payload — the names are the
+        # same handful this class already emits to the HUD.
+        now = time.monotonic()
+        if self._phase_started is not None and self._phase_name:
+            self._phase_seconds[self._phase_name] = (
+                self._phase_seconds.get(self._phase_name, 0.0)
+                + (now - self._phase_started)
+            )
+        self._phase_name, self._phase_started = phase, now
         if self._on_phase is not None:
             self._on_phase(phase)
+
+    #: Every phase name this class emits. A CLOSED set, named here rather
+    #: than left implicit: the timings are a diagnostic, so what may appear
+    #: as a key is a privacy boundary, and a test that re-lists these from
+    #: memory gets them wrong (mine did — it forgot meta_review).
+    PHASES = (
+        "opening", "independent", "cross_review",
+        "meta_review", "synthesis", "closing",
+    )
+
+    def phase_timings(self) -> dict[str, float]:
+        """Seconds spent per phase, for a diagnostic or a receipt."""
+        return dict(self._phase_seconds)
 
 
 def seat_participants(

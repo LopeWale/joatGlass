@@ -3440,3 +3440,87 @@ class TestTheSeatSeesWhatWasAsked:
         session = debate(SinkTransport(), pair(seat, seat), judge)
         assert session.consume_transcript("codex, go") is False
         assert session.transcript() == ()
+
+
+class TestWhereTheSecondsActuallyGo:
+    """P5: "JOAT is fucking slow" was about a Brainstorm TURN — two
+    subscription CLIs, a verifier and a judge per round — and nothing
+    measured it. voice_latency.py covers endpointing/STT/first-reply; the
+    Brainstorm phases were timed once, by hand, in a session now past. An
+    unmeasured cost regresses silently.
+
+    Content-free by construction (docs/BRAINSTORM.md:125-128): fixed phase
+    names the class already paints, plus elapsed floats.
+    """
+
+    async def test_a_finished_session_reports_where_its_time_went(self) -> None:
+        async def seat(prompt: str):
+            yield "a position"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 0.95\nBLOCKING: no"
+
+        session = debate(SinkTransport(), pair(seat, seat), judge)
+        await session.run()
+
+        timings = session.phase_timings()
+        assert timings, "no phase was timed"
+        # The phases this session actually runs, all fixed names.
+        assert {"opening", "independent"} <= set(timings)
+        assert all(isinstance(v, float) and v >= 0 for v in timings.values())
+
+    async def test_the_timings_carry_no_wearer_content(self) -> None:
+        """The keys are a closed set of phase names; a topic or a turn
+        appearing here would put conversation into a diagnostic."""
+        async def seat(prompt: str):
+            yield "a very distinctive position about caching"
+
+        async def judge(prompt: str) -> str:
+            return "AGREEMENT: 0.95\nBLOCKING: no"
+
+        session = debate(
+            SinkTransport(), pair(seat, seat), judge,
+            topic="a very distinctive topic",
+        )
+        await session.run()
+
+        # Read from the class, not re-listed from memory: this assertion
+        # first shipped missing "meta_review", so it would have passed a
+        # session that leaked a key it did not expect.
+        assert set(session.phase_timings()) <= set(DebateSession.PHASES), (
+            session.phase_timings()
+        )
+
+
+def test_every_emitted_phase_name_is_declared() -> None:
+    """The timings are a diagnostic, so their KEYS are a privacy boundary:
+    what may appear must be a closed, declared set. Parsed from the AST
+    rather than grepped — a first attempt with a regex missed
+    `_set_phase("independent" if round_no == 1 else "cross_review")`
+    entirely, reporting a disagreement that did not exist. Searching text
+    is not reading it.
+    """
+    import ast
+    from pathlib import Path
+
+    from joat.services.session import DebateSession
+
+    source = (Path(__file__).resolve().parents[2]
+              / "apps/mac/joat/services/session.py").read_text()
+    emitted: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not (isinstance(target, ast.Attribute) and target.attr == "_set_phase"):
+            continue
+        for argument in node.args:
+            for inner in ast.walk(argument):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    emitted.add(inner.value)
+
+    assert emitted, "no _set_phase call found — has it been renamed?"
+    assert emitted == set(DebateSession.PHASES), (
+        f"emitted-only: {sorted(emitted - set(DebateSession.PHASES))}, "
+        f"declared-only: {sorted(set(DebateSession.PHASES) - emitted)}"
+    )
