@@ -227,6 +227,10 @@ class SessionManager:
         # A new topic offered while a session is live, held until
         # the wearer answers. Never started behind their back.
         self._pending_topic: str = ""
+        #: More than one stored session matched a spoken `continue <title>`;
+        #: the wearer picks by ordinal. docs/SESSION_MODEL.md:49 — "ask on
+        #: ambiguity", never silently take the newest.
+        self._pending_resume: list[Any] = []
         # docs/SESSION_MODEL.md:49-51 — "continue <title>" and "branch this"
         # need a store to resume FROM and a factory that accepts the earlier
         # turns. Optional so existing embeddings keep working unchanged.
@@ -602,8 +606,17 @@ class SessionManager:
         if spoken and self._handle_instruction(spoken):
             return True
         request = text.strip().rstrip(".!?")
+        if self._pending_resume and spoken:
+            chosen = self._resolve_pending_resume(spoken)
+            if chosen is not None:
+                self._pending_resume = []
+                asyncio.get_running_loop().create_task(
+                    self.resume_by_id(chosen)
+                )
+                return True
         fresh_topic = _NEW_LINEAGE.match(request)
         if fresh_topic is not None:
+            self._pending_resume = []
             return self._start(fresh_topic.group("topic").strip())
         resumed = _CONTINUE.match(request)
         if resumed is not None and self._resume(resumed.group("title").strip()):
@@ -620,6 +633,38 @@ class SessionManager:
                     "start it", "new one", "switch")
     _REPLACE_NO = ("no", "nope", "never mind", "nevermind", "keep going",
                    "stay", "cancel that")
+
+    #: How the wearer answers "which one?" — ordinals and recency words.
+    _ORDINALS: dict[str, int] = {
+        "one": 0, "first": 0, "1": 0, "the first": 0, "the first one": 0,
+        "latest": 0, "the latest": 0, "newest": 0, "the newest": 0,
+        "two": 1, "second": 1, "2": 1, "the second": 1, "the second one": 1,
+        "three": 2, "third": 2, "3": 2, "the third": 2, "the third one": 2,
+    }
+
+    def _resolve_pending_resume(self, said: str) -> str | None:
+        answer = said.lower().strip().rstrip(".!?")
+        index = self._ORDINALS.get(answer)
+        if index is None or index >= len(self._pending_resume):
+            return None
+        session_id = getattr(self._pending_resume[index], "session_id", "")
+        return session_id or None
+
+    async def _ask_which_session(self, matches: list[Any]) -> None:
+        """Two or more stored sessions fit the spoken title — the wearer
+        chooses. docs/SESSION_MODEL.md:49 forbids guessing here."""
+        rows = "; ".join(
+            f"{n} — {getattr(p, 'title', '')[:36]}, {p.age()}"
+            for n, p in enumerate(matches[:3], start=1)
+        )
+        try:
+            await self._hud.assistant(
+                f"{len(matches)} sessions match: {rows}. "
+                "Say first, second, or third.",
+                answers_wearer=True,
+            )
+        except Exception:
+            log.warning("ambiguity question not painted", exc_info=True)
 
     async def _ask_before_replacing(self, topic: str) -> None:
         """Put the question on the glass. It is the wearer's call."""
@@ -1055,10 +1100,21 @@ class SessionManager:
         """
         if self._history is None or self._continuation_factory is None:
             return False
-        past = self._history.find(title)
-        if past is None:
+        finder = getattr(self._history, "find_all", None)
+        matches = finder(title) if finder is not None else []
+        if finder is None:
+            single = self._history.find(title)
+            matches = [single] if single is not None else []
+        if not matches:
             log.info("no stored brainstorm matches that title")
             return False
+        if len(matches) > 1:
+            self._pending_resume = list(matches[:3])
+            asyncio.get_running_loop().create_task(
+                self._ask_which_session(self._pending_resume)
+            )
+            return True
+        past = matches[0]
         if not self._brainstorm_is_available():
             self._show_topic_capture(armed=False)
             return True

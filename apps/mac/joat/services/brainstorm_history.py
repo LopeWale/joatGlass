@@ -321,7 +321,14 @@ class BrainstormHistory:
         return None
 
     def find(self, spoken: str) -> PastBrainstorm | None:
-        """The session the wearer means, by however they say the question.
+        """The single best match — the newest. Use ``find_all`` where the
+        spec requires ASKING on ambiguity rather than silently taking the
+        newest (docs/SESSION_MODEL.md:49)."""
+        matches = self.find_all(spoken)
+        return matches[0] if matches else None
+
+    def find_all(self, spoken: str) -> list[PastBrainstorm]:
+        """Every session the spoken title could mean, newest first.
 
         Matched on the topic only. Searching the TURNS would mean scanning
         the collaborators' words for a phrase the wearer half-remembers,
@@ -330,18 +337,21 @@ class BrainstormHistory:
         """
         said = " ".join(spoken.lower().split()).strip()
         if not said:
-            return None
+            return []
         history = self.recent(limit=self._keep)
+        matches: list[PastBrainstorm] = []
         for past in history:                       # newest first
             topic = past.topic.lower()
             if topic == said or said in topic or topic in said:
-                return past
+                matches.append(past)
         words = [w for w in said.split() if len(w) > 3]
         for past in history:
+            if past in matches:
+                continue
             topic = past.topic.lower()
             if words and all(word in topic for word in words):
-                return past
-        return None
+                matches.append(past)
+        return matches
 
     def rows(self, limit: int = 5, width: int = 46) -> list[str]:
         """Recent sessions as glance-sized rows for the HUD.
