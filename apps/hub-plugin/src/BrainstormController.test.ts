@@ -262,3 +262,46 @@ describe('approval_required means two different things', () => {
     expect((sent[0] as { action: string }).action).toBe('approve_terminal');
   });
 });
+
+describe('a Brainstorm frame carries no terminal fields at all', () => {
+  // docs/SESSION_MODEL.md:74-75. The wire dropped them in the split, so on
+  // a real Brainstorm frame terminalState/noToolsChecked/endpointHost are
+  // UNDEFINED. Two things had gated on them and silently stopped working:
+  // the ready hint stopped saying "tap: speak", and the diagnostic arm went
+  // invisible. This pins that no Brainstorm behaviour depends on them.
+  const bare = (state: string) => ({
+    screen: 'brainstorm' as const, state,
+    topic: 'cold-start latency', collaborators: ['Codex', 'Claude'],
+    activity: 'CODEX > cache it',
+    // deliberately: no terminalState, no noToolsChecked, no endpointHost.
+  });
+
+  it('a ready Brainstorm still arms topic capture', () => {
+    const { controller, sent } = make();
+    controller.present(bare('ready') as never);
+    expect(controller.handleClick()).toBe(true);
+    expect((sent[0] as { action: string }).action).toBe('begin_topic_capture');
+  });
+
+  it('a running Brainstorm still hands off to the terminal', () => {
+    const { controller, sent } = make();
+    controller.present(bare('running') as never);
+    expect(controller.handleClick()).toBe(true);
+    expect((sent[0] as { action: string }).action).toBe('show_terminal');
+  });
+
+  it('never reaches a terminal action from a Brainstorm frame', () => {
+    const { controller, sent } = make();
+    for (const state of ['ready', 'running', 'settled', 'topic_capture']) {
+      controller.present(bare(state) as never);
+      controller.handleClick();
+    }
+    const actions = sent.map((m) => (m as { action: string }).action);
+    for (const terminalOnly of [
+      'begin_terminal_input', 'retry_terminal',
+      'approve_terminal', 'deny_terminal',
+    ]) {
+      expect(actions).not.toContain(terminalOnly);
+    }
+  });
+});
