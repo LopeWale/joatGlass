@@ -14,6 +14,7 @@ decisions.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import secrets
@@ -666,7 +667,14 @@ class CapabilityRouter:
         """Focus the work session the wearer tapped, and show it."""
         names = self._terminal_row_names
         if not 0 <= index < len(names) or self._terminal_focus is None:
+            # A session can finish between the paint and the tap. Saying so
+            # is the difference between "the list moved" and "the glasses
+            # ignored me".
             log.info("terminal row %d is no longer on screen", index)
+            await self._hud.assistant(
+                "That session is no longer listed — open the terminal again.",
+                answers_wearer=True,
+            )
             return
         await self._terminal_focus(names[index])
 
@@ -691,6 +699,10 @@ class CapabilityRouter:
         picked = index - 1
         if not 0 <= picked < len(rows) or self._brainstorm_continue is None:
             log.info("brainstorm row %d is no longer on screen", index)
+            await self._hud.assistant(
+                "That session is no longer listed — open Brainstorm again.",
+                answers_wearer=True,
+            )
             return
         if not await self._brainstorm_continue(rows[picked].session_id):
             await self._show_focus(
@@ -1090,6 +1102,19 @@ class CapabilityRouter:
                     await self._select_note(index)
                 case "ACTIVITY":
                     await self._select_activity(index)
+        except Exception:
+            # One guard for all eight selections. There was a `try` with
+            # only a `finally`, so a handler that raised — a lane that
+            # vanished between the paint and the tap, a store that could
+            # not be read — became an unhandled task exception: the tap did
+            # nothing, said nothing, and the trace went somewhere the
+            # wearer will never look. A gesture that fails must say so on
+            # the surface it was made on.
+            log.exception("capability selection failed name=%s index=%d", name, index)
+            with contextlib.suppress(Exception):
+                await self._hud.assistant(
+                    "That did not open — try it again.", answers_wearer=True,
+                )
         finally:
             self._request_context.reset(token)
 

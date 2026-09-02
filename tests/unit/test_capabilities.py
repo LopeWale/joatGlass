@@ -1950,3 +1950,70 @@ class TestTheBusySignalComesFromTheRoster:
         await asyncio.sleep(0)
         await asyncio.sleep(0)
         assert roster.busy is False
+
+
+class TestATapThatFailsSaysSo:
+    """Gridding the tap-to-select paths the way the spoken verbs were
+    gridded, with the same result: three silences.
+
+    The dispatch had a `try` with only a `finally`, so a handler that
+    raised — a lane that vanished between the paint and the tap, a store
+    that could not be read — became an unhandled task exception. The tap
+    did nothing, said nothing, and the traceback went where the wearer
+    will never look. And a row that had scrolled off the list returned
+    silently, which reads as "the glasses ignored me" rather than "the
+    list moved".
+    """
+
+    async def test_a_raising_handler_is_caught_and_reported(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        async def focus(name: str) -> None:
+            raise RuntimeError("lane vanished")
+
+        router, transport, _status = make_router(tmp_path, terminal_focus=focus)
+        router._terminal_row_names = ["work"]
+        router._active_request_id = "req"
+        router._active_capability = router._canonical_capability("AGENT TERMINAL")
+
+        # (name, index, trace_id, request_id) — the production order.
+        await router._select_capability_row("AGENT TERMINAL", 0, "trace", "req")
+        await asyncio.sleep(0.02)
+
+        spoken = [
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        assert spoken, "the tap raised into nothing"
+
+    async def test_a_terminal_row_that_scrolled_away_says_the_list_moved(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async def focus(name: str) -> None:
+            return None
+
+        router, transport, _status = make_router(tmp_path, terminal_focus=focus)
+        await router._select_terminal(3)          # nothing was drawn
+        await asyncio.sleep(0.02)
+
+        spoken = [
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        assert spoken and "no longer listed" in spoken[-1]
+
+    async def test_a_brainstorm_row_that_scrolled_away_says_so_too(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async def continue_it(session_id: str) -> bool:
+            return True
+
+        router, transport, _status = make_router(
+            tmp_path, brainstorm_continue=continue_it,
+        )
+        await router._select_brainstorm(5)
+        await asyncio.sleep(0.02)
+
+        spoken = [
+            m.text for m in transport.sent
+            if isinstance(m, AssistantOverlay) and m.text
+        ]
+        assert spoken and "no longer listed" in spoken[-1]
