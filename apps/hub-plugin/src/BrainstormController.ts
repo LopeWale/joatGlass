@@ -87,9 +87,15 @@ export class BrainstormController {
     // started a Brainstorm, a different feature with different
     // collaborators.
     if (model.terminalState === 'ready') return this.send('begin_terminal_input');
+    // A waiting APPROVAL is the decision in front of the wearer, so the tap
+    // answers it. This used to send retry_terminal — retrying the daemon
+    // when what was blocked was a tool request — and the only real way to
+    // answer was to remember the words "terminal approve".
+    if (model.terminalState === 'approval_required') {
+      return this.send('approve_terminal');
+    }
     if (
       model.terminalState === 'blocked'
-      || model.terminalState === 'approval_required'
       || model.terminalState === 'unavailable'
     ) {
       return this.send('retry_terminal');
@@ -107,6 +113,15 @@ export class BrainstormController {
    * ("Speak your question"), and the wearer who swipes is saying never
    * mind — the same hands-free backout this surface always offered. */
   handleSwipe(): boolean {
+    // Deny is the swipe, opposite the tap that approves — the same
+    // accept/refuse shape the confirmation gate already uses, so there is
+    // nothing new to learn at the moment it matters most.
+    if (
+      this.model?.screen === 'agent_terminal'
+      && this.model.terminalState === 'approval_required'
+    ) {
+      return this.send('deny_terminal');
+    }
     return this.model?.screen === 'brainstorm'
       && this.model.state === 'topic_capture'
       ? this.send('cancel')

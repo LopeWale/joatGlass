@@ -182,6 +182,7 @@ class SessionManager:
             [str | None, str | None], Awaitable[str]] | None = None,
         save_reply: Callable[[str | None], Awaitable[str]] | None = None,
         history: Any | None = None,
+        terminal_decide: Callable[[str], Awaitable[str]] | None = None,
         transform: Callable[[str, str], Awaitable[str]] | None = None,
         continuation_factory: Callable[
             [str, tuple[tuple[str, str], ...]], Session | None] | None = None,
@@ -209,6 +210,8 @@ class SessionManager:
         # need a store to resume FROM and a factory that accepts the earlier
         # turns. Optional so existing embeddings keep working unchanged.
         self._history = history
+        # Answers the tool request a work session is blocked on.
+        self._terminal_decide = terminal_decide
         # JOAT acting ON the material, rather than routing it elsewhere.
         self._transform = transform
         self._continuation_factory = continuation_factory
@@ -669,6 +672,26 @@ class SessionManager:
 
     def handle_brainstorm_action(self, action: BrainstormAction) -> None:
         """Route an explicit G2 control to the session currently on screen."""
+        if action.action in ("approve_terminal", "deny_terminal"):
+            # Answered on the glass. The roster owns the decision and
+            # reports back what the gateway RECORDED — first answer wins,
+            # so another controller may already have decided, and the
+            # wearer is told that rather than shown a fiction.
+            decide = self._terminal_decide
+            if decide is not None:
+                verdict = (
+                    "approve" if action.action == "approve_terminal" else "deny"
+                )
+
+                async def run_decision() -> None:
+                    try:
+                        receipt = await decide(verdict)
+                        log.info("terminal approval answered: %s", receipt)
+                    except Exception:
+                        log.exception("terminal approval failed")
+
+                asyncio.get_running_loop().create_task(run_decision())
+            return
         if action.action == "retry_terminal":
             retry = self._terminal_retry
             if retry is not None:

@@ -99,6 +99,13 @@ BRAINSTORM_ACTIONS: tuple[str, ...] = (
     "show_brainstorm",
     "cancel",
     "retry_terminal",
+    # An approval is answered ON the glass. It was voice-only ("terminal
+    # approve"), so a wearer looking at a blocked work session had no
+    # gesture for the decision in front of them — and the tap they DID have
+    # sent retry_terminal, retrying the daemon when what was waiting was a
+    # tool request.
+    "approve_terminal",
+    "deny_terminal",
 )
 
 

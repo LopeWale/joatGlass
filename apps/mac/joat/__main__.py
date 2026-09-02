@@ -994,6 +994,8 @@ async def main() -> None:
         route_reply=lambda who, lane: terminal_commands.route_reply(who, lane),
         save_reply=save_brainstorm_reply,
         history=brainstorm_history,
+        # A tap approves, a swipe denies — see BrainstormController.
+        terminal_decide=lambda verdict: agent_terminal.decide(verdict, None),
         transform=joat_transform,
         continuation_factory=make_continuation,
     )
