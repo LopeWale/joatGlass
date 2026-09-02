@@ -9,6 +9,7 @@ behavior applies (the orchestrator's streamed reply).
 from __future__ import annotations
 
 import asyncio
+import secrets
 from typing import Any
 import logging
 import time
@@ -769,6 +770,17 @@ class SessionManager:
         if session is None:
             log.warning("branch requested but agents unavailable")
             return
+        # Lineage before the parent goes: a branch is a CHILD
+        # (docs/SESSION_MODEL.md:32) — its own fresh id, its parent's id as
+        # parent, and the family's root carried through. This wrote
+        # parent_id="" and root_id=<its own id>, so no stored branch could
+        # be traced to the conversation it forked from.
+        parent_sid = getattr(active, "session_id", "")
+        parent_root = getattr(active, "root_id", "")
+        self._adopt_lineage(
+            session, parent_id=parent_sid,
+            root_id=parent_root or parent_sid,
+        )
         self._cancel_active()
         deadline = time.monotonic() + CANCEL_GRACE_S + 1.0
         while self._active is not None and time.monotonic() < deadline:
@@ -956,6 +968,32 @@ class SessionManager:
             self._on_state("cancelled")
         self._drain_cards()
 
+    @staticmethod
+    def _adopt_lineage(
+        session: Session,
+        *,
+        session_id: str = "",
+        parent_id: str = "",
+        root_id: str = "",
+    ) -> None:
+        """Hand a continuation its durable identity, when it can carry one.
+
+        Factories stay identity-blind — a test double or a legacy session
+        without the fields is left untouched — but a resumed session gets
+        the STORED id so it continues the same record instead of minting a
+        stranger, and a branch gets its parent's lineage.
+        """
+        for name, value in (
+            ("session_id", session_id),
+            ("parent_id", parent_id),
+            ("root_id", root_id),
+        ):
+            if value and hasattr(session, name):
+                try:
+                    setattr(session, name, value)
+                except AttributeError:
+                    return
+
     def _start(self, topic: str) -> bool:
         if not self._brainstorm_is_available():
             # Consume an explicit "brainstorm" request rather than falling
@@ -996,6 +1034,14 @@ class SessionManager:
         session = self._continuation_factory(past.topic, tuple(past.turns))
         if session is None:
             return False
+        # The SAME record continues: docs/SESSION_MODEL.md:49 says resume,
+        # not replay-into-a-new-session.
+        stored_sid = getattr(past, "session_id", "")
+        self._adopt_lineage(
+            session, session_id=stored_sid,
+            parent_id=getattr(past, "parent_id", ""),
+            root_id=getattr(past, "root_id", "") or stored_sid,
+        )
         log.info("reopened a stored brainstorm (%d prior turns)", len(past.turns))
         return self.try_start_session(session, publish_state=True)
 
@@ -1020,6 +1066,12 @@ class SessionManager:
         if session is None:
             log.warning("continuation requested but agents unavailable")
             return False
+        stored_sid = getattr(past, "session_id", "")
+        self._adopt_lineage(
+            session, session_id=stored_sid,
+            parent_id=getattr(past, "parent_id", ""),
+            root_id=getattr(past, "root_id", "") or stored_sid,
+        )
         log.info("continuing a stored brainstorm (%d prior turns)",
                  len(past.turns))
         return self.try_start_session(session, publish_state=True)
@@ -1174,8 +1226,23 @@ class DebateSession(Session):
         agreement_threshold: float = 0.85,
         on_phase: Callable[[str], None] | None = None,
         prior: tuple[tuple[str, str], ...] = (),
+        session_id: str = "",
+        parent_id: str = "",
+        root_id: str = "",
     ) -> None:
         self._topic = topic
+        # Durable identity, born WITH the conversation
+        # (docs/SESSION_MODEL.md:30-32). Minted here when not carried in,
+        # so a fresh session, a branch (child id + parent lineage), and a
+        # resume (the stored id, so the same record continues) all flow
+        # through one field instead of being re-minted at close — which is
+        # what happened: the history API accepted identity and the close
+        # path never passed it, so every record's id was an orphan minted
+        # after the fact and "branch this" produced a child no record
+        # could trace to its parent.
+        self.session_id = session_id or secrets.token_hex(8)
+        self.parent_id = parent_id
+        self.root_id = root_id or self.session_id
         self._table = table
         self._sink = sink
         self._judge = judge
@@ -1369,6 +1436,9 @@ class DebateSession(Session):
         max_rounds — after which JOAT streams the verified synthesis.
         """
         self._set_phase("opening")
+        adopt = getattr(self._sink, "adopt_identity", None)
+        if adopt is not None:
+            adopt(self.session_id, self.parent_id, self.root_id)
         await self._sink.open(self._topic, self._table.names)
         outcome = "no judge — one round"
         for round_no in range(1, self._max_rounds + 1):
@@ -1673,8 +1743,31 @@ class DebateSession(Session):
             self._interrupted = False
         return "".join(collected).strip()
 
+    def _verified_overall(self) -> bool | None:
+        """The verifier's whole-session outcome, for the durable record.
+
+        SESSION_MODEL.md:34 keeps "verification state" on the record; every
+        stored row had null because nothing ever passed it. None = nothing
+        needed checking (most thinking sessions — NOT a failure); the
+        per-turn summary's LAST entry per speaker wins, because a repaired
+        turn is re-verified and the repair is the standing outcome.
+        """
+        last: dict[str, bool] = {}
+        for entry in self._verify_summary:
+            label, _, outcome = entry.partition(": ")
+            if outcome.startswith("sources check out"):
+                last[label] = True
+            elif outcome.startswith("sources don't hold up"):
+                last[label] = False
+        if not last:
+            return None
+        return all(last.values())
+
     async def _finish(self, status: str) -> None:
         self._set_phase("closing")
+        adopt = getattr(self._sink, "adopt_verification", None)
+        if adopt is not None:
+            adopt(self._verified_overall())
         await self._sink.close(status)
 
     def _set_phase(self, phase: str) -> None:
