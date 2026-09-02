@@ -372,8 +372,20 @@ class BrainstormHistory:
         return rows
 
     def _export(self, entry: PastBrainstorm) -> Path:
-        """Write one session as Markdown the wearer can open anywhere."""
-        self._export_dir.mkdir(parents=True, exist_ok=True)
+        """Write one session as Markdown the wearer can open anywhere.
+
+        Readable BY THE WEARER, not by the machine. The export is the point
+        — a session they can open later — but it is also a second complete
+        verbatim copy of the conversation, and it landed at the umask
+        default (0644) while the private store it duplicates is 0600.
+        An audit's counter-pass caught the asymmetry: SESSION_MODEL.md:37
+        calls that store private, and a world-readable twin of it in
+        ~/Documents makes the word do no work. Same mode for both copies;
+        the directory too, since its NAMES are the session topics.
+        """
+        self._export_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            self._export_dir.chmod(0o700)
         stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(entry.at))
         slug = re.sub(r"[^a-z0-9]+", "-", entry.topic.lower()).strip("-")[:48]
         target = self._export_dir / f"{stamp}-{slug or 'brainstorm'}.md"
@@ -387,6 +399,8 @@ class BrainstormHistory:
         for label, text in entry.turns:
             lines += [f"## {label}", "", text.strip(), ""]
         target.write_text("\n".join(lines))
+        with contextlib.suppress(OSError):
+            target.chmod(0o600)
         return target
 
     # ── storage ──────────────────────────────────────────────────────────

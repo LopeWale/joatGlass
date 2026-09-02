@@ -383,3 +383,44 @@ class TestTheDurableRecord:
         # the wearer between one open and the next.
         assert [r.session_id for r in self._history(tmp_path).sessions()] == \
             [r.session_id for r in rows]
+
+
+class TestTheExportIsAsPrivateAsTheStore:
+    """BSD-07, from the audit's counter-pass: the export is a SECOND
+    complete verbatim copy of the conversation, and it landed at the umask
+    default (0644) while the private store it duplicates is 0600.
+    SESSION_MODEL.md:37 calls that store private; a world-readable twin in
+    ~/Documents makes the word do no work. The export stays — it is the
+    point — but at the store's own mode.
+    """
+
+    def test_both_copies_carry_the_same_private_mode(self, tmp_path) -> None:
+        import stat
+
+        history = BrainstormHistory(
+            path=tmp_path / "store.json", export_dir=tmp_path / "exports"
+        )
+        history.record(
+            "a private question", ("codex",),
+            (("CODEX (proposer)", "a private thought"),), "done",
+        )
+        store_mode = stat.S_IMODE((tmp_path / "store.json").stat().st_mode)
+        exports = sorted((tmp_path / "exports").iterdir())
+        assert exports, "the export is the product; it must still be written"
+        export_mode = stat.S_IMODE(exports[0].stat().st_mode)
+        assert store_mode == 0o600
+        assert export_mode == store_mode, "the export is world-readable"
+
+    def test_the_export_directory_is_private_too(self, tmp_path) -> None:
+        """Its NAMES are the session topics, so the directory listing is
+        itself wearer content."""
+        import stat
+
+        history = BrainstormHistory(
+            path=tmp_path / "store.json", export_dir=tmp_path / "exports"
+        )
+        history.record(
+            "a private question", ("codex",), (("CODEX", "x"),), "done",
+        )
+        mode = stat.S_IMODE((tmp_path / "exports").stat().st_mode)
+        assert mode == 0o700

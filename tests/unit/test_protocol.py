@@ -1265,3 +1265,69 @@ class TestHudPanelWire:
         assert parse_panel_request_id("hud-request-abc") is None
         assert parse_panel_request_id("panel-notifications-1") is None
         assert parse_panel_request_id(None) is None
+
+
+class TestTheTwoLanguagesDescribeTheSameWire:
+    """CLAUDE.md: the wire lives twice by design and both files must change
+    in the same commit. Nothing enforced that. An audit found types.ts
+    still declaring the pre-split fat Brainstorm frame — endpointHost,
+    terminalState, noToolsChecked, approvals on a payload the engine has
+    never sent — so the two halves disagreed about the frame they both
+    describe and a cross-surface read type-checked.
+
+    Verified by hand once; a hand check protects one commit. This compares
+    the ACTUAL serialized payload against the ACTUAL TypeScript interface,
+    in both directions, so the next one-sided edit fails here.
+    """
+
+    @staticmethod
+    def _ts_fields(interface: str) -> set[str]:
+        import re
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[2]
+                  / "apps/hub-plugin/src/types.ts").read_text()
+        marker = f"export interface {interface} {{"
+        assert marker in source, f"{interface} has been renamed or removed"
+        body = source.split(marker)[1].split("\n}")[0]
+        # Two-space indent only: nested object literals sit deeper.
+        return set(re.findall(r"^\s{2}(\w+)\??:", body, re.M))
+
+    def test_the_brainstorm_frame_matches_its_typescript_payload(self) -> None:
+        view = BrainstormHudView(
+            state="ready", topic="t", collaborators=["a"],
+            active_speaker="s", activity="x", acceptance_armed=True,
+        )
+        emitted = set(view.to_wire()["brainstorm"].keys())
+        declared = self._ts_fields("BrainstormViewPayload")
+        assert emitted == declared, (
+            f"engine-only: {sorted(emitted - declared)}, "
+            f"plugin-only: {sorted(declared - emitted)}"
+        )
+
+    def test_the_terminal_frame_matches_its_typescript_model(self) -> None:
+        view = AgentTerminalHudView(
+            state="ready", focus="hermes", lanes=["l"], activity="x",
+            endpoint_host="h", reason="r", no_tools_checked=True, approvals=1,
+        )
+        wire = view.to_wire()
+        payload_key = next(k for k in wire if k != "kind")
+        emitted = set(wire[payload_key].keys())
+        declared = self._ts_fields("AgentTerminalHudModel")
+        assert emitted == declared, (
+            f"engine-only: {sorted(emitted - declared)}, "
+            f"plugin-only: {sorted(declared - emitted)}"
+        )
+
+    def test_the_brainstorm_frame_carries_no_terminal_field(self) -> None:
+        """docs/SESSION_MODEL.md:84-88, checked against the emitted keys
+        rather than the class definition — a producer could add one."""
+        view = BrainstormHudView(
+            state="ready", topic="t", collaborators=[], activity="x",
+        )
+        emitted = set(view.to_wire()["brainstorm"].keys())
+        forbidden = {
+            "endpointHost", "terminalState", "terminalReason",
+            "noToolsChecked", "approvals", "focus", "lanes", "screen",
+        }
+        assert not (emitted & forbidden), sorted(emitted & forbidden)
