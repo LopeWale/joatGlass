@@ -1265,3 +1265,55 @@ class TestTheTerminalVocabularies:
         for said in ("switch to decaf", "switch to work", "go to bed",
                      "open the door"):
             assert _SWITCH.match(self._norm(said)) is None, said
+
+
+class TestSwitchingSessionsByGesture:
+    """The wearer's ask, verbatim: "switch among sessions" — and their
+    complaint about the alternative: "why do I have to say something to
+    choose a work session?"
+
+    Both existing paths fail while work is RUNNING, which is exactly when
+    switching matters: the idle picker deliberately yields to live output
+    (a chooser drawn over the thing you came to watch is worse), and voice
+    means speaking. Meanwhile the tap on a busy terminal sent
+    show_brainstorm, hit `if active is None: return` in the manager, and
+    did nothing at all — a dead gesture, unnamed by the footer.
+    """
+
+    async def test_focus_cycles_and_wraps(self) -> None:
+        r = roster(work=FakeAgent(), hermes=FakeAgent(), calendar=FakeAgent())
+        assert r.focused == "work"
+        assert "hermes" in await r.focus_next()
+        assert "calendar" in await r.focus_next()
+        assert "work" in await r.focus_next()
+
+    async def test_cycling_never_touches_running_work(self) -> None:
+        gate = asyncio.Event()
+        busy = FakeAgent(gate=gate)
+        r = roster(work=busy, hermes=FakeAgent())
+        await r.send("long job")
+        await asyncio.sleep(0)
+        assert r._lanes["work"].busy
+
+        await r.focus_next()
+
+        assert r.focused == "hermes"
+        assert r._lanes["work"].busy, "switching cancelled the work"
+        assert busy.prompts == ["long job"]
+        gate.set()
+
+    async def test_a_single_lane_says_so_instead_of_pretending(self) -> None:
+        r = roster(work=FakeAgent())
+        assert "only session" in await r.focus_next()
+        assert r.focused == "work"
+
+    async def test_the_switch_repaints_so_the_strip_is_truthful(self) -> None:
+        frames: list[object] = []
+
+        async def paint(frame: object) -> None:
+            frames.append(frame)
+
+        r = roster(work=FakeAgent(), hermes=FakeAgent(), paint=paint)
+        await r.focus_next()
+        assert frames, "the wearer cannot see where focus landed"
+        assert getattr(frames[-1], "topic", "").startswith("hermes")

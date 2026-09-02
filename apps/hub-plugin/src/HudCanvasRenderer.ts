@@ -516,7 +516,14 @@ export function brainstormActionHint(
     return 'tap: retry Hermes, then approve · left x2: menu';
   }
   if (model.state === 'running') {
-    return 'swipe: scroll · say "terminal cancel" · left x2: menu';
+    // The tap is NAMED now. It sends show_brainstorm, which on a busy
+    // terminal with no Brainstorm to return to used to reach a bare
+    // `return` and do nothing — a dead gesture on the surface where the
+    // wearer most wants control, never mentioned by this hint. It cycles
+    // the focused lane there: "switch among sessions" without speaking,
+    // which is the complaint that produced the picker in the first place
+    // ("why do I have to say something to choose a work session?").
+    return 'tap: next session · swipe: scroll · say "terminal cancel"';
   }
   return model.state === 'ready'
     ? 'tap: speak to the terminal · left x2: menu'
