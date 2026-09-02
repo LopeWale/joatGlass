@@ -38,6 +38,11 @@ export const PRODUCTIVITY_VISUAL_STATES = [
   'activity',
   'activity-detail',
   'action',
+  // The two pickers. Both surfaces used to tell the wearer to SAY a phrase
+  // to see what already existed; these are what they show instead, and
+  // they need to be visually checkable like every other list.
+  'brainstorm-sessions',
+  'terminal-sessions',
 ] as const;
 
 export type ProductivityVisualState = (typeof PRODUCTIVITY_VISUAL_STATES)[number];
@@ -208,6 +213,31 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
   const fixtures: Record<ProductivityVisualState, VisualListFixture> = {
     // The thread picker speaks the dense focus-list language: dim age chip,
     // ● only on unread threads, sender bright-ish, preview as quiet detail.
+    'brainstorm-sessions': {
+      title: 'BRAINSTORM',
+      hint: 'tap: open · say “JOAT, brainstorm …” to start',
+      selectable: true,
+      items: [
+        '+ New brainstorm',
+        'cold-start latency · 11 turns · 7h ago',
+        'BLE handoff retries · 13 turns · 8h ago',
+        'naming the mic gate · 12 turns · 8h ago',
+        'whether the verifier should block · 14 turns · 1d ago',
+        'tabs or spaces · 6 turns · 2d ago',
+        'wake-word false positives · 9 turns · 3d ago',
+        'why the handoff drops a frame · 11 turns · 4d ago',
+      ],
+    },
+    'terminal-sessions': {
+      title: 'AGENT TERMINAL',
+      hint: 'tap: open · say “terminal …” to send',
+      selectable: true,
+      items: [
+        '▸ work · working · run the http audit',
+        '  calendar · needs recovery · 1 waiting',
+        '  gateway · idle',
+      ],
+    },
     messages: {
       title: 'MESSAGES',
       hint: 'tap: select · left x2: back',

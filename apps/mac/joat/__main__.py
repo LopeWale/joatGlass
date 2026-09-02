@@ -1294,7 +1294,11 @@ async def main() -> None:
         # restores that conversation instead of declaring it finished.
         brainstorm_replay=sessions.replay_active_hud,
         # SESSION_MODEL.md:47 — the idle row is a picker of real sessions.
-        brainstorm_sessions=lambda: brainstorm_history.sessions(6),
+        # NINE, plus the NEW row, is exactly what the list surface draws:
+        # planningFocusRows gives ten (baselines 60..246 on a 20px pitch).
+        # Six left four rows of the wearer's own history unused on a screen
+        # they have twice told me is too small to waste.
+        brainstorm_sessions=lambda: brainstorm_history.sessions(9),
         brainstorm_continue=sessions.resume_by_id,
         # Tap a work session instead of reciting "terminal sessions".
         terminal_rows=agent_terminal.picker_rows,
