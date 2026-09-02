@@ -431,10 +431,32 @@ class SessionManager:
                 if escape.startswith(wake + " "):
                     escape = escape[len(wake):].strip()
                     break
+            # Apostrophes out, straight AND curly: Whisper writes "that's"
+            # and sometimes "that’s", and an escape hatch that depends
+            # on which quote character the transcriber chose is not an
+            # escape hatch.
+            escape = escape.replace("’", "").replace("'", "")
+            # WHOLE-utterance matches, and heard without the wake word —
+            # so each entry is a real tradeoff, not free. The design has
+            # always been "failing toward stopped is safe": a wearer who
+            # cannot end a session is trapped watching two subscription
+            # CLIs bill, and observed live, no command worked at all while
+            # one was running.
+            #
+            # Six natural endings were missing — "that's enough", "we're
+            # done", "forget it", "abort", "quit", "enough" — and a wearer
+            # who says one of those and is ignored has no way to learn
+            # which words are real. Each is only matched as the ENTIRE
+            # utterance, so "that's enough sugar" is not a cancel and
+            # neither is any sentence merely containing "stop".
             if escape in (
                 "stop", "cancel", "stop it", "cancel that", "cancel it",
                 "stop the debate", "stop the brainstorm", "end the brainstorm",
                 "stop the session", "end the session", "never mind", "nevermind",
+                "thats enough", "that is enough", "enough",
+                "were done", "we are done", "done",
+                "forget it", "abort", "quit", "end it", "stop this",
+                "cancel this", "cancel the brainstorm",
             ):
                 log.info("wearer cancelled the active session")
                 self._cancel_active()
