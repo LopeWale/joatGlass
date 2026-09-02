@@ -92,38 +92,50 @@ class MapImageError(RuntimeError):
 #: 12–15 for the route and the position marker. A route that cannot
 #: out-shine a road is not a route.
 #:
-#: The ground sits LOW in the range, not in the middle of it, because the
-#: panel's response compresses as it brightens: measured off a captured
-#: frame, a ground at level 6 left the roads only 9 display units above it
-#: while the buildings below got 49 — so the streets, the thing the wearer
-#: is actually reading, had the least contrast of anything on the map.
-#: Anchoring at 4 spends the compressed top of the range on the roads.
-MAP_SHADOW_FLOOR = 1
-MAP_GROUND_LEVEL = 4
+#: The ground is UNLIT, and everything the map draws sits above it. This is
+#: the polarity of the reference map, and the reason is legibility of the
+#: one thing the wearer reads most: a street NAME. Mapbox draws labels as
+#: the brightest ink in the tile, so with an unlit ground they land at the
+#: top of the band and read instantly. Lighting the ground inverts that —
+#: the label becomes a dark glyph on a lit field, which is the lowest
+#: contrast pairing the panel can produce, and the names disappeared.
+#:
+#: A mid-tone ground was tried to give blocks "area", and it cost exactly
+#: that: the names went unreadable. Buildings still read here, because they
+#: are brighter than bare land in the source tile and get their own step in
+#: the band below the roads.
+MAP_GROUND_LEVEL = 0
+MAP_TONE_FLOOR = 1
 MAP_TONE_CEILING = 11
+
+#: Expands the dim end of the ink band. Below 1 lifts the tones just above
+#: bare land — which is where the road network lives — without disturbing
+#: the order the source style already puts buildings, roads and labels in.
+#: A straight linear stretch measured 18.3% of a tile one step above the
+#: ground and 1.6% across the remaining six, so the streets were the
+#: flattest thing on the map.
+_TONE_GAMMA = 0.5
 
 
 def _tone_curve(image: "ImageType") -> "ImageType":
-    """Pin the ground to a mid tone and open a band either side of it.
+    """Drop bare land to unlit; rank everything drawn on it across the band.
 
-    The tile's own ground tone — whichever level covers the most pixels —
-    is mapped to `MAP_GROUND_LEVEL`, and the two bands are stretched
-    independently around that anchor:
+        bare land (the mode) -> MAP_GROUND_LEVEL, i.e. clear glass
+        buildings/roads/labels -> MAP_TONE_FLOOR .. MAP_TONE_CEILING, by RANK
 
-        darker than ground -> MAP_SHADOW_FLOOR .. MAP_GROUND_LEVEL
-        ground             -> MAP_GROUND_LEVEL
-        brighter           -> MAP_GROUND_LEVEL .. MAP_TONE_CEILING
-
-    Anchoring on the MODE rather than the midpoint is what makes this hold
+    Anchoring on the MODE rather than the minimum is what makes this hold
     across tiles: a dense downtown tile and an open suburban one have very
-    different means, but in both the ground is the tone that covers the
-    most pixels, so the streets land in the same band on both.
+    different means, but in both, bare land is the tone covering the most
+    pixels, so the ink lands in the same band on both.
 
-    Splitting the stretch either side of the anchor is what preserves the
-    three bands. A single linear ramp across the whole range lets one
-    lopsided tile — mostly dark, or mostly bright — push the ground off
-    the anchor and collapse the structure back into the slab or the
-    wireframe this has already shipped once each.
+    Ranking rather than stretching linearly is what separates the ink. A
+    linear stretch measured 68.8% of a real tile at the ground level, 18.3%
+    one step above it, and 1.6% across the remaining six: a handful of
+    near-white label pixels set the top of the range and squashed every
+    road into the bottom of the band, so the streets — the thing being read
+    — were the flattest part of the map. Rank spends the band on the tones
+    that actually cover the panel, which is what pulls buildings, roads and
+    labels onto their own steps.
 
     Cost is measured, not assumed: `updateImageRawData` is LZ4-compressed
     by the SDK (0.0.12+) and flat quantized regions compress well — a real
@@ -143,44 +155,24 @@ def _tone_curve(image: "ImageType") -> "ImageType":
         # rectangle on the lens to say nothing; render nothing instead.
         return image.point(lambda _: 0)
 
-    # Cumulative share of the above-ground pixels at or below each tone, so a
-    # tone's level reflects how much of the map is darker than it rather than
-    # where it happens to sit between the ground and the brightest label.
-    above_total = sum(histogram[ground + 1:]) or 1
-    ranks: dict[int, float] = {}
-    seen = 0
-    for value, count in enumerate(histogram[ground + 1:], start=ground + 1):
-        seen += count
-        ranks[value] = seen / above_total
-
-    def _above_ground_rank(value: int) -> float:
-        return ranks.get(min(high, value), 1.0)
+    span = max(1, high - ground)
 
     def curve(value: int) -> int:
-        if value < ground:
-            # Buildings, water, and label glyphs: darker than the ground they
-            # sit on, and kept off pure black so they read as shapes.
-            span = max(1, ground - low)
-            normalized = (max(low, value) - low) / span
-            level = MAP_SHADOW_FLOOR + normalized * (
-                MAP_GROUND_LEVEL - MAP_SHADOW_FLOOR
-            )
-        elif value > ground:
-            # Roads and their casings, up to but never into JOAT's own levels.
-            #
-            # Spread by RANK, not by value. Stretching this band linearly
-            # measured 68.8% of the tile at the ground level, 18.3% one step
-            # above it, and 1.6% across the remaining six — because a few
-            # near-white label pixels set `high` and squashed every road into
-            # the bottom of the band. The streets are the thing being read,
-            # and they were the flattest part of the map. Ranking against how
-            # many above-ground pixels fall below this tone spends the whole
-            # band on the tones that actually cover the panel.
-            level = MAP_GROUND_LEVEL + _above_ground_rank(value) * (
-                MAP_TONE_CEILING - MAP_GROUND_LEVEL
-            )
-        else:
-            level = MAP_GROUND_LEVEL
+        if value <= ground:
+            # Bare land: the wearer is already looking at this through the
+            # lens, so drawing it costs light and buys nothing.
+            return MAP_GROUND_LEVEL * 17
+        # Buildings, roads, then labels, in the order the source already puts
+        # them — roads ARE drawn brighter than buildings in this style, so the
+        # curve must not reorder them, only spread them.
+        #
+        # The spread is by value under a gamma, not by rank. Ranking was tried
+        # and inverted the picture: rank is share-of-pixels, buildings cover
+        # the most pixels of any ink on a city tile, so they ranked highest
+        # and came out BRIGHTER than the roads crossing them. Gamma lifts the
+        # dim end without touching the ordering.
+        normalized = ((min(high, value) - ground) / span) ** _TONE_GAMMA
+        level = MAP_TONE_FLOOR + normalized * (MAP_TONE_CEILING - MAP_TONE_FLOOR)
         return int(round(level)) * 17
 
     return image.point(curve)
