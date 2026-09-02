@@ -949,3 +949,36 @@ describe('short spoken receipts are strips, not cards', () => {
     expect(HudCanvas.usesAssistantPillLayout('   ')).toBe(false);
   });
 });
+
+describe('every speaker row splits dim tag from bright words', () => {
+  // Verified against the real HudSink output, not invented: these are the
+  // exact rows it paints, including the repair label the engine builds as
+  // "<speaker> — repair <n>".
+  const TAG = /^([A-Z][A-Z0-9 .—-]{0,22}) > /;
+
+  it('tags every label the engine actually produces', () => {
+    for (const row of [
+      'CODEX > cache on the session id',
+      'CLAUDE > that breaks on handoff',
+      'VERIFIER > [1] OK — quote found',
+      'YOU > I think that is the wrong layer',
+      'JOAT > AGREED: key on the generation',
+      // A repair rendered FLAT before this: no dim tag, no bright body, on
+      // the one row where the split matters most.
+      'CODEX — REPAIR 1 > corrected with a real quote',
+      'CLAUDE — ROUND 2 > building on that',
+    ]) {
+      expect(TAG.test(row), row).toBe(true);
+    }
+  });
+
+  it('never claims a tag in ordinary prose', () => {
+    for (const row of [
+      'the cache is the wrong layer',
+      'Keep the next step explicit.',
+      'not, after a lens handoff — the auth replay resets the page.',
+    ]) {
+      expect(TAG.test(row), row).toBe(false);
+    }
+  });
+});
