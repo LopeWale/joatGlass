@@ -1462,3 +1462,74 @@ class TestInspectAsksTheRuntimeNotOurselves:
         for phrase in ("terminal history", "terminal inspect", "terminal transcript"):
             answer = await c.handle_command(phrase) or ""
             assert "run the audit" in answer, phrase
+
+
+class TestBrainstormMaterialReachesABusyLane:
+    """The wearer's headline ask, across BOTH features: "take the last
+    response from claud or codex and send it to the hermes in the Agent
+    Terminal" — into a lane that is already working.
+
+    Two things changed today meet here: routing resolves the material per
+    speaker, and a busy lane queues one line instead of refusing. Each is
+    tested alone; the combination is where material could be resolved
+    correctly and then dropped, or queued and then sent as the WRONG
+    speaker's text. Neither suite would notice.
+    """
+
+    async def test_the_right_speakers_text_survives_the_queue(self) -> None:
+        from joat.services.hud import HudWriter
+        from joat.services.session import SessionManager
+        from tests.unit.test_session import SinkTransport
+
+        gate = asyncio.Event()
+        received: list[str] = []
+
+        class Hermes:
+            async def stream(self, prompt: str):
+                received.append(prompt)
+                if len(received) == 1:
+                    await gate.wait()      # the first turn holds the lane
+                yield "ok"
+
+        roster = AgentTerminalRoster([("hermes", Hermes())])
+        replies = {
+            "claude": ("CLAUDE (critic)", "CLAUDE-TEXT key on session id"),
+            "codex": ("CODEX (proposer)", "CODEX-TEXT cache the synthesis"),
+            None: ("CLAUDE (critic)", "CLAUDE-TEXT key on session id"),
+        }
+        commands = AgentTerminalCommands(
+            roster, last_reply=lambda who: replies.get(who),
+        )
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda t: None,
+            route_reply=lambda who, lane: commands.route_reply(who, lane),
+            last_reply=lambda who: replies.get(who),
+        )
+
+        manager.handle_transcript(
+            "send that to hermes", addressed="send that to hermes",
+        )
+        await asyncio.sleep(0.05)
+        assert received == ["CLAUDE-TEXT key on session id"]
+
+        # Hermes is busy now. This must queue, not interleave, not drop.
+        manager.handle_transcript(
+            "send codex's answer to hermes",
+            addressed="send codex's answer to hermes",
+        )
+        await asyncio.sleep(0.05)
+        assert len(received) == 1, "it interleaved into a busy lane"
+        assert roster._lanes["hermes"].queued.startswith("CODEX-TEXT"), (
+            "the queue holds the wrong speaker's text"
+        )
+
+        gate.set()
+        for _ in range(60):
+            await asyncio.sleep(0.02)
+            if len(received) > 1:
+                break
+        assert received == [
+            "CLAUDE-TEXT key on session id",
+            "CODEX-TEXT cache the synthesis",
+        ]
+        await manager.close()
