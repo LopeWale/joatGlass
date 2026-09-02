@@ -16,6 +16,22 @@ from pathlib import Path
 from ..persistence.notes import NoteNotFoundError, NoteSource, NoteStore
 
 
+def _after_prefix(said: str, prefix: str) -> str | None:
+    """The text following a spoken command phrase, or None if absent.
+
+    Accepts whatever separator the transcriber produced — a space, or the
+    sentence punctuation Whisper writes after a short phrase. Returns ""
+    for a bare command so the caller can prompt rather than save nothing.
+    """
+    lowered = said.casefold()
+    if not lowered.startswith(prefix):
+        return None
+    rest = said[len(prefix):]
+    if rest and not rest[0].isspace() and rest[0] not in ".,:;!?-—":
+        return None                          # "notebook", not "note ..."
+    return rest.lstrip(" .,:;!?-—").strip()
+
+
 class NoteCommandController:
     def __init__(
         self,
@@ -36,14 +52,25 @@ class NoteCommandController:
         # punctuation is STT noise for the exact-match commands — but note
         # BODIES keep the wearer's punctuation untouched.
         command = lowered.rstrip(".,!?").rstrip()
-        for prefix in ("take a note ", "note "):
-            if lowered.startswith(prefix):
-                body = stripped[len(prefix):]
-                return self._save(body)
+        # Whisper puts a SENTENCE BREAK after a short command phrase:
+        # "Take a note. Buy milk." — so the prefix is followed by ". ",
+        # not " ", and `startswith("take a note ")` missed every real
+        # utterance. The exact-match commands below were already fixed for
+        # this (see `command`); the prefix commands were not, so dictating
+        # a note silently did nothing and the wearer's text was lost.
+        #
+        # Same defect as the Brainstorm opener, which had never matched
+        # once in the engine's entire log for exactly this reason.
+        for prefix in ("take a note", "note", "find notes"):
+            body = _after_prefix(stripped, prefix)
+            if body is None:
+                continue
+            if not body:
+                break                       # bare command — answered below
+            return (self._search(body) if prefix == "find notes"
+                    else self._save(body))
         if command in ("take a note", "note"):
             return "Say the text after “take a note”."
-        if lowered.startswith("find notes "):
-            return self._search(stripped[len("find notes "):])
         if command == "find notes":
             return "Say what to search for after “find notes”."
         if command == "undo last note":

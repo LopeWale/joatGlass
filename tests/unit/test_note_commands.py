@@ -99,3 +99,53 @@ async def test_export_never_silently_truncates_after_one_hundred_notes(
     assert "entry 000" in exported
     assert "entry 100" in exported
     store.close()
+
+
+class TestWhisperPunctuatesEveryCommand:
+    """Whisper writes a SENTENCE BREAK after a short command phrase:
+    "Take a note. Buy milk." — not "take a note buy milk".
+
+    `startswith("take a note ")` needs a SPACE, so every real dictated note
+    fell through and returned None: the wearer said it, nothing happened,
+    and their text was gone. The exact-match commands in this same method
+    were already fixed for punctuation; the prefix commands were not.
+
+    This is the defect that kept the Brainstorm opener from EVER matching
+    in the engine's whole log, found again in a second grammar because
+    nothing had been audited against transcriber output.
+    """
+
+    def _controller(self, tmp_path):
+        from joat.persistence.notes import NoteStore
+        from joat.persistence.store import DurableStore
+        from joat.services.note_commands import NoteCommandController
+
+        return NoteCommandController(NoteStore(DurableStore(tmp_path / "d.db")))
+
+    async def test_a_dictated_note_survives_punctuation(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        c = self._controller(tmp_path)
+        for said in ("Take a note. Buy milk.",
+                     "Take a note, buy milk.",
+                     "take a note buy milk",
+                     "Note. Buy milk.",
+                     "Note: buy milk"):
+            answer = await c.handle_command(said)
+            assert answer is not None and "Saved" in answer, said
+
+    async def test_find_notes_survives_punctuation(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        c = self._controller(tmp_path)
+        for said in ("Find notes. cache", "find notes cache", "Find notes, cache"):
+            assert await c.handle_command(said) is not None, said
+
+    async def test_a_bare_command_still_prompts(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        c = self._controller(tmp_path)
+        answer = await c.handle_command("Take a note.")
+        assert answer is not None and "Say the text" in answer
+
+    async def test_a_word_that_merely_starts_the_same_is_not_a_command(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """"Notebook shopping" must not become a note called "book shopping"
+        — the separator is what makes the prefix a command."""
+        c = self._controller(tmp_path)
+        assert await c.handle_command("Notebook shopping") is None
