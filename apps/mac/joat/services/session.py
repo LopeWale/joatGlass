@@ -803,6 +803,26 @@ class SessionManager:
             return False
         return self.try_start_session(session, publish_state=True)
 
+    async def resume_by_id(self, session_id: str) -> bool:
+        """Open a stored session by its id — what a picker row taps.
+
+        Distinct from `_resume`, which matches a SPOKEN title. A tap has
+        already chosen unambiguously; there is nothing left to disambiguate
+        and nothing to guess.
+        """
+        if self._history is None or self._continuation_factory is None:
+            return False
+        past = self._history.load(session_id)
+        if past is None:
+            return False
+        if self._active is not None:
+            return False
+        session = self._continuation_factory(past.topic, tuple(past.turns))
+        if session is None:
+            return False
+        log.info("reopened a stored brainstorm (%d prior turns)", len(past.turns))
+        return self.try_start_session(session, publish_state=True)
+
     def _resume(self, title: str) -> bool:
         """Continue a stored session, carrying its turns forward.
 

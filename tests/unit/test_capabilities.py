@@ -440,6 +440,8 @@ def make_router(
     actions=None,
     acceptance_armed=False,
     brainstorm_replay=None,
+    brainstorm_sessions=None,
+    brainstorm_continue=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -460,6 +462,8 @@ def make_router(
         actions=actions,
         acceptance_armed=acceptance_armed,
         brainstorm_replay=brainstorm_replay,
+        brainstorm_sessions=brainstorm_sessions,
+        brainstorm_continue=brainstorm_continue,
     )
     return router, transport, status
 
@@ -1645,3 +1649,85 @@ class TestReenteringALiveBrainstorm:
 
         frames = [m for m in transport.sent if isinstance(m, BrainstormHudView)]
         assert frames and frames[-1].state == "ready"
+
+
+class TestTheSessionPicker:
+    """docs/SESSION_MODEL.md:47 — "open Brainstorm while idle → show recent
+    sessions plus NEW."
+
+    It was four lines of dead text inside an activity string. The wearer
+    could SEE that past sessions existed and could not open one, because
+    nothing carried an id to select them by.
+    """
+
+    class Past:
+        def __init__(self, sid, topic, turns):
+            self.session_id = sid
+            self.topic = topic
+            self.turns = turns
+
+        @property
+        def title(self):
+            return self.topic
+
+        def age(self):
+            return "2m ago"
+
+    def _rows(self):
+        return [
+            self.Past("aaa", "cold-start latency", (("CODEX", "x"),)),
+            self.Past("bbb", "tabs or spaces", (("CLAUDE", "y"), ("JOAT", "z"))),
+        ]
+
+    async def test_the_idle_row_lists_real_sessions_with_new_on_top(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        rows = self._rows()
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows)
+        await router.open("Brainstorm")
+
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert lists, "the picker must be a real selectable list, not prose"
+        items = lists[-1].to_wire()["items"]
+        assert items[0] == "+ New brainstorm"
+        assert "cold-start latency" in items[1]
+        assert "2 turns" in items[2]
+        assert lists[-1].to_wire()["selectable"] is True
+
+    async def test_tapping_a_row_opens_that_session(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        rows = self._rows()
+        opened: list[str] = []
+
+        async def continue_it(session_id: str) -> bool:
+            opened.append(session_id)
+            return True
+
+        router, _t, _s = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows,
+            brainstorm_continue=continue_it)
+        await router.open("Brainstorm")
+        await router._select_brainstorm(2)      # row 0 is NEW
+
+        assert opened == ["bbb"], "the id, not the row number"
+
+    async def test_a_row_that_moved_is_not_opened_by_position(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """A session can finish between the paint and the tap. Indexing the
+        store again would open whatever had shifted into that slot."""
+        rows = self._rows()
+        opened: list[str] = []
+
+        async def continue_it(session_id: str) -> bool:
+            opened.append(session_id)
+            return True
+
+        router, _t, _s = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows,
+            brainstorm_continue=continue_it)
+        await router.open("Brainstorm")
+        rows.insert(0, self.Past("ccc", "something new", (("CODEX", "q"),)))
+
+        await router._select_brainstorm(2)
+        assert opened == ["bbb"], "resolved against what was DRAWN"

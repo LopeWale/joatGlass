@@ -253,6 +253,23 @@ def _age(unix: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d"
 
 
+_NEW_BRAINSTORM_ROW = "+ New brainstorm"
+
+
+def _session_row(past: Any) -> str:
+    """One stored session, as the wearer would pick it out of a list.
+
+    Title first because that is what they scan for; the metadata is
+    budgeted after it so a long question cannot push the age off the end.
+    """
+    meta = f" · {len(past.turns)} turns · {past.age()}"
+    room = max(8, 46 - len(meta))
+    title = past.title
+    if len(title) > room:
+        title = title[:room - 1].rstrip() + "…"
+    return f"{title}{meta}"
+
+
 class CapabilityRouter:
     """Glasses gesture in, drawn view out."""
 
@@ -273,6 +290,8 @@ class CapabilityRouter:
         terminal_view: Callable[[], Awaitable[None]] | None = None,
         brainstorm_recap: Callable[[], DebateSnapshot] | None = None,
         brainstorm_replay: Callable[[], Awaitable[bool]] | None = None,
+        brainstorm_sessions: Callable[[], list[Any]] | None = None,
+        brainstorm_continue: Callable[[str], Awaitable[bool]] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
     ) -> None:
         self._hud = hud
@@ -291,6 +310,11 @@ class CapabilityRouter:
         self._brainstorm_recap = brainstorm_recap
         # Restores a LIVE session's own frame — see _show_brainstorm.
         self._brainstorm_replay = brainstorm_replay
+        self._brainstorm_sessions = brainstorm_sessions
+        self._brainstorm_continue = brainstorm_continue
+        #: What the picker last drew, so a row tap resolves to a
+        #: session id rather than to a row number that may have moved.
+        self._brainstorm_rows: list[Any] = []
         self._brainstorm_recent = brainstorm_recent
         self._message_rows: list[MessageThread] = []
         self._message_history: _MessageHistoryState | None = None
@@ -468,10 +492,27 @@ class CapabilityRouter:
         # a reconstruction would drop the streaming turn in progress.
         if self._brainstorm_replay is not None and await self._brainstorm_replay():
             return
+        # IDLE: the picker. docs/SESSION_MODEL.md:47 — "open Brainstorm while
+        # idle → show recent sessions plus NEW."
+        #
+        # This was four lines of dead text inside an activity string: the
+        # wearer could SEE that past sessions existed and could not open one,
+        # because nothing carried an id to select them by. The record does
+        # now, so these are real rows on the same selectable surface every
+        # other data view uses — no new frame, no new gesture to learn.
+        history = self._brainstorm_sessions() if self._brainstorm_sessions else []
         recap = self._brainstorm_recap() if self._brainstorm_recap else None
         rows = recap.rows() if recap is not None else []
+        if not rows and history:
+            self._brainstorm_rows = list(history)
+            await self._show_focus(
+                "BRAINSTORM",
+                [_NEW_BRAINSTORM_ROW, *(_session_row(p) for p in history)],
+                hint="tap: open · say “JOAT, brainstorm …” to start",
+                selectable=True,
+            )
+            return
         if not rows and self._brainstorm_recent is not None:
-            # Nothing live this run, but earlier sessions survive a restart.
             past = self._brainstorm_recent(4)
             if past:
                 rows = ["Recent:", *past]
@@ -553,6 +594,35 @@ class CapabilityRouter:
             hint="tap: select · left x2: back",
             selectable=True,
         ))
+
+    async def _select_brainstorm(self, index: int) -> None:
+        """Open the session the wearer picked.
+
+        Row 0 is NEW. The rest resolve through the rows this surface last
+        DREW rather than through the store, because a session can finish
+        between the paint and the tap — indexing the store again would open
+        whatever had shifted into that position.
+        """
+        if index == 0:
+            await self._hud.show_brainstorm(BrainstormHudView(
+                state="ready",
+                topic="Ready for a question",
+                collaborators=["Codex", "Claude"],
+                activity='Say “JOAT, brainstorm …” to begin.',
+                acceptance_armed=self._acceptance_armed,
+            ))
+            return
+        rows = self._brainstorm_rows
+        picked = index - 1
+        if not 0 <= picked < len(rows) or self._brainstorm_continue is None:
+            log.info("brainstorm row %d is no longer on screen", index)
+            return
+        if not await self._brainstorm_continue(rows[picked].session_id):
+            await self._show_focus(
+                "BRAINSTORM",
+                ["That session could not be reopened.",
+                 "Say “JOAT, brainstorm …” to start a new one."],
+            )
 
     async def _select_message(self, index: int, trace_id: str) -> None:
         if (
@@ -922,6 +992,8 @@ class CapabilityRouter:
         token = self._request_context.set(request_id)
         try:
             match name:
+                case "BRAINSTORM":
+                    await self._select_brainstorm(index)
                 case "MESSAGES":
                     await self._select_message(index, trace_id)
                 case "NOTIFICATIONS":
