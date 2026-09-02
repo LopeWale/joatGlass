@@ -121,6 +121,29 @@ Ignoring 6 and 7 leaves the glasses mic streaming after the wearer exits. That's
 
 `MacLink` is the seam: the Mac's `HubGatewayTransport` speaks the same message protocol whether the peer is this plugin or `men-g2-ble-gateway`.
 
+### The three ways to draw a menu, measured
+
+Captured through the official simulator on 2026-09-01, because the choice
+between them is not a matter of taste:
+
+| Mechanism | Cost | Rows visible of 8 | Type | Verdict |
+|---|---|---|---|---|
+| `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
+| `ListContainerProperty` (native list) | text only, no tiles | ~4.5, then clips | identical OS font and pitch | Rejected — no denser than the menu, and it costs a page. |
+| Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
+
+Both native mechanisms render in the firmware's own proportional font at a
+fixed row pitch: `MenuItemProperty` exposes only `itemName` and `itemID`, and
+list containers have no per-item height or styling. **Nothing we write makes a
+native surface dense.** That is the whole trade, and it is why this plugin
+renders its pages as images at all.
+
+Two constraints worth knowing before redesigning around the contextual menu:
+it can only be opened by the wearer — **the bridge has no API to open it** —
+and the SDK never documents which gesture does so. Omitting `menuObject`
+does not remove the gesture; the README says a rebuild without it "restores
+default registration", so the OS shows its own menu instead of ours.
+
 The resting-page design and the pages the wearer moves between live in
 [HUD_DASHBOARD.md](HUD_DASHBOARD.md).
 
