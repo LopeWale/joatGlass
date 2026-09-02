@@ -41,6 +41,11 @@ function make(
     handleClick: vi.fn(() => menuConsumesLists),
     openSettings: vi.fn(),
     openPlanning: vi.fn(),
+    // `menuConsumesLists` stands in for "a menu view owns input", which is
+    // exactly when the overview click-to-notifications drill-in must NOT fire.
+    isOpen: vi.fn(() => menuConsumesLists),
+    openNotifications: vi.fn(async () => {}),
+    openFromContextualMenu: vi.fn(async () => {}),
   };
   const navigation = {
     isActive: vi.fn(() => navigationActive),
@@ -174,12 +179,22 @@ describe('EventRouter — confirm gestures', () => {
     expect(imu.confirmByTap).toHaveBeenCalledTimes(1);
   });
 
-  it('a non-decision temple press remains ordinary input', () => {
-    const { fire, imu, sent } = make();
+  it('a non-decision temple press opens the tray the overview is showing', () => {
+    const { fire, imu, menu, sent } = make();
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
     expect(imu.confirmByTap).not.toHaveBeenCalled();
     expect(imu.declineByTap).not.toHaveBeenCalled();
-    expect(sent).toHaveLength(1);
+    // Consumed locally: this is the drill-in for the cards already on the
+    // glass. The old relay carried no containerName, so the Mac dropped it.
+    expect(menu.openNotifications).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
+  });
+
+  it('leaves a click alone while a menu view already owns input', () => {
+    const { fire, menu } = make(true);
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+    expect(menu.openNotifications).not.toHaveBeenCalled();
+    expect(menu.handleClick).toHaveBeenCalledTimes(1);
   });
 
   it.each([

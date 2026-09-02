@@ -338,6 +338,14 @@ export class EventRouter {
           ? 'ring'
           : undefined;
     if (!accepted || sourceName === undefined) return;
+    // The acceptance trace keeps a deliberately BOUNDED vocabulary of
+    // actions (see G2DiagnosticTrace). An approval decision is not part of
+    // it: the acceptance run never exercises one, and a receipt is not the
+    // place to record what the wearer authorised a work session to do.
+    if (
+      accepted.action === 'approve_terminal'
+      || accepted.action === 'deny_terminal'
+    ) return;
     this.diagnostics?.record({
       type: 'brainstorm_action',
       action: accepted.action,
@@ -494,6 +502,21 @@ export class EventRouter {
       && this.brainstorm?.isActive()
     ) {
       void this.menu.toggle();
+      return;
+    }
+
+    // On the resting overview a click drills into the tray already on the
+    // glass: the notifications become a focused, scrollable page, and the
+    // next click opens the one the wearer stopped on. Any visible card was
+    // already dismissed above, so this only fires on a settled overview.
+    if (
+      type === OsEventTypeList.CLICK_EVENT
+      && this.isLocalTapSource(source)
+      && !this.menu.isOpen()
+      && !this.navigation?.isActive()
+      && !this.brainstorm?.isActive()
+    ) {
+      void this.menu.openNotifications();
       return;
     }
 
