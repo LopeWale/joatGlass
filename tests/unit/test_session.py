@@ -1212,12 +1212,31 @@ class TestConvergence:
         joined = "".join(t for t, _a, _c in hud_texts(transport))
         assert "no convergence after 2 round(s) (last 0.30)" in joined
 
-    async def test_illegible_judge_stops_without_converging(self) -> None:
+    async def test_illegible_judge_fails_closed_into_another_round(self) -> None:
+        """docs/BRAINSTORM.md:44-45 — "an illegible judgment fails closed
+        and never green-lights convergence." Failing closed means NOT
+        converged: the room goes around again, bounded by max_rounds. The
+        old behaviour broke the loop — an unreadable judge ENDED the
+        session at that round, indistinguishable on the glass from a
+        converged one."""
         transport = SinkTransport()
-        judge = ScriptedJudge(["I simply vibe with this proposal."])
-        await self._session(judge, transport, ["p1"]).run()
+        judge = ScriptedJudge([
+            "I simply vibe with this proposal.",          # round 1: illegible
+            "Fine.\nAGREEMENT: 0.9\nBLOCKING: no",        # round 2: converges
+        ])
+        await self._session(judge, transport, ["p1", "p2"]).run()
         joined = "".join(t for t, _a, _c in hud_texts(transport))
-        assert "judge gave no score" in joined
+        assert "round 2" in joined, "the illegible judgment ended the session"
+        assert "converged (agreement 0.90, round 2)" in joined
+
+    async def test_illegible_to_the_end_is_reported_as_no_convergence(self) -> None:
+        transport = SinkTransport()
+        judge = ScriptedJudge([
+            "vibes.", "still vibes.",
+        ])
+        await self._session(judge, transport, ["p1", "p2", "p3"]).run()
+        joined = "".join(t for t, _a, _c in hud_texts(transport))
+        assert "no convergence after 2 round(s) (judge unreadable)" in joined
 
 
 class TestParseJudgment:
@@ -2889,6 +2908,20 @@ class TestTheInstructionVocabularies:
 
         for said in ("that seems short", "I think that is wrong",
                      "the cache is the wrong layer", "make me a sandwich"):
+            assert not _MATERIAL_VERB.match(said), said
+
+    def test_that_as_a_conjunction_is_a_remark_not_material(self) -> None:
+        """The audit's BSI-12: an imperative followed by a that-CLAUSE is
+        a remark to the room — "explain that the cache is stale" — and
+        matching its "that" hijacked it into a transform of the last
+        reply. The pronoun is material only as the OBJECT: at the end, or
+        before a closed continuation ("shorter", "into", "up", "as")."""
+        from joat.services.session import _MATERIAL_VERB
+
+        for said in ("explain that the cache is stale",
+                     "check that the numbers add up",
+                     "show that we considered the alternative",
+                     "make that list of requirements the priority"):
             assert not _MATERIAL_VERB.match(said), said
 
     def test_saving_hears_ordinary_phrasings(self) -> None:

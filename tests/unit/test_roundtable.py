@@ -341,3 +341,49 @@ class TestStageDirectionsAreAnchored:
         from joat.services.roundtable import parse_direction
         table = self._table()
         assert parse_direction("claude was wrong about the cache", table) is None
+
+
+class TestARedirectToASpokenSeatSurvivesTheRound:
+    """The audit's dead store: direct() for an already-spoken seat wrote the
+    rotation cursor, and next_speaker() unconditionally rewrites that after
+    every turn — so the redirect was destroyed by the very next speaker. At
+    exactly two seats the +1 wrap coincidentally landed on the named seat,
+    which is the only reason production never showed it.
+    """
+
+    @staticmethod
+    def _three():
+        async def _s(prompt: str):
+            yield "x"
+        return RoundTable([
+            Participant("codex", "proposer", _s),
+            Participant("claude", "critic", _s),
+            Participant("hermes", "scribe", _s),
+        ])
+
+    def test_the_named_seat_opens_the_next_round_at_three_seats(self) -> None:
+        table = self._three()
+        table.start_round()
+        first = table.next_speaker()          # codex speaks
+        assert first.name == "codex"
+        assert table.direct("codex") is not None   # "codex, go again"
+        table.next_speaker()                  # claude — this used to clobber it
+        table.next_speaker()                  # hermes
+        table.start_round()
+        assert table.next_speaker().name == "codex", (
+            "the redirect was destroyed by the next turn"
+        )
+
+    def test_two_seats_still_behave_as_before(self) -> None:
+        async def _s(prompt: str):
+            yield "x"
+        table = RoundTable([
+            Participant("codex", "proposer", _s),
+            Participant("claude", "critic", _s),
+        ])
+        table.start_round()
+        table.next_speaker()                  # codex
+        assert table.direct("codex") is not None
+        table.next_speaker()                  # claude
+        table.start_round()
+        assert table.next_speaker().name == "codex"
