@@ -1181,3 +1181,87 @@ class TestVoiceGenerationConvention:
         from joat.core.protocol import VOICE_REQUEST_PREFIX
 
         assert VOICE_REQUEST_PREFIX == "voice-"
+
+
+class TestHudPanelWire:
+    """The overview's tabbed panel. apps/hub-plugin/src/types.ts `hud.panel`
+    reads these keys literally, and `panelRequestId` there must mint the same
+    string `panel_request_id` mints here — a row tap echoes it back."""
+
+    def test_panel_tabs_match_the_plugin_rail_order(self) -> None:
+        from joat.core.protocol import PANEL_TABS
+
+        # PANEL_TABS in types.ts is ['notifications', 'news', 'pomodoro',
+        # 'search']; notifications is never pushed, so it is absent here.
+        assert PANEL_TABS == ("news", "pomodoro", "search")
+
+    def test_hud_panel_wire_shape_and_caps(self) -> None:
+        from joat.core.protocol import HudPanel
+
+        wire = HudPanel(
+            tab="news",
+            revision=7,
+            rows=tuple(f"[{i}m] headline {i} " * 10 for i in range(30)),
+            headline="H" * 80,
+            empty="E" * 80,
+        ).to_wire()
+        assert wire["kind"] == "hud.panel"
+        assert wire["tab"] == "news"
+        assert wire["revision"] == 7
+        assert len(wire["rows"]) == 20
+        assert all(len(row) <= 64 for row in wire["rows"])
+        assert wire["headline"] == "H" * 64
+        assert wire["empty"] == "E" * 64
+        assert "pomodoro" not in wire
+        assert "activate" not in wire
+
+    def test_hud_panel_carries_the_timer_in_camel_case(self) -> None:
+        from joat.core.protocol import HudPanel, HudPanelPomodoro
+
+        wire = HudPanel(
+            tab="pomodoro",
+            revision=1,
+            rows=("Pause", "Reset"),
+            pomodoro=HudPanelPomodoro(
+                phase="focus",
+                running=True,
+                remaining_ms=1_499_000,
+                length_ms=1_500_000,
+                completed=2,
+                ends_at_unix_ms=1_760_000_000_000,
+            ),
+            activate=True,
+        ).to_wire()
+        assert wire["pomodoro"] == {
+            "phase": "focus",
+            "running": True,
+            "remainingMs": 1_499_000,
+            "lengthMs": 1_500_000,
+            "completed": 2,
+            "endsAtUnixMs": 1_760_000_000_000,
+        }
+        assert wire["activate"] is True
+
+    def test_hud_panel_refuses_unknown_tabs_and_phases(self) -> None:
+        from joat.core.protocol import HudPanel, HudPanelPomodoro, ProtocolError
+
+        with pytest.raises(ProtocolError):
+            HudPanel(tab="notifications", revision=1).to_wire()
+        with pytest.raises(ProtocolError):
+            HudPanelPomodoro(
+                phase="lunch", running=False, remaining_ms=0, length_ms=1, completed=0,
+            ).to_wire()
+        with pytest.raises(ProtocolError):
+            HudPanelPomodoro(
+                phase="focus", running=False, remaining_ms=5, length_ms=1, completed=0,
+            ).to_wire()
+
+    def test_panel_request_id_round_trips_and_rejects_foreign_ids(self) -> None:
+        from joat.core.protocol import panel_request_id, parse_panel_request_id
+
+        assert panel_request_id("news", 12) == "panel-news-12"
+        assert parse_panel_request_id("panel-news-12") == ("news", 12)
+        assert parse_panel_request_id("panel-search-0") == ("search", 0)
+        assert parse_panel_request_id("hud-request-abc") is None
+        assert parse_panel_request_id("panel-notifications-1") is None
+        assert parse_panel_request_id(None) is None

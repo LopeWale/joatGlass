@@ -428,6 +428,28 @@ export type DownlinkMessage =
     condition: string;
     unread: number;
   }
+  /**
+   * One tab of the overview's right panel, pushed proactively like
+   * `hud.ambient` so a swipe between tabs never costs a Mac round trip. The
+   * plugin caches the newest push per tab; `revision` is echoed back in every
+   * row tap (see `panelRequestId`) so a tap after a refresh cannot open the
+   * wrong story. Notifications is not a panel push: that tab reads the
+   * Main/Context/Tray streams the overview already carries.
+   */
+  | {
+    kind: 'hud.panel';
+    tab: PanelContentTab;
+    revision: number;
+    /** Dense-row grammar, "[age] primary · secondary"; ≤20 rows × ≤64 chars. */
+    rows: string[];
+    /** One quiet line above the rows: the search query, or feed freshness. */
+    headline?: string;
+    /** What the pane says when there are no rows yet. */
+    empty?: string;
+    pomodoro?: HudPanelPomodoro;
+    /** A voice-initiated open ("show the news"): switch to and expand this tab. */
+    activate?: boolean;
+  }
   | { kind: 'navigation.stop'; sessionId: string }
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
@@ -470,3 +492,46 @@ export type CapabilityName = (typeof CAPABILITIES)[number];
 /** Firmware menu ids for the rows above; item 0 is reserved by the protocol,
  * and 1-5 are the retired internal controls, so capabilities start at 10. */
 export const CAPABILITY_MENU_ID_BASE = 10;
+
+/**
+ * The overview's right panel is a vertical rail of tabs. Order is the rail
+ * order, top to bottom; Notifications is first because it is what the
+ * resting screen shows, and the tab every reopen lands on. These are NOT
+ * sidebar capabilities: the rail is reached by swiping on the overview.
+ * Mac counterpart: PANEL_TABS in apps/mac/joat/core/protocol.py.
+ */
+export const PANEL_TABS = ['notifications', 'news', 'pomodoro', 'search'] as const;
+export type PanelTab = (typeof PANEL_TABS)[number];
+/** The tabs whose content the Mac pushes as `hud.panel`. */
+export type PanelContentTab = Exclude<PanelTab, 'notifications'>;
+
+export type PomodoroPhase = 'idle' | 'focus' | 'break' | 'long_break';
+
+/** The timer as the Mac last knew it. The plugin counts down from
+ * `endsAtUnixMs` on its own clock, so a tick costs no Mac traffic. */
+export interface HudPanelPomodoro {
+  phase: PomodoroPhase;
+  running: boolean;
+  /** Wall-clock end of the running phase; absent while paused or idle. */
+  endsAtUnixMs?: number;
+  /** Time left while paused, or the full phase while idle. */
+  remainingMs: number;
+  /** Length of the current phase, for a progress bar. */
+  lengthMs: number;
+  /** Focus blocks finished in the current set of four. */
+  completed: number;
+}
+
+/** The request id a panel row tap echoes: the tab and the content revision
+ * it was tapped on. Mac counterpart: panel_request_id / parse_panel_request_id. */
+export function panelRequestId(tab: PanelContentTab, revision: number): string {
+  return `panel-${tab}-${revision}`;
+}
+
+export function parsePanelRequestId(
+  requestId: string | undefined,
+): { tab: PanelContentTab; revision: number } | undefined {
+  const match = requestId?.match(/^panel-(news|pomodoro|search)-(\d{1,9})$/);
+  if (!match) return undefined;
+  return { tab: match[1] as PanelContentTab, revision: Number(match[2]) };
+}
