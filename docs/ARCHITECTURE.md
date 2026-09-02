@@ -203,6 +203,36 @@ Progress streams to the HUD ("Round 2/4: 3 citations failed, resubmitting…").
 **Triage:** iPhone notification → macOS Notification Center → scrape → MLX priority triage → urgent card on HUD.
 **Computer use:** voice command → Brainstorm plan → cua drives Mac in Lume VM → nod/ring confirm → result summary on HUD.
 
+### Whose clock is it — the phone's
+
+Every time string the wearer READS is formatted on the Mac; the banner clock
+beside it is `new Date()` in the phone's WebView. Those were two independent
+defaults (`/etc/localtime` and the phone's zone), and nothing reconciled
+them — so travelling made "Design review · 4:30" unreadable against a
+09:41 banner, and *how long until* became uncomputable.
+
+The phone is the authority, because the wearer is where the phone is. It
+sends its IANA zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`; the
+Even Hub SDK exposes no timezone of its own) on `hello` **and with every
+position fix** — landing somewhere is a position change, so the correction
+rides the message that already reports it instead of waiting for a
+reconnect. `core/wearer_zone.WearerZone` holds it, falling back to this
+Mac's zone until a phone speaks.
+
+Two zones, because two questions are being asked:
+
+- `current()` — the wearer's. **Timed** events and reminders convert into it:
+  an instant should be rendered where it will be read.
+- `home()` — this Mac's, which is where the calendar's **all-day** entries
+  were authored. An all-day event is a DATE, not an instant; converting its
+  midnight slides it across another midnight and silently moves it a whole
+  day. Date-only reminders are anchored the same way.
+
+The agent's spoken clock (`agents/grounding.local_clock`) reads the same
+source, and names both zones while they differ. Moving the screen without
+moving the voice would have had JOAT *say* one time and *show* another —
+worse than the original bug, because nothing on screen would contradict it.
+
 ## 7. Known caveats
 
 - Protocol details are community-reverse-engineered; validate the auth bytes against `men-g2-ble-gateway`'s implementation before writing our own transport.

@@ -128,6 +128,10 @@ class Hello:
     user_name: str = ""
     """From the host's getUserInfo — grounds the wearer's name without
     configuration. Optional: older hosts omit it."""
+    time_zone: str = ""
+    """The PHONE's IANA zone, from Intl in the WebView. The Mac formats
+    every time the wearer reads and its own zone is right only by
+    coincidence. Optional: older plugins omit it and the Mac's stands in."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +231,10 @@ class Location:
     timestamp_ms: int | None = None
     # Present only when answering a Mac-requested one-shot refresh.
     refresh_id: str | None = None
+    # The phone's IANA zone, resent with every fix. Landing somewhere new
+    # is exactly a position change, so the correction rides the message
+    # that already reports it rather than waiting for a reconnect.
+    time_zone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1403,6 +1411,31 @@ def _navigation_number(value: Any, name: str, *, minimum: float, maximum: float)
     return resolved
 
 
+#: An IANA name is ``Area/Location``, sometimes ``Area/Region/Location``;
+#: a handful of legacy zones are bare words (``UTC``, ``EST5EDT``, ``Zulu``).
+_TIME_ZONE_SHAPE = re.compile(r"^[A-Za-z][A-Za-z0-9+_-]*(?:/[A-Za-z0-9+_-]+){0,2}$")
+#: Mirrors the plugin's MAX_LENGTH, so a name the phone sends is never one
+#: this side quietly truncates. The longest real name is 33 characters.
+_TIME_ZONE_MAX = 64
+
+
+def _optional_time_zone(value: Any) -> str:
+    """A plausible IANA name, or "" — never an exception.
+
+    Deliberately non-fatal, unlike its neighbours here. A `location` frame
+    also carries the fix that powers weather and grounding; dropping all of
+    that because the zone string was malformed trades a cosmetic problem
+    for a real one. Shape only — whether the name EXISTS is tzdata's
+    question, answered by WearerZone, which logs what it refuses.
+    """
+    if not isinstance(value, str):
+        return ""
+    name = value.strip()
+    if not name or len(name) > _TIME_ZONE_MAX or not _TIME_ZONE_SHAPE.match(name):
+        return ""
+    return name
+
+
 def _location_timestamp(value: Any) -> int | None:
     if value is None:
         return None
@@ -1781,6 +1814,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 model=_require(payload, "model", kind),
                 launch_source=payload.get("launchSource", "unknown"),
                 user_name=str(payload.get("userName", "")),
+                time_zone=_optional_time_zone(payload.get("timeZone")),
             )
         case "audio":
             # Coerce samples HERE so one malformed value is a ProtocolError
@@ -2064,6 +2098,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
         case "location":
             if not set(payload) <= {
                 "kind", "latitude", "longitude", "accuracy", "timestamp", "refreshId",
+                "timeZone",
             }:
                 raise ProtocolError("location has unsupported fields")
             acc = payload.get("accuracy")
@@ -2084,6 +2119,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     _navigation_identifier(refresh_id, "refreshId", maximum=64)
                     if refresh_id is not None else None
                 ),
+                time_zone=(_optional_time_zone(payload.get("timeZone")) or None),
             )
         case "device":
             return Device(
