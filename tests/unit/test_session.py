@@ -2688,3 +2688,60 @@ class TestTheOrchestratorsActualCallShape:
         await asyncio.sleep(0)
         assert acted == []
         await manager.close()
+
+
+class TestTheEscapeHatchHearsRealEndings:
+    """A wearer who cannot end a session is trapped watching two
+    subscription CLIs bill. Observed live once: no command worked at all
+    while a session was running.
+
+    Six natural endings were missing — "that's enough", "we're done",
+    "forget it", "abort", "quit", "enough" — and a wearer who says one and
+    is ignored has no way to learn which words are real.
+    """
+
+    class Live(Session):
+        def __init__(self):
+            self.cancelled = False
+
+        async def run(self) -> None:
+            while not self.cancelled:
+                await asyncio.sleep(0.01)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def consume_transcript(self, text: str) -> bool:
+            return True
+
+        def direct(self, text: str) -> str | None:
+            return None
+
+    async def _cancels(self, said: str) -> bool:
+        live = self.Live()
+        manager = SessionManager(HudWriter(SinkTransport()), lambda t: live)
+        assert manager.handle_transcript("brainstorm x")
+        await asyncio.sleep(0)
+        manager.handle_transcript(said)
+        await asyncio.sleep(0.02)
+        out = live.cancelled
+        live.cancelled = True
+        await manager.close()
+        return out
+
+    async def test_the_endings_people_actually_say(self) -> None:
+        for said in ("Stop.", "Cancel.", "Never mind.",
+                     "That's enough.", "That’s enough.", "We're done.",
+                     "Forget it.", "Abort.", "Quit.", "Enough.", "Done.",
+                     "End it.", "JOAT, stop."):
+            assert await self._cancels(said), said
+
+    async def test_a_sentence_merely_containing_one_does_not_cancel(self) -> None:
+        """Whole-utterance matching is what keeps this safe: these are heard
+        WITHOUT the wake word, so a loose match would end the wearer's
+        session on overheard room speech."""
+        for said in ("that's enough sugar",
+                     "I want to stop the cache from growing",
+                     "we are done with the first round but not the session",
+                     "the abort path is broken"):
+            assert not await self._cancels(said), said
