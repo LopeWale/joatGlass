@@ -186,3 +186,60 @@ class TestRoundInvariant:
         assert t.direct("claude") is not None
         t.start_round()
         assert t.next_speaker().name == "claude"
+
+
+class TestRedirectingTheSpeakingOrder:
+    """"You can redirect the speaking order by voice" — the wearer's spec.
+
+    Audited against punctuated speech, the way Whisper writes it. The gap
+    found: "Claude, your turn" was recognised and "Codex, you next" was
+    not. That asymmetry is what makes a voice feature feel BROKEN rather
+    than limited — the wearer says a natural variant, nothing happens, and
+    nothing explains why.
+    """
+
+    def _table(self):
+        from joat.services.roundtable import Participant, RoundTable
+
+        async def stream(_prompt: str):
+            yield "x"
+
+        return RoundTable([Participant("codex", "proposer", stream),
+                           Participant("claude", "critic", stream)])
+
+    def test_natural_phrasings_all_nominate(self) -> None:
+        from joat.services.roundtable import parse_direction
+
+        table = self._table()
+        for said, expected in [
+            ("Claude, respond.", "claude"),
+            ("Claude, your turn.", "claude"),
+            ("codex, you next", "codex"),
+            ("Codex, you're next.", "codex"),
+            ("Claude, take it.", "claude"),
+            ("Codex, answer.", "codex"),
+            ("Claude, weigh in.", "claude"),
+            ("Back to Codex.", "codex"),
+            ("Now Claude.", "claude"),
+            ("Claude, thoughts?", "claude"),
+            ("Let Claude go next.", "claude"),
+            ("Over to Claude.", "claude"),
+            ("Claude.", "claude"),
+        ]:
+            seat = parse_direction(said, table)
+            assert seat is not None and seat.name == expected, said
+
+    def test_talking_about_a_seat_never_reorders_the_room(self) -> None:
+        """The narrowness is the point: an overheard sentence mentioning a
+        collaborator must not hand them the floor."""
+        from joat.services.roundtable import parse_direction
+
+        table = self._table()
+        for said in (
+            "I was talking to Claude yesterday.",
+            "the claude cli is slow",
+            "what did codex mean by that",
+            "codex and claude disagree",
+            "I think claude is right about the cache",
+        ):
+            assert parse_direction(said, table) is None, said
