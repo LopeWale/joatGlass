@@ -123,6 +123,8 @@ export interface HudFramePainter {
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
   transcriptIsThinking?(): boolean;
+  /** The page on the glass was rebuilt: nothing painted before is on it. */
+  forgetPage?(): void;
 }
 
 /** Converts one raw raster tile into an image format the native bridge and
@@ -205,11 +207,24 @@ export const PAINT_COALESCE_MS = 40;
  */
 export const TILE_UPLOAD_TIMEOUT_MS = 15_000;
 
+/**
+ * Minimum spacing between two updateImageRawData calls. Even's display docs:
+ * "Each updateImageRawData holds the image path for 100ms. A call that
+ * arrives inside that window is held and flushed on the next one." A frame's
+ * LAST tile arriving inside the window would therefore sit on the phone
+ * until some later frame's first call — a torn page for as long as nothing
+ * else changes. Pacing the calls ourselves costs at most 10 ms a tile and
+ * never strands one. Opt-in like the burst window; main.ts passes it.
+ */
+export const TILE_CALL_GAP_MS = 110;
+
 export interface HudVisualSurfaceOptions {
   /** Burst window in ms; 0 (the default) renders the moment a frame lands. */
   coalesceMs?: number;
   /** Per-tile bridge deadline in ms; 0 waits forever. */
   uploadTimeoutMs?: number;
+  /** Minimum ms from one tile call to the next; 0 (the default) sends back to back. */
+  tileGapMs?: number;
   /**
    * The spine's state word for this frame. When supplied, the word is
    * written to the native SpineLabel container instead of being painted
@@ -316,6 +331,8 @@ export class HudVisualSurface implements HudFramePainter {
   private readonly coalesceMs: number;
   private readonly uploadTimeoutMs: number;
   private readonly spineLabel?: (frame: HudVisualFrame) => string;
+  private readonly tileGapMs: number;
+  private lastTileCallAt = Number.NEGATIVE_INFINITY;
   /** What the SpineLabel container is showing right now. Empty means the
    * page was (re)built and the container is back to its ' ' placeholder. */
   private writtenSpineLabel = '';
@@ -330,6 +347,17 @@ export class HudVisualSurface implements HudFramePainter {
     this.coalesceMs = Math.max(0, options.coalesceMs ?? 0);
     this.uploadTimeoutMs = Math.max(0, options.uploadTimeoutMs ?? TILE_UPLOAD_TIMEOUT_MS);
     this.spineLabel = options.spineLabel;
+    this.tileGapMs = Math.max(0, options.tileGapMs ?? 0);
+  }
+
+  /**
+   * The page on the glass was rebuilt — replaced by a firmware list page and
+   * later rebuilt back — so nothing delivered before it is on it any more:
+   * the next frame writes the spine word and every tile again.
+   */
+  forgetPage(): void {
+    this.deliveredTiles.clear();
+    this.writtenSpineLabel = '';
   }
 
   /**
@@ -442,9 +470,14 @@ export class HudVisualSurface implements HudFramePainter {
         if (!containerName) throw new Error(`unknown visual container ${tile.containerId}`);
         const imageData = await this.imageEncoder(tile);
         current.bytes = imageData.length;
+        if (this.tileGapMs > 0) {
+          const wait = this.tileGapMs - (now() - this.lastTileCallAt);
+          if (wait > 0) await new Promise<void>((resolve) => { setTimeout(resolve, wait); });
+        }
         // Timed from the bridge call, not the encode: the phone's LZ4 and
         // the BLE hop are what the number has to expose.
         current.startedAt = now();
+        this.lastTileCallAt = current.startedAt;
         const upload = this.client.require().updateImageRawData(
           new ImageRawDataUpdate({
             containerID: tile.containerId,

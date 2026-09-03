@@ -135,7 +135,7 @@ between them is not a matter of taste:
 | Mechanism | Cost | Rows visible of 8 | Type | Verdict |
 |---|---|---|---|---|
 | `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
-| `ListContainerProperty` (native list) | text only, no tiles | ~4.5, then clips | identical OS font and pitch | Rejected — no denser than the menu, and it costs a page. |
+| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch | **In use for NEWS and SEARCH** since 2026-09-02 (`NATIVE_LIST_TITLES`): the wearer took the font for the scroll. Rejected for the menu itself — no denser, and it costs a page. |
 | Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
 
 Both native mechanisms render in the firmware's own proportional font at a
@@ -175,11 +175,34 @@ other three, so a swipe shipped three tiles.
 
 | Interaction | Tiles before | Tiles after |
 |---|---|---|
-| Mac state word ("hearing you…"), mic on/off | 2 | **1** (top-left) |
+| Mac state word ("hearing you…") | 2 | **0** — native text (`ContainerId.SpineLabel`, `textContainerUpgrade`) |
+| Mic on/off, battery | 2 / 1 | **1** (top-right) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
-| Tap into a tab, any page change | 4 | 4 — a new page is new pixels |
+| Open NEWS or SEARCH | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
+| Scroll NEWS or SEARCH rows | 2-4 per step | **0** — the firmware moves the highlight |
+| Back from NEWS/SEARCH to the overview | 4 | 4 + one rebuild |
+| Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
 | Assistant overlay show, then dismiss | 4 + 4 | 4 + 4 |
 | Clock minute tick on a feature page | 1 | 1 |
+
+Two host facts from Even's own display docs shape the pipeline
+(`hub.evenrealities.com/docs/build/display`, read 2026-09-02):
+
+- "Each `updateImageRawData` holds the image path for 100ms. A call that
+  arrives inside that window is held and flushed on the next one." So a
+  frame's LAST tile sent inside the window waits for a call that may never
+  come — a torn page. `HudVisualSurface` paces tile calls
+  `TILE_CALL_GAP_MS` (110 ms) apart.
+- "a `success` means the update was accepted, not that the pixels are lit."
+  `durationMs` on a `tile_upload` receipt is therefore the phone's answer
+  time, not BLE delivery; only the wearer's eyes measure the hop.
+
+Community measurements (nickustinov/even-g2-notes, `docs/performance.md`)
+put the fixed per-call costs at ~104 ms for an image update (+ ~3.9 ms per
+KB of Gray4), ~83 ms for a text upgrade and ~165 ms flat for a rebuild —
+"fewer host calls beats cheaper host calls". That is why a firmware list
+page (one rebuild) beats a pixel page (four calls plus BLE) on entry, and
+why a highlight move on it costs nothing at all.
 
 Two pipeline rules landed with it, in `HudVisualSurface`: frames that
 arrive within `PAINT_COALESCE_MS` (40 ms) of each other render as ONE
@@ -204,9 +227,13 @@ The levers that remain are design decisions, not code:
   `textContainerUpgrade`. A voice-state change would then cost zero tiles.
   The price: the firmware's proportional font at a fixed 27 px line height
   (see the `font-measurement` skill), not the 10-12 px canvas type.
-- **A native list for news and search** — the firmware scrolls it itself,
-  which is why Even's own news feels smooth. Rejected once for density
-  (above); the trade is the same today.
+- ~~A native list for news and search~~ — landed 2026-09-02 (`NATIVE_LIST_TITLES`
+  in `HudPresenter`). The presenter tracks which page the glass holds
+  (`glassPage`): NEWS/SEARCH rebuild to the compat `listLayout`, status and
+  hint are written to its native containers, only NEW rows rebuild, and any
+  pixel surface (overview, reader, confirmation, overlay) rebuilds the
+  four-tile page first. Extending it to another list is one title in the
+  set — the trade is the firmware font and no rail.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.

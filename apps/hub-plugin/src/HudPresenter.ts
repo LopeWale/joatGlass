@@ -163,6 +163,31 @@ type HudSurface =
   | { kind: 'brainstorm'; brainstorm: BrainstormHudModel }
   | { kind: 'productivity'; productivity: ProductivityHudModel };
 
+/**
+ * The expanded rail pages that are FIRMWARE lists rather than pixels. Even's
+ * display docs: "native scrollable lists, with scroll highlighting handled in
+ * firmware" — a swipe moves the highlight on the glasses with no BLE traffic
+ * at all, which is why Even's own news feels smooth and a four-tile page
+ * cannot. The price is the firmware's font and row pitch and no custom rail;
+ * the wearer took that trade (2026-09-02) for these two pages. The readers
+ * they open ("NEWS · ARTICLE", "SEARCH · RESULT") stay pixels.
+ */
+export const NATIVE_LIST_TITLES: ReadonlySet<string> = new Set(['NEWS', 'SEARCH']);
+
+export function usesNativeListPage(
+  surface: HudSurface,
+): surface is Extract<HudSurface, { kind: 'list' }> {
+  return surface.kind === 'list'
+    && surface.options.railTab !== undefined
+    && NATIVE_LIST_TITLES.has(surface.options.title.trim().toUpperCase());
+}
+
+/** What a firmware list page is made of: rows and chrome, never the
+ * highlight — the firmware owns that, and a rebuild would reset it. */
+function nativeListKey(surface: Extract<HudSurface, { kind: 'list' }>): string {
+  return JSON.stringify([surface.options.title, surface.options.hint, surface.items]);
+}
+
 interface ConfirmationReturnState extends HudContentState {
   id: string;
   prompt: string;
@@ -241,6 +266,16 @@ export class HudPresenter {
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private assistantOverlay?: AssistantOverlayState;
   private actionOverlay?: ActionOverlayState;
+  /**
+   * Which page the glass holds while a visual surface is wired: the four
+   * image tiles, or a firmware list page (NEWS, SEARCH). Every path that
+   * paints pixels goes through paintVisual, which brings the tiles back
+   * first; every path that writes text goes through paint(containerId),
+   * which writes the list page's native containers while it is up.
+   */
+  private glassPage: 'visual' | 'list' = 'visual';
+  /** The rows and chrome of the firmware list currently built, if any. */
+  private nativeListKey?: string;
   private assistantOverlayPaint?: Promise<boolean>;
   private assistantOverlayPaintTimer?: ReturnType<typeof setTimeout>;
   private assistantOverlayPaintDirty = false;
@@ -835,13 +870,31 @@ export class HudPresenter {
   private async renderList(surface: Extract<HudSurface, { kind: 'list' }>): Promise<boolean> {
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
-    const ok = this.visual
+    // NEWS and SEARCH are firmware lists, not pixels (NATIVE_LIST_TITLES).
+    // Entering one costs a single rebuild (~165 ms by the community's
+    // measurements) instead of four image tiles; a highlight move costs
+    // nothing; only NEW rows rebuild, because the firmware owns the
+    // highlight and a rebuild for a selection change would reset it.
+    const firmwareList = this.visual !== undefined
+      && !this.confirmation
+      && usesNativeListPage(surface);
+    const listKey = firmwareList ? nativeListKey(surface) : undefined;
+    const alreadyBuilt = firmwareList
+      && this.glassPage === 'list'
+      && this.nativeListKey === listKey;
+    const ok = (this.visual && !firmwareList) || alreadyBuilt
       ? true
       : await this.client.require()
         .rebuildPageContainer(this.layouts.listLayout(surface.items, surface.options));
     if (!ok) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
       return false;
+    }
+    if (firmwareList && !alreadyBuilt) {
+      // The tiles and the spine word are gone with the page they were on.
+      this.visual?.forgetPage?.();
+      this.glassPage = 'list';
+      this.nativeListKey = listKey;
     }
     this.resetAll();
     this.surface = surface;
@@ -851,7 +904,19 @@ export class HudPresenter {
     this.brightness.set(ContainerId.Main, 4);
     this.streams.set(ContainerId.Hint, surface.options.hint);
     this.brightness.set(ContainerId.Hint, 1);
-    if (this.visual) {
+    if (alreadyBuilt) {
+      // Same rows on the glass already; only our mirror of the highlight
+      // moved. The status line is still the one the wearer sees.
+      if (liveStatus) {
+        this.streams.set(ContainerId.StatusBar, liveStatus.text);
+        if (liveStatus.brightness !== undefined) {
+          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+        }
+      }
+      this.recordPageTransition(from, 'list', 'show_list', 'success');
+      return true;
+    }
+    if (this.visual && !firmwareList) {
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -1298,7 +1363,7 @@ export class HudPresenter {
     this.healing = true;
     this.recordSelfHeal('attempt', containerId);
     try {
-      const layout = this.visual
+      const layout = this.visual && this.glassPage === 'visual'
         ? this.layouts.visualLayout()
         : this.confirmation
         ? this.layouts.confirmationLayout(this.confirmation.prompt)
@@ -1311,7 +1376,9 @@ export class HudPresenter {
         return false;
       }
       console.warn('[HudPresenter] page was missing — rebuilt and repainting');
-      const recovered = this.visual ? await this.paintVisual() : await this.paint(containerId);
+      const recovered = this.visual && this.glassPage === 'visual'
+        ? await this.paintVisual()
+        : await this.paint(containerId);
       this.recordSelfHeal(recovered ? 'recovered' : 'abandoned', containerId);
       return recovered;
     } catch {
@@ -1323,7 +1390,10 @@ export class HudPresenter {
   }
 
   private async paint(containerId: number): Promise<boolean> {
-    if (this.visual) return this.paintVisual();
+    if (this.visual && this.glassPage === 'visual') return this.paintVisual();
+    // No visual surface, or a firmware list page is up: the status bar,
+    // title and hint are native text containers on this page, written in
+    // place — a few bytes, no tile, no flicker.
     const full = this.streams.get(containerId) ?? '';
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
     // being read; the opening lines are already consumed.
@@ -1571,8 +1641,35 @@ export class HudPresenter {
     return this.paintVisual();
   }
 
+  /** The firmware list the glass should be showing right now, if any.
+   * Overlays and the confirmation gate are pixels over whatever page is
+   * beneath them, so while one is up the tiles win even above a list. */
+  private wantedFirmwareList(): Extract<HudSurface, { kind: 'list' }> | undefined {
+    if (this.confirmation || this.assistantOverlay || this.actionOverlay) return undefined;
+    const surface = this.surface;
+    return usesNativeListPage(surface) ? surface : undefined;
+  }
+
   private async paintVisual(localTick = false): Promise<boolean> {
     if (!this.visual) return false;
+    const wanted = this.wantedFirmwareList();
+    if (this.glassPage === 'list') {
+      // The firmware list is on the glass. A local tick has nothing to draw
+      // there. Anything else means the surface moved on, or something wants
+      // pixels over the list: bring the four tiles back first.
+      if (localTick) return true;
+      if (wanted) return this.renderList(wanted);
+      const restored = await this.client.require()
+        .rebuildPageContainer(this.layouts.visualLayout());
+      if (!restored) return false;
+      this.glassPage = 'visual';
+      this.nativeListKey = undefined;
+      this.visual.forgetPage?.();
+    } else if (wanted && !localTick) {
+      // Pixels are on the glass but the surface is a firmware list — the
+      // overlay or confirmation over it just closed. Rebuild the list.
+      return this.renderList(wanted);
+    }
     const ok = await this.visual.paint(this.visualFrame(), localTick);
     // Keep the local elapsed counter moving between Mac frames.
     this.armThinkingTicker();
