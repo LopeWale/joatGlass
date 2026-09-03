@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as HudCanvas from './HudCanvasRenderer';
+import type { HudVisualFrame } from './HudVisualSurface';
+import { SPINE_LABEL_BOX } from './types';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
   NOTIFICATION_DISMISS_HINT,
@@ -1013,13 +1015,13 @@ describe('the spine\'s left slot', () => {
       fitText(c: CanvasRenderingContext2D, t: string): void;
       drawShell(
         c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
-        f: boolean, showTime: boolean, title: string,
+        f: boolean, showTime: boolean,
       ): void;
     };
     stub.drawIcon = () => {};
     stub.fitText = (c, t) => { c.fillText(t, 0, 0); };
     stub.drawShell(
-      context, '9:41  JOAT ready  bat 87%', false, {} as unknown, true, showTime, '',
+      context, '9:41  JOAT ready  bat 87%', false, {} as unknown, true, showTime,
     );
     return texts;
   }
@@ -1035,19 +1037,20 @@ describe('the spine\'s left slot', () => {
   });
 });
 
-describe('the spine\'s voice chrome fits one image tile', () => {
-  // Every word the Mac says about a voice turn ("hearing you…"), and the
-  // microphone state beside it, repaints the 288x144 tile it sits in — at
-  // 0.5-2 s a tile over BLE. Centred on the seam at x=288 it cost two.
+describe('the spine\'s state word is native text, not pixels', () => {
+  // Every word the Mac says about a voice turn ("hearing you…") used to
+  // repaint the tile it sat in — centred on the seam, TWO tiles at 0.5-2 s
+  // each. Now a native text container carries it; the canvas must leave
+  // that box empty, and hudSpineLabel must say exactly what the canvas
+  // used to draw.
   const SEAM = 288;
-  const PX_PER_CHAR = 5.18;
 
-  function spine(): { texts: Array<{ text: string; x: number }>; icons: number[] } {
+  function shell(status: string): { texts: Array<{ text: string; x: number }>; icons: number[] } {
     const texts: Array<{ text: string; x: number }> = [];
     const icons: number[] = [];
     const context = {
       fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
-      measureText: (value: string) => ({ width: value.length * PX_PER_CHAR }),
+      measureText: (value: string) => ({ width: value.length * 5.18 }),
       save() {}, restore() {}, beginPath() {}, stroke() {},
       moveTo() {}, lineTo() {}, arcTo() {}, closePath() {},
       fillText(text: string, x: number) { texts.push({ text, x }); },
@@ -1057,45 +1060,42 @@ describe('the spine\'s voice chrome fits one image tile', () => {
       drawIcon(c: unknown, i: unknown, x: number): void;
       drawShell(
         c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
-        f: boolean, showTime: boolean, title: string,
+        f: boolean, showTime: boolean,
       ): void;
     };
     stub.drawIcon = (_c, _i, x) => { icons.push(x); };
-    stub.drawShell(
-      context, '9:41  JOAT hearing you…  bat 87%', true, {} as unknown, true, true, '',
-    );
+    stub.drawShell(context, status, true, {} as unknown, true, true);
     return { texts, icons };
   }
 
-  function drawn(texts: Array<{ text: string; x: number }>, match: (text: string) => boolean) {
-    const found = texts.find((entry) => match(entry.text));
-    if (!found) throw new Error('spine text not drawn');
-    return found;
-  }
-
-  it('keeps the clock, the state word and the microphone west of the seam', () => {
-    const { texts, icons } = spine();
-    const label = drawn(texts, (text) => text.startsWith('JOAT'));
-    expect(label.text).toBe('JOAT · HEARING YOU…');
-    expect(label.x + label.text.length * PX_PER_CHAR).toBeLessThan(SEAM);
-    const mic = drawn(texts, (text) => text === 'ON');
-    expect(mic.x + 'OFF'.length * PX_PER_CHAR).toBeLessThan(SEAM);
+  it('paints no state word into the tiles, and keeps the mic east of the seam', () => {
+    const { texts, icons } = shell('9:41  JOAT hearing you…  bat 87%');
+    expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'ON', '87%']);
+    const mic = texts.find((entry) => entry.text === 'ON');
+    expect(mic?.x).toBeGreaterThanOrEqual(SEAM);
     const [micIcon, batteryIcon] = icons;
-    expect(micIcon).toBeDefined();
-    expect((micIcon ?? 0) + 15).toBeLessThan(SEAM);
-    expect(drawn(texts, (text) => text === '9:41').x).toBeLessThan(SEAM);
-    // The battery keeps the other tile: it changes on its own slow clock,
-    // never with a voice turn.
-    expect(drawn(texts, (text) => text === '87%').x).toBeGreaterThanOrEqual(SEAM);
+    expect(micIcon).toBeGreaterThanOrEqual(SEAM);
     expect(batteryIcon).toBeGreaterThanOrEqual(SEAM);
+    // Nothing the canvas draws in the spine may cross the native box.
+    const clock = texts.find((entry) => entry.text === '9:41');
+    expect((clock?.x ?? 0) + '9:41'.length * 7.2).toBeLessThan(SPINE_LABEL_BOX.x);
   });
 
-  it('gives the state word room for the longest spine labels without a seam crossing', () => {
-    // fitText ellipsises past labelMaxWidth; the budget must still hold a
-    // real page title, and label + microphone must never overlap.
-    const { labelX, labelMaxWidth, micIconX } = HudCanvas.SPINE_VOICE_CHROME;
-    expect(labelX + labelMaxWidth).toBeLessThan(micIconX);
-    expect('MESSAGES · CONVERSATION'.length * PX_PER_CHAR).toBeLessThanOrEqual(labelMaxWidth);
+  const overview = (status: string): HudVisualFrame => ({
+    kind: 'overview', status, micOn: false, mainBrightness: 4,
+    main: '', context: '', tray: '', hint: '',
+  });
+  const list = (status: string, title: string): HudVisualFrame => ({
+    kind: 'list', status, micOn: false, title, items: [], selectable: false,
+    selectedIndex: 0, hint: '',
+  });
+
+  it('hudSpineLabel names the link state at home and the page elsewhere', () => {
+    expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT ready  bat 87%'))).toBe('JOAT · READY');
+    expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT hearing you…'))).toBe('JOAT · HEARING YOU…');
+    expect(HudCanvas.hudSpineLabel(list('9:41  JOAT ready', 'NEWS'))).toBe('NEWS');
+    // A degraded link outranks any page name.
+    expect(HudCanvas.hudSpineLabel(list('9:41  JOAT connecting', 'NEWS'))).toBe('JOAT · CONNECTING');
   });
 });
 
