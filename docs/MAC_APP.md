@@ -220,7 +220,7 @@ joat/
 ## Key classes
 
 **`Orchestrator` (services/)** — the entry point. Subscribes to `TranscriptReady` events, classifies intent:
-- *Fast path*: question/command → local MLX → `HudRenderer.show()`.
+- *Fast path*: question/command → the mind (`ClaudeReplyEngine`: Claude via the official SDK with the belt's tools offered natively; the resident MLX engine as offline fallback, or the whole seat with `--agent mlx`) → `HudRenderer.show()`. The same mind answers Even's own assistant through `AgentEndpoint` (Agent Configure).
 - *Planning path*: complex/multi-step → Brainstorm `RoundTable` / internal `DebateSession` → stream progress to HUD → confirmed plan → optional `CuaDriver` execution behind `Confirmer`.
 
 **`DirectBleTransport` (ble/)** — connects both lens peripherals, replays the 7-packet auth + init (time-sync, pipe-role, heartbeat), maintains heartbeat, auto-reconnects. Validate auth bytes against `men-g2-ble-gateway` before implementing; in Phase 0 we use `HubGatewayTransport` (the gateway's WS/MCP API) and defer raw BLE.

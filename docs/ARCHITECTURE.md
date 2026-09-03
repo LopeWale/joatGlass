@@ -3,7 +3,7 @@
 ## 1. Principles
 
 - **OOP, layered, dependency-inverted.** Domain logic in `core/` depends on abstract interfaces only; hardware, CLIs, and network live behind adapters. Swap a transport (direct-BLE ↔ Hub relay) or an STT engine without touching the orchestrator.
-- **Local-first.** MLX LLM, WhisperKit/Parakeet STT, and the Verifier's NLI judge run on the Mac. Cloud is opt-in per task.
+- **Local-first for the data, a frontier model for the mind.** WhisperKit STT and the Verifier's NLI judge run on the Mac. The assistant's model is Claude through the official SDK by default (`--agent mlx` keeps the whole turn on the Mac); the spoken query and the tool results the mind reads leave the Mac for that turn, so tools hand it summaries, not archives.
 - **Verify before trust.** No plan or critique passes between agents without every citation surviving the Verifier Gate.
 - **Human-in-the-loop for consequences.** Computer-use actions are gated behind IMU-nod or R1-ring confirmation.
 
@@ -14,7 +14,7 @@
 | G2 transport | `joat/ble` | Connect both lens peripherals, 7-packet auth replay, heartbeat, reconnect, host handoff |
 | Audio pipeline | `joat/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
 | HUD renderer | `joat/display` | 576×288 canvas, text containers, cards, differential page updates |
-| Reasoning | `joat/services` | Orchestrator: route utterances to MLX (fast path) or Brainstorm (planning path; `debate` remains a compatibility trigger) |
+| Reasoning | `joat/services`, `joat/agents` | Orchestrator: route utterances to the mind — `ClaudeReplyEngine` (Claude via the official SDK, the belt's tools offered natively, the resident MLX engine as offline fallback) — or Brainstorm (planning path; `debate` remains a compatibility trigger). `AgentEndpoint` serves the same mind to Even AI's Agent Configure |
 | Brainstorm agents | `joat/agents` | Subscription-authenticated `SubprocessAgent` adapters for `codex exec -s read-only` and `claude -p`, plus the Verifier Gate and JOAT synthesis; Hermes/OpenClaw are a separate future Agent Terminal boundary |
 | Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
 | Channels | `joat/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |

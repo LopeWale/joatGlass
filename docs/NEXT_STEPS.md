@@ -106,6 +106,77 @@ Record labelled traces (nod / head-shake / walking / nothing), derive
 thresholds from the data, and only then consider promoting a motion gesture
 back into the confirm gate (RULES.md #6).
 
+## 6. The mind on Claude, and the Even AI door — WIRED 2026-09-03
+
+The diagnosis of 2026-09-02 (nine days of `brain.log`, plus a live benchmark
+of the 3B model with the brain's own prompt): the mind was
+`Llama-3.2-3B-Instruct-4bit` told to "say you do not have it", so it answered
+"I do not have a joke." in 0.34 s; the text-level wake gate discarded 639
+utterances against 29 replies; the 1 s VAD hangover split requests into
+fragments of which only the one carrying "JOAT" was answered; and every
+reply chunk repainted BLE image tiles at 0.5–2 s each. None of that is the
+brain — the tools, channels, gateway and confirmation gates are the part
+worth keeping. The mind and the brain are different seats.
+
+What changed:
+
+- `agents/claude_reply_engine.py` fills the mind's seat with Claude through
+  the official SDK: streaming, the belt's tools offered natively (one call
+  replaces the 3B decide pass, the tool run and the answer pass), a
+  30-minute / ten-exchange working memory, and a persona that answers from
+  its own knowledge and keeps replies lens-sized. The resident MLX engine
+  is the offline fallback and still the summariser; `--agent mlx` restores
+  the old seat. The orchestrator's replier IS this engine, so the plugin's
+  voice path already uses it.
+- `services/agent_endpoint.py` is the door Even AI knocks on: an
+  OpenAI-shaped `POST /v1/chat/completions` on loopback `:8788` behind a
+  bearer token, replies stripped to plain text and cut at ~600 characters.
+- The Assistant model is a voice-switchable seat: "use sonnet for the
+  assistant", "which models are you using". Opus 5 by default, effort low.
+
+To turn it on:
+
+1. **Credentials, on the Mac that runs the brain** — a metered API key,
+   never Claude Code's OAuth tokens (RULES.md #9). Either export
+   `ANTHROPIC_API_KEY` in the brain's environment, write it to
+   `~/Library/Application Support/JOAT/anthropic-api-key` (chmod 600), or
+   run `ant auth login`. The boot log then says
+   `reply engine: Claude claude-opus-5 via the API`, and the pill turns
+   `ready` once the probe succeeds. Without credentials the mind says so on
+   the lens and the MLX fallback answers.
+2. **The token.** The first boot writes
+   `~/Library/Application Support/JOAT/agent-token` (0600); `JOAT_AGENT_TOKEN`
+   overrides it.
+3. **Expose the door over the tailnet**, next to the glasses proxy that
+   already exists:
+
+       tailscale serve --bg --set-path /agent http://127.0.0.1:8788
+
+   Check from the Mac:
+
+       curl -H "Authorization: Bearer $(cat ~/Library/Application\ Support/JOAT/agent-token)" \
+         -d '{"messages":[{"role":"user","content":"tell me a joke"}]}' \
+         https://laptop-mac.example-tailnet.ts.net/agent/v1/chat/completions
+
+4. **On the phone** (Tailscale on): Even app → Settings → Even AI →
+   Agent Configure → add an agent with that URL and the token → select it
+   as the active AI. Say "Hey Even, tell me a joke."
+
+Through this door Even owns the wake word, speech-to-text and rendering; the
+brain owns the mind and the tools. Questions, answers and reads go this way.
+Actions that need the tap/ring confirmation — send a message, write a
+calendar entry — stay on the plugin path, where the brain owns the gesture.
+
+**Metric for this door: "Hey Even" → first lens text.** Not yet measured on
+a physical G2; the community reports 3–5 s through the same Even path with
+a slower agent behind it. The `agent request … ms=` lines in `brain.log`
+give the brain's share.
+
+Still open on the plugin path, in order of payoff: push-to-talk instead of
+the text wake gate; native text (`textContainerUpgrade`) for the reply
+stream instead of tiles; a speech engine that never silently falls back to
+batch. The 1 s VAD split and the wake gate are what the button removes.
+
 ## Deferred deliberately
 
 - **`men-g2-ble-gateway` / direct-BLE** — still the desk path, but the Hub plugin gets to a working system faster and with no reverse-engineering risk. Pick it up when relay latency actually annoys you.
