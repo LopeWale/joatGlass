@@ -296,7 +296,7 @@ engine must be up for voice/cards (the script warns on both).
 ### Path B — packed private build (survives without the dev server)
 
 ```
-cd apps/hub-plugin && npm run pack     # -> build/joat.ehpk, --sdk-ver pinned 0.0.14
+cd apps/hub-plugin && npm run pack     # -> apps/hub-plugin/joat.ehpk (gitignored), --sdk-ver pinned 0.0.14
 ```
 
 Upload at hub.evenrealities.com → project → **Private builds**; install on
