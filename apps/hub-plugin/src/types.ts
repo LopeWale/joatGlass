@@ -16,8 +16,34 @@ export const ContainerId = {
   VisualTopRight: 8,
   VisualBottomLeft: 9,
   VisualBottomRight: 10,
+  /** The spine's state word: a NATIVE text container layered over the four
+   * tiles. Plugin-only — never a hud.text target, never a heal subject. */
+  SpineLabel: 11,
 } as const;
 export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
+
+/**
+ * Where the spine's state word lives. It is a native text container, not
+ * pixels in a tile, so "listening → hearing you… → reply" costs a few bytes
+ * of textContainerUpgrade instead of a 0.5-2 s image write — Even's own
+ * guidance: "use text for anything that needs to feel instant". The box
+ * sits in the spine band east of the 12 px monospace clock/date (x=30, up
+ * to nine glyphs ≈ 95 px) and ends exactly ON the tile seam, one firmware
+ * line tall (27 px, per the font-measurement skill).
+ *
+ * The width is measured, not guessed: @evenrealities/pretext puts the
+ * longest words this box must hold at 185 px ("JOAT · HEARING YOU…") and
+ * 188 px ("JOAT · RECONNECTING"), so 192 px is the smallest box that keeps
+ * them on ONE firmware line. At the old 180 px both wrapped to a second
+ * line and were truncated to "…HEARING YO...".
+ *
+ * The canvas draws NOTHING inside this box: native text has no background
+ * of its own to hide pixels underneath it.
+ */
+export const SPINE_LABEL_BOX = { x: 95, y: 7, width: 192, height: 27 } as const;
+export const SPINE_LABEL_NAME = 'spine-label';
+/** Native text brightness is 0-4; the canvas spine's SUPPORT grey (170/255) is ≈3. */
+export const SPINE_LABEL_BRIGHTNESS = 3;
 
 /** Image updates must identify the same named visual container that the
  * layout declared. Keeping the mapping beside stable IDs prevents a bridge

@@ -334,6 +334,122 @@ describe('HudVisualSurface', () => {
     }
   });
 
+  it('writes the spine word natively before any tile, and only when it changes', async () => {
+    // "listening → hearing you…" is a few bytes of textContainerUpgrade
+    // now, never a 0.5-2 s image tile — and it lands FIRST, so the wearer
+    // sees the word while the tiles that changed follow at BLE pace.
+    const calls: Array<{ kind: 'text' | 'tile'; content?: string; length?: number }> = [];
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async (update: { content?: string; contentLength?: number; containerID?: number; containerName?: string }) => {
+          expect(update.containerID).toBe(ContainerId.SpineLabel);
+          expect(update.containerName).toBe('spine-label');
+          calls.push({ kind: 'text', content: update.content, length: update.contentLength });
+          return true;
+        },
+        updateImageRawData: async () => {
+          calls.push({ kind: 'tile' });
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    let pixel = 0;
+    const renderer: HudFrameRenderer = {
+      // Every frame differs in one tile, so a tile write follows each label.
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([pixel += 1]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(1) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(1) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(1) },
+      ],
+    };
+    const frame = (status: string): HudVisualFrame => ({
+      kind: 'overview', status, micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    });
+    const surface = new HudVisualSurface(client, renderer, undefined, undefined, {
+      spineLabel: (candidate) => candidate.status,
+    });
+
+    expect(await surface.paint(frame('JOAT · LISTENING'))).toBe(true);
+    expect(calls[0]).toEqual({ kind: 'text', content: 'JOAT · LISTENING', length: 16 });
+    expect(calls.filter((call) => call.kind === 'tile')).toHaveLength(4);
+
+    calls.length = 0;
+    expect(await surface.paint(frame('JOAT · LISTENING'))).toBe(true);
+    expect(calls.filter((call) => call.kind === 'text')).toEqual([]);
+
+    calls.length = 0;
+    expect(await surface.paint(frame('JOAT · HEARING YOU…'))).toBe(true);
+    expect(calls[0]).toEqual({ kind: 'text', content: 'JOAT · HEARING YOU…', length: 19 });
+
+    // A shorter word still overwrites the whole longer one.
+    calls.length = 0;
+    expect(await surface.paint(frame('NEWS'))).toBe(true);
+    expect(calls[0]).toEqual({ kind: 'text', content: 'NEWS', length: 19 });
+  });
+
+  it('truncates the spine word to the native box with the firmware font metrics', async () => {
+    let written = '';
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async (update: { content?: string }) => {
+          written = update.content ?? '';
+          return true;
+        },
+        updateImageRawData: async () => ImageRawDataUpdateResult.success,
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [{ containerId: ContainerId.Image, pixels: new Uint8Array(1) }],
+    };
+    const long = 'JOAT · A STATE WORD FAR LONGER THAN THE SPINE BOX CAN HOLD';
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: long, micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    await new HudVisualSurface(client, renderer, undefined, undefined, {
+      spineLabel: (candidate) => candidate.status,
+    }).paint(frame);
+    expect(written.endsWith('...')).toBe(true);
+    expect(written.length).toBeLessThan(long.length);
+    expect(long.startsWith(written.slice(0, -3))).toBe(true);
+  });
+
+  it('fails the frame when the spine container is gone, and rewrites the word after the page heals', async () => {
+    let textOk = false;
+    const writes: string[] = [];
+    let tiles = 0;
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async (update: { content?: string }) => {
+          writes.push(update.content ?? '');
+          return textOk;
+        },
+        updateImageRawData: async () => { tiles += 1; return ImageRawDataUpdateResult.success; },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [{ containerId: ContainerId.Image, pixels: new Uint8Array([7]) }],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: 'JOAT · READY', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    const surface = new HudVisualSurface(client, renderer, undefined, undefined, {
+      spineLabel: (candidate) => candidate.status,
+    });
+
+    // The page is missing: no tile is attempted, the presenter will heal.
+    expect(await surface.paint(frame)).toBe(false);
+    expect(tiles).toBe(0);
+
+    textOk = true; // the presenter rebuilt the page
+    expect(await surface.paint(frame)).toBe(true);
+    expect(writes).toEqual(['JOAT · READY', 'JOAT · READY']);
+    expect(tiles).toBe(1);
+  });
+
   it('renders a burst of frames as one frame inside the coalescing window', async () => {
     // A voice turn's chrome arrives as separate Mac messages a few ms
     // apart. Rendering the first the instant it lands would ship the

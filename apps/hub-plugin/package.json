@@ -3,7 +3,7 @@
   "version": "0.1.72",
   "private": true,
   "type": "module",
-  "description": "Even Hub plugin \u2014 owns the G2 and relays audio/IMU/input to the Mac brain over WebSocket.",
+  "description": "Even Hub plugin — owns the G2 and relays audio/IMU/input to the Mac brain over WebSocket.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.14",
+    "@evenrealities/pretext": "^0.1.4",
     "@phosphor-icons/core": "2.1.1"
   },
   "devDependencies": {

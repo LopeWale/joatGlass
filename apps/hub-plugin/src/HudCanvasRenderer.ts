@@ -310,21 +310,6 @@ export function hudDateLabel(now: Date): string {
 
 /** Measured from the selected 576×288 reference panels. Keeping the major
  * anchors together makes visual drift obvious in review and in tests. */
-/**
- * Where the spine's voice chrome sits. Everything here must END west of the
- * tile seam at x=288: the four 288x144 G2 image tiles are the unit of BLE
- * cost (0.5-2 s each), and this row is the one that changes on every voice
- * turn. The clock or date at x=30 ends by ~85 ("Wed 12/31" at 12px); the
- * state word takes the middle; the microphone closes the row at ~271. The
- * battery, which changes on its own slow clock, keeps the top-right tile.
- */
-export const SPINE_VOICE_CHROME = {
-  labelX: 92,
-  labelMaxWidth: 134,
-  micIconX: 236,
-  micLabelX: 254,
-} as const;
-
 export const HUD_VISUAL_GEOMETRY = {
   statusBaselineY: 20,
   statusDividerY: 35.5,
@@ -1487,6 +1472,24 @@ export function visibleHudListItems(
  * so the page name lives there and the whole body belongs to the feature.
  * Home (overview) keeps "JOAT" — that IS the page.
  */
+/**
+ * The spine's state word — the ONE thing on the HUD that changes with every
+ * message the Mac sends about a voice turn. It is not painted into the
+ * tiles: a native text container (ContainerId.SpineLabel) carries it, and
+ * HudVisualSurface asks this function what to write. The READY rule is what
+ * the canvas used to draw: on a feature page the spine carries the page's
+ * name where "JOAT" sits on the home screen (no second title bar eating
+ * 40 px), but a degraded link outranks any page name — if JOAT is not READY
+ * the wearer must see that, whatever page they are standing on.
+ */
+export function hudSpineLabel(frame: HudVisualFrame): string {
+  const status = parseStatus(frame.status);
+  const pageTitle = hudSpinePageTitle(frame);
+  return pageTitle && status.state.endsWith('READY')
+    ? pageTitle.toUpperCase()
+    : status.state;
+}
+
 export function hudSpinePageTitle(frame: HudVisualFrame): string {
   switch (frame.kind) {
     case 'list':
@@ -1687,7 +1690,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
       frame.kind !== 'overview',
-      hudSpinePageTitle(frame),
     );
     if (frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
@@ -1718,10 +1720,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
      * and carries the DATE in that slot instead, where a banner normally
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
-    /** On a feature page the spine carries the page's name where "JOAT"
-     * sits on the home screen, so the body below the spine belongs
-     * entirely to the feature — no second title bar eating 40px. */
-    pageTitle = '',
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1740,35 +1738,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       30,
       HUD_VISUAL_GEOMETRY.statusBaselineY,
     );
-    // ── The voice chrome lives in ONE tile ──────────────────────────────
-    // The state word and the microphone sit with the clock, west of the
-    // tile seam at x=288, so "listening" → "hearing you…" → a reply costs
-    // one 288x144 image write per change instead of two. They used to
-    // straddle it — the word centred ON x=288, the microphone at x=410 —
-    // so every word the Mac said about a voice turn shipped both top tiles
-    // over BLE, at 0.5-2 s a tile: the slowest thing the wearer could
-    // watch. The battery, on its own slow clock, keeps the top-right tile.
-    context.textAlign = 'left';
+    // ── The state word is NOT painted here ──────────────────────────────
+    // It lives in a native text container layered over the tiles
+    // (ContainerId.SpineLabel, written by HudVisualSurface from
+    // hudSpineLabel), so "listening → hearing you… → reply" costs a few
+    // bytes instead of a 0.5-2 s image tile. It used to be centred ON the
+    // tile seam at x=288 and shipped BOTH top tiles per change — the
+    // slowest thing the wearer could watch. Nothing may be drawn inside
+    // SPINE_LABEL_BOX: native text has no background of its own.
     context.font = `10px ${HUD_FONT}`;
-    // A degraded link outranks navigation: if JOAT is not READY the wearer
-    // must see that, whatever page they are standing on.
-    const spineLabel = pageTitle && status.state.endsWith('READY')
-      ? pageTitle.toUpperCase()
-      : status.state;
-    this.fitText(
-      context,
-      spineLabel,
-      SPINE_VOICE_CHROME.labelX,
-      HUD_VISUAL_GEOMETRY.statusBaselineY,
-      SPINE_VOICE_CHROME.labelMaxWidth,
-    );
-
-    this.drawIcon(
-      context, icons.microphone, SPINE_VOICE_CHROME.micIconX, 12, 15, micOn ? SUPPORT : QUIET,
-    );
-    context.fillText(
-      micOn ? 'ON' : 'OFF', SPINE_VOICE_CHROME.micLabelX, HUD_VISUAL_GEOMETRY.statusBaselineY,
-    );
+    this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
+    context.textAlign = 'left';
+    context.fillText(micOn ? 'ON' : 'OFF', 428, HUD_VISUAL_GEOMETRY.statusBaselineY);
     if (status.battery) {
       context.textAlign = 'right';
       context.fillText(`${status.battery}%`, 531, HUD_VISUAL_GEOMETRY.statusBaselineY);

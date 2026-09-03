@@ -1,7 +1,9 @@
 import {
   ImageRawDataUpdate,
   ImageRawDataUpdateResult,
+  TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
+import { pxTruncate } from '@evenrealities/pretext';
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
@@ -9,6 +11,8 @@ import type { PanelRailVisual } from './PanelRail';
 import {
   CANVAS,
   ContainerId,
+  SPINE_LABEL_BOX,
+  SPINE_LABEL_NAME,
   VisualContainerName,
   type BrainstormHudModel,
   type HudContentKind,
@@ -206,6 +210,14 @@ export interface HudVisualSurfaceOptions {
   coalesceMs?: number;
   /** Per-tile bridge deadline in ms; 0 waits forever. */
   uploadTimeoutMs?: number;
+  /**
+   * The spine's state word for this frame. When supplied, the word is
+   * written to the native SpineLabel container instead of being painted
+   * into a tile — Even's own guidance: "text updates are much faster than
+   * image updates; use text for anything that needs to feel instant".
+   * Omitted in fixtures that only exercise tiles.
+   */
+  spineLabel?: (frame: HudVisualFrame) => string;
 }
 
 function now(): number {
@@ -303,6 +315,10 @@ export class HudVisualSurface implements HudFramePainter {
   private frameNumber = 0;
   private readonly coalesceMs: number;
   private readonly uploadTimeoutMs: number;
+  private readonly spineLabel?: (frame: HudVisualFrame) => string;
+  /** What the SpineLabel container is showing right now. Empty means the
+   * page was (re)built and the container is back to its ' ' placeholder. */
+  private writtenSpineLabel = '';
 
   constructor(
     private readonly client: BridgeClient,
@@ -313,6 +329,48 @@ export class HudVisualSurface implements HudFramePainter {
   ) {
     this.coalesceMs = Math.max(0, options.coalesceMs ?? 0);
     this.uploadTimeoutMs = Math.max(0, options.uploadTimeoutMs ?? TILE_UPLOAD_TIMEOUT_MS);
+    this.spineLabel = options.spineLabel;
+  }
+
+  /**
+   * Put the state word on the glass before anything else in the frame.
+   *
+   * This is the whole point of the native container: "listening" ->
+   * "hearing you..." -> a reply is a few bytes of textContainerUpgrade that
+   * lands immediately, where painting the same word into the top-left tile
+   * cost a 0.5-2 s image write per change (Even Realities' own figure) and
+   * put every other update behind it in the one paint lane.
+   *
+   * `contentLength` covers the LONGER of the old and new words: the
+   * firmware replaces a span, so a short word after a long one must erase
+   * the tail it is replacing rather than leave it standing.
+   *
+   * A false return means the container is not on the page — the host
+   * rebuilt it underneath us. Forget both the word and the delivered tiles
+   * and fail the frame, so the presenter heals the page and the next paint
+   * writes everything again.
+   */
+  private async writeSpineLabel(frame: HudVisualFrame): Promise<boolean> {
+    if (!this.spineLabel) return true;
+    const label = pxTruncate(this.spineLabel(frame), SPINE_LABEL_BOX.width);
+    if (label === this.writtenSpineLabel) return true;
+    const contentLength = Math.max(this.writtenSpineLabel.length, label.length);
+    const ok = await this.client.require().textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: ContainerId.SpineLabel,
+        containerName: SPINE_LABEL_NAME,
+        contentOffset: 0,
+        contentLength,
+        content: label,
+      }),
+    );
+    if (!ok) {
+      this.writtenSpineLabel = '';
+      this.deliveredTiles.clear();
+      return false;
+    }
+    this.writtenSpineLabel = label;
+    return true;
   }
 
   scrollTranscript(direction: 'up' | 'down'): boolean {
@@ -366,6 +424,9 @@ export class HudVisualSurface implements HudFramePainter {
     const frameNumber = ++this.frameNumber;
     let current: { order: number; tile: HudImageTile; startedAt: number; bytes: number } | undefined;
     try {
+      // The word first: it is the fastest thing on the page and the thing
+      // the wearer is waiting for. Tiles follow at BLE pace.
+      if (!(await this.writeSpineLabel(frame))) return false;
       const tiles = await this.renderer.render(frame);
       // Navigation acknowledges an exact route generation only after four
       // bridge writes. Confirmation is an exclusive decision surface and may
@@ -409,6 +470,7 @@ export class HudVisualSurface implements HudFramePainter {
         });
         if (outcome === 'failed') {
           this.deliveredTiles.clear();
+          this.writtenSpineLabel = '';
           return false;
         }
         this.deliveredTiles.set(tile.containerId, tile.pixels.slice());
@@ -429,6 +491,7 @@ export class HudVisualSurface implements HudFramePainter {
       return true;
     } catch (error) {
       this.deliveredTiles.clear();
+      this.writtenSpineLabel = '';
       if (current) {
         this.diagnostics?.record({
           type: 'tile_upload',
