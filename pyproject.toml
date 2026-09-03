@@ -14,6 +14,9 @@ dependencies = [
     "trafilatura>=2.0",
     # "JOAT, look up …": key-free metasearch (DuckDuckGo, Brave, Bing).
     "ddgs>=9.0",
+    # The mind: Claude through the official SDK, on a metered key or an
+    # `ant auth login` profile (never Claude Code's own OAuth tokens).
+    "anthropic>=1.0",
 ]
 
 [project.optional-dependencies]

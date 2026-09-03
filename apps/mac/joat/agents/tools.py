@@ -82,6 +82,24 @@ class ToolBelt:
             for t in self._tools.values()
         ]
 
+    def anthropic_tools(self) -> list[dict[str, Any]]:
+        """Anthropic Messages API tool definitions, the shape Claude consumes.
+
+        Same tools, same runners; only the envelope differs from ``schemas``.
+        A missing description falls back to the name, and a schema without a
+        type is an object — the API rejects either omission outright.
+        """
+        definitions: list[dict[str, Any]] = []
+        for t in self._tools.values():
+            schema = dict(t.parameters) if isinstance(t.parameters, dict) else {}
+            schema.setdefault("type", "object")
+            definitions.append({
+                "name": t.name,
+                "description": t.description or t.name,
+                "input_schema": schema,
+            })
+        return definitions
+
     def explicit_call(self, text: str) -> ToolCall | None:
         """Return a narrowly owned direct tool call, if any.
 
