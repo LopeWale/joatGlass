@@ -450,6 +450,39 @@ describe('HudVisualSurface', () => {
     expect(tiles).toBe(1);
   });
 
+  it('paces successive tile calls past the host\'s 100 ms hold window', async () => {
+    // Even's display docs: a call that arrives inside 100 ms of the last
+    // one "is held and flushed on the next one" — a frame's last tile would
+    // wait for a later frame that may never come.
+    const startedAt: number[] = [];
+    const client = {
+      require: () => ({
+        updateImageRawData: async () => {
+          startedAt.push(performance.now());
+          return ImageRawDataUpdateResult.success;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [
+        { containerId: ContainerId.Image, pixels: new Uint8Array([1]) },
+        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array([2]) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array([3]) },
+        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array([4]) },
+      ],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: '', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    const surface = new HudVisualSurface(client, renderer, undefined, undefined, { tileGapMs: 30 });
+    expect(await surface.paint(frame)).toBe(true);
+    expect(startedAt).toHaveLength(4);
+    for (let index = 1; index < startedAt.length; index += 1) {
+      expect(startedAt[index]! - startedAt[index - 1]!).toBeGreaterThanOrEqual(25);
+    }
+  });
+
   it('renders a burst of frames as one frame inside the coalescing window', async () => {
     // A voice turn's chrome arrives as separate Mac messages a few ms
     // apart. Rendering the first the instant it lands would ship the

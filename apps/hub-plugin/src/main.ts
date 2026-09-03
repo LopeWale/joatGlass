@@ -5,7 +5,12 @@ import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
 import { phoneTimeZone } from './PhoneTimeZone';
 import { hudSpineLabel, HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
-import { encodeGray8TilePng, HudVisualSurface, PAINT_COALESCE_MS } from './HudVisualSurface';
+import {
+  encodeGray8TilePng,
+  HudVisualSurface,
+  PAINT_COALESCE_MS,
+  TILE_CALL_GAP_MS,
+} from './HudVisualSurface';
 import {
   activateVisualHudPage,
   initializeHudPage,
@@ -184,7 +189,18 @@ async function boot(): Promise<void> {
   if (VISUAL_STATE && BROWSER_VISUAL_PREVIEW) {
     const renderer = new HudCanvasRenderer();
     const preview = new BrowserHudPreview(renderer);
-    const previewClient = new BridgeClient();
+    // The preview has no Even host. The presenter still rebuilds a page
+    // whenever the glass would switch between the four tiles and a firmware
+    // list (NEWS, SEARCH), so those calls must land somewhere that answers:
+    // a host that accepts every rebuild and text write and draws nothing.
+    // The frames the preview shows are the pixel pages only — a firmware
+    // list page is the host's own font and cannot be previewed here.
+    const previewClient = {
+      require: () => ({
+        rebuildPageContainer: async () => true,
+        textContainerUpgrade: async () => true,
+      }),
+    } as unknown as BridgeClient;
     const hud = new HudPresenter(previewClient, new HudPageBuilder(), preview);
     const previewLink = new MacLink({
       urls: MAC_WS_URLS,
@@ -357,6 +373,9 @@ async function boot(): Promise<void> {
           // canvas draws no word at all — it stopped painting one when the
           // SpineLabel container took the job.
           spineLabel: hudSpineLabel,
+          // Tile calls are paced past the host's 100 ms hold window, so a
+          // frame's last tile is never left waiting for the next frame.
+          tileGapMs: TILE_CALL_GAP_MS,
         },
       ),
       g2Diagnostics,
@@ -1000,6 +1019,12 @@ async function renderVisualState(
     if (state.endsWith('-expanded') || state === 'panel-article') {
       // Through the REAL drill-in, so simulator gestures drive the page.
       await menu.openPanelTab(tab);
+      if (state.endsWith('-expanded') && tab !== 'pomodoro') {
+        // NEWS and SEARCH expand into a FIRMWARE list page (HudPresenter's
+        // NATIVE_LIST_TITLES): the device shows the host's own list, and
+        // this canvas keeps the frame beneath it. Nothing to draw here.
+        console.info(`[joat] ${state}: a firmware list page on the device; the preview keeps the overview`);
+      }
       if (state === 'panel-article') {
         const article = panelArticleFixture();
         await menu.presentList(
