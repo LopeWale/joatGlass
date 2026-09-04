@@ -408,12 +408,26 @@ class CodexCliReplyEngine(_CliSeat):
         # MCP servers (OAuth ones fail, slowly) and the model reached for one
         # of those instead of the brain's belt — observed live 2026-09-03.
         # Auth lives in CODEX_HOME/auth.json, which this flag leaves alone.
+        #
+        # It does NOT, however, suppress servers that arrive through plugins:
+        # a turn still opened OAuth connections to the wearer's Cloudflare and
+        # RunPod servers and watched them fail. Measured 2026-09-04, same
+        # prompt: two such failures per turn with plugins on, zero with them
+        # off. A voice turn has no business dialling either.
         command = [self._binary, "exec", "--json", "-s", "read-only", "--skip-git-repo-check",
-                   "--ignore-user-config"]
+                   "--ignore-user-config", "-c", "features.plugins=false"]
         if self._mcp is not None:
             command += [
                 "-c", f'mcp_servers.joat.url="{self._mcp.url}"',
                 "-c", 'mcp_servers.joat.bearer_token_env_var="JOAT_AGENT_TOKEN"',
+                # Without this the model calls the tool and the CLI refuses it
+                # — "MCP tool call requires approval, but approval policy is
+                # never" — because exec has nobody to ask. Scoped to this one
+                # server, and it does not touch the sandbox: the turn stays
+                # read-only with approval_policy never. A/B measured
+                # 2026-09-04: without it, no tools/call and a refusal; with
+                # it, the tool ran and its text reached the answer.
+                "-c", 'mcp_servers.joat.default_tools_approval_mode="approve"',
             ]
         if resuming and self._thread_id:
             command += ["resume", self._thread_id]

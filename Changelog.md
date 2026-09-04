@@ -58,6 +58,21 @@
   policy is never", so that seat currently answers without the belt.
   1746 tests pass, strict mypy is clean on 98 files.
 
+- Gave the Codex seat its tools back. `codex exec` had been refusing every
+  MCP call with "MCP tool call requires approval, but approval policy is
+  never", because print mode has nobody to ask. The key is
+  `mcp_servers.joat.default_tools_approval_mode="approve"`, scoped to the
+  brain's own server. A/B against the live CLI with the model's discretion
+  removed by an explicit order to call the tool: without the key, no
+  `tools/call` and the refusal relayed to the wearer; with it, the tool ran
+  and its text reached the answer. Codex's own session record shows the turn
+  still running `approval_policy: never` with `sandbox_policy: read-only`,
+  so the per-tool gate is gone without the sandbox widening. Alongside it,
+  `-c features.plugins=false`: `--ignore-user-config` does not suppress
+  plugin-sourced MCP servers, so every turn was opening failing OAuth
+  connections to the wearer's Cloudflare and RunPod servers — two per turn
+  measured, zero after. A voice turn has no business dialling either.
+
 ## 2026-08-31
 
 - Prepared JOAT `0.1.40` as the uniquely versioned phone-installable

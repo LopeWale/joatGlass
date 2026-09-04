@@ -238,6 +238,10 @@ async def test_codex_answers_from_the_agent_message_and_resumes_its_thread(
     assert chunks == ["Why did the developer go broke? He used up all his cache."]
     argv = argv_of(record_dir)
     assert argv[:2] == ["exec", "--json"] and "--ignore-user-config" in argv
+    # Measured, not assumed: exec refuses an MCP tool call without this, and
+    # plugin-sourced servers keep dialling OAuth without the features flag.
+    assert 'mcp_servers.joat.default_tools_approval_mode="approve"' in argv
+    assert "features.plugins=false" in argv
     assert argv[argv.index("-m") + 1] == "gpt-5.6-terra"
     assert argv.index("-m") > argv.index("--skip-git-repo-check")
     assert 'mcp_servers.joat.url="http://127.0.0.1:8788/mcp"' in argv
