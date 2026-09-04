@@ -8,6 +8,7 @@ import {
   type HudVisualFrame,
 } from './HudVisualSurface';
 import { ContainerId } from './types';
+import { selectHudFirstLight } from './HudPageBootstrap';
 
 describe('splitGrayscaleTiles', () => {
   it('maps the raw Gray8 canvas into four ordered SDK images', () => {
@@ -414,6 +415,57 @@ describe('HudVisualSurface', () => {
     expect(written.endsWith('...')).toBe(true);
     expect(written.length).toBeLessThan(long.length);
     expect(long.startsWith(written.slice(0, -3))).toBe(true);
+  });
+
+  it('releases first light to its fallback when native status text never settles', async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let finishText!: (ok: boolean) => void;
+    const pendingText = new Promise<boolean>((resolve) => { finishText = resolve; });
+    const textContainerUpgrade = vi.fn().mockReturnValueOnce(pendingText).mockResolvedValue(true);
+    const updateImageRawData = vi.fn().mockResolvedValue(ImageRawDataUpdateResult.success);
+    const client = {
+      require: () => ({ textContainerUpgrade, updateImageRawData }),
+    } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = {
+      render: async () => [{ containerId: ContainerId.Image, pixels: new Uint8Array([7]) }],
+    };
+    const frame: HudVisualFrame = {
+      kind: 'overview', status: 'JOAT · connecting', micOn: false, mainBrightness: 4,
+      main: '', context: '', tray: '', hint: '',
+    };
+    const surface = new HudVisualSurface(client, renderer, undefined, undefined, {
+      spineLabel: (candidate) => candidate.status, uploadTimeoutMs: 50,
+    });
+    const fallback = { setStatus: vi.fn(async () => true) };
+    let selected: string | undefined;
+    try {
+      const boot = selectHudFirstLight({
+        activateSurface: async () => 'visual',
+        restoreFallback: async () => 'text',
+        restoreMinimal: async () => true,
+        createVisual: () => ({ setStatus: () => surface.paint(frame) }),
+        createText: () => fallback,
+        createMinimal: () => fallback,
+      }).then((result) => { selected = result.surface; });
+      await vi.advanceTimersByTimeAsync(51);
+      expect(selected).toBe('text');
+      await boot;
+      expect(fallback.setStatus).toHaveBeenCalledWith('JOAT · connecting');
+      expect(updateImageRawData).not.toHaveBeenCalled();
+
+      // A late success cannot retroactively acknowledge the timed-out paint
+      // or poison its cache. A new paint rewrites the label and completes.
+      finishText(true);
+      await Promise.resolve();
+      expect(await surface.paint(frame)).toBe(true);
+      expect(textContainerUpgrade).toHaveBeenCalledTimes(2);
+      expect(updateImageRawData).toHaveBeenCalledTimes(1);
+    } finally {
+      finishText(false);
+      error.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('fails the frame when the spine container is gone, and rewrites the word after the page heals', async () => {

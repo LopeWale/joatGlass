@@ -2,7 +2,7 @@
   "package_id": "com.akinwale.joat",
   "edition": "202601",
   "name": "JOAT",
-  "version": "0.1.73",
+  "version": "0.1.74",
   "min_sdk_version": "0.0.14",
   "min_app_version": "2.2.9",
   "entrypoint": "index.html",
@@ -24,7 +24,7 @@
         "ws://admins-mac-mini.tail3a3363.ts.net:8787",
         "wss://admins-mac-mini.tail3a3363.ts.net",
         "ws://emmanuels-macbook-pro.local:8787",
-        "ws://192.168.12.200:8787"
+        "ws://192.168.1.10:8787"
       ]
     },
     {

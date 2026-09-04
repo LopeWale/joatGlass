@@ -53,8 +53,104 @@ function lastOf(list: TextContainerUpgrade[]): TextContainerUpgrade {
   return list[list.length - 1]!;
 }
 
+it('shows streamed replies on the native text fallback and restores the retained page', async () => {
+  const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+  await hud.showText('Retained page', ContainerId.Main);
+  expect(await hud.showAssistantOverlay('First turn')).toBe(true);
+  expect(lastOf(mainPaints()).content).toBe('First turn');
+  expect(hud.hasAssistantOverlay()).toBe(true);
+
+  await hud.showAssistantOverlay(' preserved', true);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(lastOf(mainPaints()).content).toBe('First turn preserved');
+
+  await hud.showText('Updated page', ContainerId.Main);
+  expect(lastOf(mainPaints()).content).toBe('First turn preserved');
+  expect(hud.settleAssistantOverlay(1000)).toBe(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(hud.hasAssistantOverlay()).toBe(false);
+  expect(lastOf(mainPaints()).content).toBe('Updated page');
+  expect(lastOf(mainPaints()).contentLength).toBe('First turn preserved'.length);
+});
+
+it('keeps native text replies behind confirmation until the exact gate is dismissed', async () => {
+  const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+  await hud.showText('Retained page', ContainerId.Main);
+  await hud.showAssistantOverlay('First turn');
+  await hud.showAssistantOverlay(' pending', true);
+  await hud.showConfirmation('Send this message?', 'send-1');
+  const paintsBeforeReply = paints.length;
+
+  expect(await hud.showAssistantOverlay('Deferred reply')).toBe(true);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(paints).toHaveLength(paintsBeforeReply);
+  expect(await hud.dismissConfirmation('stale-gate')).toBe(false);
+  expect(paints).toHaveLength(paintsBeforeReply);
+
+  expect(await hud.dismissConfirmation('send-1')).toBe(true);
+  expect(lastOf(mainPaints()).content).toBe('Deferred reply');
+  await hud.dismissAssistantOverlay();
+  expect(lastOf(mainPaints()).content).toBe('Retained page');
+});
+
 beforeEach(() => {
   vi.useFakeTimers();
+});
+
+it.each([false, true])('settles an in-flight native reply before actionable confirmation (reject=%s)', async (reject) => {
+  let finishReply!: () => void;
+  let visible = '';
+  let rebuilds = 0;
+  const client = {
+    require: () => ({
+      textContainerUpgrade: async (update: TextContainerUpgrade) => {
+        if (update.containerID === ContainerId.Main) {
+          await new Promise<void>((resolve, fail) => {
+            finishReply = () => reject ? fail(new Error('native reply failed')) : resolve();
+          });
+          visible = update.content ?? '';
+        }
+        return true;
+      },
+      rebuildPageContainer: async (page: { textObject: Array<{ containerID: number; content: string }> }) => {
+        rebuilds += 1;
+        visible = page.textObject.find((item) => item.containerID === ContainerId.Main)?.content ?? '';
+        return true;
+      },
+    }),
+  } as unknown as BridgeClient;
+  const hud = new HudPresenter(client, new HudPageBuilder());
+  const reply = hud.showAssistantOverlay('Old reply').catch(() => false);
+  const confirmation = hud.showConfirmation('Send this message?', 'send-1');
+  await vi.advanceTimersByTimeAsync(500);
+  expect(rebuilds).toBe(0);
+  finishReply();
+  expect(await reply).toBe(!reject);
+  expect(await confirmation).toBe(true);
+  expect(visible).toBe('CONFIRM ACTION\n\nSend this message?');
+});
+
+it('gives a native list reply a reading area and restores the retained list', async () => {
+  const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+  const items = ['First item', 'Second item'];
+  await hud.showList(items, { title: 'NEWS' });
+  await hud.showAssistantOverlay('A reply with several lines\nthat needs more than the list title.');
+  const replyPage = rebuiltPages[rebuiltPages.length - 1] as { textObject: Array<{ containerID: number; height: number }>; listObject?: unknown[] };
+  expect(replyPage.textObject.find((item) => item.containerID === ContainerId.Main)?.height).toBeGreaterThan(40);
+  expect(replyPage.listObject ?? []).toHaveLength(0);
+  expect(lastOf(mainPaints()).content).toContain('several lines');
+  const built = rebuilds;
+  await hud.showAssistantOverlay(' Streamed tail.', true);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(rebuilds).toBe(built);
+
+  await hud.showConfirmation('Send this message?', 'send-1');
+  await hud.dismissConfirmation('send-1');
+  expect(lastOf(mainPaints()).content).toContain('Streamed tail.');
+  await hud.dismissAssistantOverlay();
+  const restored = rebuiltPages[rebuiltPages.length - 1] as { listObject: Array<{ itemContainer: { itemName: string[] } }> };
+  expect(restored.listObject[0]?.itemContainer.itemName).toEqual(items);
+  expect(hud.hasAssistantOverlay()).toBe(false);
 });
 
 afterEach(() => {
