@@ -106,7 +106,7 @@ Record labelled traces (nod / head-shake / walking / nothing), derive
 thresholds from the data, and only then consider promoting a motion gesture
 back into the confirm gate (RULES.md #6).
 
-## 6. The mind on Claude, and the Even AI door — WIRED 2026-09-03
+## 6. The mind on the wearer's subscriptions, and the Even AI door — WIRED 2026-09-03
 
 The diagnosis of 2026-09-02 (nine days of `brain.log`, plus a live benchmark
 of the 3B model with the brain's own prompt): the mind was
@@ -118,59 +118,66 @@ reply chunk repainted BLE image tiles at 0.5–2 s each. None of that is the
 brain — the tools, channels, gateway and confirmation gates are the part
 worth keeping. The mind and the brain are different seats.
 
-What changed:
+A first version of the new mind called the Anthropic API on a metered key.
+That was wrong for this project and was removed the same day: CLAUDE.md
+says both CLIs run on subscriptions with no API keys, and RULES.md #9/#10
+name the official `claude` and `codex` binaries as the only paths. What
+stands now:
 
-- `agents/claude_reply_engine.py` fills the mind's seat with Claude through
-  the official SDK: streaming, the belt's tools offered natively (one call
-  replaces the 3B decide pass, the tool run and the answer pass), a
-  30-minute / ten-exchange working memory, and a persona that answers from
-  its own knowledge and keeps replies lens-sized. The resident MLX engine
-  is the offline fallback and still the summariser; `--agent mlx` restores
-  the old seat. The orchestrator's replier IS this engine, so the plugin's
-  voice path already uses it.
-- `services/agent_endpoint.py` is the door Even AI knocks on: an
-  OpenAI-shaped `POST /v1/chat/completions` on loopback `:8788` behind a
-  bearer token, replies stripped to plain text and cut at ~600 characters.
-- The Assistant model is a voice-switchable seat: "use sonnet for the
-  assistant", "which models are you using". Opus 5 by default, effort low.
+- `agents/cli_reply_engine.py` — two seats on the wearer's own plans:
+  `ClaudeCliReplyEngine` (`claude -p --output-format stream-json
+  --include-partial-messages`, streamed; `--session-id` then `--resume` for
+  memory; `--tools ""` so the mind never holds a shell on the Mac) and
+  `CodexCliReplyEngine` (`codex exec --json`, `resume <thread>` for memory).
+  Both spawn through the Brainstorm seats' `SubprocessAgent`, stripping
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and
+  `OPENAI_API_KEY`, in their own working directory so the repo's CLAUDE.md
+  is not project context. `--bare` is not used: it ignores the OAuth login.
+- `SeatSwitch` — the Assistant slot chooses the seat per turn ("use codex
+  for the assistant"; `--agent claude|codex|mlx` sets the boot seat). A
+  seat that is missing or signed out is skipped for the next one; the
+  resident MLX model is the offline seat. Which model a seat runs is the
+  existing Claude seat / Codex seat slot.
+- The belt is offered to both CLIs over MCP: `services/agent_endpoint.py`
+  serves `/mcp` (initialize, tools/list, tools/call) on loopback behind the
+  same bearer token; Claude gets `--mcp-config … --strict-mcp-config`,
+  Codex `-c mcp_servers.joat.url=… -c mcp_servers.joat.bearer_token_env_var=JOAT_AGENT_TOKEN`.
+- The Even AI door is unchanged: `POST /v1/chat/completions` on loopback
+  `:8788`, plain text cut for the lens. `status.json` now carries
+  `accounts` (per-seat login state) and `seat` (the one answering).
 
 To turn it on:
 
-1. **Credentials, on the Mac that runs the brain** — a metered API key,
-   never Claude Code's OAuth tokens (RULES.md #9). Either export
-   `ANTHROPIC_API_KEY` in the brain's environment, write it to
-   `~/Library/Application Support/JOAT/anthropic-api-key` (chmod 600), or
-   run `ant auth login`. The boot log then says
-   `reply engine: Claude claude-opus-5 via the API`, and the pill turns
-   `ready` once the probe succeeds. Without credentials the mind says so on
-   the lens and the MLX fallback answers.
+1. **Sign in once per CLI, in Terminal** — no keys anywhere:
+   `claude auth login` (Max) and `codex login` (ChatGPT). `claude auth
+   status` must say `"loggedIn": true`; on 2026-09-03 it did not until the
+   login ran, while Codex was already signed in. The dashboard's `accounts`
+   shows both states after a Restart.
 2. **The token.** The first boot writes
    `~/Library/Application Support/JOAT/agent-token` (0600); `JOAT_AGENT_TOKEN`
    overrides it.
-3. **Expose the door over the tailnet**, next to the glasses proxy that
-   already exists:
+3. **Expose the door over the tailnet**, next to the glasses proxy:
 
        tailscale serve --bg --set-path /agent http://127.0.0.1:8788
 
-   Check from the Mac:
-
-       curl -H "Authorization: Bearer $(cat ~/Library/Application\ Support/JOAT/agent-token)" \
-         -d '{"messages":[{"role":"user","content":"tell me a joke"}]}' \
-         https://emmanuels-macbook-pro.tail3a3363.ts.net/agent/v1/chat/completions
-
 4. **On the phone** (Tailscale on): Even app → Settings → Even AI →
-   Agent Configure → add an agent with that URL and the token → select it
-   as the active AI. Say "Hey Even, tell me a joke."
+   Agent Configure → add an agent with
+   `https://emmanuels-macbook-pro.tail3a3363.ts.net/agent/v1/chat/completions`
+   and the token → select it as the active AI. Say "Hey Even, tell me a
+   joke."
 
 Through this door Even owns the wake word, speech-to-text and rendering; the
 brain owns the mind and the tools. Questions, answers and reads go this way.
 Actions that need the tap/ring confirmation — send a message, write a
 calendar entry — stay on the plugin path, where the brain owns the gesture.
 
-**Metric for this door: "Hey Even" → first lens text.** Not yet measured on
-a physical G2; the community reports 3–5 s through the same Even path with
-a slower agent behind it. The `agent request … ms=` lines in `brain.log`
-give the brain's share.
+Measured 2026-09-03 on this Mac: `codex exec` 6–8 s per cold turn (it ships
+~16k tokens of its own context); `claude -p` on the Max login ~3 s for a
+one-word answer. Open: whether `--tools ""` also hides the MCP tools from
+Claude (the first signed-in run with a tool question settles it); a
+resident `--input-format stream-json` process to drop the per-turn spawn;
+the Accounts section in the Mac app (login buttons and seat choice), which
+needs Xcode to build.
 
 Still open on the plugin path, in order of payoff: push-to-talk instead of
 the text wake gate; native text (`textContainerUpgrade`) for the reply

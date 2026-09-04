@@ -29,7 +29,9 @@ from .agents.grounding import (
 )
 from .agents.location_tools import wearer_location_tools
 from .agents.tools import ToolBelt
-from .agents.claude_reply_engine import DEFAULT_AGENT_MODEL, ClaudeReplyEngine
+from .agents.cli_reply_engine import (
+    ClaudeCliReplyEngine, CodexCliReplyEngine, McpDoor, SeatSwitch, find_codex_binary,
+)
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.openclaw_gateway import (
     BRAINSTORM_TERMINAL_POLICY,
@@ -232,13 +234,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-model", default=DEFAULT_MODEL,
                         help="the resident MLX model: the mind when --agent mlx, "
                              "otherwise the offline fallback and the summariser")
-    parser.add_argument("--agent", choices=["claude", "mlx"], default="claude",
-                        help="who fills the mind's seat: claude = Claude through the "
-                             "API (default); mlx = the resident local model only")
-    parser.add_argument("--agent-model",
-                        default=os.environ.get("JOAT_AGENT_MODEL", DEFAULT_AGENT_MODEL),
-                        help="Claude model for the assistant (env JOAT_AGENT_MODEL); "
-                             "switchable by voice: 'use sonnet for the assistant'")
+    parser.add_argument("--agent", choices=["claude", "codex", "mlx"], default="claude",
+                        help="who fills the mind's seat at boot: claude = Claude Code on "
+                             "the Max subscription (default); codex = Codex CLI on the "
+                             "ChatGPT subscription; mlx = the resident local model. "
+                             "Switchable by voice: 'use codex for the assistant'")
     parser.add_argument("--agent-port", type=int, default=8788,
                         help="loopback port of the OpenAI-shaped endpoint Even AI's "
                              "Agent Configure dials (exposed by Tailscale Serve)")
@@ -426,7 +426,7 @@ async def main() -> None:
             stt_default=args.stt_model,
             stt_apply=_switch_stt,
         ),
-        assistant_slot(args.agent_model),
+        assistant_slot("local" if args.agent == "mlx" else args.agent),
     ])
     log.info("switchable models — %s", models.summary())
 
@@ -436,6 +436,9 @@ async def main() -> None:
     local_completer: MlxReplyEngine | None = None
     belt: ToolBelt | None = None
     llm_warm_task: asyncio.Task[bool] | None = None
+    # The shared secret for the Even AI door AND the MCP route the CLI seats
+    # use to reach the belt; created once at first boot (0600).
+    agent_secret = agent_token()
     if args.no_llm:
         log.info("LLM disabled (--no-llm) — echoing transcripts")
     else:
@@ -475,35 +478,45 @@ async def main() -> None:
             belt_tools.append(messages_tool(imessage))
         belt = ToolBelt(belt_tools)
         # The mind and the brain are different seats
-        # (agents/claude_reply_engine.py): everything above is the brain's —
-        # the senses, the hands, the access. The mind is whichever model
-        # fills the seat: Claude by default, with the resident MLX model as
-        # the offline fallback and the summariser; MLX alone with --agent mlx.
+        # (agents/cli_reply_engine.py): everything above is the brain's —
+        # the senses, the hands, the access. The mind is whichever seat the
+        # wearer picked: Claude Code on the Max subscription, Codex on the
+        # ChatGPT subscription, or the resident MLX model. The CLIs reach
+        # the belt over the MCP route of the agent endpoint; never a key.
         mlx_replier: MlxReplyEngine | None = None
         if mlx_available():
             mlx_replier = MlxReplyEngine(model_id=args.llm_model, grounding=grounding,
                                          tools=belt,
                                          on_loaded=lambda: status.set(llm="ready"))
             local_completer = mlx_replier
-        if args.agent == "claude":
-            claude_mind = ClaudeReplyEngine(
-                model=models.provider("assistant"), grounding=grounding,
-                tools=belt, fallback=mlx_replier,
-                on_ready=lambda: status.set(llm="ready"),
-            )
-            replier = claude_mind
-            llm_warm_task = asyncio.create_task(claude_mind.warm(), name="claude-warm")
-            log.info("reply engine: Claude %s via the API (+%d tools)%s",
-                     args.agent_model, len(belt_tools),
-                     "; MLX fallback available" if mlx_replier is not None else "")
-        elif mlx_replier is not None:
-            replier = mlx_replier
-            llm_warm_task = asyncio.create_task(mlx_replier.warm(), name="mlx-warm")
-            log.info("reply engine: %s (+%d tools; warming in background)",
-                     args.llm_model, len(belt_tools))
-        else:
-            log.warning("mlx-lm not installed — echoing transcripts "
-                        "(pip install -e '.[mlx]')")
+        door = None if args.no_agent_endpoint else McpDoor(
+            url=f"http://127.0.0.1:{args.agent_port}/mcp", token=agent_secret,
+        )
+        accounts: dict[str, str] = {}
+
+        def note_account(seat: str, state: str) -> None:
+            accounts[seat] = state
+            status.set(accounts=dict(accounts))
+
+        mind_seats: dict[str, ReplyEngine] = {}
+        if mlx_replier is not None:
+            mind_seats["local"] = mlx_replier
+        mind_seats["claude"] = ClaudeCliReplyEngine(
+            find_claude_binary(), grounding=grounding, model=models.provider("claude"), mcp=door,
+            on_account=note_account,
+        )
+        mind_seats["codex"] = CodexCliReplyEngine(
+            find_codex_binary(), grounding=grounding, model=models.provider("codex"), mcp=door,
+            on_account=note_account,
+        )
+        seat_switch = SeatSwitch(
+            mind_seats, chosen=models.provider("assistant"),
+            on_pick=lambda name: status.set(llm="ready", seat=name),
+        )
+        replier = seat_switch
+        llm_warm_task = asyncio.create_task(seat_switch.warm(), name="mind-warm")
+        log.info("reply engine: subscription seats %s (+%d tools over MCP); boot seat %s",
+                 ", ".join(mind_seats), len(belt_tools), args.agent)
 
     # "available" is a claim about pip; "ready" is a claim about resident
     # weights. The pill said ready before the model had ever loaded (27).
@@ -1495,8 +1508,8 @@ async def main() -> None:
     agent_endpoint: AgentEndpoint | None = None
     if replier is not None and not args.no_agent_endpoint:
         agent_endpoint = AgentEndpoint(
-            replier, agent_token(), port=args.agent_port,
-            model_label=lambda: models.current("assistant") or args.agent_model,
+            replier, agent_secret, port=args.agent_port, tools=belt,
+            model_label=lambda: models.current("assistant") or "joat",
         )
         try:
             await agent_endpoint.start()

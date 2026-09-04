@@ -26,6 +26,38 @@
   voice-gap and Whisper cold-start work in this tree is NOT part of this
   release and remains uncommitted. No physical G2 run, no upload.
 
+- Replaced the assistant's mind with the wearer's own subscriptions, and
+  removed the metered-API path added earlier the same day in `d7b2ace`.
+  `claude -p` on the Max plan and `codex exec` on the ChatGPT plan now fill
+  the seat, spawned through the same `SubprocessAgent` the Brainstorm seats
+  use, with `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `ANTHROPIC_BASE_URL` and `OPENAI_API_KEY` stripped from every launch, and
+  each seat running in its own directory so this repository's CLAUDE.md is
+  not read as project context. The `anthropic` SDK is gone from the
+  dependencies, the lock and the virtualenv. `--agent claude|codex|mlx`
+  picks the boot seat; "use codex for the assistant" moves it per turn; a
+  missing or signed-out seat is skipped for the next, and the resident MLX
+  model is the offline seat.
+
+- Gave those CLIs the brain's tools over MCP rather than a second copy. The
+  Even AI endpoint also serves `/mcp` (initialize, tools/list, tools/call)
+  on loopback behind the same bearer token. Claude receives it through
+  `--mcp-config` with `--strict-mcp-config` and `--allowedTools
+  mcp__joat__*`; Codex through `-c mcp_servers.joat.*` with
+  `--ignore-user-config`. `ToolBelt.anthropic_tools` is renamed
+  `tool_definitions`, since nothing here speaks to an SDK any more.
+
+- Verified against the real logins rather than a mock. The Claude seat
+  called a belt tool through MCP and answered in 4.3 seconds. Three
+  findings came only from running it: `--bare` ignores the OAuth login and
+  demands a key, so it is not used; without `--strict-mcp-config` the CLI
+  loads the wearer's whole global MCP list and costs about four seconds of
+  API time per turn; and print mode has nobody to answer a permission
+  prompt, so the tool must be pre-allowed. Known gap: Codex reaches the
+  route and asks for the tool, but `codex exec` refuses it under "approval
+  policy is never", so that seat currently answers without the belt.
+  1746 tests pass, strict mypy is clean on 98 files.
+
 ## 2026-08-31
 
 - Prepared JOAT `0.1.40` as the uniquely versioned phone-installable

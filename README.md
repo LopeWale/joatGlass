@@ -12,7 +12,7 @@ G2 glasses (BLE, 576x288 HUD, LC3 mic)
    │
 Mac Studio brain
    ├── STT (WhisperKit / Parakeet-MLX) + wake word
-   ├── The mind: Claude via the official SDK (+ the brain's tools); local MLX as fallback + debate Judge
+   ├── The mind: claude -p (Max) or codex exec (ChatGPT) — subscriptions, never keys; the brain's tools over MCP; local MLX as the offline seat + debate Judge
    ├── Even AI door: OpenAI-shaped endpoint for Even's own assistant (Agent Configure)
    ├── Debate loop: Codex CLI (Proposer) ⇄ Claude CLI (Critic) ⇄ Verifier Gate
    ├── Computer use (cua + Lume sandbox, iPhone Mirroring)
@@ -60,7 +60,7 @@ utilsG2/
 
 1. Clone the vendor repos: see `docs/STARTER_REPOS.md` (start with `men-g2-ble-gateway`).
 2. G2 on stock firmware v2.2.20; disconnect the phone (one BLE central per lens).
-3. Run the gateway on the Mac, wire STT → the mind (Claude via the official SDK; MLX fallback) → `textContainerUpgrade` on the HUD. Or skip the plugin for questions: point Even AI's Agent Configure at the brain's endpoint (docs/NEXT_STEPS.md §6).
+3. Run the gateway on the Mac, wire STT → the mind (`claude -p` or `codex exec` on your subscriptions; MLX offline) → `textContainerUpgrade` on the HUD. Or skip the plugin for questions: point Even AI's Agent Configure at the brain's endpoint (docs/NEXT_STEPS.md §6).
 4. Target: round-trip voice → HUD under 3 seconds.
 
 ## Key constraints (read RULES.md before coding)
