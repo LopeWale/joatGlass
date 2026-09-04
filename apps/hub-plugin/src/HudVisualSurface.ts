@@ -221,7 +221,7 @@ export const TILE_CALL_GAP_MS = 110;
 export interface HudVisualSurfaceOptions {
   /** Burst window in ms; 0 (the default) renders the moment a frame lands. */
   coalesceMs?: number;
-  /** Per-tile bridge deadline in ms; 0 waits forever. */
+  /** Per text/tile bridge write deadline in ms; 0 waits forever. */
   uploadTimeoutMs?: number;
   /** Minimum ms from one tile call to the next; 0 (the default) sends back to back. */
   tileGapMs?: number;
@@ -383,7 +383,7 @@ export class HudVisualSurface implements HudFramePainter {
     const label = pxTruncate(this.spineLabel(frame), SPINE_LABEL_BOX.width);
     if (label === this.writtenSpineLabel) return true;
     const contentLength = Math.max(this.writtenSpineLabel.length, label.length);
-    const ok = await this.client.require().textContainerUpgrade(
+    const write = this.client.require().textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: ContainerId.SpineLabel,
         containerName: SPINE_LABEL_NAME,
@@ -392,6 +392,12 @@ export class HudVisualSurface implements HudFramePainter {
         content: label,
       }),
     );
+    // First light precedes MacLink.connect(). A host that never settles
+    // this native call must release the frame to the existing HUD fallback,
+    // just as a stalled tile upload does, instead of blocking all networking.
+    const ok = this.uploadTimeoutMs > 0
+      ? await settleWithin(write, this.uploadTimeoutMs, 'spine label write')
+      : await write;
     if (!ok) {
       this.writtenSpineLabel = '';
       this.deliveredTiles.clear();

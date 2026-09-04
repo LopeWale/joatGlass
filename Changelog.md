@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-09-04
+
+- Packaged the Hub plugin's startup and reply-path recovery as `0.1.74`, the
+  first package to carry it. The bounded native spine-label write no longer
+  blocks networking before `MacLink.connect()`; an assistant reply renders
+  through the native text path when no visual surface is up; and a microphone
+  pause reserves a sequence position and clears the carried odd PCM byte, so
+  resumed speech cannot join the pre-mute utterance on an unchanged socket.
+  The shipped `0.1.73` package was built at 17:22 on September 3 and the
+  fixes were written between 21:58 and 22:45, so the phone had been running
+  a build that predated all of them.
+
+- Corrected the manifest's stale LAN candidate. It named `192.168.12.200`
+  while this Mac is on `192.168.x.y`. Probed against the live gateway: the
+  old address times out during the opening handshake, the corrected one
+  reaches the pairing gate. The route a release actually packages is the
+  tailnet `wss://…/glasses` through Tailscale Serve, and that was dead for a
+  separate reason — Tailscale was stopped. Started, it connects. A
+  DHCP-assigned literal will go stale again; the tailnet name is the durable
+  route and the LAN entry is a same-Wi-Fi convenience.
+
+- Verification: 709 Hub tests, typecheck and bundle build pass, and all three
+  dial candidates were probed against the running gateway. The concurrent
+  voice-gap and Whisper cold-start work in this tree is NOT part of this
+  release and remains uncommitted. No physical G2 run, no upload.
+
 ## 2026-08-31
 
 - Prepared JOAT `0.1.40` as the uniquely versioned phone-installable

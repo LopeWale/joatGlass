@@ -89,11 +89,16 @@ export class AudioStreamer {
   async stop(): Promise<void> {
     this.controlEpoch += 1;
     this.desiredOpen = false;
+    // A pause discards PCM, even when no full batch was sent. Reserve a
+    // sequence position so resumed speech cannot join the pre-mute utterance
+    // on an otherwise unchanged socket. Repeated cleanup remains idempotent.
+    if (this.open) this.seq += 1;
     this.open = false;
     this.onState?.(false);
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = undefined;
     this.buffer = [];
+    this.carry = null;
     this.resetSpeakerAttribution();
     try {
       await this.client.require().audioControl(false);

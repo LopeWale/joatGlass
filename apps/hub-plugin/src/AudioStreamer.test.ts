@@ -55,6 +55,27 @@ describe('AudioStreamer byte decoding', () => {
     expect(msg.pcm).toEqual([258]);
   });
 
+  it('erases partial PCM and marks a discontinuity across mic stop and resume', async () => {
+    const { audio, sent } = make();
+    await audio.start();
+    audio.ingest([0x02, 0x01], 'other');
+    vi.advanceTimersByTime(200);
+    // Both a complete unflushed sample and a half-sample are private to the
+    // old capture. Neither may be joined to speech after mute/doff/reconnect.
+    audio.ingest([0x03, 0x00, 0xaa], 'other');
+    await audio.stop();
+    await audio.stop(); // redundant cleanup does not invent another boundary
+    audio.ingest([0xff, 0xff], 'other'); // closed ingress is inert
+    await audio.start();
+    audio.ingest([0x04, 0x00, 0x05, 0x00], 'self');
+    vi.advanceTimersByTime(200);
+
+    const messages = sent.filter((message) => message.kind === 'audio');
+    expect(messages.map((message) => message.seq)).toEqual([0, 2]);
+    expect(messages.map((message) => message.pcm)).toEqual([[258], [4, 5]]);
+    expect(messages[1]?.speaker).toBe('self');
+  });
+
   it('splits a delayed flush into sample-bounded messages', async () => {
     const { audio, sent } = make();
     await audio.start();

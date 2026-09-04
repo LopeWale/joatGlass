@@ -2,7 +2,7 @@
   "package_id": "com.example.joat",
   "edition": "202601",
   "name": "JOAT",
-  "version": "0.1.73",
+  "version": "0.1.74",
   "min_sdk_version": "0.0.14",
   "min_app_version": "2.2.9",
   "entrypoint": "index.html",
@@ -24,7 +24,7 @@
         "ws://home-mac.example-tailnet.ts.net:8787",
         "wss://home-mac.example-tailnet.ts.net",
         "ws://laptop-mac.local:8787",
-        "ws://192.168.12.200:8787"
+        "ws://192.168.x.y:8787"
       ]
     },
     {

@@ -274,6 +274,7 @@ export class HudPresenter {
    * which writes the list page's native containers while it is up.
    */
   private glassPage: 'visual' | 'list' = 'visual';
+  private nativeReplyPage = false;
   /** The rows and chrome of the firmware list currently built, if any. */
   private nativeListKey?: string;
   private assistantOverlayPaint?: Promise<boolean>;
@@ -404,7 +405,7 @@ export class HudPresenter {
     // seen — so the wearer was waiting on a prompt that did not exist.
     // An answer is not an interruption.
     if (this.surface.kind === 'brainstorm' && !answersWearer) return false;
-    if (!this.visual || !text) return false;
+    if (!text) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
     this.assistantOverlay = { text: append ? `${current?.text ?? ''}${text}` : text };
@@ -449,13 +450,13 @@ export class HudPresenter {
    * active and one newest tail so streaming can never outrun the four-tile
    * bridge, including when the underlying surface is Navigation. */
   private paintAssistantOverlayNow(): Promise<boolean> {
-    if (!this.visual) return Promise.resolve(false);
+    if (this.confirmation) return Promise.resolve(true);
     if (this.assistantOverlayPaint) {
       this.assistantOverlayPaintDirty = true;
       return Promise.resolve(true);
     }
     this.assistantOverlayPaintStartedAt = Date.now();
-    const paint = this.paintVisual();
+    const paint = this.visual ? this.paintVisual() : this.paintNativeAssistantOverlay();
     this.assistantOverlayPaint = paint;
     const completed = (): void => {
       if (this.assistantOverlayPaint !== paint) return;
@@ -468,8 +469,26 @@ export class HudPresenter {
     return paint;
   }
 
+  private async paintNativeAssistantOverlay(): Promise<boolean> {
+    if (this.surface.kind === 'list') {
+      if (!this.assistantOverlay && this.nativeReplyPage) return this.renderList(this.surface);
+      if (this.assistantOverlay && !this.nativeReplyPage) {
+        // A list's Main is only its short title. Give a reply the ordinary
+        // reading area while retaining the list and its selection underneath.
+        const status = this.captureLiveStatus();
+        const rebuilt = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+        if (!rebuilt) return false;
+        this.nativeReplyPage = true;
+        this.lastLength.clear();
+        await this.restoreLiveStatus(status);
+      }
+    }
+    if (this.confirmation) return true;
+    return this.paint(ContainerId.Main);
+  }
+
   private scheduleAssistantOverlayPaint(): void {
-    if (!this.visual || this.confirmation) return;
+    if (this.confirmation) return;
     if (this.assistantOverlayPaint) {
       this.assistantOverlayPaintDirty = true;
       return;
@@ -882,10 +901,13 @@ export class HudPresenter {
     const alreadyBuilt = firmwareList
       && this.glassPage === 'list'
       && this.nativeListKey === listKey;
+    const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = (this.visual && !firmwareList) || alreadyBuilt
       ? true
       : await this.client.require()
-        .rebuildPageContainer(this.layouts.listLayout(surface.items, surface.options));
+        .rebuildPageContainer(nativeReplyPage
+          ? this.layouts.defaultLayout()
+          : this.layouts.listLayout(surface.items, surface.options));
     if (!ok) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
       return false;
@@ -898,6 +920,7 @@ export class HudPresenter {
     }
     this.resetAll();
     this.surface = surface;
+    this.nativeReplyPage = nativeReplyPage;
     // Mirror payload content in presenter state so confirmation restoration
     // and a same-layout self-heal retain the named focus page.
     this.streams.set(ContainerId.Main, surface.options.title);
@@ -928,8 +951,9 @@ export class HudPresenter {
       return painted;
     }
     const restored = await this.restoreLiveStatus(liveStatus);
-    this.recordPageTransition(from, 'list', 'show_list', restored ? 'success' : 'failed');
-    return restored;
+    const painted = nativeReplyPage ? (await this.paint(ContainerId.Main)) && restored : restored;
+    this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
+    return painted;
   }
 
   /** Adopt the Mac's margin facts and repaint if the dashboard is showing. */
@@ -1145,6 +1169,11 @@ export class HudPresenter {
     openedHere = false,
     from: G2TracePage = this.tracePage(),
   ): Promise<boolean> {
+    // Native replies and consent share Main. Finish an already-dispatched
+    // reply before rebuilding consent so its late acknowledgement cannot
+    // leave reply text covering an armed decision gate.
+    // A failed reply is settled too; it must not strand this new gate.
+    if (this.assistantOverlayPaint) await this.assistantOverlayPaint.catch(() => false);
     const current = this.confirmation;
     if (!current || current.id !== id) return true;
     const liveStatus = this.captureLiveStatus();
@@ -1367,7 +1396,7 @@ export class HudPresenter {
         ? this.layouts.visualLayout()
         : this.confirmation
         ? this.layouts.confirmationLayout(this.confirmation.prompt)
-        : this.surface.kind === 'list'
+        : this.surface.kind === 'list' && !this.nativeReplyPage
           ? this.layouts.listLayout(this.surface.items, this.surface.options)
           : this.layouts.defaultLayout();
       const rebuilt = await this.client.require().rebuildPageContainer(layout);
@@ -1394,7 +1423,13 @@ export class HudPresenter {
     // No visual surface, or a firmware list page is up: the status bar,
     // title and hint are native text containers on this page, written in
     // place — a few bytes, no tile, no flicker.
-    const full = this.streams.get(containerId) ?? '';
+    // The text compatibility surface owns the same transient reply as the
+    // visual HUD. Keep page content underneath it for dismissal, and never
+    // cover an exclusive confirmation with an assistant answer.
+    const overlay = !this.visual && !this.confirmation && containerId === ContainerId.Main
+      ? this.assistantOverlay?.text
+      : undefined;
+    const full = overlay ?? this.streams.get(containerId) ?? '';
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
     // being read; the opening lines are already consumed.
     const content = full.length > MAX_UPGRADE_CHARS ? full.slice(-MAX_UPGRADE_CHARS) : full;
@@ -1797,6 +1832,7 @@ export class HudPresenter {
   }
 
   private resetAll(): void {
+    this.nativeReplyPage = false;
     for (const id of this.pendingPaint.keys()) this.cancelPending(id);
     this.clearPanelTicker();
     this.lastLength.clear();
