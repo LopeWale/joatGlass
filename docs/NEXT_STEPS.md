@@ -179,6 +179,17 @@ resident `--input-format stream-json` process to drop the per-turn spawn;
 the Accounts section in the Mac app (login buttons and seat choice), which
 needs Xcode to build.
 
+**The Codex seat's tools, closed 2026-09-04.** `codex exec` refused every
+MCP tool call with "MCP tool call requires approval, but approval policy is
+never", because print mode has nobody to ask. The key is
+`mcp_servers.joat.default_tools_approval_mode="approve"`, scoped to the
+brain's own server; the session record confirms the turn still runs
+`approval_policy: never` with `sandbox_policy: read-only`, so it removes the
+per-tool gate without widening the sandbox. `-c features.plugins=false` went
+in beside it: `--ignore-user-config` does not suppress plugin-sourced MCP
+servers, and each turn was opening failing OAuth connections to the wearer's
+Cloudflare and RunPod servers — two per turn measured, zero after.
+
 Still open on the plugin path, in order of payoff: push-to-talk instead of
 the text wake gate; native text (`textContainerUpgrade`) for the reply
 stream instead of tiles; a speech engine that never silently falls back to
