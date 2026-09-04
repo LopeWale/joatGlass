@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..agents.tools import ToolBelt, ToolCall
 from ..core.interfaces import ReplyEngine
 
 log = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ TOKEN_PATH = Path.home() / "Library/Application Support/JOAT/agent-token"
 EMPTY_REPLY = "I didn't get an answer for that — say it again."
 
 _REASONS = {
-    200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
+    200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
     405: "Method Not Allowed", 411: "Length Required", 413: "Payload Too Large",
     431: "Request Header Fields Too Large", 500: "Internal Server Error",
     504: "Gateway Timeout",
@@ -194,6 +195,14 @@ def _is_health_path(path: str) -> bool:
     return path.rstrip("/").endswith("/health")
 
 
+def _is_mcp_path(path: str) -> bool:
+    return path.rstrip("/").endswith("/mcp")
+
+
+def _rpc_error(id_: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+
+
 class AgentEndpoint:
     """Serve the brain's mind to Even AI in the shape Even AI speaks."""
 
@@ -205,6 +214,7 @@ class AgentEndpoint:
         host: str = "127.0.0.1",
         port: int = DEFAULT_PORT,
         model_label: Callable[[], str] | None = None,
+        tools: ToolBelt | None = None,
         max_body: int = MAX_BODY_BYTES,
         max_lens_chars: int = MAX_LENS_CHARS,
         request_timeout_s: float = REQUEST_TIMEOUT_S,
@@ -216,6 +226,7 @@ class AgentEndpoint:
         self._host = host
         self._port = port
         self._model_label = model_label or (lambda: "joat")
+        self._tools = tools
         self._max_body = max_body
         self._max_lens_chars = max_lens_chars
         self._request_timeout_s = request_timeout_s
@@ -279,6 +290,9 @@ class AgentEndpoint:
         if request.method == "GET" and _is_health_path(request.path):
             await self._write_json(writer, 200, {"ok": True, "model": self._model_label()})
             return
+        if _is_mcp_path(request.path):
+            await self._mcp(request, writer)
+            return
         if not _is_chat_path(request.path):
             await self._write_json(writer, 404, _error("not found"))
             return
@@ -320,6 +334,91 @@ class AgentEndpoint:
             await self._write_sse(writer, text)
         else:
             await self._write_json(writer, 200, self._completion(text))
+
+    # ── the MCP route: the brain's tools, offered to the CLI seats ──────────
+
+    async def _mcp(self, request: HttpRequest, writer: asyncio.StreamWriter) -> None:
+        """MCP over streamable HTTP, JSON responses only.
+
+        `claude --mcp-config` and `codex -c mcp_servers.*` both speak this:
+        one JSON-RPC message per POST. There is no server-initiated stream,
+        so GET answers 405 as the transport allows, and a DELETE that ends a
+        session is acknowledged and forgotten — the route is stateless.
+        """
+        if request.method == "GET":
+            await self._write_json(writer, 405, _error("no event stream"))
+            return
+        if request.method == "DELETE":
+            await self._write_json(writer, 200, {})
+            return
+        if request.method != "POST":
+            await self._write_json(writer, 405, _error("use POST"))
+            return
+        if not self._authorized(request.headers.get("authorization", "")):
+            await self._write_json(writer, 401, _error("unauthorized", "authentication_error"))
+            return
+        try:
+            payload = json.loads(request.body or b"")
+        except ValueError:
+            await self._write_json(writer, 400, _error("body is not JSON"))
+            return
+        messages = payload if isinstance(payload, list) else [payload]
+        replies: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                replies.append(_rpc_error(None, -32600, "invalid request"))
+                continue
+            reply = await self._rpc(message)
+            if reply is not None:
+                replies.append(reply)
+        if not replies:
+            await self._write_raw(writer, 202, "application/json", b"")
+            return
+        body = json.dumps(replies if isinstance(payload, list) else replies[0]).encode("utf-8")
+        await self._write_raw(writer, 200, "application/json", body)
+
+    async def _rpc(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        method = message.get("method")
+        id_ = message.get("id")
+        params = message.get("params")
+        params = params if isinstance(params, dict) else {}
+        if not isinstance(method, str):
+            return _rpc_error(id_, -32600, "method required")
+        if method.startswith("notifications/"):
+            return None
+        result: dict[str, Any]
+        if method == "initialize":
+            requested = params.get("protocolVersion")
+            result = {
+                "protocolVersion": requested if isinstance(requested, str) else "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "joat", "version": "1"},
+            }
+        elif method == "ping":
+            result = {}
+        elif method == "tools/list":
+            definitions = self._tools.tool_definitions() if self._tools is not None else []
+            result = {"tools": [
+                {"name": d["name"], "description": d["description"],
+                 "inputSchema": d["input_schema"]}
+                for d in definitions
+            ]}
+        elif method == "tools/call":
+            name = params.get("name")
+            arguments = params.get("arguments")
+            if self._tools is None or not isinstance(name, str):
+                text = "error: no such tool"
+            else:
+                text = await self._tools.execute(ToolCall(
+                    name=name,
+                    arguments=dict(arguments) if isinstance(arguments, dict) else {},
+                ))
+            log.info("mcp tool call chars=%d error=%s", len(text), text.startswith("error:"))
+            result = {"content": [{"type": "text", "text": text}],
+                      "isError": text.startswith("error:")}
+        else:
+            return _rpc_error(id_, -32601, f"unknown method {method}")
+        return {"jsonrpc": "2.0", "id": id_, "result": result}
 
     async def _collect(self, query: str) -> str:
         parts: list[str] = []

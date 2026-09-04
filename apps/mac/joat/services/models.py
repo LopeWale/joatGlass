@@ -35,9 +35,10 @@ the proposer is silent at boot for a reason no log explains."""
 
 DEFAULT_STT_MODEL = "large-v3_turbo"
 
-DEFAULT_ASSISTANT_MODEL = "claude-opus-5"
-"""The mind's seat (agents/claude_reply_engine.py). Opus 5 by default: the
-strongest everyday model; effort is set low per turn so it answers fast."""
+DEFAULT_ASSISTANT_SEAT = "claude"
+"""Which subscription answers the wearer (agents/cli_reply_engine.py):
+Claude Code on the Max plan by default, Codex on the ChatGPT plan, or the
+resident MLX model. Never an API key (RULES.md #9, #10)."""
 
 
 @dataclass(frozen=True)
@@ -231,29 +232,24 @@ async def handle_model_command(text: str, registry: ModelRegistry) -> str | None
 
 # ── defaults ────────────────────────────────────────────────────────────────
 
-def assistant_slot(default: str = DEFAULT_ASSISTANT_MODEL) -> ModelSlot:
-    """The assistant's model, named the way it is spoken.
+def assistant_slot(default: str = DEFAULT_ASSISTANT_SEAT) -> ModelSlot:
+    """The assistant's seat, named the way it is spoken.
 
     Kept apart from ``default_slots`` so the Brainstorm seats and the speech
-    slot keep their exact shape; ``__main__`` appends this one. The engine
-    reads it per turn, so "use sonnet for the assistant" lands on the next
-    question without a restart.
+    slot keep their exact shape; ``__main__`` appends this one. The seat
+    switch reads it per turn, so "use codex for the assistant" lands on the
+    next question without a restart. Which MODEL each seat runs is the
+    existing Claude seat / Codex seat slot.
     """
-    options = [
-        ModelOption("opus", "claude-opus-5", "default; strongest everyday"),
-        ModelOption("sonnet", "claude-sonnet-5", "faster, cheaper"),
-        ModelOption("haiku", "claude-haiku-4-5", "fastest"),
-        ModelOption("fable", "claude-fable-5-1", "most capable; slower, pricier"),
-    ]
-    if default not in [o.id for o in options]:
-        # A configured id outside the list is still a real choice — name it
-        # by its family word so the wearer can say it back.
-        family = default.split("-")[1] if default.count("-") >= 2 else default
-        options.insert(0, ModelOption(family, default, "configured"))
+    options = (
+        ModelOption("claude", "claude", "Claude Code on the Max subscription; streams"),
+        ModelOption("codex", "codex", "Codex CLI on the ChatGPT subscription"),
+        ModelOption("local", "local", "the resident MLX model; offline"),
+    )
+    index = next((i for i, o in enumerate(options) if o.id == default), 0)
     return ModelSlot(
-        key="assistant", title="Assistant", aliases=("agent", "mind", "joat"),
-        options=tuple(options),
-        index=next(i for i, o in enumerate(options) if o.id == default),
+        key="assistant", title="Assistant", aliases=("agent", "mind", "joat", "seat"),
+        options=options, index=index,
     )
 
 

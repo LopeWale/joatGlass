@@ -92,7 +92,11 @@ class SubprocessAgent:
                  name: str | None = None,
                  model: Callable[[], str | None] | None = None,
                  model_flag: str = "-m",
-                 stream_json: bool = False) -> None:
+                 stream_json: bool = False,
+                 notices: bool = True,
+                 capture: bool = False,
+                 cwd: str | None = None,
+                 env_extra: dict[str, str] | None = None) -> None:
         # Read the CLI's incremental protocol instead of its final stdout.
         # Measured on the real binaries: plain `-p` delivers a whole answer
         # in one chunk with the first byte at 10.4s of a 10.7s turn, so the
@@ -111,23 +115,60 @@ class SubprocessAgent:
         # leaves the tool on its own default.
         self._model = model
         self._model_flag = model_flag
+        # The assistant seats (agents/cli_reply_engine.py) render their own
+        # failure copy from the CLI's exit state, so they turn the debate
+        # notices off and read these after the stream ends.
+        self._notices = notices
+        self._capture = capture
+        # The assistant seats spawn in their own directory so the CLI does
+        # not read this repository's CLAUDE.md/AGENTS.md as project context,
+        # and hand the child the MCP token without touching os.environ.
+        self._cwd = cwd
+        self._env_extra = dict(env_extra or {})
+        self.last_returncode: int | None = None
+        self.last_failed = False
+        self.last_output = ""
 
     def _argv(self, prompt: str) -> list[str]:
         chosen = self._model() if self._model is not None else None
         flag = [self._model_flag, chosen] if chosen else []
-        return [*self._command, *flag, prompt]
+        # An empty prompt is "no prompt" — the assistant seats probe the
+        # CLIs' login state with argv alone, and a trailing "" would be
+        # parsed as a positional argument by both binaries.
+        return [*self._command, *flag, *([prompt] if prompt else [])]
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         env = {k: v for k, v in os.environ.items() if k not in self._env_strip}
         env["OTEL_SDK_DISABLED"] = "true"
+        env.update(self._env_extra)
+        self.last_returncode = None
+        self.last_failed = False
+        self.last_output = ""
         proc = await asyncio.create_subprocess_exec(
             *self._argv(prompt),
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE if self._capture else asyncio.subprocess.DEVNULL,
             stdin=asyncio.subprocess.DEVNULL,
             env=env,
+            cwd=self._cwd,
         )
         assert proc.stdout is not None
+        captured: list[str] = []
+
+        async def drain_stderr() -> None:
+            # Bounded: a chatty child must neither deadlock on a full pipe
+            # nor grow this without limit. The tail is what carries the
+            # login or usage-limit complaint.
+            assert proc.stderr is not None
+            while True:
+                chunk = await proc.stderr.read(4096)
+                if not chunk:
+                    return
+                captured.append(chunk.decode(errors="replace"))
+                if sum(len(c) for c in captured) > 16_000:
+                    del captured[:-2]
+
+        stderr_task = asyncio.ensure_future(drain_stderr()) if self._capture else None
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout_s
         pending = ""
@@ -148,7 +189,12 @@ class SubprocessAgent:
                     break
                 if not raw:
                     break
-                pending += raw.decode(errors="replace")
+                decoded = raw.decode(errors="replace")
+                pending += decoded
+                if self._capture:
+                    captured.append(decoded)
+                    if sum(len(c) for c in captured) > 16_000:
+                        del captured[:-2]
                 # Emit complete lines (noise-filtered); keep the tail fragment.
                 *lines, pending = pending.split("\n")
                 if self._stream_json:
@@ -200,9 +246,10 @@ class SubprocessAgent:
             # seat, not the whole round.
             if timed_out:
                 log.warning("agent %s timed out after %.0fs", self._name, self._timeout_s)
-                yield "\n" + failure_notice(
-                    self._name, f"no answer within {self._timeout_s:.0f}s"
-                ) + "\n"
+                if self._notices:
+                    yield "\n" + failure_notice(
+                        self._name, f"no answer within {self._timeout_s:.0f}s"
+                    ) + "\n"
             else:
                 # stdout is at EOF, so reaping is normally instant — but a
                 # child that closes stdout and lingers must not become an
@@ -215,12 +262,21 @@ class SubprocessAgent:
                     pass
                 if proc.returncode:
                     log.warning("agent %s exited %s", self._name, proc.returncode)
-                    yield "\n" + failure_notice(
-                        self._name, f"exited {proc.returncode} — see the log"
-                    ) + "\n"
+                    if self._notices:
+                        yield "\n" + failure_notice(
+                            self._name, f"exited {proc.returncode} — see the log"
+                        ) + "\n"
         finally:
             if proc.returncode is None:
                 proc.kill()
+            if stderr_task is not None:
+                try:
+                    await asyncio.wait_for(stderr_task, 2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    stderr_task.cancel()
+            self.last_returncode = proc.returncode
+            self.last_failed = timed_out or bool(proc.returncode) or result_failed
+            self.last_output = "".join(captured)[-4000:]
             # Bounded, because asyncio completes wait() only once the stdout
             # PIPE closes — and a killed agent's own children inherit that
             # pipe and keep it open. `codex exec` spawns children, so an

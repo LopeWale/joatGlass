@@ -263,3 +263,88 @@ def test_the_token_comes_from_the_environment_or_a_private_file(
 def test_an_empty_token_is_refused() -> None:
     with pytest.raises(ValueError):
         AgentEndpoint(ScriptedEngine([]), "")
+
+
+# ── the MCP route: the brain's tools for the CLI seats ───────────────────────
+
+from joat.agents.tools import Tool, ToolBelt  # noqa: E402
+
+
+async def rpc(port: int, message: Any, token: str | None = "secret") -> tuple[int, Any]:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    status, _, body = await http(port, "POST", "/agent/mcp", message, headers)
+    return status, (json.loads(body) if body else None)
+
+
+@pytest.fixture
+async def mcp_door() -> AsyncIterator[AgentEndpoint]:
+    async def weather(args: dict[str, Any]) -> str:
+        return f"72F in {args.get('location', 'here')}"
+
+    async def broken(args: dict[str, Any]) -> str:
+        raise RuntimeError("down")
+
+    belt = ToolBelt([
+        Tool("get_weather", "Current weather.",
+             {"type": "object", "properties": {"location": {"type": "string"}}}, weather),
+        Tool("broken", "", {"type": "object"}, broken),
+    ])
+    endpoint = AgentEndpoint(ScriptedEngine(["x"]), "secret", port=0, tools=belt)
+    await endpoint.start()
+    try:
+        yield endpoint
+    finally:
+        await endpoint.stop()
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialize_and_notifications(mcp_door: AgentEndpoint) -> None:
+    status, reply = await rpc(mcp_door.port, {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+    })
+    assert status == 200
+    assert reply["id"] == 1 and reply["result"]["protocolVersion"] == "2025-06-18"
+    assert reply["result"]["capabilities"] == {"tools": {}}
+    status, reply = await rpc(mcp_door.port, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert status == 202 and reply is None
+    status, reply = await rpc(mcp_door.port, {"jsonrpc": "2.0", "id": 2, "method": "ping"})
+    assert status == 200 and reply["result"] == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_lists_and_calls_the_belt(mcp_door: AgentEndpoint) -> None:
+    _, reply = await rpc(mcp_door.port, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+    names = [t["name"] for t in reply["result"]["tools"]]
+    assert names == ["get_weather", "broken"]
+    assert reply["result"]["tools"][0]["inputSchema"]["type"] == "object"
+    _, reply = await rpc(mcp_door.port, {
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "get_weather", "arguments": {"location": "Norman"}},
+    })
+    assert reply["result"] == {"content": [{"type": "text", "text": "72F in Norman"}], "isError": False}
+    _, reply = await rpc(mcp_door.port, {
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "broken"},
+    })
+    assert reply["result"]["isError"] is True and reply["result"]["content"][0]["text"].startswith("error:")
+    _, reply = await rpc(mcp_door.port, {
+        "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "nope"},
+    })
+    assert reply["result"]["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_batches_unknown_methods_and_auth(mcp_door: AgentEndpoint) -> None:
+    status, reply = await rpc(mcp_door.port, [
+        {"jsonrpc": "2.0", "id": 7, "method": "ping"},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 8, "method": "resources/list"},
+    ])
+    assert status == 200 and [r["id"] for r in reply] == [7, 8]
+    assert reply[1]["error"]["code"] == -32601
+    status, _ = await rpc(mcp_door.port, {"jsonrpc": "2.0", "id": 9, "method": "ping"}, token=None)
+    assert status == 401
+    status, _, _ = await http(mcp_door.port, "GET", "/mcp", headers=AUTH)
+    assert status == 405
+    status, _, _ = await http(mcp_door.port, "DELETE", "/mcp", headers=AUTH)
+    assert status == 200

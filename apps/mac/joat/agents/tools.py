@@ -82,12 +82,12 @@ class ToolBelt:
             for t in self._tools.values()
         ]
 
-    def anthropic_tools(self) -> list[dict[str, Any]]:
-        """Anthropic Messages API tool definitions, the shape Claude consumes.
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        """The belt as name/description/schema, for the MCP route to publish.
 
         Same tools, same runners; only the envelope differs from ``schemas``.
         A missing description falls back to the name, and a schema without a
-        type is an object — the API rejects either omission outright.
+        type is an object — a client rejects either omission outright.
         """
         definitions: list[dict[str, Any]] = []
         for t in self._tools.values():

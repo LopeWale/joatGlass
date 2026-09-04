@@ -133,3 +133,28 @@ class TestExecute:
 
 async def _resolved(value: str) -> str:
     return value
+
+
+class TestToolDefinitions:
+    """What the MCP route publishes to the CLI seats."""
+
+    def test_name_description_and_schema_travel_together(self) -> None:
+        async def run(args: dict[str, Any]) -> str:
+            return ""
+
+        belt = ToolBelt([
+            Tool("get_weather", "Weather now.", {"type": "object", "properties": {}}, run),
+            Tool("bare", "", {"properties": {"q": {"type": "string"}}}, run),
+        ])
+        definitions = belt.tool_definitions()
+        assert definitions[0] == {
+            "name": "get_weather", "description": "Weather now.",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+        # A description is required by clients, so the name stands in; a
+        # schema without a declared type is an object.
+        assert definitions[1]["description"] == "bare"
+        assert definitions[1]["input_schema"]["type"] == "object"
+
+    def test_an_empty_belt_publishes_nothing(self) -> None:
+        assert ToolBelt([]).tool_definitions() == []
