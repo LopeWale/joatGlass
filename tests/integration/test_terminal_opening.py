@@ -16,13 +16,14 @@ from typing import Any
 import pytest
 
 from joat.channels.cards import CardLog
-from joat.core.protocol import AgentTerminalHudView, HudList, InputEvent, PromptAck, PromptPresent
+from joat.core.protocol import AgentTerminalHudView, BrainstormHudView, HudList, InputEvent, PromptAck, PromptPresent
 from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster, TerminalFrame
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
 from joat.services.message_reply import MessageReplyController
 from joat.services.prompted_speech import PromptedSpeechRuntime
 from joat.services.session import SessionManager
+from joat.services.sinks import HudSink
 from joat.services.status import StatusPublisher
 from joat.services.terminal_opening import TerminalOpeningController
 
@@ -791,3 +792,72 @@ async def test_terminal_instruction_retry_ledger_caps_at_256_without_evicting_ac
     assert capacity.startswith("error:") and "capacity" in capacity.lower()
     assert "already" in replay.lower()
     assert len(visit.calls) == 256 and len(rig.agents["hermes"].scoped) == 256
+
+
+async def test_brainstorm_handoff_uses_picker_and_real_selected_lane(rig: OpeningRig) -> None:
+    rig.router.claim_brainstorm_view()
+    sink = HudSink(
+        rig.hud, open_terminal=rig.router.open_terminal_from_brainstorm,
+        brainstorm_view_current=lambda: rig.router.brainstorm_view_current,
+    )
+    await sink.open("One work surface", ["Codex", "Claude"])
+    await sink.show_terminal()
+    picker = [m for m in rig.transport.sent if isinstance(m, HudList)][-1]
+    assert picker.title == "AGENT TERMINAL"
+    assert not rig.frames, "A picker is not an invented running Hermes session"
+    assert picker.request_id is not None
+    rig.select("work", request_id=picker.request_id)
+    await rig.opened()
+    assert rig.frames[-1][0].state == "ready"
+    assert rig.frames[-1][0].topic.startswith("work")
+    before = len(rig.transport.sent)
+    await sink.chunk("Preserved while reading Terminal")
+    await sink.close("settled")
+    assert len(rig.transport.sent) == before
+    rig.router.claim_brainstorm_view()
+    await sink.replay()
+    restored = rig.transport.sent[-1]
+    assert isinstance(restored, BrainstormHudView)
+    assert restored.state == "settled"
+    assert "Preserved while reading Terminal" in restored.activity
+    rig.assert_no_input()
+
+
+@pytest.mark.parametrize("destination", ["home", "settings", "news", "search", "pomodoro", "feature"])
+async def test_local_departure_stops_brainstorm_frames_without_mac_repaint(
+    rig: OpeningRig, destination: str,
+) -> None:
+    rig.router.claim_brainstorm_view()
+    sink = HudSink(rig.hud, brainstorm_view_current=lambda: rig.router.brainstorm_view_current)
+    await sink.open("Keep selected feature", ["Codex", "Claude"])
+    before = len(rig.transport.sent)
+    rig.router.on_input(InputEvent(
+        container_name="capability-lifecycle", selected_name=f"surface-{destination}",
+    ))
+    await sink.chunk("Background result")
+    await sink.close("settled")
+    await asyncio.sleep(0)
+    assert len(rig.transport.sent) == before
+    assert not rig.router.brainstorm_view_current
+
+
+async def test_contextual_overlay_close_cannot_restore_departed_brainstorm(rig: OpeningRig) -> None:
+    def lifecycle(name: str) -> None:
+        rig.router.on_input(InputEvent(container_name="capability-lifecycle", selected_name=name))
+
+    rig.router.claim_brainstorm_view()
+    lifecycle("surface-context-menu-open")
+    assert not rig.router.brainstorm_view_current
+    lifecycle("surface-context-menu-closed")
+    assert rig.router.brainstorm_view_current
+    lifecycle("surface-context-menu-open")
+    lifecycle("surface-home")
+    lifecycle("surface-context-menu-closed")
+    assert not rig.router.brainstorm_view_current
+
+
+async def test_feature_tap_retires_brainstorm_before_async_open(rig: OpeningRig) -> None:
+    rig.router.claim_brainstorm_view()
+    rig.router.on_input(InputEvent(container_name="capmenu", selected_name="Messages", request_id="messages"))
+    assert not rig.router.brainstorm_view_current
+    await asyncio.sleep(0)

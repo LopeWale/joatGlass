@@ -372,6 +372,7 @@ class CapabilityRouter:
         self._activity_rows: list[ActionActivity] = []
         self._active_request_id: str | None = None
         self._active_capability: str | None = None
+        self._contextual_menu_open = False
         self._request_context: ContextVar[str | None] = ContextVar(
             f"capability_request_{id(self)}",
             default=None,
@@ -379,10 +380,28 @@ class CapabilityRouter:
 
     def on_input(self, event: InputEvent) -> None:
         """Transport callback — synchronous, so work is scheduled."""
+        if event.container_name == "capability-lifecycle":
+            if event.selected_name in {"surface-context-menu-open", "surface-context-menu-closed"}:
+                self._contextual_menu_open = event.selected_name.endswith("-open")
+                return
+            if event.selected_name in {
+                "surface-home", "surface-menu", "surface-settings", "surface-news",
+                "surface-search", "surface-pomodoro", "surface-feature",
+            }:
+                # These transitions are local on the Hub. Retire ownership
+                # synchronously, without painting over the page it just chose.
+                self._terminal_opening_revision += 1
+                self._active_capability = None
+                self._active_request_id = None
+                self._note_reader = None
+                self.clear_message_selection("surface-departure")
+                return
         if event.container_name == "capmenu" and event.selected_name:
             self.clear_message_selection("capability-open")
             self._terminal_opening_revision += 1
             revision = self._terminal_opening_revision
+            self._active_capability = self._canonical_capability(event.selected_name)
+            self._active_request_id = event.request_id
 
             async def open_requested() -> None:
                 if revision != self._terminal_opening_revision:
@@ -536,8 +555,12 @@ class CapabilityRouter:
                     and event.trace_id == self._terminal_selection_id):
                 self._terminal_opening_revision += 1
                 self._terminal_selection_id = None
+                self._active_capability = None
+                self._active_request_id = None
         elif event.container_name == "menu" and event.selected_name == "closed":
             self._terminal_opening_revision += 1
+            self._active_capability = None
+            self._active_request_id = None
             self._note_reader = None
             self.clear_message_selection("home")
             asyncio.get_running_loop().create_task(self.repaint_home())
@@ -565,6 +588,9 @@ class CapabilityRouter:
     def on_disconnect(self) -> None:
         """Drop any Mac-private reply target when the glasses link disappears."""
         self._terminal_opening_revision += 1
+        self._active_capability = None
+        self._active_request_id = None
+        self._contextual_menu_open = False
         self.clear_message_selection("disconnect")
         self._note_reader = None
 
@@ -815,6 +841,32 @@ class CapabilityRouter:
     def view_revision(self) -> int:
         """Navigation changes retire assistant overlays from the preceding view."""
         return self._terminal_opening_revision
+
+    @property
+    def brainstorm_view_current(self) -> bool:
+        """A running discussion is not necessarily the wearer's current view."""
+        return self._active_capability == "BRAINSTORM" and not self._contextual_menu_open
+
+    @property
+    def terminal_view_current(self) -> bool:
+        return self._active_capability == "AGENT TERMINAL" and not self._contextual_menu_open
+
+    def claim_brainstorm_view(self) -> None:
+        """Only an explicit start or return may reclaim the discussion view."""
+        self._terminal_opening_revision += 1
+        if self._active_capability != "BRAINSTORM":
+            self.clear_message_selection("brainstorm-open")
+            self._note_reader = None
+            self._active_request_id = None
+        self._active_capability = "BRAINSTORM"
+
+    async def open_terminal_from_brainstorm(self) -> bool:
+        """Use the same picker and lane preparation as an ordinary Terminal open."""
+        if not self.brainstorm_view_current:
+            return False
+        request_id = voice_request_id()
+        await self.open("Agent Terminal", request_id=request_id)
+        return self.terminal_view_current and self._active_request_id == request_id
 
     async def prepare_terminal_instruction(self, name: str, request_id: str) -> bool:
         """Open one explicitly named lane through the normal owned visit."""

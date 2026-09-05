@@ -297,6 +297,51 @@
   connections to the wearer's Cloudflare and RunPod servers — two per turn
   measured, zero after. A voice turn has no business dialling either.
 
+## 2026-09-03
+
+- Corrected September 3 zero counts to mean no usable glasses connection,
+  not a successful voice recovery. Bounded the native spine-label write that
+  could block networking before first light. The official simulator then
+  exposed dropped replies on text fallback; restored streamed replies and
+  retained-page dismissal there, including a readable native-list reply page.
+  A delegated review reproduced a delayed reply covering consent; confirmation
+  now waits for that write before presenting its exclusive gate. Verification:
+  110 focused Hub tests and typecheck passed, with an official-simulator
+  injected-startup-hang/audio-gap run visibly showing both replies. This Mac's
+  gateway was absent and Tailscale stopped at read-only inspection; physical
+  reconnection remains unverified. Evidence: `docs/VOICE_GAP_RECOVERY.md` and
+  `docs/plugin-startup-recovery-evidence.json`. No package or upload.
+
+- Repaired voice continuity across microphone pauses and replacement Hub
+  connections. The orchestrator now uses connection generation, clears partial
+  speech even when counters happen to line up, and protects completed active
+  STT work from a new ingress reset. Mic stop clears the odd PCM byte and
+  reserves a sequence boundary; real gaps still discard partial speech and
+  retain the existing wake-word/privacy gates. Independent source/log reviews
+  found all 398 historical resets immediately followed new connections, with
+  no matched gateway gap warning; the actual reconnect causes remain unproven.
+  Focused verification passed 135 Python tests, 104 Hub tests, strict mypy and
+  Hub typecheck. The official Even Realities Simulator visibly displayed
+  “First turn preserved” and “Voice recovered” using exact synthetic PCM and
+  a held local STT fixture. Source/simulator evidence and physical limits are
+  retained in `docs/VOICE_GAP_RECOVERY.md` and its receipt. No package, upload,
+  installation, live app restart or physical-G2 acceptance was performed.
+
+- Fixed resident WhisperKit cold-start session lock-in. The foreground wait
+  remains 30 seconds, but the same adapter/child can finish loading behind
+  temporary batch STT; exited children retry after a cooldown. A real isolated
+  CLI probe first passed its canary at 80.17 seconds, while the controlled
+  production-budget subprocess regression recovered with the same child.
+  Complete utterances keep one backend, shutdown reaps resident/batch children,
+  canary workers are joined before model changes, and temporary batch uses the
+  exact selected model directory. A delegated read-only lifecycle review found
+  worker-ownership and close races that are covered by regressions. See
+  `docs/WHISPER_COLD_START.md` for evidence and the separate, still-open physical
+  G2 latency gate. Final source verification: 229 tests passed (43 STT-focused),
+  strict mypy clean on 98 files, and the real 30-second-budget fixture passed.
+  No pairing/caller edits, package, upload, installation or
+  production restart were performed by this task.
+
 ## 2026-08-31
 
 - Prepared JOAT `0.1.40` as the uniquely versioned phone-installable

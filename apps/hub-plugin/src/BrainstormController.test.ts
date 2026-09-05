@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BrainstormController, liveFrameMayTakeScreen } from './BrainstormController';
+import { BrainstormController } from './BrainstormController';
 import type { BrainstormHudModel, UplinkMessage } from './types';
 
 function model(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudModel {
@@ -300,35 +300,31 @@ describe('a Brainstorm frame carries no terminal fields at all', () => {
   });
 });
 
-describe('a live frame taking the screen back', () => {
-  // Left-single opens the menu during a live run so the wearer can check
-  // Messages without left-double ending the session. Every arriving frame
-  // calls beginLiveSession, which closes the menu — so that escape hatch
-  // worked until the next streamed token, then undid itself.
-  it('yields to a menu the wearer opened mid-session', () => {
-    expect(liveFrameMayTakeScreen(true, false, 'running')).toBe(false);
+describe('native contextual menu input ownership', () => {
+  it('suspends gestures and resumes the existing visit when the overlay closes', () => {
+    const { controller, sent } = make();
+    controller.present(model({ state: 'running' }));
+    controller.setSuspended(true);
+    expect(controller.isActive()).toBe(false);
+    expect(controller.handleClick()).toBe(false);
+    expect(controller.handleCancel()).toBe(false);
+    expect(controller.handleSwipe()).toBe(false);
+    expect(controller.handleAcceptance('right')).toBe(false);
+    expect(sent).toEqual([]);
+    controller.setSuspended(false);
+    expect(controller.isActive()).toBe(true);
+    expect(controller.handleClick()).toBe(true);
+    expect(sent).toEqual([{ kind: 'brainstorm.action', action: 'show_terminal' }]);
   });
 
-  it('still lands the closing synthesis, cancel and block', () => {
-    // The engine draws the same line for the terminal handoff: it withholds
-    // only `running`, so "closing verdicts still land and a finished session
-    // is never hidden" (sinks.py). A settled frame dropped here would lose
-    // the answer the wearer sat through the whole session for.
-    for (const state of ['settled', 'cancelled', 'blocked']) {
-      expect(liveFrameMayTakeScreen(true, false, state)).toBe(true);
-    }
-  });
-
-  it('lands the frame answering the wearer own pending tap', () => {
-    // Tapping the Brainstorm row IS how they asked to come back
-    // (docs/SESSION_MODEL.md:46). Dropping this frame would strand them in
-    // the menu with no route into the room.
-    expect(liveFrameMayTakeScreen(true, true, 'running')).toBe(true);
-  });
-
-  it('never withholds anything while the menu is closed', () => {
-    for (const state of ['running', 'settled', 'topic_capture', 'ready']) {
-      expect(liveFrameMayTakeScreen(false, false, state)).toBe(true);
-    }
+  it('closing the overlay cannot restore a feature that was left while it was open', () => {
+    const { controller, sent } = make();
+    controller.present(model({ state: 'running' }));
+    controller.setSuspended(true);
+    controller.clear();
+    controller.setSuspended(false);
+    expect(controller.isActive()).toBe(false);
+    expect(controller.handleClick()).toBe(false);
+    expect(sent).toEqual([]);
   });
 });

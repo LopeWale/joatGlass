@@ -832,7 +832,11 @@ async def main() -> None:
             return DebateSession(
                 topic,
                 seat_participants(current_seated()),
-                Broadcast([HudSink(hud, status.agent_terminal_projection),
+                Broadcast([HudSink(
+                    hud,
+                    open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
+                    brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+                ),
                            TerminalSink(), debate_state]),
                 replier,
                 gate=gate,
@@ -853,7 +857,11 @@ async def main() -> None:
         return DebateSession(
             topic,
             seat_participants(seated),
-            Broadcast([HudSink(hud, status.agent_terminal_projection), TerminalSink(), debate_state]),
+            Broadcast([HudSink(
+                hud,
+                open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
+                brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+            ), TerminalSink(), debate_state]),
             replier,
             gate=gate,
             on_phase=publish_brainstorm_phase,
@@ -896,6 +904,8 @@ async def main() -> None:
         )
 
     def publish_brainstorm_state(state: str) -> None:
+        if state == "running":
+            capabilities.claim_brainstorm_view()
         status.set_brainstorm(
             state=state,
             seat_count=len(current_seated()),
@@ -1091,6 +1101,8 @@ async def main() -> None:
         card_log=card_log,
         terminal_capture=arm_terminal_capture,
         terminal_view_current=lambda: terminal_opening.current,
+        brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+        surface_revision=lambda: capabilities.view_revision,
         on_state=publish_brainstorm_state,
         starters=[make_navigation],
         terminal_retry=retry_selected_terminal,
@@ -1161,6 +1173,11 @@ async def main() -> None:
     transport.on_navigation_action(on_navigation_action)
 
     def on_brainstorm_action(action: BrainstormAction) -> None:
+        if (action.action == "begin_topic_capture" and not sessions.active) or (
+            action.action == "show_brainstorm"
+            and isinstance(sessions.active_session, DebateSession)
+        ):
+            capabilities.claim_brainstorm_view()
         if action.action == "begin_acceptance":
             rejection = try_start_g2_gesture_acceptance(
                 transport=transport,
@@ -1263,8 +1280,7 @@ async def main() -> None:
         # line still lands in the lane's tail either way.
         # An owned Terminal already carries this line in its bound transcript
         # frame. A second unbound text write could repaint after Home.
-        if (not terminal_opening.owns_opening
-                and (not sessions.active or sessions.terminal_owns_hud())):
+        if not terminal_opening.owns_opening and capabilities.terminal_view_current:
             await hud.show(line)
 
     async def terminal_paint(
@@ -1281,8 +1297,7 @@ async def main() -> None:
         # A live Brainstorm owns the lenses — EXCEPT while the wearer has
         # tapped away to the terminal, which is precisely when these frames
         # are the screen they are looking at.
-        if (opening_request_id is None and sessions.active
-                and not sessions.terminal_owns_hud()):
+        if not capabilities.terminal_view_current:
             return
         terminal = status.agent_terminal_projection()
         await hud.show_agent_terminal(AgentTerminalHudView(
@@ -1369,6 +1384,7 @@ async def main() -> None:
         transport, stt, stt_available=stt_available, replier=replier,
         sessions=sessions, wake_words=wake_words, status=status,
         commands=voice_commands,
+        feature_navigation=capability_opens.handle_command,
         latency_observer=voice_latency.record if voice_latency is not None else None,
         frames=audio_router,
         prompted_input=prompted_speech.dispatcher,
@@ -1500,7 +1516,14 @@ async def main() -> None:
             belt.register(tool)
 
     def on_capability_input(event: InputEvent) -> None:
-        if event.container_name == "menu" and event.selected_name == "closed":
+        departing = (
+            event.container_name == "capability-lifecycle"
+            and event.selected_name in {
+                "surface-home", "surface-menu", "surface-settings", "surface-news",
+                "surface-search", "surface-pomodoro", "surface-feature",
+            }
+        )
+        if departing or (event.container_name == "menu" and event.selected_name == "closed"):
             prompted_speech.revoke_current()
             sessions.clear_topic_capture()
         terminal_was_current = terminal_opening.current

@@ -224,6 +224,11 @@ export class CapabilityMenu {
     paneIndex: number;
   };
   private transitionId = 0;
+  private brainstormVisit = 0;
+  private brainstormOwnsSurface = false;
+  private contextualMenuOpen = false;
+  /** Retire the gesture controller before any replacement paint can wait. */
+  onSurfaceDeparture: () => void = () => {};
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
 
@@ -237,19 +242,50 @@ export class CapabilityMenu {
     return this.view !== 'closed';
   }
 
-  /** A live session owns the overview, not the menu page that launched it.
-   * Clear input ownership synchronously before rebuilding so the first
-   * streamed frame cannot remain trapped behind the Brainstorm instructions. */
-  /** True while a wearer tap is waiting on the Mac to answer it.
-   *
-   * A live Brainstorm frame arriving in this window IS that answer — the
-   * wearer asked to go back into the room (docs/SESSION_MODEL.md:46), so it
-   * takes the screen. One arriving OUTSIDE the window is an ordinary
-   * streamed turn, which must not snatch the lenses away from a menu the
-   * wearer just opened. Without this, making left-double open the menu
-   * would achieve nothing: the next turn would repaint over it. */
   isAwaitingResponse(): boolean {
     return this.pendingRequestId !== undefined;
+  }
+
+  /** Capture at ingress: queued frames lose authority on local departure. */
+  captureBrainstormVisit(): () => boolean {
+    const visit = this.brainstormVisit;
+    return () => visit === this.brainstormVisit;
+  }
+
+  /** Only an explicit local open or Mac start/replay rebuild grants focus. */
+  claimBrainstormVisit(isCurrent: () => boolean): boolean {
+    if (!isCurrent()) return false;
+    this.brainstormOwnsSurface = true;
+    return true;
+  }
+
+  mayPresentBrainstorm(isCurrent: () => boolean): boolean {
+    return isCurrent() && this.brainstormOwnsSurface && !this.contextualMenuOpen;
+  }
+
+  /** Mac-authored replacement frames retire focus without echoing a request.
+   * Do not increment the local visit: an explicit rebuild already queued
+   * after that replacement must still be able to open Brainstorm. */
+  retireBrainstormSurface(): void {
+    this.brainstormOwnsSurface = false;
+    this.onSurfaceDeparture();
+  }
+
+  setContextualMenuOpen(open: boolean): void {
+    if (open === this.contextualMenuOpen) return;
+    this.contextualMenuOpen = open;
+    this.brainstormVisit += 1;
+    this.sendSurfaceLifecycle(open ? 'surface-context-menu-open' : 'surface-context-menu-closed');
+  }
+
+  private departSurface(surface: 'home' | 'settings' | 'news' | 'search' | 'pomodoro' | 'feature'): void {
+    this.brainstormVisit += 1;
+    this.retireBrainstormSurface();
+    this.sendSurfaceLifecycle(`surface-${surface}`);
+  }
+
+  private sendSurfaceLifecycle(selectedName: string): void {
+    this.link.send({ kind: 'input', event: { containerName: 'capability-lifecycle', selectedName } });
   }
 
   /** Synchronous ingress reserves a typed action only for the row we sent. */
@@ -432,6 +468,7 @@ export class CapabilityMenu {
       || !isCurrent()
     ) return false;
 
+    this.retireBrainstormSurface();
     const revision = ++this.terminalPaintRevision;
     const stillCurrent = () => this.terminalOpening === opening
       && this.terminalPaintRevision === revision && isCurrent();
@@ -464,7 +501,8 @@ export class CapabilityMenu {
     void session;
     // The caller immediately paints its live frame. Painting Overview here
     // doubled tile traffic and exposed unrelated quadrants between updates.
-    this.releaseToLiveSession();
+    this.retireTerminalOpening();
+    this.releaseMenuToLiveSession();
   }
 
   /** An external live surface (Navigation) is taking the lenses. Clear menu
@@ -474,6 +512,7 @@ export class CapabilityMenu {
    * response timeout armed for the menu request from later repainting a
    * retry list over the live session's frame. */
   releaseToLiveSession(): void {
+    this.retireBrainstormSurface();
     this.retireTerminalOpening();
     this.releaseMenuToLiveSession();
   }
@@ -507,6 +546,7 @@ export class CapabilityMenu {
   /** Contextual-menu entry: settings remains reachable without consuming one
    * of the five 576x288 sidebar rows. */
   async openSettings(): Promise<void> {
+    this.departSurface('settings');
     this.leaveMessages();
     this.retireQuickNotesReader('home');
     this.pendingTitle = undefined;
@@ -571,6 +611,7 @@ export class CapabilityMenu {
     const matches = normalized === this.pendingTitle
       || normalized.startsWith(`${this.pendingTitle} ·`);
     if (!matches) return false;
+    if (this.pendingTitle !== 'BRAINSTORM') this.retireBrainstormSurface();
     const messagesState = this.pendingTitle === 'MESSAGES'
       ? resolveMessagesViewState(title, selectable)
       : undefined;
@@ -674,6 +715,7 @@ export class CapabilityMenu {
     hint?: string,
   ): Promise<boolean> {
     if (!isActionLifecycleTitle(title)) return false;
+    this.retireBrainstormSurface();
     this.leaveMessages();
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
@@ -700,6 +742,7 @@ export class CapabilityMenu {
     productivity: ProductivityHudModel,
     onVisible?: () => void,
   ): Promise<boolean> {
+    this.retireBrainstormSurface();
     this.leaveMessages();
     this.clearResponseTimeout();
     const transition = this.beginTransition();
@@ -1264,7 +1307,9 @@ export class CapabilityMenu {
    * `capdata` carrying the cached revision, and the Mac answers an opened
    * row with a `hud.list` titled "<TAB> · …" that presentList matches.
    */
-  async openPanelTab(tab: PanelContentTab, keepSelection = 0): Promise<void> {
+  async openPanelTab(tab: PanelContentTab, keepSelection = 0, notifyMac = true): Promise<void> {
+    if (notifyMac) this.departSurface(tab);
+    else this.retireBrainstormSurface();
     this.leaveMessages();
     this.retireQuickNotesReader('home');
     this.dashboard = undefined;
@@ -1294,11 +1339,11 @@ export class CapabilityMenu {
     if (this.hud.rail.requestId(tab) !== requestId) {
       // The cache moved on while the page painted; what is on the glass is
       // already stale. Paint once more from the new cache.
-      return this.openPanelTab(tab, keepSelection);
+      return this.openPanelTab(tab, keepSelection, false);
     }
     const selectedIndex = await this.restorePanelSelection(keepSelection, items.length, transition);
     if (selectedIndex === undefined || !this.isCurrentTransition(transition)) return;
-    if (this.hud.rail.requestId(tab) !== requestId) return this.openPanelTab(tab, keepSelection);
+    if (this.hud.rail.requestId(tab) !== requestId) return this.openPanelTab(tab, keepSelection, false);
     this.view = 'data';
     this.pendingTitle = title;
     this.pendingRequestId = requestId;
@@ -1332,7 +1377,7 @@ export class CapabilityMenu {
   async presentPanelContent(tab: PanelContentTab): Promise<boolean> {
     if (!this.isPanelExpanded() || panelTabForTitle(this.pendingTitle) !== tab) return false;
     const keep = this.selectedIndex;
-    await this.openPanelTab(tab, keep);
+    await this.openPanelTab(tab, keep, false);
     return true;
   }
 
@@ -1426,6 +1471,8 @@ export class CapabilityMenu {
     index: number,
     planningAnchorUnixMs?: number,
   ): Promise<void> {
+    this.departSurface('feature');
+    if (picked === 'Brainstorm') this.claimBrainstormVisit(this.captureBrainstormVisit());
     // Retrying an unopened Messages picker replaces its request on the Mac.
     // There is no selected conversation or draft requiring a second Home.
     if (picked !== 'Messages' || this.messageLifecycleBinding) this.leaveMessages();
@@ -1805,6 +1852,7 @@ export class CapabilityMenu {
   }
 
   private async close(): Promise<void> {
+    this.departSurface('home');
     this.retireTerminalOpening();
     this.retireQuickNotesReader('home');
     this.leaveMessages();

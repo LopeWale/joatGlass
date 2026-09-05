@@ -13,35 +13,9 @@ export interface AcceptedBrainstormAction {
  * on the lenses. Rendering remains in HudPresenter; this class makes the
  * gesture → bounded-Mac-action edge explicit and reconnect-safe.
  */
-/** May an incoming live Brainstorm frame TAKE the screen?
- *
- * Left-single press already opens the capability menu during a live run
- * (EventRouter) — deliberately, so the wearer can check Messages without
- * left-DOUBLE ending their session. But every arriving frame calls
- * `beginLiveSession`, which closes the menu outright, so the menu the
- * wearer just opened survived only until the next streamed token. The
- * escape hatch existed and was unusable.
- *
- * The engine already draws this line for the terminal handoff and draws it
- * in exactly one place — sinks.py withholds a repaint only while
- * `state == "running"`, so "closing verdicts still land and a finished
- * session is never hidden". This mirrors that rule rather than inventing a
- * second one: a STREAMING turn yields to the menu, a settled / cancelled /
- * blocked one still lands, and anything answering the wearer's own pending
- * tap lands too — that tap is how they asked to come back
- * (docs/SESSION_MODEL.md:46).
- */
-export function liveFrameMayTakeScreen(
-  menuOpen: boolean,
-  awaitingResponse: boolean,
-  state: string,
-): boolean {
-  if (!menuOpen || awaitingResponse) return true;
-  return state !== 'running';
-}
-
 export class BrainstormController {
   private model?: BrainstormHudModel;
+  private suspended = false;
   private acceptedAction?: AcceptedBrainstormAction;
   private acceptancePending = false;
   private acceptanceStartPending = false;
@@ -63,7 +37,13 @@ export class BrainstormController {
   }
 
   isActive(): boolean {
-    return this.model !== undefined;
+    return this.model !== undefined && !this.suspended;
+  }
+
+  /** The OS menu temporarily owns input; retain the underlying frame only
+   * until a real departure clears it. Closing the overlay cannot revive it. */
+  setSuspended(suspended: boolean): void {
+    this.suspended = suspended;
   }
 
   /** The Mac must explicitly arm the isolated diagnostic route. Absence is
@@ -82,7 +62,7 @@ export class BrainstormController {
     // local opt-in that is off by default, and the acceptance controller
     // refuses its own run when the terminal cannot carry it — the check
     // belongs there, where the terminal's state actually lives.
-    return model?.acceptanceArmed === true
+    return !this.suspended && model?.acceptanceArmed === true
       && model.screen === 'brainstorm'
       && model.state === 'ready';
   }
@@ -98,7 +78,7 @@ export class BrainstormController {
   /** Right-temple/ring click: make the next legitimate Brainstorm move. */
   handleClick(): boolean {
     const model = this.model;
-    if (model === undefined) return false;
+    if (model === undefined || this.suspended) return false;
     if (model.screen === 'brainstorm' && model.state === 'acceptance_ready') {
       if (this.acceptanceStartPending) return true;
       const accepted = this.send('begin_topic_capture');
@@ -160,6 +140,7 @@ export class BrainstormController {
    * ("Speak your question"), and the wearer who swipes is saying never
    * mind — the same hands-free backout this surface always offered. */
   handleSwipe(): boolean {
+    if (this.suspended) return false;
     // Deny is the swipe, opposite the tap that approves — the same
     // accept/refuse shape the confirmation gate already uses, so there is
     // nothing new to learn at the moment it matters most.
@@ -177,6 +158,7 @@ export class BrainstormController {
 
   /** Left-double-click is a visible cancellation affordance during a live run. */
   handleCancel(): boolean {
+    if (this.suspended) return false;
     return this.model?.screen === 'brainstorm'
       && (this.model.state === 'running' || this.model.state === 'topic_capture')
       ? this.send('cancel')
@@ -187,6 +169,7 @@ export class BrainstormController {
    * The fixed metadata proves the initiating G2 input without carrying a
    * topic, prompt, endpoint, or any OpenClaw payload. */
   handleAcceptance(source: 'right' | 'ring'): boolean {
+    if (this.suspended) return false;
     const model = this.model;
     if (this.acceptancePending || model?.state === 'acceptance_ready') return true;
     if (!this.isAcceptanceArmed()) return false;

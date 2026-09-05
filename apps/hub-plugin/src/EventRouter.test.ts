@@ -96,6 +96,7 @@ function make(
   const lifecycle: LifecycleHandler = {
     onForegroundEnter: vi.fn(),
     onForegroundExit: vi.fn(),
+    onContextualMenu: vi.fn(),
     onExit: vi.fn(),
   };
   const link = {
@@ -843,6 +844,8 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.audio.start).not.toHaveBeenCalled();
     expect(r.lifecycle.onForegroundEnter).not.toHaveBeenCalled();
     expect(r.lifecycle.onForegroundExit).not.toHaveBeenCalled();
+    expect(r.lifecycle.onContextualMenu).toHaveBeenNthCalledWith(1, true);
+    expect(r.lifecycle.onContextualMenu).toHaveBeenNthCalledWith(2, false);
   });
 
   it('does not leave the app backgrounded after an automation-style menu selection', () => {

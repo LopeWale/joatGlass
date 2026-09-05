@@ -249,6 +249,8 @@ class SessionManager:
         publish_topic_capture: TopicCapturePublisher | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         terminal_view_current: Callable[[], bool] | None = None,
+        brainstorm_view_current: Callable[[], bool] | None = None,
+        surface_revision: Callable[[], int] | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
@@ -259,6 +261,8 @@ class SessionManager:
         self._card_log = card_log
         self._terminal_capture = terminal_capture
         self._terminal_view_current = terminal_view_current
+        self._brainstorm_view_current = brainstorm_view_current
+        self._surface_revision = surface_revision or (lambda: 0)
         self._on_state = on_state
         self._starters = list(starters)
         self._terminal_retry = terminal_retry
@@ -521,23 +525,30 @@ class SessionManager:
         capture_source: AudioSource | None = None,
         addressed: str | None = _UNSET_ADDRESSED,
     ) -> bool:
-        """True = consumed (session active or started); False = default flow.
+        """True = consumed by the selected session; False = default flow.
 
         ``addressed`` is the utterance with the wake word stripped, or None
         when the wearer did not address JOAT. Callers that omit it (tests,
         internal flows) are treated as addressed, preserving the previous
         behaviour for everything except the live microphone path.
+        A running Brainstorm only owns ordinary speech while its feature is
+        selected. The injected predicate comes from navigation, not task state.
         """
         lowered = text.lower().strip().rstrip(".!?")
         if self._active is not None:
-            # A live session consumes every transcript, so the escape hatch
-            # must match how people actually say it. "JOAT, stop" and
+            background_brainstorm = (
+                isinstance(self._active, DebateSession)
+                and self._brainstorm_view_current is not None
+                and not self._brainstorm_view_current()
+            )
+            # A live session's escape hatch must match how people say it.
+            # "JOAT, stop" and
             # "stop it" failing here left the wearer trapped until the
             # session ended on its own (observed: no command worked at all
             # while a session was live). Wake-word prefix and filler are
             # stripped before the exact match; the vocabulary stays small so
             # dictating a sentence CONTAINING "stop" cannot end a session.
-            if self._pending_topic:
+            if self._pending_topic and not background_brainstorm:
                 # ADDRESSED speech only. This resolved from the raw
                 # transcript, so with the question on the glass an overheard
                 # bystander's "yes" — or the wearer agreeing with someone in
@@ -598,6 +609,11 @@ class SessionManager:
                 log.info("wearer cancelled the active session")
                 self._cancel_active()
                 return True
+            if background_brainstorm:
+                # This check covers both the raw-transcript and addressed
+                # admission paths. Leave other features' requests, dictation,
+                # and the assistant wake gate to their existing owners.
+                return False
             # STEERING requires address. An overheard sentence must not
             # reorder the round table, and must never become a follow-up
             # the collaborators answer.
@@ -1176,7 +1192,11 @@ class SessionManager:
             asyncio.get_running_loop().create_task(route_cancel())
             return
 
+        surface_revision = self._surface_revision()
+
         async def route() -> None:
+            if self._active is not active or self._surface_revision() != surface_revision:
+                return
             try:
                 await active.handle_brainstorm_action(action)
             except Exception:

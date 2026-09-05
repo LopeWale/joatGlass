@@ -11,10 +11,15 @@ import asyncio
 import re
 
 import io
+from collections.abc import AsyncIterator
 
-from joat.core.protocol import AgentTerminalHudView, BrainstormHudView
+import pytest
+
+from joat.core.protocol import AgentTerminalHudView, BrainstormHudView, HudRebuild
 from joat.services.hud import HudWriter
 from joat.services.sinks import Broadcast, HudSink, TerminalSink
+from joat.services.agent_terminal import AgentTerminalRoster, TerminalFrame
+from joat.services.terminal_opening import TerminalOpeningController
 
 
 class HudTransport:
@@ -23,6 +28,54 @@ class HudTransport:
 
     async def send(self, message: object) -> None:
         self.sent.append(message)
+
+
+class TerminalHandoffRig:
+    """The real opening/roster path; no remote model or device calls."""
+
+    class Agent:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.capture_context_generation: int | None = None
+            self.fail = fail
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.release.set()
+
+        async def initialize(self) -> None:
+            self.started.set()
+            await self.release.wait()
+            if self.fail:
+                raise RuntimeError("synthetic setup refusal")
+            self.capture_context_generation = 1
+
+        async def stream(self, text: str) -> AsyncIterator[str]:
+            raise AssertionError("Handoff must not send an instruction")
+            yield ""
+
+        async def stream_captured(self, text: str, *, context_generation: int) -> AsyncIterator[str]:
+            raise AssertionError("Handoff must not send a captured instruction")
+            yield ""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.transport = HudTransport()
+        self.hud = HudWriter(self.transport)  # type: ignore[arg-type]
+        self.agent = self.Agent(fail=fail)
+        self.roster = AgentTerminalRoster([("work", self.agent), ("hermes", self.Agent())])
+        self.opening = TerminalOpeningController(
+            self.roster, paint=self.paint, connection_generation=lambda: "connection",
+        )
+        self.sink = HudSink(self.hud, open_terminal=self.open)
+
+    async def paint(self, frame: TerminalFrame, request_id: str | None, selection_id: str | None) -> None:
+        await self.hud.show_agent_terminal(AgentTerminalHudView(
+            state=frame.state, focus=frame.topic, lanes=frame.lanes,
+            activity="\n".join(frame.lines), reason=frame.reason,
+            opening_request_id=request_id, opening_selection_id=selection_id,
+        ))
+
+    async def open(self) -> bool:
+        await self.opening.open("work", "visit", "selection", lambda: True)
+        return self.opening.current
 
 
 class Recorder:
@@ -73,15 +126,7 @@ class TestTerminalSink:
 class TestHudSink:
     async def test_paints_the_structured_brainstorm_view_not_streamed_overview_text(self) -> None:
         transport = HudTransport()
-        sink = HudSink(
-            HudWriter(transport),  # type: ignore[arg-type]
-            lambda: {
-                "state": "ready",
-                "reason": "",
-                "endpoint_host": "admins-mac-mini.tail3a3363.ts.net",
-                "no_tools_checked": True,
-            },
-        )
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
         await sink.open("tabs or spaces", ["codex (proposer)", "openclaw (agent terminal)"])
         await sink.turn("openclaw (agent terminal)")
         await sink.chunk("Use tabs with a formatter.")
@@ -144,32 +189,21 @@ class TestHudSink:
         )
 
     async def test_terminal_overlay_and_replay_keep_the_real_brainstorm_state(self) -> None:
-        transport = HudTransport()
-        sink = HudSink(
-            HudWriter(transport),  # type: ignore[arg-type]
-            lambda: {
-                "state": "ready",
-                "reason": "",
-                "endpoint_host": "admins-mac-mini.tail3a3363.ts.net",
-                "no_tools_checked": True,
-            },
-        )
+        rig = TerminalHandoffRig()
+        transport, sink = rig.transport, rig.sink
         await sink.open("reconnect safely", ["codex", "claude", "hermes"])
         await sink.turn("hermes (agent terminal)")
         await sink.show_terminal()
 
         terminal = transport.sent[-1]
-        # The handoff paints the TERMINAL's own frame now. It used to be a
-        # BrainstormHudView wearing screen="agent_terminal", which is the
-        # violation of SESSION_MODEL.md:74-75 this split removed.
         assert isinstance(terminal, AgentTerminalHudView)
-        assert isinstance(terminal, AgentTerminalHudView)
-        assert terminal.state == "running"
-        assert terminal.activity == "HERMES > Thinking…"
+        assert terminal.state == "ready"
+        assert terminal.focus == "work · idle"
+        assert terminal.lanes == ["work·idle", "hermes·setup"]
+        assert "Thinking…" not in terminal.activity
 
         await sink.replay()
         restored = transport.sent[-1]
-        assert isinstance(restored, BrainstormHudView)
         assert isinstance(restored, BrainstormHudView)
         assert restored.state == "running"
         assert restored.active_speaker == "hermes"
@@ -805,11 +839,11 @@ class TestTheTerminalHandoffSurvivesStreaming:
     """Watched live: tapping to the terminal painted it for ONE frame,
     then the next streamed token repainted the Brainstorm over it. While
     the wearer is on the terminal view, running repaints are withheld;
-    the closing verdict still lands, and replay() returns to the room."""
+    the closing verdict is retained, and replay() returns to the room."""
 
     async def test_a_streamed_chunk_does_not_snatch_the_lenses_back(self) -> None:
-        transport = HudTransport()
-        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        rig = TerminalHandoffRig()
+        transport, sink = rig.transport, rig.sink
         await sink.open("topic", ["codex"])
         await sink.turn("codex (proposer)")
         await sink.chunk("GIST: first.")
@@ -825,17 +859,223 @@ class TestTheTerminalHandoffSurvivesStreaming:
         assert isinstance(transport.sent[-1], BrainstormHudView)
         assert "more words arrive" in transport.sent[-1].activity
 
-    async def test_the_verdict_still_lands_while_handed_off(self) -> None:
-        transport = HudTransport()
-        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+    @pytest.mark.parametrize("verdict,state", [
+        ("converged (agreement 0.90, round 1)", "settled"),
+        ("cancelled", "cancelled"),
+        ("blocked · collaborator disconnected", "blocked"),
+    ])
+    async def test_final_state_waits_for_explicit_return(self, verdict: str, state: str) -> None:
+        rig = TerminalHandoffRig()
+        transport, sink = rig.transport, rig.sink
         await sink.open("topic", ["codex"])
         await sink.turn("joat (synthesis)")
         await sink.chunk("AGREED\nShip it.")
         await sink.show_terminal()
-        await sink.close("converged (agreement 0.90, round 1)")
+        await sink.close(verdict)
+
+        assert isinstance(transport.sent[-1], AgentTerminalHudView)
+        assert sink.terminal_owns_hud()
+        await sink.replay()
 
         assert isinstance(transport.sent[-1], BrainstormHudView)
-        assert "converged" in transport.sent[-1].activity
+        assert transport.sent[-1].state == state
+        assert verdict in transport.sent[-1].activity
+        assert "Ship it." in transport.sent[-1].activity
+
+
+class TestOwnedTerminalHandoff:
+    async def test_departed_queued_open_does_not_issue_an_entry_rebuild(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport), brainstorm_view_current=lambda: False)  # type: ignore[arg-type]
+        await sink.open("queued topic", ["codex"])
+        assert not transport.sent
+
+    @pytest.mark.parametrize("operation", ["open", "replay"])
+    @pytest.mark.parametrize("departure", ["view", "handoff"])
+    async def test_delayed_entry_does_not_paint_after_departure(self, operation: str, departure: str) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class HeldEntryTransport(HudTransport):
+            hold = False
+
+            async def send(self, message: object) -> None:
+                await super().send(message)
+                if self.hold and isinstance(message, HudRebuild):
+                    entered.set()
+                    await release.wait()
+
+        async def open_terminal() -> bool:
+            return True
+
+        current = True
+        transport = HeldEntryTransport()
+        sink = HudSink(HudWriter(transport), open_terminal=open_terminal,  # type: ignore[arg-type]
+                       brainstorm_view_current=lambda: current)
+        if operation == "replay":
+            await sink.open("topic", ["codex"])
+        transport.hold = True
+        pending = asyncio.create_task(sink.open("topic", ["codex"]) if operation == "open" else sink.replay())
+        await asyncio.wait_for(entered.wait(), 1)
+        before = len(transport.sent)
+        if departure == "view":
+            current = False
+        else:
+            await sink.show_terminal()
+        release.set()
+        await pending
+        assert len(transport.sent) == before
+        assert isinstance(transport.sent[-1], HudRebuild)
+        if departure == "handoff":
+            assert sink.terminal_owns_hud()
+
+    async def test_explicit_replay_rebuilds_before_returning_current_frame(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        await sink.chunk("current transcript")
+        before = len(transport.sent)
+        await sink.replay()
+        returned = transport.sent[before:]
+        assert len(returned) == 2
+        assert isinstance(returned[0], HudRebuild)
+        assert returned[0].reason == "brainstorm"
+        assert isinstance(returned[1], BrainstormHudView)
+        assert "current transcript" in returned[1].activity
+
+    async def test_handoff_matches_normal_opening_including_blocked_setup(self) -> None:
+        normal = TerminalHandoffRig(fail=True)
+        assert await normal.open()
+        expected = normal.transport.sent[-1]
+        rig = TerminalHandoffRig(fail=True)
+        await rig.sink.open("topic", ["codex"])
+        await rig.sink.chunk("Brainstorm output is not a terminal transcript.")
+        await rig.sink.show_terminal()
+        actual = rig.transport.sent[-1]
+        assert isinstance(actual, AgentTerminalHudView)
+        assert isinstance(expected, AgentTerminalHudView)
+        assert actual == expected
+        assert actual.state != "running"
+        assert rig.sink.terminal_owns_hud()
+
+    async def test_preparation_yields_display_before_initializer_finishes(self) -> None:
+        rig = TerminalHandoffRig()
+        rig.agent.release.clear()
+        await rig.sink.open("topic", ["codex"])
+        opening = asyncio.create_task(rig.sink.show_terminal())
+        try:
+            await asyncio.wait_for(rig.agent.started.wait(), 1)
+            preparing = rig.transport.sent[-1]
+            assert isinstance(preparing, AgentTerminalHudView)
+            assert preparing.state == "unavailable"
+            assert preparing.focus == "work · preparing"
+            assert preparing.reason == "Connecting to work…"
+            assert rig.sink.terminal_owns_hud()
+            await rig.sink.chunk("background answer")
+            assert rig.transport.sent[-1] is preparing
+        finally:
+            rig.agent.release.set()
+            await opening
+        assert rig.transport.sent[-1].state == "ready"
+
+    async def test_missing_opener_never_fabricates_terminal(self) -> None:
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport))  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        before = len(transport.sent)
+        await sink.show_terminal()
+        assert len(transport.sent) == before
+        assert not sink.terminal_owns_hud()
+
+    async def test_departed_brainstorm_cannot_start_an_old_handoff(self) -> None:
+        rig = TerminalHandoffRig()
+        sink = HudSink(rig.hud, open_terminal=rig.open, brainstorm_view_current=lambda: False)
+        await sink.show_terminal()
+        assert not rig.agent.started.is_set()
+        assert not rig.opening.current
+        assert not sink.terminal_owns_hud()
+
+    async def test_cancelled_opening_releases_its_own_handoff(self) -> None:
+        entered = asyncio.Event()
+
+        async def cancelled() -> bool:
+            entered.set()
+            await asyncio.Event().wait()
+            return True
+
+        transport = HudTransport()
+        sink = HudSink(HudWriter(transport), open_terminal=cancelled)  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        opening = asyncio.create_task(sink.show_terminal())
+        await asyncio.wait_for(entered.wait(), 1)
+        opening.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        assert not sink.terminal_owns_hud()
+        await sink.chunk("still running")
+        assert isinstance(transport.sent[-1], BrainstormHudView)
+        assert "still running" in transport.sent[-1].activity
+
+    async def test_rejected_handoff_restores_latest_brainstorm_state(self) -> None:
+        transport = HudTransport()
+
+        async def reject() -> bool:
+            await sink.chunk("arrived while opening")
+            return False
+
+        sink = HudSink(HudWriter(transport), open_terminal=reject)  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        await sink.show_terminal()
+        assert not sink.terminal_owns_hud()
+        assert isinstance(transport.sent[-1], BrainstormHudView)
+        assert "arrived while opening" in transport.sent[-1].activity
+
+    @pytest.mark.parametrize("fail", [False, True])
+    async def test_late_opening_result_cannot_rollback_a_new_handoff(self, fail: bool) -> None:
+        transport = HudTransport()
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def open_terminal() -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+                if fail:
+                    raise RuntimeError("old opening failed")
+                return False
+            return True
+
+        sink = HudSink(HudWriter(transport), open_terminal=open_terminal)  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        old = asyncio.create_task(sink.show_terminal())
+        await asyncio.wait_for(entered.wait(), 1)
+        await sink.replay()
+        await sink.show_terminal()
+        release.set()
+        if fail:
+            with pytest.raises(RuntimeError, match="old opening failed"):
+                await old
+        else:
+            await old
+        assert sink.terminal_owns_hud()
+
+    async def test_off_view_stream_and_completion_wait_for_explicit_return(self) -> None:
+        transport = HudTransport()
+        current = True
+        sink = HudSink(HudWriter(transport), brainstorm_view_current=lambda: current)  # type: ignore[arg-type]
+        await sink.open("topic", ["codex"])
+        current = False
+        before = len(transport.sent)
+        await sink.chunk("background final answer")
+        await sink.close("settled")
+        await sink.replay()  # Even an obsolete return must not claim the view.
+        assert len(transport.sent) == before
+        current = True
+        await sink.replay()
+        assert isinstance(transport.sent[-1], BrainstormHudView)
+        assert transport.sent[-1].state == "settled"
+        assert "background final answer" in transport.sent[-1].activity
 
 
 class TestTheSnapshotQuotesWholeReplies:

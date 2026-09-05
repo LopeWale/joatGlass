@@ -74,7 +74,7 @@ import {
   type NavigationVisualState,
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
-import { BrainstormController, liveFrameMayTakeScreen } from './BrainstormController';
+import { BrainstormController } from './BrainstormController';
 import { reminderDueAckFor } from './ReminderDueReceipt';
 import { productivityViewAckFor } from './ProductivityViewReceipt';
 import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
@@ -328,6 +328,7 @@ async function boot(): Promise<void> {
     else {
       promptedInputRef?.cancel('connection', false);
       menuRef?.retireTerminalOpening(false);
+      menuRef?.retireBrainstormSurface();
       menuRef?.retireMessageUI(false);
       // A disconnected or replacement brain no longer authorizes either
       // opt-in diagnostic path. A fresh authenticated session will send its
@@ -454,6 +455,7 @@ async function boot(): Promise<void> {
   menuRef = menu;
   const navigation = new NavigationController(hud, link, location, g2Diagnostics);
   const brainstorm = new BrainstormController(link);
+  menu.onSurfaceDeparture = () => brainstorm.clear();
   brainstormRef = brainstorm;
   navigationRef = navigation;
   menu.micIsOpen = () => audio.isOpen;
@@ -469,6 +471,10 @@ async function boot(): Promise<void> {
   };
 
   const lifecycle: LifecycleHandler = {
+    onContextualMenu: (open) => {
+      menu.setContextualMenuOpen(open);
+      brainstorm.setSuspended(open);
+    },
     onForegroundEnter: () => {
       if (exiting) return;
       link.resumeIfReplaced();
@@ -521,8 +527,12 @@ async function boot(): Promise<void> {
   devices.attach();
 
   const terminalPreludeGuards = new WeakMap<DownlinkMessage, () => boolean>();
+  const brainstormVisitGuards = new WeakMap<DownlinkMessage, () => boolean>();
   link.onMessageIngress((msg, context) => {
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'ingress', msg.kind);
+    if (msg.kind === 'brainstorm.view' || (msg.kind === 'hud.rebuild' && msg.reason === 'brainstorm')) {
+      brainstormVisitGuards.set(msg, menu.captureBrainstormVisit());
+    }
     if (msg.kind === 'hud.list' && msg.selectable !== true
       && msg.title?.trim().toUpperCase() === 'AGENT TERMINAL'
       && msg.requestId?.startsWith(VOICE_REQUEST_PREFIX)) {
@@ -602,14 +612,13 @@ async function boot(): Promise<void> {
           ...msg.brainstorm,
           screen: 'brainstorm',
         };
-        // Left-single already opens the menu mid-session; beginLiveSession
-        // below closes it again, so that escape hatch lasted exactly until
-        // the next streamed token. See liveFrameMayTakeScreen.
-        if (!liveFrameMayTakeScreen(
-          menu.isOpen(), menu.isAwaitingResponse(), model.state,
-        )) break;
+        const visitCurrent = brainstormVisitGuards.get(msg);
+        brainstormVisitGuards.delete(msg);
+        const mayPaint = () => !context.signal.aborted
+          && visitCurrent !== undefined && menu.mayPresentBrainstorm(visitCurrent);
+        if (!mayPaint()) break;
         await awaitCurrent(menu.beginLiveSession('brainstorm'));
-        if (await awaitCurrent(hud.showBrainstorm(model))) {
+        if (mayPaint() && await awaitCurrent(hud.showBrainstorm(model, undefined, mayPaint)) && mayPaint()) {
           brainstorm.present(model);
         }
         break;
@@ -643,7 +652,7 @@ async function boot(): Promise<void> {
         }
         if (!menu.mayPresentUnboundTerminal()) break;
         menu.retireTerminalOpening();
-        await awaitCurrent(menu.beginLiveSession('brainstorm'));
+        menu.releaseToLiveSession();
         if (await awaitCurrent(hud.showBrainstorm(model))) {
           brainstorm.present(model);
         }
@@ -694,7 +703,7 @@ async function boot(): Promise<void> {
         await awaitCurrent(hud.acceptPanel(msg));
         if (msg.activate) {
           brainstorm.clear();
-          await awaitCurrent(menu.openPanelTab(msg.tab));
+          await awaitCurrent(menu.openPanelTab(msg.tab, 0, false));
         } else {
           await awaitCurrent(menu.presentPanelContent(msg.tab));
         }
@@ -746,15 +755,8 @@ async function boot(): Promise<void> {
         const preludeCurrent = terminalPreludeGuards.get(msg);
         terminalPreludeGuards.delete(msg);
         if (preludeCurrent && !preludeCurrent()) break;
-        // A data view REPLACES the Brainstorm on the glass, so the
-        // controller must stop owning input for it. Without this, tapping
-        // a Messages row after a terminal handoff was intercepted by
-        // BrainstormController — which still believed it was on screen —
-        // and sent `show_brainstorm`, yanking the wearer back into the
-        // session instead of opening the row they picked. Navigation,
-        // productivity and the default rebuild all clear it already; the
-        // list path was simply missed.
-        brainstorm.clear();
+        // CapabilityMenu retires Brainstorm only after accepting this list's
+        // owner. A stale response must not clear the current controller.
         if (await awaitCurrent(menu.presentList(
           msg.title,
           msg.items,
@@ -770,9 +772,13 @@ async function boot(): Promise<void> {
       }
       case 'hud.rebuild':
         if (msg.reason === 'brainstorm') {
-          await awaitCurrent(menu.beginLiveSession('brainstorm'));
+          const visitCurrent = brainstormVisitGuards.get(msg);
+          brainstormVisitGuards.delete(msg);
+          if (visitCurrent && menu.claimBrainstormVisit(visitCurrent)) {
+            await awaitCurrent(menu.beginLiveSession('brainstorm'));
+          }
         } else {
-          brainstorm.clear();
+          menu.retireBrainstormSurface();
           // A fresh brain is a fresh start: the resting screen reopens on
           // its first tab, the one that shows what that brain now says.
           hud.resetTab();

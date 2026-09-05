@@ -31,12 +31,13 @@ from pathlib import Path
 from typing import Any
 
 from ..core.interfaces import SttEngine, Transcript
-from .whisperkit import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
+from .whisperkit import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, WhisperKitEngine
 
 log = logging.getLogger(__name__)
 
 MIN_UTTERANCE_BYTES = SAMPLE_RATE * SAMPLE_WIDTH // 4  # < 250 ms is a VAD blip
 DEFAULT_READY_TIMEOUT_S = 30.0
+START_RETRY_DELAY_S = 30.0
 
 DEFAULT_MODEL_DIR = Path.home() / "Library/Application Support/JOAT/models"
 """Where NEW WhisperKit weights are downloaded.
@@ -200,6 +201,15 @@ class WhisperServeEngine(SttEngine):
         self._without_timestamps = without_timestamps
         self._buffer = bytearray()
         self._proc: asyncio.subprocess.Process | None = None
+        self._ready = False
+        self._started = False
+        self._closed = False
+        self._shutdown: asyncio.Event | None = None
+        self._startup_task: asyncio.Task[None] | None = None
+        self._canary_task: asyncio.Task[str] | None = None
+        self._batch_tasks: set[asyncio.Task[Transcript | None]] = set()
+        self._lifecycle_lock = asyncio.Lock()
+        self._process_lock = asyncio.Lock()
 
     @property
     def available(self) -> bool:
@@ -208,53 +218,139 @@ class WhisperServeEngine(SttEngine):
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def start(self, shutdown: asyncio.Event | None = None) -> bool:
-        """Spawn the server (unless external) and wait until it transcribes.
+        """Wait at most the foreground budget, then recover behind batch STT.
 
-        Startup is bounded so STT cannot hold every unrelated capability
-        hostage. Returns False (never raises) when serve can't come up —
-        callers degrade to the batch engine.
+        True means this adapter owns STT (resident OR temporary batch), not
+        that the model is already warm. Keep the same object in the session.
+        A slow child and its in-flight canary survive the foreground timeout.
         """
-        try:
-            if not self._external:
-                await self._spawn()
-            if shutdown is None:
-                await self._wait_ready()
-            else:
-                await self._wait_ready_or_shutdown(shutdown)
-            log.info("whisper serve ready at %s (model %s)", self._base_url, self._model)
-            return True
-        except Exception as exc:
-            log.error("whisper serve failed to start: %s", exc)
-            await self.close()
+        if self._closed:
             return False
-
-    async def _wait_ready_or_shutdown(self, shutdown: asyncio.Event) -> None:
-        """Wait for readiness without trapping a shell-initiated shutdown."""
-        ready = asyncio.create_task(self._wait_ready())
-        stopped = asyncio.create_task(shutdown.wait())
+        if shutdown is not None:
+            self._shutdown = shutdown
+        if self._shutdown is not None and self._shutdown.is_set():
+            await self.close()
+            raise asyncio.CancelledError
+        if self._startup_task is None:
+            self._started = True
+            self._startup_task = asyncio.create_task(self._recover_until_ready())
+        startup = self._startup_task
         try:
-            done, _pending = await asyncio.wait(
-                (ready, stopped),
-                return_when=asyncio.FIRST_COMPLETED,
+            done, _ = await asyncio.wait(
+                (startup,), timeout=self._ready_timeout_s,
             )
-            if stopped in done:
-                ready.cancel()
-                await asyncio.gather(ready, return_exceptions=True)
-                await self.close()
+            if done:
+                await startup
+            else:
+                log.warning("whisper serve warming — temporary batch STT; recovery active")
+            if self._closed or (self._shutdown is not None and self._shutdown.is_set()):
                 raise asyncio.CancelledError
-            await ready
+            return True
+        except asyncio.CancelledError:
+            await self.close()
+            raise
+
+    async def _recover_until_ready(self) -> None:
+        """One lifecycle owner, including after start() returns to its caller."""
+        loading = asyncio.create_task(self._load_resident())
+        stopped = (
+            asyncio.create_task(self._shutdown.wait())
+            if self._shutdown is not None else None
+        )
+        try:
+            if stopped is not None:
+                done, _ = await asyncio.wait(
+                    (loading, stopped), return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stopped in done:
+                    self._closed = True
+                    raise asyncio.CancelledError
+            await loading
         finally:
-            stopped.cancel()
-            await asyncio.gather(stopped, return_exceptions=True)
+            loading.cancel()
+            if stopped is not None:
+                stopped.cancel()
+            await asyncio.gather(
+                loading, *((stopped,) if stopped is not None else ()),
+                return_exceptions=True,
+            )
+            if self._closed:
+                self._ready = False
+                await self._close_process()
+                await self._join_canary()
+                await self._stop_batches()
+
+    async def _load_resident(self) -> None:
+        while not self._closed:
+            try:
+                if not self._external:
+                    await self._spawn()
+                await self._wait_ready()
+                if not self._closed:
+                    self._ready = True
+                    log.info("whisper serve ready at %s (model %s)", self._base_url, self._model)
+                return
+            except Exception as exc:
+                # Never retain CLI output, server response bodies or audio.
+                log.warning("whisper serve startup retry error=%s", type(exc).__name__)
+                await self._close_process()
+                await asyncio.sleep(START_RETRY_DELAY_S)
 
     async def close(self) -> None:
-        proc, self._proc = self._proc, None
-        if proc is not None and proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), 5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
+        self._closed = True
+        self.reset()
+        await self._stop_resident()
+        await self._stop_batches()
+
+    async def _stop_batches(self) -> None:
+        tasks = tuple(self._batch_tasks)
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _stop_resident(self) -> None:
+        self._ready = False
+        task = self._startup_task
+        if task is not None:
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._startup_task is task:
+                self._startup_task = None
+        await self._close_process()
+        await self._join_canary()
+
+    async def _join_canary(self) -> None:
+        task = self._canary_task
+        if task is not None:
+            # Cancelling to_thread's awaiter does not stop its worker. Kill
+            # the owned server FIRST, then join before mutating/restarting.
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+            if self._canary_task is task:
+                self._canary_task = None
+
+    async def _close_process(self) -> None:
+        async with self._process_lock:
+            proc = self._proc
+            if proc is None:
+                return
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), 5.0)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+            # Keep the handle until reaped, even if cleanup is interrupted.
+            if proc.returncode is None:
+                await proc.wait()
+            self._proc = None
 
     async def _spawn(self) -> None:
         if self._command is not None:
@@ -269,25 +365,41 @@ class WhisperServeEngine(SttEngine):
             ]
             if self._without_timestamps:
                 cmd.append("--without-timestamps")
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-        )
+        spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        ))
+        try:
+            self._proc = await asyncio.shield(spawning)
+        except asyncio.CancelledError:
+            self._proc = await spawning
+            raise
 
     async def _wait_ready(self) -> None:
         canary = wav_bytes(b"\x00\x00" * (SAMPLE_RATE // 10))  # 100 ms silence
-        deadline = asyncio.get_running_loop().time() + self._ready_timeout_s
         while True:
+            if self._proc is not None and self._proc.returncode is not None:
+                raise ChildProcessError("whisper serve exited before readiness")
             try:
-                await asyncio.to_thread(self._post, canary)
+                self._canary_task = asyncio.create_task(asyncio.to_thread(self._post, canary))
+                await asyncio.shield(self._canary_task)
+                if self._proc is not None and self._proc.returncode is not None:
+                    raise ChildProcessError("whisper serve exited during readiness")
                 return
-            except Exception as exc:
-                if asyncio.get_running_loop().time() > deadline:
-                    raise TimeoutError(f"serve not ready after {self._ready_timeout_s}s: {exc}") from exc
+            except ChildProcessError:
+                raise
+            except Exception:
+                # Sequential probes: never abandon a canary just because the
+                # foreground budget elapsed, then start an overlapping one.
                 await asyncio.sleep(1.0)
+            finally:
+                if self._canary_task is not None and self._canary_task.done():
+                    self._canary_task = None
 
     # ── SttEngine ────────────────────────────────────────────────────────────
 
     async def feed(self, pcm: bytes) -> Transcript | None:
+        if self._closed:
+            return None
         self._buffer.extend(pcm)
         if len(self._buffer) > self._max_bytes:
             overflow = len(self._buffer) - self._max_bytes
@@ -307,11 +419,17 @@ class WhisperServeEngine(SttEngine):
         return transcript
 
     async def _flush_raw(self) -> Transcript | None:
+        if self._closed or (self._shutdown is not None and self._shutdown.is_set()):
+            self._buffer.clear()
+            return None
         if len(self._buffer) < MIN_UTTERANCE_BYTES:
             self._buffer.clear()
             return None
-        payload = wav_bytes(bytes(self._buffer))
+        pcm = bytes(self._buffer)
         self._buffer.clear()
+        if self._started and not self._ready:
+            return await self._batch_transcribe(pcm)
+        payload = wav_bytes(pcm)
         try:
             text = await asyncio.to_thread(self._post, payload)
         except Exception as exc:
@@ -320,13 +438,35 @@ class WhisperServeEngine(SttEngine):
                 type(exc).__name__,
             )
             if not await self._respawn():
-                return None
+                return await self._batch_transcribe(pcm) if not self._external else None
             try:
                 text = await asyncio.to_thread(self._post, payload)
             except Exception as exc2:
                 log.error("whisper serve retry failed error=%s", type(exc2).__name__)
                 return None
         return Transcript(text=text, is_final=True) if text else None
+
+    async def _batch_transcribe(self, pcm: bytes) -> Transcript | None:
+        if self._closed or (self._shutdown is not None and self._shutdown.is_set()):
+            return None
+        # Capture one complete utterance/model. Late readiness affects ONLY
+        # the next flush, never replays or splits an in-flight batch request.
+        batch = WhisperKitEngine(
+            binary=self._binary, model=self._model, model_dir=self._model_dir,
+        )
+        await batch.feed(pcm)
+        task = asyncio.create_task(batch.flush())
+        self._batch_tasks.add(task)
+        task.add_done_callback(self._batch_tasks.discard)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Session cancellation and close may race. Send cancellation
+            # once; a second one must not interrupt child reaping.
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+            raise
 
     def reset(self) -> None:
         self._buffer.clear()
@@ -344,30 +484,32 @@ class WhisperServeEngine(SttEngine):
         silently deaf cannot ask for the old model back. So a failed switch
         restores the previous one before returning False.
         """
-        if self._external:
+        if self._external or self._closed:
             log.info("STT model is owned by an external server — not switching")
             return False
-        if model == self._model:
-            return True
-        previous, self._model = self._model, model
-        if await self._respawn():
-            log.info("whisper serve now on %s", model)
-            return True
-        self._model = previous
-        log.warning("whisper serve could not load %s — restoring %s", model, previous)
-        return await self._respawn()
+        async with self._lifecycle_lock:
+            if self._closed:
+                return False
+            if model == self._model:
+                return True
+            # Stop the old canary before changing the model it refers to.
+            await self._stop_resident()
+            previous, self._model = self._model, model
+            if await self.start() and self._ready:
+                log.info("whisper serve now on %s", model)
+                return True
+            await self._stop_resident()
+            self._model = previous
+            log.warning("whisper serve could not load %s — restoring %s", model, previous)
+            await self.start()
+            return False
 
     async def _respawn(self) -> bool:
-        if self._external:
+        if self._external or self._closed:
             return False  # nothing we own to restart
-        await self.close()
-        try:
-            await self._spawn()
-            await self._wait_ready()
-            return True
-        except Exception as exc:
-            log.error("whisper serve respawn failed: %s", exc)
-            return False
+        async with self._lifecycle_lock:
+            await self._stop_resident()
+            return await self.start() and self._ready
 
     def _post(self, wav_payload: bytes) -> str:
         fields = {"model": self._model, "response_format": "json"}
@@ -383,6 +525,8 @@ class WhisperServeEngine(SttEngine):
         with urllib.request.urlopen(req, timeout=60.0) as resp:
             parsed: Any = json.loads(resp.read().decode())
         if not isinstance(parsed, dict) or parsed.get("error"):
-            raise RuntimeError(f"serve error response: {parsed!r}")
+            raise RuntimeError("serve error response")
         text = parsed.get("text")
-        return text.strip() if isinstance(text, str) else ""
+        if not isinstance(text, str):
+            raise RuntimeError("serve response missing transcription text")
+        return text.strip()
