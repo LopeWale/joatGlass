@@ -45,6 +45,9 @@ class Tool:
     # making that tool unreachable. An empty tuple means explicit_intent owns
     # the tool's entire spoken surface.
     decision_hints: tuple[str, ...] | None = None
+    # A tool that has to leave the Mac (an article fetch) may need longer
+    # than the belt's default ceiling. None keeps the belt's own deadline.
+    timeout_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -185,16 +188,16 @@ class ToolBelt:
         tool = self._tools.get(call.name)
         if tool is None:
             return f"error: no tool named {call.name!r}"
+        deadline = tool.timeout_s if tool.timeout_s is not None else self._timeout_s
         try:
-            result = await asyncio.wait_for(
-                tool.run(call.arguments), self._timeout_s)
+            result = await asyncio.wait_for(tool.run(call.arguments), deadline)
             # Tool arguments may be an exact place category, a message search,
             # or another piece of wearer speech.  A tool name and bounded
             # result length are sufficient operational evidence.
             log.info("tool %s -> %d chars", call.name, len(result))
             return result
         except asyncio.TimeoutError:
-            return f"error: {call.name} timed out after {self._timeout_s:.0f}s"
+            return f"error: {call.name} timed out after {deadline:.0f}s"
         except Exception as exc:
             # Provider error strings can include request echoing.  Keep the
             # diagnostic content-free while preserving a stable result for

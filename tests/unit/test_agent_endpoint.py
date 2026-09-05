@@ -21,7 +21,7 @@ from joat.services.agent_endpoint import (
     AgentEndpoint,
     agent_token,
     last_user_text,
-    lens_text,
+    lens_text, seat_prompt,
 )
 
 
@@ -141,7 +141,13 @@ async def test_the_newest_user_turn_is_what_gets_asked(
                                      {"type": "text", "text": "is it"}]},
     ]}
     status, _, _ = await http(endpoint.port, "POST", "/v1/chat/completions", body, AUTH)
-    assert status == 200 and engine.asked == ["what time is it"]
+    # The caller's earlier turns ride with the question (the audit's A8:
+    # the door used to keep only the newest user turn); the system message
+    # is the caller's instruction, not replayed speech.
+    assert status == 200 and engine.asked == [seat_prompt(body, "what time is it")]
+    asked = engine.asked[0]
+    assert asked.rstrip().endswith("Wearer: what time is it")
+    assert "Wearer: first" in asked and "JOAT: reply" in asked and "ignored" not in asked
 
 
 @pytest.mark.asyncio
@@ -171,9 +177,14 @@ async def test_streaming_requests_get_server_sent_events(
     assert status == 200 and headers["content-type"].startswith("text/event-stream")
     events = [line for line in body.decode().split("\n\n") if line.startswith("data: ")]
     assert events[-1] == "data: [DONE]"
-    first = json.loads(events[0][len("data: "):])
-    assert first["object"] == "chat.completion.chunk"
-    assert first["choices"][0]["delta"]["content"] == "Hello world."
+    chunks = [json.loads(line[len("data: "):]) for line in events[:-1]]
+    assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+    # Streamed as produced (the audit's A8): one SSE event per mind chunk,
+    # the role on the first, the words joining back to the whole answer.
+    assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+    assert "".join(c["choices"][0]["delta"].get("content", "") for c in chunks) == "Hello world."
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    assert len(chunks) >= 3
 
 
 @pytest.mark.asyncio

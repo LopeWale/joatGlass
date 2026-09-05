@@ -359,6 +359,24 @@ class MessageReplyController:
             body_digest=self._body_digest(body) if body is not None else None,
         )
         self._prepared[action_id] = action
+        if self._active_action is not None:
+            previous = self._prepared.get(self._active_action)
+            if (
+                previous is not None
+                and previous.status.state == "awaiting_input"
+                and previous.task is None
+                and not previous.resolving
+                and not previous.send_started
+            ):
+                # A draft still waiting for a name or a body has nothing on
+                # the glass to protect and nothing in flight. The wearer's
+                # newer request replaces it — observed live: "tell Alex I'm
+                # late" after an abandoned "message my wife" was refused as
+                # "already awaiting input", and every message after it too.
+                # Confirmation, sending and a contact lookup in progress
+                # still hold the single flight.
+                log.info("message draft superseded by a newer request")
+                self.cancel_message_action(self._active_action)
         if self._active_action is not None or self._draft_lock.locked():
             self._set_status(action, "failed", "A message reply is already awaiting input or confirmation.")
         else:

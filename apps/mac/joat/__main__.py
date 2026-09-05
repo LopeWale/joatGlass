@@ -20,8 +20,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .agents.builtin_tools import messages_tool, notifications_tool
-from .agents.feature_tools import feature_tools
+from .agents.builtin_tools import conversation_tool, messages_tool, notifications_tool
+from .agents.feature_tools import feature_tools, quicknote_reader_tool, terminal_sessions_tool
 from .agents.message_tools import message_tools
 from .agents.grounding import (
     Grounding,
@@ -33,7 +33,8 @@ from .agents.grounding import (
 from .agents.location_tools import wearer_location_tools
 from .agents.tools import ToolBelt
 from .agents.cli_reply_engine import (
-    ClaudeCliReplyEngine, CodexCliReplyEngine, McpDoor, SeatSwitch, find_codex_binary,
+    DEFAULT_WORKDIR, WORKER_PERSONA, ClaudeCliReplyEngine, CodexCliReplyEngine,
+    LocalTaskEngine, McpDoor, SeatSwitch, find_codex_binary,
 )
 from .agents.reply_engine import DEFAULT_MODEL, MlxReplyEngine, mlx_available
 from .agents.openclaw_gateway import (
@@ -118,7 +119,9 @@ from .services.orchestrator import VoiceOrchestrator
 from .services.prompted_speech import PromptedSpeechRuntime
 from .services.voice_latency import VoiceLatencyStore
 from .services.ambient import AmbientPublisher
-from .agents.panel_tools import news_headlines_tool, pomodoro_status_tool, web_search_tool
+from .agents.panel_tools import (
+    news_article_tool, news_headlines_tool, pomodoro_status_tool, web_search_tool,
+)
 from .services.news import NewsService
 from .services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
 from .services.panels import PanelPublisher
@@ -439,6 +442,10 @@ async def main() -> None:
     log.info("switchable models — %s", models.summary())
 
     replier: ReplyEngine | None = None
+    # JOAT's chores (judge, synthesis, rewording) and the Even AI door each
+    # answer from their own seats; None means the mind is off entirely.
+    worker: ReplyEngine | None = None
+    door_replier: ReplyEngine | None = None
     # The same resident MLX weights serve QuickNote summarization through a
     # separate persona-free completion path; None degrades those commands.
     local_completer: MlxReplyEngine | None = None
@@ -479,12 +486,18 @@ async def main() -> None:
             # there anything about Apple in the news", "how long until my
             # break", "who won last night". Cache reads and one bounded fetch.
             news_headlines_tool(news),
+            # "What does that story say?" — the article behind a headline,
+            # read the way the News tab reads it on a tap.
+            news_article_tool(news),
             web_search_tool(search, panels),
             pomodoro_status_tool(pomodoro),
         ]
-        # Availability can change after startup; the tool reports access
-        # failures and retries the same read-only store on each request.
+        # Availability can change after startup; the tools report access
+        # failures and retry the same read-only store on each request.
         belt_tools.append(messages_tool(imessage))
+        # Whole messages, not snippets: the mind reads the same Mac-owned
+        # thread the Messages page opens.
+        belt_tools.append(conversation_tool(imessage))
         belt = ToolBelt(belt_tools)
         # The mind and the brain are different seats
         # (agents/cli_reply_engine.py): everything above is the brain's —
@@ -523,6 +536,43 @@ async def main() -> None:
             on_pick=lambda name: status.set(llm="ready", seat=name),
         )
         replier = seat_switch
+        # JOAT's own chores — judging a Brainstorm round, the synthesis,
+        # rewording a collaborator's answer — get their OWN seats and CLI
+        # sessions (the audit's A7): a verdict prompt was landing in the
+        # wearer's conversation history, and a chore was waiting on the
+        # same lock as their next spoken question. No tools, no facts
+        # block; everything a chore needs is in its prompt.
+        worker_seats: dict[str, ReplyEngine] = {}
+        if mlx_replier is not None:
+            worker_seats["local"] = LocalTaskEngine(mlx_replier, WORKER_PERSONA)
+        worker_seats["claude"] = ClaudeCliReplyEngine(
+            find_claude_binary(), model=models.provider("claude"),
+            persona=WORKER_PERSONA, workdir=DEFAULT_WORKDIR / "worker",
+            on_account=note_account,
+        )
+        worker_seats["codex"] = CodexCliReplyEngine(
+            find_codex_binary(), model=models.provider("codex"),
+            persona=WORKER_PERSONA, workdir=DEFAULT_WORKDIR / "worker",
+            on_account=note_account,
+        )
+        worker = SeatSwitch(worker_seats, chosen=models.provider("assistant"))
+        # The Even AI door (A8): the phone sends the whole conversation with
+        # every request, so these seats never resume a CLI session of their
+        # own — the caller's history is the only history, honoured verbatim.
+        door_seats: dict[str, ReplyEngine] = {}
+        if mlx_replier is not None:
+            door_seats["local"] = mlx_replier
+        door_seats["claude"] = ClaudeCliReplyEngine(
+            find_claude_binary(), grounding=grounding, model=models.provider("claude"),
+            mcp=door, on_account=note_account, session_ttl_s=0.0,
+            workdir=DEFAULT_WORKDIR / "door",
+        )
+        door_seats["codex"] = CodexCliReplyEngine(
+            find_codex_binary(), grounding=grounding, model=models.provider("codex"),
+            mcp=door, on_account=note_account, session_ttl_s=0.0,
+            workdir=DEFAULT_WORKDIR / "door",
+        )
+        door_replier = SeatSwitch(door_seats, chosen=models.provider("assistant"))
         llm_warm_task = asyncio.create_task(seat_switch.warm(), name="mind-warm")
         log.info("reply engine: subscription seats %s (+%d tools over MCP); boot seat %s",
                  ", ".join(mind_seats), len(belt_tools), args.agent)
@@ -802,13 +852,13 @@ async def main() -> None:
     async def joat_transform(instruction: str, material: str) -> str:
         """JOAT doing what was asked WITH a collaborator's answer.
 
-        The local model, not a billed CLI turn: this fires while a session
-        is already running two subscriptions, and rewording an answer the
-        wearer is looking at should not cost a third.
+        The worker seat, not the wearer's conversation: this fires while a
+        session is already running two subscriptions, and the rewording
+        prompt must not become a turn of the wearer's chat.
         """
-        if replier is None:
-            return "No local model is loaded, so I cannot do that here."
-        answer = await replier.reply(
+        if worker is None:
+            return "No model is loaded, so I cannot do that here."
+        answer = await worker.reply(
             "You are JOAT. Do exactly what the wearer asks with the text "
             "below, and reply with the RESULT only — no preamble, no "
             "restating the request.\n\n"
@@ -838,7 +888,7 @@ async def main() -> None:
                     brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
                 ),
                            TerminalSink(), debate_state]),
-                replier,
+                worker,
                 gate=gate,
                 on_phase=publish_brainstorm_phase,
                 prior=prior,
@@ -862,15 +912,25 @@ async def main() -> None:
                 open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
                 brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
             ), TerminalSink(), debate_state]),
-            replier,
+            worker,
             gate=gate,
             on_phase=publish_brainstorm_phase,
         )
 
     def make_navigation(text: str) -> Session | None:
+        """The spoken door: "navigate to <place>" and its siblings."""
         destination = navigation_query(text)
         if destination is None:
             return None
+        return make_navigation_session(destination)
+
+    def make_navigation_session(destination: str) -> Session | None:
+        """One route session for a destination, however it was asked for.
+
+        The mind's start_navigation tool and the spoken grammar both land
+        here, so "help me walk to the library" and "navigate to the
+        library" open the identical confirm-place / choose-mode flow.
+        """
         session_id = f"nav-{uuid.uuid4().hex[:20]}"
         provider = navigation_provider
         if provider is None:
@@ -1105,6 +1165,7 @@ async def main() -> None:
         surface_revision=lambda: capabilities.view_revision,
         on_state=publish_brainstorm_state,
         starters=[make_navigation],
+        navigation_factory=make_navigation_session,
         terminal_retry=retry_selected_terminal,
         topic_capture_view=topic_capture_view,
         brainstorm_available=brainstorm_available,
@@ -1115,7 +1176,7 @@ async def main() -> None:
         save_reply=save_brainstorm_reply,
         history=brainstorm_history,
         # A tap approves, a swipe denies — see BrainstormController.
-        terminal_decide=lambda verdict: agent_terminal.decide(verdict, None),
+        terminal_decide=lambda verdict: agent_terminal.decide_receipt(verdict, None),
         # A tap on a busy terminal with no Brainstorm to return to cycles
         # the focused lane: "switch among sessions" without speaking.
         terminal_cycle=lambda: terminal_opening.cycle(),
@@ -1510,10 +1571,18 @@ async def main() -> None:
                 lane, instruction, operation_id, capabilities.prepare_terminal_instruction,
             ),
             terminal_lanes=agent_terminal.names(),
+            # "Help me walk to the library": the same destination flow the
+            # spoken "navigate to" grammar opens, reached by conversation.
+            navigation=sessions,
         ):
             belt.register(tool)
         for tool in message_tools(message_replies, after_input=prompted_speech.after_message_input):
             belt.register(tool)
+        # The mind can read what the wearer keeps and what their terminals
+        # are doing, not only write into them.
+        belt.register(quicknote_reader_tool(note_store, voice_note_store))
+        if agent_terminal.names():
+            belt.register(terminal_sessions_tool(agent_terminal))
 
     def on_capability_input(event: InputEvent) -> None:
         departing = (
@@ -1536,9 +1605,32 @@ async def main() -> None:
     # The resting dashboard's margin facts. Weather is not in the Even Hub
     # SDK, so JOAT resolves it on this Mac from the position the phone
     # already reports, and sends only the finished words.
+    # The dashboard's unread number is Messages.app's OWN unread count (the
+    # audit's O1: it used to count retained notification cards, battery
+    # cards included, and never fell when the wearer read a message on the
+    # phone). Counted off the loop thread on a slow cadence and cached: a
+    # COUNT over chat.db is not free, and the voice path must never wait on it.
+    unread_state = {"count": 0}
+
+    async def refresh_unread_count() -> None:
+        while True:
+            try:
+                unread_state["count"] = await asyncio.to_thread(imessage.unread_count)
+            except asyncio.CancelledError:
+                raise
+            except PermissionError:
+                unread_state["count"] = 0  # no access means no claim, not a stale one
+            except Exception as exc:
+                # A transient read failure keeps the last truthful value.
+                log.info("unread count unavailable (%s)", type(exc).__name__)
+            await asyncio.sleep(20.0)
+
+    unread_task = asyncio.get_running_loop().create_task(
+        refresh_unread_count(), name="unread-count",
+    )
     ambient = AmbientPublisher(
         transport,
-        unread_count=lambda: len(card_log.recent(99)),
+        unread_count=lambda: unread_state["count"],
     )
 
     def on_location(fix: Location) -> None:
@@ -1625,7 +1717,9 @@ async def main() -> None:
     agent_endpoint: AgentEndpoint | None = None
     if replier is not None and not args.no_agent_endpoint:
         agent_endpoint = AgentEndpoint(
-            replier, agent_secret, port=args.agent_port, tools=belt,
+            # The door's own seats: no resumed CLI session, so the history
+            # the Even app sends with each request is the whole memory.
+            door_replier or replier, agent_secret, port=args.agent_port, tools=belt,
             model_label=lambda: models.current("assistant") or "joat",
         )
         try:
@@ -1658,6 +1752,7 @@ async def main() -> None:
         watchdog.cancel()
         lag_task.cancel()
         beat_task.cancel()
+        unread_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()
         news.stop()

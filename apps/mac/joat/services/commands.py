@@ -117,6 +117,12 @@ class VoiceCommandRouter:
         if self._notes is not None:
             note_result = await self._notes.handle_command(text)
             if note_result is not None:
+                # An exact-text save is a change to the list the wearer may
+                # be looking at. Refresh it the way a recording does; the
+                # audit's Q3 found "JOAT, note …" left an open QuickNotes
+                # page stale until the next visit.
+                if self._capability_opens is not None:
+                    await self._capability_opens.reflect_quicknotes()
                 return note_result
         if self._productivity is not None:
             productivity_result = await self._productivity.handle_command(text)

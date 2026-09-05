@@ -224,6 +224,34 @@ class IMessageStore:
         """
         return [(row.sender, row.text, row.at) for row in self.recent_threads(limit)]
 
+    def unread_count(self) -> int:
+        """Incoming messages Messages.app itself still marks unread.
+
+        The Overview's "unread" number counted retained notification cards
+        (the audit's O1): it included battery cards and never went down when
+        the wearer read a message on their phone. `message.is_read` is the
+        app's own flag; a schema without it answers zero rather than a guess.
+        """
+        with self._connect() as conn:
+            columns = self._columns(conn, "message")
+            if "is_read" not in columns:
+                return 0
+            _body_expr, _body_size_expr, visible_clause = self._body_sql(columns)
+            if "cache_has_attachments" in columns:
+                visible_clause = (
+                    f"(({visible_clause}) OR COALESCE(m.cache_has_attachments, 0) != 0)"
+                )
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM message m
+                WHERE COALESCE(m.is_from_me, 0) = 0
+                  AND COALESCE(m.is_read, 1) = 0
+                  AND {visible_clause}
+                """
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def recent_threads(self, limit: int = 5) -> list[MessageThread]:
         """Newest incoming message per conversation, retaining its send target.
 

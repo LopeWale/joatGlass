@@ -21,11 +21,17 @@ from typing import Callable
 VOICE_LATENCY_SCHEMA = "joat.voice-latency.v1"
 MAX_EVENTS = 128
 STAGES = frozenset({
+    # Every stage is measured from the wearer's end of speech (VAD close),
+    # so utterance_ready is the queue wait and reply_complete the whole
+    # wait. reply_complete is also emitted for deterministic command
+    # answers and for prompted answers handed to their owner, and
+    # interrupted marks a reply the wearer cut short.
     "utterance_ready",
     "ack_sent",
     "stt_complete",
     "first_reply_sent",
     "reply_complete",
+    "interrupted",
 })
 BUCKETS = frozenset({
     "lte250ms",

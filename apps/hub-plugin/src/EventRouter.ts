@@ -539,13 +539,15 @@ export class EventRouter {
       return;
     }
 
+    // "tap" on the Brainstorm and Terminal footers means a single press on
+    // EITHER temple or the ring: Even's input reference gives both temples
+    // the same gesture set, and only the LEFT DOUBLE press is JOAT's Back.
+    // The gate used to admit right/ring only, so a left tap silently did
+    // nothing while the footer promised it would (the audit's O3).
     if (
       type === OsEventTypeList.CLICK_EVENT
       && this.brainstorm?.isActive()
-      && (
-        source === EventSourceType.TOUCH_EVENT_FROM_RING
-        || source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
-      )
+      && this.isLocalTapSource(source)
       && this.brainstorm.handleClick()
     ) {
       this.recordAcceptedBrainstormAction(source, 'tap');

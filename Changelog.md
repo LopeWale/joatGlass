@@ -2,6 +2,59 @@
 
 ## 2026-09-05
 
+- Made the mind able to use every feature by ordinary conversation (audit A1,
+  M8, N2, NAV1, part of Q3 and T2). New belt tools: `read_conversation` (whole
+  messages from one thread, not an 80-character snippet), `read_news_article`,
+  `read_quicknotes` (exact text and recording transcripts), `terminal_sessions`
+  (roster and a lane's recent output) and `start_navigation` (the same
+  confirm-place / choose-mode flow as "navigate to"). The persona now names
+  what the mind can do and requires the wearer's words to pass through tools
+  verbatim; message-tool results name their own next step. Measured against
+  the REAL `claude -p` and `codex exec` seats over the real MCP endpoint with
+  recording controllers (`scratchpad/a1_probe.py`, 14 ordinary requests):
+  before, Claude reached the right controller in 8 of 11 and Codex in 6 of 11,
+  and both paraphrased a message body, a note and a topic; after, both seats
+  reach it in 14 of 14 with every phrase intact. Codex turns take 7–15 s,
+  Claude 4–6 s; STT and paint are on top of that and were not measured here.
+- A spoken correction now interrupts the answer in progress (A3): completed
+  utterances queue in order (three deep) instead of replacing each other, the
+  next one is transcribed while the current reply streams, and speech that
+  ends while an answer is under way — an addressed request or a bare stop
+  word — cancels that reply (and its CLI child) and takes its place. A second
+  request spoken before any answer existed is answered after the first, not
+  instead of it. Executed against the production orchestrator with a slow
+  streaming replier: the first query was cancelled, the correction answered,
+  room talk deferred.
+- Latency receipts count from the wearer's end of speech (A6), so the first
+  bucket is the queue wait; deterministic command answers, prompted answers
+  and interrupted replies now emit stages too. The paint receipt from the
+  plugin's `tile_upload` trace is still not correlated into the receipt.
+- Batch WhisperKit transcription has an inference deadline (A5, 90 s, above
+  the measured cold path); a hung child is terminated and the utterance
+  dropped instead of holding "hearing you…" forever. Executed: a hung fake
+  binary returned at the 1 s probe deadline.
+- JOAT's own chores (Brainstorm judge, synthesis, rewording) run on separate
+  worker seats and CLI sessions with a task persona (A7); the judge line
+  names the seat that answered instead of "local". The Even AI door has its
+  own seats that never resume a CLI session: the app's supplied history is
+  the prompt (A8), and streamed answers reach the phone chunk by chunk over a
+  close-delimited SSE body instead of one buffered event. Executed: history
+  in the seat prompt, chunks spread over 1.2 s, markup stripped.
+- Terminal approvals report the recorded verdict as data (T1): every
+  successful approval was announced as "another controller answered first"
+  because the roster's sentence was compared with the bare verdict.
+- Overview's unread number is Messages.app's own unread count (O1), read off
+  the loop thread every 20 s, not the retained notification-card count.
+- A draft still waiting for a name or body is superseded by a newer message
+  request instead of blocking it; "note …" refreshes an open QuickNotes list;
+  the Messages picker shows ten conversations and QuickNotes eight plus eight
+  (M5, Q3); "open navigation/directions/map" is a spoken opener (NAV1); a
+  Brainstorm or Terminal "tap" accepts either temple or the ring (O3); the
+  synthesis ends with a VERIFY line saying what, if anything, was checked
+  (B3); MAC_APP.md no longer requires a Hermes seat for Brainstorm.
+  The audit itself was deleted from the tree by commit 8bb5cc1; the findings
+  are read from `f1e4ada:docs/audits/2026-09-04-feature-audit/AUDIT.md`.
+
 - Repaired authenticated display handoff: replaced clients yield instead of
   redialing, retired painters/input cannot operate the successor, and explicit
   foreground restoration reconnects once. Concurrent server admissions now

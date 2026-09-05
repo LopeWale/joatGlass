@@ -847,20 +847,23 @@ class TestReplyFlow:
 
         emit_utterance(8000, "phone")
         await asyncio.wait_for(replier.entered.wait(), timeout=1)
-        # Two finished utterances arrive while the resident reply engine is
-        # occupied.  The one-slot handoff replaces the older phone utterance
-        # with the newest glasses one, retaining its source for the G2 topic
-        # capture security gate.
+        # Two finished utterances arrive while the reply engine is occupied.
+        # They queue in order (the audit's A3: the old one-slot handoff
+        # dropped the middle one). Without wake words every utterance is
+        # addressed, and speech that ends while an answer is under way
+        # replaces that answer — so the newest glasses utterance wins the
+        # turn, retaining its source for the G2 topic capture security gate.
         sessions.topic_capture_armed = True
         emit_utterance(7000, "phone")
         emit_utterance(6000, "glasses")
         replier.gate.set()
-        await drain()
+        assert orch._utterance_worker is not None
+        await asyncio.wait_for(orch._utterance_worker, 2)
 
-        assert replier.asked == ["first question"]  # no overlapping reply work
+        assert replier.asked[0] == "first question"
+        assert "latest question" not in replier.asked  # captured, never a reply
         assert sessions.captured == [("latest question", "glasses")]
-        assert assistant_text(transport) == ["slow answer"]
-        assert region(transport, ContainerId.CONTEXT) == ["you  first question"]
+        assert region(transport, ContainerId.CONTEXT)[0] == "you  first question"
 
 
 class StreamingReplier(ReplyEngine):

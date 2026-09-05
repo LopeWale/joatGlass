@@ -33,6 +33,9 @@ from .sinks import TranscriptSink
 
 
 MAX_BRAINSTORM_TOPIC_CHARS = 4096
+# A spoken place name or address; Mapbox Search Box caps a query at 256
+# characters, and nothing a wearer says about a destination is longer.
+MAX_NAVIGATION_DESTINATION_CHARS = 200
 
 
 class BrainstormStartResult(StrEnum):
@@ -123,7 +126,7 @@ _BRAINSTORM_TRIGGER = re.compile(
     re.IGNORECASE,
 )
 
-from .agent_terminal import parse_reply_route
+from .agent_terminal import ApprovalReceipt, parse_reply_route
 
 # "Note that" / "save Claude's reply as a note", spoken into a live
 # session. Anchored so a REMARK that happens to open with "note that…"
@@ -240,7 +243,7 @@ class SessionManager:
             [str | None, str | None], Awaitable[str]] | None = None,
         save_reply: Callable[[str | None], Awaitable[str]] | None = None,
         history: Any | None = None,
-        terminal_decide: Callable[[str], Awaitable[str]] | None = None,
+        terminal_decide: Callable[[str], Awaitable[str | ApprovalReceipt]] | None = None,
         terminal_cycle: Callable[[], Awaitable[str]] | None = None,
         last_reply: Callable[[str | None], tuple[str, str] | None] | None = None,
         transform: Callable[[str, str], Awaitable[str]] | None = None,
@@ -251,9 +254,14 @@ class SessionManager:
         terminal_view_current: Callable[[], bool] | None = None,
         brainstorm_view_current: Callable[[], bool] | None = None,
         surface_revision: Callable[[], int] | None = None,
+        navigation_factory: Callable[[str], Session | None] | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
+        # A typed destination, for the mind's start_navigation tool. The
+        # spoken "navigate to …" grammar reaches the same sessions through
+        # `starters`; this is the conversational door to the same room.
+        self._navigation_factory = navigation_factory
         self._active: Session | None = None
         self._session_revision = 0
         self._task: asyncio.Task[None] | None = None
@@ -1052,31 +1060,56 @@ class SessionManager:
                 )
 
                 async def run_decision() -> None:
-                    # The receipt is the POINT here, and it only reached
-                    # the log. First answer wins on the gateway, so a
-                    # wearer who taps approve may have their choice
-                    # recorded as the opposite by another controller — and
-                    # the comment above already claimed they "are told
-                    # that rather than shown a fiction". They were not.
+                    # The receipt is the POINT here. First answer wins on
+                    # the gateway, so a wearer who taps approve may have
+                    # their choice recorded as the opposite by another
+                    # controller — and they must be told that, not shown a
+                    # fiction. The audit's T1 found the OPPOSITE fiction:
+                    # the roster's whole sentence was compared with the
+                    # bare verdict, so every successful approval was
+                    # announced as a conflict. The verdict now arrives as
+                    # data (ApprovalReceipt); a legacy string is parsed.
                     try:
-                        receipt = await decide(verdict)
-                        log.info("terminal approval answered: %s", receipt)
+                        answer = await decide(verdict)
+                        log.info("terminal approval answered: %s", answer)
                     except Exception as exc:
                         reason = str(exc) or exc.__class__.__name__
                         log.exception("terminal approval failed")
                         await self._say(f"Could not answer that — {reason}")
                         return
-                    if not receipt:
+                    if isinstance(answer, ApprovalReceipt):
+                        recorded, outcome, sentence = answer.recorded, answer.outcome, answer.sentence
+                    else:
+                        # Legacy shapes: a bare recorded verdict, or the
+                        # roster's sentence. Either way, say what stood.
+                        sentence = str(answer or "")
+                        bare = sentence.strip().lower()
+                        if bare in ("approve", "deny"):
+                            recorded = bare
+                            outcome = "recorded" if bare == verdict else "conflict"
+                        else:
+                            recorded = verdict if f"recorded {verdict}" in sentence else None
+                            outcome = (
+                                "conflict" if "another controller" in sentence
+                                else "recorded" if recorded
+                                else "no_receipt" if not sentence else "failed"
+                            )
+                            if outcome == "conflict":
+                                found = re.search(r"recorded (approve|deny)", sentence)
+                                recorded = found.group(1) if found else "the other answer"
+                    if outcome == "recorded":
+                        await self._say(f"Recorded: {recorded}.")
+                    elif outcome == "conflict":
+                        await self._say(
+                            f"Recorded as {recorded} — another controller "
+                            "answered first."
+                        )
+                    elif outcome == "no_receipt":
                         await self._say(
                             "The gateway gave no receipt for that answer."
                         )
-                    elif receipt != verdict:
-                        await self._say(
-                            f"Recorded as {receipt} — another controller "
-                            "answered first."
-                        )
                     else:
-                        await self._say(f"Recorded: {receipt}.")
+                        await self._say(sentence or "That answer did not go through.")
 
                 asyncio.get_running_loop().create_task(run_decision())
             return
@@ -1387,6 +1420,42 @@ class SessionManager:
         if session is None:
             return BrainstormStartResult.UNAVAILABLE
         if self.try_start_session(session, publish_state=True):
+            return BrainstormStartResult.STARTED
+        return BrainstormStartResult.CLOSED if self._closed else BrainstormStartResult.BUSY
+
+    def start_navigation(self, destination: str) -> BrainstormStartResult:
+        """Start a route to a typed destination, the way "navigate to …" does.
+
+        The spoken grammar in `starters` and this typed door build the same
+        session; only the admission receipt differs. A STARTED receipt means
+        the destination search began, not that a route exists — the glasses
+        still confirm the place and the mode with the wearer.
+        """
+        if self._closed:
+            return BrainstormStartResult.CLOSED
+        if (
+            not isinstance(destination, str) or not destination.strip()
+            or len(destination) > MAX_NAVIGATION_DESTINATION_CHARS or "\x00" in destination
+        ):
+            return BrainstormStartResult.INVALID
+        try:
+            destination.encode("utf-8")
+        except UnicodeEncodeError:
+            return BrainstormStartResult.INVALID
+        if self._navigation_factory is None:
+            return BrainstormStartResult.UNAVAILABLE
+        if self._active is not None:
+            return BrainstormStartResult.BUSY
+        try:
+            session = self._navigation_factory(destination.strip())
+        except Exception as exc:
+            log.warning("typed navigation factory failed error=%s", type(exc).__name__)
+            return BrainstormStartResult.UNAVAILABLE
+        if session is None:
+            return BrainstormStartResult.UNAVAILABLE
+        # Same publish_state as the spoken starter path: navigation is not a
+        # Brainstorm, so it must not announce a Brainstorm state.
+        if self.try_start_session(session, publish_state=False):
             return BrainstormStartResult.STARTED
         return BrainstormStartResult.CLOSED if self._closed else BrainstormStartResult.BUSY
 
@@ -2053,10 +2122,50 @@ class DebateSession(Session):
             # transcript so the reopenable panel holds the product, not
             # just the path to it.
             self._transcript.append(("JOAT (synthesis)", text))
+            if not self._cancelled:
+                await self._verify_synthesis(text)
+
+    async def _verify_synthesis(self, text: str) -> None:
+        """Say what the "verified synthesis" actually rests on (the audit's B3).
+
+        The synthesis prompt forbids asserting unverified claims, but the
+        label promised verification the pipeline never performed on the
+        synthesis itself, and a session in which nobody cited anything
+        still ended under the same banner. One VERIFY line closes the gap:
+        the synthesis's own citations are checked when it offers any, and
+        otherwise the wearer is told plainly how many sources the whole
+        session had checked — which may be none.
+        """
+        citations = parse_citations(text)
+        if citations:
+            try:
+                await self._verify_visibly("JOAT (synthesis)", text)
+            except Exception:
+                log.exception("synthesis verification failed")
+                await self._sink.turn("VERIFY")
+                await self._sink.chunk("the synthesis's sources could not be checked\n")
+            return
+        checked = sum(
+            1 for entry in self._verify_summary
+            if "sources check out" in entry or "sources don't hold up" in entry
+        )
+        await self._sink.turn("VERIFY")
+        if checked:
+            await self._sink.chunk(
+                f"the synthesis cites nothing new; {checked} earlier turn(s) had their sources checked\n"
+            )
+        else:
+            await self._sink.chunk(
+                "no sources were cited in this session — this is the collaborators' "
+                "agreement, not verified fact\n"
+            )
 
     async def _judge_turn(self, round_no: int) -> str:
         assert self._judge is not None
-        await self._sink.turn(f"JUDGE (local) — round {round_no}")
+        # Name the seat that actually judges. It read "local" while the
+        # verdict came from a cloud CLI (the audit's A7).
+        judge_name = str(getattr(self._judge, "name", "") or "local")
+        await self._sink.turn(f"JUDGE ({judge_name}) — round {round_no}")
         verification = "; ".join(self._verify_summary) or "no citations offered"
         collected: list[str] = []
         async for chunk in self._judge.stream(

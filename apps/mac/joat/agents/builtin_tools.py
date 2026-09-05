@@ -197,16 +197,31 @@ def notifications_tool(log_: "CardLog") -> Tool:
     )
 
 
-def messages_tool(store: "IMessageStore") -> Tool:
-    def _age(unix: float) -> str:
-        mins = max(0, int((time.time() - unix) / 60))
-        if mins < 1:
-            return "just now"
-        if mins < 60:
-            return f"{mins}m ago"
-        hours = mins // 60
-        return f"{hours}h ago" if hours < 24 else f"{hours // 24}d ago"
+def _message_age(unix: float) -> str:
+    mins = max(0, int((time.time() - unix) / 60))
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    return f"{hours}h ago" if hours < 24 else f"{hours // 24}d ago"
 
+
+MESSAGES_PERMISSION_NOTICE = (
+    "Messages access unavailable. Check Mac Settings > Privacy & Security > "
+    "Full Disk Access, then retry. No messages were read."
+)
+MESSAGES_UNAVAILABLE_NOTICE = (
+    "Messages is temporarily unavailable. Retry shortly. No messages were read."
+)
+# A conversation read is the wearer's own history; the reader on the lens
+# already shows whole messages, so the mind gets the same, bounded so one
+# chatty thread cannot swallow the reply loop. Newest messages win the cut.
+CONVERSATION_SNIPPET_CHARS = 160
+CONVERSATION_READ_CHARS = 2_400
+
+
+def messages_tool(store: "IMessageStore") -> Tool:
     async def run(args: dict[str, Any]) -> str:
         try:
             limit = int(args.get("limit", 3))
@@ -215,24 +230,25 @@ def messages_tool(store: "IMessageStore") -> Tool:
         try:
             rows = await asyncio.to_thread(store.recent, limit)
         except PermissionError:
-            return (
-                "Messages access unavailable. Check Mac Settings > Privacy & Security > "
-                "Full Disk Access, then retry. No messages were read."
-            )
+            return MESSAGES_PERMISSION_NOTICE
         except (OSError, sqlite3.Error):
-            return "Messages is temporarily unavailable. Retry shortly. No messages were read."
+            return MESSAGES_UNAVAILABLE_NOTICE
         if not rows:
             return "no recent messages"
         return "; ".join(
-            f"{sender} ({_age(at)}): {text[:80]}" for sender, text, at in rows
+            f"{sender} ({_message_age(at)}): "
+            f"{text[:CONVERSATION_SNIPPET_CHARS]}"
+            f"{'…' if len(text) > CONVERSATION_SNIPPET_CHARS else ''}"
+            for sender, text, at in rows
         )
 
     return Tool(
         name="get_recent_messages",
         description=(
             "The wearer's most recent incoming text messages, newest per "
-            "sender. Call this when they ask who messaged them or what "
-            "someone said."
+            "sender, as short snippets. Call this when they ask who messaged "
+            "them. To read what someone actually said, in full, call "
+            "read_conversation with that sender's name."
         ),
         parameters={
             "type": "object",
@@ -241,4 +257,101 @@ def messages_tool(store: "IMessageStore") -> Tool:
         },
         run=run,
         decision_hints=("message", "messages", "text", "texts", "texted", "messaged", "said"),
+    )
+
+
+def conversation_tool(store: "IMessageStore") -> Tool:
+    """Whole messages from one conversation, the way the lens reader shows them.
+
+    The audit's M8: the mind saw eighty characters per sender and nothing
+    else, so "read me Dele's message" answered with a snippet and an
+    apology. This reads the same Mac-owned thread the Messages feature
+    opens, oldest to newest, complete text, bounded by characters rather
+    than by cutting a sentence in half.
+    """
+
+    async def run(args: dict[str, Any]) -> str:
+        name = str(args.get("name", "") or "").strip()
+        if not name:
+            return "error: name is required — whose conversation to read"
+        try:
+            count = int(args.get("messages", 8))
+        except (TypeError, ValueError):
+            count = 8
+        count = max(1, min(count, 16))
+        try:
+            threads = await asyncio.to_thread(store.recent_threads, 10)
+        except PermissionError:
+            return MESSAGES_PERMISSION_NOTICE
+        except (OSError, sqlite3.Error):
+            return MESSAGES_UNAVAILABLE_NOTICE
+        needle = name.casefold()
+        matches = [t for t in threads if needle in t.sender.casefold()]
+        exact = [t for t in matches if t.sender.casefold() == needle]
+        if exact:
+            matches = exact
+        if not matches:
+            senders = ", ".join(t.sender for t in threads) or "none"
+            return f"no recent conversation with {name!r}; recent conversations: {senders}"
+        if len(matches) > 1:
+            return "several conversations match — say which: " + ", ".join(t.sender for t in matches)
+        thread = matches[0]
+        try:
+            page = await asyncio.to_thread(store.thread_message_page, thread, limit=count)
+        except PermissionError:
+            return MESSAGES_PERMISSION_NOTICE
+        except (OSError, sqlite3.Error):
+            return MESSAGES_UNAVAILABLE_NOTICE
+        # The page arrives newest first; the mind reads it like a transcript.
+        entries = list(reversed(page.entries))
+        if not entries:
+            return f"the conversation with {thread.sender} has no readable messages"
+        lines: list[str] = []
+        for entry in entries:
+            who = "You" if entry.from_me else (entry.sender or thread.sender)
+            text = entry.text or ("[attachment]" if entry.attachment_count else "")
+            lines.append(f"{who} ({_message_age(entry.at)}): {text}")
+        body = "\n".join(lines)
+        truncated = False
+        while len(body) > CONVERSATION_READ_CHARS and len(lines) > 1:
+            lines.pop(0)
+            body = "\n".join(lines)
+            truncated = True
+        if len(body) > CONVERSATION_READ_CHARS:
+            body = "…" + body[-CONVERSATION_READ_CHARS:]
+            truncated = True
+        kind = "group conversation" if thread.is_group else "conversation"
+        notes = []
+        if page.has_older or truncated:
+            notes.append("older messages exist")
+        notes.append(
+            "a reply can be prepared from the glasses" if thread.reply_target is not None
+            else "replying from the glasses is not available for this conversation"
+        )
+        return f"{kind} with {thread.sender} ({'; '.join(notes)}):\n{body}"
+
+    return Tool(
+        name="read_conversation",
+        description=(
+            "Read the wearer's recent messages with one person or group, in "
+            "full and in order. Call this when they ask what someone said, "
+            "to read a message, or for the whole thread. Takes the sender's "
+            "name as it appears in Messages."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The sender or group name, as spoken."},
+                "messages": {
+                    "type": "integer",
+                    "description": "How many of the newest messages to read, 1 to 16 (default 8)",
+                },
+            },
+            "required": ["name"],
+        },
+        run=run,
+        decision_hints=(
+            "message", "messages", "text", "texts", "said", "read", "conversation",
+            "thread", "in full", "whole",
+        ),
     )

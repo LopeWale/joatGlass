@@ -783,7 +783,11 @@ class CapabilityRouter:
             )
             return
         try:
-            rows = await asyncio.to_thread(self._messages.recent_threads, 5)
+            # Ten conversations, the store's ceiling: the custom list windows
+            # around the cursor (visibleHudListItems), so a picker longer
+            # than one screen scrolls instead of hiding threads (the
+            # audit's M5 found five, with no way to reach the sixth).
+            rows = await asyncio.to_thread(self._messages.recent_threads, 10)
         except PermissionError as exc:
             log.warning("Messages capability unavailable: %s", type(exc).__name__)
             if self._request_is_current():
@@ -1803,8 +1807,11 @@ class CapabilityRouter:
             )
             return
         rows: list[_NoteRow] = []
+        # Eight recordings plus eight text notes fits the 20-row wire list
+        # with the recording controls; the surface scrolls, so older notes
+        # are reachable on the glasses (the audit's Q3 found four and four).
         if self._voice_notes is not None:
-            for note in self._voice_notes.recent_retained(4):
+            for note in self._voice_notes.recent_retained(8):
                 age = _age(note.updated_at_us / 1_000_000)
                 suffix = "" if note.state == "saved" else " · gaps"
                 title = note.title or "Untitled"
@@ -1816,7 +1823,7 @@ class CapabilityRouter:
                     voice_note=note,
                 ))
         if self._notes is not None:
-            for text_note in list(self._notes.active()[:4]):
+            for text_note in list(self._notes.active()[:8]):
                 rows.append(_NoteRow(
                     label=f"[{_age(text_note.updated_at_us / 1_000_000)}] {text_note.text}",
                     kind="text",
@@ -2123,7 +2130,11 @@ _OPEN_CAPABILITY = re.compile(
     r"tasks|reminders|notifications|activity|"
     # The two surfaces that had no spoken opener. 'agent terminal' before
     # 'terminal' so the longer name wins the alternation.
-    r"brainstorm|debate|agent\s?terminal|terminal)$",
+    r"brainstorm|debate|agent\s?terminal|terminal|"
+    # Navigation sat in the sidebar with no spoken door (the audit's NAV1).
+    # "navigate to <place>" still starts a route directly; this only opens
+    # the feature's own surface.
+    r"navigation|directions|map)$",
     re.IGNORECASE,
 )
 
@@ -2147,6 +2158,9 @@ _SPOKEN_CAPABILITY = {
     "agent terminal": "Agent Terminal",
     "agentterminal": "Agent Terminal",
     "terminal": "Agent Terminal",
+    "navigation": "Navigation",
+    "directions": "Navigation",
+    "map": "Navigation",
 }
 
 

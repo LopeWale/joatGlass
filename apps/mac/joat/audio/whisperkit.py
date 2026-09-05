@@ -27,6 +27,12 @@ log = logging.getLogger(__name__)
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2  # signed 16-bit
 CHANNELS = 1
+# A batch transcription that has not answered by now is not going to: the
+# wearer has been watching "hearing you…" the whole time. The bound is set
+# above the measured cold path (docs/WHISPER_COLD_START.md records ~80 s
+# to first readiness on this Mac) so it never cuts a slow-but-live model,
+# only a hung one. The audit's A5: this wait had no deadline at all.
+DEFAULT_INFERENCE_DEADLINE_S = 90.0
 
 
 class WhisperKitEngine(SttEngine):
@@ -43,11 +49,15 @@ class WhisperKitEngine(SttEngine):
         model: str = "large-v3_turbo",
         max_buffer_s: float = 30.0,
         model_dir: Path | None = None,
+        inference_deadline_s: float = DEFAULT_INFERENCE_DEADLINE_S,
     ) -> None:
+        if inference_deadline_s <= 0:
+            raise ValueError("inference_deadline_s must be positive")
         self._binary = binary
         self._model = model
         self._max_bytes = int(max_buffer_s * SAMPLE_RATE * SAMPLE_WIDTH)
         self._model_dir = model_dir
+        self._inference_deadline_s = inference_deadline_s
         self._buffer = bytearray()
 
     @property
@@ -103,9 +113,22 @@ class WhisperKitEngine(SttEngine):
                 stderr=asyncio.subprocess.PIPE,
             ))
             proc = None
+            stdout = b""
+            timed_out = False
             try:
                 proc = await asyncio.shield(spawning)
-                stdout, _stderr = await proc.communicate()
+                try:
+                    stdout, _stderr = await asyncio.wait_for(
+                        proc.communicate(), self._inference_deadline_s,
+                    )
+                except asyncio.TimeoutError:
+                    # The finally below terminates the child; the wearer
+                    # gets an empty transcript rather than an endless wait.
+                    timed_out = True
+                    log.error(
+                        "whisperkit transcription exceeded %.0fs — dropping this utterance",
+                        self._inference_deadline_s,
+                    )
             finally:
                 # A cancelled temporary fallback must not leave its model
                 # process alive or remove the WAV while it is still reading.
@@ -125,6 +148,8 @@ class WhisperKitEngine(SttEngine):
                             pass
                         await proc.wait()
 
+        if timed_out:
+            return ""
         if proc.returncode != 0:
             log.error("whisperkit failed returncode=%s", proc.returncode)
             return ""
