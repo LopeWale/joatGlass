@@ -215,9 +215,19 @@ class IMessageStore:
         self._drain_after = last if len(rows) > _READ_PAGE_SIZE else None
         return out, last
 
-    def full_text_near(
-        self, preview: str, at: float, *, window_s: float = 300.0,
-    ) -> str | None:
+    # A banner usually appears within seconds of the chat.db row, so the
+    # tight window resolves almost everything. But macOS re-shows and stacks
+    # banners, and the watcher can read one that lingered, which leaves the
+    # timestamps hours apart — the wearer keeps a cut message for a reason
+    # they cannot see. The wide pass covers that, and pays for the looser
+    # time bound with a much longer prefix: 24 characters of an exact opening
+    # that still matches exactly one message.
+    _TIGHT_WINDOW_S = 300.0
+    _WIDE_WINDOW_S = 86_400.0
+    _MIN_HEAD_CHARS = 12
+    _WIDE_MIN_HEAD_CHARS = 24
+
+    def full_text_near(self, preview: str, at: float) -> str | None:
         """The complete message behind a TRUNCATED banner preview, or None.
 
         macOS renders notification banners with an elided body ("Hey! Our
@@ -235,8 +245,16 @@ class IMessageStore:
         head = preview.strip().rstrip("…").rstrip(".").strip()
         # Too short to identify a message; a 3-character prefix would match
         # half the archive.
-        if len(head) < 12 or at <= 0:
+        if len(head) < self._MIN_HEAD_CHARS or at <= 0:
             return None
+        found = self._match_within(head, preview, at, self._TIGHT_WINDOW_S)
+        if found is not None or len(head) < self._WIDE_MIN_HEAD_CHARS:
+            return found
+        return self._match_within(head, preview, at, self._WIDE_WINDOW_S)
+
+    def _match_within(
+        self, head: str, preview: str, at: float, window_s: float,
+    ) -> str | None:
         # `message.date` is nanoseconds since the Apple epoch on modern
         # macOS and SECONDS on older databases — _unix_time reads both, so
         # the window must cover both or a seconds-schema store silently
