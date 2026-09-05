@@ -2239,12 +2239,19 @@ class TestTheSessionPicker:
             opened.append(session_id)
             return True
 
-        router, _t, _s = make_router(
+        router, transport, _s = make_router(
             tmp_path, brainstorm_sessions=lambda: rows,
             brainstorm_continue=continue_it)
         await router.open("Brainstorm")
         await router._select_brainstorm(2)      # row 0 is NEW
 
+        # Read first (the audit's B3): the tap opens the saved transcript in
+        # the exact reader; continuation — two subscription CLIs — starts
+        # only on the next, deliberate tap.
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert lists[-1].title == "BRAINSTORM · SAVED"
+        assert opened == [], "a first tap reads; it must not start collaborators"
+        await router._select_brainstorm(2)
         assert opened == ["bbb"], "the id, not the row number"
 
     async def test_a_row_that_moved_is_not_opened_by_position(
@@ -2265,7 +2272,8 @@ class TestTheSessionPicker:
         await router.open("Brainstorm")
         rows.insert(0, self.Past("ccc", "something new", (("CODEX", "q"),)))
 
-        await router._select_brainstorm(2)
+        await router._select_brainstorm(2)      # opens the reader for "bbb"
+        await router._select_brainstorm(2)      # the reader's tap: continue
         assert opened == ["bbb"], "resolved against what was DRAWN"
 
 
@@ -2360,10 +2368,20 @@ class TestARowTapCrossesTheRealGuards:
         await router.open("Brainstorm")
 
         lists = [m for m in transport.sent if isinstance(m, HudList)]
+        request_id = getattr(lists[-1], "request_id", None)
         router.on_input(InputEvent(
             container_name="capdata", selected_index=2,
-            selected_name="BRAINSTORM",
-            request_id=getattr(lists[-1], "request_id", None), trace_id="hud",
+            selected_name="BRAINSTORM", request_id=request_id, trace_id="hud",
+        ))
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if any(isinstance(m, HudList) and m.title == "BRAINSTORM · SAVED" for m in transport.sent):
+                break
+        assert opened == [], "the first tap opens the saved transcript, not the collaborators"
+        # The tap inside the open reader is its action: continue this session.
+        router.on_input(InputEvent(
+            container_name="capdata", selected_index=0,
+            selected_name="BRAINSTORM", request_id=request_id, trace_id="hud",
         ))
         for _ in range(40):
             await asyncio.sleep(0.01)

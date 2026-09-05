@@ -191,6 +191,8 @@ class Headline:
     category: str
     published_at: float
     guid: str
+    #: The feed's own description, tags stripped; empty when it had none.
+    summary: str = ""
 
     def row(self, now: float | None = None) -> str:
         """"[3m] Headline · BBC" — the dense-row grammar the glass parses."""
@@ -264,6 +266,11 @@ def fetch_feed(url: str, category: str, *, now: float | None = None) -> list[Hea
             entry_source = str(source_field.get("title", "") or "")
             # Google News titles carry the publisher; the row names it.
             title = _strip_publisher(title)
+        # The feed's own description is the fallback article (the audit's
+        # N2): when the publisher page cannot be extracted, the wearer
+        # gets the feed's summary rather than the headline repeated.
+        summary_html = str(entry.get("summary", "") or entry.get("description", "") or "")
+        summary = " ".join(re.sub(r"<[^>]+>", " ", summary_html).split())
         headlines.append(Headline(
             title=title,
             link=link,
@@ -271,6 +278,7 @@ def fetch_feed(url: str, category: str, *, now: float | None = None) -> list[Hea
             category=category,
             published_at=published,
             guid=str(entry.get("id", "") or link),
+            summary=summary[:2_000],
         ))
     headlines.sort(key=lambda h: h.published_at, reverse=True)
     return headlines
@@ -333,6 +341,7 @@ class NewsService:
         self._headlines: list[Headline] = []
         self._fetched_at: float | None = None
         self._last_error: str | None = None
+        self._partial = False
         self._running = False
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -363,9 +372,30 @@ class NewsService:
     def fetched_at(self) -> float | None:
         return self._fetched_at
 
+    @property
+    def last_error(self) -> str | None:
+        """Why the newest pass could not refresh, or None when it did."""
+        return self._last_error
+
+    @property
+    def partial(self) -> bool:
+        """True when the newest pass lost some feeds but kept others."""
+        return self._partial
+
     async def refresh_once(self) -> int:
         """Fetch every configured feed, each on its own thread, each failing
         alone. Returns how many headlines the tab now holds."""
+        await self.refresh_changed()
+        return len(self._headlines)
+
+    async def refresh_changed(self) -> bool:
+        """One pass; True when what the wearer would see changed.
+
+        The audit's N1: a pass that kept every feed's old headlines still
+        published, and the plugin stamps "updated now" on every push — so a
+        failed refresh looked fresh. Now a pass reports whether the
+        headlines OR the failure state changed, and only that publishes.
+        """
         feeds = self.config.feeds()
         results = await asyncio.gather(
             *(asyncio.to_thread(self._fetch_feed, url, category) for category, url in feeds),
@@ -379,29 +409,37 @@ class NewsService:
                 log.info("feed unavailable category=%s (%s)", category, type(result).__name__)
                 continue
             merged.extend(result)
+        before = (tuple(h.guid for h in self._headlines), self._last_error, self._partial)
         if failures and not merged and self._headlines:
-            # Every feed failed: keep what the wearer already has.
+            # Every feed failed: keep what the wearer already has, and say
+            # so. fetched_at stays where it was — nothing was fetched.
             self._last_error = "feeds unavailable"
-            return len(self._headlines)
-        self._headlines = _dedupe(merged, self._clock())[: self._max]
-        self._fetched_at = self._clock()
-        self._last_error = "feeds unavailable" if failures == len(feeds) and feeds else None
-        return len(self._headlines)
+            self._partial = False
+        else:
+            self._headlines = _dedupe(merged, self._clock())[: self._max]
+            self._fetched_at = self._clock()
+            self._last_error = "feeds unavailable" if failures == len(feeds) and feeds else None
+            self._partial = 0 < failures < len(feeds)
+        after = (tuple(h.guid for h in self._headlines), self._last_error, self._partial)
+        return before != after
 
     async def refresh(self) -> None:
         await self.refresh_once()
 
     async def run(self, on_refreshed: Callable[[], Any] | None = None) -> None:
-        """Poll on the configured cadence, publishing after each pass."""
+        """Poll on the configured cadence, publishing only when a pass changed
+        what the wearer would see (the plugin dates the panel by its push)."""
         self._running = True
+        first_pass = True
         while self._running:
+            changed = False
             try:
-                await self.refresh_once()
+                changed = await self.refresh_changed()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.warning("news refresh failed", exc_info=True)
-            if on_refreshed is not None:
+            if on_refreshed is not None and (changed or first_pass):
                 try:
                     result = on_refreshed()
                     if asyncio.iscoroutine(result):
@@ -410,6 +448,7 @@ class NewsService:
                     raise
                 except Exception:
                     log.warning("news publish failed", exc_info=True)
+            first_pass = False
             await asyncio.sleep(self.config.refresh_minutes * 60)
 
     def stop(self) -> None:
@@ -426,7 +465,15 @@ class NewsService:
                 else "No headlines yet — hold to refresh."
             )
             return PanelSnapshot(rows=(), empty=empty)
-        return PanelSnapshot(rows=tuple(h.row(now) for h in self._headlines))
+        rows = tuple(h.row(now) for h in self._headlines)
+        # A kept-but-stale list says so on its own first row: the plugin's
+        # "updated now" is when it was pushed, not when these were fetched.
+        if self._last_error and self._fetched_at is not None:
+            age = relative_age(self._fetched_at, now)
+            return PanelSnapshot(rows=(f"[!] Feeds unavailable · showing headlines from {age} ago", *rows))
+        if self._partial:
+            return PanelSnapshot(rows=("[!] Some feeds unavailable · partial list", *rows))
+        return PanelSnapshot(rows=rows)
 
     async def open(self, index: int) -> Reader | None:
         if not 0 <= index < len(self._headlines):
@@ -437,6 +484,8 @@ class NewsService:
         except (OSError, ValueError, urllib.error.URLError) as exc:
             log.info("article unavailable (%s)", type(exc).__name__)
             title, text = headline.title, ""
+        if not text and headline.summary and headline.summary.casefold() != headline.title.casefold():
+            text = f"{headline.summary}\n\n(From the feed's summary; the full article could not be read on the Mac.)"
         body = text or (
             "The article text could not be read on the Mac. "
             f"Headline: {headline.title}"

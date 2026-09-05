@@ -224,5 +224,27 @@ async def main() -> None:
     await a8()
 
 
+# ── A6: the plugin's tile upload closes the reply with a paint receipt ────
+
+async def a6() -> None:
+    print("\n=== A6: first successful tile upload after the reply's first words is 'painted' ===")
+    stages: list[tuple[int, str, str]] = []
+    orch = VoiceOrchestrator(Transport(), Stt({}), wake_words=("joat",),
+                             latency_observer=lambda t, s, b: stages.append((t, s, b)))
+    orch._observe_latency(7, "first_reply_sent", time.monotonic() - 1.2)
+    orch.on_paint_trace({"type": "gesture", "gesture": "tap", "delivery": "sys"})      # not a paint
+    orch.on_paint_trace({"type": "tile_upload", "frame": 1, "order": 0, "containerId": 7, "outcome": "failed"})
+    orch.on_paint_trace({"type": "tile_upload", "frame": 1, "order": 1, "containerId": 7, "outcome": "success"})
+    orch.on_paint_trace({"type": "tile_upload", "frame": 1, "order": 2, "containerId": 8, "outcome": "success"})  # only the first counts
+    print("stages:", stages)
+    painted = [s for s in stages if s[1] == "painted"]
+    print("A6 verdict:", "PASS" if len(painted) == 1 and painted[0][0] == 7 and painted[0][2] == "1_2s" else "FAIL")
+
+
+async def main_all() -> None:
+    await main()
+    await a6()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_all())

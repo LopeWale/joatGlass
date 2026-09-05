@@ -211,6 +211,10 @@ class VoiceOrchestrator:
         self._pending_arrived = asyncio.Event()
         self._stt_busy = 0
         self._utterance_worker: asyncio.Task[None] | None = None
+        # The reply whose first words were sent but not yet seen painted:
+        # (turn ordinal, end of speech). The next successful tile upload
+        # the plugin reports closes it with the `painted` stage.
+        self._awaiting_paint: tuple[int, float] | None = None
 
     def attach(self) -> None:
         if self._frames is not None:
@@ -790,8 +794,22 @@ class VoiceOrchestrator:
             and (self._prompted_input is None or self._prompted_input.current_ticket is None)
         )
 
+    def on_paint_trace(self, event: dict[str, str | int]) -> None:
+        """A plugin trace event: the first successful tile upload after a
+        reply's first words is the closest thing to "the wearer can see it"
+        the host has (the audit's A6). Diagnostics-only, like the receipt."""
+        if self._awaiting_paint is None:
+            return
+        if event.get("type") != "tile_upload" or event.get("outcome") != "success":
+            return
+        turn, started_at = self._awaiting_paint
+        self._awaiting_paint = None
+        self._observe_latency(turn, "painted", started_at)
+
     def _observe_latency(self, turn: int, stage: str, started_at: float) -> None:
         """Emit one opt-in, fixed-vocabulary, coarsely bucketed stage."""
+        if stage == "first_reply_sent":
+            self._awaiting_paint = (turn, started_at)
         if self._latency_observer is None:
             return
         try:

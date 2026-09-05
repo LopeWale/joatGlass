@@ -204,12 +204,24 @@ class _NoteRow:
 
 @dataclass(slots=True)
 class _NoteReaderState:
+    """The exact reader: any long text, paged, under one capability.
+
+    Born for QuickNotes; now also the read-only Brainstorm transcript
+    (the audit's B3) and the long-message review before confirmation
+    (M7). `on_tap` is what a row tap does while the reader is open —
+    continue the session, confirm the draft — and `tap_hint` is how the
+    footer promises it.
+    """
+
     title: str
     label: str
     pages: tuple[tuple[str, ...], ...]
     trace_id: str
     index: int = 0
     page_pending: bool = False
+    capability: str = "QUICKNOTES"
+    on_tap: Callable[[], Awaitable[None]] | None = None
+    tap_hint: str | None = None
 
 
 @dataclass(slots=True)
@@ -416,6 +428,18 @@ class CapabilityRouter:
         elif event.container_name == "capdata" and event.selected_index is not None:
             terminal_revision = None
             message_epoch = None
+            reader = self._note_reader
+            if (
+                reader is not None and reader.on_tap is not None
+                and event.selected_name == reader.capability
+                and self._active_capability == reader.capability
+                and event.request_id == self._active_request_id
+            ):
+                # A tap inside an open reader is the reader's own action
+                # (continue this Brainstorm, confirm this draft) — never a
+                # row selection on the list underneath it.
+                asyncio.get_running_loop().create_task(self._tap_reader(reader))
+                return
             if event.selected_name == "MESSAGES":
                 if (event.request_id != self._active_request_id
                         or self._active_capability != "MESSAGES"):
@@ -491,11 +515,15 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(
                 self._panels.page(event.selected_name, event.event_type, event.request_id)
             )
-        elif event.container_name == "cappage" and event.selected_name == "QUICKNOTES":
+        elif (
+            event.container_name == "cappage"
+            and self._note_reader is not None
+            and event.selected_name == self._note_reader.capability
+        ):
             reader = self._note_reader
             if (
-                reader is None or reader.page_pending
-                or self._active_capability != "QUICKNOTES"
+                reader.page_pending
+                or self._active_capability != reader.capability
                 or event.request_id != self._active_request_id
                 or event.trace_id != reader.trace_id
                 or event.selected_index != reader.index
@@ -864,6 +892,43 @@ class CapabilityRouter:
             self._active_request_id = None
         self._active_capability = "BRAINSTORM"
 
+    async def review_message(self, recipient_label: str, body: str, *, timeout_s: float = 90.0) -> bool:
+        """Show a whole draft before its confirmation; True when the wearer taps.
+
+        The audit's M7: a draft longer than the confirmation prompt's 120
+        UTF-16 units was rejected outright ("shorten it and try again").
+        The wearer said what they said; they should read it, in full, and
+        then confirm. Back, Home, another selection or the timeout all
+        return False and nothing is sent.
+        """
+        loop = asyncio.get_running_loop()
+        decided: asyncio.Future[bool] = loop.create_future()
+
+        async def confirm_from_review() -> None:
+            if not decided.done():
+                decided.set_result(True)
+
+        request_id = voice_request_id()
+        self.clear_message_selection("message-review")
+        self._active_capability = "MESSAGES"
+        self._active_request_id = request_id
+        token = self._request_context.set(request_id)
+        try:
+            await self._open_note_reader(
+                "MESSAGES · REVIEW", f"To {recipient_label}", body, "message-review",
+                capability="MESSAGES", on_tap=confirm_from_review, tap_hint="tap: send",
+            )
+        finally:
+            self._request_context.reset(token)
+        reader = self._note_reader
+        deadline = loop.time() + timeout_s
+        while not decided.done():
+            if self._note_reader is not reader or loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.2)
+        self._note_reader = None
+        return decided.result()
+
     async def open_terminal_from_brainstorm(self) -> bool:
         """Use the same picker and lane preparation as an ordinary Terminal open."""
         if not self.brainstorm_view_current:
@@ -943,7 +1008,32 @@ class CapabilityRouter:
                 answers_wearer=True,
             )
             return
-        if not await self._brainstorm_continue(rows[picked].session_id):
+        past = rows[picked]
+        turns = getattr(past, "turns", ())
+        if turns and self._note_reader is None:
+            # Read first, continue on purpose (the audit's B3): selecting a
+            # saved session used to start a continuation — two subscription
+            # CLIs — before the wearer had seen a word of it. The exact
+            # reader shows the whole transcript; a tap continues it.
+            session_id = past.session_id
+            continue_session = self._brainstorm_continue
+
+            async def continue_saved() -> None:
+                self._note_reader = None
+                if not await continue_session(session_id):
+                    await self._show_focus(
+                        "BRAINSTORM",
+                        ["That session could not be reopened.",
+                         "Say “JOAT, brainstorm …” to start a new one."],
+                    )
+
+            body = "\n\n".join(f"[{label}]\n{text}" for label, text in turns)
+            await self._open_note_reader(
+                "BRAINSTORM · SAVED", getattr(past, "title", "session"), body, "brainstorm",
+                capability="BRAINSTORM", on_tap=continue_saved, tap_hint="tap: continue",
+            )
+            return
+        if not await self._brainstorm_continue(past.session_id):
             await self._show_focus(
                 "BRAINSTORM",
                 ["That session could not be reopened.",
@@ -1900,9 +1990,27 @@ class CapabilityRouter:
         if row.text_note is not None:
             await self._open_note_reader("QUICKNOTES · DETAIL", "Exact text", row.text_note.text, trace_id)
 
-    async def _open_note_reader(self, title: str, label: str, text: str, trace_id: str) -> None:
-        self._note_reader = _NoteReaderState(title, label, paginate_reader_text(text), trace_id)
+    async def _open_note_reader(
+        self, title: str, label: str, text: str, trace_id: str, *,
+        capability: str = "QUICKNOTES",
+        on_tap: Callable[[], Awaitable[None]] | None = None,
+        tap_hint: str | None = None,
+    ) -> None:
+        self._note_reader = _NoteReaderState(
+            title, label, paginate_reader_text(text), trace_id,
+            capability=capability, on_tap=on_tap, tap_hint=tap_hint,
+        )
         await self._show_note_reader()
+
+    async def _tap_reader(self, reader: _NoteReaderState) -> None:
+        if self._note_reader is not reader or reader.on_tap is None:
+            return
+        try:
+            await reader.on_tap()
+        except Exception:
+            log.exception("reader action failed capability=%s", reader.capability)
+            with contextlib.suppress(Exception):
+                await self._hud.assistant("That did not go through — try again.", answers_wearer=True)
 
     async def _show_note_reader(self) -> None:
         reader = self._note_reader
@@ -1913,6 +2021,8 @@ class CapabilityRouter:
             hint.append("up previous")
         if reader.index + 1 < len(reader.pages):
             hint.append("down more")
+        if reader.tap_hint:
+            hint.append(reader.tap_hint)
         hint.append(BACK_HINT)
         await self._show_focus(
             reader.title,

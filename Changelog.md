@@ -54,6 +54,32 @@
   (B3); MAC_APP.md no longer requires a Hermes seat for Brainstorm.
   The audit itself was deleted from the tree by commit 8bb5cc1; the findings
   are read from `f1e4ada:docs/audits/2026-09-04-feature-audit/AUDIT.md`.
+- "Message my wife" resolves (M6): a `RelationshipBook` under Application
+  Support, written only from the wearer's own statement through the new
+  `remember_relationship` tool (the name must match exactly one Mac contact);
+  nothing is inferred. A draft too long for the 120-unit confirmation prompt
+  is read whole in the exact reader first — "MESSAGES · REVIEW", tap: send,
+  Back cancels — and the confirmation then carries the opening words marked
+  "(reviewed)" (M7). Selecting a saved Brainstorm opens its transcript in the
+  reader; a second tap continues it (B3). The latency receipt gains a
+  `painted` stage from the plugin's tile-upload trace (A6, diagnostics-only).
+  The gateway now logs a disconnect's close code, reason and duration: the
+  wearer's log had "plugin disconnected" and nothing else for the 04:46–05:17
+  drops on the physical glasses, which followed audio sequence gaps and
+  returned after seven minutes. Executed: `scripts/probes/verify_m6_m7.py`.
+  Note for the live engine: it restarted at 13:32 while a two-step edit was
+  half applied (NameError on import) and recovered on the supervisor's
+  retry; it is still running pre-commit code until deliberately restarted.
+  Hub 0.1.74 package rebuilt from d4a6a58 (`joat.ehpk`, sha256 aa8c61c3…),
+  with only a test-file typecheck patch applied in the packaging worktree.
+- News freshness is truthful without a wire change (N1): the service
+  publishes only when a pass changed the headlines or the failure state, a
+  kept-stale list opens with "[!] Feeds unavailable · showing headlines from
+  N ago", a partial pass says so, and "refresh the news" answers updated /
+  partial / kept-from-earlier accordingly. When a publisher page cannot be
+  extracted, the feed's own summary is the article body, labelled as such
+  (N2). "Terminal history" entries are no longer cut to their first 160
+  characters (T2).
 
 - Repaired authenticated display handoff: replaced clients yield instead of
   redialing, retired painters/input cannot operate the successor, and explicit

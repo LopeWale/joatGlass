@@ -66,6 +66,7 @@ from .ble.hub_gateway import HubGatewayTransport
 from .core.pairing import PairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.cards import CardLog
+from .channels.contacts import RelationshipBook
 from .channels.imessage import IMessageStore
 from .channels.message_sender import MessagesAppSender
 from .channels.jsonl_source import JsonlNotificationStore
@@ -1267,6 +1268,11 @@ async def main() -> None:
         action_journal,
         begin_reply=lambda: message_ui.begin_reply(),
         on_status=lambda status: message_ui.on_status(status),
+        # "my wife" resolves only to a contact the wearer named as such.
+        relationships=RelationshipBook(),
+        # A draft too long for the confirmation prompt is read in full on
+        # the glasses first; capabilities is composed further down.
+        review=lambda label, body: capabilities.review_message(label, body),
     )
     task_occurrences = TaskOccurrenceStore(durable_store)
 
@@ -1601,6 +1607,9 @@ async def main() -> None:
             prompted_speech.revoke_current()
 
     transport.on_input(on_capability_input)
+    # Paint receipts for the latency record: the plugin's tile-upload trace
+    # (diagnostics-only) closes a reply's `first_reply_sent` with `painted`.
+    transport.on_trace(orchestrator.on_paint_trace)
 
     # The resting dashboard's margin facts. Weather is not in the Even Hub
     # SDK, so JOAT resolves it on this Mac from the position the phone

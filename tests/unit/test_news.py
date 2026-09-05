@@ -134,15 +134,26 @@ class TestService:
         bbc, _npr, _google = CATEGORY_FEEDS["technology"]
         svc = service(tmp_path, {bbc: [headline("Only story")]})
         assert await svc.refresh_once() == 1
-        assert svc.snapshot().rows == ("[1m] Only story · BBC",)
+        # A partial pass keeps the surviving feed's rows AND says so on the
+        # first row (the audit's N1: nonempty snapshots hid the failure).
+        assert svc.snapshot().rows == (
+            "[!] Some feeds unavailable · partial list", "[1m] Only story · BBC",
+        )
+        assert svc.partial is True and svc.last_error is None
 
     async def test_all_feeds_dead_keeps_yesterdays_headlines(self, tmp_path: Path) -> None:
         bbc, _npr, _google = CATEGORY_FEEDS["technology"]
         svc = service(tmp_path, {bbc: [headline("Kept")]})
         await svc.refresh_once()
+        fetched_at = svc.fetched_at
         svc._fetch_feed = lambda url, category: (_ for _ in ()).throw(OSError())  # type: ignore[assignment]
         assert await svc.refresh_once() == 1
         assert [h.title for h in svc.headlines] == ["Kept"]
+        # Kept, not refreshed: fetched_at does not move, the list opens with
+        # its age, and a pass that changes nothing reports no change.
+        assert svc.fetched_at == fetched_at and svc.last_error == "feeds unavailable"
+        assert svc.snapshot().rows[0].startswith("[!] Feeds unavailable · showing headlines from ")
+        assert await svc.refresh_changed() is False
 
     async def test_an_empty_tab_says_why(self, tmp_path: Path) -> None:
         svc = service(tmp_path, {})

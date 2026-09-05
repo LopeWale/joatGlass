@@ -315,6 +315,7 @@ async def test_message_hints_leave_tool_choice_to_model_and_publish_all_cli_tool
     assert belt.explicit_call(text) is None
     assert {item["name"] for item in belt.tool_definitions()} == {
         "prepare_message", "provide_message_input", "message_action_status", "cancel_message_action",
+        "remember_relationship",
     }
 
 

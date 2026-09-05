@@ -186,6 +186,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._audio_cbs: list[AudioCallback] = []
         self._audio_frame_cbs: list[AudioFrameCallback] = []
         self._input_cbs: list[InputCallback] = []
+        # Redacted plugin trace events (tile uploads, transitions), for the
+        # latency receipt's paint stage. Only flow while diagnostics are on.
+        self._trace_cbs: list[Callable[[dict[str, str | int]], None]] = []
         self._device_cbs: list[DeviceCallback] = []
         self._imu_cbs: list[ImuCallback] = []
         self._confirm_cbs: list[ConfirmCallback] = []
@@ -371,6 +374,14 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
     def on_input(self, callback: InputCallback) -> None:
         self._input_cbs.append(callback)
+
+    def on_trace(self, callback: Callable[[dict[str, str | int]], None]) -> None:
+        """Observe the plugin's redacted diagnostic events (already parsed).
+
+        The protocol parser is the redaction firewall; observers see only
+        its fixed-vocabulary dicts, never raw plugin fields.
+        """
+        self._trace_cbs.append(callback)
 
     def on_device(self, callback: DeviceCallback) -> None:
         self._device_cbs.append(callback)
@@ -1109,6 +1120,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         host = str(conn.remote_address[0]) if conn.remote_address else "?"
         self._refusals.pop(host, None)
         self._lockout_warned = False
+        connected_at = time.monotonic()
         log.info("plugin connected")
         try:
             if previous is not None:
@@ -1148,7 +1160,19 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 self._clear_reminder_due_acks(session_id)
                 for cb in self._disconnect_cbs:
                     cb()
-            log.info("plugin disconnected")
+            # Say HOW it ended. Every disconnect in the wearer's log read
+            # "plugin disconnected" and nothing else, so the early-morning
+            # drops on 2026-09-05 (audio gaps, then a 7-minute absence) had
+            # no explanation on record. The close code and reason are the
+            # WebSocket peer's own words; the duration says whether this was
+            # a stable link that dropped or a dial that never settled.
+            log.info(
+                "plugin disconnected code=%s reason=%r after=%.1fs replaced=%s",
+                getattr(conn, "close_code", None),
+                getattr(conn, "close_reason", None) or "",
+                time.monotonic() - connected_at,
+                self._conn is not None and self._conn is not conn,
+            )
 
     def _dispatch(self, raw: str | bytes, session_id: str) -> None:
         # The newest authenticated WebSocket owns the HUD.  Its predecessor
@@ -1292,6 +1316,11 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                         # Support capture is optional. A custom or degraded
                         # recorder must not drop a real G2 control session.
                         log.warning("dropping G2 diagnostic after %s", type(exc).__name__)
+                for trace_cb in self._trace_cbs:
+                    try:
+                        trace_cb(message.event)
+                    except Exception:
+                        log.warning("trace observer failed", exc_info=False)
             case BrainstormAction():
                 # The plugin cannot choose this generation on the wire.  The
                 # gateway attaches it only after selecting the authenticated
