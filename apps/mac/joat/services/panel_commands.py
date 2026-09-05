@@ -83,6 +83,18 @@ class NewsCommands:
             await self._panels.activate("news")
             if count == 0:
                 return "I couldn't get any headlines right now."
+            # Say what actually happened (the audit's N1): a pass that kept
+            # earlier headlines because every feed failed is not an update.
+            if self._news.last_error:
+                return (
+                    f"The feeds didn't answer, so these are the {count} headlines from "
+                    f"earlier. {self._news.spoken_headlines(3)}"
+                )
+            if self._news.partial:
+                return (
+                    f"Some feeds didn't answer. {count} headlines from the rest. "
+                    f"{self._news.spoken_headlines(3)}"
+                )
             return f"News updated: {count} headlines. {self._news.spoken_headlines(3)}"
         match = _NEWS_READ_NTH.fullmatch(normalized)
         if match:

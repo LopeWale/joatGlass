@@ -130,3 +130,87 @@ class ContactResolver:
                 for query_word in words
             )
         ]
+
+
+RELATIONSHIPS_PATH = os.path.expanduser(
+    "~/Library/Application Support/JOAT/relationships.json",
+)
+
+
+def normalize_relationship(label: str) -> str:
+    """"my wife" / "My Wife" / "wife" → "wife". Possessives are not identity."""
+    words = [w for w in re.sub(r"[^a-z\s]", " ", label.casefold()).split() if w]
+    while words and words[0] in ("my", "our", "the"):
+        words.pop(0)
+    return " ".join(words)
+
+
+class RelationshipBook:
+    """Who "my wife" is — told by the wearer, never inferred.
+
+    The audit's M6: "send a message to my wife" had no way to resolve, and
+    the contact resolver rightly refuses to guess a spouse from names or
+    message frequency. This is the one place a relationship maps to a Mac
+    contact name, written only by an explicit statement from the wearer
+    ("Sam is my wife", through the remember_relationship tool) and stored
+    as plain JSON under Application Support with owner-only permissions.
+    Names only — no handles, so a stale entry can never redirect a send.
+    """
+
+    def __init__(self, path: str = RELATIONSHIPS_PATH) -> None:
+        self._path = path
+        self._entries: dict[str, str] | None = None
+
+    def _load(self) -> dict[str, str]:
+        if self._entries is None:
+            try:
+                with open(self._path, encoding="utf-8") as handle:
+                    import json
+                    raw = json.load(handle)
+                self._entries = {
+                    str(k): str(v) for k, v in raw.items()
+                    if isinstance(k, str) and isinstance(v, str) and k and v
+                } if isinstance(raw, dict) else {}
+            except FileNotFoundError:
+                self._entries = {}
+            except Exception:
+                log.warning("relationship book unreadable — starting empty")
+                self._entries = {}
+        return self._entries
+
+    def resolve(self, label: str) -> str | None:
+        """The contact name the wearer said this relationship is, if any."""
+        key = normalize_relationship(label)
+        return self._load().get(key) if key else None
+
+    def remember(self, label: str, contact_name: str) -> str:
+        """Record one relationship → contact name; returns the stored label."""
+        key = normalize_relationship(label)
+        name = " ".join(contact_name.split())
+        if not key or not name:
+            raise ValueError("relationship and contact name are both required")
+        entries = self._load()
+        entries[key] = name
+        import json
+        os.makedirs(os.path.dirname(self._path), mode=0o700, exist_ok=True)
+        tmp = self._path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(entries, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self._path)
+        return key
+
+    def forget(self, label: str) -> bool:
+        key = normalize_relationship(label)
+        entries = self._load()
+        if key not in entries:
+            return False
+        del entries[key]
+        import json
+        with open(self._path, "w", encoding="utf-8") as handle:
+            json.dump(entries, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        os.chmod(self._path, 0o600)
+        return True
+
+    def labels(self) -> dict[str, str]:
+        return dict(self._load())

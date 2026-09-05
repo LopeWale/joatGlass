@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ..channels.contacts import ContactResolver
+from ..channels.contacts import ContactResolver, RelationshipBook
 from ..channels.imessage import MessageThread
 from ..channels.message_sender import MessageSendError
 from ..core.interfaces import MessageSender
@@ -154,16 +154,22 @@ class MessageReplyController:
         contact_search: ContactSearch | None = None,
         begin_reply: Callable[[], Awaitable[str]] | None = None,
         on_status: Callable[[MessageActionStatus], None] | None = None,
+        relationships: RelationshipBook | None = None,
+        review: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         if selection_ttl_s <= 0:
             raise ValueError("message selection TTL must be positive")
         self._sender = sender
         self._confirm = confirm
+        # Shows a draft too long for the confirmation prompt in full and
+        # returns whether the wearer chose to proceed.
+        self._review = review
         self._journal = journal
         self._selection_ttl_s = selection_ttl_s
         self._monotonic = monotonic
         self._pending_reply: _PendingReply | None = None
         self._contact_search = contact_search or ContactResolver().search
+        self._relationships = relationships
         self._begin_reply = begin_reply
         self._on_status = on_status
         self._selection: _MessageSelection | None = None
@@ -278,6 +284,36 @@ class MessageReplyController:
             # missing-selection status requires a Messages UI selection.
             return "recipient" if action.origin_kind == "messages.compose" else None
         return "body" if action.body is None else None
+
+    async def remember_relationship(self, label: str, contact_name: str) -> str:
+        """Record who a relationship is, from the wearer's own statement.
+
+        The name must match exactly one Mac contact, so a later "message my
+        wife" resolves to a verified person and never to a guess. Returns a
+        receipt sentence; raises ValueError when it cannot be recorded.
+        """
+        if self._relationships is None:
+            raise ValueError("Relationship memory is not available on this Mac.")
+        if not _RELATIONSHIP.fullmatch(" ".join(label.split())):
+            raise ValueError(
+                "Only wife, husband, spouse or partner can be remembered as a relationship."
+            )
+        name = self._validated_name(contact_name)
+        if not name:
+            raise ValueError("A contact name is required.")
+        try:
+            matches = await asyncio.wait_for(
+                asyncio.to_thread(self._contact_search, name), CONTACT_LOOKUP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ValueError("Mac contact lookup did not complete.") from exc
+        names = list(dict.fromkeys(match_name for match_name, _handle in matches))
+        if not names:
+            raise ValueError(f"No Mac contact matched {name}. Try a fuller name.")
+        if len(names) > 1:
+            raise ValueError("Several contacts match — say a fuller name: " + ", ".join(names[:6]))
+        stored = self._relationships.remember(label, names[0])
+        return f"Remembered: your {stored} is {names[0]}."
 
     def cancel_message_action(self, action_id: str) -> MessageActionStatus:
         """Cancel before submission, or retain uncertainty once sending began."""
@@ -431,8 +467,19 @@ class MessageReplyController:
 
     async def _resolve_prepared_recipient(self, action: _PreparedMessage, query: str) -> None:
         if _RELATIONSHIP.fullmatch(query):
-            self._set_status(action, "awaiting_input", "I don't have a verified relationship contact. What is their Mac contact name?", needs_input="recipient")
-            return
+            # Only a relationship the wearer stated explicitly resolves
+            # (RelationshipBook); nothing is inferred from names or history.
+            known = self._relationships.resolve(query) if self._relationships is not None else None
+            if known is None:
+                self._set_status(
+                    action, "awaiting_input",
+                    "I don't have a verified relationship contact. What is their Mac contact "
+                    "name? (Say who they are once and I'll remember it.)",
+                    needs_input="recipient",
+                )
+                return
+            log.info("message recipient relationship resolved from the relationship book")
+            query = known
         action.resolving = True
         try:
             matches = await asyncio.wait_for(
@@ -842,18 +889,41 @@ class MessageReplyController:
         recipient_label = f"group {thread.sender}" if thread.is_group else thread.sender
         prompt = f"Send to {recipient_label}? “{body}”"
         if utf16_units(prompt) > CONFIRM_PROMPT_MAX_UTF16_UNITS:
+            # Too long for the confirmation screen: show the whole draft in
+            # the reader first and let the wearer tap to proceed; the
+            # confirmation then carries the opening words and says the rest
+            # was reviewed. Without a reviewer the old refusal stands —
+            # confirming text the wearer cannot see is not consent.
+            if self._review is None:
+                log.info(
+                    "message reply trace=%s stage=draft-rejected reason=confirmation-overflow chars=%d",
+                    action_id,
+                    len(body),
+                )
+                message = (
+                    "Reply is too long for the confirmation screen. "
+                    "Shorten it and try again."
+                )
+                if prepared is not None:
+                    self._set_status(prepared, "failed", message)
+                return message
             log.info(
-                "message reply trace=%s stage=draft-rejected reason=confirmation-overflow chars=%d",
-                action_id,
-                len(body),
+                "message reply trace=%s stage=review-requested chars=%d", action_id, len(body),
             )
-            message = (
-                "Reply is too long for the confirmation screen. "
-                "Shorten it and try again."
-            )
-            if prepared is not None:
-                self._set_status(prepared, "failed", message)
-            return message
+            reviewed = await self._review(recipient_label, body)
+            if prepared is not None and prepared.cancel_requested:
+                raise asyncio.CancelledError
+            if not reviewed:
+                message = "Message review cancelled. Nothing was sent."
+                if prepared is not None:
+                    self._set_status(prepared, "cancelled", message)
+                return message
+            head = f"Send to {recipient_label}? (reviewed) “"
+            budget = CONFIRM_PROMPT_MAX_UTF16_UNITS - utf16_units(head) - 2
+            opening = body
+            while utf16_units(opening) > budget:
+                opening = opening[:-1]
+            prompt = f"{head}{opening.rstrip()}…”"
         payload = json.dumps(
             {"body": body, "target": {"kind": target_kind, "id": target_id}},
             ensure_ascii=False,

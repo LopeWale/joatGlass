@@ -776,7 +776,13 @@ class AgentTerminalRoster:
         out = []
         for role, text in rows:
             prefix = "> " if role == "user" else ""
-            out.append(f"{prefix}{text.splitlines()[0][:160]}")
+            # The whole entry, not its first line: multi-line answers used
+            # to lose everything after line one (the audit's T2). The
+            # renderer wraps; this cap only stops one entry eating the page.
+            flat = " ".join(text.split())
+            if len(flat) > 400:
+                flat = flat[:399].rstrip() + "…"
+            out.append(f"{prefix}{flat}")
         return "\n".join(out)
 
     def tail(self, name: str | None = None, lines: int = 6) -> str:

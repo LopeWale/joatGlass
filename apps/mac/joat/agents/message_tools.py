@@ -173,6 +173,16 @@ def message_tools(
         except (ValueError, RuntimeError) as exc:
             return f"error: {exc}"
 
+    async def remember_relationship(arguments: dict[str, Any]) -> str:
+        try:
+            _fields(arguments, required={"relationship", "contact_name"}, allowed={"relationship", "contact_name"})
+            label = _optional_text(arguments, "relationship", 40)
+            name = _optional_text(arguments, "contact_name", 200)
+            assert label is not None and name is not None
+            return await replies.remember_relationship(label, name)
+        except (ValueError, RuntimeError) as exc:
+            return f"error: {exc}"
+
     async def cancel_message_action(arguments: dict[str, Any]) -> str:
         try:
             _fields(arguments, required={"action_id"}, allowed={"action_id"})
@@ -255,6 +265,28 @@ def message_tools(
             },
             run=message_action_status,
             decision_hints=("message", "messages", "sent", "submitted", "delivered", "reply"),
+        ),
+        Tool(
+            name="remember_relationship",
+            description=(
+                "Record who a relationship is, from the wearer's own words ('Sam is my wife'), "
+                "so 'message my wife' resolves next time. The contact name must match exactly "
+                "one Mac contact. Never call this on a guess."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "relationship": {
+                        "type": "string", "minLength": 1, "maxLength": 40,
+                        "description": "wife, husband, spouse or partner, as the wearer said it.",
+                    },
+                    "contact_name": recipient_name,
+                },
+                "required": ["relationship", "contact_name"],
+                "additionalProperties": False,
+            },
+            run=remember_relationship,
+            decision_hints=("wife", "husband", "spouse", "partner", "remember"),
         ),
         Tool(
             name="cancel_message_action",

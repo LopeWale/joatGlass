@@ -32,6 +32,9 @@ STAGES = frozenset({
     "first_reply_sent",
     "reply_complete",
     "interrupted",
+    # The plugin's first successful tile upload after first_reply_sent —
+    # a host-side paint receipt, only while G2 diagnostics are enabled.
+    "painted",
 })
 BUCKETS = frozenset({
     "lte250ms",
