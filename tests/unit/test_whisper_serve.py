@@ -252,13 +252,17 @@ class TestLifecycle:
         await engine.close()
         assert engine._proc is None
 
-    async def test_start_fails_soft_when_command_dies(self, tmp_path: Path) -> None:
+    async def test_start_retains_recovery_when_command_dies(self, tmp_path: Path) -> None:
         engine = WhisperServeEngine(
             command=[sys.executable, "-c", "raise SystemExit(1)"],
             port=free_port(),
-            ready_timeout_s=2.0,
+            ready_timeout_s=0.05,
         )
-        assert await engine.start() is False  # returned, not raised
+        try:
+            assert await engine.start() is True  # temporary batch, still recoverable
+            assert not engine._ready
+        finally:
+            await engine.close()
 
     async def test_shutdown_interrupts_readiness_and_reaps_child(self, tmp_path: Path) -> None:
         script = tmp_path / "never_ready.py"
@@ -277,6 +281,232 @@ class TestLifecycle:
         with pytest.raises(asyncio.CancelledError):
             await starting
         assert engine._proc is None
+
+
+class TestColdStartRecovery:
+    async def test_failed_spawns_retry_at_a_bounded_cadence_without_logging_content(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from joat.audio import whisper_serve
+
+        monkeypatch.setattr(whisper_serve, "START_RETRY_DELAY_S", 0.1)
+        engine = WhisperServeEngine(command=["test-only"], ready_timeout_s=0.02)
+        attempts: list[float] = []
+
+        async def spawn() -> None:
+            attempts.append(asyncio.get_running_loop().time())
+            raise OSError("private server body and prompt must not appear")
+
+        monkeypatch.setattr(engine, "_spawn", spawn)
+        try:
+            assert await engine.start()
+            async with asyncio.timeout(1):
+                while len(attempts) < 3:
+                    await asyncio.sleep(0.01)
+            assert all(b - a >= 0.09 for a, b in zip(attempts, attempts[1:]))
+            assert "private server body" not in caplog.text
+            await engine.close()
+            count = len(attempts)
+            await asyncio.sleep(0.15)
+            assert len(attempts) == count
+        finally:
+            await engine.close()
+
+    async def test_model_switch_joins_old_canary_worker_before_spawning(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        joining = asyncio.Event()
+        engine = WhisperServeEngine(command=["test-only"], ready_timeout_s=0.05)
+        spawned: list[str] = []
+        worker_models: list[str] = []
+        original_join = engine._join_canary
+
+        async def spawn() -> None:
+            spawned.append(engine._model)
+
+        def post(_payload: bytes) -> str:
+            worker_models.append(engine._model)
+            if len(worker_models) == 1:
+                entered.set()
+                release.wait(3)
+            return ""
+
+        async def join() -> None:
+            joining.set()
+            await original_join()
+
+        monkeypatch.setattr(engine, "_spawn", spawn)
+        monkeypatch.setattr(engine, "_post", post)
+        monkeypatch.setattr(engine, "_join_canary", join)
+        switching = None
+        try:
+            assert await engine.start()
+            assert entered.is_set()
+            switching = asyncio.create_task(engine.set_model("tiny"))
+            await asyncio.wait_for(joining.wait(), 1)
+            assert not switching.done()
+            assert spawned == ["large-v3_turbo"]
+            assert engine._model == "large-v3_turbo"
+            release.set()
+            assert await asyncio.wait_for(switching, 1)
+            assert worker_models == ["large-v3_turbo", "tiny"]
+            assert spawned == ["large-v3_turbo", "tiny"]
+        finally:
+            release.set()
+            if switching is not None:
+                await switching
+            await engine.close()
+
+    async def test_failed_model_switch_restores_old_model_without_reporting_success(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = WhisperServeEngine(command=["test-only"], ready_timeout_s=0.02)
+        spawned: list[str] = []
+
+        async def spawn() -> None:
+            spawned.append(engine._model)
+
+        async def wait_ready() -> None:
+            if engine._model == "unavailable":
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(engine, "_spawn", spawn)
+        monkeypatch.setattr(engine, "_wait_ready", wait_ready)
+        try:
+            assert await engine.start()
+            assert not await engine.set_model("unavailable")
+            assert engine._model == "large-v3_turbo"
+            assert engine._ready
+            assert spawned == ["large-v3_turbo", "unavailable", "large-v3_turbo"]
+        finally:
+            await engine.close()
+
+    async def test_concurrent_start_and_close_cannot_await_a_cleared_task(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1")
+
+        async def wait_ready() -> None:
+            pass
+
+        monkeypatch.setattr(engine, "_wait_ready", wait_ready)
+        assert await engine.start()
+        results = await asyncio.gather(engine.start(), engine.close(), return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert results[1] is None
+        assert not engine._ready
+
+    async def test_invalid_response_is_not_readiness_or_logged_content(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import urllib.request
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def read(self):
+                return b'{"unexpected": "private response"}'
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Response())
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1")
+        with pytest.raises(RuntimeError, match="missing transcription text"):
+            engine._post(b"synthetic")
+
+    async def test_late_canary_keeps_one_worker_and_recovers_after_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 30-second gate is scaled down; the same POST finishes late."""
+        from joat.audio.whisperkit import WhisperKitEngine
+
+        canary_started = threading.Event()
+        release_canary = threading.Event()
+        batch_started = asyncio.Event()
+        release_batch = asyncio.Event()
+        calls: list[bytes] = []
+        batch_audio: list[bytes] = []
+        engine = WhisperServeEngine(
+            base_url="http://127.0.0.1:1", ready_timeout_s=0.05,
+        )
+
+        def post(payload: bytes) -> str:
+            calls.append(payload)
+            if len(calls) == 1:
+                canary_started.set()
+                release_canary.wait(3)
+                return ""
+            return "resident result"
+
+        async def batch(_self: WhisperKitEngine, pcm: bytes) -> str:
+            batch_audio.append(pcm)
+            batch_started.set()
+            await release_batch.wait()
+            return "batch result"
+
+        monkeypatch.setattr(engine, "_post", post)
+        monkeypatch.setattr(WhisperKitEngine, "_transcribe", batch)
+        flushing = None
+        try:
+            assert await asyncio.wait_for(engine.start(), 0.5)
+            assert canary_started.is_set()
+            assert not engine._ready
+            await engine.feed(SPEECH)
+            flushing = asyncio.create_task(engine.flush())
+            await asyncio.wait_for(batch_started.wait(), 0.5)
+            assert len(calls) == 1
+            release_canary.set()
+            await asyncio.wait_for(asyncio.shield(engine._startup_task), 1)
+            assert engine._ready
+            assert not flushing.done()
+            release_batch.set()
+            assert (await flushing).text == "batch result"
+            await engine.feed(SPEECH)
+            assert (await engine.flush()).text == "resident result"
+            assert batch_audio == [SPEECH]
+            assert len(calls) == 2  # no replay of the utterance that used batch
+        finally:
+            release_canary.set()
+            release_batch.set()
+            if flushing is not None:
+                await flushing
+            await engine.close()
+
+    @pytest.mark.parametrize("stop", ["close", "shutdown", "cancel"])
+    async def test_stopping_during_canary_cannot_publish_late_readiness(
+        self, monkeypatch: pytest.MonkeyPatch, stop: str
+    ) -> None:
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        shutdown = asyncio.Event()
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1")
+
+        async def wait_ready() -> None:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(engine, "_wait_ready", wait_ready)
+        starting = asyncio.create_task(engine.start(shutdown=shutdown))
+        await asyncio.wait_for(entered.wait(), 1)
+        if stop == "close":
+            await engine.close()
+        elif stop == "shutdown":
+            shutdown.set()
+        else:
+            starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(starting, 1)
+        assert cancelled.is_set()
+        assert engine._proc is None
+        assert not engine._ready
+        await engine.close()
 
 
 class TestPromptEcho:

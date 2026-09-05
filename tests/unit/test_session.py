@@ -1549,6 +1549,127 @@ class TestActiveSessionAddressGate:
         assert session.directed == ["ask claude about that"]
 
 
+@pytest.fixture
+async def selected_brainstorm():
+    transport = SinkTransport()
+    entered, release = asyncio.Event(), asyncio.Event()
+    selected = [True]
+
+    async def held(_prompt):
+        entered.set()
+        await release.wait()
+        yield "Finished."
+
+    session = debate(transport, pair(held, held), None, max_rounds=1)
+    manager = SessionManager(
+        HudWriter(transport), lambda _topic: session,
+        brainstorm_view_current=lambda: selected[0],
+    )
+    try:
+        assert manager.try_start_session(session)
+        await asyncio.wait_for(entered.wait(), 1)
+        yield manager, session, selected
+    finally:
+        release.set()
+        await manager.close(timeout_s=.25)
+
+
+class TestBrainstormSpeechOwnership:
+    @pytest.mark.parametrize("departures", [0, 1, 2])
+    async def test_queued_handoff_expires_even_after_leave_and_return(self, departures):
+        transport = SinkTransport()
+        entered, release = asyncio.Event(), asyncio.Event()
+        revision = [0]
+        opened = []
+
+        async def held(_prompt):
+            entered.set()
+            await release.wait()
+            yield "Finished."
+
+        async def open_terminal():
+            opened.append("terminal")
+            return True
+
+        session = DebateSession(
+            "Desk organization", pair(held, held),
+            HudSink(HudWriter(transport), open_terminal=open_terminal), None,
+            max_rounds=1,
+        )
+        manager = SessionManager(
+            HudWriter(transport), lambda _topic: session,
+            surface_revision=lambda: revision[0],
+        )
+        try:
+            assert manager.try_start_session(session)
+            await asyncio.wait_for(entered.wait(), 1)
+            manager.handle_brainstorm_action(BrainstormAction("show_terminal"))
+            # The task has not run yet. Two visits may bring the wearer back
+            # to the same feature, but the old gesture is still obsolete.
+            revision[0] += departures
+            await asyncio.sleep(0)
+            assert opened == (["terminal"] if departures == 0 else [])
+            assert manager.active_session is session
+        finally:
+            release.set()
+            await manager.close(timeout_s=.25)
+
+    async def test_returning_to_brainstorm_restores_contributions(self, selected_brainstorm):
+        manager, session, selected = selected_brainstorm
+        assert manager.handle_transcript("JOAT, weigh the cost", addressed="weigh the cost")
+        selected[0] = False
+        assert manager.handle_transcript("JOAT, open Messages", addressed="open Messages") is False
+        selected[0] = True
+        assert manager.handle_transcript("JOAT, weigh reliability", addressed="weigh reliability")
+        assert session.transcript() == (
+            ("YOU", "weigh the cost"), ("YOU", "weigh reliability"),
+        )
+        assert manager.active_session is session
+
+    @pytest.mark.parametrize("selected", [False, True])
+    @pytest.mark.parametrize("spoken,addressed", [("stop", None), ("JOAT, cancel", "cancel")])
+    async def test_exact_cancellation_remains_available(self, selected_brainstorm, selected, spoken, addressed):
+        manager, session, selection = selected_brainstorm
+        selection[0] = selected
+        assert manager.handle_transcript(spoken, addressed=addressed)
+        assert session._cancelled
+        assert session.transcript() == ()
+
+    async def test_pending_topic_does_not_take_yes_from_another_feature(self, selected_brainstorm):
+        manager, session, selected = selected_brainstorm
+        assert manager.handle_transcript(
+            "JOAT, brainstorm another question", addressed="brainstorm another question",
+        )
+        selected[0] = False
+        assert manager.handle_transcript("JOAT, yes", addressed="yes") is False
+        assert not session._cancelled
+        assert session.transcript() == ()
+        selected[0] = True
+        assert manager.handle_transcript("JOAT, no", addressed="no")
+        assert manager.active_session is session
+        assert session.transcript() == ()
+
+    async def test_unaddressed_selected_conversation_is_still_private(self, selected_brainstorm):
+        manager, session, _selected = selected_brainstorm
+        assert manager.handle_transcript("we should call Claude", addressed=None)
+        assert session.transcript() == ()
+
+    async def test_navigation_session_keeps_its_correction_input(self):
+        session = TestActiveSessionAddressGate.Steerable()
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda _topic: None,
+            brainstorm_view_current=lambda: False,
+        )
+        try:
+            assert manager.try_start_session(session)
+            assert manager.handle_transcript(
+                "JOAT, the street number is 2301", addressed="the street number is 2301",
+            )
+            assert session.consumed == ["the street number is 2301"]
+        finally:
+            await manager.close(timeout_s=.25)
+
+
 class TestWearerTurn:
     """The wearer is a participant, not an audience.
 
@@ -3369,7 +3490,10 @@ class TestTheTerminalPaintsDuringTheHandoff:
     async def test_ownership_follows_the_handoff(self) -> None:
         from joat.services.sinks import Broadcast, HudSink
 
-        sink = HudSink(HudWriter(SinkTransport()))
+        async def open_terminal():
+            return True
+
+        sink = HudSink(HudWriter(SinkTransport()), open_terminal=open_terminal)
         broadcast = Broadcast([sink])
         await broadcast.open("topic", ["codex", "claude"])
         assert broadcast.terminal_owns_hud() is False

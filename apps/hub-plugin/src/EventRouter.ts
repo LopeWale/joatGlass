@@ -22,6 +22,8 @@ type G2GestureDelivery = Extract<G2TraceEvent, { type: 'gesture' }>['delivery'];
 export interface LifecycleHandler {
   onForegroundEnter(): void;
   onForegroundExit(): void;
+  /** Temporary native menu overlay; does not suspend the app. */
+  onContextualMenu?(open: boolean): void;
   /** Terminal: SYSTEM_EXIT (user confirmed) or ABNORMAL_EXIT (disconnect). */
   onExit(reason: 'system' | 'abnormal'): void;
 }
@@ -223,6 +225,7 @@ export class EventRouter {
       // The simulator's `context_menu` automation input does not replay the
       // physical raw long-press. Preserve the same overlay boundary before
       // its following foreground-exit event reaches lifecycle consumers.
+      if (!this.contextualMenuOverlayOpen) this.lifecycle?.onContextualMenu?.(true);
       this.contextualMenuOverlayOpen = true;
       this.pendingMicLongPress = false;
       this.recordGesture('menu_item', 'menu');
@@ -252,6 +255,8 @@ export class EventRouter {
       this.handleSys(event.sysEvent);
       return;
     }
+
+    if (this.contextualMenuOverlayOpen) return;
 
     if (event.textEvent) {
       this.recordGesture(this.classify(event.textEvent.eventType), 'text');
@@ -432,6 +437,7 @@ export class EventRouter {
           // pause location or repaint underneath the still-mounted HUD.
           this.pendingMicLongPress = false;
           this.contextualMenuOverlayOpen = true;
+          this.lifecycle?.onContextualMenu?.(true);
           return;
         }
         this.lifecycle?.onForegroundEnter();
@@ -442,6 +448,7 @@ export class EventRouter {
           // particular, do not leave LocationSessionManager marked background
           // after the wearer chose a menu action.
           this.contextualMenuOverlayOpen = false;
+          this.lifecycle?.onContextualMenu?.(false);
           return;
         }
         this.lifecycle?.onForegroundExit();
@@ -453,6 +460,8 @@ export class EventRouter {
         this.lifecycle?.onExit('abnormal');
         return;
     }
+
+    if (this.contextualMenuOverlayOpen) return;
 
     // Confirmation is exclusive: no menu navigation, OS exit dialog, or
     // generic Mac input may occur behind it. Either built-in G2 temple is the

@@ -42,10 +42,12 @@ class WhisperKitEngine(SttEngine):
         binary: str = "whisperkit-cli",
         model: str = "large-v3_turbo",
         max_buffer_s: float = 30.0,
+        model_dir: Path | None = None,
     ) -> None:
         self._binary = binary
         self._model = model
         self._max_bytes = int(max_buffer_s * SAMPLE_RATE * SAMPLE_WIDTH)
+        self._model_dir = model_dir
         self._buffer = bytearray()
 
     @property
@@ -88,20 +90,43 @@ class WhisperKitEngine(SttEngine):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "utterance.wav"
             write_wav(path, pcm)
-            proc = await asyncio.create_subprocess_exec(
+            spawning = asyncio.create_task(asyncio.create_subprocess_exec(
                 self._binary,
                 "transcribe",
                 "--audio-path",
                 str(path),
                 "--model",
                 self._model,
+                *(["--download-model-path", str(self._model_dir)]
+                  if self._model_dir is not None else []),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
+            ))
+            proc = None
+            try:
+                proc = await asyncio.shield(spawning)
+                stdout, _stderr = await proc.communicate()
+            finally:
+                # A cancelled temporary fallback must not leave its model
+                # process alive or remove the WAV while it is still reading.
+                if proc is None:
+                    proc = await spawning
+                if proc.returncode is None:
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), 5.0)
+                    except asyncio.TimeoutError:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        await proc.wait()
 
         if proc.returncode != 0:
-            log.error("whisperkit failed (%s): %s", proc.returncode, stderr.decode()[:400])
+            log.error("whisperkit failed returncode=%s", proc.returncode)
             return ""
         return stdout.decode().strip()
 

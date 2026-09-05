@@ -3,6 +3,7 @@ import {
 } from 'vitest';
 import { OsEventTypeList, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
+import { BrainstormController } from './BrainstormController';
 import { Settings } from './Settings';
 import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
@@ -36,6 +37,7 @@ function rig(
   const selections: number[] = [];
   const moves: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
+  const surfaceEvents: Array<Record<string, unknown>> = [];
   let defaults = 0;
   let listCall = 0;
   let visibleSelection = 0;
@@ -85,11 +87,17 @@ function rig(
     isProductivityVisible: vi.fn(() => productivityVisible),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
   } as unknown as HudPresenter;
-  const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
+  const link = { send: (m: Record<string, unknown>) => {
+    const event = m.event as { containerName?: string; selectedName?: string } | undefined;
+    if (event?.containerName === 'capability-lifecycle' && event.selectedName?.startsWith('surface-')) {
+      operations.push(event.selectedName);
+      surfaceEvents.push(m);
+    } else sent.push(m);
+  } } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
     menu, hud, lists, listOptions, operations, productivities,
-    deferredProductivityVisibleCallbacks, selections, moves, statuses, sent,
+    deferredProductivityVisibleCallbacks, selections, moves, statuses, sent, surfaceEvents,
     defaultsCount: () => defaults,
     visibleSelection: () => visibleSelection,
   };
@@ -110,6 +118,94 @@ function latestRequestId(sent: Array<Record<string, unknown>>): string {
 }
 
 const rows = (count: number) => Array.from({ length: count }, (_, index) => `Row ${index + 1}`);
+
+describe('Brainstorm surface ownership', () => {
+  it('a pending Messages request does not authorize a Brainstorm frame', async () => {
+    const { menu } = rig();
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
+    expect(menu.isAwaitingResponse()).toBe(true);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
+  });
+
+  it('a final Brainstorm frame does not replace local Settings', async () => {
+    const { menu } = rig();
+    await menu.openSettings();
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
+  });
+
+  it('retires queued and in-flight Brainstorm work before Settings finishes painting', async () => {
+    let finish!: (value: boolean) => void;
+    const { menu, surfaceEvents, operations } = rig(new Promise<boolean>((resolve) => { finish = resolve; }));
+    const oldVisit = menu.captureBrainstormVisit();
+    menu.claimBrainstormVisit(oldVisit);
+    const controller = new BrainstormController({ sendBrainstorm: () => true });
+    controller.present({ screen: 'brainstorm', state: 'running', topic: '', collaborators: [], activity: '' });
+    menu.onSurfaceDeparture = () => controller.clear();
+    const opening = menu.openSettings();
+    expect(controller.isActive()).toBe(false);
+    expect(oldVisit()).toBe(false);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
+    expect(menu.claimBrainstormVisit(oldVisit)).toBe(false);
+    expect(operations.slice(0, 2)).toEqual(['surface-settings', 'list']);
+    expect(surfaceEvents).toEqual([{ kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'surface-settings',
+    } }]);
+    finish(true);
+    await opening;
+  });
+
+  it('notifies Home locally and permits only a subsequent explicit Brainstorm visit', async () => {
+    const { menu, surfaceEvents } = rig();
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Brainstorm'));
+    const previous = menu.captureBrainstormVisit();
+    expect(menu.mayPresentBrainstorm(previous)).toBe(true);
+    await menu.toggle();
+    expect(menu.mayPresentBrainstorm(previous)).toBe(false);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
+    expect(surfaceEvents.at(-1)?.event).toEqual({ containerName: 'capability-lifecycle', selectedName: 'surface-home' });
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Brainstorm'));
+    expect(menu.mayPresentBrainstorm(previous)).toBe(false);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(true);
+  });
+
+  it('suspends the native menu, then preserves the visit only if no feature was chosen', async () => {
+    const { menu, surfaceEvents } = rig();
+    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
+    const beforeOverlay = menu.captureBrainstormVisit();
+    menu.setContextualMenuOpen(true);
+    expect(beforeOverlay()).toBe(false);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
+    menu.setContextualMenuOpen(false);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(true);
+    menu.setContextualMenuOpen(true);
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
+    menu.setContextualMenuOpen(false);
+    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
+    expect(surfaceEvents.map((message) => (message.event as { selectedName: string }).selectedName)).toEqual([
+      'surface-context-menu-open', 'surface-context-menu-closed',
+      'surface-context-menu-open', 'surface-feature', 'surface-context-menu-closed',
+    ]);
+  });
+
+  it('retires an accepted Mac list without echoing, while an explicitly queued replay may reopen', async () => {
+    const { menu, surfaceEvents } = rig();
+    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
+    const explicitReplay = menu.captureBrainstormVisit();
+    expect(await menu.presentList('MESSAGES', ['Conversation'], 'voice-request-new', true)).toBe(true);
+    expect(menu.mayPresentBrainstorm(explicitReplay)).toBe(false);
+    expect(surfaceEvents).toEqual([]);
+    expect(menu.claimBrainstormVisit(explicitReplay)).toBe(true);
+    expect(menu.mayPresentBrainstorm(explicitReplay)).toBe(true);
+  });
+
+  it('does not retire Brainstorm for a rejected stale list', async () => {
+    const { menu } = rig();
+    const visit = menu.captureBrainstormVisit();
+    menu.claimBrainstormVisit(visit);
+    expect(await menu.presentList('MESSAGES', ['Old conversation'], 'old-request', true)).toBe(false);
+    expect(menu.mayPresentBrainstorm(visit)).toBe(true);
+  });
+});
 
 function conversationSelectionRig(native = false) {
   let completed: HudVisualFrame | undefined;

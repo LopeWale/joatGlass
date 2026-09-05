@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -34,7 +35,12 @@ from joat.core.protocol import (
 from joat.services.orchestrator import VoiceOrchestrator
 from joat.services.greetings import greeting_response
 from joat.services.hud import HudWriter
-from joat.services.session import Session, SessionManager
+from joat.channels.cards import CardLog
+from joat.services.capabilities import CapabilityOpenController, CapabilityRouter
+from joat.services.prompted_input import PromptedInputDispatcher, UtteranceProvenance
+from joat.services.roundtable import Participant, RoundTable
+from joat.services.session import DebateSession, Session, SessionManager
+from joat.services.sinks import HudSink
 
 BATCH_SAMPLES = 3200
 
@@ -364,6 +370,169 @@ class FakeReplier(ReplyEngine):
     async def reply(self, text: str) -> str | None:
         self.asked.append(text)
         return self.text
+
+
+@asynccontextmanager
+async def held_brainstorm():
+    """Keep real collaborators pending while the wearer changes features."""
+    transport = FakeTransport()
+    hud = HudWriter(transport)
+    entered, release = asyncio.Event(), asyncio.Event()
+    selected = ["Brainstorm"]
+
+    async def collaborator(_prompt):
+        entered.set()
+        await release.wait()
+        yield "Finished."
+
+    seats = RoundTable([
+        Participant(name=name, role=role, stream=collaborator)
+        for name, role in (("codex", "proposer"), ("claude", "critic"))
+    ])
+    session = DebateSession("Desk organization", seats, HudSink(hud), None, max_rounds=1)
+    manager = SessionManager(
+        hud, lambda _topic: session,
+        brainstorm_view_current=lambda: selected[0] == "Brainstorm",
+    )
+    try:
+        assert manager.try_start_session(session)
+        await asyncio.wait_for(entered.wait(), 1)
+        yield transport, manager, session, selected
+    finally:
+        release.set()
+        await manager.close(timeout_s=.25)
+
+
+class TestSpeechWhileBrainstormRunsElsewhere:
+    @pytest.mark.parametrize("spoken,navigated,contribution", [
+        ("JOAT, open Messages", True, ()),
+        ("open Messages", False, ()),
+        ("JOAT, consider a standing desk", False, (("YOU", "consider a standing desk"),)),
+    ])
+    async def test_only_addressed_feature_open_leaves_selected_brainstorm(self, spoken, navigated, contribution):
+        async with held_brainstorm() as (transport, manager, session, _selected):
+            capabilities = CapabilityRouter(
+                HudWriter(transport), transport, None, None, CardLog(),
+            )
+            capabilities.claim_brainstorm_view()
+            opener = CapabilityOpenController(lambda: capabilities)
+            before = capabilities.view_revision
+            orchestrator = VoiceOrchestrator(
+                transport, FakeEngine(spoken), sessions=manager,
+                wake_words=("joat",), feature_navigation=opener.handle_command,
+                surface_revision=lambda: capabilities.view_revision,
+            )
+            await orchestrator._handle_utterance(LOUD)
+
+            assert capabilities.brainstorm_view_current is not navigated
+            assert (capabilities.view_revision > before) is navigated
+            assert session.transcript() == contribution
+            assert manager.active_session is session
+            assert not any(isinstance(frame, AssistantOverlay) for frame in transport.sent)
+
+    @pytest.mark.parametrize("surface,query", [
+        ("Messages", "open QuickNotes"),
+        ("QuickNotes", "open Messages"),
+        ("Agent Terminal", "terminal cancel"),
+    ])
+    async def test_addressed_feature_request_reaches_its_controller(self, surface, query):
+        async with held_brainstorm() as (transport, manager, session, selected):
+            selected[0] = surface
+            dispatched = []
+
+            async def command(text):
+                dispatched.append(text)
+                return "Feature request handled."
+
+            orchestrator = VoiceOrchestrator(
+                transport, FakeEngine("JOAT, " + query), sessions=manager,
+                wake_words=("joat",), commands=command,
+            )
+            await orchestrator._handle_utterance(LOUD)
+
+            assert dispatched == [query]
+            assert session.transcript() == ()
+            assert manager.active_session is session
+
+    @pytest.mark.parametrize("spoken,expected", [
+        ("JOAT, what is a standing desk?", ["what is a standing desk?"]),
+        ("what is a standing desk?", []),
+    ])
+    async def test_assistant_address_gate_survives_background_work(self, spoken, expected):
+        async with held_brainstorm() as (transport, manager, session, selected):
+            selected[0] = "QuickNotes"
+            replier = FakeReplier()
+            orchestrator = VoiceOrchestrator(
+                transport, FakeEngine(spoken), sessions=manager,
+                wake_words=("joat",), replier=replier,
+            )
+            await orchestrator._handle_utterance(LOUD)
+
+            assert replier.asked == expected
+            assert session.transcript() == ()
+            assert manager.active_session is session
+
+    async def test_selected_bare_reply_reaches_message_owner(self):
+        async with held_brainstorm() as (transport, manager, session, selected):
+            selected[0] = "Messages"
+            received = []
+            provenance = UtteranceProvenance("glasses", "g1", None, 1, 2, frozenset({"self"}))
+
+            async def reply(text, receipt):
+                received.append((text, receipt))
+                return True
+
+            orchestrator = VoiceOrchestrator(
+                transport, FakeEngine("reply"), sessions=manager,
+                wake_words=("joat",), selected_message_reply=reply,
+            )
+            await orchestrator._handle_utterance(LOUD, provenance=provenance)
+
+            assert received == [("reply", provenance)]
+            assert session.transcript() == ()
+            assert manager.active_session is session
+
+    @pytest.mark.parametrize("spoken", ["cancel", "JOAT, open QuickNotes"])
+    async def test_published_message_body_precedes_cancel_and_feature_routing(self, spoken):
+        async with held_brainstorm() as (transport, manager, session, selected):
+            selected[0] = "Messages"
+            received = []
+            navigated = []
+            dispatcher = PromptedInputDispatcher()
+
+            async def consume(text):
+                received.append(text)
+
+            async def navigate(text):
+                navigated.append(text)
+                return "Opening QuickNotes."
+
+            ticket = dispatcher.begin_publication(
+                owner_kind="message", owner_id="selected", field="body",
+                source="glasses", connection_generation="g1",
+                presentation_binding="body-prompt", ttl_s=30,
+                is_valid=lambda: True, consume=consume,
+            )
+            assert dispatcher.acknowledge(
+                ticket.prompt_id, success=True, presentation_binding="body-prompt",
+                connection_generation="g1", audio_epoch=ticket.prompt_id, ingress_fence=0,
+            )
+            provenance = UtteranceProvenance(
+                "glasses", "g1", ticket.prompt_id, 1, 2, frozenset({"self"}),
+            )
+            replier = FakeReplier()
+            orchestrator = VoiceOrchestrator(
+                transport, FakeEngine(spoken), sessions=manager,
+                wake_words=("joat",), prompted_input=dispatcher, replier=replier,
+                feature_navigation=navigate,
+            )
+            await orchestrator._handle_utterance(LOUD, provenance=provenance)
+
+            assert received == [spoken]
+            assert navigated == []
+            assert replier.asked == []
+            assert session.transcript() == ()
+            assert manager.active_session is session
 
 
 class HeldTopicSession(Session):

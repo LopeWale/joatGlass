@@ -77,6 +77,7 @@ class VoiceOrchestrator:
         prompted_input: PromptedInputDispatcher | None = None,
         selected_message_reply: Callable[[str, UtteranceProvenance], Awaitable[bool]] | None = None,
         surface_revision: Callable[[], int] | None = None,
+        feature_navigation: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         self._transport = transport
         # An interposed source (the AudioRouter) lets an exclusive Voice Note
@@ -87,6 +88,7 @@ class VoiceOrchestrator:
         self._selected_message_reply = selected_message_reply
         self._surface_revision = surface_revision or (lambda: 0)
         self._commands = commands
+        self._feature_navigation = feature_navigation
         self._hud = HudWriter(transport)
         self._sessions = sessions
         self._status = status
@@ -482,8 +484,17 @@ class VoiceOrchestrator:
                 )
             ):
                 return
-            # An ACTIVE session owns the HUD, but it does NOT get unaddressed
-            # speech. Only the cancel words are heard unaddressed — failing
+            addressed = self._strip_wake_word(transcript.text)
+            if addressed and self._feature_navigation is not None:
+                navigation = await self._feature_navigation(addressed)
+                if navigation is not None:
+                    # The narrow capability opener already owns its new
+                    # surface and revision. Do not cover it with an assistant
+                    # receipt or turn the request into a Brainstorm remark.
+                    return
+            # SessionManager checks whether the current feature owns speech;
+            # a background Brainstorm must not swallow another feature's input.
+            # Only the cancel words are heard unaddressed — failing
             # toward "stopped" is safe, and a wearer who wants it to stop
             # should not have to negotiate with the wake gate. Everything
             # that STEERS the session (turn direction, and any future
@@ -492,10 +503,9 @@ class VoiceOrchestrator:
             # table, and once follow-ups reach the collaborators the same
             # sentence would be room conversation shipped to a subprocess.
             if self._sessions is not None and self._sessions.active:
-                session_addressed = self._strip_wake_word(transcript.text)
                 if self._sessions.handle_transcript(
                     transcript.text,
-                    addressed=session_addressed,
+                    addressed=addressed,
                 ):
                     return
             # Address gate BEFORE any trigger phrase: session routing used to
@@ -505,7 +515,6 @@ class VoiceOrchestrator:
             # the wearer ever addressing JOAT — observed live, and
             # a direct violation of explicit invocation. Room conversation is
             # not a prompt.
-            addressed = self._strip_wake_word(transcript.text)
             if addressed is None:
                 if (
                     self._selected_message_reply is not None

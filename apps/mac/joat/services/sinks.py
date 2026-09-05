@@ -17,13 +17,12 @@ import asyncio
 import re
 import sys
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol, TextIO
 
 from .hud import HudWriter
 from ..core.protocol import (
     BRAINSTORM_ACTIVITY_MAX,
-    AgentTerminalHudView,
     BRAINSTORM_ROW_COLUMNS,
     BrainstormHudView,
 )
@@ -62,10 +61,13 @@ class HudSink:
     def __init__(
         self,
         hud: HudWriter,
-        terminal_projection: Callable[[], dict[str, str | bool]] | None = None,
+        *,
+        open_terminal: Callable[[], Awaitable[bool]] | None = None,
+        brainstorm_view_current: Callable[[], bool] | None = None,
     ) -> None:
         self._hud = hud
-        self._terminal_projection = terminal_projection
+        self._open_terminal = open_terminal
+        self._brainstorm_view_current = brainstorm_view_current
         self._topic = ""
         self._speakers: list[str] = []
         self._speaker = ""
@@ -78,6 +80,7 @@ class HudSink:
         self._placeholder = ""
         self._streaming = False
         self._handed_to_terminal = False
+        self._handoff_epoch = 0
         self._progress = ""
         self._state = "ready"
 
@@ -196,16 +199,6 @@ class HudSink:
         self._head = ""
         self._body = ""
 
-    def _terminal_status(self) -> dict[str, str | bool]:
-        if self._terminal_projection is not None:
-            return self._terminal_projection()
-        return {
-            "state": "unavailable",
-            "reason": "gateway_not_ready",
-            "endpoint_host": "",
-            "no_tools_checked": False,
-        }
-
     @staticmethod
     def _display_speaker(label: str) -> str:
         """Keep a compact participant name while retaining live turn context."""
@@ -218,13 +211,14 @@ class HudSink:
         suffix = remainder[closing + 1:].strip()
         return f"{name} {suffix}"[:64] if suffix else name[:64]
 
+    def _view_is_current(self) -> bool:
+        return self._brainstorm_view_current is None or self._brainstorm_view_current()
+
     async def _paint(self, state: str) -> None:
         self._state = state
-        if self._handed_to_terminal and state == "running":
-            # The wearer tapped away to the terminal mid-session. The
-            # debate keeps streaming into the transcript, but it must not
-            # snatch the lenses back token by token; closing verdicts
-            # still land so a finished session is never hidden.
+        if self._handed_to_terminal or not self._view_is_current():
+            # Computation and history continue after navigation. Neither
+            # streamed tokens nor the final verdict may reclaim that view.
             return
         await self._hud.show_brainstorm(BrainstormHudView(
             state=state,
@@ -250,6 +244,9 @@ class HudSink:
         self._progress = f"round {round_no}/{max_rounds} · {calls} calls"
 
     async def open(self, topic: str, speakers: list[str]) -> None:
+        self._handoff_epoch += 1
+        epoch = self._handoff_epoch
+        self._handed_to_terminal = False
         self._topic = topic[:96]
         self._speakers = list(speakers)
         self._speaker = ""
@@ -257,9 +254,14 @@ class HudSink:
         self._head = ""
         self._body = ""
         self._placeholder = "JOAT > Preparing collaborators…"
+        self._state = "running"
         # Claim the initial entry once. Ordinary streamed frames still yield
         # to a menu the wearer opens later; they cannot supply this handoff.
+        if not self._view_is_current():
+            return
         await self._hud.begin_brainstorm()
+        if epoch != self._handoff_epoch or not self._view_is_current():
+            return
         await self._paint("running")
 
     THINKING_MARKER = "Thinking…"
@@ -314,7 +316,6 @@ class HudSink:
         one-line status where the answer had been. The verdict is a
         footer, not a replacement.
         """
-        self._handed_to_terminal = False
         # The last live turn is the SYNTHESIS — the thing the wearer sat
         # through the session for. Every other turn collapses; this one
         # stays whole.
@@ -331,25 +332,23 @@ class HudSink:
             await self._paint("settled")
 
     async def show_terminal(self) -> None:
-        """Hand the lenses to the terminal without stopping the roundtable.
-
-        Watched live in the simulator: the tap painted this view for ONE
-        frame, then the next streamed token repainted the Brainstorm over
-        it — a working handoff stomped by its own session. While the
-        wearer is looking at the terminal, streaming continues silently
-        and repaints are withheld; replay() is the way back.
-        """
+        """Open the existing Terminal visit while the roundtable continues."""
+        if self._open_terminal is None or self._handed_to_terminal or not self._view_is_current():
+            return
+        self._handoff_epoch += 1
+        epoch = self._handoff_epoch
+        # Yield before opening starts, including while a lane prepares or
+        # displays its real blocked state. The opener owns those frames.
         self._handed_to_terminal = True
-        terminal = self._terminal_status()
-        await self._hud.show_agent_terminal(AgentTerminalHudView(
-            state="running",
-            focus="hermes",
-            lanes=[],
-            activity=self._activity or "JOAT > Brainstorm remains active. Tap to return to the room.",
-            endpoint_host=str(terminal["endpoint_host"]),
-            reason=str(terminal["reason"]),
-            no_tools_checked=bool(terminal["no_tools_checked"]),
-        ))
+        try:
+            accepted = await self._open_terminal()
+        except BaseException:
+            if epoch == self._handoff_epoch:
+                self._handed_to_terminal = False
+            raise
+        if not accepted and epoch == self._handoff_epoch:
+            self._handed_to_terminal = False
+            await self._paint(self._state)
 
     def terminal_owns_hud(self) -> bool:
         """True while the wearer has tapped away to the terminal."""
@@ -358,8 +357,13 @@ class HudSink:
     async def replay(self) -> None:
         """Repaint the last semantic frame (reconnect, or back from the
         terminal handoff)."""
+        if not self._topic or not self._view_is_current():
+            return
+        self._handoff_epoch += 1
+        epoch = self._handoff_epoch
         self._handed_to_terminal = False
-        if self._topic:
+        await self._hud.begin_brainstorm()
+        if epoch == self._handoff_epoch and self._view_is_current():
             await self._paint(self._state)
 
 

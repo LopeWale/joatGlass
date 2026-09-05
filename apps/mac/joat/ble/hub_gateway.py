@@ -1343,8 +1343,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
     def _handle_audio(self, message: Audio, session_id: str) -> None:
         if self._last_seq is not None and message.seq != self._last_seq + 1:
-            # Gap = MacLink shed frames while the socket was down. Surfaced so
-            # the STT layer can reset instead of splicing across the hole.
+            # A discontinuity after plugin batching, including an explicit
+            # mic pause. Sequence alone cannot identify loss at the SDK,
+            # relay, or queue; forward the boundary so VAD cannot splice it.
             log.warning("audio gap: seq %d → %d", self._last_seq, message.seq)
         self._last_seq = message.seq
 
