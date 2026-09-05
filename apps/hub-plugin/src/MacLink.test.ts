@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MacLink } from './MacLink';
+import { MacLink, type DownlinkContext } from './MacLink';
+import type { UplinkMessage } from './types';
 
 /**
  * Stub WebSocket capturing every constructor URL — vitest runs in node.
@@ -39,6 +40,81 @@ class FakeWebSocket {
 }
 
 (globalThis as { WebSocket?: unknown }).WebSocket = FakeWebSocket;
+
+describe('MacLink prompt ingress interruption', () => {
+  it('revokes a question immediately while keeping ordinary downlinks ordered', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'], token: 'fixture' });
+    let release!: () => void;
+    const painting = new Promise<void>((resolve) => { release = resolve; });
+    const order: string[] = [];
+    let armed = true;
+    link.onMessageIngress((message) => {
+      order.push(`ingress:${message.kind}`);
+      if (message.kind === 'prompt.cancel') armed = false;
+    });
+    link.onMessage(async (message) => {
+      order.push(`start:${message.kind}`);
+      if (message.kind === 'prompt.present') {
+        await painting;
+        expect(armed).toBe(false);
+      }
+      order.push(`end:${message.kind}`);
+    });
+    link.connect();
+    const socket = sockets[sockets.length - 1]!;
+    socket.open();
+    socket.receive({ kind: 'auth.accepted' });
+    socket.receive({ kind: 'prompt.present' });
+    await Promise.resolve();
+    socket.receive({ kind: 'prompt.cancel' });
+    expect(armed).toBe(false);
+    expect(order).toEqual([
+      'ingress:prompt.present', 'start:prompt.present', 'ingress:prompt.cancel',
+    ]);
+    release();
+    await vi.waitFor(() => expect(order).toContain('end:prompt.cancel'));
+    expect(order.slice(-3)).toEqual([
+      'end:prompt.present', 'start:prompt.cancel', 'end:prompt.cancel',
+    ]);
+    link.close();
+  });
+
+  it('never observes unauthenticated frames, pairing offers or old socket callbacks', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'], token: 'fixture' });
+    const ingress = vi.fn();
+    link.onMessageIngress(ingress);
+    link.connect();
+    const first = sockets[sockets.length - 1]!;
+    first.open();
+    first.receive({ kind: 'pairing.set', token: 'candidate' });
+    first.receive({ kind: 'prompt.cancel' });
+    expect(ingress).not.toHaveBeenCalled();
+    first.receive({ kind: 'auth.accepted' });
+    const oldCallback = first.onmessage!;
+    first.receive({ kind: 'prompt.cancel' });
+    expect(ingress).toHaveBeenCalledTimes(1);
+    const context = ingress.mock.calls[0]![1] as DownlinkContext;
+    link.connect();
+    expect(context.signal.aborted).toBe(true);
+    oldCallback({ data: JSON.stringify({ kind: 'prompt.present' }) });
+    expect(ingress).toHaveBeenCalledTimes(1);
+    link.close();
+  });
+
+  it('contains an observer failure and continues normal ordered delivery', async () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'], token: 'fixture' });
+    const handled = vi.fn();
+    link.onMessageIngress(() => { throw new Error('private question fixture'); });
+    link.onMessage(handled);
+    link.connect();
+    const socket = sockets[sockets.length - 1]!;
+    socket.open();
+    socket.receive({ kind: 'auth.accepted' });
+    socket.receive({ kind: 'hud.text', text: 'normal fixture', containerId: 4 });
+    await vi.waitFor(() => expect(handled).toHaveBeenCalledTimes(1));
+    link.close();
+  });
+});
 
 afterEach(() => {
   dialed.length = 0;
@@ -151,6 +227,157 @@ describe('MacLink pairing token', () => {
       origin: 'ws://a:1',
       tokens: { 'ws://b:1': 'token-b' },
     }]);
+  });
+});
+
+describe('MacLink generation-bound delivery', () => {
+  type BoundMessage = Extract<UplinkMessage, { kind: 'audio' | 'prompt.ack' | 'prompt.cancel' }>;
+  const messages: BoundMessage[] = [
+    { kind: 'audio', source: 'glasses', seq: 1, pcm: [258], audioEpoch: 'prompt-1' },
+    {
+      kind: 'prompt.ack', promptId: 'prompt-1', presentationBinding: 'binding-1',
+      connectionGeneration: 'mac-audio-session', source: 'glasses', success: true,
+      audioEpoch: 'prompt-1',
+    },
+    { kind: 'prompt.cancel', promptId: 'prompt-1', connectionGeneration: 'mac-audio-session' },
+  ];
+  const cases = messages.map((message) => [message.kind, message] as const);
+
+  function send(link: MacLink, message: BoundMessage, generation: number): boolean {
+    return link.sendForGeneration(message, generation);
+  }
+  async function authenticate(link: MacLink): Promise<{
+    socket: FakeWebSocket; context: DownlinkContext;
+  }> {
+    let context: DownlinkContext | undefined;
+    link.onMessage((_message, received) => { context = received; });
+    link.connect();
+    const socket = sockets[sockets.length - 1]!;
+    socket.open();
+    socket.receive({ kind: 'auth.accepted' });
+    socket.receive({ kind: 'hud.text', containerId: 4, text: 'context fixture' });
+    await Promise.resolve();
+    expect(context).toBeDefined();
+    return { socket, context: context! };
+  }
+
+  it.each(cases)('drops offline %s without replaying it or evicting wearer input', async (_kind, message) => {
+    const link = new MacLink({ urls: ['ws://m:1/g'], maxQueue: 1 });
+    try {
+      link.send({ kind: 'input', event: { eventType: 0 } });
+      const accepted = send(link, message, 1);
+      const { socket } = await authenticate(link);
+      expect(socket.sent.map((value) => JSON.parse(value))).toEqual([
+        { kind: 'auth', token: null }, { kind: 'input', event: { eventType: 0 } },
+      ]);
+      expect(accepted).toBe(false);
+    } finally {
+      link.close();
+    }
+  });
+
+  it.each(cases)('never queues %s on an open but unauthenticated socket', (_kind, message) => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    try {
+      link.connect();
+      const socket = sockets[sockets.length - 1]!;
+      socket.open();
+      const accepted = send(link, message, 1);
+      expect(socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+      socket.receive({ kind: 'auth.accepted' });
+      expect(socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+      expect(accepted).toBe(false);
+    } finally {
+      link.close();
+    }
+  });
+
+  it.each(cases)('sends %s only through its current authenticated generation', async (_kind, message) => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    try {
+      const { socket, context } = await authenticate(link);
+      expect(context.signal.aborted).toBe(false);
+      expect(send(link, message, context.generation)).toBe(true);
+      expect(socket.sent.map((value) => JSON.parse(value))).toEqual([
+        { kind: 'auth', token: null }, message,
+      ]);
+    } finally {
+      link.close();
+    }
+  });
+
+  it.each(cases)('rejects a mismatched generation for %s without later replay', async (_kind, message) => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    try {
+      const { socket, context } = await authenticate(link);
+      const accepted = send(link, message, context.generation + 1);
+      const replacement = await authenticate(link);
+      expect(socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+      expect(replacement.socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+      expect(accepted).toBe(false);
+    } finally {
+      link.close();
+    }
+  });
+
+  it.each(cases)('never sends an abandoned generation\'s %s to its replacement', async (_kind, message) => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    try {
+      const original = await authenticate(link);
+      const replacement = await authenticate(link);
+      expect(original.context.signal.aborted).toBe(true);
+      const accepted = send(link, message, original.context.generation);
+      expect(replacement.socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+      expect(accepted).toBe(false);
+    } finally {
+      link.close();
+    }
+  });
+
+  it.each(cases)('contains a socket send failure for %s without queueing a retry', async (_kind, message) => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    const original = await authenticate(link);
+    const failing = vi.spyOn(original.socket, 'send').mockImplementation(() => {
+      throw new Error('controlled socket failure');
+    });
+    try {
+      let accepted: boolean | undefined;
+      expect(() => { accepted = send(link, message, original.context.generation); }).not.toThrow();
+      expect(accepted).toBe(false);
+      failing.mockRestore();
+      const replacement = await authenticate(link);
+      expect(replacement.socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+    } finally {
+      failing.mockRestore();
+      link.close();
+    }
+  });
+
+  it('rejects an aborted dispatcher even before its open socket finishes closing', async () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://m:1/g'], downlinkHandlerTimeoutMs: 10 });
+    const { socket, context } = await authenticate(link);
+    let release!: () => void;
+    let entered = false;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    link.onMessage(async () => { entered = true; await hold; });
+    const delayedClose = vi.spyOn(socket, 'close').mockImplementation(() => {});
+    try {
+      socket.receive({ kind: 'hud.text', containerId: 4, text: 'held fixture' });
+      await vi.waitFor(() => expect(entered).toBe(true), { timeout: 100, interval: 1 });
+      vi.advanceTimersByTime(10);
+      expect(context.signal.aborted).toBe(true);
+      expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+
+      const accepted = send(link, messages[0]!, context.generation);
+      expect(socket.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: null }]);
+      expect(accepted).toBe(false);
+    } finally {
+      release();
+      await hold;
+      delayedClose.mockRestore();
+      link.close();
+    }
   });
 });
 
@@ -513,6 +740,155 @@ describe('MacLink reconnect storm', () => {
     // Socket never opens: watchdog closes it, which schedules one retry.
     vi.advanceTimersByTime(100 + SETTLE_MS);
     expect(dialed.length).toBe(before + 1);
+  });
+
+  it.each(['dial', 'authentication'] as const)(
+    'retries a timed-out %s without waiting for the browser close event',
+    (phase) => {
+      vi.useFakeTimers();
+      const link = new MacLink({
+        urls: ['ws://a:1/g', 'ws://b:1/g'], dialTimeoutMs: 100,
+        reconnectBaseMs: 10, reconnectMaxMs: 10,
+      });
+      link.connect();
+      const stalled = sockets[0]!;
+      if (phase === 'authentication') stalled.open();
+      const lateClose = stalled.onclose;
+      // Browser close() starts asynchronous teardown; its close event need
+      // not arrive within our application deadline.
+      stalled.close = () => { stalled.readyState = 2; };
+      vi.advanceTimersByTime(120);
+      expect(dialed).toEqual(['ws://a:1/g', 'ws://b:1/g']);
+      const replacement = sockets[1]!;
+      replacement.open();
+      replacement.receive({ kind: 'auth.accepted' });
+      lateClose?.({ code: 1006 });
+      vi.advanceTimersByTime(SETTLE_MS);
+      expect(link.linkState).toBe('connected');
+      expect(dialed).toHaveLength(2);
+      link.close();
+    },
+  );
+
+  it.each(['manual reconnect', 'close and reopen'] as const)(
+    'does not let a pending retry replace a successful %s',
+    (action) => {
+      vi.useFakeTimers();
+      const link = new MacLink({ urls: ['ws://m:1/g'] });
+      link.connect();
+      sockets[0]!.close();
+      if (action === 'close and reopen') link.close();
+      link.connect();
+      const recovered = sockets[1]!;
+      recovered.open();
+      recovered.receive({ kind: 'auth.accepted' });
+      vi.advanceTimersByTime(SETTLE_MS);
+      expect(dialed).toHaveLength(2);
+      expect(recovered.closed).toBe(false);
+      expect(link.linkState).toBe('connected');
+      link.close();
+    },
+  );
+
+  it.each(['close event', 'deadline'] as const)(
+    'honors a reconnect made by the state observer during a %s',
+    (trigger) => {
+      vi.useFakeTimers();
+      const link = new MacLink({ urls: ['ws://m:1/g'], dialTimeoutMs: 100 });
+      let recovered = false;
+      link.onState((state) => {
+        if (state !== 'reconnecting' || recovered) return;
+        recovered = true;
+        link.connect();
+        sockets[1]!.open();
+        sockets[1]!.receive({ kind: 'auth.accepted' });
+      });
+      link.connect();
+      if (trigger === 'deadline') vi.advanceTimersByTime(100);
+      else sockets[0]!.close();
+      vi.advanceTimersByTime(SETTLE_MS);
+      expect(dialed).toHaveLength(2);
+      expect(link.linkState).toBe('connected');
+      link.close();
+    },
+  );
+});
+
+describe('MacLink replaced display', () => {
+  it('takes over once when the host restores a retired foreground WebView', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g'], token: 'paired' });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.close(4409);
+    link.resumeIfReplaced();
+    link.resumeIfReplaced(); // restore-state and foreground-enter can both fire
+    expect(dialed).toHaveLength(2);
+    sockets[1]!.open();
+    sockets[1]!.receive({ kind: 'auth.accepted' });
+    link.resumeIfReplaced();
+    vi.advanceTimersByTime(60_000);
+    expect(dialed).toHaveLength(2);
+    expect(link.linkState).toBe('connected');
+    link.close();
+    link.resumeIfReplaced(); // explicit teardown is terminal
+    expect(dialed).toHaveLength(2);
+  });
+
+  it('yields after authenticated replacement until an explicit reconnect', async () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g', 'ws://b:1/g'], token: 'paired' });
+    let context: DownlinkContext | undefined;
+    link.onMessageIngress((_message, owned) => { context = owned; });
+    link.connect();
+    const first = sockets[0]!;
+    first.open();
+    first.receive({ kind: 'auth.accepted' });
+    first.receive({ kind: 'hud.text', text: 'old display' });
+    first.close(4409);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(dialed).toEqual(['ws://a:1/g']);
+    expect(link.linkState).toBe('closed');
+    expect(link.wasReplaced).toBe(true);
+    expect(context?.signal.aborted).toBe(true);
+    expect(link.pairingToken).toBe('paired');
+
+    // Input produced during retirement cannot appear on a later owner.
+    link.send({ kind: 'hello', model: 'retired', sn: 'fixture', launchSource: 'unknown' });
+    link.connect();
+    expect(link.wasReplaced).toBe(false);
+    expect(dialed).toEqual(['ws://a:1/g', 'ws://a:1/g']);
+    sockets[1]!.open();
+    sockets[1]!.receive({ kind: 'auth.accepted' });
+    expect(sockets[1]!.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: 'paired' }]);
+    expect(link.linkState).toBe('connected');
+    link.close();
+  });
+
+  it.each([1000, 1006])('still retries ordinary authenticated closure %s', (code) => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g'], token: 'paired' });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.close(code);
+    vi.advanceTimersByTime(700);
+    expect(dialed).toHaveLength(2);
+    expect(link.pairingToken).toBe('paired');
+    link.close();
+  });
+
+  it('does not accept a replacement claim before authentication', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g'], token: 'paired' });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.close(4409);
+    vi.advanceTimersByTime(700);
+    expect(dialed).toHaveLength(2);
+    expect(link.pairingToken).toBe('paired');
+    link.close();
   });
 });
 

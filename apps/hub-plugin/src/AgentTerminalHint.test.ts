@@ -106,7 +106,8 @@ describe('Agent Terminal action hints', () => {
     // approval_required with NO pending tool request is the connection
     // waiting on device approval in OpenClaw — remedy: retry.
     const waiting = terminal({ state: 'approval_required', approvals: 0 });
-    expect(brainstormActionHint(waiting)).toContain('retry Hermes');
+    expect(brainstormActionHint(waiting)).toContain('approve in OpenClaw');
+    expect(brainstormActionHint(waiting)).toContain('tap: retry');
     expect(tapAction(waiting)).toBe('retry_terminal');
   });
 

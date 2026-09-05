@@ -5,6 +5,8 @@ description = "J.A.R.V.I.S. brain for the Even Realities G2 — Mac Studio side.
 requires-python = ">=3.12"
 dependencies = [
     "websockets>=13.0",
+    # Decode Messages attributedBody archives without executing native objects.
+    "pytypedstream==0.1.0",
     # Street surroundings for the guidance HUD are rendered on this Mac.
     "pillow>=10.0",
     # The News tab: free RSS/Atom feeds, parsed here, never on the glasses
@@ -69,4 +71,9 @@ ignore_missing_imports = true
 # feedparser and ddgs ship no stubs; trafilatura's are partial. The News
 # and Search services keep their use behind small typed wrappers.
 module = ["feedparser.*", "trafilatura.*", "ddgs.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The pinned archive parser has no py.typed; message_body is the typed boundary.
+module = "typedstream.*"
 ignore_missing_imports = true

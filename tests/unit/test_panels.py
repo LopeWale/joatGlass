@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import unicodedata
 
 import pytest
 
@@ -121,7 +122,7 @@ class TestTaps:
         assert page.title == "NEWS · ARTICLE"
         assert page.request_id == "panel-news-1"
         assert page.selectable is False
-        assert page.items[0] == "BBC · 1m · A · 1/3"
+        assert page.items[0] == "1/3 · BBC · 1m · A"
         assert page.items[1:] == ["page one words"]
         assert page.hint == "down more · left x2: back"
 
@@ -203,8 +204,9 @@ class TestPagination:
         text = " ".join(f"word{i}" for i in range(300))
         pages = paginate(text, 100)
         assert all(len(page) <= 100 for page in pages)
-        assert " ".join(pages) == text
-        assert paginate("   ") == ("No text is available for this page.",)
+        assert "".join(pages) == text
+        assert paginate("   ") == ("   ",)
+        assert paginate("") == ("No text is available for this page.",)
 
     def test_hints_name_only_the_pages_that_exist(self) -> None:
         assert reader_hint(0, 1) == "left x2: back"
@@ -229,6 +231,109 @@ class TestPagination:
         wire = last_list(transport).to_wire()
         assert len(wire["items"]) <= 20
         assert all(len(item) <= 64 for item in wire["items"])
+
+
+def _reader_columns(text: str) -> int:
+    """Independent bounds for the fixture characters, not the paginator."""
+    return sum(
+        0 if char in "\r\n" or unicodedata.combining(char) else
+        8 if char == "\t" else
+        2 if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in ("W", "F") else 1
+        for char in text
+    )
+
+
+class TestLosslessReaders:
+    @pytest.mark.parametrize("tab,metadata,label", [
+        ("news", "", "Article"),
+        ("search", "", "Result"),
+        ("news", " \r\n\t ", "Article"),
+        ("search", "\r\n  example.com\t \n Result title  ", "example.com Result title"),
+    ], ids=["empty-news", "empty-search", "blank-metadata", "metadata-line-breaks"])
+    async def test_metadata_always_identifies_prepared_rows(
+        self, tab: str, metadata: str, label: str,
+    ) -> None:
+        transport = Transport()
+        provider = Provider()
+
+        async def open_source(index: int) -> Reader:
+            return Reader(
+                tab=tab, title=f"{tab.upper()} · READER", metadata=metadata,
+                pages=("body words",),
+            )
+
+        provider.open = open_source  # type: ignore[method-assign]
+        publisher = PanelPublisher(transport, {tab: provider})  # type: ignore[dict-item]
+        await publisher.open_by_voice(tab, 0)
+        items = last_list(transport).to_wire()["items"]
+        assert items[0] == f"1/1 · {label}"
+        assert items[1:] == ["body words"]
+
+    @pytest.mark.parametrize("tab,title", [("news", "NEWS · ARTICLE"), ("search", "SEARCH · RESULT")])
+    @pytest.mark.parametrize("source", [
+        "x" * 440,
+        "界" * 440,
+        "  start\r\n\r\nsecond  line \tkeeps spaces  \r\n" * 24 + "  LATER MARKER  ",
+        "🙂" * 320 + "LATER MARKER",
+    ], ids=["unbroken-440", "cjk-440", "crlf-and-spaces", "emoji-320-and-tail"])
+    async def test_every_source_character_survives_wire_pages_and_reverse_navigation(
+        self, tab: str, title: str, source: str,
+    ) -> None:
+        transport = Transport()
+        provider = Provider()
+
+        async def open_source(index: int) -> Reader:
+            # Providers may supply an overlong page; publication must make
+            # every piece reachable rather than cap or trim it on the wire.
+            return Reader(tab=tab, title=title, metadata="Origin · " + "🙂" * 80, pages=(source,))
+
+        provider.open = open_source  # type: ignore[method-assign]
+        publisher = PanelPublisher(transport, {tab: provider})  # type: ignore[dict-item]
+        reader = await publisher.open_by_voice(tab, 0)
+        assert reader is not None
+        assert "".join(reader.pages) == source
+        total = len(reader.pages)
+        request_id = f"panel-{tab}-1"
+        forward: list[list[str]] = []
+        for index in range(total):
+            if index:
+                await publisher.page(title, EventType.SCROLL_BOTTOM, request_id)
+            wire = last_list(transport).to_wire()
+            items = wire["items"]
+            assert "".join(items[1:]) == reader.pages[index]
+            assert items[0].startswith(f"{index + 1}/{total} · ")
+            assert 1 <= len(items[1:]) <= 10
+            assert all(len(row.encode("utf-16-le")) // 2 <= 64 for row in items)
+            assert all(_reader_columns(row) <= 62 for row in items)
+            assert wire["requestId"] == request_id
+            forward.append(items)
+
+        assert "".join(row for page in forward for row in page[1:]) == source
+        for index in range(total - 2, -1, -1):
+            await publisher.page(title, EventType.SCROLL_TOP, request_id)
+            assert last_list(transport).to_wire()["items"] == forward[index]
+        sent = len(transport.sent)
+        await publisher.page(title, EventType.SCROLL_TOP, request_id)
+        assert len(transport.sent) == sent
+
+    async def test_provider_page_boundaries_never_insert_or_remove_whitespace(self) -> None:
+        transport = Transport()
+        provider = Provider()
+        original_pages = ("first  \r\n", "\r\n  second", "third\t  ")
+
+        async def open_source(index: int) -> Reader:
+            return Reader(tab="news", title="NEWS · ARTICLE", metadata="BBC", pages=original_pages)
+
+        provider.open = open_source  # type: ignore[method-assign]
+        publisher = PanelPublisher(transport, {"news": provider})  # type: ignore[dict-item]
+        reader = await publisher.open_by_voice("news", 0)
+        assert reader is not None
+        displayed = []
+        for index in range(len(reader.pages)):
+            if index:
+                await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
+            displayed.extend(last_list(transport).to_wire()["items"][1:])
+        assert "".join(displayed) == "".join(original_pages)
 
 
 class TestReaderSurvivesABackgroundRefresh:

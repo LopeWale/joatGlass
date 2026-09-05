@@ -21,6 +21,208 @@ from joat.agents.openclaw_runtime import (
 from joat.agents.openclaw_terminal import OpenClawToolsEnabled
 
 
+@pytest.fixture
+def capture_agent(monkeypatch: pytest.MonkeyPatch):
+    """Real adapter lifecycle; the owned terminal only records exact input."""
+    terminals = []
+
+    class Terminal:
+        def __init__(self, connection):
+            self.connection = connection
+            self.recovery = None
+            self.received = []
+            self.cleanup_before_close = False
+
+        async def stream(self, prompt):
+            self.received.append(prompt)
+            try:
+                yield "captured answer"
+            finally:
+                await asyncio.sleep(0)
+                self.cleanup_before_close = not self.connection.closed
+
+    async def create(**kwargs):
+        terminal = Terminal(kwargs["connection"])
+        terminals.append(terminal)
+        return terminal
+
+    monkeypatch.setattr("joat.agents.openclaw_runtime.OpenClawAgentTerminal.create", create)
+    factory = RuntimeFactory([RuntimeConnection({}), RuntimeConnection({})])
+    return OpenClawTerminalAgent(client=factory, agent_id="hermes"), factory, terminals
+
+
+def capture_generation(agent):
+    return agent.capture_context_generation
+
+
+def captured_stream(agent, prompt, generation):
+    return agent.stream_captured(prompt, context_generation=generation)
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_context_changes_after_reinitialization(capture_agent) -> None:
+    agent, factory, terminals = capture_agent
+    assert capture_generation(agent) is None
+    await agent.initialize()
+    original = capture_generation(agent)
+    assert isinstance(original, int)
+    assert [chunk async for chunk in agent.stream("explicit command")] == ["captured answer"]
+    assert capture_generation(agent) == original
+    await agent._invalidate_terminal()
+    assert capture_generation(agent) is None
+    await agent.initialize()
+    try:
+        assert capture_generation(agent) != original
+        assert factory.calls == 2
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_cannot_retarget_while_waiting_for_adapter_lock(capture_agent) -> None:
+    agent, _factory, terminals = capture_agent
+    await agent.initialize()
+    original = capture_generation(agent)
+    await agent._lock.acquire()
+
+    async def consume():
+        return [chunk async for chunk in captured_stream(agent, "  keep this?!\n  ", original)]
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)  # The real adapter is waiting for its lock.
+    try:
+        await agent._invalidate_terminal()
+        await agent._initialize_locked()  # This actor already holds the adapter lock.
+        agent._lock.release()
+        with pytest.raises(OpenClawGatewayError, match="changed|unavailable"):
+            await asyncio.wait_for(task, 1)
+        assert all(terminal.received == [] for terminal in terminals)
+        assert agent.initialized  # A stale request must not destroy its successor.
+    finally:
+        if agent._lock.locked():
+            agent._lock.release()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_does_not_initialize_a_missing_context(capture_agent) -> None:
+    agent, factory, _terminals = capture_agent
+    try:
+        with pytest.raises(OpenClawGatewayError, match="changed|unavailable"):
+            _ = [chunk async for chunk in captured_stream(agent, "old captured instruction", 1)]
+        assert factory.calls == 0
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_preserves_literal_input_in_the_current_context(capture_agent) -> None:
+    agent, factory, terminals = capture_agent
+    await agent.initialize()
+    generation = capture_generation(agent)
+    text = "  Stop, open News?!\nKeep these exact words.  "
+    try:
+        assert [chunk async for chunk in captured_stream(agent, text, generation)] == ["captured answer"]
+        assert terminals[0].received == [text]
+        assert capture_generation(agent) == generation
+        assert factory.calls == 1
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_generator_close_invalidates_its_connection(capture_agent) -> None:
+    agent, _factory, terminals = capture_agent
+    await agent.initialize()
+    chunks = captured_stream(agent, "literal input", capture_generation(agent))
+    try:
+        assert await anext(chunks) == "captured answer"
+        await chunks.aclose()
+        assert terminals[0].cleanup_before_close
+        assert capture_generation(agent) is None
+        assert terminals[0].connection.closed
+    finally:
+        await chunks.aclose()
+        await agent.close()
+
+
+@pytest.fixture
+def held_initialization(monkeypatch: pytest.MonkeyPatch):
+    started, release = asyncio.Event(), asyncio.Event()
+    connection = RuntimeConnection({})
+    factory = RuntimeFactory([connection, RuntimeConnection({})])
+
+    class Terminal:
+        recovery = None
+
+        def __init__(self, owned_connection):
+            self.connection = owned_connection
+
+    async def create(**kwargs):
+        started.set()
+        await release.wait()
+        return Terminal(kwargs["connection"])
+
+    monkeypatch.setattr("joat.agents.openclaw_runtime.OpenClawAgentTerminal.create", create)
+    return OpenClawTerminalAgent(client=factory, agent_id="hermes"), factory, connection, started, release
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_initialization_cannot_publish_after_close(held_initialization) -> None:
+    agent, _factory, connection, started, release = held_initialization
+    setup = asyncio.create_task(agent.initialize())
+    await asyncio.wait_for(started.wait(), 1)
+    closing = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+    release.set()
+    try:
+        await asyncio.wait_for(closing, 1)
+        await asyncio.gather(setup, return_exceptions=True)
+        assert not agent.initialized
+        assert capture_generation(agent) is None
+        assert connection.closed
+    finally:
+        release.set()
+        await asyncio.gather(setup, closing, return_exceptions=True)
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_close_cancels_held_initialization(held_initialization) -> None:
+    agent, _factory, connection, started, release = held_initialization
+    setup = asyncio.create_task(agent.initialize())
+    await asyncio.wait_for(started.wait(), 1)
+    try:
+        await asyncio.wait_for(agent.close(), .2)
+        assert setup.done()
+        assert connection.closed
+        assert capture_generation(agent) is None
+    finally:
+        release.set()
+        await asyncio.gather(setup, return_exceptions=True)
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_captured_terminal_concurrent_initialization_owns_one_connection(held_initialization) -> None:
+    agent, factory, _connection, started, release = held_initialization
+    first = asyncio.create_task(agent.initialize())
+    await asyncio.wait_for(started.wait(), 1)
+    second = asyncio.create_task(agent.initialize())
+    await asyncio.sleep(0)
+    release.set()
+    try:
+        await asyncio.wait_for(asyncio.gather(first, second), 1)
+        assert factory.calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await agent.close()
+
+
 METHODS = frozenset(
     {
         "tools.effective",
@@ -633,7 +835,8 @@ async def test_terminal_agent_close_is_bounded_when_socket_close_stalls(
 
 
 @pytest.mark.asyncio
-async def test_terminal_agent_close_cancels_active_stream_before_returning() -> None:
+@pytest.mark.parametrize("captured", [False, True])
+async def test_terminal_agent_close_cancels_active_stream_before_returning(captured: bool) -> None:
     entered = asyncio.Event()
 
     class Terminal:
@@ -649,7 +852,9 @@ async def test_terminal_agent_close_cancels_active_stream_before_returning() -> 
     agent._terminal = Terminal()  # type: ignore[assignment]
 
     async def consume() -> list[str]:
-        return [chunk async for chunk in agent.stream("question")]
+        chunks = (captured_stream(agent, "question", capture_generation(agent))
+                  if captured else agent.stream("question"))
+        return [chunk async for chunk in chunks]
 
     task = asyncio.create_task(consume())
     await entered.wait()
@@ -802,3 +1007,100 @@ class TestAnsweringAnApprovalDuringItsOwnRun:
         terminal.release.set()
         await asyncio.wait_for(run_done.wait(), 2.0)
         task.cancel()
+
+
+class RunOutcomeConnection(RuntimeConnection):
+    """Real adapter/terminal lifecycle; only gateway RPC and events are synthetic."""
+
+    def __init__(self, outcome: dict[str, object]) -> None:
+        key = "agent:hermes:joat-123"
+        super().__init__({
+            "sessions.list": {"sessions": []},
+            "sessions.create": {
+                "ok": True, "key": key, "sessionId": "session-1",
+                "entry": {"sessionId": "session-1", "label": "JOAT Agent Terminal"},
+                "runStarted": False,
+            },
+            "sessions.describe": {"session": {
+                "key": key, "sessionId": "session-1", "label": "JOAT Agent Terminal",
+                "agentId": "hermes",
+            }},
+            "tools.effective": {"agentId": "hermes", "groups": [{"id": "core", "tools": []}], "notices": []},
+            "sessions.messages.subscribe": {"subscribed": True, "key": key},
+            "sessions.send": deque([{"runId": "run-1"}, {"runId": "run-2"}]),
+            "sessions.abort": {"ok": True, "abortedRunId": "run-1", "status": "aborted"},
+        })
+        self.events: deque[dict[str, object]] = deque([
+            {"event": "chat", "payload": {
+                "runId": "run-1", "sessionKey": key, "seq": 1, **outcome,
+            }},
+            {"event": "chat", "payload": {
+                "runId": "run-2", "sessionKey": key, "seq": 1, "state": "final",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "second run completed"}]},
+            }},
+        ])
+
+    async def next_event(self) -> dict[str, object]:
+        assert not self.closed, "runtime reused a closed connection"
+        return self.events.popleft()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    {"state": "error", "errorKind": "rate_limit", "errorMessage": "PRIVATE_PROVIDER_PAYLOAD"},
+    {"state": "error"},
+    {"state": "aborted", "stopReason": "restart"},
+])
+async def test_run_outcome_keeps_ready_context_for_a_followup_captured_run(outcome: dict[str, object]) -> None:
+    connection = RunOutcomeConnection(outcome)
+    factory = RuntimeFactory([connection])
+    states: list[tuple[str, str]] = []
+    agent = OpenClawTerminalAgent(client=factory, agent_id="hermes",
+                                 state_changed=lambda state, reason: states.append((state, reason)))
+    try:
+        await agent.initialize()
+        terminal = agent._terminal
+        generation = agent.capture_context_generation
+        assert generation is not None
+        states.clear()
+        with pytest.raises(OpenClawGatewayError) as failed:
+            _ = [chunk async for chunk in agent.stream_captured("synthetic first", context_generation=generation)]
+        assert agent.initialized
+        assert agent._terminal is terminal
+        assert agent.capture_context_generation == generation
+        assert not connection.closed
+        assert states == [("running", ""), ("ready", "")]
+        assert "PRIVATE_" not in str(failed.value)
+
+        assert [chunk async for chunk in agent.stream_captured("synthetic second", context_generation=generation)] == ["second run completed"]
+        assert factory.calls == 1
+        assert [method for method, _ in connection.calls].count("sessions.create") == 1
+        assert not any(method == "sessions.abort" for method, _ in connection.calls)
+    finally:
+        await agent.close()
+    assert connection.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [
+    {"state": "error", "errorKind": "PRIVATE_NEW_KIND"},
+    {"state": "error", "errorMessage": {"private": "synthetic secret"}},
+    {"state": "error", "stopReason": False},
+    {"state": "PRIVATE_NEW_STATE"},
+])
+async def test_run_outcome_malformed_event_still_invalidates_runtime(invalid: dict[str, object]) -> None:
+    connection = RunOutcomeConnection(invalid)
+    states: list[tuple[str, str]] = []
+    agent = OpenClawTerminalAgent(client=RuntimeFactory([connection]), agent_id="hermes",
+                                 state_changed=lambda state, reason: states.append((state, reason)))
+    try:
+        await agent.initialize()
+        with pytest.raises(OpenClawGatewayError) as failed:
+            _ = [chunk async for chunk in agent.stream("synthetic instruction")]
+        assert agent.capture_context_generation is None
+        assert not agent.initialized
+        assert connection.closed
+        assert states[-1] == ("blocked", "protocol_rejected")
+        assert "PRIVATE_" not in str(failed.value)
+    finally:
+        await agent.close()

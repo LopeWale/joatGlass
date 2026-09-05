@@ -86,15 +86,14 @@ describe('HudPresenter — the tab rail', () => {
     });
   });
 
-  it('an expanded tab keeps its rail on the list frame; other lists carry none', async () => {
-    // Pomodoro is the expanded tab that is still pixels: NEWS and SEARCH
-    // became firmware list pages (HudPresenter.nativeList.test.ts) and paint
-    // no frame at all.
+  it.each([
+    ['POMODORO', 'pomodoro'], ['NEWS', 'news'], ['SEARCH', 'search'],
+  ] as const)('expanded %s keeps the custom banner and rail; other lists carry none', async (title, tab) => {
     const { hud, frames } = presenter();
-    await hud.acceptPanel({ kind: 'hud.panel', tab: 'pomodoro', revision: 4, rows: ['Pause', 'Reset'] });
-    await hud.showList(['Pause', 'Reset'], { title: 'POMODORO', railTab: 'pomodoro', selectable: true });
+    if (tab !== 'search') await hud.acceptPanel({ kind: 'hud.panel', tab, revision: 4, rows: ['First', 'Second'] });
+    await hud.showList(['First', 'Second'], { title, railTab: tab, selectable: true });
     expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'list', title: 'POMODORO', rail: { activeTab: 'pomodoro', content: { revision: 4 } },
+      kind: 'list', title, rail: { activeTab: tab },
     });
     await hud.showList(['Loading…'], { title: 'MESSAGES' });
     expect(frames[frames.length - 1]).not.toHaveProperty('rail');

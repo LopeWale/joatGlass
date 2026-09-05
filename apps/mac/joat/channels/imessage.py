@@ -7,8 +7,8 @@ docs/MAC_APP.md §Notification sources. Messages' own store is stable, is
 already covered by the app's Full Disk Access grant, and carries far more
 than a banner ever could (real sender, full text, thread, attachments).
 
-Read-only and immutable: the database is live and WAL-journaled, so a
-writer-ish open could stall the user's Messages app. Never write.
+Read-only and WAL-aware: committed deliveries may still be in the live
+journal rather than the main database file. Never write.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .contacts import ContactResolver
+from .message_body import MAX_ATTRIBUTED_BODY_BYTES, decode_message_body
 from .notifications import Notification
 
 log = logging.getLogger(__name__)
@@ -35,20 +36,34 @@ _READ_PAGE_SIZE = 20
 
 @dataclass(frozen=True, slots=True)
 class MessageThread:
-    """One recent incoming conversation with its private send handle."""
+    """One recent incoming conversation with its private send identity."""
 
     sender: str
     handle: str
     text: str
     at: float
     replyable: bool = True
-    """False for group chats until Messages.app group targeting is proven."""
+    """Whether the Mac has a concrete outbound target for this conversation."""
     chat_id: int | None = None
     """Private chat identity; never sent to the Hub or accepted from it."""
     unread: bool = False
     """True only when the newest incoming row is explicitly unread."""
     attachment_count: int = 0
     """Bounded attachment count; filenames and paths never leave the Mac."""
+    chat_guid: str | None = None
+    """Messages.app chat identity, distinct from SQLite ROWID and sender handle."""
+    is_group: bool = False
+
+    @property
+    def reply_target(self) -> tuple[Literal["participant", "chat"], str] | None:
+        """Mac-owned send identity; never substitute a group participant."""
+        if not self.replyable:
+            return None
+        if self.chat_guid and self.chat_guid.strip():
+            return ("chat", self.chat_guid)
+        if not self.is_group and self.handle.strip():
+            return ("participant", self.handle)
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +77,8 @@ class MessageEntry:
     unread: bool = False
     delivery: Literal["sent", "delivered", "read"] | None = None
     attachment_count: int = 0
+    sender: str | None = None
+    """Incoming participant display label, independent of the private reply target."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,20 +163,29 @@ class IMessageStore:
         # retry with the same watermark can still recover the page.
         self._drain_after = last
         with self._connect() as conn:
+            columns = self._columns(conn, "message")
+            body_expr, body_size_expr, visible_clause = self._body_sql(columns)
+            attachment_expr = (
+                "COALESCE(m.cache_has_attachments, 0)"
+                if "cache_has_attachments" in columns else "0"
+            )
             rows = conn.execute(
-                """
+                f"""
                 SELECT m.ROWID,
                        COALESCE(m.text, ''),
                        COALESCE(h.id, ''),
                        m.date,
-                       COALESCE(c.display_name, '')
+                       COALESCE(c.display_name, ''),
+                       {body_expr},
+                       {body_size_expr},
+                       {attachment_expr}
                 FROM message m
                 LEFT JOIN handle h ON m.handle_id = h.ROWID
                 LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                 LEFT JOIN chat c ON c.ROWID = cmj.chat_id
                 WHERE m.ROWID > ?
                   AND m.is_from_me = 0
-                  AND m.text IS NOT NULL AND m.text != ''
+                  AND {visible_clause}
                 ORDER BY m.ROWID
                 LIMIT ?
                 """,
@@ -167,8 +193,15 @@ class IMessageStore:
             ).fetchall()
 
         out: list[Notification] = []
-        for rowid, text, sender, date, chat_name in rows[:_READ_PAGE_SIZE]:
+        for rowid, plain, sender, date, chat_name, body, body_size, attachments in rows[:_READ_PAGE_SIZE]:
+            # A blank archive still consumes its candidate ROWID. Otherwise a
+            # page of blank bodies can strand later deliveries forever.
             last = max(last, int(rowid))
+            text = decode_message_body(plain, body, attributed_size=int(body_size)).text
+            if not text and int(attachments) > 0:
+                text = "Attachment"
+            if not text:
+                continue
             who = chat_name or self._contacts.name_for(sender) or "unknown"
             out.append(Notification(
                 rec_id=int(rowid),
@@ -192,14 +225,16 @@ class IMessageStore:
         return [(row.sender, row.text, row.at) for row in self.recent_threads(limit)]
 
     def recent_threads(self, limit: int = 5) -> list[MessageThread]:
-        """Newest incoming message per sender, retaining the send handle.
+        """Newest incoming message per conversation, retaining its send target.
 
-        The handle remains Mac-side. The HUD receives only sender and preview,
+        Send identities remain Mac-side. The HUD receives only sender and preview,
         so a forged plugin row cannot redirect a reply to a different address.
         """
         limit = max(1, min(int(limit), 10))
         with self._connect() as conn:
             columns = self._columns(conn, "message")
+            chat_columns = self._columns(conn, "chat")
+            guid_expr = "COALESCE(c.guid, '')" if "guid" in chat_columns else "''"
             attachment_expr = (
                 "COALESCE(m.cache_has_attachments, 0)"
                 if "cache_has_attachments" in columns else "0"
@@ -210,7 +245,7 @@ class IMessageStore:
                 "ELSE 0 END"
                 if "is_read" in columns else "0"
             )
-            visible_clause = "m.text IS NOT NULL AND m.text != ''"
+            body_expr, body_size_expr, visible_clause = self._body_sql(columns)
             if "cache_has_attachments" in columns:
                 visible_clause = (
                     f"(({visible_clause}) OR COALESCE(m.cache_has_attachments, 0) != 0)"
@@ -228,7 +263,10 @@ class IMessageStore:
                            WHERE chj.chat_id = c.ROWID
                        ), 1),
                        {unread_expr},
-                       {attachment_expr}
+                       {attachment_expr},
+                       {guid_expr},
+                       {body_expr},
+                       {body_size_expr}
                 FROM message m
                 LEFT JOIN handle h ON m.handle_id = h.ROWID
                 LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
@@ -242,8 +280,8 @@ class IMessageStore:
         out: list[MessageThread] = []
         seen: set[tuple[str, str | int]] = set()
         for (
-            handle, text, raw_date, display, chat_id, participant_count,
-            unread, attachment_count,
+            handle, plain, raw_date, display, chat_id, participant_count,
+            unread, attachment_count, chat_guid, body, body_size,
         ) in rows:
             sender = display or self._contacts.name_for(handle)
             identity: tuple[str, str | int] = (
@@ -255,12 +293,14 @@ class IMessageStore:
             out.append(MessageThread(
                 sender=sender,
                 handle=str(handle),
-                text=str(text),
+                text=decode_message_body(plain, body, attributed_size=int(body_size)).text,
                 at=_unix_time(raw_date),
-                replyable=int(participant_count) <= 1,
+                replyable=bool(str(chat_guid).strip()) or int(participant_count) <= 1,
                 chat_id=int(chat_id) if int(chat_id) > 0 else None,
                 unread=bool(unread),
                 attachment_count=1 if int(attachment_count) > 0 else 0,
+                chat_guid=str(chat_guid) if str(chat_guid).strip() else None,
+                is_group=int(participant_count) > 1,
             ))
             if len(out) >= limit:
                 break
@@ -308,12 +348,17 @@ class IMessageStore:
                 "COALESCE(m.cache_has_attachments, 0)"
                 if "cache_has_attachments" in columns else "0"
             )
-            visible_clause = "m.text IS NOT NULL AND m.text != ''"
+            body_expr, body_size_expr, visible_clause = self._body_sql(columns)
             if "cache_has_attachments" in columns:
                 visible_clause = (
                     f"(({visible_clause}) OR COALESCE(m.cache_has_attachments, 0) != 0)"
                 )
             before_clause = " AND m.ROWID < ?" if before_row_id is not None else ""
+            sender_expr = "COALESCE(h.id, '')" if "handle_id" in columns else "''"
+            sender_join = (
+                "LEFT JOIN handle h ON h.ROWID = m.handle_id"
+                if "handle_id" in columns else ""
+            )
             params: tuple[int, ...] = (
                 (thread.chat_id, int(before_row_id), limit + 1)
                 if before_row_id is not None
@@ -330,9 +375,13 @@ class IMessageStore:
                        {delivered_expr},
                        {date_delivered_expr},
                        {date_read_expr},
-                       {attachment_expr}
+                       {attachment_expr},
+                       {sender_expr},
+                       {body_expr},
+                       {body_size_expr}
                 FROM message m
                 JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                {sender_join}
                 WHERE cmj.chat_id = ?
                   AND {visible_clause}
                   {before_clause}
@@ -343,8 +392,8 @@ class IMessageStore:
             ).fetchall()
         entries: list[MessageEntry] = []
         for (
-            row_id, text, raw_date, from_me, unread, sent, delivered,
-            date_delivered, date_read, attachment_count,
+            row_id, plain, raw_date, from_me, unread, sent, delivered,
+            date_delivered, date_read, attachment_count, handle, body, body_size,
         ) in rows[:limit]:
             delivery: Literal["sent", "delivered", "read"] | None = None
             if bool(from_me):
@@ -355,15 +404,31 @@ class IMessageStore:
                 elif bool(sent):
                     delivery = "sent"
             entries.append(MessageEntry(
-                text=str(text),
+                text=decode_message_body(plain, body, attributed_size=int(body_size)).text,
                 at=_unix_time(raw_date),
                 from_me=bool(from_me),
                 row_id=int(row_id),
                 unread=bool(unread),
                 delivery=delivery,
                 attachment_count=1 if int(attachment_count) > 0 else 0,
+                sender=(self._contacts.name_for(str(handle)) or None) if not from_me else None,
             ))
         return MessageHistoryPage(entries=tuple(entries), has_older=len(rows) > limit)
+
+    @staticmethod
+    def _body_sql(columns: set[str]) -> tuple[str, str, str]:
+        """Shared archive projection and candidate predicate for all readers."""
+        plain_clause = "(m.text IS NOT NULL AND m.text != '')"
+        if "attributedBody" not in columns:
+            return "NULL", "0", plain_clause
+        size = "COALESCE(length(m.attributedBody), 0)"
+        # SQLite computes BLOB length without fetching its entire contents.
+        # Also avoid fetching an archive when the preferred text is present.
+        body = (
+            f"CASE WHEN NOT {plain_clause} AND {size} <= {MAX_ATTRIBUTED_BODY_BYTES} "
+            "THEN m.attributedBody ELSE NULL END"
+        )
+        return body, size, f"({plain_clause} OR {size} > 0)"
 
     @staticmethod
     def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -371,6 +436,6 @@ class IMessageStore:
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
     def _connect(self) -> sqlite3.Connection:
-        # immutable=1: the store is live and WAL-journaled; a normal open can
-        # take locks that stall Messages itself.
-        return sqlite3.connect(f"file:{self._path}?immutable=1", uri=True)
+        # Read committed WAL rows without granting write access. immutable=1
+        # ignores the live journal and can hide deliveries until checkpoint.
+        return sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)

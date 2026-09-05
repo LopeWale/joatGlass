@@ -1,6 +1,7 @@
 import {
   waitForEvenAppBridge,
   StartUpPageCreateResult,
+  ImageRawDataUpdateResult,
   type EvenAppBridge,
 } from '@evenrealities/even_hub_sdk';
 import type { Unsubscribe } from './types';
@@ -19,6 +20,9 @@ export type StartupPageResolution = 'created' | 'recovered';
  */
 export class BridgeClient {
   private bridge?: EvenAppBridge;
+  private displayBridge?: EvenAppBridge;
+  private displayActive = true;
+  private displayRevision = 0;
   private started = false;
   private readonly unsubscribes: Unsubscribe[] = [];
   private launchSource?: string;
@@ -49,7 +53,7 @@ export class BridgeClient {
       if (timer !== undefined) clearTimeout(timer);
     }
     this.track(this.bridge.onLaunchSource((src) => { this.launchSource = src; }));
-    return this.bridge;
+    return this.require();
   }
 
   /**
@@ -65,13 +69,15 @@ export class BridgeClient {
     rebuild?: Parameters<EvenAppBridge['rebuildPageContainer']>[0],
   ): Promise<StartupPageResolution> {
     if (this.started) throw new Error('createStartUpPageContainer already called (one-shot)');
+    const current = this.captureDisplayGuard();
     const result = await this.require().createStartUpPageContainer(container);
+    if (!current()) throw new Error('startup display ownership retired');
     if (result === StartUpPageCreateResult.success) {
       this.started = true;
       return 'created';
     }
     if (result === StartUpPageCreateResult.invalid && rebuild !== undefined) {
-      if (await this.require().rebuildPageContainer(rebuild)) {
+      if (await this.require().rebuildPageContainer(rebuild) && current()) {
         this.started = true;
         return 'recovered';
       }
@@ -87,7 +93,66 @@ export class BridgeClient {
 
   require(): EvenAppBridge {
     if (!this.bridge) throw new Error('bridge not initialized; call init() first');
-    return this.bridge;
+    if (!this.displayBridge) {
+      const native = this.bridge;
+      // Only display writes are gated. Keep the SDK singleton as the receiver
+      // for every other method, including synchronous listener registration
+      // and microphone/IMU cleanup. Never mutate the SDK singleton itself.
+      const writes: Pick<EvenAppBridge,
+        'createStartUpPageContainer' | 'rebuildPageContainer' | 'textContainerUpgrade' | 'updateImageRawData'
+      > = {
+        createStartUpPageContainer: (page) => this.writeDisplay(
+          () => native.createStartUpPageContainer(page), StartUpPageCreateResult.invalid,
+        ),
+        rebuildPageContainer: (page) => this.writeDisplay(() => native.rebuildPageContainer(page), false),
+        textContainerUpgrade: (text) => this.writeDisplay(() => native.textContainerUpgrade(text), false),
+        updateImageRawData: (image) => this.writeDisplay(
+          () => native.updateImageRawData(image), ImageRawDataUpdateResult.sendFailed,
+        ),
+      };
+      this.displayBridge = new Proxy(native, {
+        get(target, property) {
+          switch (property) {
+            case 'createStartUpPageContainer': return writes.createStartUpPageContainer;
+            case 'rebuildPageContainer': return writes.rebuildPageContainer;
+            case 'textContainerUpgrade': return writes.textContainerUpgrade;
+            case 'updateImageRawData': return writes.updateImageRawData;
+            default: {
+              const value: unknown = Reflect.get(target, property, target);
+              return typeof value === 'function' ? value.bind(target) : value;
+            }
+          }
+        },
+      });
+    }
+    return this.displayBridge;
+  }
+
+  /** An evicted document yields its display until deliberate recovery. */
+  suspendDisplay(): void {
+    if (!this.displayActive) return;
+    this.displayActive = false;
+    this.displayRevision += 1;
+  }
+
+  resumeDisplay(): void {
+    this.displayActive = true;
+  }
+
+  /** Work from an earlier ownership interval stays stale after resume. */
+  captureDisplayGuard(): () => boolean {
+    const revision = this.displayRevision;
+    const active = this.displayActive;
+    return () => active && this.displayActive && this.displayRevision === revision;
+  }
+
+  private async writeDisplay<T>(write: () => Promise<T>, declined: T): Promise<T> {
+    const current = this.captureDisplayGuard();
+    if (!current()) return declined;
+    const result = await write();
+    // A call already handed to the host cannot be recalled. Its late result
+    // cannot authorize another tile, fallback rebuild, or visible receipt.
+    return current() ? result : declined;
   }
 
   getLaunchSource(): string | undefined {

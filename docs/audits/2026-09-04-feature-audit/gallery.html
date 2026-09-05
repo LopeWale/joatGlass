@@ -1,0 +1,56 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JOAT feature audit: simulator evidence</title><style>body{margin:0;background:#13181b;color:#e9eef0;font:16px/1.5 system-ui,sans-serif}main{max-width:1240px;margin:auto;padding:32px}h1{font-size:30px}p{max-width:920px}a{color:#a8dbff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,576px),1fr));gap:24px}figure{margin:0;padding:16px;background:#20272b;border-radius:10px}h2{font-size:18px;margin:0 0 12px}img{display:block;width:100%;height:auto;background:black}figcaption{margin-top:12px;color:#c5d0d5}.excluded{border:1px solid #e6b669}.tag{font-size:13px;color:#e6b669}</style><main><h1>JOAT feature audit: simulator evidence</h1><p>September 4, 2026. Current working-tree source, official simulator, synthetic fixtures. All 26 captures were inspected; 24 show their intended feature layouts. The two News drill-in captures are retained as evidence limits, not successful reader checks. These images do not establish physical G2 usability, timing, service access or completed user journeys.</p><p><a href="AUDIT.md">Full audit with 34 findings</a> · <a href="VISUAL_REVIEW.md">Visual review and limits</a> · <a href="evidence/verified/checks.json">Capture receipt and source hashes</a></p><div class="grid">
+<figure class="accepted"><h2>overview</h2>
+<a href="evidence/verified/gallery/overview.png"><img src="evidence/verified/gallery/overview.png" alt="overview simulator fixture"></a><figcaption>Large left clock, narrow right information column, icon-only tab rail.</figcaption></figure>
+<figure class="accepted"><h2>messages</h2>
+<a href="evidence/verified/gallery/messages.png"><img src="evidence/verified/gallery/messages.png" alt="messages simulator fixture"></a><figcaption>Clear picker and New message row; most of the lower display is unused.</figcaption></figure>
+<figure class="accepted"><h2>messages-conversation</h2>
+<a href="evidence/verified/gallery/messages-conversation.png"><img src="evidence/verified/gallery/messages-conversation.png" alt="messages-conversation simulator fixture"></a><figcaption>Five short message rows; page title is ellipsized. Static pixels do not exercise paging.</figcaption></figure>
+<figure class="accepted"><h2>message-reader</h2>
+<a href="evidence/verified/gallery/message-reader.png"><img src="evidence/verified/gallery/message-reader.png" alt="message-reader simulator fixture"></a><figcaption>Readable multi-line body and page indication. This short fixture does not cover the M9 overflow case.</figcaption></figure>
+<figure class="accepted"><h2>messages-compose</h2>
+<a href="evidence/verified/gallery/messages-compose.png"><img src="evidence/verified/gallery/messages-compose.png" alt="messages-compose simulator fixture"></a><figcaption>Recipient-first prompt; no editable transcript in this fixture.</figcaption></figure>
+<figure class="accepted"><h2>notifications</h2>
+<a href="evidence/verified/gallery/notifications.png"><img src="evidence/verified/gallery/notifications.png" alt="notifications simulator fixture"></a><figcaption>Three preview rows with a detail hint.</figcaption></figure>
+<figure class="accepted"><h2>notification-detail</h2>
+<a href="evidence/verified/gallery/notification-detail.png"><img src="evidence/verified/gallery/notification-detail.png" alt="notification-detail simulator fixture"></a><figcaption>Sender, short message and receipt age; most of the display is empty.</figcaption></figure>
+<figure class="accepted"><h2>quicknotes</h2>
+<a href="evidence/verified/gallery/quicknotes.png"><img src="evidence/verified/gallery/quicknotes.png" alt="quicknotes simulator fixture"></a><figcaption>Four note summaries; static fixture is not a complete-history check.</figcaption></figure>
+<figure class="accepted"><h2>quicknote-detail</h2>
+<a href="evidence/verified/gallery/quicknote-detail.png"><img src="evidence/verified/gallery/quicknote-detail.png" alt="quicknote-detail simulator fixture"></a><figcaption>Summary, key points and todos; complete transcript is not displayed.</figcaption></figure>
+<figure class="accepted"><h2>quicknote-recording</h2>
+<a href="evidence/verified/gallery/quicknote-recording.png"><img src="evidence/verified/gallery/quicknote-recording.png" alt="quicknote-recording simulator fixture"></a><figcaption>Save, Pause and Discard rows; static view does not prove safe Back behavior.</figcaption></figure>
+<figure class="accepted"><h2>quicknote-discard</h2>
+<a href="evidence/verified/gallery/quicknote-discard.png"><img src="evidence/verified/gallery/quicknote-discard.png" alt="quicknote-discard simulator fixture"></a><figcaption>Confirm discard and Keep recording rows.</figcaption></figure>
+<figure class="accepted"><h2>brainstorm-sessions</h2>
+<a href="evidence/verified/gallery/brainstorm-sessions.png"><img src="evidence/verified/gallery/brainstorm-sessions.png" alt="brainstorm-sessions simulator fixture"></a><figcaption>Eight rows fit; visible metadata distinguishes saved sessions.</figcaption></figure>
+<figure class="accepted"><h2>brainstorm-ready</h2>
+<a href="evidence/verified/gallery/brainstorm-ready.png"><img src="evidence/verified/gallery/brainstorm-ready.png" alt="brainstorm-ready simulator fixture"></a><figcaption>Short topic prompt with tap/speech and Back hints.</figcaption></figure>
+<figure class="accepted"><h2>brainstorm-live</h2>
+<a href="evidence/verified/gallery/brainstorm-live.png"><img src="evidence/verified/gallery/brainstorm-live.png" alt="brainstorm-live simulator fixture"></a><figcaption>Dense multi-speaker text in a smaller body style; footer offers Terminal and cancel.</figcaption></figure>
+<figure class="accepted"><h2>terminal-sessions</h2>
+<a href="evidence/verified/gallery/terminal-sessions.png"><img src="evidence/verified/gallery/terminal-sessions.png" alt="terminal-sessions simulator fixture"></a><figcaption>Three named lanes and states.</figcaption></figure>
+<figure class="accepted"><h2>agent-terminal-ready</h2>
+<a href="evidence/verified/gallery/agent-terminal-ready.png"><img src="evidence/verified/gallery/agent-terminal-ready.png" alt="agent-terminal-ready simulator fixture"></a><figcaption>Status, lane summary and instruction; substantially smaller text than Messages.</figcaption></figure>
+<figure class="accepted"><h2>agent-terminal-blocked</h2>
+<a href="evidence/verified/gallery/agent-terminal-blocked.png"><img src="evidence/verified/gallery/agent-terminal-blocked.png" alt="agent-terminal-blocked simulator fixture"></a><figcaption>Blocked, host/policy/session lines and retry hint. Fixture host is synthetic.</figcaption></figure>
+<figure class="accepted"><h2>panel-news</h2>
+<a href="evidence/verified/gallery/panel-news.png"><img src="evidence/verified/gallery/panel-news.png" alt="panel-news simulator fixture"></a><figcaption>Three headline previews beside the clock; Updated now is a receipt-time label, not source verification.</figcaption></figure>
+<figure class="excluded"><h2>panel-news-expanded</h2>
+<p class="tag">Intended feature layout not established</p>
+<a href="evidence/verified/gallery/panel-news-expanded.png"><img src="evidence/verified/gallery/panel-news-expanded.png" alt="panel-news-expanded simulator fixture"></a><figcaption>Native NEWS page rebuild returns false in the transition diagnostic and restores Overview.</figcaption></figure>
+<figure class="excluded"><h2>panel-article</h2>
+<p class="tag">Intended feature layout not established</p>
+<a href="evidence/verified/gallery/panel-article.png"><img src="evidence/verified/gallery/panel-article.png" alt="panel-article simulator fixture"></a><figcaption>Native NEWS opening fails in the transition diagnostic, so the article is not reached.</figcaption></figure>
+<figure class="accepted"><h2>panel-pomodoro</h2>
+<a href="evidence/verified/gallery/panel-pomodoro.png"><img src="evidence/verified/gallery/panel-pomodoro.png" alt="panel-pomodoro simulator fixture"></a><figcaption>Overview timer shows rounded remaining minutes and block count.</figcaption></figure>
+<figure class="accepted"><h2>panel-pomodoro-expanded</h2>
+<a href="evidence/verified/gallery/panel-pomodoro-expanded.png"><img src="evidence/verified/gallery/panel-pomodoro-expanded.png" alt="panel-pomodoro-expanded simulator fixture"></a><figcaption>Large exact countdown, block progress and Pause/Skip/Reset controls.</figcaption></figure>
+<figure class="accepted"><h2>assistant-overlay</h2>
+<a href="evidence/verified/gallery/assistant-overlay.png"><img src="evidence/verified/gallery/assistant-overlay.png" alt="assistant-overlay simulator fixture"></a><figcaption>Large centered response overlay with a dismissal hint; no latency evidence.</figcaption></figure>
+<figure class="accepted"><h2>nav-destination</h2>
+<a href="evidence/verified/gallery/nav-destination.png"><img src="evidence/verified/gallery/nav-destination.png" alt="nav-destination simulator fixture"></a><figcaption>Destination name/address and confirm/retry hints.</figcaption></figure>
+<figure class="accepted"><h2>nav-guidance</h2>
+<a href="evidence/verified/gallery/nav-guidance.png"><img src="evidence/verified/gallery/nav-guidance.png" alt="nav-guidance simulator fixture"></a><figcaption>Prominent turn arrow, distance, street and trip summary; no live-route proof.</figcaption></figure>
+<figure class="accepted"><h2>nav-error</h2>
+<a href="evidence/verified/gallery/nav-error.png"><img src="evidence/verified/gallery/nav-error.png" alt="nav-error simulator fixture"></a><figcaption>Visible location-start error and retry/cancel hints.</figcaption></figure>
+</div></main></html>

@@ -84,11 +84,12 @@ class FrameTransport(FakeTransport, AudioFrameSource):
         seq: int,
         source: AudioSource,
         speaker: str | None = None,
+        generation: str = "current",
     ) -> None:
         assert self.frame_cb is not None
         self.frame_cb(AudioFrame(
             pcm=pcm,
-            connection_generation="current",
+            connection_generation=generation,
             seq=seq,
             source=source,
             speaker=speaker,
@@ -245,6 +246,94 @@ class TestVoiceLoop:
             transport.audio_cb(pcm, 8 + i)
         await drain()
         assert len(region(transport, ContainerId.CONTEXT)) == 1
+
+    @pytest.mark.parametrize("next_seq", [0, 2])
+    async def test_new_connection_never_joins_partial_speech(
+        self, next_seq: int, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class RecordingEngine(FakeEngine):
+            async def feed(self, pcm: bytes) -> Transcript | None:
+                self.received = pcm
+                return await super().feed(pcm)
+
+        transport, engine = FrameTransport(), RecordingEngine()
+        VoiceOrchestrator(transport, engine, vad=TEST_VAD()).attach()
+        transport.emit_frame(batch(4000), 0, "glasses", generation="old")
+        transport.emit_frame(batch(4000), 1, "glasses", generation="old")
+        for seq, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET], next_seq):
+            transport.emit_frame(pcm, seq, "glasses", generation="replacement")
+        await drain()
+
+        assert engine.received == LOUD * 2 + QUIET * 3
+        assert "audio gap" not in caplog.text  # counter restart is a stream boundary
+
+    @pytest.mark.parametrize("boundary", ["gap", "replacement"])
+    async def test_gap_during_stt_preserves_complete_turn_and_recovers_without_splicing(
+        self, boundary: str,
+    ) -> None:
+        class HeldEngine(FakeEngine):
+            def __init__(self) -> None:
+                super().__init__("JOAT, recovery proof")
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+                self.flushed: list[bytes] = []
+
+            async def feed(self, pcm: bytes) -> Transcript | None:
+                await super().feed(pcm)
+                self.entered.set()
+                await self.release.wait()
+                return None
+
+            async def flush(self) -> Transcript | None:
+                self.flushed.append(bytes(self.fed))
+                return await super().flush()
+
+        transport, engine = FrameTransport(), HeldEngine()
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), wake_words=("joat",),
+        )
+        orch.attach()
+        complete = [LOUD, LOUD, QUIET, QUIET, QUIET]
+        for seq, pcm in enumerate(complete):
+            transport.emit_frame(pcm, seq, "glasses", "self")
+        await asyncio.wait_for(engine.entered.wait(), 1)
+        try:
+            transport.emit_frame(batch(4000), 5, "glasses", "self")
+            # seq 6 is genuinely missing. Neither its prefix nor its speaker
+            # attribution may leak into the contiguous recovery segment.
+            recovered = [batch(9000), batch(9000), QUIET, QUIET, QUIET]
+            for seq, pcm in enumerate(recovered, 7):
+                transport.emit_frame(
+                    pcm, seq, "glasses", "unknown",
+                    generation="replacement" if boundary == "replacement" else "current",
+                )
+            engine.release.set()
+            assert orch._utterance_worker is not None
+            await asyncio.wait_for(orch._utterance_worker, 1)
+        finally:
+            engine.release.set()
+
+        assert engine.flushed == [b"".join(complete), b"".join(recovered)]
+        assert region(transport, ContainerId.CONTEXT) == [
+            "you  recovery proof", "you  recovery proof",
+        ]
+
+    async def test_gap_clears_speaker_provenance_and_keeps_unaddressed_gate(self) -> None:
+        transport, engine = FrameTransport(), FakeEngine("ambient private fixture")
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), wake_words=("joat",),
+        )
+        orch.attach()
+        transport.emit_frame(LOUD, 0, "glasses", "self")
+        for seq, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET], 2):
+            transport.emit_frame(pcm, seq, "glasses", "other")
+        await drain()
+        assert orch._voice_turn == 0  # pre-gap self must not admit other-only speech
+        for seq, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET], 7):
+            transport.emit_frame(pcm, seq, "glasses", "unknown")
+        await drain()
+        assert orch._voice_turn == 1
+        assert region(transport, ContainerId.CONTEXT) == []
 
     async def test_no_stt_stays_silent_but_alive(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
@@ -620,6 +709,84 @@ class StreamingReplier(ReplyEngine):
 
 
 class TestStreamedReply:
+    async def test_model_opened_terminal_keeps_its_view_and_finishes_the_reply(self) -> None:
+        transport = FakeTransport()
+        revision = 0
+        completed = asyncio.Event()
+
+        class TerminalToolReplier(ReplyEngine):
+            async def reply(self, _text: str) -> str | None:
+                raise AssertionError("stream owns this test")
+
+            async def stream(self, _text: str):
+                nonlocal revision
+                revision += 1  # The typed tool acquires its explicit Terminal visit.
+                yield "Your instruction was accepted by Hermes."
+                completed.set()
+
+        orch = VoiceOrchestrator(
+            transport, FakeEngine("JOAT, ask Hermes for two desk organization ideas"),
+            vad=TEST_VAD(), replier=TerminalToolReplier(), wake_words=WAKE,
+            surface_revision=lambda: revision,
+        )
+        await orch._handle_utterance(LOUD)
+        assert completed.is_set()
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
+
+    @pytest.mark.parametrize("settles_before_receipt", [False, True])
+    async def test_model_started_session_keeps_hud_after_tool_receipt(
+        self, settles_before_receipt: bool,
+    ) -> None:
+        transport = FakeTransport()
+        opened, release, settled = (asyncio.Event() for _ in range(3))
+        model_completed = asyncio.Event()
+        hud = HudWriter(transport)
+
+        class StartedBrainstorm(Session):
+            async def run(self) -> None:
+                await hud.show_brainstorm(BrainstormHudView(
+                    state="running", topic="Organize a desk",
+                    collaborators=["codex", "claude"], activity="Collaborators are working",
+                ))
+                opened.set()
+                await release.wait()
+
+            def cancel(self) -> None:
+                release.set()
+
+        sessions = SessionManager(
+            hud, lambda _topic: StartedBrainstorm(),
+            on_state=lambda state: settled.set() if state == "settled" else None,
+        )
+
+        class ToolCallingReplier(ReplyEngine):
+            async def reply(self, _text: str) -> str | None:
+                raise AssertionError("stream owns this test")
+
+            async def stream(self, _text: str):
+                assert sessions.start_brainstorm("Organize a desk") == "started"
+                await opened.wait()
+                if settles_before_receipt:
+                    release.set()
+                    await settled.wait()
+                yield "I've started your Brainstorm."
+                model_completed.set()
+
+        orch = VoiceOrchestrator(
+            transport, FakeEngine("JOAT, have the collaborators consider desk organization"),
+            vad=TEST_VAD(), replier=ToolCallingReplier(), sessions=sessions, wake_words=WAKE,
+        )
+        try:
+            await orch._handle_utterance(LOUD)
+            assert any(isinstance(message, BrainstormHudView) for message in transport.sent)
+            assert not any(isinstance(message, AssistantOverlay) for message in transport.sent), (
+                "The obsolete assistant receipt must not cover the newly owned session, even after it settles"
+            )
+            assert model_completed.is_set(), "a successful tool handoff must finish the assistant turn"
+        finally:
+            release.set()
+            await sessions.close(timeout_s=.1)
+
     async def test_opt_in_latency_observer_is_bounded_content_free_and_ordered(
         self,
     ) -> None:

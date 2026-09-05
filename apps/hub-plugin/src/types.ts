@@ -3,6 +3,9 @@
  * Keep this file in sync with apps/mac/joat/core (the Python mirror).
  */
 
+/** RFC 6455 private-use close code: another authenticated display took over. */
+export const PLUGIN_REPLACED_CLOSE_CODE = 4409;
+
 /** Container IDs — stable across rebuilds so textContainerUpgrade can target them. */
 export const ContainerId = {
   StatusBar: 1,
@@ -161,6 +164,9 @@ export interface BrainstormHudModel {
  * with the connection and tool-policy facts that belong to it and to no
  * other surface. */
 export interface AgentTerminalHudModel {
+  /** Opaque visit and row-selection identity; both are present together. */
+  openingRequestId?: string;
+  openingSelectionId?: string;
   state: BrainstormHudState;
   /** The focused lane, in the roster's "<lane> · <state>" shape. */
   focus: string;
@@ -281,8 +287,53 @@ export type NavigationAction =
   | 'retry'
   | 'cancel';
 
+/** Exact application question; distinct from an ordinary assistant reply. */
+export interface PromptPresentMessage {
+  kind: 'prompt.present';
+  promptId: string;
+  question: string;
+  presentationBinding: string;
+  /** Opaque Mac audio-session identity, not the local MacLink generation. */
+  connectionGeneration: string;
+  source: 'glasses' | 'phone';
+  expiresInMs: number;
+  ownerKind: 'messages' | 'brainstorm' | 'terminal';
+  ownerId: string;
+  field: string;
+}
+
+/** A Messages picker action, bound to the exact local visit and row tap. */
+export interface MessageUIMessage {
+  kind: 'message.ui';
+  requestId: string;
+  selectionId: string;
+  actionId: string;
+  state: 'preparing' | 'awaiting_input' | 'awaiting_confirmation' | 'sending'
+    | 'cancelled' | 'sent' | 'failed' | 'uncertain';
+  text: string;
+}
+
+/** Either side can revoke precisely this question on its original session. */
+export interface PromptCancelMessage {
+  kind: 'prompt.cancel';
+  promptId: string;
+  connectionGeneration: string;
+}
+
+export interface PromptAckMessage {
+  kind: 'prompt.ack';
+  promptId: string;
+  presentationBinding: string;
+  connectionGeneration: string;
+  source: 'glasses' | 'phone';
+  success: boolean;
+  audioEpoch?: string | null;
+}
+
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
+  | PromptAckMessage
+  | PromptCancelMessage
   /** First application frame on every socket. Credentials never belong in a URL. */
   | { kind: 'auth'; token: string | null }
   | {
@@ -291,10 +342,10 @@ export type UplinkMessage =
      * and its own zone is only right by coincidence — see phoneTimeZone. */
     timeZone?: string;
   }
-  | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string }
+  | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string; audioEpoch?: string }
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
-  | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string; mic?: boolean }
+  | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string; mic?: boolean; micSource?: 'glasses' | 'phone'; micPromptId?: string }
   | { kind: 'confirm'; actionId: string; accepted: boolean; challengeId?: string; sessionId?: string; payloadDigest?: string; previewDigest?: string }
   | { kind: 'policy'; resume: ResumePolicy }
   /** Wearer position via bridge.getAppLocation — the sideload-safe API. */
@@ -398,6 +449,9 @@ export type UplinkMessage =
 
 /** Messages sent Mac → plugin. */
 export type DownlinkMessage =
+  | PromptPresentMessage
+  | MessageUIMessage
+  | PromptCancelMessage
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
@@ -429,7 +483,7 @@ export type DownlinkMessage =
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */
   | { kind: 'imu.trace'; enabled: boolean }
-  | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages' }
+  | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages'; messageUIActionId?: string }
   | { kind: 'policy.set'; resume: ResumePolicy }
   /** Explicit-window pairing: issued only after an auth frame with a null token. */
   | { kind: 'pairing.set'; token: string }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { EventSourceType, OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
+import { AudioInputSource, EventSourceType, OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { EventRouter, type LifecycleHandler } from './EventRouter';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
@@ -23,6 +23,7 @@ function make(
   // Refreshable implies expanded, never the reverse: the pomodoro page is
   // expanded but excluded from the carve-out, so it keeps the mic.
   panelRefreshable = panelExpanded,
+  promptedInput?: { isActive(): boolean; cancel(reason?: string): void },
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -100,6 +101,7 @@ function make(
   const link = {
     send: (message: UplinkMessage) => sent.push(message),
     connect: vi.fn(),
+    wasReplaced: false,
   };
   const client = {
     track: (u: () => void) => u,
@@ -124,6 +126,7 @@ function make(
     brainstorm,
     assistantOverlay,
     transcriptScroll,
+    promptedInput,
   ).attach();
   return {
     fire: (e: unknown) => dispatch(e as EvenHubEvent),
@@ -140,6 +143,22 @@ function make(
     shutDownPageContainer,
   };
 }
+
+it('a replaced document ignores gestures and PCM while retaining host lifecycle recovery', () => {
+  const r = make();
+  r.link.wasReplaced = true;
+  r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+  r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+  r.fire({ menuItemClickEvent: { itemID: 2 } });
+  r.fire({ audioEvent: { audioPcm: [1, 2] } });
+  r.fire({ textEvent: { eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
+  expect(r.audio.start).not.toHaveBeenCalled();
+  expect(r.audio.stop).not.toHaveBeenCalled();
+  expect(r.audio.ingest).not.toHaveBeenCalled();
+  expect(r.sent).toEqual([]);
+  r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
+  expect(r.lifecycle.onForegroundEnter).toHaveBeenCalledOnce();
+});
 
 /**
  * The protobuf transport omits zero-valued fields, so a single press arrives
@@ -166,7 +185,23 @@ describe('EventRouter — audio and IMU', () => {
   it('audio frames go to the streamer', () => {
     const { fire, audio } = make();
     fire({ audioEvent: { audioPcm: [1, 2, 3] } });
-    expect(audio.ingest).toHaveBeenCalledWith([1, 2, 3], undefined);
+    expect(audio.ingest).toHaveBeenCalledWith([1, 2, 3], undefined, undefined);
+  });
+
+  it.each([AudioInputSource.Glasses, AudioInputSource.Phone])(
+    'forwards the SDK actual %s audio source alongside speaker attribution', (source) => {
+      const { fire, audio } = make();
+      fire({ audioEvent: { audioPcm: [2, 1], speakerRole: 'other', source } });
+
+      expect(audio.ingest).toHaveBeenCalledExactlyOnceWith([2, 1], 'other', source);
+    },
+  );
+
+  it('does not replace an unknown SDK audio source with the requested microphone', () => {
+    const { fire, audio } = make();
+    fire({ audioEvent: { audioPcm: [2, 1], speakerRole: 'self', source: 'future-microphone' } });
+
+    expect(audio.ingest).toHaveBeenCalledExactlyOnceWith([2, 1], 'self', 'future-microphone');
   });
 
   it('IMU reports go to the monitor and are not relayed', () => {
@@ -940,6 +975,13 @@ describe('EventRouter — production Messages menu composition', () => {
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
     } } as EvenHubEvent);
     await vi.waitFor(() => expect(hud.showList).toHaveBeenCalledTimes(4));
+    // The list call starts before its restored highlight has finished.
+    // A second deliberate Back belongs after the visible picker is ready.
+    const selection = sent[1] as Extract<UplinkMessage, { kind: 'input' }>;
+    await vi.waitFor(() => expect(sent[2]).toEqual({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId: request.event.requestId, traceId: selection.event.traceId },
+    }));
     dispatch({ sysEvent: {
       eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
@@ -950,6 +992,8 @@ describe('EventRouter — production Messages menu composition', () => {
       event: {
         containerName: 'capability-lifecycle',
         selectedName: 'messages-list',
+        requestId: request.event.requestId,
+        traceId: selection.event.traceId,
       },
     });
     expect(sent[3]).toEqual({
@@ -957,7 +1001,76 @@ describe('EventRouter — production Messages menu composition', () => {
       event: {
         containerName: 'capability-lifecycle',
         selectedName: 'messages-home',
+        requestId: request.event.requestId,
+        traceId: selection.event.traceId,
       },
     });
+  });
+});
+
+
+describe('EventRouter prompt ownership', () => {
+  function question() {
+    const owner = { isActive: vi.fn(() => true), cancel: vi.fn() };
+    return { owner, ...make(false, undefined, true, true, true, true, false, true, true, true, owner) };
+  }
+
+  it('Back cancels the question before touching its retained feature or overlay', () => {
+    const f = question();
+    f.fire({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } });
+    expect(f.owner.cancel).toHaveBeenCalledOnce();
+    expect(f.assistantOverlay.dismissAssistantOverlay).not.toHaveBeenCalled();
+    expect(f.navigation.handleCancel).not.toHaveBeenCalled();
+    expect(f.brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(f.menu.toggle).not.toHaveBeenCalled();
+    expect(f.sent).toEqual([]);
+  });
+
+  it.each([
+    click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R),
+    { textEvent: { eventType: OsEventTypeList.SCROLL_TOP_EVENT } },
+    { textEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } },
+    { textEvent: {} },
+    { listEvent: { currentSelectItemIndex: 1 } },
+  ])('consumes ordinary input without operating a hidden feature: %j', (event) => {
+    const f = question();
+    f.fire(event);
+    expect(f.owner.cancel).not.toHaveBeenCalled();
+    expect(f.assistantOverlay.dismissAssistantOverlay).not.toHaveBeenCalled();
+    expect(f.menu.handleList).not.toHaveBeenCalled();
+    expect(f.navigation.handleClick).not.toHaveBeenCalled();
+    expect(f.navigation.handleScroll).not.toHaveBeenCalled();
+    expect(f.brainstorm.handleClick).not.toHaveBeenCalled();
+    expect(f.sent).toEqual([]);
+  });
+
+  it('keeps hold-to-mute instead of refreshing the hidden News page', () => {
+    const f = question();
+    f.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    f.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    expect(f.audio.stop).toHaveBeenCalledOnce();
+    expect(f.menu.refreshPanel).not.toHaveBeenCalled();
+  });
+
+  it('releases the question before a contextual-menu feature action', () => {
+    const f = question();
+    f.fire({ menuItemClickEvent: { itemID: CAPABILITY_MENU_ID_BASE } });
+    expect(f.owner.cancel).toHaveBeenCalledOnce();
+    expect(f.owner.cancel.mock.invocationCallOrder[0]).toBeLessThan(
+      f.menu.openFromContextualMenu.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('preserves confirmation priority and lifecycle delivery', () => {
+    const f = question();
+    f.imu.isPending.mockReturnValue(true);
+    f.fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+    expect(f.imu.confirmByTap).toHaveBeenCalledOnce();
+    expect(f.owner.cancel).not.toHaveBeenCalled();
+    f.fire({ sysEvent: { eventType: OsEventTypeList.SYSTEM_EXIT_EVENT } });
+    expect(f.lifecycle.onExit).toHaveBeenCalledWith('system');
   });
 });

@@ -16,6 +16,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import secrets
 import struct
 import time
@@ -48,6 +49,7 @@ from ..core.confirmation import ConfirmationResult
 from ..core.pairing import PairingStore
 from ..core.protocol import (
     Audio,
+    AudioSource,
     Auth,
     AuthAccepted,
     BrainstormAction,
@@ -74,10 +76,14 @@ from ..core.protocol import (
     PairingSet,
     Policy,
     ProtocolError,
+    PromptAck,
+    PromptCancel,
+    PromptPresent,
     ProductivityHudView,
     ProductivityViewAck,
     ReminderDueAck,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
+    PLUGIN_REPLACED_CLOSE_CODE,
     parse_uplink,
     utf16_units,
 )
@@ -130,6 +136,16 @@ class _PendingReminderDueAck:
     session_id: str
     generation: int
     attempt_id: str
+
+
+@dataclass(slots=True)
+class _PendingPrompt:
+    request: PromptPresent
+    future: asyncio.Future[bool]
+    on_presented: Callable[[PromptAck], bool]
+    on_revoked: Callable[[], None] | None
+    acknowledgment_deadline: float
+    expiry: asyncio.TimerHandle | None = None
 
 
 class HubGatewayTransport(GlassesTransport, AudioFrameSource):
@@ -194,6 +210,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._reminder_due_ack_last_attempt_at_s: float | None = None
         self._reminder_due_ack_inflight_generation: int | None = None
         self._session_id: str | None = None
+        self._prompt_audio_source: AudioSource = "glasses"
+        self._prompt: _PendingPrompt | None = None
         self._connection_generation = 0
         self._session_pairing_identity_digest: bytes | None = None
         # Unlike ordinary JOAT, a field-acceptance receipt must not allow a
@@ -243,6 +261,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         log.info("hub gateway listening on ws://%s:%d", self._host, self._port)
 
     async def stop(self) -> None:
+        self._prompt_audio_source = "glasses"
+        self._retire_prompt()
         if self._conn is not None:
             if self._session_id is not None:
                 self._invalidate_confirms(self._session_id)
@@ -265,6 +285,16 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     @property
     def connected(self) -> bool:
         return self._conn is not None
+
+    @property
+    def audio_connection_generation(self) -> str | None:
+        """The admitted socket identity also carried by every AudioFrame."""
+        return self._session_id if self._conn is not None else None
+
+    @property
+    def prompt_audio_source(self) -> AudioSource:
+        """This connection's selected mic, never evidence of a PCM frame's source."""
+        return self._prompt_audio_source
 
     @property
     def physical_g2_connected(self) -> bool:
@@ -426,6 +456,129 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             # fail-closed rather than explode inside the safety gate.
             log.info("dropping %s — plugin disconnected mid-send",
                      type(message).__name__)
+
+    async def request_prompt(
+        self,
+        request: PromptPresent,
+        *,
+        on_presented: Callable[[PromptAck], bool],
+        on_revoked: Callable[[], None] | None = None,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        """Present one question and activate its owner inside ack dispatch.
+
+        The callback must synchronously establish the host ingress fence and
+        arm its typed owner. Resolving a future alone would race following
+        audio. A successful receipt remains owned until cancellation/expiry.
+        """
+        wire = request.to_wire()
+        if (
+            isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s) or timeout_s <= 0
+            or not callable(on_presented)
+            or (on_revoked is not None and not callable(on_revoked))
+        ):
+            raise ValueError("invalid prompt publication callback or timeout")
+        conn = self._conn
+        if conn is None or request.connection_generation != self._session_id:
+            return False
+        previous = self._prompt
+        if previous is not None and previous.request.prompt_id == request.prompt_id:
+            # A duplicate may not extend either publication or answer time.
+            return False
+        self._retire_prompt()
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        lifetime = request.expires_in_ms / 1_000
+        deadline = now + min(timeout_s, lifetime)
+        pending = _PendingPrompt(
+            request=request, future=loop.create_future(),
+            on_presented=on_presented, on_revoked=on_revoked,
+            acknowledgment_deadline=deadline,
+        )
+        self._prompt = pending
+        pending.expiry = loop.call_later(lifetime, self._retire_prompt, pending)
+        succeeded = False
+        try:
+            async with asyncio.timeout_at(deadline):
+                await conn.send(json.dumps(wire))
+                if self._conn is not conn or self._session_id != request.connection_generation:
+                    return False
+                succeeded = await asyncio.shield(pending.future)
+                return succeeded
+        except (TimeoutError, websockets.ConnectionClosed):
+            return False
+        finally:
+            if not succeeded:
+                self._retire_prompt(pending)
+                # State is already invalid. A bounded best-effort notification
+                # removes a displayed question whose publication timed out.
+                await self._send_prompt_cancel(pending)
+
+    async def cancel_prompt(self, prompt_id: str | None = None) -> bool:
+        pending = self._prompt
+        if pending is None or (prompt_id is not None and pending.request.prompt_id != prompt_id):
+            return False
+        self._retire_prompt(pending)
+        await self._send_prompt_cancel(pending)
+        return True
+
+    def _retire_prompt(self, pending: _PendingPrompt | None = None) -> None:
+        current = self._prompt
+        if current is None or (pending is not None and current is not pending):
+            return
+        self._prompt = None
+        if current.expiry is not None:
+            current.expiry.cancel()
+        if not current.future.done():
+            current.future.set_result(False)
+        if current.on_revoked is not None:
+            try:
+                current.on_revoked()
+            except Exception as exc:
+                log.warning("prompt revocation callback failed error=%s", type(exc).__name__)
+
+    async def _send_prompt_cancel(self, pending: _PendingPrompt) -> None:
+        conn = self._conn
+        request = pending.request
+        if conn is None or request.connection_generation != self._session_id:
+            return
+        try:
+            async with asyncio.timeout(0.25):
+                await conn.send(json.dumps(PromptCancel(
+                    request.prompt_id, request.connection_generation,
+                ).to_wire()))
+        except (TimeoutError, websockets.ConnectionClosed):
+            pass
+
+    def _accept_prompt_ack(self, message: PromptAck, session_id: str) -> None:
+        pending = self._prompt
+        if pending is None or pending.future.done():
+            return
+        request = pending.request
+        if (
+            session_id != message.connection_generation
+            or request.connection_generation != session_id
+            or request.prompt_id != message.prompt_id
+            or request.presentation_binding != message.presentation_binding
+            or request.source != message.source
+        ):
+            return
+        if not message.success or asyncio.get_running_loop().time() >= pending.acknowledgment_deadline:
+            self._retire_prompt(pending)
+            return
+        try:
+            accepted = pending.on_presented(message) is True
+        except Exception as exc:
+            log.warning("prompt activation callback failed error=%s", type(exc).__name__)
+            accepted = False
+        # The callback may revoke or replace its own publication. That wins.
+        if self._prompt is not pending:
+            return
+        if not accepted:
+            self._retire_prompt(pending)
+            return
+        pending.future.set_result(True)
 
     async def request_reminder_due_ack(
         self,
@@ -623,6 +776,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         *,
         payload_digest: str | None = None,
         diagnostic_kind: Literal["messages"] | None = None,
+        message_ui_action_id: str | None = None,
     ) -> ConfirmationResult | None:
         """Return durable evidence only for an explicit bound HUD decision."""
 
@@ -686,6 +840,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 preview_digest=preview_digest,
                 expires_at_ms=int(expires_at_s * 1000),
                 diagnostic_kind=diagnostic_kind,
+                message_ui_action_id=message_ui_action_id,
             ).to_wire()))
             if self._conn is not conn or self._session_id != session_id:
                 return None
@@ -926,15 +1081,20 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         if pairing_identity_digest is None:
             return
         session_id = secrets.token_urlsafe(18)
-        if self._conn is not None:
+        previous = self._conn
+        if previous is not None:
             log.info("replacing existing plugin connection")
+            self._retire_prompt()
             if self._session_id is not None:
                 self._invalidate_confirms(self._session_id)
                 self._clear_location(self._session_id)
                 self._clear_reminder_due_acks(self._session_id)
-            await self._conn.close()
+        # Publish the authenticated owner without yielding. Another arrival
+        # must replace this connection, not race us to close the same old one.
+        # The previous handler's finally block can no longer clear our state.
         self._conn = conn
         self._session_id = session_id
+        self._prompt_audio_source = "glasses"
         self._connection_generation += 1
         self._reminder_due_ack_unavailable_generation = None
         self._reminder_due_ack_reprobe_at_s = None
@@ -951,21 +1111,36 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._lockout_warned = False
         log.info("plugin connected")
         try:
+            if previous is not None:
+                await previous.close(
+                    code=PLUGIN_REPLACED_CLOSE_CODE,
+                    reason="plugin connection replaced",
+                )
+            # Closing can yield long enough for a newer authenticated arrival.
+            # Never resume this superseded handler's startup or receive loop.
+            if self._conn is not conn:
+                return
             if initial_raw is not None:
                 self._dispatch(initial_raw, session_id)
             if self._g2_diagnostics is not None:
                 await conn.send(json.dumps(G2DiagnosticControl(enabled=True).to_wire()))
+            if self._conn is not conn:
+                return
             if self._location_probe:
                 await conn.send(json.dumps(LocationProbeControl(enabled=True).to_wire()))
+            if self._conn is not conn:
+                return
             async for raw in conn:
                 self._dispatch(raw, session_id)
         except websockets.ConnectionClosed:
             pass
         finally:
             if self._conn is conn:
+                self._retire_prompt()
                 self._invalidate_confirms(session_id)
                 self._conn = None
                 self._session_id = None
+                self._prompt_audio_source = "glasses"
                 self._session_pairing_identity_digest = None
                 self._current_peer_is_loopback = False
                 self.hello = None
@@ -1002,6 +1177,16 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     hello_cb(message)
             case Audio():
                 self._handle_audio(message, session_id)
+            case PromptAck():
+                self._accept_prompt_ack(message, session_id)
+            case PromptCancel():
+                pending_prompt = self._prompt
+                if (
+                    pending_prompt is not None
+                    and message.connection_generation == session_id == pending_prompt.request.connection_generation
+                    and message.prompt_id == pending_prompt.request.prompt_id
+                ):
+                    self._retire_prompt(pending_prompt)
             case Imu():
                 for imu_cb in self._imu_cbs:
                     imu_cb(message)
@@ -1017,6 +1202,15 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     input_cb(message.event)
             case Device():
                 self.device = message
+                if message.mic_source is not None:
+                    self._prompt_audio_source = message.mic_source
+                if message.wearing is False or (message.mic is False and message.mic_prompt_id is None):
+                    self._retire_prompt()
+                elif (
+                    message.mic is False and self._prompt is not None
+                    and self._prompt.request.prompt_id == message.mic_prompt_id
+                ):
+                    self._retire_prompt(self._prompt)
                 for device_cb in self._device_cbs:
                     device_cb(message)
             case Confirm():
@@ -1162,6 +1356,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             source=message.source,
             speaker=message.speaker,
             received_at_us=time.time_ns() // 1_000,
+            audio_epoch=message.audio_epoch,
         )
         # Capture subscribers run first. A durable note can therefore journal
         # the received frame before the conversational lane starts VAD/STT.

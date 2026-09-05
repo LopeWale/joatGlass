@@ -1,0 +1,81 @@
+{
+  "version": "before",
+  "mode": "replaced",
+  "finishedMs": 2202,
+  "events": [
+    {
+      "state": "connecting",
+      "ms": 0
+    },
+    {
+      "state": "connected",
+      "ms": 3
+    },
+    {
+      "state": "reconnecting",
+      "ms": 305
+    },
+    {
+      "state": "reconnecting",
+      "ms": 883
+    },
+    {
+      "state": "connected",
+      "ms": 886
+    },
+    {
+      "state": "reconnecting",
+      "ms": 1187
+    },
+    {
+      "state": "reconnecting",
+      "ms": 1781
+    },
+    {
+      "state": "connected",
+      "ms": 1784
+    },
+    {
+      "state": "reconnecting",
+      "ms": 2086
+    }
+  ],
+  "server_events": [
+    {
+      "path": "/before-replaced",
+      "connection": 1,
+      "event": "open",
+      "time": 1788598795.054304
+    },
+    {
+      "path": "/before-replaced",
+      "connection": 1,
+      "event": "closed",
+      "time": 1788598795.355546
+    },
+    {
+      "path": "/before-replaced",
+      "connection": 2,
+      "event": "open",
+      "time": 1788598795.93728
+    },
+    {
+      "path": "/before-replaced",
+      "connection": 2,
+      "event": "closed",
+      "time": 1788598796.238442
+    },
+    {
+      "path": "/before-replaced",
+      "connection": 3,
+      "event": "open",
+      "time": 1788598796.8355799
+    },
+    {
+      "path": "/before-replaced",
+      "connection": 3,
+      "event": "closed",
+      "time": 1788598797.136895
+    }
+  ]
+}

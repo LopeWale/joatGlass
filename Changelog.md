@@ -1,6 +1,230 @@
 # Changelog
 
+## 2026-09-05
+
+- Repaired authenticated display handoff: replaced clients yield instead of
+  redialing, retired painters/input cannot operate the successor, and explicit
+  foreground restoration reconnects once. Concurrent server admissions now
+  retain the newest owner. In the isolated official
+  simulator: 2 unsolicited redials became 0 over 2.2 seconds; duplicate restoration
+  produced one takeover. Mac repair loaded in supervised engine 4704. Hub 0.1.77 is built in the canonical
+  `apps/hub-plugin/joat.ehpk`, with matching source/package hashes; physical migration and the broader feature goal remain open.
+  This is a source checkpoint with inspected transport-harness evidence, not
+  acceptance of the glasses UI or completion of the 34 audited findings.
+
+- Built requested Hub 0.1.75 at `apps/hub-plugin/joat.ehpk`: 984 Hub tests,
+  eight release checks, typing and official SDK-pinned packaging passed.
+  During live use, the task's simulator and the other G2 connection replaced
+  each other 76 times in one minute. Stopping the simulator ended the loop;
+  the other G2 reconnected and stayed connected through the next four-minute
+  observation. An explicit replacement/yield protocol is under verification.
+  The package predates that correction. No upload was performed by this task.
+
+- Corrected Hermes run-outcome classification in source: valid failed or
+  cancelled runs preserve their proven connection rather than becoming a
+  protocol rejection. All 125 Terminal/runtime tests and typing pass, with
+  23 failing-before regressions corrected. The actual remote run cause and
+  completed answer remain unresolved. Evidence: `LIVE_CONNECTION_AND_REPLY_REPAIR.md`.
+
+- Added conversational Terminal instruction admission with an explicit lane,
+  exact text, captured adapter context and cancellation-safe retry identity.
+  Existing queued work and approvals are preserved. The new entry binds its
+  display before preparation, retains timeout recovery and drops queued
+  openings after Home. Assistant overlays yield after a view handoff.
+  Parent-run checks passed: 377 Mac cases, one additional HTTP MCP contract,
+  214 Hub ownership cases, Python typing and TypeScript. Broader checks and
+  the actual assistant-to-Hermes request are pending.
+  Also removed the reproduced Overview paint before every Brainstorm frame;
+  the initial test showed two unwanted home paints for two live updates.
+  Actual after-transfer measurements remain pending. Evidence:
+  `docs/audits/2026-09-04-feature-audit/LIVE_CONNECTION_AND_REPLY_REPAIR.md`.
+
+- Connected conversational Brainstorm topics to the existing session controller
+  through a typed MCP tool, with exact-topic preservation, active-session
+  protection and bounded retry deduplication. Assistant receipts now yield the
+  HUD after their tool starts a session. The missing adapter and two overlay
+  regressions were reproduced before repair; 290 related tests, 149 final
+  feature/orchestrator/MCP checks, ten admission/revision checks and typing pass.
+  The final broader gate passed 422 tests and typing on 108 modules. The signed
+  app's actual assistant invoked the tool, both real collaborators responded,
+  and the session settled in 26.077 s (HTTP response 4.901 s). The later simulator
+  frame was blank, so automatic display acceptance failed. Separately retained
+  a 93.382-second simulator stall before
+  JavaScript ingress; a webview snapshot woke it without input. No renderer
+  workaround or hardware-latency claim was made. Evidence and official sources:
+  `docs/audits/2026-09-04-feature-audit/LIVE_CONNECTION_AND_REPLY_REPAIR.md`.
+
+- Fixed a live Hermes false blocker: OpenClaw's `browser-filtered-by-profile`
+  notice describes an excluded tool, but JOAT rejected it as unsettled inventory.
+  Only documented, well-formed browser exclusion notices may now accompany an
+  otherwise valid empty inventory; enabled tools and discovery/unknown notices
+  still reject. The actual signed app now reports connected_operator/ready,
+  and the official simulator lists Hermes and opens its READY terminal.
+  Seven new failing cases now pass; 287 related Terminal tests and typing on
+  108 modules pass. A complete spoken turn and Work's separate scope grant
+  remain unverified/unresolved. Official source and live receipt are linked in
+  `LIVE_CONNECTION_AND_REPLY_REPAIR.md`.
+- Fixed MacLink retry ownership: manual reconnect cancels an obsolete retry,
+  and application timeouts retire the socket without waiting for browser close.
+  Six reproduced regressions now pass; 974 Hub cases and build pass. Official
+  simulator WebKit fault tests retain the successful manual connection (two
+  sockets rather than three) and recover the timed-out auth peer in 4.747 s.
+  A separate real-runtime startup/reconnect delay remains unexplained.
+
+- Recovered attributed Messages bodies in notifications, assistant/conversation
+  previews and history with bounded data-only decoding. Real 500-row sample:
+  14 archived strings decoded through both readers, all marker-only. A wider
+  200-archive sample also contained no readable prose; live readable-text
+  recovery is therefore unproven. Public text fixtures cover that capability.
+  Marker-only output now uses Attachment or Message text unavailable. 305
+  combined Messages tests pass; the pinned dependency is installed and
+  the actual supervised engine restarted. Personal text was not retained.
+
+- Fixed prompted microphone entry from mute for Brainstorm, Messages and
+  Terminal, with per-question microphone ownership and selected-source reporting.
+  The Mac freezes each prompt's source; automatic mic stops revoke only their
+  owning prompt. Manual mute and glasses removal remain global. 968 Hub tests,
+  342 Mac prompt/transport tests, typing and Hub build pass. On the actual Mac
+  engine and official simulator, Brainstorm's muted tap now opens the question
+  and microphone; manual cancellation restores MIC OFF. Full spoken response
+  and physical-G2 acceptance remain open.
+
+- Completed existing-chat reply targeting through the native Messages chat
+  identifier, including groups, while preserving contact-based composition.
+  In the real Mac engine and official simulator, a selected group reached
+  reply confirmation and was cancelled without sending. Native chat resolution
+  timed out; actual submission and delivery remain unverified.
+- Reproduced Work's actual `AUTH_SCOPE_MISMATCH`, separate from historical
+  DNS/refusal failures and Hermes inventory attestation. Added private-content-free
+  connection diagnostics, truthful approval guidance, unchanged-token grant
+  preservation and native Work-scope validation. The remote grant remains
+  unresolved. Five native credential tests and the signed universal build/install
+  passed; the real app was restarted from `/Applications/JOAT.app`. Focused
+  Python checks, typing, renderer checks and Hub build pass.
+  Sources and real-data evidence:
+  `docs/audits/2026-09-04-feature-audit/LIVE_CONNECTION_AND_REPLY_REPAIR.md`.
+
 ## 2026-09-04
+
+- Added Terminal capture ownership after 23 reproduced stale/wrong-input
+  failures. All 121 Terminal unit cases and typing now pass; the real tap
+  and shared prompt runtime integration remain in progress. Captured work
+  retains its local adapter generation through queued and delayed dispatch.
+  Adapter review reproduced four additional shutdown/generator cleanup
+  failures; those and the earlier context failures now pass in 34 adapter
+  tests. Local generation does not establish remote session-reset safety.
+  Evidence: `docs/audits/2026-09-04-feature-audit/TERMINAL_CAPTURE_REPAIR.md`.
+
+- Rejected the first prompted-speech simulator run: it stopped before the
+  second synthetic answer and exposed an oversized sans-serif question.
+  Question rendering now uses the existing 14px JOAT monospace face; a
+  reproduced font regression, all 100 renderer tests and the Hub build pass.
+  Fresh visual acceptance remains pending. Retained the failed screenshots
+  and added replay-stage diagnostics without changing production speech
+  admission in response to an unproven fixture stall.
+
+- Repaired exact Message/News/Note text paging and the clipped Messages Back
+  footer while retaining the existing compact JOAT banner. The corrected
+  simulator entry retry delivered all 980 Message and 974 Note characters
+  across three honest pages, with matching source/wire/presenter hashes.
+  Root and independent review inspected all seven images: full Back labels,
+  visible final markers, bounded rows and correct parent selections pass.
+  News/source checks are reused from the prior frozen gate. Emoji glyph
+  fidelity remains unresolved; Search has test coverage without its own
+  visual journey. Evidence: `docs/audits/2026-09-04-feature-audit/READER_ENTRY_VISUAL_RECEIPT.md`.
+
+- Removed Codex's process-EOF wait for completed answers. The final JSONL turn
+  now reaches the HUD while the owned child drains and exits; late failures
+  invalidate resume context without repeating already delivered tool work.
+  Ten reproduced failures are repaired, all 27 CLI tests and mypy pass, and a
+  controlled completion-to-HUD measurement is 0.171 ms before EOF release.
+  This is host buffering proof, not model or physical-glasses latency.
+  Evidence: `docs/audits/2026-09-04-feature-audit/CODEX_EOF_LATENCY_REPAIR.md`.
+
+- Connected Message tools and Brainstorm topic capture to one production
+  prompted-speech runtime, preserving exact owner/connection/audio-epoch
+  matching and cleanup on Home, microphone-off, reconnect and shutdown.
+  Retirement reasons prevent cleanup from erasing an admitted Brainstorm
+  topic before consumption. Twenty runtime failures and six retirement
+  regressions drove the implementation; all 26 runtime and 141 supporting
+  cases pass, with strict typing. Fresh simulator prompt-flow acceptance
+  remains pending. Terminal and legacy Messages UI capture remain separate
+  unfinished adapters; no real send or physical-G2 speech claim is made.
+
+- The combined prompt/recording/CLI gate passes 1,156 tests in 90.09 seconds
+  and mypy on 104 source files with unchanged source hashes. A first run hit
+  the runner's 60-second aggregate limit; its isolated next test passed, and
+  the same source completed under a corrected bounded deadline. Starting a
+  QuickNote also now revokes the previous question synchronously, preventing
+  an old completed transcript from answering it after recording ends.
+
+- Restored the existing compact JOAT canvas banner and News/Search typography
+  after the wearer rejected the native-font migration. Fresh current-source
+  simulator captures show ten complete News rows and the same 861-character
+  Note over two pages instead of three; occupied first-page text width grew
+  from 393px to 488px. Root and independent review inspected all 13 captures.
+  The gate passed 397 Python/868 Hub tests, typing and build, but visual
+  acceptance remains partial: Messages footer truncation was observed and is
+  being repaired with exact long-text readers. No physical-G2 or latency
+  improvement is claimed. Evidence: `docs/audits/2026-09-04-feature-audit/COMPACT_UI_VISUAL_RECEIPT.md`.
+
+- Visually reviewed all 34 matched repair captures. Saved-note reading grew
+  from 64/861 to exact 861/861 characters across three pages; Messages paging
+  and Back/reopen now work; QuickNotes Back followed by Save no longer
+  discards. Native News succeeded in both runs, demonstrating no causal gain,
+  and visual review exposed a Back highlight/target mismatch that internal
+  state checks missed. Its new failing regressions drove an awaited visual
+  selection restoration. Fresh simulator review now confirms Story 02 stays
+  visibly selected after Back and the next tap reopens it. The combined
+  candidate passed 506 Python and 728 Hub tests, strict typing and build.
+  The specific before/after receipt is `docs/audits/2026-09-04-feature-audit/NEWS_SELECTION_RECEIPT.md`.
+  Full evidence and limitations: `docs/audits/2026-09-04-feature-audit/WAVE2_VISUAL_REVIEW.md`.
+
+- Implemented scoped prompted-speech admission, exact typed message input,
+  fresh-question recovery after invalid answers, and a VAD fence that preserves
+  completed STT while rejecting speech already underway. The tool-to-PCM host
+  journey reaches exact message review; 209 combined tests passed. Independent
+  review reproduced and repaired queued-answer and awaited-send races that
+  could cover a newer question. Live wiring still requires microphone-source,
+  audio-epoch and exact presenter acknowledgment contracts; these host fixtures
+  do not establish physical-glasses input or speech recognition quality.
+  Design, official source boundaries and red/green logs are linked from
+  `docs/audits/2026-09-04-feature-audit/PROMPTED_SPEECH_PLAN.md`.
+
+- Added conversational feature and message-preparation tools to the shared
+  assistant registry, exact QuickNote/transcript paging, and controller-owned
+  message confirmation/status. Focused checks verify real SQLite note saves,
+  timer changes, authenticated MCP calls, pending-action cancellation and
+  reader state. Review caught and repaired swallowed conversation and missed
+  Home/disconnect cancellation. Official contracts and retained regressions
+  are linked in the feature remediation report. Sender execution now has a
+  bounded lifetime and preserves exact body text; 26 lifecycle cases pass.
+  The combined gate passed 315 Python and 720 Hub tests plus strict typing;
+  a test-only TypeScript error was corrected and the build passes. Simulator comparisons,
+  scoped prompted speech and the remaining audit findings are still open.
+
+- Started repairs against the feature audit with failing regressions first:
+  read-only live-WAL Messages access, QuickNotes discard cancellation on Back,
+  Messages paging/reselection and late-read ownership, and native News list
+  failure recovery through the existing visual renderer. Source-linked
+  before/after controller and simulator evidence is tracked in
+  `docs/audits/2026-09-04-feature-audit/REMEDIATION.md`; current-candidate final
+  verification is pending, with no physical-G2 or deployment claim.
+  The first combined run passed 80 Python tests, 713 Hub tests and strict
+  mypy; its test-only TypeScript compatibility failure was corrected.
+  Additional Messages Back highlight repair passed its failing regression
+  and all 84 menu tests. Simulator acceptance remains pending.
+
+- Added a read-only feature audit in `docs/audits/2026-09-04-feature-audit/`.
+  Separate source reviews cover conversational actions/latency, Brainstorm,
+  Agent Terminal, Messages, QuickNotes, Overview, News, Timer and navigation.
+  The audit distinguishes implemented paths from incomplete interactions,
+  reproduces live-WAL reading and QuickNotes/Messages state failures with
+  synthetic data. Typecheck, 709 plugin tests and 303 focused Python tests pass;
+  all 26 corrected simulator captures were inspected. A separate diagnostic
+  reproduces native News list rejection and return to Overview. The report
+  records 34 bounded findings; no product fix, real send, package upload or
+  physical-G2 acceptance is claimed.
 
 - Packaged the Hub plugin's startup and reply-path recovery as `0.1.74`, the
   first package to carry it. The bounded native spine-label write no longer
@@ -1064,3 +1288,68 @@
 - Verification: `42 passed` in `tests/integration/test_hub_gateway.py`, `15
   passed` in `tests/unit/test_pairing.py`, and strict mypy completed with no
   issues across 39 source files.
+
+### September 4: prompted input transport and visual acceptance correction
+
+- Added exact question presentation, source/epoch-preserving audio, and
+  generation-bound prompt traffic. The Hub stages cancellation at wire ingress
+  while retaining ordinary downlink order; Back and mute cannot operate the
+  feature hidden behind a question.
+- Connected the production HUD publisher to the authenticated gateway and
+  synchronous owner activation. A real WebSocket fixture now completes two
+  spoken message fields without a wake phrase, preserving literal command-like
+  body text and refusing the synthetic send. Retirement clears the exact lease
+  before consumption and preserves any successor.
+- Root checked 533 host tests and 149 Hub controller/gesture tests. Full-current
+  build/simulator gates remain pending. Component checks do not prove physical
+  microphone recognition or optical delivery, or assistant latency improvement.
+- The wearer's screenshot review rejected cross-feature typography: native
+  News text differs sharply from raster Messages text, with a clipped footer.
+  Earlier selection receipts are now explicitly limited to interaction
+  correctness. Root owns the visual integration repair; the typography agent
+  is comparing native and raster options against the supplied screens and
+  official Even constraints before editing.
+
+
+### September 4: compact HUD correction after wearer review (verification pending)
+
+- The source history identifies mixed rendering generations: September 2's native status label and September 3's native News/Search lists replaced parts of the authored compact JOAT UI. Earlier interaction receipts did not establish design fidelity.
+- Restored the existing canvas font for the banner at 10px, with one separate mic indicator; removed the production native banner overlay. News/Search are being returned to the same custom surface through selection and Back.
+- Expanded the shared reader bounds from x36..540 to x14..562. Exact QuickNote rows now use 62 conservative columns instead of 52, preserving UTF-16 limits, CRLF, Unicode and full source reconstruction.
+- Root observed four failing banner/layout regressions before repair and 135 passing renderer/builder tests afterward; seven width regressions failed before repair and ten focused Note tests pass afterward. New actual-simulator images and their review remain required before visual acceptance.
+- Brainstorm's separate scoped capture now passes all 18 new cases. The attempted full session suite was interrupted after 118 passes at 51.82s; the full gate will rerun it with a bounded job timeout. This is not a failing Brainstorm test or a completed full-suite receipt.
+
+- Fresh adversarial review found that applying the 14px reader edge to News/Search articles would overlap the 14px tab icons at x12. Two reproduced regressions now reserve x36 for rail-bearing readers, while Notes/Messages retain x14 and all readers can use the right edge at x562.
+
+- JOAT audit follow-up: the frozen Terminal capture/composition candidate passed 1,444 Python tests, 877 Hub tests, mypy (104 files), and the Hub build. First-use Terminal opening remains a separate repair: preparation tests reproduced false readiness, while Mac/Hub tests reproduced late opening frames after navigation. Work is underway on selected-lane initialization, truthful connecting/retry state, and visit/selection ownership through image painting. Simulator speech-flow acceptance remains failed/pending; details and source citations are in `docs/audits/2026-09-04-feature-audit/TERMINAL_CAPTURE_REPAIR.md`.
+- Terminal first-use repair now passes 600 focused Python tests, all-source mypy (105 files), 206 focused Hub tests and build. Opening initializes the selected lane before capture; visit/selection guards reject late paints; retry/cycle retain their original selection; explicit voice entry remains available with a navigation-owned view. The broad gate and fresh simulator verification remain pending, and unbound frames/actions already in transit retain their documented limits.
+
+### Messages UI typed speech and outcome repair (in progress)
+
+New Message and selected-conversation Reply now enter the typed acknowledged speech owner; dictated bodies retain exact text. Added visit/action-bound Messages receipts, narrow unaddressed Reply admission using captured glasses provenance, cancellation before queued work, and observer isolation. Three bounded agent assignments cover controller, Hub display and speech entry, with root-owned execution. Initial behavioral failures and intermediate focused results are retained in `docs/audits/2026-09-04-feature-audit/MESSAGES_UI_REPAIR.md`. Final regression and simulator acceptance remain pending. No real message sends or package changes.
+
+- Messages focused verification: 57 host cases and 359 Hub cases pass; Python typing checks cover 106 source files and the Hub TypeScript/build passes. Additional reproduced confirmation ownership and tagged double-Back failures are corrected. The frozen regression gate remains pending; there is no new simulator or physical-G2 acceptance for this slice.
+
+- Messages frozen regression candidate: 1,706 Python tests, 947 Hub tests, mypy (106 files) and production build passed with no source changes. Simulator acceptance remains pending while the Mac is locked.
+
+### Timer restart recovery (in progress)
+
+- Reproduced running focus, paused focus and a completed focus block's break all resetting to idle on service reconstruction. Implementing one checkpoint in the existing local SQLite store, delayed recovery activation after composition, and shutdown that preserves deadlines. Root owns integration and execution; bounded agents own checkpoint storage and timer behavior/tests. No timer visual acceptance or production database migration is claimed yet.
+
+- Timer source/store reconstruction now preserves all three reproduced phases (previously 0/3), including exact paused time and the running absolute deadline. Existing typography renders explicit recovery errors; spoken Reset now reaches recovery. Mypy (107 files) and Hub build pass. The initial combined suite hit its 15-second check bound after 76 passing cases; broader regression and simulator acceptance remain pending.
+
+### 2026-09-05 — Timer recovery gate and Messages reading repair
+
+- Timer host gate passed: 570 Python tests, 129 Hub tests, strict mypy and production build. Frozen source unchanged. Three synthetic restart scenarios now retain expected timer state (previously none). Full-engine and simulator/device acceptance remain pending.
+- Beginning M4/M10: group reading with per-participant labels, no participant reply target, and Messages service retention across startup access failure. See `docs/audits/2026-09-04-feature-audit/MESSAGE_READING_ACCESS_REPAIR.md`.
+- Implemented group history/detail paging and participant labels using the existing compact UI. Group reading cannot arm a private reply target or offer reply prompts. The original seven host checks now pass; three additional selection races preserve direct-thread/Home ownership with zero sends.
+- Removed boot-only Messages availability filtering from router/tool/notification registration; model reads now return access/retry guidance without exposing exception paths. Added same-instance database appearance/access recovery checks. Combined regression gate pending; no new simulator or physical-G2 acceptance claim.
+- Messages group/access combined gate passed: 726 Python tests, 333 Hub tests, strict types and production build; all 298 frozen files matched. Same notification lane recovered after database appearance and ingested a later delivery.
+- Began M5 attributed-body recovery: pinned parser/independent-fixture experiment prepared, with vendor notices retained and no live Messages access or runtime dependency change. See `MESSAGE_BODY_REPAIR.md` in the feature audit.
+
+### 2026-09-05: UI stabilization after wearer challenge
+
+- Paused feature expansion. Rechecked official Even documentation against installed SDK 0.0.14 and current rendering/audio code; version drift and unresolved bridge/fallback issues are recorded in `EVEN_SDK_RECHECK.md`.
+- Fresh current-source simulator inspection confirms compact News typography but rejects complete visual acceptance: emoji remain malformed, and an immediate conversation tap selects metadata and opens nothing. Earlier reader automation swiped first and missed that entry failure. Root and an independent reviewer inspected the screens; the new bounded repair targets first-message selection before tap. See `UI_STABILIZATION_REVIEW.md` for retained pixels and source hashes. Installed-app delivery remains unverified.
+- Fixed the reproduced inert first conversation tap: first actual message selected in the initial custom frame, informational rows skipped, conflicting hidden cursor indices rejected. Fresh simulator tap/Back/reopen reached the same full message twice with selection 1 (previously metadata index 0 opened nothing). All 960 Hub tests and build pass; 185 copied source hashes unchanged. Emoji appearance and installed-app acceptance remain open.
+- Reviewed the completed attributed-body parser experiment: nine public samples decoded (eight nonempty), while unchanged production readers exposed none of the synthetic rows. Two samples matched independent expected text; remaining decoded samples have structural/hash evidence. No decoder integration or runtime dependency installation occurred. Recorded in `MESSAGE_BODY_REPAIR.md`; UI stabilization remains the immediate priority.

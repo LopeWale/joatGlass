@@ -65,6 +65,10 @@ const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
  * spine, where column alignment is the point.
  */
 const HUD_TEXT_FONT = '"Helvetica Neue", "SF Pro Text", Arial, sans-serif';
+// Flat feature pickers have two text roles. The selection rail carries
+// focus; changing face, weight or size must not masquerade as selection.
+const PICKER_BODY_FONT = `400 14px ${HUD_TEXT_FONT}`;
+const PICKER_META_FONT = `400 10px ${HUD_TEXT_FONT}`;
 
 /** Where content starts and stops on the 576px lens.
  *
@@ -257,6 +261,23 @@ export function usesPanelReaderLayout(title: string): boolean {
   return normalized === 'NEWS · ARTICLE' || normalized === 'SEARCH · RESULT';
 }
 
+/** New Mac readers send exact prepared rows after a counter-first metadata
+ * row. Recognize only full-reader pages so ordinary numbered lists keep
+ * their own layout, and older Mac text pages retain their compatibility path. */
+function usesPreparedReaderLayout(title: string, items: readonly string[]): boolean {
+  const normalized = title.trim().toUpperCase();
+  return (normalized === 'MESSAGES · MESSAGE' || usesPanelReaderLayout(normalized)
+    || normalized === 'QUICKNOTES · DETAIL' || normalized === 'QUICKNOTES · NOTE')
+    && /^\d+\/\d+ · /.test(items[0] ?? '');
+}
+
+/** The counter distinguishes prepared Notes from older Mac detail lists. */
+export function usesQuickNotesReaderLayout(title: string, items: readonly string[]): boolean {
+  const normalized = title.trim().toUpperCase();
+  return (normalized === 'QUICKNOTES · DETAIL' || normalized === 'QUICKNOTES · NOTE')
+    && usesPreparedReaderLayout(title, items);
+}
+
 export interface HudNotificationRow {
   source: string;
   age: string;
@@ -379,7 +400,7 @@ export function usesFlatHudShell(
   // rounded frame occupies is a pixel of discussion the wearer cannot
   // read, and it is the surface they said was wasting space.
   return kind === 'confirmation' || kind === 'productivity' || kind === 'list'
-    || kind === 'brainstorm';
+    || kind === 'brainstorm' || kind === 'prompt_question';
 }
 
 export type HudIconName =
@@ -522,7 +543,7 @@ export function brainstormActionHint(
     // branch keyed on the render model's old `terminalState` twin claimed
     // a voice-only wording here; that twin mirrored `state`, making the
     // branch statically unreachable — it never showed once.)
-    return 'tap: retry Hermes, then approve · left x2: menu';
+    return 'approve in OpenClaw · tap: retry · left x2: menu';
   }
   if (model.state === 'running') {
     // The tap is NAMED now — but only where it does something. It cycles
@@ -550,7 +571,7 @@ export function brainstormActionHint(
 export function agentTerminalSafetyLabel(
   model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked'>,
 ): string {
-  if (model.state === 'approval_required') return 'APPROVAL PENDING';
+  if (model.state === 'approval_required') return 'APPROVAL REQUIRED';
   if (model.state === 'unavailable') return 'CONNECTION UNAVAILABLE';
   if (model.state === 'blocked') return 'TERMINAL BLOCKED';
   return model.noToolsChecked
@@ -1062,10 +1083,10 @@ export interface HudListItemParts {
 
 /** The Mac prefixes real relative ages as `[2m]`; fixtures and empty/setup
  * rows omit the prefix, so the renderer never invents a timestamp. */
-export function parseHudListItem(value: string): HudListItemParts {
+export function parseHudListItem(value: string, preservePreview = false): HudListItemParts {
   const ageMatch = value.match(/^\[([^\]]+)]\s*/);
   const content = ageMatch ? value.slice(ageMatch[0].length) : value;
-  const [primary, secondary] = splitMessage(content);
+  const [primary, secondary] = preservePreview ? [content, ''] : splitMessage(content);
   return { primary, secondary, age: ageMatch?.[1]?.trim() ?? '' };
 }
 
@@ -1154,10 +1175,9 @@ export function messagesConversationFooterFontSize(hint: string): 8 | 9 {
 /** A full message uses the lens body, while preserving its status footer. */
 export const MESSAGES_READER_BODY_LINE_CAPACITY = 10;
 
-/** The official simulator under-reports the width of the G2 bitmap font.
- * This conservative visible-column limit keeps a rendered line inside the
- * actual lens instead of trusting that inaccurate measurement. */
-export const MESSAGES_READER_VISIBLE_COLUMNS = 52;
+/** 62 mono columns at 14px fit the 548px reader. Two UTF-16 units remain
+ * available for CRLF in exact Note wire rows (SDK item limit: 64). */
+export const MESSAGES_READER_VISIBLE_COLUMNS = 62;
 
 export function messagesReaderBodyLines(text: string): string[] {
   return wrapHudText(
@@ -1448,6 +1468,32 @@ export function fitHudWrappedText(
   return { fontSize: 12, lines: visibleHudTailLines(minimumLines, lineLimit) };
 }
 
+/** Questions cannot discard their beginning or split a UTF-16 surrogate pair
+ * when a contact label contains a long unbroken value. */
+function wrapPromptQuestion(text: string, width: number, measure: (value: string) => number): string[] {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.trim().split(/\s+/)) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (measure(candidate) <= width) {
+      line = candidate;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = '';
+    for (const character of word) {
+      if (measure(character) > width) throw new Error('Question exceeds readable HUD width');
+      if (line && measure(line + character) > width) {
+        lines.push(line);
+        line = '';
+      }
+      line += character;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 /** Keep the selected row visible on the three-row optical page without
  * throwing away rows four and five from the Mac's capability results. */
 export function visibleHudListItems(
@@ -1472,26 +1518,23 @@ export function visibleHudListItems(
  * so the page name lives there and the whole body belongs to the feature.
  * Home (overview) keeps "JOAT" — that IS the page.
  */
-/**
- * The spine's state word — the ONE thing on the HUD that changes with every
- * message the Mac sends about a voice turn. It is not painted into the
- * tiles: a native text container (ContainerId.SpineLabel) carries it, and
- * HudVisualSurface asks this function what to write. The READY rule is what
- * the canvas used to draw: on a feature page the spine carries the page's
- * name where "JOAT" sits on the home screen (no second title bar eating
- * 40 px), but a degraded link outranks any page name — if JOAT is not READY
- * the wearer must see that, whatever page they are standing on.
- */
+/** The compact banner names the current page. Active voice and link states
+ * remain visible; the separate mic icon already communicates muted state. */
 export function hudSpineLabel(frame: HudVisualFrame): string {
+  // A displayed question accepts the answer directly. The resting banner's
+  // wake-word instruction would contradict the question and its footer.
+  if (frame.kind === 'prompt_question') return 'JOAT';
   const status = parseStatus(frame.status);
   const pageTitle = hudSpinePageTitle(frame);
-  return pageTitle && status.state.endsWith('READY')
-    ? pageTitle.toUpperCase()
-    : status.state;
+  const resting = /(?:READY|MIC OFF)$/.test(status.state);
+  if (pageTitle && resting) return pageTitle.toUpperCase();
+  return status.state.endsWith('MIC OFF') ? 'JOAT' : status.state;
 }
 
 export function hudSpinePageTitle(frame: HudVisualFrame): string {
   switch (frame.kind) {
+    case 'prompt_question':
+      return 'Question';
     case 'list':
       return hudDisplayTitle(frame.title);
     case 'navigation':
@@ -1657,6 +1700,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.imageSmoothingEnabled = true;
 
     switch (frame.kind) {
+      case 'prompt_question':
+        this.drawPromptQuestion(context, frame.question);
+        break;
       case 'overview':
         this.drawOverview(context, frame, icons);
         break;
@@ -1690,14 +1736,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
       frame.kind !== 'overview',
+      hudSpineLabel(frame),
     );
-    if (frame.actionOverlay) {
+    if (frame.kind !== 'prompt_question' && frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
     }
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
     // impossible fifth image container or replacing the feature underneath.
-    if (frame.assistantOverlay) {
+    if (frame.kind !== 'prompt_question' && frame.assistantOverlay) {
       this.drawAssistantOverlay(context, frame.assistantOverlay.text, icons);
     }
 
@@ -1720,6 +1767,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
      * and carries the DATE in that slot instead, where a banner normally
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
+    label = parseStatus(statusText).state,
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1731,22 +1779,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const status = parseStatus(statusText);
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
-    context.font = `12px ${HUD_FONT}`;
+    context.font = flat ? PICKER_META_FONT : `12px ${HUD_FONT}`;
     context.textAlign = 'left';
     context.fillText(
       showTime ? (status.time || '--:--') : hudDateLabel(new Date()),
       30,
       HUD_VISUAL_GEOMETRY.statusBaselineY,
     );
-    // ── The state word is NOT painted here ──────────────────────────────
-    // It lives in a native text container layered over the tiles
-    // (ContainerId.SpineLabel, written by HudVisualSurface from
-    // hudSpineLabel), so "listening → hearing you… → reply" costs a few
-    // bytes instead of a 0.5-2 s image tile. It used to be centred ON the
-    // tile seam at x=288 and shipped BOTH top tiles per change — the
-    // slowest thing the wearer could watch. Nothing may be drawn inside
-    // SPINE_LABEL_BOX: native text has no background of its own.
-    context.font = `10px ${HUD_FONT}`;
+    // Use the same compact face as the surrounding clock and privacy
+    // indicator. Keep the changing label inside the top-left tile so an
+    // isolated status update dirties one tile, not both halves of the HUD.
+    context.font = flat ? PICKER_META_FONT : `10px ${HUD_FONT}`;
+    this.fitText(context, label, 100, HUD_VISUAL_GEOMETRY.statusBaselineY, 184);
     this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
     context.textAlign = 'left';
     context.fillText(micOn ? 'ON' : 'OFF', 428, HUD_VISUAL_GEOMETRY.statusBaselineY);
@@ -1759,6 +1803,34 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // No rule under the spine. It separated nothing that the gap below it
     // does not already separate, and it lit 540 pixels to do it (the
     // wearer's ruling: another waste).
+  }
+
+  private drawPromptQuestion(context: CanvasRenderingContext2D, question: string): void {
+    let fitted: { lines: string[]; fontSize: number; lineHeight: number } | undefined;
+    for (let fontSize = 14; fontSize >= 12; fontSize -= 1) {
+      context.font = `${fontSize}px ${HUD_FONT}`;
+      const lines = wrapPromptQuestion(question, HUD_CONTENT_WIDTH, (value) => context.measureText(value).width);
+      const lineHeight = fontSize + 3;
+      if (lines.length && 84 + (lines.length - 1) * lineHeight <= 237) {
+        fitted = { lines, fontSize, lineHeight };
+        break;
+      }
+    }
+    if (!fitted) throw new Error('Complete question does not fit the readable HUD region');
+    context.textAlign = 'left';
+    context.textBaseline = 'alphabetic';
+    context.fillStyle = gray(SUPPORT);
+    context.font = `11px ${HUD_FONT}`;
+    context.fillText('QUESTION', HUD_EDGE, 58);
+    context.fillStyle = gray(BRIGHT);
+    context.font = `${fitted.fontSize}px ${HUD_FONT}`;
+    fitted.lines.forEach((line, index) => {
+      context.fillText(line, HUD_EDGE, 84 + index * fitted.lineHeight);
+    });
+    context.fillStyle = gray(SUPPORT);
+    context.font = `10px ${HUD_FONT}`;
+    context.textAlign = 'center';
+    context.fillText('speak your answer · left x2: cancel', 288, 267);
   }
 
   private drawAssistantOverlay(
@@ -2098,6 +2170,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     if (rail.activeTab === 'pomodoro') {
       label('POMODORO');
+      if (content?.empty) {
+        quiet([content.headline ?? 'Timer unavailable', content.empty], layout.mainTopBaselineY);
+        return;
+      }
       const pomodoro = content?.pomodoro;
       if (!pomodoro) {
         quiet(['Say “JOAT, start a pomodoro”'], layout.mainTopBaselineY);
@@ -2199,10 +2275,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
   ): void {
-    const pomodoro = frame.rail?.content?.pomodoro;
+    const content = frame.rail?.content;
+    const pomodoro = content?.pomodoro;
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    if (!pomodoro) {
+    if (content?.empty) {
+      context.fillStyle = gray(SUPPORT);
+      context.font = `14px ${HUD_FONT}`;
+      this.fitText(context, content.headline ?? 'Timer unavailable', 52, 80, 496);
+      context.fillStyle = gray(CHROME);
+      context.font = `12px ${HUD_FONT}`;
+      this.drawWrappedText(context, content.empty, 52, 106, 496, 17, 3, 'leading');
+    } else if (!pomodoro) {
       context.fillStyle = gray(SUPPORT);
       context.font = `14px ${HUD_FONT}`;
       context.fillText('Say “JOAT, start a pomodoro”', 52, 96);
@@ -2258,19 +2342,32 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     metadata: string,
     body: string,
     hint: string,
+    preparedLines?: readonly string[],
+    left = HUD_EDGE,
   ): void {
+    if (preparedLines && preparedLines.length > MESSAGES_READER_BODY_LINE_CAPACITY) {
+      throw new Error('Prepared reader page exceeds 10 display rows');
+    }
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(CHROME);
     context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, metadata, 36, 58, 504);
+    this.fitText(context, metadata, left, 58, HUD_CONTENT_RIGHT - left);
     context.fillStyle = gray(BRIGHT);
     context.font = `14px ${HUD_FONT}`;
-    visibleHudLeadingLines(
-      messagesReaderBodyLines(body),
-      MESSAGES_READER_BODY_LINE_CAPACITY,
-    ).forEach((line, index) => {
-      this.fitText(context, line, 36, 84 + index * 17, 504);
+    const lines = preparedLines ?? visibleHudLeadingLines(
+      messagesReaderBodyLines(body), MESSAGES_READER_BODY_LINE_CAPACITY,
+    );
+    lines.forEach((line, index) => {
+      if (preparedLines) {
+        // Mac pages already respect the wire and display budgets. Only
+        // interpret their line terminator and fixed-width tab for painting;
+        // never trim, join, rewrap or replace body text with an ellipsis.
+        const displayLine = line.replace(/\r\n$|[\r\n]$/u, '').replace(/\t/g, '        ');
+        context.fillText(displayLine, left, 84 + index * 17);
+      } else {
+        this.fitText(context, line, left, 84 + index * 17, HUD_CONTENT_RIGHT - left);
+      }
     });
     context.fillStyle = gray(QUIET);
     context.font = `9px ${HUD_FONT}`;
@@ -2291,7 +2388,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawPomodoroPage(context, frame);
       } else if (usesPanelReaderLayout(frame.title)) {
         const detail = messagesFullTextContent(frame.items);
-        this.drawTextReader(context, detail.metadata, detail.body, frame.hint);
+        this.drawTextReader(context, detail.metadata, detail.body, frame.hint,
+          usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined, 36);
       } else {
         this.drawPlanningFocusList(context, frame);
       }
@@ -2335,6 +2433,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
+    if (usesQuickNotesReaderLayout(frame.title, frame.items)) {
+      this.drawTextReader(context, frame.items[0] ?? 'QuickNote', '', frame.hint,
+        frame.items.slice(1));
+      return;
+    }
+
     if (usesNavigationSetupLayout(frame.title, frame.selectable)) {
       this.drawNavigationSetup(context, frame);
       return;
@@ -2351,7 +2455,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
   ): void {
     const rows = planningFocusRows(frame.title, frame.items.length);
-    const reserveMarker = frame.selectable && listReservesMarkerColumn(frame.items);
+    const notePreview = frame.title.trim().toUpperCase() === 'QUICKNOTES';
+    const reserveMarker = !notePreview && frame.selectable && listReservesMarkerColumn(frame.items);
 
     context.textAlign = 'left';
     context.textBaseline = 'middle';
@@ -2368,14 +2473,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       if (row.secondaryBaselineY !== undefined) {
         const { primary, secondary } = parseHudListItem(entry.item);
         context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-        context.font = `14px ${HUD_FONT}`;
+        context.font = PICKER_BODY_FONT;
         this.fitText(context, primary || entry.item, 52, row.primaryBaselineY, 488);
         context.fillStyle = gray(selected ? SUPPORT : CHROME);
-        context.font = `10px ${HUD_FONT}`;
+        context.font = PICKER_META_FONT;
         this.fitText(context, secondary, 52, row.secondaryBaselineY, 488);
         return;
       }
-      this.drawFocusListLine(context, entry.item, row.primaryBaselineY, selected, reserveMarker);
+      this.drawFocusListLine(context, entry.item, row.primaryBaselineY, selected, reserveMarker, notePreview);
     });
 
     // Content longer than one window gets a hairline scrollbar at the right
@@ -2399,65 +2504,65 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
 
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = PICKER_META_FONT;
     context.textAlign = 'center';
-    context.fillText(frame.hint, 288, 267);
+    this.fitText(context, frame.hint, 288, 267, 504);
     context.textAlign = 'left';
   }
 
-  /** One dense line with real internal hierarchy, so weight means something:
-   * a small dim age chip, an aligned semantic marker column (● recording,
-   * □ todo, – key point — firmware-safe glyphs that INDICATE, never badge
-   * chrome), normal-weight primary, dimmer trailing detail, and quiet 10px
-   * label treatment for ALL-CAPS section markers (SUMMARY, KEY POINTS, …).
-   * Uniform 12px SUPPORT across whole rows read as "everything bold" — the
-   * wearer's exact complaint. */
+  /** One primary text edge; optional age is a separate trailing column.
+   * All supporting text shares the banner/footer face and size. */
   private drawFocusListLine(
     context: CanvasRenderingContext2D,
     item: string,
     baselineY: number,
     selected: boolean,
     reserveMarker = false,
+    preservePreview = false,
   ): void {
     const trimmed = item.trim();
-    if (/^[A-Z][A-Z ]{1,18}$/.test(trimmed)) {
+    if (!preservePreview && /^[A-Z][A-Z ]{1,18}$/.test(trimmed)) {
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
+      context.font = PICKER_META_FONT;
       context.fillText(trimmed, 52, baselineY);
       return;
     }
-    const { age, primary, secondary } = parseHudListItem(item);
+    const { age, primary, secondary } = parseHudListItem(item, preservePreview);
     let x = 52;
+    let right = 540;
     if (age) {
-      context.fillStyle = gray(selected ? SUPPORT : CHROME);
-      context.font = `9px ${HUD_FONT}`;
-      context.fillText(age, x, baselineY);
-      x += 34;
+      context.fillStyle = gray(CHROME);
+      context.font = PICKER_META_FONT;
+      context.textAlign = 'right';
+      context.fillText(age, right, baselineY);
+      right -= context.measureText(age).width + 12;
+      context.textAlign = 'left';
     }
     let text = primary || item;
-    const marker = focusListMarker(text);
+    const marker = preservePreview ? undefined : focusListMarker(text);
     if (marker) {
       text = text.slice(2);
       context.fillStyle = gray(
         marker.emphasis === 'content' ? (selected ? BRIGHT : SUPPORT) : CHROME,
       );
-      context.font = `11px ${HUD_FONT}`;
+      context.font = PICKER_BODY_FONT;
       context.fillText(marker.glyph, x, baselineY);
       x += 18;
     } else if (reserveMarker) {
       x += 18; // keep one shared title edge in lists that mix marked rows
     }
     context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-    context.font = `12px ${HUD_FONT}`;
+    context.font = PICKER_BODY_FONT;
     if (!secondary) {
-      this.fitText(context, text, x, baselineY, 540 - x);
+      this.fitText(context, text, x, baselineY, right - x);
       return;
     }
-    const primaryWidth = Math.min(context.measureText(text).width, 320);
-    this.fitText(context, text, x, baselineY, 320);
+    const primaryWidth = Math.min(context.measureText(text).width, 320, right - x);
+    this.fitText(context, text, x, baselineY, primaryWidth);
     context.fillStyle = gray(selected ? SUPPORT : CHROME);
-    context.font = `10px ${HUD_FONT}`;
-    this.fitText(context, secondary, x + primaryWidth + 12, baselineY, 540 - x - primaryWidth - 12);
+    context.font = PICKER_META_FONT;
+    this.fitText(context, secondary, x + primaryWidth + 12, baselineY,
+      Math.max(0, right - x - primaryWidth - 12));
   }
 
   private drawNavigationSetup(
@@ -2536,7 +2641,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // MESSAGES · MESSAGE — the full-text reader. Metadata is quiet chrome;
     // the message body is the one bright thing on the page.
     const detail = messagesFullTextContent(frame.items);
-    this.drawTextReader(context, detail.metadata, detail.body, frame.hint);
+    this.drawTextReader(context, detail.metadata, detail.body, frame.hint,
+      usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined);
   }
 
   /**

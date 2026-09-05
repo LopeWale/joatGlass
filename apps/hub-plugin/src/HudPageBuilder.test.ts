@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
 import { HudPageBuilder } from './HudPageBuilder';
-import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId, SPINE_LABEL_BOX, SPINE_LABEL_NAME } from './types';
+import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
 type Page = {
   containerTotalNum?: number;
@@ -65,13 +65,13 @@ describe('HudPageBuilder invariants', () => {
 
   it('makes the one-shot startup an image-first hardware surface', () => {
     const startup = builder.visualStartup() as Page;
-    expect(startup.containerTotalNum).toBe(6);
+    expect(startup.containerTotalNum).toBe(5);
     expect(startup.menuObject?.menuItems).toContainEqual({
       itemID: CAPABILITY_MENU_ID_BASE + CAPABILITIES.indexOf('Planning'),
       itemName: 'Planning',
     });
     expect(startup.imageObject).toHaveLength(4);
-    expect(startup.textObject).toHaveLength(2);
+    expect(startup.textObject).toHaveLength(1);
     expect(startup.textObject?.[0]).toMatchObject({
       isEventCapture: 1,
       content: ' ',
@@ -83,29 +83,12 @@ describe('HudPageBuilder invariants', () => {
     )).toBe(true);
   });
 
-  it('layers the native spine word above every tile without touching input', () => {
-    // The state word is text, not pixels: a voice turn's "hearing you…"
-    // costs a textContainerUpgrade, never a 0.5-2 s image tile. It must
-    // render in FRONT of the tiles and must never steal the capture.
+  it('keeps native lettering out of the authored compact banner', () => {
     for (const page of [builder.visualStartup() as Page, builder.visualLayout() as Page]) {
-      const label = page.textObject?.find((text) => text.containerID === ContainerId.SpineLabel);
-      expect(label).toMatchObject({
-        containerName: SPINE_LABEL_NAME,
-        xPosition: SPINE_LABEL_BOX.x,
-        yPosition: SPINE_LABEL_BOX.y,
-        width: SPINE_LABEL_BOX.width,
-        height: SPINE_LABEL_BOX.height,
-        isEventCapture: 0,
-        content: ' ',
-      });
-      const highestTile = Math.max(...(page.imageObject ?? []).map((image) => image.zOrderIndex ?? 0));
-      expect(label?.zOrderIndex ?? 0).toBeGreaterThan(highestTile);
+      expect(page.textObject).toHaveLength(1);
+      expect(page.textObject?.[0]).toMatchObject({content: ' ', isEventCapture: 1});
+      expect(page.textObject?.some((text) => text.containerID === ContainerId.SpineLabel)).toBe(false);
     }
-    // One firmware line tall, inside the top-left tile, east of the date.
-    expect(SPINE_LABEL_BOX.height).toBe(27);
-    expect(SPINE_LABEL_BOX.x).toBeGreaterThanOrEqual(30 + 9 * 7.2);
-    expect(SPINE_LABEL_BOX.x + SPINE_LABEL_BOX.width).toBeLessThanOrEqual(288);
-    expect(SPINE_LABEL_BOX.y + SPINE_LABEL_BOX.height).toBeLessThanOrEqual(144);
   });
 
   it('keeps every visual container name within the packaged-host limit', () => {
@@ -239,17 +222,11 @@ describe('HudPageBuilder invariants', () => {
       }>;
     };
 
-    expect(page.containerTotalNum).toBe(6);
+    expect(page.containerTotalNum).toBe(5);
     expect(page.textObject).toEqual([
       expect.objectContaining({
         xPosition: 0, yPosition: 0, width: 576, height: 288,
         content: ' ', textColor: 0, isEventCapture: 1, zOrderIndex: 1,
-      }),
-      // The native state word rides above the tiles and never captures.
-      expect.objectContaining({
-        xPosition: SPINE_LABEL_BOX.x, yPosition: SPINE_LABEL_BOX.y,
-        width: SPINE_LABEL_BOX.width, height: SPINE_LABEL_BOX.height,
-        content: ' ', isEventCapture: 0, zOrderIndex: 6,
       }),
     ]);
     expect(page.imageObject).toEqual([

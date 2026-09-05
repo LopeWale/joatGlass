@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ImageRawDataUpdateResult,
+  type RebuildPageContainer,
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
 import { HudPresenter } from './HudPresenter';
@@ -52,6 +53,457 @@ function mainPaints(): TextContainerUpgrade[] {
 function lastOf(list: TextContainerUpgrade[]): TextContainerUpgrade {
   return list[list.length - 1]!;
 }
+
+describe('guarded Messages receipt list ownership', () => {
+  function showBound(hud: HudPresenter, current: () => boolean) {
+    return hud.showList(['Sent. Delivery is unverified.'], {
+      title: 'MESSAGES · SENT', selectable: false, hint: 'left x2: back',
+    }, current);
+  }
+
+  it('does not replace the current surface when the guard was already retired', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: vi.fn(async (frame: HudVisualFrame) => { frames.push(frame); return true; }),
+      paintExact: vi.fn(async (frame: HudVisualFrame, guard: () => boolean) => {
+        if (!guard()) return false;
+        frames.push(frame);
+        return true;
+      }),
+    };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    await hud.showText('Current Overview', ContainerId.Main);
+    const before = frames.length;
+    expect(await showBound(hud, () => false)).toBe(false);
+    expect(frames).toHaveLength(before);
+    await hud.setStatus('Still at Home');
+    expect(frames[frames.length - 1]?.kind).toBe('overview');
+  });
+
+  it('uses the exact renderer receipt for a bound status without changing the unbound list path', async () => {
+    const paint = vi.fn(async () => true);
+    const paintExact = vi.fn(async (_frame: HudVisualFrame, guard: () => boolean) => guard());
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint, paintExact });
+    expect(await showBound(hud, () => true)).toBe(true);
+    expect(paintExact).toHaveBeenCalledOnce();
+    expect(paint).not.toHaveBeenCalled();
+    expect(await hud.showList(['Legacy list'], { title: 'MESSAGES' })).toBe(true);
+    expect(paint).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an exact list when the optional renderer cannot provide guarded completion', async () => {
+    const paint = vi.fn(async () => true);
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint });
+    expect(await showBound(hud, () => true)).toBe(false);
+    expect(paint).not.toHaveBeenCalled();
+    expect(await hud.showList(['Legacy list'], { title: 'MESSAGES' })).toBe(true);
+  });
+
+  it('does not defer an exact status under confirmation and resurrect it when confirmation closes', async () => {
+    const frames: HudVisualFrame[] = [];
+    const paint = async (frame: HudVisualFrame) => { frames.push(frame); return true; };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
+      paint,
+      paintExact: async (frame, guard) => guard() && await paint(frame),
+    });
+    await hud.showText('Underlying conversation', ContainerId.Main);
+    await hud.showConfirmation('Send the reviewed message?', 'confirmation_one');
+    expect(await showBound(hud, () => true)).toBe(false);
+    await hud.dismissConfirmation('confirmation_one');
+    expect(frames.some((frame) => frame.kind === 'list' && frame.title === 'MESSAGES · SENT')).toBe(false);
+  });
+
+  it('prevents a held status upload from repainting or restoring itself over a later Home surface', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    let current = true;
+    let visible = '';
+    const paint = async (frame: HudVisualFrame, guard?: () => boolean) => {
+      if (frame.kind === 'list' && frame.title === 'MESSAGES · SENT') {
+        entered = true;
+        await held;
+      }
+      if (guard && !guard()) return false;
+      visible = frame.kind === 'list' ? frame.title : frame.kind;
+      return true;
+    };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
+      paint: (frame) => paint(frame),
+      paintExact: (frame, guard) => paint(frame, guard),
+    });
+    const work = showBound(hud, () => current);
+    try {
+      await Promise.resolve();
+      expect(entered).toBe(true);
+      current = false;
+      await hud.showDefault();
+      release();
+      expect(await work).toBe(false);
+      expect(visible).toBe('overview');
+      await hud.setStatus('Home remains current');
+      expect(visible).toBe('overview');
+    } finally { release(); await work; }
+  });
+});
+
+describe('guarded Messages confirmation ownership', () => {
+  function showBound(hud: HudPresenter, id: string, current: () => boolean) {
+    return hud.showConfirmation('Send the exact reviewed message?', id, 'messages', current);
+  }
+
+  it('rejects a stale action before claiming the confirmation surface', async () => {
+    const frames: HudVisualFrame[] = [];
+    const paint = async (frame: HudVisualFrame) => { frames.push(frame); return true; };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
+      paint, paintExact: async (frame, guard) => guard() && await paint(frame),
+    });
+    await hud.showText('Current conversation', ContainerId.Main);
+    expect(await showBound(hud, 'journal_one', () => false)).toBe(false);
+    await hud.setStatus('Still in the conversation');
+    expect(frames.some((frame) => frame.kind === 'confirmation')).toBe(false);
+  });
+
+  it('requires the exact renderer path while retaining ordinary confirmation compatibility', async () => {
+    const paint = vi.fn(async () => true);
+    const paintExact = vi.fn(async (_frame: HudVisualFrame, guard: () => boolean) => guard());
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint, paintExact });
+    expect(await showBound(hud, 'journal_one', () => true)).toBe(true);
+    expect(paintExact).toHaveBeenCalledOnce();
+    expect(paint).not.toHaveBeenCalled();
+    await hud.dismissConfirmation('journal_one');
+    const before = paint.mock.calls.length;
+    expect(await hud.showConfirmation('Existing unbound decision', 'legacy_one')).toBe(true);
+    expect(paint.mock.calls.length).toBeGreaterThan(before);
+    await hud.dismissConfirmation('legacy_one');
+  });
+
+  it('does not accept a held preview after its action is cancelled or commit its stale pixels', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    let current = true;
+    const committed: HudVisualFrame[] = [];
+    const paint = async (frame: HudVisualFrame, guard?: () => boolean) => {
+      if (frame.kind === 'confirmation') { entered = true; await held; }
+      if (guard && !guard()) return false;
+      committed.push(frame);
+      return true;
+    };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
+      paint: (frame) => paint(frame), paintExact: (frame, guard) => paint(frame, guard),
+    });
+    const work = showBound(hud, 'journal_one', () => current);
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(entered).toBe(true);
+      current = false;
+      const dismiss = hud.dismissConfirmation('journal_one');
+      await hud.showDefault();
+      release();
+      expect(await work).toBe(false);
+      await dismiss;
+      expect(committed.some((frame) => frame.kind === 'confirmation')).toBe(false);
+      expect(committed[committed.length - 1]?.kind).toBe('overview');
+    } finally { release(); await work; await hud.dismissConfirmation('journal_one'); }
+  });
+
+  it('refuses an optimistic optional renderer for a bound confirmation', async () => {
+    const paint = vi.fn(async () => true);
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint });
+    expect(await showBound(hud, 'journal_one', () => true)).toBe(false);
+    expect(paint).not.toHaveBeenCalled();
+  });
+});
+
+describe('prompt question ownership', () => {
+  function show(hud: HudPresenter, id: string, question: string, isCurrent = () => true) {
+    return hud.showPromptQuestion(id, question, isCurrent);
+  }
+  function dismiss(hud: HudPresenter, id: string) {
+    return hud.dismissPromptQuestion(id);
+  }
+  function questionOn(value: HudVisualFrame): string | undefined {
+    return value.kind === 'prompt_question' ? value.question : undefined;
+  }
+  function rig(paint: (value: HudVisualFrame) => Promise<boolean>) {
+    const visual = {
+      paint,
+      paintExact: async (value: HudVisualFrame, isCurrent: () => boolean) => {
+        if (!isCurrent()) return false;
+        const ok = await paint(value);
+        return ok && isCurrent();
+      },
+    };
+    return new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+  }
+
+  it('awaits its question paint and remains dominant over an incidental reply and text update', async () => {
+    const frames: HudVisualFrame[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    const question = 'Who should receive the message?';
+    const hud = rig(async (value) => {
+      frames.push(value);
+      if (!entered && questionOn(value) === question) { entered = true; await held; }
+      return true;
+    });
+    await hud.showText('Existing feature content', ContainerId.Main);
+    let settled = false;
+    const publication = show(hud, 'prompt-a', question).then((ok) => { settled = true; return ok; });
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      expect(settled).toBe(false);
+      release();
+      expect(await publication).toBe(true);
+      await hud.showAssistantOverlay('An unrelated reply.', false, true);
+      await hud.showText('Latest feature content', ContainerId.Main);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(frames[frames.length - 1]).toMatchObject({ kind: 'prompt_question', promptId: 'prompt-a', question });
+      await dismiss(hud, 'prompt-a');
+      expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', main: 'Latest feature content' });
+    } finally {
+      release();
+      await publication;
+      await dismiss(hud, 'prompt-a');
+    }
+  });
+
+  it('reports failure while confirmation owns the visible surface', async () => {
+    const frames: HudVisualFrame[] = [];
+    const hud = rig(async (value) => { frames.push(value); return true; });
+    await hud.showConfirmation('Send the reviewed message?', 'confirm-a');
+    expect(await show(hud, 'prompt-a', 'Say the message.')).toBe(false);
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'confirmation', prompt: 'Send the reviewed message?' });
+    await hud.dismissConfirmation('confirm-a');
+    expect(frames[frames.length - 1]).not.toHaveProperty('question');
+  });
+
+  it('rejects an optional painter without exact receipt support instead of using its optimistic paint', async () => {
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint: async () => true });
+    expect(await show(hud, 'prompt-a', 'Say the message.')).toBe(false);
+  });
+
+  it('does not let cancellation during a successful upload acknowledge the question', async () => {
+    let current = true;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    const hud = rig(async () => { entered = true; await held; return true; });
+    const publication = show(hud, 'prompt-a', 'Say the message.', () => current);
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      current = false;
+      release();
+      expect(await publication).toBe(false);
+    } finally {
+      current = false;
+      release();
+      await publication;
+      await dismiss(hud, 'prompt-a');
+    }
+  });
+
+  it('keeps a newer question after an older upload finishes and an old dismissal arrives', async () => {
+    const frames: HudVisualFrame[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    const firstQuestion = 'Who should receive the message?';
+    const nextQuestion = 'Recipient selected. Say the message.';
+    const hud = rig(async (value) => {
+      frames.push(value);
+      if (!entered && questionOn(value) === firstQuestion) { entered = true; await held; }
+      return true;
+    });
+    const first = show(hud, 'prompt-a', firstQuestion);
+    let next: Promise<boolean> | undefined;
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      next = show(hud, 'prompt-b', nextQuestion);
+      release();
+      expect(await first).toBe(false);
+      expect(await next).toBe(true);
+      await dismiss(hud, 'prompt-a');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(frames[frames.length - 1]).toMatchObject({
+        kind: 'prompt_question', promptId: 'prompt-b', question: nextQuestion,
+      });
+    } finally {
+      release();
+      await Promise.all([first, next]);
+      await dismiss(hud, 'prompt-b');
+    }
+  });
+});
+
+describe('custom News list recovery', () => {
+  it('paints ordinary and restored News selection consistently without switching page types', async () => {
+    const pages: RebuildPageContainer[] = [];
+    const frames: HudVisualFrame[] = [];
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => true,
+        rebuildPageContainer: async (page: RebuildPageContainer) => { pages.push(page); return true; },
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async (frame) => { frames.push(frame); return true; },
+    });
+    const rows = ['Story 01', 'Story 02'];
+    const options = { title: 'NEWS', selectable: true, railTab: 'news' as const };
+    expect(await hud.showList(rows, options)).toBe(true);
+    expect(await hud.setSelection(1)).toBe(true);
+    expect(pages).toHaveLength(0);
+    expect(frames).toHaveLength(2);
+
+    expect(await hud.restoreSelection(1)).toBe(true);
+    expect(pages.map((page) => [page.listObject?.length ?? 0, page.imageObject?.length ?? 0]))
+      .toEqual([]);
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
+    expect(await hud.setSelection(0)).toBe(true);
+    expect(pages).toHaveLength(0);
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 0 });
+
+    // Reopening has exactly the same custom typography as the restored page.
+    expect(await hud.showList(rows, options)).toBe(true);
+    expect(pages).toHaveLength(0);
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 0 });
+  });
+
+  it('does not report cursor restoration when the selected-row paint and recovery fail', async () => {
+    const frames: HudVisualFrame[] = [];
+    let accepted = true;
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => true,
+        rebuildPageContainer: async () => false,
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async (frame) => { frames.push(frame); return accepted; },
+    });
+    expect(await hud.showList(['Story 01', 'Story 02'], {
+      title: 'NEWS', selectable: true, railTab: 'news',
+    })).toBe(true);
+
+    accepted = false;
+    expect(await hud.restoreSelection(1)).toBe(false);
+    expect(frames.length).toBeGreaterThan(1);
+    expect(hud.exportBackgroundState().surface).toMatchObject({ kind: 'list', selectedIndex: 0 });
+  });
+
+  it('keeps Home when a selected-row paint completes after the list is abandoned', async () => {
+    const frames: HudVisualFrame[] = [];
+    let finishInstall!: (installed: boolean) => void;
+    const install = new Promise<boolean>((resolve) => { finishInstall = resolve; });
+    let selectionPaints = 0;
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => true,
+        rebuildPageContainer: async () => true,
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async (frame) => {
+        frames.push(frame);
+        if (frame.kind === 'list' && frame.selectedIndex === 1) {
+          selectionPaints += 1;
+          return install;
+        }
+        return true;
+      },
+    });
+    await hud.showList(['Story 01', 'Story 02'], { title: 'NEWS', selectable: true, railTab: 'news' });
+    const restoring = hud.restoreSelection(1);
+    try {
+      await vi.waitFor(() => expect(selectionPaints).toBe(1));
+      expect(await hud.showDefault()).toBe(true);
+      finishInstall(true);
+      expect(await restoring).toBe(false);
+      expect(hud.exportBackgroundState().surface).toMatchObject({ kind: 'default' });
+      expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview' });
+    } finally {
+      finishInstall(true);
+      await restoring;
+    }
+  });
+
+  it('keeps News selectable through reader and reopen even on a host that rejects native lists', async () => {
+    const pages: RebuildPageContainer[] = [];
+    const frames: HudVisualFrame[] = [];
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => true,
+        rebuildPageContainer: async (page: RebuildPageContainer) => {
+          pages.push(page);
+          return !page.listObject?.length;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async (frame) => { frames.push(frame); return true; },
+    });
+    const rows = ['First headline', 'Second headline'];
+    const options = {
+      title: 'NEWS', hint: 'tap: open · hold: refresh · left x2: back',
+      selectable: true, railTab: 'news' as const,
+    };
+    await hud.showText('9:41 JOAT ready', ContainerId.StatusBar);
+    await hud.showText('Retained overview', ContainerId.Main);
+
+    expect(await hud.showList(rows, options)).toBe(true);
+    expect(pages.map((page) => [page.listObject?.length ?? 0, page.imageObject?.length ?? 0]))
+      .toEqual([]);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'list', title: 'NEWS', items: rows, selectedIndex: 0,
+      selectable: true, hint: options.hint, rail: { activeTab: 'news' },
+    });
+
+    const rebuildCount = pages.length;
+    expect(await hud.moveSelection(1)).toBe(true);
+    await hud.showText('9:42 JOAT ready', ContainerId.StatusBar);
+    expect(pages).toHaveLength(rebuildCount);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'list', title: 'NEWS', items: rows, selectedIndex: 1, status: '9:42 JOAT ready',
+    });
+    expect(await hud.showList(['Second headline', 'Full article text'], {
+      title: 'NEWS · ARTICLE', railTab: 'news', hint: 'left x2: back',
+    })).toBe(true);
+    expect(frames[frames.length - 1]).toMatchObject({
+      kind: 'list', title: 'NEWS · ARTICLE', items: ['Second headline', 'Full article text'],
+    });
+
+    await hud.showDefault();
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', main: 'Retained overview' });
+    const frameCount = frames.length;
+    expect(await hud.showList(rows, options)).toBe(true);
+    expect(pages).toHaveLength(rebuildCount);
+    expect(frames).toHaveLength(frameCount + 1);
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS' });
+  });
+
+  it('reports failure when the custom News frame and image recovery both fail', async () => {
+    const pages: RebuildPageContainer[] = [];
+    const frames: HudVisualFrame[] = [];
+    const client = {
+      require: () => ({
+        rebuildPageContainer: async (page: RebuildPageContainer) => { pages.push(page); return false; },
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async (frame) => { frames.push(frame); return false; },
+    });
+
+    expect(await hud.showList(['A headline'], { title: 'NEWS', selectable: true, railTab: 'news' }))
+      .toBe(false);
+    expect(pages.map((page) => [page.listObject?.length ?? 0, page.imageObject?.length ?? 0]))
+      .toEqual([[0, 4]]);
+    expect(frames).toHaveLength(1);
+  });
+});
 
 it('shows streamed replies on the native text fallback and restores the retained page', async () => {
   const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
@@ -1337,5 +1789,59 @@ describe('an answer is not an interruption', () => {
     expect(frames[frames.length - 1]).toMatchObject({
       assistantOverlay: { text: 'shorter version' },
     });
+  });
+});
+
+
+describe('complete compact action footers', () => {
+  it('retains all paging, read, reply and Back controls on the custom surface', async () => {
+    const frames: HudVisualFrame[] = [];
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
+      paint: async (frame) => {frames.push(frame); return true;},
+    });
+    const hint = 'up newer · down older · tap read · say reply · left x2: back';
+    await hud.showList(['Latest messages', 'Dele · Ready'], {title: 'MESSAGES · CONVERSATION', hint});
+    const frame = frames[frames.length - 1];
+    expect(frame?.kind).toBe('list');
+    if (frame?.kind !== 'list') throw new Error('Expected conversation');
+    expect(frame.hint).toBe(hint);
+  });
+});
+
+describe('Terminal opening paint ownership', () => {
+  const model = { screen: 'agent_terminal', state: 'ready', topic: 'work', collaborators: [], activity: 'Ready' } as const;
+  it('does not paint an opening retired before presentation', async () => {
+    const paint = vi.fn(async () => true);
+    const visual = { paint, paintExact: vi.fn(async (_value, current) => current()) };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    expect(await hud.showBrainstorm({ ...model, collaborators: [] }, undefined, () => false)).toBe(false);
+    expect(paint).not.toHaveBeenCalled();
+    expect(visual.paintExact).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('a held opening settling %s cannot acknowledge or restore over Home', async (paintResult) => {
+    const frames: HudVisualFrame[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const began = new Promise<void>((resolve) => { entered = resolve; });
+    let current = true;
+    const paint = async (frame: HudVisualFrame) => {
+      frames.push(frame);
+      if (frame.kind === 'brainstorm') { entered(); await held; return paintResult; }
+      return true;
+    };
+    const visual = { paint, paintExact: async (frame: HudVisualFrame, valid: () => boolean) => valid() && await paint(frame) && valid() };
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    await hud.showText('Original feature', ContainerId.Main);
+    const opening = hud.showBrainstorm({ ...model, collaborators: [] }, undefined, () => current);
+    await began;
+    current = false;
+    await hud.showDefault();
+    const countAfterHome = frames.length;
+    release();
+    expect(await opening).toBe(false);
+    expect(frames).toHaveLength(countAfterHome);
+    expect(frames[frames.length - 1]?.kind).toBe('overview');
   });
 });

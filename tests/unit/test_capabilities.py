@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import date, datetime
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ from joat.persistence.notes import NoteSource, NoteStore
 from joat.persistence.store import DurableStore
 from joat.persistence.voice_notes import VoiceNoteStore
 from joat.services.capabilities import CapabilityOpenController, CapabilityRouter
+from joat.services.message_reply import MessageReplyController
 from joat.services.voice_note_capture import VoiceNoteCaptureSnapshot
 from joat.services.hud import HudWriter
 from joat.services.planning import PlanningScope
@@ -259,6 +262,42 @@ class PagedHistoryMessages(FakeMessages):
         ), has_older=False)
 
 
+class HeldHistoryMessages(FakeMessages):
+    """Keep one synthetic thread read in flight across a navigation change."""
+
+    def __init__(
+        self, *, hold_older: bool = False, error: OSError | None = None,
+    ) -> None:
+        super().__init__([
+            ("Thread A", "First thread", 1.0),
+            ("Thread B", "Second thread", 2.0),
+        ])
+        self.hold_older = hold_older
+        self.error = error
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del limit
+        older = before_row_id is not None
+        if thread.sender == "Thread A" and older == self.hold_older:
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("held Messages read was not released")
+            if self.error is not None:
+                raise self.error
+        return MessageHistoryPage(
+            entries=(MessageEntry(thread.text, thread.at, False, row_id=9 if older else 10),),
+            has_older=not older,
+        )
+
+
 class FakePersonalData:
     def __init__(self, responses):  # type: ignore[no-untyped-def]
         self._responses = responses
@@ -307,6 +346,52 @@ async def wait_until(predicate, *, attempts: int = 100) -> None:  # type: ignore
             return
         await asyncio.sleep(0)
     raise AssertionError("condition did not become true")
+
+
+async def collect_note_reader(router, transport, *, request_id, trace_id):  # type: ignore[no-untyped-def]
+    """Read actual serialized pages, replaying each page gesture once."""
+    pages = []
+    for expected_index in range(100):
+        frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        wire = frame.to_wire()
+        assert wire["items"] == frame.items, "reader data was truncated on the wire"
+        assert frame.request_id == request_id
+        assert frame.selectable is False
+        assert 1 < len(frame.items) <= 11
+        assert all(sum(
+            8 if char == "\t" else 2
+            if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in "WF" else 1
+            for char in row.rstrip("\r\n")
+        ) <= 62 for row in frame.items[1:])
+        assert all(len(row.encode("utf-16-le")) // 2 <= 64 for row in wire["items"])
+        assert all(len(row.rstrip("\r\n")) <= 31 for row in frame.items[1:]
+                   if row.rstrip("\r\n") and set(row.rstrip("\r\n")) == {"漢"})
+        counter = re.match(r"^(\d+)/(\d+) · ", frame.items[0])
+        assert counter is not None, "reader must identify its actual page"
+        index, total = int(counter[1]) - 1, int(counter[2])
+        assert index == expected_index and total > index
+        hint = wire.get("hint", "")
+        assert ("up previous" in hint) == (index > 0)
+        assert ("down more" in hint) == (index + 1 < total)
+        assert "left x2: back" in hint
+        pages.append(wire)
+        if index + 1 == total:
+            return pages
+        before = len(transport.sent)
+        event = InputEvent(
+            container_name="cappage", selected_name="QUICKNOTES",
+            selected_index=index, event_type=EventType.SCROLL_BOTTOM,
+            request_id=request_id, trace_id=trace_id,
+        )
+        router.on_input(event)
+        router.on_input(event)
+        await wait_until(lambda: len(transport.sent) > before)
+        await asyncio.sleep(0)
+        assert len(transport.sent) == before + 1, "duplicate gesture skipped a page"
+        router.on_input(event)  # A delayed duplicate still names the old page.
+        await asyncio.sleep(0)
+        assert len(transport.sent) == before + 1, "delayed duplicate skipped a page"
+    raise AssertionError("reader did not finish")
 
 
 def message_row_index(transport: FakeTransport, label: str) -> int:
@@ -447,6 +532,7 @@ def make_router(
     terminal_focus=None,
     terminal_view=None,
     terminal_busy=None,
+    terminal_open=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -474,6 +560,7 @@ def make_router(
         terminal_focus=terminal_focus,
         terminal_view=terminal_view,
         terminal_busy=terminal_busy,
+        terminal_open=terminal_open,
     )
     return router, transport, status
 
@@ -806,9 +893,9 @@ class TestCapabilityViews:
             item for item in transport.sent
             if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
         ][-1]
-        assert first_page.items[0] == "From Dele · unread · 1/2"
+        assert first_page.items[0] == "1/2 · From Dele · unread"
         assert len(first_page.items) > 2
-        assert all(len(line) <= 52 for line in first_page.items[1:])
+        assert all(len(line) <= 62 for line in first_page.items[1:])
         assert " ".join(first_page.items[1:]).startswith("Opening words")
         assert first_page.hint == "down more · say reply · left x2: back"
         assert first_page.selectable is False
@@ -829,7 +916,7 @@ class TestCapabilityViews:
             item for item in transport.sent
             if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
         ][-1]
-        assert second_page.items[0] == "From Dele · unread · 2/2"
+        assert second_page.items[0] == "2/2 · From Dele · unread"
         assert second_page.hint == "up previous · say reply · left x2: back"
         assert first_page.items[1] != second_page.items[1]
         assert len(replies.selected) == 1
@@ -840,14 +927,95 @@ class TestCapabilityViews:
         ))
         assert router._message_detail is None
         assert router._message_history is not None
-        assert replies.cleared == []
+        assert replies.cleared == ["messages-open"]
 
         router.on_input(InputEvent(
             container_name="capability-lifecycle",
             selected_name="messages-home",
         ))
         assert router._message_history is None
-        assert replies.cleared == ["home"]
+        assert replies.cleared == ["messages-open", "home"]
+
+    @pytest.mark.parametrize("body", [
+        pytest.param("x" * 2500 + "FINAL", id="unbroken-value"),
+        pytest.param("漢" * 440 + "FINAL", id="wide-cjk"),
+        pytest.param("😀" * 320 + "FINAL", id="emoji-exceeds-ten-old-rows"),
+        pytest.param("  Opening\r\n\r\n" + "Keep  every\tspace.\r\n" * 35 + "FINAL\n  ",
+                     id="exact-whitespace"),
+        pytest.param("e\u0301 👩\u200d💻 " * 100 + "FINAL", id="combining-and-joined-emoji"),
+    ])
+    async def test_full_message_reader_preserves_exact_serialized_pages_and_back(
+        self, tmp_path, body: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        messages = LongHistoryMessages([("Dele", "Preview", time.time())])
+        messages.body = body
+        router._messages = messages  # type: ignore[assignment]
+        request_id = "message-exact-reader"
+        await router.open("Messages", request_id=request_id)
+        await router._select_capability_row("MESSAGES", 1, "select-thread", request_id)
+        await router._select_message_detail(1, "select-message", request_id)
+
+        pages = []
+        for expected in range(100):
+            frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
+            wire = frame.to_wire()
+            assert frame.title == "MESSAGES · MESSAGE"
+            assert frame.request_id == request_id
+            assert wire["items"] == frame.items, "body cannot be shortened during serialization"
+            assert 2 <= len(frame.items) <= 11
+            assert all(len(row.encode("utf-16-le")) // 2 <= 64 for row in frame.items)
+            assert all(sum(
+                8 if char == "\t" else 2
+                if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in "WF" else 1
+                for char in row.rstrip("\r\n")
+            ) <= 62 for row in frame.items[1:])
+            counter = re.match(r"^(\d+)/(\d+) · From Dele · unread$", frame.items[0])
+            assert counter is not None, "prepared reader pages must identify their row contract first"
+            index, total = int(counter[1]) - 1, int(counter[2])
+            assert index == expected
+            assert ("down more" in (frame.hint or "")) == (index + 1 < total)
+            assert ("up previous" in (frame.hint or "")) == (index > 0)
+            pages.append(wire)
+            if index + 1 == total:
+                break
+            await router._page_message_history(EventType.SCROLL_BOTTOM, "page-next", request_id)
+        else:
+            pytest.fail("message reader did not expose its final page")
+
+        assert len(pages) > 1
+        assert "".join(row for page in pages for row in page["items"][1:]) == body
+        assert "FINAL" in "".join(pages[-1]["items"][1:])
+        assert messages.body == body
+        assert len(replies.selected) == 1
+
+        before = len(transport.sent)
+        await router._page_message_history(EventType.SCROLL_TOP, "stale", "old-request")
+        assert len(transport.sent) == before
+        await router._page_message_history(EventType.SCROLL_TOP, "page-previous", request_id)
+        assert transport.sent[-1].to_wire() == pages[-2]
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+            selected_name="messages-conversation", request_id=request_id))
+        assert router._message_detail is None
+        assert router._message_history is not None
+        assert len(replies.selected) == 1
+
+    async def test_full_message_reader_keeps_counter_visible_before_long_metadata(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path, replies=FakeReplies())
+        messages = LongHistoryMessages([("😀" * 50, "Preview", time.time())])
+        messages.body = "Exact body."
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="long-sender")
+        await router._select_capability_row("MESSAGES", 1, "select-thread", "long-sender")
+        await router._select_message_detail(1, "select-message", "long-sender")
+        frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
+        wire = frame.to_wire()
+        assert wire["items"][0].startswith("1/1 · From ")
+        assert len(wire["items"][0].encode("utf-16-le")) // 2 <= 64
+        assert "".join(wire["items"][1:]) == "Exact body."
 
     async def test_conversation_pages_are_request_bound_and_show_message_metadata(
         self, tmp_path,
@@ -879,7 +1047,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert latest.hint == "tap read · say reply · left x2: back"
+        assert latest.hint == "down older · tap read · say reply · left x2: back"
 
         router.on_input(InputEvent(
             container_name="cappage",
@@ -902,7 +1070,7 @@ class TestCapabilityViews:
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
         ]
-        assert older.hint == "tap read · say reply · left x2: back"
+        assert older.hint == "up newer · tap read · say reply · left x2: back"
         # The async page task clears its duplicate-input guard after its
         # replacement frame is committed, as the production bridge does.
         await asyncio.sleep(0)
@@ -957,6 +1125,90 @@ class TestCapabilityViews:
         assert detail.request_id == "messages-history-denied"
         assert replies.selected == []
 
+    async def test_picker_back_disarms_reply_but_allows_second_selection(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = PagedHistoryMessages()  # type: ignore[assignment]
+        await router.open("Messages", request_id="picker-return")
+        select = InputEvent(container_name="capdata", selected_name="MESSAGES",
+                            selected_index=1, request_id="picker-return")
+        router.on_input(select)
+        await wait_until(lambda: len(replies.selected) == 1)
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="messages-list"))
+        assert replies.cleared == ["messages-open", "list"]
+        before = len(transport.sent)
+        router.on_input(select)
+        await asyncio.sleep(.05)
+        assert len(replies.selected) == 2
+        assert any(isinstance(m, HudList) and m.title == "MESSAGES · CONVERSATION"
+                   for m in transport.sent[before:])
+
+    @pytest.mark.parametrize("boundary", ["messages-list", "messages-home", "disconnect"])
+    async def test_pending_message_selection_cannot_rearm_after_context_ends(
+        self, tmp_path, boundary: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        messages = HeldHistoryMessages()
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="held-selection")
+        pending = asyncio.create_task(router._select_capability_row(
+            "MESSAGES", message_row_index(transport, "] Thread A ·"),
+            "held-selection", "held-selection",
+        ))
+        try:
+            assert await asyncio.to_thread(messages.started.wait, 1)
+            if boundary == "disconnect":
+                router.on_disconnect()
+            else:
+                router.on_input(InputEvent(
+                    container_name="capability-lifecycle", selected_name=boundary,
+                ))
+            before = list(transport.sent)
+        finally:
+            messages.release.set()
+            await pending
+
+        assert replies.selected == []
+        assert router._message_selection_active is False
+        assert router._message_history is None
+        assert transport.sent == before
+
+    async def test_old_message_page_failure_cannot_clear_new_selection(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        messages = HeldHistoryMessages(
+            hold_older=True, error=PermissionError("synthetic old page failure"),
+        )
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="held-page")
+        first_index = message_row_index(transport, "] Thread A ·")
+        second_index = message_row_index(transport, "] Thread B ·")
+        await router._select_capability_row("MESSAGES", first_index, "first", "held-page")
+        pending = asyncio.create_task(router._page_message_history(
+            EventType.SCROLL_BOTTOM, "old-page", "held-page",
+        ))
+        try:
+            assert await asyncio.to_thread(messages.started.wait, 1)
+            router.on_input(InputEvent(
+                container_name="capability-lifecycle", selected_name="messages-list",
+            ))
+            await router._select_capability_row("MESSAGES", second_index, "second", "held-page")
+            assert replies.selected[-1][0].sender == "Thread B"
+            before = list(transport.sent)
+        finally:
+            messages.release.set()
+            await pending
+
+        assert replies.cleared == ["messages-open", "list"]
+        assert router._message_selection_active is True
+        assert router._message_history is not None
+        assert router._message_history.thread.sender == "Thread B"
+        assert transport.sent == before
+
     async def test_returning_home_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
         router, transport, _ = make_router(
@@ -981,7 +1233,7 @@ class TestCapabilityViews:
         ))
         await asyncio.sleep(0)
 
-        assert replies.cleared == ["home"]
+        assert replies.cleared == ["messages-open", "home"]
 
     async def test_reopening_messages_clears_a_previously_selected_recipient(
         self, tmp_path
@@ -1005,7 +1257,7 @@ class TestCapabilityViews:
 
         await router.open("Messages", request_id="messages-second")
 
-        assert replies.cleared == ["messages-open"]
+        assert replies.cleared == ["messages-open", "messages-open"]
         picker = [message for message in transport.sent if isinstance(message, HudList)][-1]
         assert picker.title == "MESSAGES"
         assert picker.request_id == "messages-second"
@@ -1030,7 +1282,69 @@ class TestCapabilityViews:
 
         router.on_disconnect()
 
-        assert replies.cleared == ["disconnect"]
+        assert replies.cleared == ["messages-open", "disconnect"]
+
+    @pytest.mark.parametrize("boundary", ["messages-home", "menu-home", "disconnect"])
+    @pytest.mark.parametrize("stage", ["awaiting_input", "awaiting_confirmation"])
+    async def test_home_and_disconnect_cancel_typed_message_without_picker_selection(
+        self, tmp_path, boundary: str, stage: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        sent: list[tuple[str, str]] = []
+        confirmation_started = asyncio.Event()
+        release_confirmation = asyncio.Event()
+
+        async def send(recipient: str, body: str) -> None:
+            sent.append((recipient, body))
+
+        async def confirm(
+            _action_id: str, _prompt: str, _timeout_s: float, **_binding: str,
+        ) -> bool:
+            confirmation_started.set()
+            await release_confirmation.wait()
+            return True
+
+        replies = MessageReplyController(
+            SimpleNamespace(send=send),  # type: ignore[arg-type]
+            confirm,
+            contact_search=lambda _query: [("Synthetic Contact", "+12025550123")],
+        )
+        router, _, _ = make_router(tmp_path, replies=replies)
+        action_id = f"typed-{boundary}-{stage}"
+        try:
+            prepared = await replies.prepare_new_message(
+                action_id=action_id, trace_id="synthetic-conversation",
+                recipient_name="Synthetic Contact",
+                body="Synthetic message." if stage == "awaiting_confirmation" else None,
+            )
+            assert prepared.state == stage
+            assert router._message_selection_active is False
+            if stage == "awaiting_confirmation":
+                await asyncio.wait_for(confirmation_started.wait(), timeout=1)
+
+            if boundary == "disconnect":
+                router.on_disconnect()
+            elif boundary == "menu-home":
+                router.on_input(InputEvent(container_name="menu", selected_name="closed"))
+            else:
+                router.on_input(InputEvent(
+                    container_name="capability-lifecycle", selected_name="messages-home",
+                ))
+            await asyncio.sleep(0)
+            state_after_boundary = replies.message_action_status(action_id).state
+
+            # A delayed input or approval from the retired context cannot send.
+            if stage == "awaiting_input":
+                await replies.provide_message_input(action_id, body="Synthetic message.")
+            release_confirmation.set()
+            await wait_until(lambda: replies.message_action_status(action_id).state
+                             not in {"awaiting_input", "awaiting_confirmation", "sending"})
+
+            assert state_after_boundary == "cancelled"
+            assert replies.message_action_status(action_id).state == "cancelled"
+            assert sent == []
+        finally:
+            release_confirmation.set()
+            await replies.aclose()
 
     async def test_group_message_cannot_be_misrouted_to_one_participant(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         now = time.time()
@@ -1048,16 +1362,47 @@ class TestCapabilityViews:
             selected_index=message_row_index(transport, "] Project team"),
             trace_id="hud-group",
         ))
-        await asyncio.sleep(0)
+        await wait_until(lambda: any(
+            isinstance(m, HudList) and m.title == "MESSAGES · CONVERSATION"
+            for m in transport.sent
+        ))
 
         assert replies.selected == []
-        # The refusal is a band over the conversation list, not a page that
-        # replaces it: the list the wearer was reading is still the surface.
-        assert [m.title for m in transport.sent if isinstance(m, HudList)][-1] == "MESSAGES"
-        band = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
-        assert any(
-            m.text is not None and "read-only" in m.text for m in band
+        frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert frame.selectable
+        assert "Participant · Ship it" in frame.items
+        assert "read-only" in frame.hint
+        assert "say reply" not in frame.hint
+
+    async def test_group_with_chat_guid_arms_reply_and_keeps_identity_mac_side(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        thread = MessageThread(
+            "Project team", "private-latest-participant", "Ship it", time.time(),
+            chat_guid="iMessage;+;private-group-target", is_group=True,
         )
+        monkeypatch.setattr(FakeMessages, "recent_threads", lambda _self, limit=5: [thread])
+        replies = FakeReplies()
+        router, transport, _ = make_router(tmp_path, rows=[], replies=replies)
+        await router.open("Messages")
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "] Project team"), trace_id="group-guid",
+        ))
+        await wait_until(lambda: bool(replies.selected))
+        await wait_until(lambda: any(
+            isinstance(message, HudList) and message.title == "MESSAGES · CONVERSATION"
+            for message in transport.sent
+        ))
+
+        assert replies.selected == [(thread, "group-guid")]
+        frame = [message for message in transport.sent if isinstance(message, HudList)][-1]
+        assert "say reply" in frame.hint
+        assert "read-only" not in frame.hint
+        assert "Participant · Ship it" in frame.items
+        wire_frames = repr(transport.sent)
+        assert thread.handle not in wire_frames
+        assert thread.chat_guid not in wire_frames
 
     async def test_messages_without_access_states_the_gap(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, rows=None)
@@ -1378,7 +1723,8 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         note_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_detail.title == "QUICKNOTES · DETAIL"
-        assert note_detail.items == ["Ask Adaeze about the design review"]
+        assert note_detail.items[0] == "1/1 · Exact text"
+        assert "".join(note_detail.to_wire()["items"][1:]) == "Ask Adaeze about the design review"
 
         await router.open("Activity")
         action_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -1398,6 +1744,129 @@ class TestCapabilityViews:
         assert detail.text is not None
         assert detail.text.startswith("Calendar create · Drafted · ref ")
         store.close()
+
+    @pytest.mark.parametrize(("body", "first_row"), [
+        pytest.param("A" * 62 + "Z" * 8 + "\r\n", "A" * 62, id="long-word"),
+        pytest.param("word " * 30, "word " * 12, id="whole-words"),
+        pytest.param("漢" * 31 + "字" * 4 + "\r\n", "漢" * 31, id="wide-cjk"),
+        pytest.param("😀" * 31 + "🙂" * 4 + "\r\n", "😀" * 31, id="surrogate-pairs"),
+        pytest.param("C" * 62 + "\r\n", "C" * 62 + "\r\n", id="crlf-reservation"),
+        pytest.param("A" * 61 + "e\u0301" + "Z" * 5 + "\r\n", "A" * 61,
+                     id="combining-boundary"),
+        pytest.param("A" * 59 + "👩\u200d💻" + "Z" * 5 + "\r\n", "A" * 59,
+                     id="joined-emoji-boundary"),
+        pytest.param("\t" * 10 + "FINAL", "\t" * 7, id="conservative-tabs"),
+    ])
+    async def test_quicknote_reader_uses_expanded_width_without_wire_loss(
+        self, tmp_path, body: str, first_row: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The 548px reader uses up to 62 mono columns without SDK clipping."""
+        with DurableStore(tmp_path / "wide-note.sqlite3") as durable:
+            notes = NoteStore(durable)
+            notes.create(note_id="wide", idempotency_key="wide", text=body,
+                         source=NoteSource(kind="synthetic"), now_us=10)
+            router, transport, _ = make_router(tmp_path, notes=notes)
+            await router.open("QuickNotes", request_id="wide-note-reader")
+            await router._select_capability_row(
+                "QUICKNOTES", 0, "reader-wide", "wide-note-reader",
+            )
+            pages = await collect_note_reader(
+                router, transport, request_id="wide-note-reader", trace_id="reader-wide",
+            )
+            rows = [row for page in pages for row in page["items"][1:]]
+            assert rows[0] == first_row, "reader still leaves the available width unused"
+            assert "".join(rows) == body
+            assert notes.get("wide").text == body
+            assert all(not row.startswith(("\u0301", "\u200d")) for row in rows)
+            assert all(not row.endswith("\u200d") for row in rows)
+
+    async def test_quicknote_reader_preserves_full_exact_wire_text_and_back_selection(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        body = (
+            "  Opening words.\r\n\r\n" + "漢" * 60 + "\n" + "😀" * 30 + "\r\n"
+            + "e\u0301 👩\u200d💻 " * 18 + "\n" + "unbroken" * 35 + "\n"
+            + "Keep  both spaces. " * 60 + "FINAL-TEXT-MARKER\n  "
+        )
+        second_body = "Second note " + "second-body " * 60
+        with DurableStore(tmp_path / "notes.sqlite3") as durable:
+            notes = NoteStore(durable)
+            for identifier, text, at in (("long", body, 10), ("second", second_body, 20)):
+                notes.create(note_id=identifier, idempotency_key=identifier, text=text,
+                             source=NoteSource(kind="synthetic"), now_us=at)
+            router, transport, _ = make_router(tmp_path, notes=notes)
+            await router.open("QuickNotes", request_id="note-reader")
+            await router._select_capability_row("QUICKNOTES", 1, "reader-long", "note-reader")
+            pages = await collect_note_reader(router, transport, request_id="note-reader", trace_id="reader-long")
+            assert len(pages) > 2
+            assert "".join(row for page in pages for row in page["items"][1:]) == body
+            assert notes.get("long").text == body
+
+            before = len(transport.sent)
+            router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
+                selected_index=len(pages) - 1, event_type=EventType.SCROLL_TOP,
+                request_id="old-request", trace_id="reader-long"))
+            await asyncio.sleep(0)
+            assert len(transport.sent) == before
+            router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
+                selected_index=len(pages) - 1, event_type=EventType.SCROLL_TOP,
+                request_id="note-reader", trace_id="reader-long"))
+            await wait_until(lambda: len(transport.sent) > before)
+            assert transport.sent[-1].to_wire() == pages[-2]
+
+            before = len(transport.sent)
+            router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
+                selected_index=len(pages) - 2, event_type=EventType.SCROLL_TOP,
+                request_id="note-reader", trace_id="reader-long"))
+            router.on_input(InputEvent(container_name="capability-lifecycle",
+                selected_name="quicknotes-list", request_id="note-reader"))
+            await asyncio.sleep(0)
+            assert len(transport.sent) == before, "Back must retire an already queued page"
+            await router._select_capability_row("QUICKNOTES", 0, "reader-second", "note-reader")
+            second = [m for m in transport.sent if isinstance(m, HudList)][-1].to_wire()
+            assert "".join(second["items"][1:]).startswith("Second note")
+            assert "down more" in second["hint"]
+            before = len(transport.sent)
+            # An old reader's page zero cannot advance a newly opened note.
+            router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
+                selected_index=0, event_type=EventType.SCROLL_BOTTOM,
+                request_id="note-reader", trace_id="reader-long"))
+            await asyncio.sleep(0)
+            assert len(transport.sent) == before
+
+    @pytest.mark.parametrize("with_summary", [True, False])
+    async def test_quicknote_reader_reaches_complete_recording_transcript(
+        self, tmp_path, with_summary: bool,
+    ) -> None:  # type: ignore[no-untyped-def]
+        first = "First section\n\n" + ("Keep exact  words. " * 40).rstrip()
+        last = "Last section " + "unbroken" * 40 + " FINAL-RECORDING-MARKER"
+        with DurableStore(tmp_path / "recording.sqlite3") as durable:
+            notes = VoiceNoteStore(durable)
+            notes.create(capture_id="recording", idempotency_key="recording",
+                         title="Synthetic recording", source_kind="synthetic", now_us=10)
+            notes.transition("recording", "recording", now_us=11)
+            for seq in range(2):
+                notes.append_frame("recording", connection_generation="synthetic", seq=seq,
+                    source="glasses", speaker="wearer", pcm=b"\x01\x00", received_at_us=12 + seq)
+            notes.append_gap("recording", code="synthetic_gap", detail="Missing interval", now_us=14)
+            notes.transition("recording", "finalizing", now_us=15)
+            for ordinal, text in enumerate((first, last)):
+                notes.append_transcript("recording", text=text, first_frame_ordinal=ordinal,
+                    last_frame_ordinal=ordinal, now_us=16 + ordinal)
+            notes.finalize("recording", complete=False, completion_code="incomplete_raw_retained", now_us=20)
+            if with_summary:
+                notes.replace_insights("recording", engine="synthetic", summary="Summary only.",
+                    key_points=("One point",), todos=("One action",), now_us=21)
+            router, transport, _ = make_router(tmp_path, voice_notes=notes)
+            await router.open("QuickNotes", request_id="recording-reader")
+            await router._select_capability_row("QUICKNOTES", 0, "reader-recording", "recording-reader")
+            pages = await collect_note_reader(router, transport, request_id="recording-reader", trace_id="reader-recording")
+            body = "".join(row for page in pages for row in page["items"][1:])
+            assert first in body and last in body
+            assert body.index(first) < body.index(last)
+            assert "[synthetic_gap] Missing interval" in body
+            assert ("Summary only." in body) == with_summary
+            assert "FINAL-RECORDING-MARKER" in "".join(pages[-1]["items"][1:])
 
     async def test_quicknotes_unifies_recordings_and_text_notes(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
@@ -1440,13 +1909,14 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "QUICKNOTES · NOTE"
-        assert detail.items[0] == "Standup notes"
-        assert "SUMMARY" in detail.items
-        assert any("ship Friday" in item for item in detail.items)
-        assert "KEY POINTS" in detail.items
-        assert "TODOS" in detail.items
-        # The newest recording advertises the transcript Q&A grammar.
-        assert detail.hint is not None and "ask the last note" in detail.hint
+        recording_pages = await collect_note_reader(router, transport, request_id=None, trace_id="hud")
+        recording_text = "".join(row for page in recording_pages for row in page["items"][1:])
+        assert recording_text.startswith("Standup notes\n")
+        assert "SUMMARY\nThe team agreed to ship Friday." in recording_text
+        assert "KEY POINTS" in recording_text and "TODOS" in recording_text
+        # Q&A remains discoverable in the body; the footer owns page/Back gestures.
+        assert "ask the last note" in recording_text
+        assert "TRANSCRIPT\nWe agreed to ship Friday." in recording_text
 
         # Text rows keep their exact-text detail behaviour.
         await router.open("QuickNotes")
@@ -1458,7 +1928,8 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         text_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert text_detail.title == "QUICKNOTES · DETAIL"
-        assert text_detail.items == ["Ask Adaeze about the design review"]
+        assert text_detail.items[0] == "1/1 · Exact text"
+        assert "".join(text_detail.to_wire()["items"][1:]) == "Ask Adaeze about the design review"
 
     async def test_live_recording_owns_the_quicknotes_page_with_tap_controls(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
@@ -1509,6 +1980,34 @@ class TestCapabilityViews:
         controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert controls.title == "QUICKNOTES · DISCARD?"
         assert controls.items == ["Confirm discard", "Keep recording"]
+
+    async def test_quicknotes_discard_back_keeps_then_saves_the_recording(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(state="recording", discard_pending=True)
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-current")
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-back", request_id="notes-current"))
+        await asyncio.sleep(.05)
+        assert capture.calls == ["keep"]
+        controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert controls.title == "QUICKNOTES · RECORDING"
+        assert controls.items[0] == "Save and finish"
+        router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
+                                   selected_index=0, request_id="notes-current"))
+        await asyncio.sleep(.05)
+        assert capture.calls == ["keep", "stop"]
+        assert not capture.active
+
+    async def test_quicknotes_back_rejects_an_old_request(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(discard_pending=True)
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-current")
+        before = len(transport.sent)
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-back", request_id="notes-old"))
+        await asyncio.sleep(.05)
+        assert capture.calls == []
+        assert len(transport.sent) == before
 
 
 class TestGestureReflexes:
@@ -2017,3 +2516,87 @@ class TestATapThatFailsSaysSo:
             if isinstance(m, AssistantOverlay) and m.text
         ]
         assert spoken and "no longer listed" in spoken[-1]
+
+
+class TestTerminalOpeningLease:
+    async def setup_opening(self, tmp_path):  # type: ignore[no-untyped-def]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        started = []
+        painted = []
+
+        async def opener(name, request_id, selection_id, current):
+            started.append((name, request_id, selection_id, current))
+            entered.set()
+            await release.wait()
+            if current():
+                painted.append(name)
+
+        router, transport, _ = make_router(
+            tmp_path, terminal_rows=lambda: [("work", "work"), ("calendar", "calendar")],
+            terminal_open=opener,
+        )
+        await router.open("Agent Terminal", request_id="visit-1")
+        return router, transport, entered, release, started, painted
+
+    @pytest.mark.parametrize("leave", ["home", "disconnect", "new-capability", "queued-capability"])
+    async def test_held_open_cannot_paint_after_leaving(self, tmp_path, leave):  # type: ignore[no-untyped-def]
+        router, _, entered, release, started, painted = await self.setup_opening(tmp_path)
+        opening = asyncio.create_task(router._select_capability_row("AGENT TERMINAL", 0, "tap-1", "visit-1"))
+        await entered.wait()
+        if leave == "home":
+            router.on_input(InputEvent(container_name="menu", selected_name="closed"))
+        elif leave == "disconnect":
+            router.on_disconnect()
+        elif leave == "new-capability":
+            await router.open("Messages", request_id="visit-2")
+        else:
+            router.on_input(InputEvent(container_name="capmenu", selected_name="Messages", request_id="visit-2"))
+        assert not started[0][3](), "Leaving must retire the opening synchronously"
+        release.set()
+        await opening
+        assert painted == []
+
+    async def test_opening_echoes_exact_visit_and_selection(self, tmp_path):  # type: ignore[no-untyped-def]
+        router, _, entered, release, started, painted = await self.setup_opening(tmp_path)
+        opening = asyncio.create_task(router._select_capability_row("AGENT TERMINAL", 1, "tap-2", "visit-1"))
+        await entered.wait()
+        release.set()
+        await opening
+        assert started[0][:3] == ("calendar", "visit-1", "tap-2")
+        assert painted == ["calendar"]
+
+    async def test_new_selection_retires_held_first_selection(self, tmp_path):  # type: ignore[no-untyped-def]
+        router, _, entered, release, started, painted = await self.setup_opening(tmp_path)
+        first = asyncio.create_task(router._select_capability_row("AGENT TERMINAL", 0, "tap-1", "visit-1"))
+        await entered.wait()
+        router.on_input(InputEvent(container_name="capdata", selected_name="AGENT TERMINAL", selected_index=1, trace_id="tap-2", request_id="visit-1"))
+        assert not started[0][3](), "Second selection must retire the first before queued work runs"
+        release.set()
+        await first
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert painted == ["calendar"]
+
+    async def test_home_before_queued_selection_prevents_preparation(self, tmp_path):  # type: ignore[no-untyped-def]
+        router, _, _, release, started, _ = await self.setup_opening(tmp_path)
+        release.set()
+        router.on_input(InputEvent(container_name="capdata", selected_name="AGENT TERMINAL", selected_index=0, trace_id="tap-1", request_id="visit-1"))
+        router.on_input(InputEvent(container_name="menu", selected_name="closed"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert started == []
+
+    async def test_old_terminal_home_does_not_retire_newer_selection(self, tmp_path):  # type: ignore[no-untyped-def]
+        router, _, entered, release, started, _ = await self.setup_opening(tmp_path)
+        first = asyncio.create_task(router._select_capability_row("AGENT TERMINAL", 0, "tap-1", "visit-1"))
+        await entered.wait()
+        entered.clear()
+        second = asyncio.create_task(router._select_capability_row("AGENT TERMINAL", 1, "tap-2", "visit-1"))
+        await entered.wait()
+        router.on_input(InputEvent(container_name="capability-lifecycle", selected_name="terminal-home", request_id="visit-1", trace_id="tap-1"))
+        assert not started[0][3]() and started[1][3]()
+        router.on_input(InputEvent(container_name="capability-lifecycle", selected_name="terminal-home", request_id="visit-1", trace_id="tap-2"))
+        assert not started[1][3]()
+        release.set()
+        await asyncio.gather(first, second)

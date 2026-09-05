@@ -1,10 +1,14 @@
 import {
   afterEach, beforeEach, describe, expect, it, vi,
 } from 'vitest';
-import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
+import { OsEventTypeList, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
 import { Settings } from './Settings';
-import type { HudPresenter } from './HudPresenter';
+import { HudPresenter } from './HudPresenter';
+import { HudPageBuilder } from './HudPageBuilder';
+import type { BridgeClient } from './BridgeClient';
+import type { HudVisualFrame } from './HudVisualSurface';
+import { selectedMessagesConversationRow } from './HudCanvasRenderer';
 import type { MacLink } from './MacLink';
 import { CAPABILITIES, type ProductivityHudModel } from './types';
 
@@ -21,6 +25,7 @@ function rig(
   listResult: PaintResult | PaintResult[] = true,
   productivityResult: PaintResult | PaintResult[] = true,
   productivityVisible = true,
+  selectionResult: PaintResult = true,
 ) {
   const lists: string[][] = [];
   const listOptions: Array<{ title?: string; hint?: string; selectable?: boolean } | undefined> = [];
@@ -33,12 +38,14 @@ function rig(
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
   let listCall = 0;
+  let visibleSelection = 0;
   let productivityCall = 0;
   const hud = {
     showList: vi.fn(async (
       items: string[], options?: { title?: string; hint?: string; selectable?: boolean },
     ) => {
       operations.push('list');
+      visibleSelection = 0;
       lists.push(items);
       listOptions.push(options);
       const result = Array.isArray(listResult)
@@ -53,8 +60,9 @@ function rig(
       return true;
     }),
     setSelection: vi.fn(async (index: number) => {
+      visibleSelection = index;
       selections.push(index);
-      return true;
+      return selectionResult;
     }),
     moveSelection: vi.fn(async (delta: number) => {
       moves.push(delta);
@@ -80,9 +88,10 @@ function rig(
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
-    menu, lists, listOptions, operations, productivities,
+    menu, hud, lists, listOptions, operations, productivities,
     deferredProductivityVisibleCallbacks, selections, moves, statuses, sent,
     defaultsCount: () => defaults,
+    visibleSelection: () => visibleSelection,
   };
 }
 
@@ -101,6 +110,188 @@ function latestRequestId(sent: Array<Record<string, unknown>>): string {
 }
 
 const rows = (count: number) => Array.from({ length: count }, (_, index) => `Row ${index + 1}`);
+
+function conversationSelectionRig(native = false) {
+  let completed: HudVisualFrame | undefined;
+  const frames: HudVisualFrame[] = [];
+  const sent: Array<Record<string, unknown>> = [];
+  const hooks: { paint?: (frame: HudVisualFrame) => Promise<void> } = {};
+  const client = {
+    require: () => ({
+      textContainerUpgrade: async () => true,
+      rebuildPageContainer: async () => true,
+    }),
+  } as unknown as BridgeClient;
+  const hud = new HudPresenter(client, new HudPageBuilder(), native ? undefined : {
+    paint: async (frame) => {
+      await hooks.paint?.(frame);
+      completed = frame;
+      frames.push(frame);
+      return true;
+    },
+  });
+  const link = { send: (message: Record<string, unknown>) => sent.push(message) } as unknown as MacLink;
+  const menu = new CapabilityMenu(hud, new Settings(), link);
+  return { menu, hud, sent, frames, hooks, completed: () => completed };
+}
+
+async function openConversationSelection(r: ReturnType<typeof conversationSelectionRig>) {
+  await r.menu.openFromContextualMenu(0);
+  const requestId = latestRequestId(r.sent);
+  await r.menu.presentList('MESSAGES', ['New message', 'Alex · Preview'], requestId, true);
+  r.menu.handleList(click(1));
+  return requestId;
+}
+
+const actionableConversation = [
+  'Latest messages — down for older',
+  'Alex · First received body',
+  'You · Second message body',
+  'Say “JOAT, reply saying …”',
+  'Mic off? Long press to enable.',
+];
+
+describe('Conversation actionable selection', () => {
+  it.each(['text', 'native-zero', 'omitted-zero'] as const)(
+    'opens with the first message visibly selected and immediately readable (%s tap)', async (tap) => {
+      const r = conversationSelectionRig();
+      try {
+        const requestId = await openConversationSelection(r);
+        expect(await r.menu.presentList(
+          'MESSAGES · CONVERSATION', actionableConversation, requestId, true,
+          'down older · tap read · say reply · left x2: back',
+        )).toBe(true);
+        expect(r.completed()).toMatchObject({
+          kind: 'list', title: 'MESSAGES · CONVERSATION', selectedIndex: 1,
+        });
+        expect(r.frames.filter((frame) => frame.kind === 'list'
+          && frame.title === 'MESSAGES · CONVERSATION')).toHaveLength(1);
+        const frame = r.completed();
+        if (frame?.kind !== 'list') throw new Error('Expected completed conversation frame');
+        expect(selectedMessagesConversationRow(frame.items, frame.selectedIndex)).toBe(0);
+        if (tap === 'text') r.menu.handleClick();
+        else r.menu.handleList(tap === 'native-zero' ? click(0) : clickRow0());
+        expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
+          containerName: 'capmessage', selectedIndex: 1, requestId,
+        });
+      } finally { r.menu.releaseToLiveSession(); }
+    },
+  );
+
+  it('awaits the first actionable highlight before admitting an immediate tap', async () => {
+    const r = conversationSelectionRig();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let selectionStarted = false;
+    let opening: Promise<boolean> | undefined;
+    try {
+      const requestId = await openConversationSelection(r);
+      r.hooks.paint = async (frame) => {
+        if (frame.kind === 'list' && frame.title === 'MESSAGES · CONVERSATION'
+          && frame.selectedIndex === 1) {
+          selectionStarted = true;
+          await held;
+        }
+      };
+      let finished = false;
+      opening = r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true)
+        .then((result) => { finished = true; return result; });
+      await vi.waitFor(() => expect(selectionStarted).toBe(true));
+      expect(finished).toBe(false);
+      expect(r.menu.handleClick()).toBe(true);
+      expect(r.sent).toHaveLength(2);
+      release();
+      await opening;
+      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
+      r.menu.handleClick();
+      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1 });
+    } finally {
+      release();
+      await opening;
+      r.menu.releaseToLiveSession();
+    }
+  });
+
+  it('pages at the last actual message instead of stepping into invisible reply instructions', async () => {
+    const r = conversationSelectionRig();
+    try {
+      const requestId = await openConversationSelection(r);
+      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true, 'down older');
+      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      await vi.waitFor(() => expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 2 }));
+      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      expect(r.sent).toHaveLength(3);
+      expect(r.sent[2]?.event).toMatchObject({
+        containerName: 'cappage', selectedName: 'MESSAGES',
+        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId,
+      });
+      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 2 });
+    } finally { r.menu.releaseToLiveSession(); }
+  });
+
+  it('pages upward from the first actual message without an invisible header stop', async () => {
+    const r = conversationSelectionRig();
+    try {
+      const requestId = await openConversationSelection(r);
+      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true, 'up newer');
+      r.menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
+      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
+        containerName: 'cappage', eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId,
+      });
+      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
+    } finally { r.menu.releaseToLiveSession(); }
+  });
+
+  it('does not turn a reported instruction row into an invisible tap target', async () => {
+    const r = conversationSelectionRig();
+    try {
+      const requestId = await openConversationSelection(r);
+      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
+      r.menu.handleList(click(4));
+      expect(r.sent).toHaveLength(2);
+      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
+      r.menu.handleClick();
+      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1 });
+    } finally { r.menu.releaseToLiveSession(); }
+  });
+
+  it('keeps the visible message authoritative when a hidden native cursor reports another speaker', async () => {
+    const r = conversationSelectionRig();
+    try {
+      const requestId = await openConversationSelection(r);
+      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
+      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
+      expect(r.menu.handleList(click(2))).toBe(true);
+      expect(r.sent).toHaveLength(2);
+      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
+      r.menu.handleClick();
+      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
+        containerName: 'capmessage', selectedIndex: 1, requestId,
+      });
+    } finally { r.menu.releaseToLiveSession(); }
+  });
+
+  it('preserves arbitrary legacy conversation row indices', async () => {
+    const r = conversationSelectionRig();
+    try {
+      const requestId = await openConversationSelection(r);
+      await r.menu.presentList('MESSAGES · CONVERSATION', ['Legacy row one', 'Legacy row two'], requestId, true);
+      r.menu.handleClick();
+      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 0 });
+    } finally { r.menu.releaseToLiveSession(); }
+  });
+
+  it('preserves the actual firmware row index in native fallback', async () => {
+    const r = conversationSelectionRig(true);
+    try {
+      const requestId = await openConversationSelection(r);
+      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
+      r.menu.handleList(click(2));
+      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 2 });
+    } finally { r.menu.releaseToLiveSession(); }
+  });
+});
 
 describe('CapabilityMenu', () => {
   it('recognizes only the explicit safe-action lifecycle namespace', () => {
@@ -610,7 +801,7 @@ describe('CapabilityMenu', () => {
   });
 
   it('returns from full text to the live conversation before clearing its reply target', async () => {
-    const { menu, lists, sent } = rig();
+    const { menu, lists, sent, visibleSelection } = rig();
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
@@ -618,6 +809,7 @@ describe('CapabilityMenu', () => {
     const transcript = ['Latest messages', 'Dele · Opening words', 'Say reply'];
     expect(await menu.presentList('MESSAGES', conversations, requestId, true)).toBe(true);
     menu.handleList(click(1));
+    const selectionId = (sent[1]!.event as { traceId: string }).traceId;
     expect(await menu.presentList(
       'MESSAGES · CONVERSATION', transcript, requestId, true,
       'tap read · say reply · left x2: back',
@@ -630,17 +822,111 @@ describe('CapabilityMenu', () => {
 
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(transcript);
+    expect(visibleSelection()).toBe(1);
     expect(sent[3]).toEqual({
       kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation' },
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation', requestId, traceId: selectionId },
     });
 
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(conversations);
+    expect(visibleSelection()).toBe(1);
     expect(sent[4]).toEqual({
       kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId, traceId: selectionId },
     });
+  });
+
+  it('asks the Mac to cancel discard before enabling refreshed QuickNotes controls', async () => {
+    const { menu, lists, sent } = rig();
+    const requestId = 'voice-notes-back';
+    const recording = ['Save and finish', 'Pause recording', 'Discard recording'];
+    await menu.presentList('QUICKNOTES · RECORDING', recording, requestId, true);
+    menu.handleList(click(2));
+    await menu.presentList('QUICKNOTES · DISCARD?', ['Confirm discard', 'Keep recording'], requestId, true);
+    const paints = lists.length;
+    await menu.toggle();
+    expect(lists).toHaveLength(paints); // No stale Save label while the Mac still maps row zero to discard.
+    expect(sent[sent.length - 1]).toEqual({kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'quicknotes-back', requestId,
+    }});
+    const requests = sent.length;
+    menu.handleList(click(0));
+    expect(sent).toHaveLength(requests);
+    await menu.presentList('QUICKNOTES · RECORDING', recording, requestId, true);
+    menu.handleList(click(0));
+    expect(sent[sent.length - 1]).toMatchObject({event: {
+      containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 0, requestId,
+    }});
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false); // The abandoned discard dialog is not in Back history.
+  });
+
+  it('leaves QuickNotes retry after the Mac keep response is lost', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, listOptions, sent } = rig();
+      const requestId = 'voice-notes-lost';
+      await menu.presentList('QUICKNOTES · DISCARD?', ['Confirm discard', 'Keep recording'], requestId, true);
+      await menu.toggle();
+      const pending = sent.length;
+      await menu.toggle();
+      expect(sent).toHaveLength(pending); // Do not duplicate an in-flight keep.
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(listOptions[listOptions.length - 1]?.title).toBe('QUICKNOTES · RETRY');
+      await menu.toggle();
+      expect(menu.isOpen()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['text', 'native'] as const)('QuickNotes reader pages through %s input and restores the Back target', async (input) => {
+    const { menu, sent, lists, visibleSelection } = rig();
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    const requestId = latestRequestId(sent);
+    const picker = ['Other note', 'Long exact note'];
+    await menu.presentList('QUICKNOTES', picker, requestId, true);
+    menu.handleList(click(1));
+    const selection = sent[sent.length - 1];
+    if (!selection) throw new Error('No note selection was emitted');
+    const traceId = (selection.event as { traceId: string }).traceId;
+    await menu.presentList('QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page\n'], requestId, false, 'down more · left x2: back');
+    const swipe = (event: number) => input === 'text'
+      ? menu.handleScroll(event) : menu.handleList(scroll(event, 0));
+    const before = sent.length;
+    swipe(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    swipe(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(sent).toHaveLength(before + 1);
+    expect(sent[sent.length - 1]).toEqual({kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'QUICKNOTES', selectedIndex: 0,
+      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId, traceId,
+    }});
+    expect(await menu.presentList('QUICKNOTES · DETAIL', ['2/2 · Exact text', 'Wrong request'], 'old-request', false)).toBe(false);
+    await menu.presentList('QUICKNOTES · DETAIL', ['2/2 · Exact text', 'Final page'], requestId, false, 'up previous · left x2: back');
+    const lastPage = sent.length;
+    swipe(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(sent).toHaveLength(lastPage);
+    swipe(OsEventTypeList.SCROLL_TOP_EVENT);
+    expect(sent[sent.length - 1]).toMatchObject({event: {selectedIndex: 1, traceId}});
+    await menu.toggle();
+    expect(lists[lists.length - 1]).toEqual(picker);
+    expect(visibleSelection()).toBe(1);
+    expect(sent[sent.length - 1]).toEqual({kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'quicknotes-list', requestId,
+    }});
+    expect(await menu.presentList('QUICKNOTES · DETAIL', ['1/2 · Exact text', 'Late page'], requestId, false)).toBe(false);
+    menu.handleList(click(0));
+    expect(sent[sent.length - 1]).toMatchObject({event: {
+      containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 0, requestId,
+    }});
+    await menu.presentList('QUICKNOTES · NOTE', ['1/1 · Recording', 'Full transcript'], requestId, false, 'left x2: back');
+    const complete = sent.length;
+    swipe(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(sent).toHaveLength(complete);
+    await menu.toggle();
+    expect(lists[lists.length - 1]).toEqual(picker);
+    expect(visibleSelection()).toBe(0);
   });
 
   it('requests older and newer conversation pages only at scroll boundaries', async () => {
@@ -1114,6 +1400,7 @@ describe('CapabilityMenu', () => {
     const conversationRows = ['New message · voice recipient + text', '[now] Adele · Good morning'];
     expect(await menu.presentList('MESSAGES', conversationRows, requestId, true)).toBe(true);
     menu.handleList(click(1));
+    const selectionId = (sent[1]!.event as { traceId: string }).traceId;
     expect(sent).toHaveLength(2);
     expect(await menu.presentList(
       'MESSAGES · CONVERSATION', ['Adele · Good morning', 'Say reply saying …'], requestId, false,
@@ -1124,7 +1411,7 @@ describe('CapabilityMenu', () => {
     expect(defaultsCount()).toBe(0);
     expect(sent[2]).toEqual({
       kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId, traceId: selectionId },
     });
 
     await menu.toggle();
@@ -1132,8 +1419,121 @@ describe('CapabilityMenu', () => {
     expect(defaultsCount()).toBe(1);
     expect(sent[3]).toEqual({
       kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
     });
+  });
+
+  it.each([true, false])('News Back completes a visible row restoration before accepting a tap (native accepted=%s)', async (nativeAccepted) => {
+    let releaseSelection!: () => void;
+    const selectionPaint = new Promise<void>((resolve) => { releaseSelection = resolve; });
+    let holdSelection = false;
+    let selectionPaintStarted = false;
+    let completedSurface: HudVisualFrame | { kind: 'native'; selectedIndex: number } | undefined;
+    const sent: Array<Record<string, unknown>> = [];
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => true,
+        rebuildPageContainer: async (page: RebuildPageContainer) => {
+          if (page.listObject?.length) {
+            if (nativeAccepted) completedSurface = { kind: 'native', selectedIndex: 0 };
+            return nativeAccepted;
+          }
+          return true;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async (frame) => {
+        if (holdSelection && frame.kind === 'list' && frame.title === 'NEWS'
+          && frame.selectedIndex === 1) {
+          selectionPaintStarted = true;
+          await selectionPaint;
+        }
+        completedSurface = frame;
+        return true;
+      },
+    });
+    const link = { send: (message: Record<string, unknown>) => sent.push(message) } as unknown as MacLink;
+    const menu = new CapabilityMenu(hud, new Settings(), link);
+    hud.rail.accept({ kind: 'hud.panel', tab: 'news', revision: 7, rows: ['Story 01', 'Story 02'] });
+    await menu.openPanelTab('news');
+    menu.handleList(click(1));
+    expect(sent).toHaveLength(1);
+    expect(await menu.presentList(
+      'NEWS · ARTICLE', ['Story 02', 'Complete synthetic article.'], 'panel-news-7', false,
+    )).toBe(true);
+    expect(completedSurface).toMatchObject({ kind: 'list', title: 'NEWS · ARTICLE' });
+
+    holdSelection = true;
+    let backFinished = false;
+    const returning = menu.toggle().then(() => { backFinished = true; });
+    try {
+      // A logical selectedIndex is insufficient: a rebuilt native list starts
+      // at row zero. Require the actual painter to restore the chosen row.
+      await vi.waitFor(() => expect(selectionPaintStarted).toBe(true));
+      expect(backFinished).toBe(false);
+      expect(completedSurface).not.toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
+      expect(menu.handleClick()).toBe(true);
+      expect(sent).toHaveLength(1);
+
+      releaseSelection();
+      await returning;
+      expect(completedSurface).toMatchObject({
+        kind: 'list', title: 'NEWS', items: ['Story 01', 'Story 02'], selectedIndex: 1,
+      });
+      expect(hud.exportBackgroundState().surface).toMatchObject({
+        kind: 'list', options: { title: 'NEWS' }, selectedIndex: 1,
+      });
+      expect(menu.handleClick()).toBe(true);
+      expect(sent).toHaveLength(2);
+      expect(sent[1]?.event).toMatchObject({
+        containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 1, requestId: 'panel-news-7',
+      });
+    } finally {
+      releaseSelection();
+      await returning;
+      menu.releaseToLiveSession();
+    }
+  });
+
+  it.each([true, false])('keeps Home after cancelling pending highlight restoration (late result=%s)', async (lateResult) => {
+    let finishSelection!: (painted: boolean) => void;
+    const selectionPaint = new Promise<boolean>((resolve) => { finishSelection = resolve; });
+    const { menu, sent, selections, defaultsCount } = rig(true, true, true, selectionPaint);
+    await menu.openFromContextualMenu(0);
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList('MESSAGES', ['Refresh', 'Adele'], requestId, true)).toBe(true);
+    menu.handleList(click(1));
+    const selectionId = (sent[1]!.event as { traceId: string }).traceId;
+    expect(sent).toHaveLength(2);
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', ['Adele · Good morning'], requestId, false,
+    )).toBe(true);
+
+    const returning = menu.toggle();
+    await vi.waitFor(() => expect(selections).toEqual([1]));
+    // The first Back is still restoring the visible row; a tap cannot select
+    // from either the old conversation or the not-yet-ready picker.
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(2);
+
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(1);
+    expect(sent.slice(2)).toEqual([{
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
+    }]);
+
+    finishSelection(lateResult);
+    await returning;
+    expect(menu.isOpen()).toBe(false);
+    expect(menu.handleClick()).toBe(false);
+    expect(defaultsCount()).toBe(1);
+    expect(sent.slice(2)).toEqual([{
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
+    }]);
   });
 
   it('double-tap from the Messages root returns Home and clears Mac-private Messages state', async () => {
@@ -1167,7 +1567,7 @@ describe('CapabilityMenu', () => {
     await menu.beginLiveSession('brainstorm');
 
     expect(menu.isOpen()).toBe(false);
-    expect(defaultsCount()).toBe(1);
+    expect(defaultsCount()).toBe(0);
     expect(menu.handleClick()).toBe(false);
   });
 
@@ -1290,6 +1690,45 @@ describe('CapabilityMenu', () => {
       'voice-abc123', true,
     );
     expect(detail).toBe(true);
+  });
+
+  it('binds a conversational Terminal visit and rejects its frames after Home', async () => {
+    const { menu, hud } = rig();
+    const shown = vi.fn(async () => true);
+    hud.showBrainstorm = shown;
+    await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-messages', true);
+    expect(await menu.presentList('AGENT TERMINAL', ['Opening hermes…'], 'voice-terminal')).toBe(true);
+    const model = { screen: 'agent_terminal' as const, state: 'ready' as const,
+      topic: 'hermes', collaborators: ['hermes'], activity: 'Ready' };
+    const binding = { requestId: 'voice-terminal', selectionId: 'voice-terminal' };
+    expect(await menu.presentTerminalOpening(model, binding, () => true)).toBe(true);
+    expect(shown).toHaveBeenCalledTimes(1);
+    menu.retireTerminalOpening();
+    expect(await menu.presentTerminalOpening(model, binding, () => true)).toBe(false);
+    expect(shown).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers retry if a conversational Terminal frame never paints', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, hud, lists } = rig();
+      hud.showBrainstorm = vi.fn(async () => false);
+      await menu.presentList('AGENT TERMINAL', ['Opening hermes…'], 'voice-lost-terminal');
+      await menu.presentTerminalOpening({ screen: 'agent_terminal', state: 'ready',
+        topic: 'hermes', collaborators: ['hermes'], activity: 'Ready' },
+      { requestId: 'voice-lost-terminal', selectionId: 'voice-lost-terminal' }, () => true);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(lists[lists.length - 1]?.join(' ')).toContain('retry');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('hands a live Brainstorm its view without painting Overview between updates', async () => {
+    const { menu, defaultsCount } = rig();
+    await menu.presentList('BRAINSTORM', ['New brainstorm'], 'voice-brainstorm', true);
+    await menu.beginLiveSession('brainstorm');
+    await menu.beginLiveSession('brainstorm');
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(0);
   });
 
   it('still drops an unsolicited list without the voice prefix', async () => {
@@ -1448,5 +1887,136 @@ describe('Planning split dashboard', () => {
     menu.handleClick();
     // No pane repaint claiming focus happened.
     expect(panes.slice(before).every((p) => !p.focused)).toBe(true);
+  });
+});
+
+describe('queued conversational Terminal prelude ownership', () => {
+  function queuedPrelude(menu: CapabilityMenu, requestId: string): () => Promise<boolean> {
+    const current = menu.captureTerminalPreludeGuard();
+    return async () => current()
+      ? menu.presentList('AGENT TERMINAL', ['Opening hermes…'], requestId, false, 'left x2: back')
+      : false;
+  }
+
+  const ready = {
+    screen: 'agent_terminal' as const, state: 'ready' as const,
+    topic: 'hermes', collaborators: ['hermes'], activity: 'Ready',
+  };
+
+  it('drops a prelude received before Home but dispatched afterward, without opening its queued ready frame', async () => {
+    const { menu, hud, lists } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-old-messages', true);
+    const dispatch = queuedPrelude(menu, 'voice-queued-terminal');
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false);
+    const before = lists.length;
+
+    expect(await dispatch()).toBe(false);
+    expect(lists).toHaveLength(before);
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-queued-terminal', selectionId: 'voice-queued-terminal',
+    }, () => true)).toBe(false);
+    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(menu.isOpen()).toBe(false);
+  });
+
+  it('keeps a newly chosen capability when an older prelude leaves the downlink queue', async () => {
+    const { menu, hud, lists, listOptions } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    const dispatch = queuedPrelude(menu, 'voice-before-quicknotes');
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    const before = lists.length;
+
+    expect(await dispatch()).toBe(false);
+    expect(lists).toHaveLength(before);
+    expect(listOptions[listOptions.length - 1]?.title).toBe('QUICKNOTES');
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-before-quicknotes', selectionId: 'voice-before-quicknotes',
+    }, () => true)).toBe(false);
+    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    await menu.toggle();
+  });
+
+  it('retires a queued prelude on disconnect even before any Terminal binding exists', async () => {
+    const { menu, hud, lists, sent } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    const dispatch = queuedPrelude(menu, 'voice-before-disconnect');
+    menu.retireTerminalOpening(false);
+
+    expect(await dispatch()).toBe(false);
+    expect(lists).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-before-disconnect', selectionId: 'voice-before-disconnect',
+    }, () => true)).toBe(false);
+    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+  });
+
+  it('admits a current prelude once before adoption and accepts its normal bound ready frame', async () => {
+    const { menu, hud, lists } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-current-messages', true);
+    const dispatch = queuedPrelude(menu, 'voice-current-terminal');
+
+    expect(await dispatch()).toBe(true);
+    expect(lists[lists.length - 1]).toEqual(['Opening hermes…']);
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-current-terminal', selectionId: 'voice-current-terminal',
+    }, () => true)).toBe(true);
+    expect(hud.showBrainstorm).toHaveBeenCalledTimes(1);
+    expect(menu.isOpen()).toBe(false);
+  });
+
+  it('accepts two legitimate queued preludes in order without adoption retiring the later arrival', async () => {
+    const { menu, hud, lists } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    const first = queuedPrelude(menu, 'voice-queued-first');
+    const second = queuedPrelude(menu, 'voice-queued-second');
+
+    expect(await first()).toBe(true);
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-queued-first', selectionId: 'voice-queued-first',
+    }, () => true)).toBe(true);
+    expect(await second()).toBe(true);
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-queued-second', selectionId: 'voice-queued-second',
+    }, () => true)).toBe(true);
+    expect(lists).toEqual([['Opening hermes…'], ['Opening hermes…']]);
+    expect(hud.showBrainstorm).toHaveBeenCalledTimes(2);
+  });
+
+  it('Home retires both queued preludes, including the one not yet dispatched', async () => {
+    const { menu, hud, lists } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-before-both', true);
+    const first = queuedPrelude(menu, 'voice-retired-first');
+    const second = queuedPrelude(menu, 'voice-retired-second');
+    await menu.toggle();
+    const before = lists.length;
+
+    expect(await first()).toBe(false);
+    expect(await second()).toBe(false);
+    expect(lists).toHaveLength(before);
+    for (const requestId of ['voice-retired-first', 'voice-retired-second']) {
+      expect(await menu.presentTerminalOpening(ready, {
+        requestId, selectionId: requestId,
+      }, () => true)).toBe(false);
+    }
+    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(menu.isOpen()).toBe(false);
+  });
+
+  it('keeps a queued prelude current across an ordinary incoming live-frame handoff', async () => {
+    const { menu, hud } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    const dispatch = queuedPrelude(menu, 'voice-after-incoming-frame');
+    await menu.beginLiveSession('brainstorm');
+
+    expect(await dispatch()).toBe(true);
+    expect(await menu.presentTerminalOpening(ready, {
+      requestId: 'voice-after-incoming-frame', selectionId: 'voice-after-incoming-frame',
+    }, () => true)).toBe(true);
+    expect(hud.showBrainstorm).toHaveBeenCalledTimes(1);
   });
 });

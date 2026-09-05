@@ -34,9 +34,11 @@ import logging
 import shutil
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from ..core.interfaces import ReplyEngine
 from .grounding import Grounding
@@ -192,9 +194,13 @@ class _CliSeat(ReplyEngine):
             if not resuming:
                 self._session_id = str(uuid.uuid4())
             spoke = False
-            async for chunk in self._turn(text, resuming):
-                spoke = True
-                yield chunk
+            # A consumer may close immediately after its first display send.
+            # Explicit closure keeps the nested turn's child cleanup owned by
+            # this stream instead of deferring it to async-generator GC.
+            async with aclosing(cast(AsyncGenerator[str, None], self._turn(text, resuming))) as turn:
+                async for chunk in turn:
+                    spoke = True
+                    yield chunk
             if spoke:
                 self._session_used_at = time.monotonic()
 
@@ -366,9 +372,10 @@ class ClaudeCliReplyEngine(_CliSeat):
 class CodexCliReplyEngine(_CliSeat):
     """Codex CLI in exec mode on the ChatGPT subscription.
 
-    `codex exec --json` reports one `agent_message` item at the end of the
-    turn, so the answer lands as a single chunk; `thread.started` carries
-    the id that `codex exec resume <id>` continues. Codex has no
+    `codex exec --json` reports completed `agent_message` items. The latest
+    becomes the final answer at `turn.completed`, before child cleanup ends;
+    `thread.started` carries the id that `codex exec resume <id>` continues.
+    Codex has no
     system-prompt flag in exec mode, so the persona rides at the top of the
     first prompt and the live facts at the top of every prompt.
     """
@@ -439,41 +446,80 @@ class CodexCliReplyEngine(_CliSeat):
         agent = self._agent(self._command(resuming), stream_json=False, env_extra=token_env)
         agent._model = self._model  # noqa: SLF001
         agent._model_flag = "-m"  # noqa: SLF001
-        lines: list[str] = []
+        answer = ""
+        completed = False
+        delivered = False
+        stream_failed = False
         try:
-            async for piece in agent.stream(self._prompt(text, resuming)):
-                lines.append(piece)
+            # SubprocessAgent yields complete newline batches and, at EOF,
+            # any last unterminated line. Keep it as the sole child owner.
+            output = cast(AsyncGenerator[str, None], agent.stream(self._prompt(text, resuming)))
+            async with aclosing(output):
+                async for piece in output:
+                    for line in piece.split("\n"):
+                        try:
+                            event = json.loads(line)
+                        except (ValueError, UnicodeError):
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        kind = event.get("type")
+                        if kind in ("turn.failed", "error"):
+                            # A fatal JSON event is authoritative even if a
+                            # wrapper later exits zero. An error ITEM is only
+                            # a nonfatal warning and does not enter this path.
+                            stream_failed = True
+                        elif not completed and kind == "thread.started":
+                            thread_id = event.get("thread_id")
+                            if isinstance(thread_id, str) and thread_id:
+                                self._thread_id = thread_id
+                        elif not completed and kind == "item.completed":
+                            item = event.get("item")
+                            if isinstance(item, dict) and item.get("type") == "agent_message":
+                                text_out = item.get("text")
+                                if isinstance(text_out, str):
+                                    answer = text_out.strip()
+                        elif kind == "turn.completed" and not completed:
+                            # Completed items can precede tools or a later
+                            # assistant item. This boundary preserves the
+                            # CLI's latest-final-message semantics.
+                            completed = True
+                            if answer and not stream_failed:
+                                delivered = True
+                                yield answer
+                    # Continue through EOF and process exit after delivery.
+                    # Breaking here would abandon cleanup and its error state.
+        except (asyncio.CancelledError, GeneratorExit):
+            self._discard_thread()
+            raise
         except OSError as exc:
             log.error("codex could not be started (%s)", type(exc).__name__)
-            async for chunk in self._degraded(text, FAILED_NOTICE):
-                yield chunk
+            self._discard_thread()
+            if not delivered:
+                async for chunk in self._degraded(text, FAILED_NOTICE):
+                    yield chunk
             return
-        answer = ""
-        for line in "".join(lines).splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            kind = event.get("type")
-            if kind == "thread.started" and isinstance(event.get("thread_id"), str):
-                self._thread_id = event["thread_id"]
-            elif kind == "item.completed":
-                item = event.get("item")
-                if isinstance(item, dict) and item.get("type") == "agent_message":
-                    text_out = item.get("text")
-                    if isinstance(text_out, str):
-                        answer = text_out
-        if agent.last_failed or not answer:
+        if agent.last_failed or agent.last_returncode != 0 or stream_failed or not answer:
             notice = self._failure(agent, resuming)
-            if resuming and "signed in" not in notice:
-                self._thread_id = None
-            async for chunk in self._degraded(text, notice):
-                yield chunk
+            self._discard_thread()
+            # The model's completed reply may already be on the display.
+            # A late process failure cannot retract it, and rerunning the
+            # prompt through fallback could repeat the turn's tool actions.
+            if not delivered:
+                async for chunk in self._degraded(text, notice):
+                    yield chunk
             return
         self._set_account("logged_in")
-        yield answer.strip()
+        if not delivered:
+            # Compatibility with a clean older stream that supplies its
+            # final assistant item without a turn-completed event.
+            yield answer
+
+    def _discard_thread(self) -> None:
+        """Do not resume context whose child did not finish cleanly."""
+        self._thread_id = None
+        self._session_id = None
+        self._session_used_at = 0.0
 
 
 class SeatSwitch(ReplyEngine):

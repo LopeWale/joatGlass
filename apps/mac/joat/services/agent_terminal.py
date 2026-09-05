@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
+import secrets
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
+from ..agents.openclaw_gateway import OpenClawPairingRequired, OpenClawScopeMismatch
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +61,23 @@ HUD_TOPIC_COLUMNS = 96
 HUD_LANE_COLUMNS = 48
 """The wire's bound on one lane chip."""
 
+SETUP_LANE_COLUMNS = 20
+"""Leave room for complete retry guidance in the 64-character reason."""
+
+MAX_TERMINAL_INSTRUCTION_CHARS = 4096
+
+
+class TerminalInstructionResult(StrEnum):
+    """Local admission, not proof the remote session received or finished work."""
+
+    ACCEPTED = "accepted"
+    INVALID = "invalid"
+    WRONG_FOCUS = "wrong_focus"
+    UNAVAILABLE = "unavailable"
+    BUSY = "busy"
+    APPROVAL_REQUIRED = "approval_required"
+    CONTEXT_CHANGED = "context_changed"
+
 
 @dataclass(frozen=True)
 class TerminalFrame:
@@ -76,6 +97,8 @@ class TerminalFrame:
     #: the tool vs retry the daemon), so a gesture keys on this count
     #: rather than on the overloaded state word.
     approvals: int = 0
+    #: Safe lane-specific setup guidance; never an adapter exception.
+    reason: str = ""
 
 
 def _one_row(text: str, columns: int) -> str:
@@ -99,6 +122,63 @@ class TerminalAgentLike(Protocol):
     """What a lane needs from its runtime — the adapter already satisfies it."""
 
     def stream(self, prompt: str) -> AsyncIterator[str]: ...
+
+
+@runtime_checkable
+class CapturedTerminalAgentLike(TerminalAgentLike, Protocol):
+    """A subscribed target that can reject a changed context under its lock."""
+
+    @property
+    def capture_context_generation(self) -> int | None: ...
+
+    def stream_captured(
+        self, prompt: str, *, context_generation: int,
+    ) -> AsyncIterator[str]: ...
+
+
+@runtime_checkable
+class InitializableTerminalAgentLike(CapturedTerminalAgentLike, Protocol):
+    async def initialize(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class TerminalCapture:
+    """One question about the exact terminal target selected at the tap."""
+
+    capture_id: str
+    lane_name: str
+    question: str
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class _CapturedContext:
+    agent: CapturedTerminalAgentLike
+    generation: int
+
+
+def _capture_context(agent: TerminalAgentLike) -> _CapturedContext | None:
+    try:
+        if not isinstance(agent, CapturedTerminalAgentLike):
+            return None
+        generation = agent.capture_context_generation
+    except Exception:
+        return None
+    if type(generation) is not int or generation < 0:
+        return None
+    return _CapturedContext(agent, generation)
+
+
+@dataclass
+class _LanePreparation:
+    """One owned initialize attempt, shared by independently bounded visits."""
+
+    agent: InitializableTerminalAgentLike
+    requires_authorization: bool = False
+    task: asyncio.Task[bool] | None = None
+    waiters: set[object] = field(default_factory=set)
+    abandoned: bool = False
+    reason: str = ""
 
 
 class SessionListerLike(Protocol):
@@ -187,8 +267,11 @@ class TerminalLane:
     #: 'terminal cancel', because a line landing after a cancel is a
     #: surprise, not a service.
     queued: str = ""
+    queued_context: _CapturedContext | None = None
+    capture_revision: int = 0
     approvals: list[tuple[str, str, str]] = field(default_factory=list)
     """Pending (id, kind, summary) — tool calls waiting on the wearer."""
+    preparation: _LanePreparation | None = None
 
     @property
     def busy(self) -> bool:
@@ -198,9 +281,48 @@ class TerminalLane:
     def state(self) -> str:
         if self.busy:
             return "working"
+        setup, _ = self.preparation_status
+        if setup != "ready":
+            return setup
         if self.last_error:
             return "needs recovery"
         return "idle"
+
+    @property
+    def preparation_status(self) -> tuple[str, str]:
+        # Legacy stream-only embeddings have no typed readiness contract.
+        # Retain their behavior; actual captured lanes must prove a context.
+        try:
+            scoped = isinstance(self.agent, CapturedTerminalAgentLike)
+        except Exception:
+            scoped = True
+        if not scoped:
+            return "ready", ""
+        attempt = self.preparation
+        if attempt is not None and attempt.agent is not self.agent:
+            attempt = None
+        label = _one_row(self.name, SETUP_LANE_COLUMNS)
+        if attempt is not None and attempt.task is not None and not attempt.task.done():
+            if attempt.abandoned:
+                return "failed", attempt.reason
+            return "preparing", f"Connecting to {label}…"
+        if _capture_context(self.agent) is not None:
+            return "ready", ""
+        if attempt is not None and attempt.reason:
+            if attempt.requires_authorization:
+                return "approval_required", attempt.reason
+            return "failed", attempt.reason
+        return "unprepared", f"Open {label} to connect this session."
+
+
+@dataclass(frozen=True)
+class _TerminalCaptureTarget:
+    lane: TerminalLane
+    context: _CapturedContext
+    focus_revision: int
+    lane_revision: int
+    task: asyncio.Task[None] | None
+    busy: bool
 
 
 class AgentTerminalRoster:
@@ -225,6 +347,7 @@ class AgentTerminalRoster:
         self._announce = announce
         self._paint = paint
         self._focus: str | None = next(iter(self._lanes), None)
+        self._focus_revision = 0
         self._discovered: list[dict[str, str]] = []
         # Last chip text painted per lane, so a background lane
         # repaints on a STATE change and not on every line.
@@ -236,6 +359,47 @@ class AgentTerminalRoster:
     @property
     def focused(self) -> str | None:
         return self._focus
+
+    @property
+    def focus_generation(self) -> int:
+        """Changes even when focus leaves a lane and later returns to it."""
+        return self._focus_revision
+
+    def _capture_target(self) -> _TerminalCaptureTarget | None:
+        lane = self._lanes.get(self._focus or "")
+        if lane is None or lane.preparation_status[0] != "ready":
+            return None
+        context = _capture_context(lane.agent)
+        if context is None:
+            return None
+        return _TerminalCaptureTarget(
+            lane=lane, context=context,
+            focus_revision=self._focus_revision, lane_revision=lane.capture_revision,
+            task=lane.task, busy=lane.busy,
+        )
+
+    def _context_is_current(self, lane: TerminalLane, context: _CapturedContext) -> bool:
+        if self._lanes.get(lane.name) is not lane or lane.agent is not context.agent:
+            return False
+        try:
+            generation = context.agent.capture_context_generation
+        except Exception:
+            return False
+        return type(generation) is int and generation == context.generation
+
+    def _capture_target_is_current(self, target: _TerminalCaptureTarget) -> bool:
+        lane = target.lane
+        return (
+            self._focus == lane.name and self._focus_revision == target.focus_revision
+            and lane.capture_revision == target.lane_revision
+            and lane.task is target.task and lane.busy == target.busy
+            and self._context_is_current(lane, target.context)
+        )
+
+    async def _send_captured(self, target: _TerminalCaptureTarget, text: str) -> str | None:
+        if not self._capture_target_is_current(target):
+            return None
+        return await self._send_to_lane(target.lane, text, target.context)
 
     def names(self) -> list[str]:
         return list(self._lanes)
@@ -319,15 +483,17 @@ class AgentTerminalRoster:
         # line count.
         body = [_one_row(line, HUD_COLUMNS)
                 for line in list(lane.tail)[-HUD_LINES:]] or ["no output yet"]
+        setup, reason = lane.preparation_status
         state = (
             "running" if lane.busy
-            else "approval_required" if lane.approvals
+            else "approval_required" if lane.approvals or setup == "approval_required"
+            else "unavailable" if setup != "ready"
             else "blocked" if lane.last_error
             else "ready"
         )
         return TerminalFrame(
             approvals=len(lane.approvals),
-            topic=header, state=state,
+            topic=header, state=state, reason=reason,
             # Names alone made 'watch concurrent work' impossible: a
             # background lane could finish, block, or start waiting on an
             # approval and the frame looked identical. Each lane now
@@ -343,6 +509,15 @@ class AgentTerminalRoster:
             return f"ask{len(lane.approvals)}"
         if lane.busy:
             return "run"
+        setup, _ = lane.preparation_status
+        if setup == "preparing":
+            return "connect"
+        if setup == "unprepared":
+            return "setup"
+        if setup == "failed":
+            return "err"
+        if setup == "approval_required":
+            return "access"
         if lane.last_error:
             return "err"
         return "idle"
@@ -367,11 +542,165 @@ class AgentTerminalRoster:
             except Exception:  # a dead surface must not kill the work
                 pass
 
+    async def prepare_lane(
+        self, name: str, *, is_current: Callable[[], bool],
+        timeout_s: float = 8.0, paint: Paint | None = None,
+    ) -> bool:
+        """Connect an explicitly opened lane without transferring its visit.
+
+        Initialize is shared, but each visit owns its deadline and paint
+        rights. The final departing waiter cancels setup and allows 100 ms
+        for cleanup. A non-cooperative task remains owned and blocks a
+        parallel attempt until it finishes. The adapter owns connection
+        cleanup and also joins its initialization during shutdown.
+        """
+        if type(timeout_s) not in (int, float) or not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("Terminal preparation timeout must be finite and positive")
+        try:
+            if not is_current() or name not in self._lanes:
+                return False
+        except Exception:
+            return False
+        self.focus(name)
+        lane = self._lanes[name]
+        agent = lane.agent
+        focus_generation = self._focus_revision
+        attempt = lane.preparation
+        if attempt is not None and attempt.agent is not agent:
+            attempt = None
+
+        def current() -> bool:
+            try:
+                return (
+                    self._lanes.get(name) is lane and lane.agent is agent
+                    and self._focus == name and self._focus_revision == focus_generation
+                    and (attempt is None or lane.preparation is attempt)
+                    and is_current()
+                )
+            except Exception:
+                return False
+
+        async def show() -> None:
+            sink = paint if paint is not None else self._paint
+            if sink is not None and current():
+                try:
+                    await sink(self.frame())
+                except Exception:  # Presentation failure cannot break a live lane.
+                    pass
+
+        async def show_bounded() -> bool:
+            try:
+                async with asyncio.timeout(timeout_s):
+                    await show()
+            except TimeoutError:
+                return False
+            return current()
+
+        pending = attempt is not None and attempt.task is not None and not attempt.task.done()
+        if not pending and _capture_context(agent) is not None:
+            return await show_bounded() and _capture_context(agent) is not None
+        # Opening a running legacy lane must not wait on its turn lock or
+        # secretly reconnect the target of an instruction already in flight.
+        if lane.busy or (pending and attempt is not None and attempt.abandoned):
+            await show_bounded()
+            return False
+        if not pending:
+            if not isinstance(agent, InitializableTerminalAgentLike):
+                await show_bounded()
+                return False
+            attempt = _LanePreparation(agent)
+            lane.preparation = attempt
+            lane.capture_revision += 1
+            attempt.task = asyncio.create_task(self._initialize_lane(lane, attempt))
+        assert attempt is not None and attempt.task is not None
+        task = attempt.task
+        waiter = object()
+        attempt.waiters.add(waiter)
+        timed_out = False
+        try:
+            async with asyncio.timeout(timeout_s):
+                await show()
+                if not current():
+                    return False
+                ready = await asyncio.shield(task)
+                await show()
+                return ready and current() and _capture_context(agent) is not None
+        except TimeoutError:
+            timed_out = True
+            return False
+        finally:
+            attempt.waiters.discard(waiter)
+            if not attempt.waiters and not task.done():
+                attempt.abandoned = True
+                label = _one_row(name, SETUP_LANE_COLUMNS)
+                attempt.reason = (
+                    f"Connection to {label} timed out. Tap retry." if timed_out
+                    else f"Connection to {label} was interrupted. Tap retry."
+                )
+                task.cancel()
+                # asyncio.wait does not cancel a task again or wait forever
+                # for an initializer that suppresses cancellation. Keep its
+                # attempt identity on the lane even if this grace expires.
+                await asyncio.wait({task}, timeout=.1)
+            if timed_out and current():
+                try:
+                    async with asyncio.timeout(.1):
+                        await show()
+                except TimeoutError:
+                    pass
+
+    async def _initialize_lane(self, lane: TerminalLane, attempt: _LanePreparation) -> bool:
+        label = _one_row(lane.name, SETUP_LANE_COLUMNS)
+        try:
+            await attempt.agent.initialize()
+            ready = _capture_context(attempt.agent) is not None
+        except Exception as exc:
+            # Connection errors can contain private remote payloads. Only a
+            # fixed lane-specific recovery sentence reaches TerminalFrame.
+            # Retain the failing code boundary without logging its payload:
+            # otherwise authentication, protocol and session failures all
+            # disappear behind the same retry sentence, even in local logs.
+            origin = exc.__traceback__
+            while origin is not None and origin.tb_next is not None:
+                origin = origin.tb_next
+            log.warning(
+                "terminal initialization failed lane=%s error=%s function=%s line=%s",
+                label, type(exc).__name__,
+                origin.tb_frame.f_code.co_name if origin is not None else "unknown",
+                origin.tb_lineno if origin is not None else 0,
+            )
+            if isinstance(exc, (OpenClawScopeMismatch, OpenClawPairingRequired)):
+                attempt.requires_authorization = True
+                attempt.reason = (
+                    "Approve Work permissions in OpenClaw, then retry."
+                    if isinstance(exc, OpenClawScopeMismatch)
+                    else "Approve this device in OpenClaw, then retry."
+                )
+            ready = False
+        if (
+            self._lanes.get(lane.name) is not lane or lane.agent is not attempt.agent
+            or lane.preparation is not attempt or attempt.abandoned
+        ):
+            return False
+        if ready:
+            attempt.reason = ""
+            lane.last_error = ""
+        elif not attempt.requires_authorization:
+            attempt.reason = f"Could not connect to {label}. Tap retry."
+        return ready
+
     def focus(self, name: str) -> bool:
         """Switch focus. Never touches any lane's running work."""
         said = name.strip().lower()
+        if said in self._lanes:
+            if self._focus != said:
+                self._focus_revision += 1
+            self._focus = said
+            return True
         for lane_name in self._lanes:
-            if lane_name == said or lane_name in said:
+            if lane_name in said:
+                if self._focus != lane_name:
+                    self._focus_revision += 1
                 self._focus = lane_name
                 return True
         return False
@@ -394,6 +723,7 @@ class AgentTerminalRoster:
             return f"{names[0]} is the only session."
         current = self._focus if self._focus in names else names[0]
         self._focus = names[(names.index(current) + 1) % len(names)]
+        self._focus_revision += 1
         await self.repaint()
         lane = self._lanes[self._focus]
         return f"{self._focus} · {lane.state}"
@@ -449,17 +779,63 @@ class AgentTerminalRoster:
 
     # ── input, work, cancel ──────────────────────────────────────────────
 
+    def admit_instruction(self, name: str, text: str) -> TerminalInstructionResult:
+        """Atomically admit exact input into the prepared, focused context.
+
+        The caller owns explicit view preparation and retry identity. Unlike
+        gesture type-ahead, this entry never queues or replaces input and
+        never answers a pending Work approval.
+        """
+        if (
+            not isinstance(name, str) or not isinstance(text, str)
+            or not text.strip() or "\x00" in text
+            or len(text) > MAX_TERMINAL_INSTRUCTION_CHARS
+        ):
+            return TerminalInstructionResult.INVALID
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            return TerminalInstructionResult.INVALID
+        lane = self._lanes.get(name)
+        if lane is None or self._focus != name:
+            return TerminalInstructionResult.WRONG_FOCUS
+        if lane.approvals:
+            return TerminalInstructionResult.APPROVAL_REQUIRED
+        if lane.busy or lane.queued:
+            return TerminalInstructionResult.BUSY
+        target = self._capture_target()
+        if target is None:
+            return TerminalInstructionResult.UNAVAILABLE
+        if target.lane is not lane or not self._capture_target_is_current(target):
+            return TerminalInstructionResult.CONTEXT_CHANGED
+        # Accessing an adapter's captured generation may invoke its own
+        # state code. Recheck admission after that boundary, without yielding.
+        if lane.approvals:
+            return TerminalInstructionResult.APPROVAL_REQUIRED
+        if lane.busy or lane.queued:
+            return TerminalInstructionResult.BUSY
+        lane.capture_revision += 1
+        self._launch_idle_send(lane, text, target.context)
+        return TerminalInstructionResult.ACCEPTED
+
     async def send(self, text: str, name: str | None = None) -> str:
         """Voice becomes terminal input to the (focused) session — T2.
 
         Returns the immediate receipt line; the turn itself runs as a task
-        so the wearer can switch away. One in-flight turn per lane: the
-        runtime serializes anyway, so a queued second utterance would only
-        fire much later with stale intent — refusing is more honest.
+        so the wearer can switch away. Busy lanes keep one newest instruction;
+        captured instructions additionally retain their exact adapter context.
         """
         lane = self._lanes.get(name or self._focus or "")
         if lane is None:
             return "No terminal session is focused."
+        return await self._send_to_lane(lane, text)
+
+    async def _send_to_lane(
+        self, lane: TerminalLane, text: str, context: _CapturedContext | None = None,
+    ) -> str:
+        if context is not None and not self._context_is_current(lane, context):
+            return f"{lane.name} ▸ input expired; select the session and speak again."
+        lane.capture_revision += 1
         if lane.busy:
             # AGENT_TERMINAL_ROADMAP.md:32 — "speak ordinary instructions
             # to steer the focused session". Refusing while a turn was in
@@ -470,6 +846,7 @@ class AgentTerminalRoster:
             # settles — and the receipt says which of those happened.
             replaced = bool(lane.queued)
             lane.queued = text
+            lane.queued_context = context
             lane.tail.append(f"> {text} (queued)")
             await self.repaint()
             return (
@@ -477,20 +854,26 @@ class AgentTerminalRoster:
                 if replaced
                 else f"{lane.name} ▸ queued — lands when this turn finishes."
             )
+        return self._launch_idle_send(lane, text, context)
+
+    def _launch_idle_send(
+        self, lane: TerminalLane, text: str, context: _CapturedContext | None = None,
+    ) -> str:
+        """Schedule an admitted idle turn with the existing settlement hook."""
         lane.last_error = ""
         lane.tail.append(f"> {text}")
         task = asyncio.get_running_loop().create_task(
-            self._run_send(lane, text), name=f"terminal-{lane.name}"
+            self._run_send(lane, text, context), name=f"terminal-{lane.name}"
         )
         lane.task = task
 
         def _schedule_settled(_task: asyncio.Task[None]) -> None:
-            asyncio.get_running_loop().create_task(self._lane_settled(lane))
+            asyncio.get_running_loop().create_task(self._lane_settled(lane, _task))
 
         task.add_done_callback(_schedule_settled)
         return f"{lane.name} ▸ sent."
 
-    async def _lane_settled(self, lane: TerminalLane) -> None:
+    async def _lane_settled(self, lane: TerminalLane, completed: asyncio.Task[None]) -> None:
         """The run→idle / run→err transition, which nothing else can see.
 
         The last _narrate of a turn executes INSIDE the still-running task,
@@ -500,25 +883,43 @@ class AgentTerminalRoster:
         finish, and "watch concurrent work" showed stale state until the
         focused lane happened to speak. This runs after the task is done.
         """
+        # An old completion cannot take a newer turn's queued instruction.
+        if lane.task is not completed or self._lanes.get(lane.name) is not lane:
+            return
+        queued, context = lane.queued, lane.queued_context
+        lane.queued, lane.queued_context = "", None
+        if queued:
+            lane.capture_revision += 1
+            receipt = await self._send_to_lane(lane, queued, context)
+            await self._narrate(lane, receipt)
         mark = self._mark(lane)
         if self._marks.get(lane.name) != mark:
             self._marks[lane.name] = mark
             await self.repaint()
-        queued, lane.queued = lane.queued, ""
-        if queued and not lane.busy:
-            receipt = await self.send(queued, lane.name)
-            await self._narrate(lane, receipt)
 
-    async def _run_send(self, lane: TerminalLane, text: str) -> None:
+    async def _run_send(
+        self, lane: TerminalLane, text: str, context: _CapturedContext | None = None,
+    ) -> None:
         pending = ""
         try:
-            async for chunk in lane.agent.stream(text):
-                pending += chunk
-                *lines, pending = pending.split("\n")
-                for line in lines:
-                    if line.strip():
-                        lane.tail.append(line)
-                        await self._narrate(lane, line)
+            if context is not None:
+                if not self._context_is_current(lane, context):
+                    raise RuntimeError("Captured terminal context changed")
+                stream = context.agent.stream_captured(text, context_generation=context.generation)
+            else:
+                stream = lane.agent.stream(text)
+            try:
+                async for chunk in stream:
+                    pending += chunk
+                    *lines, pending = pending.split("\n")
+                    for line in lines:
+                        if line.strip():
+                            lane.tail.append(line)
+                            await self._narrate(lane, line)
+            finally:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    await close()
             if pending.strip():
                 lane.tail.append(pending)
                 await self._narrate(lane, pending)
@@ -649,6 +1050,9 @@ class AgentTerminalRoster:
             return "No terminal lane on this Mac can resume a session."
         if lane.busy:
             return f"{lane.name} is still working — cancel it before resuming."
+        # Invalidate before the adapter awaits a lock or connection close.
+        # Even a failed resume has displaced the prior spoken question.
+        lane.capture_revision += 1
         try:
             await lane.agent.resume_session(match["key"])  # type: ignore[attr-defined]
         except Exception as exc:
@@ -675,6 +1079,8 @@ class AgentTerminalRoster:
                 lane.tail.append(
                     f"[history unavailable — {str(exc) or exc.__class__.__name__}]"
                 )
+        if self._focus != lane.name:
+            self._focus_revision += 1
         self._focus = lane.name
         return f"{lane.name} ▸ resumed '{label}'. Speak to send into it."
 
@@ -691,6 +1097,7 @@ class AgentTerminalRoster:
         lane = self._lanes.get(lane_name)
         if lane is None:
             return
+        lane.capture_revision += 1
         lane.approvals.append((approval_id, kind, summary))
         line = f"[approval] {kind}: {summary or approval_id} — say 'terminal approve' or 'terminal deny'"
         lane.tail.append(line)
@@ -743,6 +1150,7 @@ class AgentTerminalRoster:
         if resolver is None:
             return f"{lane.name} cannot answer approvals."
         approval_id, kind, summary = lane.approvals[position]
+        lane.capture_revision += 1
         try:
             recorded = await resolver(approval_id, kind, decision)
         except Exception as exc:
@@ -771,9 +1179,16 @@ class AgentTerminalRoster:
         lane = self._lanes.get(name or self._focus or "")
         if lane is None:
             return "No terminal session is focused."
+        lane.capture_revision += 1
+        discarded_queue = bool(lane.queued)
+        # A completed turn can still have a scheduled settlement callback.
+        # Clear its queue before checking busy so that callback cannot send
+        # an instruction after the wearer has cancelled it.
+        lane.queued, lane.queued_context = "", None
         if not lane.busy or lane.task is None:
+            if discarded_queue:
+                return f"{lane.name} ▸ queued instruction discarded; no turn is running."
             return f"{lane.name} has nothing running."
-        lane.queued = ""
         lane.task.cancel()
         try:
             await lane.task
@@ -852,14 +1267,71 @@ class AgentTerminalCommands:
                  window_s: float | None = None,
                  last_reply: Callable[
                      [str | None], tuple[str, str] | None] | None = None,
+                 *, monotonic: Callable[[], float] = time.monotonic,
+                 on_explicit_view: Callable[[], None] | None = None,
                  ) -> None:
         self._roster = roster
         self._armed_until = 0.0
         self._window_s = self.ARM_WINDOW_S if window_s is None else window_s
+        self._monotonic = monotonic
+        self._capture: TerminalCapture | None = None
+        self._capture_target: _TerminalCaptureTarget | None = None
         # Answers "what did <seat> last say?" from the Brainstorm snapshot.
         # Injected, because the discussion belongs to another feature and
         # this grammar must not import its internals to quote it.
         self._last_reply = last_reply
+        self._on_explicit_view = on_explicit_view
+
+    def begin_capture(self) -> TerminalCapture | None:
+        """Snapshot one ready target without arming the legacy command parser."""
+        current = self.current_capture
+        if current is not None:
+            return current
+        self.clear_capture()
+        target = self._roster._capture_target()
+        ttl_s = min(self.ARM_WINDOW_S, self._window_s)
+        if target is None or not math.isfinite(ttl_s) or ttl_s <= 0:
+            return None
+        capture = TerminalCapture(
+            capture_id=secrets.token_urlsafe(18), lane_name=target.lane.name,
+            question=f"What should {target.lane.name} do?",
+            expires_at=self._monotonic() + ttl_s,
+        )
+        self._capture, self._capture_target = capture, target
+        return capture
+
+    @property
+    def current_capture(self) -> TerminalCapture | None:
+        capture = self._capture
+        return capture if capture is not None and self.capture_is_current(capture) else None
+
+    def capture_is_current(self, capture: TerminalCapture) -> bool:
+        if self._capture is not capture:
+            return False
+        target = self._capture_target
+        if (
+            target is None or self._monotonic() >= capture.expires_at
+            or not self._roster._capture_target_is_current(target)
+        ):
+            self.clear_capture()
+            return False
+        return True
+
+    def clear_capture(self) -> None:
+        """End both forms of pending input on Home, reconnect or replacement."""
+        self._capture, self._capture_target = None, None
+        self._disarm()
+
+    async def consume_capture(self, capture: TerminalCapture, text: str) -> str | None:
+        """Consume literal admitted speech once, retaining its adapter context."""
+        if not self.capture_is_current(capture):
+            return None
+        target = self._capture_target
+        self.clear_capture()
+        if target is None or not isinstance(text, str) or not text.strip():
+            return None
+        # No await precedes owner removal or the roster's second target check.
+        return await self._roster._send_captured(target, text)
 
     def arm(self) -> None:
         """A tap on the terminal promises the NEXT utterance as its input.
@@ -869,21 +1341,29 @@ class AgentTerminalCommands:
         that this is terminal speech, which is exactly the consent the
         prefix exists to obtain. It also expires: see ARM_WINDOW_S.
         """
-        self._armed_until = time.monotonic() + self._window_s
+        self.clear_capture()
+        self._armed_until = self._monotonic() + self._window_s
 
     @property
     def armed(self) -> bool:
-        return time.monotonic() < self._armed_until
+        return self._monotonic() < self._armed_until
 
     def _disarm(self) -> None:
         self._armed_until = 0.0
 
+    def _acquire_explicit_view(self) -> None:
+        """Recognition owns this boundary; ambient and scoped input skip it."""
+        if self._on_explicit_view is not None:
+            self._on_explicit_view()
+
     async def handle_command(self, text: str) -> str | None:
         if self.armed:
-            self._disarm()
             said = text.strip()
             if not said:
+                self._disarm()
                 return None
+            self._acquire_explicit_view()
+            self._disarm()
             # Cancelling the promise must not become a command sent INTO
             # the session — "never mind" is spoken to JOAT, not to Hermes.
             if said.lower().rstrip(".!?") in ("stop", "cancel", "never mind",
@@ -909,6 +1389,7 @@ class AgentTerminalCommands:
         "sent Claude's answer" from "sent the newest answer" without
         opening the terminal to check.
         """
+        self._acquire_explicit_view()
         if self._last_reply is None:
             return "No Brainstorm has run yet — nothing to send."
         found = self._last_reply(who)
@@ -929,39 +1410,48 @@ class AgentTerminalCommands:
             return None
         if said in ("terminal", "terminal sessions", "terminal list",
                     "list terminal sessions", "agent terminal"):
+            self._acquire_explicit_view()
             return self._roster.overview()
         m = _SWITCH.match(said)
         if m is not None:
             # Two alternations, two groups: "switch terminal to work" and
             # "go to the work terminal" name the lane in different places.
             name = (m.group("name") or m.group("named") or "").strip()
+            self._acquire_explicit_view()
             if self._roster.focus(name):
                 return f"Focused on {self._roster.focused}."
             return f"No terminal session called {name}. " + self._roster.overview()
         if said in ("terminal cancel", "terminal stop", "cancel the terminal"):
+            self._acquire_explicit_view()
             return await self._roster.cancel()
         if said in ("terminal approvals", "terminal pending"):
+            self._acquire_explicit_view()
             return self._roster.approvals_view()
         if said in ("terminal discover", "terminal refresh",
                     "terminal all sessions"):
+            self._acquire_explicit_view()
             return await self._roster.discover()
         resume_match = _RESUME.match(said)
         if resume_match is not None:
+            self._acquire_explicit_view()
             return await self._roster.resume(resume_match.group("name"))
         decision_match = _DECIDE.match(said)
         if decision_match is not None:
             spoken = decision_match.group("decision")
             index = decision_match.group("index")
+            self._acquire_explicit_view()
             return await self._roster.decide(
                 "approve" if spoken == "approve" else "deny",  # 'reject' → deny
                 int(index) if index else None,
             )
         if said in ("terminal tail", "terminal output"):
+            self._acquire_explicit_view()
             return self._roster.tail()
         if said in ("terminal history", "terminal inspect", "terminal transcript"):
             # The RUNTIME's record, not JOAT's echo. These were the same
             # command, so "inspect" showed only what this engine happened
             # to relay — nothing at all for a session it did not run.
+            self._acquire_explicit_view()
             return await self._roster.history()
         if said.startswith("terminal "):
             route = parse_reply_route(said[len("terminal "):])
@@ -972,5 +1462,6 @@ class AgentTerminalCommands:
             raw = text.strip()
             body = raw[raw.lower().index("terminal") + len("terminal"):].strip(" ,:")
             if body:
+                self._acquire_explicit_view()
                 return await self._roster.send(body)
         return None

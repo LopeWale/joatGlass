@@ -8,7 +8,9 @@ would have been sent.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
+from dataclasses import FrozenInstanceError, replace
+from typing import Any
 
 import pytest
 
@@ -18,8 +20,107 @@ from joat.channels.cards import Card, CardLog, Urgency
 from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
 from joat.services.roundtable import Participant, RoundTable
-from joat.services.session import DebateSession, Session, SessionManager
+from joat.services.session import DebateSession, Session, SessionManager, TopicCapture
 from joat.services.sinks import HudSink
+
+
+class ScopedTopicHarness:
+    """Real SessionManager, controlled publication and a session with no agents."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.available = True
+        self.factory_ready = True
+        self.transport = SinkTransport()
+        self.topics: list[str] = []
+        self.factory_owners: list[object] = []
+        self.published: list[TopicCapture] = []
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.finished: dict[str, asyncio.Event] = {}
+        self.hold: asyncio.Event | None = None
+        self.cancel_cleanup: asyncio.Event | None = None
+        self.ignore_cancel = False
+        self.failure: str | None = None
+        self.consume_inside_publication: str | None = None
+        self.inline_result = False
+        self.inline_completed = False
+        self.session_release = asyncio.Event()
+        harness = self
+
+        class HeldTopicSession(Session):
+            async def run(self) -> None:
+                await harness.session_release.wait()
+
+            def cancel(self) -> None:
+                harness.session_release.set()
+
+        self.session = HeldTopicSession()
+
+        def factory(topic: str) -> Session | None:
+            self.factory_owners.append(self.capture)
+            self.topics.append(topic)
+            return self.session if self.factory_ready else None
+
+        options: dict[str, Any] = {
+            "brainstorm_available": lambda: self.available,
+            "publish_topic_capture": self.publish,
+            "monotonic": lambda: self.now,
+            "topic_capture_view": lambda armed: BrainstormHudView(
+                state="topic_capture" if armed else "ready", topic="Brainstorm",
+                collaborators=["Codex", "Claude"],
+                activity="Say a topic" if armed else "Tap for a topic",
+            ),
+        }
+        self.manager = SessionManager(HudWriter(self.transport), factory, **options)
+
+    @property
+    def capture(self) -> TopicCapture | None:
+        return self.manager.current_topic_capture
+
+    def is_current(self, capture: TopicCapture) -> bool:
+        return self.manager.topic_capture_is_current(capture)
+
+    def consume(self, capture: TopicCapture, text: str) -> bool:
+        return self.manager.consume_topic_capture(capture, text)
+
+    def begin(self) -> TopicCapture | None:
+        self.manager.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
+        return self.capture
+
+    async def publish(self, capture: TopicCapture) -> bool:
+        self.published.append(capture)
+        finished = self.finished[capture.capture_id] = asyncio.Event()
+        hold = self.hold
+        self.started.set()
+        try:
+            try:
+                if hold is not None:
+                    await hold.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                if self.cancel_cleanup is not None:
+                    await self.cancel_cleanup.wait()
+                if not self.ignore_cancel:
+                    raise
+                if hold is not None:
+                    await hold.wait()
+            if self.failure == "exception":
+                raise OSError("private-topic-publication-failure")
+            if self.consume_inside_publication is not None:
+                self.inline_result = self.consume(capture, self.consume_inside_publication)
+                await asyncio.sleep(0)
+                self.inline_completed = True
+            return self.failure != "rejected"
+        finally:
+            finished.set()
+
+    async def close(self) -> None:
+        if self.hold is not None:
+            self.hold.set()
+        if self.cancel_cleanup is not None:
+            self.cancel_cleanup.set()
+        await asyncio.wait_for(self.manager.close(timeout_s=.05), timeout=.5)
 from joat.services.status import StatusPublisher
 
 
@@ -315,6 +416,92 @@ class TestDebateSession:
 
 
 class TestSessionManager:
+    async def test_session_revision_survives_completion_and_counts_admitted_starts_only(self) -> None:
+        class ImmediateSession(Session):
+            async def run(self) -> None:
+                return None
+
+            def cancel(self) -> None:
+                return None
+
+        observed: list[tuple[str, int]] = []
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda _topic: ImmediateSession(),
+            on_state=lambda state: observed.append((state, manager.session_revision)),
+        )
+        try:
+            assert manager.session_revision == 0
+            assert manager.start_brainstorm("").value == "invalid"
+            assert manager.session_revision == 0
+            for revision in (1, 2):
+                assert manager.start_brainstorm("Question").value == "started"
+                assert manager.session_revision == revision
+                assert not manager.try_start_session(ImmediateSession())
+                assert manager.session_revision == revision
+                await asyncio.sleep(0)
+                assert not manager.active
+                assert manager.session_revision == revision
+            assert observed == [
+                ("running", 1), ("settled", 1), ("running", 2), ("settled", 2),
+            ]
+        finally:
+            await manager.close()
+
+    async def test_typed_brainstorm_starts_exact_topic_without_replacing_owner(self) -> None:
+        harness = ScopedTopicHarness()
+        topic = "  Café: two  approaches?\nKeep the wording.  "
+        try:
+            assert harness.manager.start_brainstorm(topic).value == "started"
+            assert harness.manager.active_session is harness.session
+            assert harness.topics == [topic]
+            assert harness.manager.start_brainstorm("Replacement").value == "busy"
+            assert harness.topics == [topic]
+            assert harness.manager.active_session is harness.session
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize("topic", ["", " \n", "bad\x00topic", "bad\ud800topic", "a" * 4097])
+    async def test_typed_brainstorm_invalid_topic_never_calls_factory(self, topic: str) -> None:
+        harness = ScopedTopicHarness()
+        try:
+            assert harness.manager.start_brainstorm(topic).value == "invalid"
+            assert harness.topics == []
+            assert not harness.manager.active
+        finally:
+            await harness.close()
+
+    async def test_typed_brainstorm_unavailable_factory_and_shutdown_are_not_starts(self) -> None:
+        harness = ScopedTopicHarness()
+        harness.available = False
+        try:
+            assert harness.manager.start_brainstorm("Question").value == "unavailable"
+            assert harness.topics == []
+            harness.available = True
+            harness.factory_ready = False
+            assert harness.manager.start_brainstorm("Question").value == "unavailable"
+            assert not harness.manager.active
+            harness.factory_ready = True
+            assert harness.manager.start_brainstorm("Question").value == "started"
+        finally:
+            await harness.close()
+        assert harness.manager.start_brainstorm("After close").value == "closed"
+        assert harness.topics == ["Question", "Question"]
+
+    @pytest.mark.parametrize("failing_boundary", ["availability", "factory"])
+    async def test_typed_brainstorm_callback_failure_is_unavailable(self, failing_boundary: str) -> None:
+        def fail(*_args: object) -> Any:
+            raise OSError("private provider detail")
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), fail if failing_boundary == "factory" else lambda _topic: None,
+            brainstorm_available=fail if failing_boundary == "availability" else lambda: True,
+        )
+        try:
+            assert manager.start_brainstorm("Question").value == "unavailable"
+            assert not manager.active
+        finally:
+            await manager.close()
+
     async def test_typed_external_session_cannot_replace_the_active_wearer_session(self) -> None:
         entered = asyncio.Event()
 
@@ -3781,3 +3968,454 @@ class TestEveryGlassActionTellsTheWearerWhatHappened:
         assert "No terminal sessions" in await self._act(
             "show_brainstorm", terminal_cycle=cycle,
         )
+
+
+class TestScopedTopicCapture:
+    async def test_scoped_topic_capture_consumption_inside_publisher_does_not_cancel_itself(self) -> None:
+        harness = ScopedTopicHarness()
+        harness.consume_inside_publication = "  Why cache this?!  "
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            await asyncio.wait_for(harness.finished[capture.capture_id].wait(), timeout=.2)
+            assert harness.inline_result and harness.inline_completed
+            assert not harness.cancelled.is_set()
+            assert harness.topics == ["  Why cache this?!  "]
+            assert harness.factory_owners == [None] and harness.capture is None
+        finally:
+            await harness.close()
+
+    async def test_scoped_topic_capture_has_frozen_identity_and_duplicate_taps_do_not_extend_it(self) -> None:
+        harness = ScopedTopicHarness()
+        release = harness.hold = asyncio.Event()
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            assert capture.capture_id and capture.question.strip()
+            assert capture.expires_at == 145.0
+            with pytest.raises(FrozenInstanceError):
+                capture.capture_id = "changed"
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            assert harness.published == [capture]
+            # The scoped publisher owns actual prompt presentation. The
+            # manager must not independently paint an earlier "speak now".
+            assert brainstorm_frames(harness.transport) == []
+            harness.now = 110.0
+            assert harness.begin() is capture
+            assert capture.expires_at == 145.0 and harness.published == [capture]
+            release.set()
+            await asyncio.wait_for(harness.finished[capture.capture_id].wait(), timeout=.2)
+            assert harness.capture is capture and harness.is_current(capture)
+            harness.now = capture.expires_at
+            assert harness.is_current(capture) is False and harness.capture is None
+        finally:
+            await harness.close()
+
+    async def test_scoped_topic_capture_delivers_exact_text_once_and_clears_before_factory(self) -> None:
+        harness = ScopedTopicHarness()
+        harness.hold = asyncio.Event()
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            topic = "  Stop?!\nWhy cache caf\u00e9 and e\u0301?  "
+            assert harness.consume(capture, topic) is True
+            assert harness.topics == [topic] and harness.factory_owners == [None]
+            assert harness.capture is None and harness.manager.active_session is harness.session
+            assert harness.consume(capture, "A duplicate answer") is False
+            assert harness.topics == [topic]
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize("source", [None, "phone", "glasses"])
+    async def test_scoped_topic_capture_cannot_be_filled_by_legacy_transcript_entry(
+        self, source: str | None,
+    ) -> None:
+        harness = ScopedTopicHarness()
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            assert harness.manager.handle_transcript(
+                "A topic from unscoped PCM?!", capture_source=source,  # type: ignore[arg-type]
+            ) is False
+            assert harness.capture is capture and harness.topics == []
+            assert not harness.manager.active and harness.published == [capture]
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize("reason", ["clear_or_reconnect", "cancel", "external_session", "expiry"])
+    async def test_scoped_topic_capture_cannot_survive_its_owner_boundary(self, reason: str) -> None:
+        harness = ScopedTopicHarness()
+        release = harness.hold = asyncio.Event()
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            if reason == "clear_or_reconnect":
+                harness.manager.clear_topic_capture()
+            elif reason == "cancel":
+                harness.manager.handle_brainstorm_action(BrainstormAction("cancel"))
+            elif reason == "external_session":
+                assert harness.manager.try_start_session(harness.session)
+            else:
+                harness.now = capture.expires_at
+            assert harness.is_current(capture) is False
+            assert harness.capture is None
+            assert harness.consume(capture, "Late topic") is False and harness.topics == []
+            release.set()
+            await asyncio.wait_for(harness.finished[capture.capture_id].wait(), timeout=.2)
+            assert harness.capture is None
+        finally:
+            await harness.close()
+
+    async def test_scoped_topic_capture_rejects_copied_or_foreign_identity_without_spending_current(self) -> None:
+        harness = ScopedTopicHarness()
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            copied = replace(capture)
+            foreign = replace(capture, capture_id="foreign-capture")
+            for candidate in (copied, foreign):
+                assert harness.is_current(candidate) is False
+                assert harness.consume(candidate, "Wrong ownership") is False
+            assert harness.capture is capture and harness.is_current(capture)
+            assert harness.topics == []
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize("when", ["before_begin", "before_consume"])
+    async def test_scoped_topic_capture_checks_collaborators_at_both_boundaries(self, when: str) -> None:
+        harness = ScopedTopicHarness()
+        try:
+            if when == "before_begin":
+                harness.available = False
+                assert harness.begin() is None
+                await asyncio.sleep(0)
+                assert harness.published == []
+            else:
+                capture = harness.begin()
+                assert capture is not None
+                await asyncio.wait_for(harness.started.wait(), timeout=.2)
+                harness.available = False
+                assert harness.consume(capture, "A valid topic") is False
+            assert harness.capture is None and not harness.manager.active
+            assert harness.topics == []
+        finally:
+            await harness.close()
+
+    async def test_scoped_topic_capture_factory_failure_does_not_rearm_or_retry(self) -> None:
+        harness = ScopedTopicHarness()
+        harness.factory_ready = False
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            assert harness.consume(capture, "Exact topic?!") is False
+            assert harness.capture is None and not harness.manager.active
+            assert harness.topics == ["Exact topic?!"] and harness.factory_owners == [None]
+            assert harness.consume(capture, "Exact topic?!") is False
+            assert len(harness.topics) == 1 and harness.published == [capture]
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize("failure", ["rejected", "exception"])
+    async def test_scoped_topic_capture_publication_failure_clears_without_private_logs(
+        self, failure: str, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        harness = ScopedTopicHarness()
+        harness.failure = failure
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            await asyncio.wait_for(harness.finished[capture.capture_id].wait(), timeout=.2)
+            assert harness.capture is None and not harness.is_current(capture)
+            assert harness.topics == [] and not harness.manager.active
+            assert "private-topic-publication-failure" not in caplog.text
+        finally:
+            await harness.close()
+
+    async def test_scoped_topic_capture_late_old_publication_cannot_clear_or_restore_successor(self) -> None:
+        harness = ScopedTopicHarness()
+        release = harness.hold = asyncio.Event()
+        harness.ignore_cancel = True
+        try:
+            old = harness.begin()
+            assert old is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            harness.manager.clear_topic_capture()
+            await asyncio.wait_for(harness.cancelled.wait(), timeout=.2)
+            harness.hold = None
+            current = harness.begin()
+            assert current is not None and current.capture_id != old.capture_id
+            await asyncio.sleep(0)
+            await asyncio.wait_for(harness.finished[current.capture_id].wait(), timeout=.2)
+            assert harness.capture is current
+            release.set()
+            await asyncio.wait_for(harness.finished[old.capture_id].wait(), timeout=.2)
+            assert harness.capture is current and harness.is_current(current)
+            assert not harness.is_current(old) and harness.topics == []
+        finally:
+            release.set()
+            await harness.close()
+
+    async def test_scoped_topic_capture_close_waits_for_owned_publication_cleanup(self) -> None:
+        harness = ScopedTopicHarness()
+        harness.hold = asyncio.Event()
+        cleanup = harness.cancel_cleanup = asyncio.Event()
+        closing: asyncio.Task[None] | None = None
+        try:
+            capture = harness.begin()
+            assert capture is not None
+            await asyncio.wait_for(harness.started.wait(), timeout=.2)
+            closing = asyncio.create_task(harness.manager.close(timeout_s=.4))
+            await asyncio.wait_for(harness.cancelled.wait(), timeout=.2)
+            assert not closing.done()
+            cleanup.set()
+            await asyncio.wait_for(closing, timeout=.4)
+            assert harness.finished[capture.capture_id].is_set()
+            assert harness.capture is None and not harness.is_current(capture)
+            assert harness.begin() is None and harness.published == [capture]
+        finally:
+            cleanup.set()
+            if harness.hold is not None:
+                harness.hold.set()
+            if closing is not None:
+                await asyncio.gather(closing, return_exceptions=True)
+            await harness.close()
+
+
+class TestTerminalCapturePublicationBoundary:
+    async def test_home_before_queued_publication_cannot_create_a_new_terminal_owner(self) -> None:
+        """The tap owns its target synchronously; scheduling owns only paint."""
+        from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster, TerminalCapture
+
+        sent: list[str] = []
+
+        class CapturedAgent:
+            capture_context_generation = 1
+
+            async def stream(self, prompt: str) -> AsyncIterator[str]:
+                sent.append(prompt)
+                yield "done"
+
+            async def stream_captured(self, prompt: str, *, context_generation: int) -> AsyncIterator[str]:
+                assert context_generation == self.capture_context_generation
+                async for chunk in self.stream(prompt):
+                    yield chunk
+
+        roster = AgentTerminalRoster([("work", CapturedAgent())])
+        commands = AgentTerminalCommands(roster)
+        created: list[TerminalCapture | None] = []
+        finished = asyncio.Event()
+
+        def arm() -> Awaitable[None]:
+            capture = commands.begin_capture()
+            created.append(capture)
+
+            async def publish() -> None:
+                try:
+                    if capture is not None and commands.capture_is_current(capture):
+                        # Model a delayed presentation and its fresh answer.
+                        # The fixture never acquires a new target during paint.
+                        await commands.consume_capture(capture, "instruction for the old tap")
+                finally:
+                    finished.set()
+
+            return publish()
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda _topic: None, terminal_capture=arm,
+        )
+        try:
+            manager.handle_brainstorm_action(BrainstormAction(
+                "begin_terminal_input", surface="agent_terminal",
+            ))
+            owner_at_tap_return = commands.current_capture
+            # Home is synchronous and occurs before any scheduled publisher
+            # can run. It must be able to invalidate the already-created owner.
+            commands.clear_capture()
+            await asyncio.wait_for(finished.wait(), 1)
+            tasks = [lane.task for lane in roster._lanes.values() if lane.task is not None]
+            if tasks:
+                await asyncio.wait_for(asyncio.gather(*tasks), 1)
+            assert sent == [], "Publication created a fresh terminal owner after Home"
+            assert owner_at_tap_return is not None and created == [owner_at_tap_return]
+            assert commands.current_capture is None
+        finally:
+            await manager.close()
+            for lane in roster._lanes.values():
+                if lane.task is not None and not lane.task.done():
+                    lane.task.cancel()
+            tasks = [lane.task for lane in roster._lanes.values() if lane.task is not None]
+            if tasks:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1)
+            await asyncio.sleep(0)
+
+    async def test_closed_manager_never_invokes_terminal_capture_callback(self) -> None:
+        called: list[str] = []
+
+        def arm() -> Awaitable[None]:
+            called.append("new owner")
+
+            async def publish() -> None:
+                called.append("published")
+
+            return publish()
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda _topic: None, terminal_capture=arm,
+        )
+        try:
+            await manager.close()
+            manager.handle_brainstorm_action(BrainstormAction(
+                "begin_terminal_input", surface="agent_terminal",
+            ))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert called == [], "Closed SessionManager created a terminal owner"
+        finally:
+            await manager.close()
+
+    async def test_existing_async_terminal_callback_is_still_awaited(self) -> None:
+        called: list[str] = []
+        finished = asyncio.Event()
+
+        async def arm() -> None:
+            called.append("async callback")
+            await asyncio.sleep(0)
+            finished.set()
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda _topic: None, terminal_capture=arm,
+        )
+        try:
+            manager.handle_brainstorm_action(BrainstormAction(
+                "begin_terminal_input", surface="agent_terminal",
+            ))
+            await asyncio.wait_for(finished.wait(), 1)
+            assert called == ["async callback"]
+        finally:
+            await manager.close()
+
+    @pytest.mark.parametrize("terminal_visible", [True, False])
+    async def test_active_session_accepts_terminal_capture_only_while_terminal_owns_hud(
+        self, terminal_visible: bool,
+    ) -> None:
+        class HeldSession(Session):
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.cancelled = False
+
+            async def run(self) -> None:
+                self.started.set()
+                await self.release.wait()
+
+            def cancel(self) -> None:
+                self.cancelled = True
+                self.release.set()
+
+            def terminal_owns_hud(self) -> bool:
+                return terminal_visible
+
+        session = HeldSession()
+        created: list[object] = []
+        publication_started = asyncio.Event()
+        publication_release = asyncio.Event()
+        publication_finished = asyncio.Event()
+
+        def arm() -> Awaitable[None]:
+            created.append(object())
+
+            async def publish() -> None:
+                publication_started.set()
+                try:
+                    await publication_release.wait()
+                finally:
+                    publication_finished.set()
+
+            return publish()
+
+        manager = SessionManager(
+            HudWriter(SinkTransport()), lambda _topic: None, terminal_capture=arm,
+        )
+        try:
+            assert manager.try_start_session(session)
+            await asyncio.wait_for(session.started.wait(), 1)
+            assert manager.terminal_owns_hud() is terminal_visible
+
+            manager.handle_brainstorm_action(BrainstormAction(
+                "begin_terminal_input", surface="agent_terminal",
+            ))
+
+            assert len(created) == int(terminal_visible), (
+                "A visible terminal must bind its input owner in the tap callback"
+            )
+            if terminal_visible:
+                await asyncio.wait_for(publication_started.wait(), 1)
+            else:
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert created == [] and not publication_started.is_set()
+            assert manager.active_session is session and not session.cancelled
+            assert not session.release.is_set(), "Terminal input must leave the Brainstorm running"
+
+            publication_release.set()
+            if terminal_visible:
+                await asyncio.wait_for(publication_finished.wait(), 1)
+            assert manager.active_session is session and not session.cancelled
+        finally:
+            publication_release.set()
+            await manager.close()
+            if publication_started.is_set():
+                await asyncio.wait_for(publication_finished.wait(), 1)
+
+
+async def test_explicit_terminal_visit_owns_capture_during_active_brainstorm():
+    selected = True
+    called = []
+    async def capture():
+        called.append("capture")
+    manager = SessionManager(HudWriter(SinkTransport()), lambda _text: None, terminal_capture=capture,
+                             terminal_view_current=lambda: selected)
+    class Active:
+        def terminal_owns_hud(self):
+            return False
+    manager._active = Active()
+    assert manager.terminal_owns_hud() is True
+    selected = False
+    assert manager.terminal_owns_hud() is False
+
+
+@pytest.mark.parametrize("action", ["retry_terminal", "show_brainstorm"])
+async def test_terminal_retry_and_cycle_bind_before_scheduled_action(action):
+    selected = "work"
+    captured = []
+    finished = asyncio.Event()
+
+    def bind():
+        target = selected
+        captured.append(target)
+
+        async def run():
+            assert target == "work", "A queued action changed its target"
+            finished.set()
+            return "" if action == "show_brainstorm" else None
+
+        return run()
+
+    manager = SessionManager(
+        HudWriter(SinkTransport()), lambda _text: None,
+        terminal_retry=bind if action == "retry_terminal" else None,
+        terminal_cycle=bind if action == "show_brainstorm" else None,
+    )
+    try:
+        manager.handle_brainstorm_action(BrainstormAction(action, surface="agent_terminal"))
+        assert captured == ["work"]
+        selected = "calendar"
+        await asyncio.wait_for(finished.wait(), 1)
+    finally:
+        await manager.close()

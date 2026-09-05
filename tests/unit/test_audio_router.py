@@ -82,6 +82,36 @@ def test_capture_has_one_explicit_owner() -> None:
     assert router.capturing is False
 
 
+@pytest.mark.parametrize("exclusive", [True, False])
+def test_capture_entry_retires_context_before_any_recorded_frame(exclusive: bool) -> None:
+    source = FakeFrameSource()
+    order: list[str] = []
+    router = AudioRouter(source, on_capture_started=lambda: order.append("retire-prompt"))
+
+    def capture(_frame: AudioFrame) -> None:
+        order.append("capture")
+
+    router.begin_capture(capture, exclusive=exclusive)
+    with pytest.raises(AudioRouteConflictError):
+        router.begin_capture(capture)
+    source.emit(frame())
+    router.end_capture(capture)
+    assert order == ["retire-prompt", "capture"]
+
+
+def test_failed_capture_entry_cannot_leave_an_unreported_recorder_active() -> None:
+    def unavailable() -> None:
+        raise RuntimeError("capture lifecycle failed")
+
+    source = FakeFrameSource()
+    router = AudioRouter(source, on_capture_started=unavailable)
+    captured: list[AudioFrame] = []
+    with pytest.raises(RuntimeError, match="capture lifecycle failed"):
+        router.begin_capture(captured.append)
+    source.emit(frame())
+    assert not router.capturing and captured == []
+
+
 def test_router_is_a_frame_source_for_conversation_consumers() -> None:
     """The orchestrator subscribes to the router exactly like a transport."""
     source = FakeFrameSource()

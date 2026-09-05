@@ -88,6 +88,9 @@ class RmsVad:
     _closing_quiet_samples: int = 0
     _closing_noise_chunks: int = 0
     _loud_run: int = 0
+    _speech_since_quiet: bool = False
+    _prompt_quiet_samples: int = 0
+    _prompt_discarding: bool = False
     _preroll: deque[bytes] = field(
         default_factory=lambda: deque(maxlen=3), repr=False)
     _recent: deque[float] = field(
@@ -100,6 +103,33 @@ class RmsVad:
     @property
     def in_speech(self) -> bool:
         return self._in_speech
+
+    @property
+    def preroll_capacity(self) -> int:
+        """Actual callback capacity, for a matching ingress-provenance ring."""
+        capacity = self._preroll.maxlen
+        assert capacity is not None
+        return capacity
+
+    @property
+    def prompt_discarding(self) -> bool:
+        """Whether ingress is currently dropping pre-prompt speech."""
+        return self._prompt_discarding
+
+    def fence_prompt(self) -> None:
+        """Drop old pre-roll and discard begun speech through a quiet boundary.
+
+        A debounce or maximum-duration cut can leave speech underway even
+        when ``in_speech`` is false. Neither may become a new prompt's input.
+        Completed utterance bytes and the room-noise history are untouched.
+        """
+        discard = (
+            self._prompt_discarding or self._speech_since_quiet
+            or self._in_speech or self._loud_run > 0
+        )
+        self.reset()
+        self._prompt_discarding = discard
+        self._speech_since_quiet = discard
 
     @property
     def floor(self) -> float:
@@ -127,6 +157,21 @@ class RmsVad:
         # speech to know what is NOT speech.
         self._recent.append(level)
         loud = level >= self.trigger
+
+        # Prompt ownership needs an actual quiet boundary, independent of
+        # ordinary segmentation's hard cap and isolated-noise tolerance.
+        if loud:
+            self._speech_since_quiet = True
+            self._prompt_quiet_samples = 0
+        elif self._speech_since_quiet:
+            self._prompt_quiet_samples += sample_count
+            if self._prompt_quiet_samples >= self.hangover_batches * NOMINAL_BATCH_SAMPLES:
+                self._speech_since_quiet = False
+                self._prompt_quiet_samples = 0
+        if self._prompt_discarding:
+            self._prompt_discarding = self._speech_since_quiet
+            # The closing quiet frame is discarded too, never pre-roll.
+            return None
 
         if not self._in_speech:
             self._preroll.append(pcm)
@@ -174,6 +219,9 @@ class RmsVad:
         self._closing_noise_chunks = 0
         self._loud_run = 0
         self._preroll.clear()
+        self._speech_since_quiet = False
+        self._prompt_quiet_samples = 0
+        self._prompt_discarding = False
 
     def _cap_buffer(self) -> bool:
         """Trim to the exact configured sample limit and report completion."""
@@ -186,5 +234,11 @@ class RmsVad:
 
     def _finish(self) -> bytes:
         utterance = bytes(self._buffer)
+        # Emitting a chunk is not proof of quiet: a cap can cut live speech,
+        # and ordinary hangover permits one isolated noisy callback.
+        speech_since_quiet = self._speech_since_quiet
+        prompt_quiet_samples = self._prompt_quiet_samples
         self.reset()
+        self._speech_since_quiet = speech_since_quiet
+        self._prompt_quiet_samples = prompt_quiet_samples
         return utterance

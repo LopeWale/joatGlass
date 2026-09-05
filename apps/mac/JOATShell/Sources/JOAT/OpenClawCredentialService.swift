@@ -138,7 +138,7 @@ struct OpenClawStoredDTO: Encodable, Sendable {
 }
 
 actor OpenClawCredentialService: OpenClawCredentialServicing {
-    private static let operatorScopes = Set(["operator.read", "operator.write"])
+    private static let operatorScopes = Set(["operator.read", "operator.write", "operator.approvals"])
     private static let maximumSignedPayloadBytes = 65_536
     private static let maximumTokenBytes = 8_192
 
@@ -254,7 +254,9 @@ actor OpenClawCredentialService: OpenClawCredentialServicing {
               token.lengthOfBytes(using: .utf8) <= Self.maximumTokenBytes,
               !scopes.isEmpty,
               Set(scopes).count == scopes.count,
-              scopes.allSatisfy(Self.operatorScopes.contains)
+              scopes.allSatisfy(Self.operatorScopes.contains),
+              !scopes.contains("operator.approvals")
+                || Set(["operator.read", "operator.write"]).isSubset(of: Set(scopes))
         else {
             throw NativeBridgeError(
                 "openclaw_token_invalid",

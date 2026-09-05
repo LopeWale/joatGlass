@@ -33,11 +33,16 @@ export class Chrome {
   private charging = false;
   private macState?: string;
   private macStateTimer?: ReturnType<typeof setTimeout>;
+  private active = true;
+  private paintGeneration = 0;
 
   constructor(private readonly hud: HudPresenter) {}
 
   /** Paint now, then keep the clock honest. */
   start(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.paintGeneration += 1;
+    this.active = true;
     // Claim the status bar: every setStatus() anywhere becomes this
     // Chrome's state word, so container 1 has exactly one writer.
     this.hud.onStatus = (text) => this.setMacState(text);
@@ -48,8 +53,13 @@ export class Chrome {
   }
 
   stop(): void {
+    this.active = false;
+    this.paintGeneration += 1;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.macStateTimer) clearTimeout(this.macStateTimer);
+    this.macStateTimer = undefined;
+    this.macState = undefined;
   }
 
   setLink(state: LinkState): void {
@@ -63,6 +73,7 @@ export class Chrome {
    * rather than painting the line, and the clock and battery survive.
    */
   setMacState(text: string): void {
+    if (!this.active) return;
     this.macState = text.replace(/^JOAT\s*[·-]?\s*/i, '').trim() || undefined;
     void this.paint();
     // Transient by nature: fall back to the derived state so the bar cannot
@@ -101,6 +112,8 @@ export class Chrome {
   }
 
   private async paint(): Promise<void> {
+    if (!this.active) return;
+    const generation = this.paintGeneration;
     const left = this.clock();
     const right = this.battery !== undefined
       ? `bat ${this.battery}%${this.charging ? '+' : ''}`
@@ -123,6 +136,7 @@ export class Chrome {
       : `${state.slice(0, Math.max(0, middleBudget - 1)).trimEnd()}…`;
     const line = right ? `${left} ${middle} ${right}` : `${left} ${middle}`;
     await this.hud.showText(line, ContainerId.StatusBar);
+    if (!this.active || generation !== this.paintGeneration) return;
     await this.hud.showText(HINT, ContainerId.Hint);
   }
 }

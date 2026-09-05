@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Sequence
 from contextlib import suppress
@@ -21,6 +22,7 @@ from websockets.asyncio.client import ClientConnection, connect as open_websocke
 
 from ..core.log_redaction import install_websocket_secret_redaction
 
+log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 4
 # ``gateway-client`` / ``backend`` is OpenClaw's reserved direct-loopback
@@ -205,6 +207,10 @@ class DeviceTokenStore(Protocol):
 
 class OpenClawGatewayError(RuntimeError):
     """Sanitized Gateway failure safe to surface in local UI."""
+
+
+class OpenClawScopeMismatch(OpenClawGatewayError):
+    """The Gateway recognized this device, but its grant needs approval."""
 
 
 class OpenClawEventSequenceGap(OpenClawGatewayError):
@@ -827,7 +833,11 @@ class OpenClawGatewayClient:
                     request_id=request_id,
                     requested_scopes=self._scopes,
                 )
-                if issued_token and self._token_store:
+                # An unchanged token retains its approved grant, even when
+                # this socket explicitly requests narrower live authority.
+                # https://docs.openclaw.ai/gateway/protocol#auth
+                if (issued_token and self._token_store
+                        and (stored is None or issued_token != stored.token)):
                     await self._token_store.store(
                         device_id=self._identity.device_id,
                         role=CLIENT_ROLE,
@@ -975,6 +985,9 @@ def _read_connect_response(
         reason = raw_reason if isinstance(raw_reason, str) else None
         raise OpenClawPairingRequired(request_id=pairing_request_id, reason=reason)
     code = _safe_error_code(detail_code, error.get("code") if error else None)
+    log.warning("OpenClaw handshake rejected code=%s", code or "unspecified")
+    if code == "AUTH_SCOPE_MISMATCH":
+        raise OpenClawScopeMismatch("Approve Work permissions in OpenClaw, then retry.")
     raise OpenClawGatewayError(
         f"OpenClaw rejected the connection ({code})" if code
         else "OpenClaw rejected the connection"

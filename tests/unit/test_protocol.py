@@ -630,14 +630,20 @@ class TestDownlinkWire:
         wire = HudList(
             items=["Messages"],
             title="T" * 60,
-            hint="H" * 60,
+            hint="H" * 120,
             request_id="hud-request-7",
             selectable=True,
         ).to_wire()
         assert wire["title"] == "T" * 46
-        assert wire["hint"] == "H" * 46
+        assert wire["hint"] == "H" * 96
         assert wire["requestId"] == "hud-request-7"
         assert wire["selectable"] is True
+
+    def test_message_footer_preserves_paging_reply_and_complete_back_hint(self) -> None:
+        hint = "up newer · down older · tap read · say reply · left x2: back"
+        wire = HudList(items=["Latest messages"], title="MESSAGES · CONVERSATION", hint=hint).to_wire()
+        assert wire["hint"] == hint
+        assert wire["hint"].endswith("left x2: back")
 
     def test_planning_grid_entries_are_bounded_and_carry_no_identifiers(self) -> None:
         """The dashboard's right pane repaints from these on hover, so titles
@@ -1237,6 +1243,47 @@ class TestLocationAndIdentity:
         bare = parse_uplink({"kind": "device", "connect": "connected"})
         assert isinstance(bare, Device)
         assert bare.mic is None
+
+    @pytest.mark.parametrize("source", ["glasses", "phone"])
+    @pytest.mark.parametrize("mic", [True, False])
+    def test_device_mic_source_selection_survives_muting(self, source: str, mic: bool) -> None:
+        msg = parse_uplink({"kind": "device", "connect": "connected", "mic": mic,
+                            "micSource": source})
+        assert isinstance(msg, Device)
+        assert msg.mic is mic
+        assert msg.mic_source == source
+
+    def test_device_mic_source_is_optional_for_older_clients(self) -> None:
+        msg = parse_uplink({"kind": "device", "connect": "connected", "mic": False})
+        assert isinstance(msg, Device)
+        assert msg.mic_source is None
+        assert Device(connect="connected").mic_source is None
+
+    @pytest.mark.parametrize("source", [None, "", "Phone", "microphone", 0, True, [], {}])
+    def test_device_mic_source_rejects_invalid_wire_values(self, source: object) -> None:
+        with pytest.raises(ProtocolError):
+            parse_uplink({"kind": "device", "connect": "connected", "micSource": source})
+
+    def test_device_mic_prompt_id_names_only_an_automatic_stop(self) -> None:
+        msg = parse_uplink({"kind": "device", "connect": "connected", "mic": False,
+                            "micSource": "phone", "micPromptId": "old_prompt-1"})
+        assert isinstance(msg, Device)
+        assert msg.mic_prompt_id == "old_prompt-1" and msg.mic_source == "phone"
+        manual = parse_uplink({"kind": "device", "connect": "connected", "mic": False})
+        assert isinstance(manual, Device) and manual.mic_prompt_id is None
+
+    @pytest.mark.parametrize("prompt_id", [None, "", "private prompt", "x" * 129, 1, True, [], {}])
+    def test_device_mic_prompt_id_rejects_invalid_tokens(self, prompt_id: object) -> None:
+        with pytest.raises(ProtocolError):
+            parse_uplink({"kind": "device", "connect": "connected", "mic": False,
+                          "micPromptId": prompt_id})
+
+    @pytest.mark.parametrize("mic", [None, True, 0, "false"])
+    def test_device_mic_prompt_id_requires_explicit_false(self, mic: object) -> None:
+        with pytest.raises(ProtocolError):
+            parse_uplink({"kind": "device", "connect": "connected", "mic": mic,
+                          "micPromptId": "old_prompt"})
+
     def test_auth_accepted_wire_shape(self) -> None:
         assert AuthAccepted().to_wire() == {"kind": "auth.accepted"}
 
@@ -1372,10 +1419,20 @@ class TestTheTwoLanguagesDescribeTheSameWire:
             f"plugin-only: {sorted(declared - emitted)}"
         )
 
+    def test_messages_ui_receipt_matches_its_typescript_payload(self) -> None:
+        from joat.core.protocol import MessageUIView
+        wire = MessageUIView('request', 'selection', 'messages-ui-action',
+                             'sent', 'Submitted; delivery unverified.').to_wire()
+        assert set(wire) == self._ts_fields('MessageUIMessage')
+        assert wire['requestId'] == 'request'
+        assert wire['selectionId'] == 'selection'
+        assert wire['actionId'] == 'messages-ui-action'
+
     def test_the_terminal_frame_matches_its_typescript_model(self) -> None:
         view = AgentTerminalHudView(
             state="ready", focus="hermes", lanes=["l"], activity="x",
             endpoint_host="h", reason="r", no_tools_checked=True, approvals=1,
+            opening_request_id="visit", opening_selection_id="selection",
         )
         wire = view.to_wire()
         payload_key = next(k for k in wire if k != "kind")
@@ -1398,3 +1455,10 @@ class TestTheTwoLanguagesDescribeTheSameWire:
             "noToolsChecked", "approvals", "focus", "lanes", "screen",
         }
         assert not (emitted & forbidden), sorted(emitted & forbidden)
+
+
+@pytest.mark.parametrize("request_id,selection_id", [("visit", None), (None, "selection"), ("", "selection"), ("visit", "")])
+def test_terminal_opening_requires_a_complete_nonempty_binding(request_id, selection_id):
+    view = AgentTerminalHudView(state="ready", focus="work", lanes=[], activity="", opening_request_id=request_id, opening_selection_id=selection_id)
+    with pytest.raises(ProtocolError):
+        view.to_wire()

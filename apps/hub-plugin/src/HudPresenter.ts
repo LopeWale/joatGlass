@@ -36,6 +36,9 @@ const PAINT_INTERVAL_MS = 300;
 const DEFAULT_LIST_TITLE = 'JOAT';
 const DEFAULT_LIST_HINT = 'left x2 overview';
 const MAX_FOCUS_COPY_CHARS = 46;
+// The compact image footer supports more copy than the title. Preserve all
+// controls through normalization; Python HudList uses the same bound.
+const MAX_FOCUS_HINT_CHARS = 96;
 
 /** The downlink is a WebSocket boundary, so treat its optional visual
  * metadata as untrusted even though TypeScript says it is well shaped. A bad
@@ -125,6 +128,8 @@ export interface ListSurfaceOptions {
   title?: string;
   hint?: string;
   selectable?: boolean;
+  /** Plugin-local initial cursor, applied in the first custom frame only. */
+  initialSelectedIndex?: number;
   planningGrid?: readonly PlanningGridCell[];
   planningPane?: PlanningPaneState;
   /** This list is an expanded panel tab: keep its rail lit on the left. */
@@ -163,35 +168,11 @@ type HudSurface =
   | { kind: 'brainstorm'; brainstorm: BrainstormHudModel }
   | { kind: 'productivity'; productivity: ProductivityHudModel };
 
-/**
- * The expanded rail pages that are FIRMWARE lists rather than pixels. Even's
- * display docs: "native scrollable lists, with scroll highlighting handled in
- * firmware" — a swipe moves the highlight on the glasses with no BLE traffic
- * at all, which is why Even's own news feels smooth and a four-tile page
- * cannot. The price is the firmware's font and row pitch and no custom rail;
- * the wearer took that trade (2026-09-02) for these two pages. The readers
- * they open ("NEWS · ARTICLE", "SEARCH · RESULT") stay pixels.
- */
-export const NATIVE_LIST_TITLES: ReadonlySet<string> = new Set(['NEWS', 'SEARCH']);
-
-export function usesNativeListPage(
-  surface: HudSurface,
-): surface is Extract<HudSurface, { kind: 'list' }> {
-  return surface.kind === 'list'
-    && surface.options.railTab !== undefined
-    && NATIVE_LIST_TITLES.has(surface.options.title.trim().toUpperCase());
-}
-
-/** What a firmware list page is made of: rows and chrome, never the
- * highlight — the firmware owns that, and a rebuild would reset it. */
-function nativeListKey(surface: Extract<HudSurface, { kind: 'list' }>): string {
-  return JSON.stringify([surface.options.title, surface.options.hint, surface.items]);
-}
-
 interface ConfirmationReturnState extends HudContentState {
   id: string;
   prompt: string;
   diagnosticKind?: 'messages';
+  isCurrent?: () => boolean;
   surface: HudSurface;
   onDeferredProductivityVisible?: () => void;
   /** Pill deferred behind an in-flight dismissal; fires once the restore paints. */
@@ -200,6 +181,13 @@ interface ConfirmationReturnState extends HudContentState {
 
 interface AssistantOverlayState extends AssistantOverlayVisual {
   dismissTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface PromptQuestionState {
+  id: string;
+  question: string;
+  isCurrent: () => boolean;
+  paint?: Promise<boolean>;
 }
 
 interface ActionOverlayState {
@@ -265,24 +253,18 @@ export class HudPresenter {
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private assistantOverlay?: AssistantOverlayState;
+  private promptQuestion?: PromptQuestionState;
+  private promptQuestionPaint?: Promise<boolean>;
   private actionOverlay?: ActionOverlayState;
-  /**
-   * Which page the glass holds while a visual surface is wired: the four
-   * image tiles, or a firmware list page (NEWS, SEARCH). Every path that
-   * paints pixels goes through paintVisual, which brings the tiles back
-   * first; every path that writes text goes through paint(containerId),
-   * which writes the list page's native containers while it is up.
-   */
-  private glassPage: 'visual' | 'list' = 'visual';
   private nativeReplyPage = false;
-  /** The rows and chrome of the firmware list currently built, if any. */
-  private nativeListKey?: string;
   private assistantOverlayPaint?: Promise<boolean>;
   private assistantOverlayPaintTimer?: ReturnType<typeof setTimeout>;
   private assistantOverlayPaintDirty = false;
   private assistantOverlayPaintStartedAt = 0;
   private notificationReturn?: NotificationReturnState;
   private micOn = false;
+  private displayActive = true;
+  private displayRevision = 0;
 
   constructor(
     private readonly client: BridgeClient,
@@ -290,6 +272,53 @@ export class HudPresenter {
     private readonly visual?: HudFramePainter,
     private readonly diagnostics?: G2DiagnosticTrace,
   ) {}
+
+  /** Stop this document's painters, including delayed native fallback work. */
+  suspendDisplay(): void {
+    if (!this.displayActive) return;
+    this.displayActive = false;
+    this.displayRevision += 1;
+    this.client.suspendDisplay?.();
+    this.visual?.suspendDisplay?.();
+    this.guardedListPaintRevision += 1;
+    if (this.thinkingTicker !== undefined) clearTimeout(this.thinkingTicker);
+    this.thinkingTicker = undefined;
+    this.thinkingTicks = 0;
+    this.cancelAssistantOverlayPaintTimer();
+    this.assistantOverlayPaintDirty = false;
+    this.assistantOverlayPaint = undefined;
+    if (this.assistantOverlay?.dismissTimer !== undefined) clearTimeout(this.assistantOverlay.dismissTimer);
+    this.assistantOverlay = undefined;
+    this.clearActionOverlay();
+    this.promptQuestion = undefined;
+    this.promptQuestionPaint = undefined;
+    this.confirmation = undefined;
+    this.confirmationQueue = Promise.resolve();
+    this.healing = false;
+    this.notificationReturn = undefined;
+    this.focusReturn = undefined;
+    this.resetAll();
+    this.surface = { kind: 'default' };
+  }
+
+  /** Recovery permits fresh work; no paint or timer is replayed here. */
+  resumeDisplay(): void {
+    this.client.resumeDisplay?.();
+    this.visual?.resumeDisplay?.();
+    this.displayActive = true;
+  }
+
+  private captureDisplayGuard(): () => boolean {
+    const revision = this.displayRevision;
+    const active = this.displayActive;
+    const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
+    return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
+  }
+
+  /** The custom list owns its cursor; the compatibility list is firmware-owned. */
+  usesCustomListSelection(): boolean {
+    return this.visual !== undefined;
+  }
 
   /** Replace a container's full text. Also resets any stream in progress.
    *
@@ -384,11 +413,73 @@ export class HudPresenter {
     return true;
   }
 
-  /**
-   * JOAT is a transient top layer, not another content page. It intentionally
-   * leaves the current Messages/Navigation/Brainstorm/Hermes surface intact;
-   * only a consent confirmation remains visually exclusive.
-   */
+  /** Present one complete question without replacing the feature beneath it.
+   * Only this prompt's current, completed frame may acknowledge publication. */
+  showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean): Promise<boolean> {
+    if (!this.visual?.paintExact || this.confirmation || !promptId
+      || !question.trim() || question.length > 1000) return Promise.resolve(false);
+    const existing = this.promptQuestion;
+    if (existing?.id === promptId) {
+      return existing.question === question && this.isPromptCurrent(existing)
+        ? existing.paint ?? Promise.resolve(false)
+        : Promise.resolve(false);
+    }
+    const prompt: PromptQuestionState = { id: promptId, question, isCurrent };
+    this.promptQuestion = prompt;
+    this.cancelAssistantOverlayPaintTimer();
+    this.assistantOverlayPaintDirty = false;
+    const paint = this.renderPromptQuestion(prompt, this.promptQuestionPaint);
+    prompt.paint = paint;
+    this.promptQuestionPaint = paint;
+    return paint;
+  }
+
+  async dismissPromptQuestion(promptId: string): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    const prompt = this.promptQuestion;
+    if (!prompt || prompt.id !== promptId) return false;
+    this.promptQuestion = undefined;
+    // The old frame may already have one bridge write in flight. Its guard
+    // prevents further writes; restore only after that owned work settles.
+    await prompt.paint?.catch(() => false);
+    if (!displayCurrent()) return false;
+    if (this.promptQuestion || this.confirmation) return false;
+    return this.paintVisual();
+  }
+
+  private isPromptCurrent(prompt: PromptQuestionState): boolean {
+    try {
+      return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent();
+    } catch {
+      return false;
+    }
+  }
+
+  private async renderPromptQuestion(prompt: PromptQuestionState, previous?: Promise<boolean>): Promise<boolean> {
+    let painted = false;
+    try {
+      // Serialize prompt layout changes too, and drain an already-dispatched
+      // assistant frame before claiming an exact question receipt.
+      await previous?.catch(() => false);
+      await this.assistantOverlayPaint?.catch(() => false);
+      if (!this.isPromptCurrent(prompt) || !this.visual?.paintExact) return false;
+      if (!this.isPromptCurrent(prompt)) return false;
+      painted = await this.visual.paintExact(this.visualFrame(), () => this.isPromptCurrent(prompt));
+      return painted && this.isPromptCurrent(prompt);
+    } catch {
+      return false;
+    } finally {
+      if ((!painted || !this.isPromptCurrent(prompt)) && this.promptQuestion === prompt) {
+        this.promptQuestion = undefined;
+        // Recover the latest underlying content without converting that
+        // different frame's successful paint into a question acknowledgement.
+        await this.paintVisual().catch(() => false);
+      }
+    }
+  }
+
+  /** JOAT replies leave the current feature intact; a question or consent
+   * surface has priority over incidental assistant content. */
   async showAssistantOverlay(
     text: string, append = false, answersWearer = false,
   ): Promise<boolean> {
@@ -430,6 +521,7 @@ export class HudPresenter {
   }
 
   async dismissAssistantOverlay(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
     const overlay = this.assistantOverlay;
     if (!overlay) return true;
     if (overlay.dismissTimer !== undefined) clearTimeout(overlay.dismissTimer);
@@ -438,6 +530,7 @@ export class HudPresenter {
     this.cancelAssistantOverlayPaintTimer();
     const active = this.assistantOverlayPaint;
     if (active) await active;
+    if (!displayCurrent()) return false;
     // The active paint's completion may have queued the newest reply frame.
     // Cancel it after the await so an old tail can never repaint over a local
     // wearer dismissal.
@@ -450,6 +543,7 @@ export class HudPresenter {
    * active and one newest tail so streaming can never outrun the four-tile
    * bridge, including when the underlying surface is Navigation. */
   private paintAssistantOverlayNow(): Promise<boolean> {
+    if (!this.displayActive) return Promise.resolve(false);
     if (this.confirmation) return Promise.resolve(true);
     if (this.assistantOverlayPaint) {
       this.assistantOverlayPaintDirty = true;
@@ -470,6 +564,8 @@ export class HudPresenter {
   }
 
   private async paintNativeAssistantOverlay(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     if (this.surface.kind === 'list') {
       if (!this.assistantOverlay && this.nativeReplyPage) return this.renderList(this.surface);
       if (this.assistantOverlay && !this.nativeReplyPage) {
@@ -481,6 +577,7 @@ export class HudPresenter {
         this.nativeReplyPage = true;
         this.lastLength.clear();
         await this.restoreLiveStatus(status);
+        if (!displayCurrent()) return false;
       }
     }
     if (this.confirmation) return true;
@@ -488,6 +585,7 @@ export class HudPresenter {
   }
 
   private scheduleAssistantOverlayPaint(): void {
+    if (!this.displayActive) return;
     if (this.confirmation) return;
     if (this.assistantOverlayPaint) {
       this.assistantOverlayPaintDirty = true;
@@ -567,10 +665,16 @@ export class HudPresenter {
     this.micOn = open;
   }
 
-  async showList(items: string[], options: ListSurfaceOptions = {}): Promise<boolean> {
+  private guardedListPaintRevision = 0;
+
+  async showList(
+    items: string[], options: ListSurfaceOptions = {}, isCurrent?: () => boolean,
+  ): Promise<boolean> {
+    if (isCurrent) return this.renderBoundList(items, options, isCurrent);
     const resolved = this.resolveListOptions(options);
     const surface: HudSurface = {
-      kind: 'list', items: [...items], options: resolved, selectedIndex: 0,
+      kind: 'list', items: [...items], options: resolved,
+      selectedIndex: this.initialListSelection(items, options),
     };
     if (this.confirmation) {
       if (this.confirmation.surface.kind === 'default' && !this.focusReturn) {
@@ -592,6 +696,59 @@ export class HudPresenter {
     }
     this.clearActionOverlay();
     return this.renderList(surface);
+  }
+
+  /** Stage an owned raster list without adopting it before its exact receipt.
+   * A failed or superseded upload leaves both the prior view and its Back
+   * snapshot intact; it cannot become a deferred confirmation surface. */
+  private async renderBoundList(
+    items: string[], options: ListSurfaceOptions, isCurrent: () => boolean,
+  ): Promise<boolean> {
+    if (!this.visual?.paintExact || this.confirmation || this.promptQuestion) return false;
+    const priorSurface = this.surface;
+    const surface: Extract<HudSurface, { kind: 'list' }> = {
+      kind: 'list', items: [...items], options: this.resolveListOptions(options),
+      selectedIndex: this.initialListSelection(items, options),
+    };
+    const revision = ++this.guardedListPaintRevision;
+    let committed = false;
+    const current = () => {
+      try {
+        return revision === this.guardedListPaintRevision && isCurrent()
+          && !this.confirmation && !this.promptQuestion
+          && this.surface === (committed ? surface : priorSurface);
+      } catch { return false; }
+    };
+    if (!current()) return false;
+    const frame: HudVisualFrame = {
+      kind: 'list', status: this.streams.get(ContainerId.StatusBar) ?? '', micOn: this.micOn,
+      title: surface.options.title, items: [...surface.items], selectedIndex: surface.selectedIndex,
+      selectable: surface.options.selectable, hint: surface.options.hint,
+      planningGrid: surface.options.planningGrid, planningPane: surface.options.planningPane,
+      ...(surface.options.railTab ? { rail: this.rail.visualFor(surface.options.railTab) } : {}),
+    };
+    let painted = false;
+    try { painted = await this.visual.paintExact(frame, current); } catch { /* No exact receipt. */ }
+    if (!painted || !current()) return false;
+    const liveStatus = this.captureLiveStatus();
+    if (priorSurface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams), brightness: new Map(this.brightness), kinds: new Map(this.kinds),
+      };
+    }
+    this.clearActionOverlay();
+    this.resetAll();
+    committed = true;
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, surface.options.title);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, surface.options.hint);
+    this.brightness.set(ContainerId.Hint, 1);
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+    }
+    return true;
   }
 
   /** Paint a complete navigation snapshot. The Mac/session owns the state;
@@ -644,6 +801,7 @@ export class HudPresenter {
   private static readonly THINKING_PRECISE_S = 60;
 
   private armThinkingTicker(): void {
+    if (!this.displayActive) return;
     if (this.thinkingTicker !== undefined) return;
     if (this.surface.kind !== 'brainstorm') return;
     if (!(this.visual?.transcriptIsThinking?.() ?? false)) {
@@ -677,8 +835,12 @@ export class HudPresenter {
     return true;
   }
 
-  async showBrainstorm(brainstorm: BrainstormHudModel, statusOverride?: string): Promise<boolean> {
-    if (!this.visual || this.confirmation) return false;
+  async showBrainstorm(
+    brainstorm: BrainstormHudModel, statusOverride?: string, isCurrent?: () => boolean,
+  ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    if (!this.visual || this.confirmation || (isCurrent && !isCurrent())) return false;
     this.clearActionOverlay();
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
@@ -703,7 +865,13 @@ export class HudPresenter {
         this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
       }
     }
-    const painted = await this.paintVisual();
+    const stillCurrent = () => displayCurrent() && this.surface === surface && (isCurrent?.() ?? true);
+    const painted = isCurrent
+      ? await (this.visual.paintExact?.(this.visualFrame(), stillCurrent) ?? Promise.resolve(false))
+      : await this.paintVisual();
+    // A departed opening cannot acknowledge or restore its old snapshot over
+    // Home, another feature, or a newer Terminal selection.
+    if (!stillCurrent()) return false;
     if (!painted) {
       this.restorePresenterSnapshot(prior);
       await this.visual.paint(this.visualFrame());
@@ -718,6 +886,8 @@ export class HudPresenter {
     statusOverride?: string,
     onDeferredProductivityVisible?: () => void,
   ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     if (!this.visual) return false;
     if (usesActionPillLayout(productivity.phase)) {
       return this.showActionPill(productivity, onDeferredProductivityVisible);
@@ -755,6 +925,7 @@ export class HudPresenter {
       }
     }
     const painted = await this.paintVisual();
+    if (!displayCurrent()) return false;
     if (!painted) {
       this.restorePresenterSnapshot(prior);
       await this.visual.paint(this.visualFrame());
@@ -767,6 +938,8 @@ export class HudPresenter {
     productivity: ProductivityHudModel,
     onVisible?: () => void,
   ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     this.clearActionOverlay();
     if (this.confirmation) {
       // A retained truth page under the gate is superseded by this newer
@@ -780,6 +953,7 @@ export class HudPresenter {
     }
     if (this.surface.kind === 'productivity') {
       await this.showDefault();
+      if (!displayCurrent()) return false;
     }
     const overlay = this.armActionOverlay(productivity);
     const painted = await this.paintVisual();
@@ -845,6 +1019,27 @@ export class HudPresenter {
     return this.renderList(surface);
   }
 
+  /** Restore only after the selected custom row has painted and still owns
+   * the surface. Native compatibility lists have no cursor-setting API. */
+  async restoreSelection(index: number): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    const current = this.surface;
+    if (current.kind !== 'list' || this.confirmation || this.promptQuestion) return false;
+    const selectedIndex = Math.max(0, Math.min(Math.max(0, current.items.length - 1), index));
+    if (!this.visual) return selectedIndex === 0 ? this.setSelection(0) : false;
+    const surface: HudSurface = { ...current, selectedIndex };
+    const painted = await this.renderList(surface);
+    if (!displayCurrent()) return false;
+    if (!painted && this.surface === surface && !this.confirmation && !this.promptQuestion) {
+      this.surface = current;
+      // One direct rollback paint follows the existing bounded recovery.
+      // Never recurse into another healing attempt or overwrite a successor.
+      await this.visual.paint(this.visualFrame());
+    }
+    return painted && this.surface === surface && !this.confirmation && !this.promptQuestion;
+  }
+
   moveSelection(delta: number): Promise<boolean> {
     if (
       this.surface.kind === 'default'
@@ -862,6 +1057,8 @@ export class HudPresenter {
     statusOverride?: string,
     prior?: PresenterSnapshot,
   ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     const from = this.tracePage();
     const liveStatus = statusOverride === undefined
       ? this.captureLiveStatus()
@@ -875,6 +1072,7 @@ export class HudPresenter {
       }
     }
     const painted = await this.paintVisual();
+    if (!displayCurrent()) return false;
     if (!painted && prior) {
       this.restorePresenterSnapshot(prior);
       // paintVisual already spent its one bounded self-heal on the failed new
@@ -887,36 +1085,22 @@ export class HudPresenter {
   }
 
   private async renderList(surface: Extract<HudSurface, { kind: 'list' }>): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
-    // NEWS and SEARCH are firmware lists, not pixels (NATIVE_LIST_TITLES).
-    // Entering one costs a single rebuild (~165 ms by the community's
-    // measurements) instead of four image tiles; a highlight move costs
-    // nothing; only NEW rows rebuild, because the firmware owns the
-    // highlight and a rebuild for a selection change would reset it.
-    const firmwareList = this.visual !== undefined
-      && !this.confirmation
-      && usesNativeListPage(surface);
-    const listKey = firmwareList ? nativeListKey(surface) : undefined;
-    const alreadyBuilt = firmwareList
-      && this.glassPage === 'list'
-      && this.nativeListKey === listKey;
+    // Every feature retains the custom typography, banner and selection
+    // renderer. Native lists are only the no-renderer compatibility path.
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
-    const ok = (this.visual && !firmwareList) || alreadyBuilt
+    const ok = this.visual
       ? true
       : await this.client.require()
         .rebuildPageContainer(nativeReplyPage
           ? this.layouts.defaultLayout()
           : this.layouts.listLayout(surface.items, surface.options));
-    if (!ok) {
+    if (!ok || !displayCurrent()) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
       return false;
-    }
-    if (firmwareList && !alreadyBuilt) {
-      // The tiles and the spine word are gone with the page they were on.
-      this.visual?.forgetPage?.();
-      this.glassPage = 'list';
-      this.nativeListKey = listKey;
     }
     this.resetAll();
     this.surface = surface;
@@ -927,19 +1111,7 @@ export class HudPresenter {
     this.brightness.set(ContainerId.Main, 4);
     this.streams.set(ContainerId.Hint, surface.options.hint);
     this.brightness.set(ContainerId.Hint, 1);
-    if (alreadyBuilt) {
-      // Same rows on the glass already; only our mirror of the highlight
-      // moved. The status line is still the one the wearer sees.
-      if (liveStatus) {
-        this.streams.set(ContainerId.StatusBar, liveStatus.text);
-        if (liveStatus.brightness !== undefined) {
-          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-        }
-      }
-      this.recordPageTransition(from, 'list', 'show_list', 'success');
-      return true;
-    }
-    if (this.visual && !firmwareList) {
+    if (this.visual) {
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -951,6 +1123,7 @@ export class HudPresenter {
       return painted;
     }
     const restored = await this.restoreLiveStatus(liveStatus);
+    if (!displayCurrent()) return false;
     const painted = nativeReplyPage ? (await this.paint(ContainerId.Main)) && restored : restored;
     this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
     return painted;
@@ -1018,6 +1191,7 @@ export class HudPresenter {
    * on the glass or not running.
    */
   private armPanelTicker(): void {
+    if (!this.displayActive) return;
     if (this.panelTicker !== undefined) return;
     const delay = this.panelTickDelay();
     if (delay === undefined) return;
@@ -1048,6 +1222,8 @@ export class HudPresenter {
   }
 
   async showDefault(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     if (this.confirmation) {
       this.confirmation.surface = { kind: 'default' };
       if (this.focusReturn) {
@@ -1093,6 +1269,7 @@ export class HudPresenter {
     this.surface = { kind: 'default' };
     this.focusReturn = undefined;
     let restored = await this.restoreLiveStatus(liveStatus);
+    if (!displayCurrent()) return false;
     if (!deferred) {
       this.recordPageTransition(from, 'overview', 'show_overview', restored ? 'success' : 'failed');
       return restored;
@@ -1114,6 +1291,7 @@ export class HudPresenter {
       ContainerId.Hint,
     ] as const) {
       if (this.streams.has(id)) restored = (await this.paint(id)) && restored;
+      if (!displayCurrent()) return false;
     }
     this.recordPageTransition(from, 'overview', 'show_overview', restored ? 'success' : 'failed');
     return restored;
@@ -1130,7 +1308,12 @@ export class HudPresenter {
     prompt: string,
     id = 'hud:confirmation',
     diagnosticKind?: 'messages',
+    isCurrent?: () => boolean,
   ): Promise<boolean> {
+    if (isCurrent) {
+      if (!this.visual?.paintExact) return Promise.resolve(false);
+      try { if (!isCurrent()) return Promise.resolve(false); } catch { return Promise.resolve(false); }
+    }
     const priorPage = this.tracePage();
     const openedHere = this.confirmation === undefined;
     // A new decision gate supersedes any lingering outcome strip.
@@ -1140,6 +1323,8 @@ export class HudPresenter {
       console.error('[HudPresenter] exact confirmation preview exceeds HUD capacity');
       return Promise.resolve(false);
     }
+    // Asking for text never survives a transition into write consent.
+    this.promptQuestion = undefined;
     if (!this.confirmation) {
       const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn
@@ -1148,6 +1333,7 @@ export class HudPresenter {
         id,
         prompt: safePrompt,
         ...(diagnosticKind ? { diagnosticKind } : {}),
+        ...(isCurrent ? { isCurrent } : {}),
         surface: this.cloneSurface(this.surface),
         streams: new Map(content.streams),
         brightness: new Map(content.brightness),
@@ -1156,26 +1342,39 @@ export class HudPresenter {
     } else {
       // Claim ownership synchronously, before an awaited bridge call. A stale
       // result callback can now only enqueue a no-op dismissal for its old id.
-      this.confirmation.id = id;
-      this.confirmation.prompt = safePrompt;
-      this.confirmation.diagnosticKind = diagnosticKind;
+      this.confirmation = { ...this.confirmation, id, prompt: safePrompt, diagnosticKind, isCurrent };
     }
 
-    return this.enqueueConfirmation(() => this.renderConfirmation(id, openedHere, priorPage));
+    const claimed = this.confirmation;
+    return this.enqueueConfirmation(() => this.renderConfirmation(id, openedHere, priorPage, claimed));
+  }
+
+  private isConfirmationCurrent(confirmation: ConfirmationReturnState): boolean {
+    try { return this.confirmation === confirmation && (confirmation.isCurrent?.() ?? true); }
+    catch { return false; }
   }
 
   private async renderConfirmation(
     id: string,
     openedHere = false,
     from: G2TracePage = this.tracePage(),
+    claimed?: ConfirmationReturnState,
   ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     // Native replies and consent share Main. Finish an already-dispatched
     // reply before rebuilding consent so its late acknowledgement cannot
     // leave reply text covering an armed decision gate.
     // A failed reply is settled too; it must not strand this new gate.
     if (this.assistantOverlayPaint) await this.assistantOverlayPaint.catch(() => false);
+    if (!displayCurrent()) return false;
     const current = this.confirmation;
-    if (!current || current.id !== id) return true;
+    if (!current || current.id !== id || (claimed && current !== claimed)) return !claimed?.isCurrent;
+    if (current.isCurrent && !this.isConfirmationCurrent(current)) {
+      this.confirmation = undefined;
+      await this.restoreAfterConfirmation(current);
+      return false;
+    }
     const liveStatus = this.captureLiveStatus();
     if (this.visual) {
       this.resetAll();
@@ -1189,7 +1388,18 @@ export class HudPresenter {
           this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
         }
       }
-      const painted = await this.paintVisual();
+      const painted = (await this.paintVisual()) && (!current.isCurrent || this.isConfirmationCurrent(current));
+      if (!displayCurrent()) return false;
+      if (!painted && current.isCurrent) {
+        // A failed or retired exact preview cannot keep an invisible gate.
+        // Restore only this claim; a successor owns its own return surface.
+        if (this.confirmation === current) {
+          this.confirmation = undefined;
+          await this.restoreAfterConfirmation(current);
+        }
+        this.recordPageTransition(from, 'confirmation', 'show_confirmation', 'failed');
+        return false;
+      }
       if (!painted && openedHere && this.confirmation?.id === id) {
         // A failed first paint must not leave an invisible decision gate owning
         // every later content update. Restore the logical surface snapshot so
@@ -1216,6 +1426,7 @@ export class HudPresenter {
     }
     const ok = await this.client.require()
       .rebuildPageContainer(this.layouts.confirmationLayout(current.prompt));
+    if (!displayCurrent()) return false;
     if (this.confirmation?.id !== id) return true;
     if (!ok) {
       if (openedHere) {
@@ -1261,6 +1472,8 @@ export class HudPresenter {
   }
 
   private async restoreAfterConfirmation(prior: ConfirmationReturnState): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     if (prior.surface.kind === 'list') {
       this.focusReturn = {
         streams: new Map(prior.streams),
@@ -1268,7 +1481,7 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.renderList(prior.surface);
-      const result = await this.repaintReplacementConfirmation(restored);
+      const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
       this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
     }
@@ -1280,7 +1493,7 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.renderNavigation(prior.surface);
-      const result = await this.repaintReplacementConfirmation(restored);
+      const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
       this.recordPageTransition('confirmation', 'navigation', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
     }
@@ -1292,7 +1505,7 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.showBrainstorm(prior.surface.brainstorm);
-      const result = await this.repaintReplacementConfirmation(restored);
+      const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
       this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
     }
@@ -1304,10 +1517,11 @@ export class HudPresenter {
         kinds: new Map(prior.kinds),
       };
       const restored = await this.showProductivity(prior.surface.productivity);
+      if (!displayCurrent()) return false;
       if (restored && this.isProductivityVisible(prior.surface.productivity)) {
         prior.onDeferredProductivityVisible?.();
       }
-      const result = await this.repaintReplacementConfirmation(restored);
+      const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
       this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
     }
@@ -1325,7 +1539,7 @@ export class HudPresenter {
           this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
         }
       }
-      const result = await this.repaintReplacementConfirmation(await this.paintVisual());
+      const result = await this.repaintReplacementConfirmation(await this.paintVisual(), displayCurrent);
       this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
     }
@@ -1360,8 +1574,9 @@ export class HudPresenter {
       this.streams.set(id, this.streams.get(id) ?? '');
       this.brightness.set(id, this.brightness.get(id) ?? DEFAULT_BRIGHTNESS[id]!);
       ok = (await this.paint(id)) && ok;
+      if (!displayCurrent()) return false;
     }
-    const result = await this.repaintReplacementConfirmation(ok);
+    const result = await this.repaintReplacementConfirmation(ok, displayCurrent);
     this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', result ? 'success' : 'failed');
     return result;
   }
@@ -1385,6 +1600,8 @@ export class HudPresenter {
   private healing = false;
 
   private async healAndRetry(containerId: number): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     if (this.healing) {
       this.recordSelfHeal('skipped', containerId);
       return false; // one attempt; never recurse
@@ -1392,20 +1609,23 @@ export class HudPresenter {
     this.healing = true;
     this.recordSelfHeal('attempt', containerId);
     try {
-      const layout = this.visual && this.glassPage === 'visual'
+      const layout = this.visual
         ? this.layouts.visualLayout()
         : this.confirmation
         ? this.layouts.confirmationLayout(this.confirmation.prompt)
         : this.surface.kind === 'list' && !this.nativeReplyPage
           ? this.layouts.listLayout(this.surface.items, this.surface.options)
           : this.layouts.defaultLayout();
+      if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'heal-rebuild-start');
       const rebuilt = await this.client.require().rebuildPageContainer(layout);
-      if (!rebuilt) {
+      if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'heal-rebuild-result', rebuilt);
+      if (!rebuilt || !displayCurrent()) {
         this.recordSelfHeal('abandoned', containerId);
         return false;
       }
+      this.visual?.forgetPage?.();
       console.warn('[HudPresenter] page was missing — rebuilt and repainting');
-      const recovered = this.visual && this.glassPage === 'visual'
+      const recovered = this.visual
         ? await this.paintVisual()
         : await this.paint(containerId);
       this.recordSelfHeal(recovered ? 'recovered' : 'abandoned', containerId);
@@ -1414,15 +1634,15 @@ export class HudPresenter {
       this.recordSelfHeal('abandoned', containerId);
       return false;
     } finally {
-      this.healing = false;
+      if (displayCurrent()) this.healing = false;
     }
   }
 
   private async paint(containerId: number): Promise<boolean> {
-    if (this.visual && this.glassPage === 'visual') return this.paintVisual();
-    // No visual surface, or a firmware list page is up: the status bar,
-    // title and hint are native text containers on this page, written in
-    // place — a few bytes, no tile, no flicker.
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    if (this.visual) return this.paintVisual();
+    // No custom renderer: retain native text compatibility updates.
     // The text compatibility surface owns the same transient reply as the
     // visual HUD. Keep page content underneath it for dismissal, and never
     // cover an exclusive confirmation with an assistant answer.
@@ -1447,6 +1667,7 @@ export class HudPresenter {
         ...(level !== undefined ? { textColor: level } : {}),
       }),
     );
+    if (!displayCurrent()) return false;
     this.lastLength.set(containerId, content.length);
     if (!ok && !this.healing) {
       // The container is gone. Rebuild the page and paint again, rather
@@ -1550,12 +1771,17 @@ export class HudPresenter {
   }
 
   private enqueueConfirmation(operation: () => Promise<boolean>): Promise<boolean> {
-    const next = this.confirmationQueue.then(operation, operation);
+    const displayCurrent = this.captureDisplayGuard();
+    const owned = () => displayCurrent() ? operation() : Promise.resolve(false);
+    const next = this.confirmationQueue.then(owned, owned);
     this.confirmationQueue = next.then(() => undefined, () => undefined);
     return next;
   }
 
-  private async repaintReplacementConfirmation(restored: boolean): Promise<boolean> {
+  private async repaintReplacementConfirmation(
+    restored: boolean, displayCurrent: () => boolean,
+  ): Promise<boolean> {
+    if (!displayCurrent()) return false;
     const replacement = this.confirmation;
     if (!replacement) return restored;
     // The queued dismissal belongs to the confirmation that was visible when
@@ -1567,11 +1793,17 @@ export class HudPresenter {
     return false;
   }
 
+  private initialListSelection(items: readonly string[], options: ListSurfaceOptions): number {
+    const requested = options.initialSelectedIndex;
+    if (!this.visual || requested === undefined || !Number.isInteger(requested)) return 0;
+    return Math.max(0, Math.min(Math.max(0, items.length - 1), requested));
+  }
+
   private resolveListOptions(options: ListSurfaceOptions): ResolvedListSurfaceOptions {
     const planningGrid = normalizePlanningGrid(options.planningGrid);
     return {
       title: (options.title?.trim() || DEFAULT_LIST_TITLE).slice(0, MAX_FOCUS_COPY_CHARS),
-      hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_COPY_CHARS),
+      hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
@@ -1595,6 +1827,12 @@ export class HudPresenter {
         ...(this.confirmation.diagnosticKind
           ? { diagnosticKind: this.confirmation.diagnosticKind }
           : {}),
+      };
+    }
+    if (this.promptQuestion) {
+      return {
+        kind: 'prompt_question', status, micOn: this.micOn,
+        promptId: this.promptQuestion.id, question: this.promptQuestion.question,
       };
     }
     if (this.surface.kind === 'list') {
@@ -1676,36 +1914,26 @@ export class HudPresenter {
     return this.paintVisual();
   }
 
-  /** The firmware list the glass should be showing right now, if any.
-   * Overlays and the confirmation gate are pixels over whatever page is
-   * beneath them, so while one is up the tiles win even above a list. */
-  private wantedFirmwareList(): Extract<HudSurface, { kind: 'list' }> | undefined {
-    if (this.confirmation || this.assistantOverlay || this.actionOverlay) return undefined;
-    const surface = this.surface;
-    return usesNativeListPage(surface) ? surface : undefined;
-  }
-
   private async paintVisual(localTick = false): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
     if (!this.visual) return false;
-    const wanted = this.wantedFirmwareList();
-    if (this.glassPage === 'list') {
-      // The firmware list is on the glass. A local tick has nothing to draw
-      // there. Anything else means the surface moved on, or something wants
-      // pixels over the list: bring the four tiles back first.
-      if (localTick) return true;
-      if (wanted) return this.renderList(wanted);
-      const restored = await this.client.require()
-        .rebuildPageContainer(this.layouts.visualLayout());
-      if (!restored) return false;
-      this.glassPage = 'visual';
-      this.nativeListKey = undefined;
-      this.visual.forgetPage?.();
-    } else if (wanted && !localTick) {
-      // Pixels are on the glass but the surface is a firmware list — the
-      // overlay or confirmation over it just closed. Rebuild the list.
-      return this.renderList(wanted);
+    const confirmation = this.confirmation;
+    if (confirmation?.isCurrent) {
+      if (!this.isConfirmationCurrent(confirmation)) return false;
+      try {
+        return await (this.visual.paintExact?.(this.visualFrame(), () => this.isConfirmationCurrent(confirmation))
+          ?? Promise.resolve(false));
+      } catch { return false; }
+    }
+    const prompt = this.promptQuestion;
+    // Incidental status/content paints must retain the same question owner,
+    // and must never heal to a different frame while reporting its success.
+    if (prompt) {
+      return this.visual.paintExact?.(this.visualFrame(), () => this.isPromptCurrent(prompt)) ?? false;
     }
     const ok = await this.visual.paint(this.visualFrame(), localTick);
+    if (!displayCurrent()) return false;
     // Keep the local elapsed counter moving between Mac frames.
     this.armThinkingTicker();
     this.armPanelTicker();

@@ -62,6 +62,11 @@ export interface AssistantOverlayInputOwner {
   dismissVisibleNotification(): Promise<boolean>;
 }
 
+export interface PromptInputOwner {
+  isActive(): boolean;
+  cancel(reason?: string): void;
+}
+
 /**
  * Single onEvenHubEvent subscription fanned out to typed handlers.
  *
@@ -109,6 +114,7 @@ export class EventRouter {
     private readonly brainstorm?: BrainstormInputOwner,
     private readonly assistantOverlay?: AssistantOverlayInputOwner,
     private readonly transcriptScroll?: (direction: 'up' | 'down') => boolean,
+    private readonly promptedInput?: PromptInputOwner,
   ) {}
 
   attach(): void {
@@ -136,7 +142,7 @@ export class EventRouter {
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
-      if (toggleMic && this.menu.isPanelRefreshable()) {
+      if (toggleMic && !this.promptedInput?.isActive() && this.menu.isPanelRefreshable()) {
         // The one carve-out from "long press is the mic": on the top level
         // of news or search it re-fetches that tab (the wearer's ruling,
         // 2026-09-02). Everywhere else — the resting overview, an opened
@@ -169,8 +175,25 @@ export class EventRouter {
   }
 
   private dispatch(event: EvenHubEvent): void {
+    if (this.link.wasReplaced) {
+      // A foreground/headless predecessor may still receive host events.
+      // Only lifecycle delivery can restore it; gestures must not control
+      // the successor's microphone, menu or display.
+      this.pendingMicLongPress = false;
+      this.contextualMenuOverlayOpen = false;
+      const type = event.sysEvent?.eventType;
+      if (event.sysEvent && (
+        type === OsEventTypeList.FOREGROUND_ENTER_EVENT
+        || type === OsEventTypeList.FOREGROUND_EXIT_EVENT
+        || type === OsEventTypeList.SYSTEM_EXIT_EVENT
+        || type === OsEventTypeList.ABNORMAL_EXIT_EVENT
+      )) this.handleSys(event.sysEvent);
+      return;
+    }
     if (event.audioEvent) {
-      this.audio.ingest(event.audioEvent.audioPcm, event.audioEvent.speakerRole);
+      this.audio.ingest(
+        event.audioEvent.audioPcm, event.audioEvent.speakerRole, event.audioEvent.source,
+      );
     }
 
     // The decision surface owns every non-lifecycle input. A G2 swipe is the
@@ -196,6 +219,7 @@ export class EventRouter {
     // menu renders but every selection vanishes silently — the event has
     // its own field and matches none of the other branches.
     if (event.menuItemClickEvent) {
+      this.promptedInput?.cancel('context-menu');
       // The simulator's `context_menu` automation input does not replay the
       // physical raw long-press. Preserve the same overlay boundary before
       // its following foreground-exit event reaches lifecycle consumers.
@@ -234,6 +258,7 @@ export class EventRouter {
       // Long-press first: on a text-capture page the SDK delivers 9/10
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
+      if (this.handlePromptInput(event.textEvent.eventType)) return;
       if (this.dismissAssistantOverlayFor(event.textEvent.eventType)) return;
       if (this.dismissVisibleNotificationFor(event.textEvent.eventType)) return;
       if (this.navigation?.isActive()) {
@@ -301,6 +326,7 @@ export class EventRouter {
     if (event.listEvent) {
       this.recordGesture(this.classify(event.listEvent.eventType), 'list');
       if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
+      if (this.handlePromptInput(event.listEvent.eventType)) return;
       if (this.dismissAssistantOverlayFor(event.listEvent.eventType)) return;
       // Some G2 firmware represents a Home-tile tap as a List event. A
       // transient notification must own that ordinary tap before the hidden
@@ -319,6 +345,20 @@ export class EventRouter {
         },
       });
     }
+  }
+
+  /** Questions retain the feature underneath; only Back releases this owner. */
+  private handlePromptInput(eventType: number | undefined, backAllowed = true): boolean {
+    if (!this.promptedInput?.isActive()) return false;
+    const type = eventType ?? OsEventTypeList.CLICK_EVENT;
+    if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      if (!backAllowed) return false; // Keep the firmware exit gesture.
+      this.promptedInput.cancel('back');
+      return true;
+    }
+    return type === OsEventTypeList.CLICK_EVENT
+      || type === OsEventTypeList.SCROLL_TOP_EVENT
+      || type === OsEventTypeList.SCROLL_BOTTOM_EVENT;
   }
 
   /** Classify raw SDK events without retaining source IDs or user content. */
@@ -439,6 +479,7 @@ export class EventRouter {
       return;
     }
 
+    if (this.handlePromptInput(type, this.isBackSource(source))) return;
     if (this.dismissAssistantOverlayFor(type)) return;
     if (this.dismissVisibleNotificationFor(type)) return;
 

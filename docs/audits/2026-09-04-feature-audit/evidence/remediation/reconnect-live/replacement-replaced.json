@@ -1,0 +1,33 @@
+{
+  "version": "replacement",
+  "mode": "replaced",
+  "finishedMs": 2202,
+  "events": [
+    {
+      "state": "connecting",
+      "ms": 0
+    },
+    {
+      "state": "connected",
+      "ms": 2
+    },
+    {
+      "state": "closed",
+      "ms": 304
+    }
+  ],
+  "server_events": [
+    {
+      "path": "/replacement-replaced",
+      "connection": 1,
+      "event": "open",
+      "time": 1788598822.2958379
+    },
+    {
+      "path": "/replacement-replaced",
+      "connection": 1,
+      "event": "closed",
+      "time": 1788598822.597033
+    }
+  ]
+}

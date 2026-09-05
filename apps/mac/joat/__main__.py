@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -20,6 +21,8 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .agents.builtin_tools import messages_tool, notifications_tool
+from .agents.feature_tools import feature_tools
+from .agents.message_tools import message_tools
 from .agents.grounding import (
     Grounding,
     device_facts,
@@ -97,6 +100,7 @@ from .native.bridge import (
 from .persistence.actions import ActionJournal
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
+from .persistence.pomodoro import PomodoroStore
 from .persistence.store import DurableStore
 from .persistence.tasks import TaskOccurrenceStore
 from .persistence.voice_notes import VoiceNoteStore
@@ -111,6 +115,7 @@ from .services.brainstorm_acceptance import (
 )
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
+from .services.prompted_speech import PromptedSpeechRuntime
 from .services.voice_latency import VoiceLatencyStore
 from .services.ambient import AmbientPublisher
 from .agents.panel_tools import news_headlines_tool, pomodoro_status_tool, web_search_tool
@@ -125,6 +130,7 @@ from .services.capabilities import (
     CapabilityRouter,
     system_home_zone,
 )
+from .services.terminal_opening import TerminalOpeningController
 from .services.agent_terminal import (
     AgentTerminalCommands,
     AgentTerminalRoster,
@@ -137,6 +143,7 @@ from .services.hermes_productivity import (
 )
 from .services.planning import personal_data_bridge_state
 from .services.message_reply import MessageReplyController
+from .services.message_ui import MessageUIController
 from .services.note_commands import NoteCommandController
 from .services.note_insights import (
     NoteInsightCommandController,
@@ -371,8 +378,9 @@ async def main() -> None:
     news = NewsService()
     search = SearchService()
     pomodoro = PomodoroService(
-        # Late-bound on purpose: the publisher and the session manager are
-        # composed below, and the timer cannot fire before the loop runs.
+        store=PomodoroStore(durable_store),
+        # Loading a checkpoint does not arm it. Activate only after these
+        # late-bound owners exist, once the rest of composition is ready.
         on_change=lambda: panels.publish("pomodoro"),
         notify=lambda card: sessions.notify(card),
     )
@@ -474,8 +482,9 @@ async def main() -> None:
             web_search_tool(search, panels),
             pomodoro_status_tool(pomodoro),
         ]
-        if imessage.available:
-            belt_tools.append(messages_tool(imessage))
+        # Availability can change after startup; the tool reports access
+        # failures and retries the same read-only store on each request.
+        belt_tools.append(messages_tool(imessage))
         belt = ToolBelt(belt_tools)
         # The mind and the brain are different seats
         # (agents/cli_reply_engine.py): everything above is the brain's —
@@ -1043,19 +1052,27 @@ async def main() -> None:
         seat_count=initial_count,
         phase="idle",
     )
-    async def arm_terminal_capture() -> None:
-        """A tap on the terminal arms ONE utterance as its input.
+    def retry_selected_terminal() -> Awaitable[None]:
+        retry = terminal_opening.retry()
 
-        Deliberately not the Brainstorm topic-capture path: this feature
-        has different workers, and conflating them is what made the
-        terminal's own gesture start a Brainstorm.
-        """
-        terminal_commands.arm()
-        await agent_terminal.repaint()
-        # Must be the band: the repaint above owns the surface, and a plain
-        # HudText is DEFERRED behind a focus page, so this acknowledgement
-        # never reached the lenses at all.
-        await hud.assistant("Listening · speak your terminal instruction.")
+        async def run() -> None:
+            if not await retry:
+                await retry_openclaw_terminal()
+
+        return run()
+
+    def arm_terminal_capture() -> Awaitable[None]:
+        """Bind this tap before scheduling its acknowledged question."""
+        capture = (
+            terminal_commands.begin_capture()
+            if not terminal_opening.owns_opening or terminal_opening.current else None
+        )
+
+        async def publish() -> None:
+            if capture is not None:
+                await prompted_speech.publish_terminal_capture(capture)
+
+        return publish()
 
     async def save_brainstorm_reply(who: str | None) -> str:
         """"Save Claude's reply as a note" — the discussion feeds the notes."""
@@ -1073,9 +1090,10 @@ async def main() -> None:
         make_debate,
         card_log=card_log,
         terminal_capture=arm_terminal_capture,
+        terminal_view_current=lambda: terminal_opening.current,
         on_state=publish_brainstorm_state,
         starters=[make_navigation],
-        terminal_retry=retry_openclaw_terminal,
+        terminal_retry=retry_selected_terminal,
         topic_capture_view=topic_capture_view,
         brainstorm_available=brainstorm_available,
         # "Send Claude's last reply to Hermes", spoken into a live
@@ -1088,12 +1106,15 @@ async def main() -> None:
         terminal_decide=lambda verdict: agent_terminal.decide(verdict, None),
         # A tap on a busy terminal with no Brainstorm to return to cycles
         # the focused lane: "switch among sessions" without speaking.
-        terminal_cycle=lambda: agent_terminal.focus_next(),
+        terminal_cycle=lambda: terminal_opening.cycle(),
         # Resolves "that" once the room has closed. The snapshot outlives
         # the session precisely so a finished answer can still be acted on.
         last_reply=lambda who: debate_state.snapshot.last_reply(who),
         transform=joat_transform,
         continuation_factory=make_continuation,
+        # Bound after the message controller/audio router are composed;
+        # SessionManager invokes this only for a wearer-requested question.
+        publish_topic_capture=lambda capture: prompted_speech.publish_topic_capture(capture),
     )
 
     def active_navigation() -> NavigationSession | NavigationUnavailableSession | None:
@@ -1166,6 +1187,8 @@ async def main() -> None:
         MessagesAppSender(),
         transport.request_confirmation,
         action_journal,
+        begin_reply=lambda: message_ui.begin_reply(),
+        on_status=lambda status: message_ui.on_status(status),
     )
     task_occurrences = TaskOccurrenceStore(durable_store)
 
@@ -1199,7 +1222,11 @@ async def main() -> None:
         log.info(
             "recovered %d interrupted QuickNote recordings", len(recovered_notes)
         )
-    audio_router = AudioRouter(transport)
+    def capture_started() -> None:
+        message_ui.retire()
+        prompted_speech.revoke_current()
+
+    audio_router = AudioRouter(transport, on_capture_started=capture_started)
     claude_binary = find_claude_binary()
     note_insights = NoteInsightsService(
         voice_note_store,
@@ -1234,10 +1261,16 @@ async def main() -> None:
         # The SessionManager owns the HUD while a session runs; terminal
         # narration must never fight a live Brainstorm for the lenses. The
         # line still lands in the lane's tail either way.
-        if not sessions.active or sessions.terminal_owns_hud():
+        # An owned Terminal already carries this line in its bound transcript
+        # frame. A second unbound text write could repaint after Home.
+        if (not terminal_opening.owns_opening
+                and (not sessions.active or sessions.terminal_owns_hud())):
             await hud.show(line)
 
-    async def terminal_paint(frame: TerminalFrame) -> None:
+    async def terminal_paint(
+        frame: TerminalFrame, opening_request_id: str | None = None,
+        opening_selection_id: str | None = None,
+    ) -> None:
         """Put the roster's own tail on the lenses, densely.
 
         The agent_terminal screen already reserves a multi-row transcript
@@ -1248,7 +1281,8 @@ async def main() -> None:
         # A live Brainstorm owns the lenses — EXCEPT while the wearer has
         # tapped away to the terminal, which is precisely when these frames
         # are the screen they are looking at.
-        if sessions.active and not sessions.terminal_owns_hud():
+        if (opening_request_id is None and sessions.active
+                and not sessions.terminal_owns_hud()):
             return
         terminal = status.agent_terminal_projection()
         await hud.show_agent_terminal(AgentTerminalHudView(
@@ -1257,26 +1291,29 @@ async def main() -> None:
             lanes=frame.lanes,
             activity="\n".join(frame.lines),
             endpoint_host=str(terminal["endpoint_host"]),
-            reason=str(terminal["reason"]),
+            reason=frame.reason,
             no_tools_checked=bool(terminal["no_tools_checked"]),
             approvals=frame.approvals,
+            opening_request_id=opening_request_id,
+            opening_selection_id=opening_selection_id,
         ))
 
     agent_terminal = AgentTerminalRoster(
         terminal_lanes,  # type: ignore[arg-type]
         announce=terminal_announce,
-        paint=terminal_paint,
+        paint=lambda frame: terminal_opening.paint(frame),
     )
-    async def focus_terminal_lane(name: str) -> None:
-        """Focus a lane from a row tap, then show it — the tap IS the choice."""
-        agent_terminal.focus(name)
-        await agent_terminal.repaint()
+    terminal_opening = TerminalOpeningController(
+        agent_terminal, paint=terminal_paint,
+        connection_generation=lambda: transport.audio_connection_generation,
+    )
 
     terminal_commands = AgentTerminalCommands(
         agent_terminal,
         # The Brainstorm snapshot answers "what did Claude just say?" with
         # the whole reply — live during a session and after it settles.
         last_reply=lambda who: debate_state.snapshot.last_reply(who),
+        on_explicit_view=lambda: terminal_opening.claim_legacy(capabilities.claim_terminal_voice),
     )
     # The capability router is composed later; the provider defers the
     # lookup to call time, when it is guaranteed to exist.
@@ -1305,12 +1342,38 @@ async def main() -> None:
         "joat", "jote", "jolt", "jokes", "jot",
     )
     voice_latency = VoiceLatencyStore() if args.voice_latency_diagnostics else None
+    prompted_speech = PromptedSpeechRuntime(
+        hud, message_replies,
+        sessions=lambda: sessions,
+        terminal=lambda: terminal_commands,
+        connection_generation=lambda: transport.audio_connection_generation,
+        audio_source=lambda: transport.prompt_audio_source,
+        fence_audio=lambda: orchestrator.fence_prompt_audio(),
+        capturing=lambda: audio_router.capturing,
+        on_message_prompt_retired=lambda action_id: message_ui.cancel(action_id),
+    )
+
+    def revoke_message_prompt(action_id: str) -> None:
+        ticket = prompted_speech.dispatcher.current_ticket
+        if ticket is not None and ticket.owner_kind == "messages" and ticket.owner_id == action_id:
+            prompted_speech.dispatcher.revoke(ticket.prompt_id)
+
+    message_ui = MessageUIController(
+        message_replies, publish=transport.send,
+        after_input=prompted_speech.after_message_input,
+        connection_generation=lambda: transport.audio_connection_generation,
+        fence_audio=lambda: orchestrator.fence_prompt_audio(),
+        capturing=lambda: audio_router.capturing, revoke_prompt=revoke_message_prompt,
+    )
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,
         sessions=sessions, wake_words=wake_words, status=status,
         commands=voice_commands,
         latency_observer=voice_latency.record if voice_latency is not None else None,
         frames=audio_router,
+        prompted_input=prompted_speech.dispatcher,
+        selected_message_reply=message_ui.handle_unaddressed_reply,
+        surface_revision=lambda: capabilities.view_revision,
     )
     orchestrator.attach()
 
@@ -1326,6 +1389,7 @@ async def main() -> None:
         status.set(glasses="connected", device=f"{hello.model} / {hello.sn}")
         # A topic armed on a replaced Hub connection is no longer an action
         # from the current wearer surface. The new G2 must tap again.
+        prompted_speech.revoke_current()
         sessions.clear_topic_capture()
         # Newest-wins socket replacement does not emit the last-disconnect
         # callback. The replacement renderer has no installed route, so the
@@ -1346,6 +1410,7 @@ async def main() -> None:
         # part of the live-link projection too: retaining it made a stale
         # disconnected row look like the G2 was still attached.
         status.set(glasses="disconnected", device="", mic="off")
+        prompted_speech.revoke_current()
         sessions.clear_topic_capture()
         # A replaced WebContent process has lost its phone-side tracker. Until
         # route rehydration has evidence, keeping the Mac session "installed"
@@ -1356,6 +1421,7 @@ async def main() -> None:
         capabilities.on_disconnect()
 
     def on_device(device: Device) -> None:
+        prompted_speech.handle_device(device)
         # Battery reaches the dashboard, not just the model.
         hello = transport.hello
         who = f"{hello.model} / {hello.sn}" if hello else "glasses"
@@ -1378,8 +1444,9 @@ async def main() -> None:
     # the repaint after a menu close blanked the regions.
     capabilities = CapabilityRouter(
         hud=hud, transport=transport, status=status,
-        messages=imessage if imessage.available else None, cards=card_log,
+        messages=imessage, cards=card_log,
         replies=message_replies,
+        message_ui=message_ui,
         personal_data=personal_data,
         notes=note_store,
         voice_notes=voice_note_store,
@@ -1408,14 +1475,40 @@ async def main() -> None:
         brainstorm_continue=sessions.resume_by_id,
         # Tap a work session instead of reciting "terminal sessions".
         terminal_rows=agent_terminal.picker_rows,
-        terminal_focus=focus_terminal_lane,
+        terminal_open=terminal_opening.open,
+        terminal_current=lambda: agent_terminal.focused,
         terminal_busy=lambda: agent_terminal.busy,
         brainstorm_recent=brainstorm_history.rows,
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
         wearer_zone=wearer_zone,
     )
-    transport.on_input(capabilities.on_input)
+    if belt is not None:
+        for tool in feature_tools(
+            capabilities=capabilities,
+            notes=note_commands,
+            pomodoro=pomodoro,
+            panels=panels,
+            brainstorm=sessions,
+            terminal=lambda lane, instruction, operation_id: terminal_opening.submit_instruction(
+                lane, instruction, operation_id, capabilities.prepare_terminal_instruction,
+            ),
+            terminal_lanes=agent_terminal.names(),
+        ):
+            belt.register(tool)
+        for tool in message_tools(message_replies, after_input=prompted_speech.after_message_input):
+            belt.register(tool)
+
+    def on_capability_input(event: InputEvent) -> None:
+        if event.container_name == "menu" and event.selected_name == "closed":
+            prompted_speech.revoke_current()
+            sessions.clear_topic_capture()
+        terminal_was_current = terminal_opening.current
+        capabilities.on_input(event)
+        if terminal_was_current and not terminal_opening.current:
+            prompted_speech.revoke_current()
+
+    transport.on_input(on_capability_input)
 
     # The resting dashboard's margin facts. Weather is not in the Even Hub
     # SDK, so JOAT resolves it on this Mac from the position the phone
@@ -1463,13 +1556,13 @@ async def main() -> None:
     notif_task: asyncio.Task[None] | None = None
     notification_mux: NotificationMux | None = None
     if not args.no_notifications:
-        lanes: list[NotificationLane] = []
-        if imessage.available:
-            lanes.append(NotificationLane(
-                "messages-db", imessage, "messages.incoming_text", "authoritative",
-                "healthy_complete_for_scope", "complete_for_scope",
-                "messages.incoming_text",
-            ))
+        # The mux already retries baseline failures independently. Retain
+        # this lane when Messages is not yet accessible at startup.
+        lanes: list[NotificationLane] = [NotificationLane(
+            "messages-db", imessage, "messages.incoming_text", "authoritative",
+            "healthy_complete_for_scope", "complete_for_scope",
+            "messages.incoming_text",
+        )]
         # Keep the watcher lane even before its first file exists. It retries
         # independently, so Messages never masks Mail/Calendar/Reminder/general banners.
         lanes.append(NotificationLane(
@@ -1499,6 +1592,7 @@ async def main() -> None:
         )
         notif_task = asyncio.get_running_loop().create_task(notification_mux.run())
 
+    pomodoro.activate_restored()
     await transport.start()
     log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
 
@@ -1531,6 +1625,10 @@ async def main() -> None:
         await shutdown.wait()
     finally:
         remove_shutdown_handlers(shutdown_signals)
+        # Stop new questions before draining their owners. This does not
+        # cancel completed STT or an unrelated caller's tool execution.
+        prompted_speech.begin_shutdown()
+        message_ui.retire()
         # Close the capture lane first: an in-flight recording is journaled
         # as interrupted (raw retained) rather than silently truncated.
         voice_capture.interrupt_for_shutdown()
@@ -1541,6 +1639,9 @@ async def main() -> None:
         task_monitor_task.cancel()
         news.stop()
         news_task.cancel()
+        # Stop timer callbacks and drain publications before their owners
+        # close. Preserve the saved deadline for the next engine start.
+        await pomodoro.aclose()
         if llm_warm_task is not None:
             if not llm_warm_task.done():
                 llm_warm_task.cancel()
@@ -1548,6 +1649,9 @@ async def main() -> None:
         await sessions.close()
         if agent_endpoint is not None:
             await agent_endpoint.stop()
+        await message_replies.aclose()
+        await message_ui.aclose()
+        await prompted_speech.aclose()
         await transport.stop()
         if notif_task is not None:
             if notification_mux is not None:

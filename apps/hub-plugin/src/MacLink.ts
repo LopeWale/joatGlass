@@ -1,4 +1,5 @@
 import type { DownlinkMessage, UplinkMessage } from './types';
+import { PLUGIN_REPLACED_CLOSE_CODE } from './types';
 
 /** Observable link lifecycle, for status surfaces (webview panel, HUD). */
 export type LinkState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
@@ -32,6 +33,7 @@ type NavigationUplinkMessage = Extract<UplinkMessage, {
 
 type BrainstormUplinkMessage = Extract<UplinkMessage, { kind: 'brainstorm.action' }>;
 type PhoneLocationUplink = Extract<UplinkMessage, { kind: 'location' }>;
+type PromptBoundUplink = Extract<UplinkMessage, { kind: 'audio' | 'prompt.ack' | 'prompt.cancel' }>;
 
 interface QueuedDownlink {
   message: DownlinkMessage;
@@ -107,7 +109,9 @@ export class MacLink {
   private attempt = 0;
   private urlIndex = 0;
   private closed = false;
+  private replaced = false;
   private handler?: DownlinkHandler;
+  private ingressHandler?: (msg: DownlinkMessage, context: DownlinkContext) => void;
   private downlinkDispatcher?: DownlinkDispatcher;
   private nextDownlinkGeneration = 0;
   private stateHandler?: (state: LinkState) => void;
@@ -122,7 +126,7 @@ export class MacLink {
   private readonly dialMs: number;
   private readonly downlinkMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
-  private reconnectPending = false;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
   private staleTokenHandler?: (origin: string, tokens: PairingTokensByOrigin) => void;
 
   constructor(private readonly opts: MacLinkOptions) {
@@ -153,6 +157,16 @@ export class MacLink {
   /** The URL currently being dialed (for status surfaces). */
   get activeUrl(): string {
     return this.opts.urls[this.urlIndex % this.opts.urls.length] as string;
+  }
+
+  /** A replaced display yields until its user explicitly reconnects it. */
+  get wasReplaced(): boolean {
+    return this.replaced;
+  }
+
+  /** The Even host can restore an earlier foreground WebView after migration. */
+  resumeIfReplaced(): void {
+    if (this.replaced) this.connect();
   }
 
   /** Canonical origin of the candidate currently being dialed. */
@@ -204,6 +218,11 @@ export class MacLink {
     this.handler = handler;
   }
 
+  /** Synchronous invalidation only; HUD work stays on the ordered handler. */
+  onMessageIngress(handler: (msg: DownlinkMessage, context: DownlinkContext) => void): void {
+    this.ingressHandler = handler;
+  }
+
   onState(handler: (state: LinkState) => void): void {
     this.stateHandler = handler;
   }
@@ -215,6 +234,9 @@ export class MacLink {
 
   connect(): void {
     this.closed = false;
+    this.replaced = false;
+    this.clearReconnectTimer();
+    this.clearDialTimer();
     // Abandon any previous socket BEFORE dialing again. A socket we are
     // replacing must stop driving state: otherwise its close schedules
     // another dial that races this one, both open, the newest-wins server
@@ -241,7 +263,7 @@ export class MacLink {
     // give up early and let the next candidate have its turn.
     this.clearDialTimer();
     this.dialTimer = setTimeout(() => {
-      if (socket.readyState !== WebSocket.OPEN) socket.close();
+      if (socket.readyState !== WebSocket.OPEN) this.expireSocket(socket);
     }, this.dialMs);
 
     socket.onopen = () => {
@@ -251,7 +273,7 @@ export class MacLink {
       // TCP/WebSocket open is not application authentication. Bound the
       // second phase too, or a peer can leave the HUD connecting forever.
       this.dialTimer = setTimeout(() => {
-        if (this.socket === socket && !this.authenticated) socket.close();
+        if (!this.authenticated) this.expireSocket(socket);
       }, this.dialMs);
     };
     socket.onmessage = (event) => {
@@ -275,6 +297,17 @@ export class MacLink {
         // A new client must store and ack pairing.set before the session is
         // authenticated. Every other pre-auth downlink is ignored.
         if (!this.authenticated && message.kind !== 'pairing.set') return;
+        const context: DownlinkContext = {
+          generation: dispatcher.generation,
+          signal: dispatcher.controller.signal,
+        };
+        if (this.authenticated && !context.signal.aborted) {
+          try {
+            this.ingressHandler?.(message, context);
+          } catch {
+            // Invalidating one owner must not poison the ordered dispatcher.
+          }
+        }
         const handler = this.handler;
         if (handler !== undefined) {
           if (isAssistantAppendWithText(message)) {
@@ -302,10 +335,6 @@ export class MacLink {
           // asynchronous. Preserve wire order so a rebuild cannot race the
           // status/text frames that follow it, and contain one rejected
           // render without poisoning later downlinks.
-          const context: DownlinkContext = {
-            generation: dispatcher.generation,
-            signal: dispatcher.controller.signal,
-          };
           dispatcher.tail = dispatcher.tail
             .then(async () => {
               work.started = true;
@@ -319,8 +348,7 @@ export class MacLink {
               ) return;
               dispatcher.deadline = setTimeout(() => {
                 if (this.downlinkDispatcher !== dispatcher) return;
-                this.revokeDownlinkDispatcher(socket);
-                socket.close();
+                this.expireSocket(socket);
               }, this.downlinkMs);
               try {
                 await handler(work.message, context);
@@ -343,6 +371,14 @@ export class MacLink {
       this.revokeDownlinkDispatcher(socket);
       const wasAuthenticated = this.authenticated;
       this.authenticated = false;
+      if (wasAuthenticated && event.code === PLUGIN_REPLACED_CLOSE_CODE) {
+        this.replaced = true;
+        this.pendingLocation = undefined;
+        // halt() cancels all timers, revokes queued downlinks and notifies
+        // the host to stop audio/input. Keep credentials for manual takeover.
+        this.halt();
+        return;
+      }
       // Post-handshake auth gives an explicit close code. Never discard a
       // durable token for generic network failure, sleep, or a dead endpoint.
       const origin = this.activeOrigin;
@@ -359,8 +395,8 @@ export class MacLink {
         }
       }
       if (!this.closed) {
-        this.reportState('reconnecting');
         this.scheduleReconnect();
+        this.reportState('reconnecting');
       } else {
         this.reportState('closed');
       }
@@ -369,6 +405,7 @@ export class MacLink {
   }
 
   send(msg: UplinkMessage): void {
+    if (this.closed) return;
     if (
       this.socket?.readyState === WebSocket.OPEN
       && (this.authenticated || msg.kind === 'pairing')
@@ -380,6 +417,35 @@ export class MacLink {
     this.queue.push(msg);
   }
 
+  /** Prompt receipts and audio belong to one authenticated dispatcher only. */
+  sendForGeneration(msg: PromptBoundUplink, expectedGeneration: number): boolean {
+    const socket = this.socket;
+    const dispatcher = this.downlinkDispatcher;
+    if (
+      this.closed || !this.authenticated || socket?.readyState !== WebSocket.OPEN
+      || dispatcher === undefined || dispatcher.socket !== socket
+      || dispatcher.controller.signal.aborted
+      || !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1
+      || dispatcher.generation !== expectedGeneration
+      || !['audio', 'prompt.ack', 'prompt.cancel'].includes(msg.kind)
+    ) return false;
+    try {
+      const payload = JSON.stringify(msg);
+      // Serialization can invoke user-supplied hooks. Never write to a
+      // replacement connection if one ran while building this payload.
+      if (
+        this.socket !== socket || this.downlinkDispatcher !== dispatcher
+        || dispatcher.controller.signal.aborted || !this.authenticated
+        || socket.readyState !== WebSocket.OPEN
+      ) return false;
+      socket.send(payload);
+      return true;
+    } catch {
+      // No replay queue, including when an open socket rejects a write.
+      return false;
+    }
+  }
+
   /**
    * Preserve only the newest phone fix while a WebSocket authenticates.
    * Location is current context, not a replayable audio stream: placing it in
@@ -387,6 +453,7 @@ export class MacLink {
    * fix before the Mac can ask a nearby-place or navigation question.
    */
   sendLatestLocation(msg: PhoneLocationUplink): void {
+    if (this.closed) return;
     if (this.socket?.readyState === WebSocket.OPEN && this.authenticated) {
       this.rawSend(msg);
       return;
@@ -439,11 +506,18 @@ export class MacLink {
   }
 
   close(): void {
+    this.replaced = false;
+    this.halt();
+  }
+
+  private halt(): void {
     this.closed = true;
     this.authenticated = false;
+    this.clearReconnectTimer();
     this.clearDialTimer();
     this.abandon();
     this.queue = [];
+    this.pendingLocation = undefined;
     this.reportState('closed');
   }
 
@@ -482,6 +556,23 @@ export class MacLink {
     }
   }
 
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
+  /** A local deadline must not wait for the browser's asynchronous close. */
+  private expireSocket(socket: WebSocket): void {
+    if (this.socket !== socket || this.closed) return;
+    this.clearDialTimer();
+    this.authenticated = false;
+    this.abandon();
+    this.scheduleReconnect();
+    this.reportState('reconnecting');
+  }
+
   private rawSend(msg: UplinkMessage): void {
     this.socket?.send(JSON.stringify(msg));
   }
@@ -489,8 +580,7 @@ export class MacLink {
   private scheduleReconnect(): void {
     // At most ONE dial in flight. Without this, every stray close adds
     // another pending connect and they compound.
-    if (this.reconnectPending) return;
-    this.reconnectPending = true;
+    if (this.reconnectTimer !== undefined) return;
     // Rotate to the next candidate brain before retrying, so a dead primary
     // never blocks a live secondary. Backoff grows per full rotation, not per
     // attempt — trying 3 dead hosts shouldn't take 3x as long to give up on.
@@ -498,8 +588,8 @@ export class MacLink {
     const round = Math.floor(this.attempt++ / this.opts.urls.length);
     const delay = Math.min(this.baseMs * 2 ** round, this.capMs);
     const jitter = delay * 0.2 * Math.random();
-    setTimeout(() => {
-      this.reconnectPending = false;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
       if (!this.closed) this.connect();
     }, delay + jitter);
   }

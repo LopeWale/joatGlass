@@ -1,0 +1,47 @@
+{
+  "version": "replacement",
+  "mode": "restore",
+  "finishedMs": 2203,
+  "events": [
+    {
+      "state": "connecting",
+      "ms": 1
+    },
+    {
+      "state": "connected",
+      "ms": 3
+    },
+    {
+      "state": "closed",
+      "ms": 305
+    },
+    {
+      "state": "connecting",
+      "ms": 406
+    },
+    {
+      "state": "connected",
+      "ms": 414
+    }
+  ],
+  "server_events": [
+    {
+      "path": "/replacement-restore",
+      "connection": 1,
+      "event": "open",
+      "time": 1788598844.1389272
+    },
+    {
+      "path": "/replacement-restore",
+      "connection": 1,
+      "event": "closed",
+      "time": 1788598844.439638
+    },
+    {
+      "path": "/replacement-restore",
+      "connection": 2,
+      "event": "open",
+      "time": 1788598844.5497549
+    }
+  ]
+}

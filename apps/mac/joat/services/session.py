@@ -16,6 +16,8 @@ import time
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 
 from ..core.interfaces import ReplyEngine
 from ..core.protocol import AudioSource, BrainstormAction, BrainstormHudView
@@ -28,6 +30,19 @@ from .roundtable import (
     _mode_at_start, direction_tail, parse_direction, parse_relay_mode,
 )
 from .sinks import TranscriptSink
+
+
+MAX_BRAINSTORM_TOPIC_CHARS = 4096
+
+
+class BrainstormStartResult(StrEnum):
+    """Admission result, distinct from whether a transcript was consumed."""
+
+    STARTED = "started"
+    BUSY = "busy"
+    UNAVAILABLE = "unavailable"
+    CLOSED = "closed"
+    INVALID = "invalid"
 
 #: docs/SESSION_MODEL.md:49-51. "continue <title>" resumes a stored
 #: session's lineage; "branch this" forks the one on screen; "new
@@ -195,6 +210,18 @@ BrainstormAvailable = Callable[[], bool]
 """Whether the required remote Brainstorm collaborator is ready right now."""
 
 
+@dataclass(frozen=True, slots=True)
+class TopicCapture:
+    """One explicit request for a topic, independent of audio admission."""
+
+    capture_id: str
+    question: str
+    expires_at: float
+
+
+TopicCapturePublisher = Callable[[TopicCapture], Awaitable[bool]]
+
+
 class SessionManager:
     """Routes transcripts; enforces the one-active-session invariant."""
 
@@ -219,19 +246,30 @@ class SessionManager:
         transform: Callable[[str, str], Awaitable[str]] | None = None,
         continuation_factory: Callable[
             [str, tuple[tuple[str, str], ...]], Session | None] | None = None,
+        publish_topic_capture: TopicCapturePublisher | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        terminal_view_current: Callable[[], bool] | None = None,
     ) -> None:
         self._hud = hud
         self._factory = factory
         self._active: Session | None = None
+        self._session_revision = 0
         self._task: asyncio.Task[None] | None = None
         self._pending_cards: list[tuple[Card, asyncio.Future[None] | None]] = []
         self._card_log = card_log
         self._terminal_capture = terminal_capture
+        self._terminal_view_current = terminal_view_current
         self._on_state = on_state
         self._starters = list(starters)
         self._terminal_retry = terminal_retry
         self._topic_capture_view = topic_capture_view
         self._brainstorm_available = brainstorm_available
+        self._publish_topic_capture = publish_topic_capture
+        self._monotonic = monotonic
+        self._closed = False
+        self._topic_capture: TopicCapture | None = None
+        self._topic_capture_task: asyncio.Task[None] | None = None
+        self._topic_publication_tasks: set[asyncio.Task[None]] = set()
         # JOAT as the glue between surfaces: "send Claude's last reply to
         # Hermes" is spoken INTO a live Brainstorm but acts on the Agent
         # Terminal. Injected so this manager stays ignorant of the roster.
@@ -276,6 +314,11 @@ class SessionManager:
         """Typed event-routing seam; ownership remains read-only to callers."""
         return self._active
 
+    @property
+    def session_revision(self) -> int:
+        """Count admitted starts even after their sessions have finished."""
+        return self._session_revision
+
     TOPIC_CAPTURE_WINDOW_S = 45.0
     """How long a tap's promise of "the next phrase is the topic" lasts.
 
@@ -291,17 +334,71 @@ class SessionManager:
     """
 
     def _arm_topic_capture(self) -> None:
-        self._topic_capture_armed_until = (
-            time.monotonic() + self.TOPIC_CAPTURE_WINDOW_S
-        )
+        self._topic_capture_armed_until = self._monotonic() + self.TOPIC_CAPTURE_WINDOW_S
+        if self._publish_topic_capture is not None:
+            self._topic_capture = TopicCapture(
+                capture_id=secrets.token_urlsafe(18),
+                question="What would you like to brainstorm?",
+                expires_at=self._topic_capture_armed_until,
+            )
 
     def _disarm_topic_capture(self) -> None:
         self._topic_capture_armed_until = 0.0
+        self._topic_capture = None
+        task, self._topic_capture_task = self._topic_capture_task, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
 
     @property
     def topic_capture_armed(self) -> bool:
         """Whether a visible G2 tap is waiting for one glasses-mic phrase."""
-        return time.monotonic() < self._topic_capture_armed_until
+        if self._publish_topic_capture is not None:
+            return self.current_topic_capture is not None
+        return not self._closed and self._monotonic() < self._topic_capture_armed_until
+
+    @property
+    def current_topic_capture(self) -> TopicCapture | None:
+        capture = self._topic_capture
+        return capture if capture is not None and self.topic_capture_is_current(capture) else None
+
+    def topic_capture_is_current(self, capture: TopicCapture) -> bool:
+        """Validate the exact owner without admitting or interpreting speech."""
+        if self._topic_capture is not capture:
+            return False
+        if (
+            self._closed or self._active is not None
+            or self._monotonic() >= capture.expires_at
+            or not self._scoped_brainstorm_available()
+        ):
+            self._disarm_topic_capture()
+            return False
+        return True
+
+    def consume_topic_capture(self, capture: TopicCapture, text: str) -> bool:
+        """Start from exact, already-admitted topic text, at most once.
+
+        The caller owns source/epoch admission. This API never gives the
+        legacy transcript parser permission to fill a scoped capture.
+        """
+        if not self.topic_capture_is_current(capture) or not isinstance(text, str) or not text.strip():
+            return False
+        self._disarm_topic_capture()
+        try:
+            session = self._factory(text)
+        except Exception as exc:
+            log.warning("scoped brainstorm factory failed error=%s", type(exc).__name__)
+            session = None
+        if session is None:
+            self._show_topic_capture(armed=False)
+            return False
+        return self.try_start_session(session, publish_state=True)
+
+    def _scoped_brainstorm_available(self) -> bool:
+        try:
+            return self._brainstorm_is_available()
+        except Exception as exc:
+            log.warning("scoped brainstorm availability failed error=%s", type(exc).__name__)
+            return False
 
     def notify(self, card: Card) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
@@ -555,6 +652,10 @@ class SessionManager:
                     len(text),
                 )
             return True
+        if self._publish_topic_capture is not None and self.current_topic_capture is not None:
+            # The generic dispatcher alone delivers scoped topic input. Even
+            # a glasses label here lacks its prompt epoch and receive fence.
+            return False
         if self.topic_capture_armed:
             # The wearer armed this path on the glasses. A phone or legacy
             # source may still exist as a general voice fallback, but it must
@@ -964,15 +1065,19 @@ class SessionManager:
                 asyncio.get_running_loop().create_task(run_decision())
             return
         if action.action == "retry_terminal":
+            if self._closed:
+                return
             retry = self._terminal_retry
             if retry is not None:
+                operation = retry()
+
                 async def run_retry() -> None:
                     # Unguarded, this raised into a bare task: the wearer
                     # tapped retry, the daemon was still down, and the only
                     # trace was "Task exception was never retrieved" in a
                     # log they will never read.
                     try:
-                        await retry()
+                        await operation
                     except Exception as exc:
                         reason = str(exc) or exc.__class__.__name__
                         log.exception("terminal retry failed")
@@ -987,11 +1092,15 @@ class SessionManager:
             # control, and one the running footer never even named. With
             # no Brainstorm to go back to, the useful move is the one they
             # asked for and could otherwise only SPEAK: switch sessions.
+            if self._closed:
+                return
             cycle = self._terminal_cycle
             if cycle is not None:
+                cycle_operation = cycle()
+
                 async def run_cycle() -> None:
                     try:
-                        moved = await cycle()
+                        moved = await cycle_operation
                     except Exception as exc:
                         reason = str(exc) or exc.__class__.__name__
                         log.exception("terminal focus cycle failed")
@@ -1001,25 +1110,37 @@ class SessionManager:
                     # A gesture whose effect is a one-chip change on the
                     # lane strip needs to say where it landed, and needs to
                     # say when it landed NOWHERE (a single-lane Mac).
-                    await self._say(moved)
+                    if moved:
+                        await self._say(moved)
 
                 asyncio.get_running_loop().create_task(run_cycle())
             return
-        if action.action == "begin_terminal_input" and active is None:
+        if action.action == "begin_terminal_input" and (active is None or self.terminal_owns_hud()):
             # One utterance, into the focused terminal session. Symmetrical
             # with topic capture and deliberately separate from it: this
             # feature has different workers and must never start a
             # Brainstorm by accident.
+            if self._closed:
+                return
             arm = self._terminal_capture
             if arm is not None:
+                # Bind the owner in this input callback, before queued work
+                # yields to Home or reconnect. Await only its publication.
+                publication = arm()
                 async def run_arm() -> None:
-                    await arm()
+                    await publication
                 asyncio.get_running_loop().create_task(run_arm())
             return
         if action.action == "begin_topic_capture" and active is None:
+            if self._closed:
+                return
             if self.topic_capture_armed:
                 return
-            if not self._brainstorm_is_available():
+            available = (
+                self._scoped_brainstorm_available()
+                if self._publish_topic_capture is not None else self._brainstorm_is_available()
+            )
+            if not available:
                 # A glasses tap must never promise an ordinary local
                 # Brainstorm when the required Hermes seat is unavailable.
                 # The cleared view is supplied by the host and renders the
@@ -1027,7 +1148,10 @@ class SessionManager:
                 self._show_topic_capture(armed=False)
                 return
             self._arm_topic_capture()
-            self._show_topic_capture(armed=True)
+            if self._topic_capture is not None:
+                self._publish_scoped_topic_capture(self._topic_capture)
+            else:
+                self._show_topic_capture(armed=True)
             return
         if action.action == "cancel" and active is None and self.topic_capture_armed:
             self._disarm_topic_capture()
@@ -1064,19 +1188,54 @@ class SessionManager:
         """Drop a pending spoken topic when its G2 connection is replaced."""
         self._disarm_topic_capture()
 
+    def _publish_scoped_topic_capture(self, capture: TopicCapture) -> None:
+        publish = self._publish_topic_capture
+        assert publish is not None
+
+        async def run_publication() -> None:
+            try:
+                accepted = await publish(capture)
+            except asyncio.CancelledError:
+                if self._topic_capture is capture:
+                    self._disarm_topic_capture()
+                raise
+            except Exception as exc:
+                log.warning("scoped topic publication failed error=%s", type(exc).__name__)
+                accepted = False
+            if self._topic_capture is not capture:
+                return
+            if accepted is not True or not self.topic_capture_is_current(capture):
+                self._disarm_topic_capture()
+                self._show_topic_capture(armed=False)
+
+        task = asyncio.get_running_loop().create_task(run_publication())
+        self._topic_capture_task = task
+        self._topic_publication_tasks.add(task)
+        task.add_done_callback(self._topic_publication_done)
+
+    def _topic_publication_done(self, task: asyncio.Task[None]) -> None:
+        self._topic_publication_tasks.discard(task)
+        if self._topic_capture_task is task:
+            self._topic_capture_task = None
+
     def _show_topic_capture(self, *, armed: bool) -> None:
+        if self._closed:
+            return
         view = self._topic_capture_view
 
         async def show_capture() -> None:
-            if view is not None:
-                await self._hud.show_brainstorm(view(armed))
-            elif armed:
-                # Older embeddings can still request a topic before they
-                # supply the visual factory. Preserve the old status-only
-                # signal rather than rejecting their action outright.
-                await self._hud.status("BRAINSTORM · speak your question")
+            try:
+                if view is not None:
+                    await self._hud.show_brainstorm(view(armed))
+                elif armed:
+                    # Older embeddings retain their status-only signal.
+                    await self._hud.status("BRAINSTORM · speak your question")
+            except Exception as exc:
+                log.warning("topic capture view failed error=%s", type(exc).__name__)
 
-        asyncio.get_running_loop().create_task(show_capture())
+        task = asyncio.get_running_loop().create_task(show_capture())
+        self._topic_publication_tasks.add(task)
+        task.add_done_callback(self._topic_publication_done)
 
     async def replay_active_hud(self) -> bool:
         active = self._active
@@ -1115,6 +1274,8 @@ class SessionManager:
         new lane output and approvals never painting until the session
         ended."""
         active = self._active
+        if self._terminal_view_current is not None and self._terminal_view_current():
+            return True
         probe = getattr(active, "terminal_owns_hud", None) if active else None
         return bool(probe()) if callable(probe) else False
 
@@ -1176,6 +1337,38 @@ class SessionManager:
                     setattr(session, name, value)
                 except AttributeError:
                     return
+
+    def start_brainstorm(self, topic: str) -> BrainstormStartResult:
+        """Start an exact typed topic without replacing the wearer's session.
+
+        A successful receipt means the session was admitted, not that any
+        collaborator has answered. No await separates admission and return.
+        """
+        if self._closed:
+            return BrainstormStartResult.CLOSED
+        if (
+            not isinstance(topic, str) or not topic.strip()
+            or len(topic) > MAX_BRAINSTORM_TOPIC_CHARS or "\x00" in topic
+        ):
+            return BrainstormStartResult.INVALID
+        try:
+            topic.encode("utf-8")
+        except UnicodeEncodeError:
+            return BrainstormStartResult.INVALID
+        if self._active is not None:
+            return BrainstormStartResult.BUSY
+        if not self._scoped_brainstorm_available():
+            return BrainstormStartResult.UNAVAILABLE
+        try:
+            session = self._factory(topic)
+        except Exception as exc:
+            log.warning("typed brainstorm factory failed error=%s", type(exc).__name__)
+            return BrainstormStartResult.UNAVAILABLE
+        if session is None:
+            return BrainstormStartResult.UNAVAILABLE
+        if self.try_start_session(session, publish_state=True):
+            return BrainstormStartResult.STARTED
+        return BrainstormStartResult.CLOSED if self._closed else BrainstormStartResult.BUSY
 
     def _start(self, topic: str) -> bool:
         if not self._brainstorm_is_available():
@@ -1278,12 +1471,14 @@ class SessionManager:
     def try_start_session(self, session: Session, *, publish_state: bool = False) -> bool:
         """Atomically reserve the single wearer session for a typed trigger."""
 
-        if self._active is not None:
+        if self._closed or self._active is not None:
             return False
         return self._start_session(session, publish_state=publish_state)
 
     def _start_session(self, session: Session, *, publish_state: bool) -> bool:
+        self._disarm_topic_capture()
         self._active = session
+        self._session_revision += 1
         if publish_state and self._on_state is not None:
             self._on_state("running")
 
@@ -1320,6 +1515,22 @@ class SessionManager:
 
     async def close(self, timeout_s: float = 5.0) -> None:
         """Cancel and await the active session before transports close."""
+        self._closed = True
+        self._disarm_topic_capture()
+        publications = tuple(
+            task for task in self._topic_publication_tasks if task is not asyncio.current_task()
+        )
+        for publication in publications:
+            publication.cancel()
+        if publications:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*publications, return_exceptions=True), timeout=timeout_s,
+                )
+            except TimeoutError:
+                for publication in publications:
+                    publication.cancel()
+                await asyncio.gather(*publications, return_exceptions=True)
         session = self._active
         task = self._task
         if session is not None:

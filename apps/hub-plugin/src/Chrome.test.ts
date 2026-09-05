@@ -51,6 +51,27 @@ afterEach(() => {
 });
 
 describe('Chrome', () => {
+  it('retires transient and clock writes, then resumes one clock on restart', async () => {
+    const hud = realPresenter();
+    const chrome = new Chrome(hud);
+    chrome.start();
+    chrome.setMacState('working');
+    chrome.stop();
+    paints.length = 0;
+    chrome.setLink('closed');
+    chrome.setMic(false);
+    chrome.setBattery(70);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(paints).toEqual([]);
+    chrome.start();
+    chrome.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    paints.length = 0;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(wrote(ContainerId.StatusBar)).toHaveLength(1);
+    chrome.stop();
+  });
+
   it('paints clock, state and battery into the status bar on start', () => {
     const hud = realPresenter();
     const chrome = new Chrome(hud);
