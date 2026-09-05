@@ -25,7 +25,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
 from ..agents.openclaw_gateway import OpenClawPairingRequired, OpenClawScopeMismatch
@@ -313,6 +313,23 @@ class TerminalLane:
                 return "approval_required", attempt.reason
             return "failed", attempt.reason
         return "unprepared", f"Open {label} to connect this session."
+
+
+@dataclass(frozen=True)
+class ApprovalReceipt:
+    """What an approval answer came back as, separated from how it is said.
+
+    `recorded` is the verdict the gateway kept ("approve"/"deny") or None
+    when nothing was recorded; `outcome` names why, so a consumer never has
+    to parse the sentence to know whether the wearer's answer stood.
+    """
+
+    recorded: str | None
+    sentence: str
+    outcome: Literal[
+        "recorded", "conflict", "no_receipt", "failed", "nothing_pending",
+        "ambiguous", "unsupported", "no_session",
+    ] = "recorded"
 
 
 @dataclass(frozen=True)
@@ -1134,38 +1151,58 @@ class AgentTerminalRoster:
         'terminal <instruction>' IS the documented alternative flow: deny
         the original, steer the same session with the replacement.
         """
+        return (await self.decide_receipt(decision, index)).sentence
+
+    async def decide_receipt(self, decision: str, index: int | None = None) -> ApprovalReceipt:
+        """`decide`, with the recorded verdict separate from the sentence.
+
+        The audit's T1: the glasses handler compared this method's whole
+        sentence ("work: recorded approve for '…'") with the bare verdict
+        and told the wearer another controller had answered first — on
+        every successful approval. The verdict now travels as data.
+        """
         lane = self._lanes.get(self._focus or "")
         if lane is None:
-            return "No terminal session is focused."
+            return ApprovalReceipt(None, "No terminal session is focused.", outcome="no_session")
         if not lane.approvals:
-            return f"{lane.name}: nothing waiting for approval."
+            return ApprovalReceipt(None, f"{lane.name}: nothing waiting for approval.", outcome="nothing_pending")
         if index is None and len(lane.approvals) > 1:
-            return (f"{lane.name} has {len(lane.approvals)} waiting — say "
-                    f"'terminal {decision} 1' through "
-                    f"'terminal {decision} {len(lane.approvals)}'.")
+            return ApprovalReceipt(None, (
+                f"{lane.name} has {len(lane.approvals)} waiting — say "
+                f"'terminal {decision} 1' through "
+                f"'terminal {decision} {len(lane.approvals)}'."
+            ), outcome="ambiguous")
         position = (index or 1) - 1
         if not 0 <= position < len(lane.approvals):
-            return f"{lane.name}: no approval number {index}."
+            return ApprovalReceipt(None, f"{lane.name}: no approval number {index}.", outcome="ambiguous")
         resolver = getattr(lane.agent, "resolve_approval", None)
         if resolver is None:
-            return f"{lane.name} cannot answer approvals."
+            return ApprovalReceipt(None, f"{lane.name} cannot answer approvals.", outcome="unsupported")
         approval_id, kind, summary = lane.approvals[position]
         lane.capture_revision += 1
         try:
             recorded = await resolver(approval_id, kind, decision)
         except Exception as exc:
             lane.last_error = str(exc) or exc.__class__.__name__
-            return f"{lane.name}: approval failed — {lane.last_error}"
+            return ApprovalReceipt(
+                None, f"{lane.name}: approval failed — {lane.last_error}", outcome="failed",
+            )
         lane.approvals.pop(position)
         label = summary or approval_id
         if recorded is None:
-            return (f"{lane.name}: sent {decision} for '{label}' but the "
-                    "gateway gave no legible receipt.")
+            return ApprovalReceipt(None, (
+                f"{lane.name}: sent {decision} for '{label}' but the "
+                "gateway gave no legible receipt."
+            ), outcome="no_receipt")
         if recorded != decision:
-            return (f"{lane.name}: another controller answered first — "
-                    f"recorded {recorded} for '{label}'.")
+            return ApprovalReceipt(recorded, (
+                f"{lane.name}: another controller answered first — "
+                f"recorded {recorded} for '{label}'."
+            ), outcome="conflict")
         lane.tail.append(f"[approval] {recorded}: {label}")
-        return f"{lane.name}: recorded {recorded} for '{label}'."
+        return ApprovalReceipt(
+            recorded, f"{lane.name}: recorded {recorded} for '{label}'.", outcome="recorded",
+        )
 
     async def cancel(self, name: str | None = None) -> str:
         """Cancel the (focused) lane's in-flight turn — T4's honest half.

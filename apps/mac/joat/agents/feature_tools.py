@@ -7,14 +7,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import re
-from typing import Any, Protocol
+import time
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..services.capabilities import voice_request_id
 from ..services.agent_terminal import MAX_TERMINAL_INSTRUCTION_CHARS
 from ..services.note_commands import NoteCommandController
 from ..services.pomodoro import PomodoroService
-from ..services.session import BrainstormStartResult, MAX_BRAINSTORM_TOPIC_CHARS
+from ..services.session import (
+    BrainstormStartResult, MAX_BRAINSTORM_TOPIC_CHARS, MAX_NAVIGATION_DESTINATION_CHARS,
+)
 from .tools import Tool
+
+if TYPE_CHECKING:
+    from ..persistence.notes import NoteStore
+    from ..persistence.voice_notes import VoiceNoteStore
 
 
 class FeatureName(StrEnum):
@@ -74,6 +81,156 @@ class BrainstormStarter(Protocol):
     def start_brainstorm(self, topic: str) -> BrainstormStartResult: ...
 
 
+class NavigationStarter(Protocol):
+    def start_navigation(self, destination: str) -> BrainstormStartResult: ...
+
+
+class TerminalRosterReader(Protocol):
+    def picker_rows(self) -> list[tuple[str, str]]: ...
+
+    def tail(self, name: str | None = None, lines: int = 6) -> str: ...
+
+
+def _age(unix_us: int, now: float | None = None) -> str:
+    elapsed = max(0.0, (now if now is not None else time.time()) - unix_us / 1_000_000)
+    if elapsed < 60:
+        return "now"
+    if elapsed < 3_600:
+        return f"{int(elapsed // 60)}m"
+    if elapsed < 86_400:
+        return f"{int(elapsed // 3_600)}h"
+    return f"{int(elapsed // 86_400)}d"
+
+
+# One note read stays bounded so a long dictation cannot swallow the reply
+# loop; the lens reader still shows every character.
+NOTE_READ_CHARS = 1_200
+TERMINAL_TAIL_LINES = 8
+
+
+def quicknote_reader_tool(notes: NoteStore, voice_notes: VoiceNoteStore | None = None) -> Tool:
+    """The wearer's notes, whole, for the mind to read back or search.
+
+    The audit's Q3: the mind could save a note but never read one, and
+    the spoken search returned snippets. This reads the same stores the
+    QuickNotes page shows — exact text notes and the transcript segments
+    of retained recordings — oldest to newest within each note.
+    """
+
+    async def run(arguments: dict[str, Any]) -> str:
+        if not isinstance(arguments, dict):
+            return "error: read_quicknotes takes an optional query and count"
+        query = arguments.get("query")
+        if query is not None and not isinstance(query, str):
+            return "error: query must be text"
+        query = (query or "").strip()
+        try:
+            count = int(arguments.get("count", 5))
+        except (TypeError, ValueError):
+            count = 5
+        count = max(1, min(count, 10))
+        lines: list[str] = []
+        text_notes = notes.search(query, limit=count) if query else notes.active()[:count]
+        for note in text_notes:
+            body = note.text
+            if len(body) > NOTE_READ_CHARS:
+                body = body[:NOTE_READ_CHARS].rstrip() + "…"
+            lines.append(f"[{_age(note.updated_at_us)}] note: {body}")
+        if voice_notes is not None:
+            needle = query.casefold()
+            for recording in voice_notes.recent_retained(count):
+                segments = voice_notes.segments(recording.capture_id)
+                transcript = " ".join(
+                    segment.text.strip() for segment in segments
+                    if segment.kind == "transcript" and segment.text.strip()
+                )
+                title = recording.title or "Untitled"
+                if needle and needle not in title.casefold() and needle not in transcript.casefold():
+                    continue
+                if not transcript:
+                    transcript = "(no transcript is available for this recording)"
+                elif len(transcript) > NOTE_READ_CHARS:
+                    transcript = transcript[:NOTE_READ_CHARS].rstrip() + "…"
+                gaps = f", {recording.gap_count} gap(s)" if recording.gap_count else ""
+                lines.append(
+                    f"[{_age(recording.updated_at_us)}] recording {title!r}{gaps}: {transcript}"
+                )
+        if not lines:
+            return f"no quick notes match {query!r}" if query else "no quick notes yet"
+        return "\n".join(lines)
+
+    return Tool(
+        name="read_quicknotes",
+        description=(
+            "Read the wearer's QuickNotes: exact saved text and the transcripts of "
+            "their voice recordings, newest first. Call this when they ask what they "
+            "noted, to find a note, or to read one back. Optional query filters by words."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Words to search for; omit for the newest notes."},
+                "count": {"type": "integer", "description": "How many notes, 1 to 10 (default 5)."},
+            },
+            "additionalProperties": False,
+        },
+        run=run,
+        decision_hints=(
+            "note", "notes", "quicknote", "quicknotes", "noted", "wrote down",
+            "recording", "recorded", "transcript",
+        ),
+    )
+
+
+def terminal_sessions_tool(roster: TerminalRosterReader) -> Tool:
+    """What the Agent Terminal sessions are doing, readable by the mind.
+
+    The audit's T2 in part: the roster and each lane's output existed on
+    the lens but the mind could only send into a lane blind. This lists the
+    configured sessions in the same shape the picker shows and reads one
+    lane's recent output lines.
+    """
+
+    async def run(arguments: dict[str, Any]) -> str:
+        if not isinstance(arguments, dict):
+            return "error: terminal_sessions takes an optional lane and lines"
+        rows = roster.picker_rows()
+        if not rows:
+            return "No terminal sessions are configured on this Mac."
+        lane = arguments.get("lane")
+        if lane is None:
+            return "\n".join(row for _name, row in rows)
+        names = [name for name, _row in rows]
+        if not isinstance(lane, str) or lane not in names:
+            return "error: lane must exactly match a configured Terminal session: " + ", ".join(names)
+        try:
+            lines = int(arguments.get("lines", TERMINAL_TAIL_LINES))
+        except (TypeError, ValueError):
+            lines = TERMINAL_TAIL_LINES
+        lines = max(1, min(lines, 40))
+        return roster.tail(lane, lines)
+
+    return Tool(
+        name="terminal_sessions",
+        description=(
+            "List the Agent Terminal sessions with their state, or read the recent "
+            "output of one named session. Call this when the wearer asks what a "
+            "terminal is doing, what it answered, or which sessions exist, before "
+            "send_terminal_instruction if the lane is unclear."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "lane": {"type": "string", "description": "A configured session name; omit to list all."},
+                "lines": {"type": "integer", "description": "Recent output lines to read, 1 to 40."},
+            },
+            "additionalProperties": False,
+        },
+        run=run,
+        decision_hints=("terminal", "hermes", "session", "sessions", "openclaw", "codex", "claude code"),
+    )
+
+
 def feature_tools(
     *,
     capabilities: FeatureOpener,
@@ -85,6 +242,7 @@ def feature_tools(
     max_brainstorm_operations: int = 256,
     terminal: Callable[[str, str, str], Awaitable[str]] | None = None,
     terminal_lanes: Sequence[str] = (),
+    navigation: NavigationStarter | None = None,
 ) -> list[Tool]:
     """Compose one adapter instance for the lifetime of the assistant's belt.
 
@@ -98,7 +256,54 @@ def feature_tools(
         raise ValueError("max_brainstorm_operations must be a positive integer")
     saved_notes: dict[str, _SavedNote] = {}
     started_brainstorms: dict[str, bytes] = {}
+    started_routes: dict[str, bytes] = {}
     lane_names = tuple(terminal_lanes)
+
+    async def start_navigation(arguments: dict[str, Any]) -> str:
+        if not isinstance(arguments, dict) or set(arguments) != {"destination", "operation_id"}:
+            return "error: start_navigation requires only destination and operation_id"
+        destination, operation_id = arguments["destination"], arguments["operation_id"]
+        if (
+            not isinstance(destination, str) or not destination.strip() or "\x00" in destination
+            or len(destination) > MAX_NAVIGATION_DESTINATION_CHARS
+        ):
+            return (
+                "error: destination must be non-empty text of at most "
+                f"{MAX_NAVIGATION_DESTINATION_CHARS} characters without null characters"
+            )
+        try:
+            encoded = destination.encode("utf-8")
+        except UnicodeEncodeError:
+            return "error: destination must be valid UTF-8 text"
+        if not isinstance(operation_id, str) or _OPERATION_ID.fullmatch(operation_id) is None:
+            return "error: operation_id must be 1-128 letters, digits, dots, underscores, colons or hyphens, starting with a letter or digit"
+        digest = sha256(encoded).digest()
+        previous = started_routes.get(operation_id)
+        if previous is not None:
+            if previous != digest:
+                return "error: operation_id was already used for a different destination"
+            return "Navigation was already started for this request; no second route was requested."
+        if len(started_routes) >= max_brainstorm_operations:
+            return "error: navigation retry capacity reached for this assistant process; no route started"
+        if navigation is None:
+            return "error: navigation is unavailable on this Mac; no route started"
+        result = navigation.start_navigation(destination)
+        if result is BrainstormStartResult.STARTED:
+            started_routes[operation_id] = digest
+            return (
+                "Navigation started. The glasses now search for that place, ask the wearer "
+                "to confirm it and choose walking or cycling, then route from the phone's "
+                "current position. Nothing else is needed from you."
+            )
+        return {
+            BrainstormStartResult.BUSY: (
+                "error: another session (a Brainstorm or a route) is active; it must finish "
+                "or be stopped before a new route"
+            ),
+            BrainstormStartResult.UNAVAILABLE: "error: navigation is unavailable on this Mac; no route started",
+            BrainstormStartResult.CLOSED: "error: the session controller is closed; no route started",
+            BrainstormStartResult.INVALID: "error: destination is invalid; no route started",
+        }[result]
 
     async def send_terminal_instruction(arguments: dict[str, Any]) -> str:
         if not isinstance(arguments, dict) or set(arguments) != {"lane", "instruction", "operation_id"}:
@@ -264,7 +469,9 @@ def feature_tools(
         Tool(
             name="create_quicknote",
             description=(
-                "Save the exact supplied text as a local QuickNote and refresh QuickNotes. "
+                "Save the wearer's words as a local QuickNote and refresh QuickNotes. "
+                "The text is stored verbatim: pass exactly what they said, without "
+                "rewording, capitalising, or adding punctuation. "
                 "Reuse operation_id only when retrying the same save; keep its text identical. "
                 "Retry deduplication lasts for this assistant process."
             ),
@@ -273,7 +480,10 @@ def feature_tools(
                 "properties": {
                     "text": {
                         "type": "string", "minLength": 1,
-                        "description": "The exact note body, including punctuation and whitespace.",
+                        "description": (
+                            "The note body exactly as the wearer spoke it, including their "
+                            "capitalisation, punctuation and whitespace."
+                        ),
                     },
                     "operation_id": {
                         "type": "string", "minLength": 1, "maxLength": 128,
@@ -316,7 +526,8 @@ def feature_tools(
             name="start_brainstorm",
             description=(
                 "Start a collaborative Brainstorm on the user's supplied topic. "
-                "Pass the exact topic; this starts the existing collaborators and does not "
+                "Pass the topic verbatim, in the wearer's own words, not rephrased as a question; "
+                "this starts the existing collaborators and does not "
                 "replace an active session. The receipt confirms admission, not completed answers. "
                 "Reuse operation_id and identical topic on retries. Deduplication lasts for "
                 "this assistant process. If no topic is supplied, ask for it or open the Brainstorm view."
@@ -327,7 +538,10 @@ def feature_tools(
                     "topic": {
                         "type": "string", "minLength": 1,
                         "maxLength": MAX_BRAINSTORM_TOPIC_CHARS,
-                        "description": "The exact question or topic the user wants collaborators to consider.",
+                        "description": (
+                            "The topic exactly as the wearer said it, e.g. the words after "
+                            "'brainstorm about', unchanged."
+                        ),
                     },
                     "operation_id": {
                         "type": "string", "minLength": 1, "maxLength": 128,
@@ -364,5 +578,35 @@ def feature_tools(
             },
             run=send_terminal_instruction,
             decision_hints=("terminal", "hermes"),
+        ))
+    if navigation is not None:
+        tools.append(Tool(
+            name="start_navigation",
+            description=(
+                "Start walking or cycling navigation to a place the wearer named. Pass the "
+                "destination in their exact words (a name or an address); the glasses then "
+                "confirm the matched place, ask walk or cycle, and route from the phone's "
+                "position. Nothing is needed from you after a successful start. Reuse "
+                "operation_id and the identical destination on retries."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "destination": {
+                        "type": "string", "minLength": 1,
+                        "maxLength": MAX_NAVIGATION_DESTINATION_CHARS,
+                        "description": "The place exactly as the wearer said it, e.g. 'the library'.",
+                    },
+                    "operation_id": {"type": "string", "minLength": 1, "maxLength": 128,
+                                     "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+                },
+                "required": ["destination", "operation_id"],
+                "additionalProperties": False,
+            },
+            run=start_navigation,
+            decision_hints=(
+                "navigate", "navigation", "directions", "walk to", "walking", "cycle to",
+                "bike to", "route", "take me", "get to", "way to",
+            ),
         ))
     return tools

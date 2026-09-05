@@ -31,10 +31,11 @@ import re
 import secrets
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..agents.tools import ToolBelt, ToolCall
 from ..core.interfaces import ReplyEngine
@@ -136,6 +137,24 @@ def lens_text(text: str, max_chars: int = MAX_LENS_CHARS) -> str:
     return cut.rstrip(" ,;:") + "…"
 
 
+def _message_text(message: Any) -> str | None:
+    """Plain text of one OpenAI-shaped message, or None when it has none."""
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        texts = [
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        joined = " ".join(t for t in texts if t).strip()
+        return joined or None
+    return None
+
+
 def last_user_text(body: dict[str, Any]) -> str | None:
     """The newest user turn of an OpenAI-shaped request, as plain text."""
     messages = body.get("messages")
@@ -144,19 +163,76 @@ def last_user_text(body: dict[str, Any]) -> str | None:
     for message in reversed(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content.strip() or None
-        if isinstance(content, list):
-            texts = [
-                str(part.get("text", ""))
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            ]
-            joined = " ".join(t for t in texts if t).strip()
-            return joined or None
-        return None
+        return _message_text(message)
     return None
+
+
+# How much of the caller's conversation rides into the seat. Even AI sends
+# the whole chat every time; the seat itself resumes nothing (the audit's
+# A8), so this block IS its memory. Bounded so a long chat cannot push the
+# actual question out of a small model's window.
+HISTORY_TURNS = 8
+HISTORY_CHARS = 2_400
+
+
+def conversation_context(body: dict[str, Any]) -> str:
+    """The caller's earlier turns, newest last, as a block the seat can read.
+
+    Everything before the newest user message is history; system messages
+    are the caller's own instructions and are not replayed as speech.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    latest = None
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], dict) and messages[index].get("role") == "user":
+            latest = index
+            break
+    if latest is None:
+        return ""
+    turns: list[str] = []
+    for message in messages[:latest]:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        text = _message_text(message)
+        if not text or role not in ("user", "assistant"):
+            continue
+        turns.append(f"{'Wearer' if role == 'user' else 'JOAT'}: {text}")
+    turns = turns[-HISTORY_TURNS:]
+    block = "\n".join(turns)
+    while len(block) > HISTORY_CHARS and len(turns) > 1:
+        turns.pop(0)
+        block = "\n".join(turns)
+    if len(block) > HISTORY_CHARS:
+        block = "…" + block[-HISTORY_CHARS:]
+    return block
+
+
+def seat_prompt(body: dict[str, Any], query: str) -> str:
+    """The text the seat receives: the caller's history, then the question."""
+    context = conversation_context(body)
+    if not context:
+        return query
+    return (
+        "Earlier in this conversation (the wearer's own app keeps it; treat "
+        f"it as what was already said):\n{context}\n\nWearer: {query}"
+    )
+
+
+_STREAM_MARKUP = re.compile(r"`+|\*\*|__|^\s{0,3}#{1,6}\s*|^\s*(?:[-*•]|\d+[.)])\s+", re.M)
+
+
+def stream_text(piece: str) -> str:
+    """Lens-safe text for ONE streamed chunk: markup gone, newlines spaced.
+
+    The whole-answer cleaner (`lens_text`) needs the whole answer. While
+    streaming, each chunk gets the same treatment it can get on its own;
+    the character cap is enforced by the caller across chunks.
+    """
+    t = _STREAM_MARKUP.sub("", piece)
+    return re.sub(r"\s+", " ", t)
 
 
 def agent_token(path: Path = TOKEN_PATH, env: str = "JOAT_AGENT_TOKEN") -> str:
@@ -317,9 +393,20 @@ class AgentEndpoint:
             await self._write_json(writer, 400, _error("no user message"))
             return
         wants_stream = bool(body.get("stream"))
+        prompt = seat_prompt(body, query)
+        if wants_stream:
+            # Words reach the phone as the mind produces them (the audit's
+            # A8): the answer used to be collected whole, then replayed as
+            # one SSE chunk, so streaming bought the wearer nothing.
+            sent = await self._stream_sse(writer, self._replier.stream(prompt))
+            log.info(
+                "agent request chars=%d reply_chars=%d ms=%d stream=True",
+                len(query), sent, int((time.monotonic() - started) * 1000),
+            )
+            return
         try:
             answer = await asyncio.wait_for(
-                self._collect(query), timeout=self._request_timeout_s,
+                self._collect(prompt), timeout=self._request_timeout_s,
             )
         except asyncio.TimeoutError:
             log.warning("agent request timed out after %.0fs", self._request_timeout_s)
@@ -327,13 +414,10 @@ class AgentEndpoint:
             return
         text = lens_text(answer, self._max_lens_chars) or EMPTY_REPLY
         log.info(
-            "agent request chars=%d reply_chars=%d ms=%d stream=%s",
-            len(query), len(text), int((time.monotonic() - started) * 1000), wants_stream,
+            "agent request chars=%d reply_chars=%d ms=%d stream=False",
+            len(query), len(text), int((time.monotonic() - started) * 1000),
         )
-        if wants_stream:
-            await self._write_sse(writer, text)
-        else:
-            await self._write_json(writer, 200, self._completion(text))
+        await self._write_json(writer, 200, self._completion(text))
 
     # ── the MCP route: the brain's tools, offered to the CLI seats ──────────
 
@@ -448,26 +532,84 @@ class AgentEndpoint:
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
+    def _sse_chunk(self, completion_id: str, created: int,
+                   delta: dict[str, Any], finish: str | None) -> bytes:
+        payload = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": self._model_label(),
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        return f"data: {json.dumps(payload)}\n\n".encode()
+
     async def _write_sse(self, writer: asyncio.StreamWriter, text: str) -> None:
+        """One complete answer as a single SSE event (non-streamed fallback)."""
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
-
-        def chunk(delta: dict[str, Any], finish: str | None) -> bytes:
-            payload = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": self._model_label(),
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-            }
-            return f"data: {json.dumps(payload)}\n\n".encode()
-
         body = (
-            chunk({"role": "assistant", "content": text}, None)
-            + chunk({}, "stop")
+            self._sse_chunk(completion_id, created, {"role": "assistant", "content": text}, None)
+            + self._sse_chunk(completion_id, created, {}, "stop")
             + b"data: [DONE]\n\n"
         )
         await self._write_raw(writer, 200, "text/event-stream", body)
+
+    async def _stream_sse(
+        self, writer: asyncio.StreamWriter, chunks: AsyncIterator[str],
+    ) -> int:
+        """Relay the mind's chunks as they arrive. Returns characters sent.
+
+        Close-delimited body: no Content-Length, `Connection: close`, and
+        the socket ends the stream — the form HTTP/1.1 (RFC 9112 §6.3)
+        allows and every chat-completions client already handles. The
+        request deadline bounds the whole stream; on expiry the wearer
+        gets what was said so far, ended cleanly, not a dropped socket.
+        """
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        head = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("latin-1")
+        writer.write(head)
+        await writer.drain()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._request_timeout_s
+        sent = 0
+        opened = False
+        async with aclosing(cast(AsyncGenerator[str, None], chunks)) as source:
+            while sent < self._max_lens_chars:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    log.warning("agent stream cut at %.0fs", self._request_timeout_s)
+                    break
+                try:
+                    piece = await asyncio.wait_for(anext(source), remaining)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    log.warning("agent stream cut at %.0fs", self._request_timeout_s)
+                    break
+                text = stream_text(piece)
+                if not text:
+                    continue
+                text = text[: self._max_lens_chars - sent]
+                delta: dict[str, Any] = {"content": text}
+                if not opened:
+                    delta["role"] = "assistant"
+                    opened = True
+                writer.write(self._sse_chunk(completion_id, created, delta, None))
+                await writer.drain()
+                sent += len(text)
+        if not opened:
+            writer.write(self._sse_chunk(
+                completion_id, created, {"role": "assistant", "content": EMPTY_REPLY}, None,
+            ))
+        writer.write(self._sse_chunk(completion_id, created, {}, "stop") + b"data: [DONE]\n\n")
+        await writer.drain()
+        return sent
 
     async def _write_json(
         self, writer: asyncio.StreamWriter, status: int, payload: dict[str, Any],

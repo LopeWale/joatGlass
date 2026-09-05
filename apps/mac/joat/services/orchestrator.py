@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from dataclasses import dataclass
 import difflib
 import logging
 from collections.abc import Awaitable, Callable
@@ -22,7 +23,9 @@ import re
 import time
 
 from ..audio.vad import RmsVad
-from ..core.interfaces import AudioFrame, AudioFrameSource, GlassesTransport, ReplyEngine, SttEngine
+from ..core.interfaces import (
+    AudioFrame, AudioFrameSource, GlassesTransport, ReplyEngine, SttEngine, Transcript,
+)
 from ..core.protocol import AudioControl, AudioSource, ContainerId, HudText
 from .hud import HudWriter
 from .prompted_input import PromptedInputDispatcher, PromptTicket, UtteranceProvenance
@@ -47,6 +50,45 @@ def _latency_bucket(elapsed_s: float) -> str:
         if elapsed_s <= upper_bound:
             return label
     return "gt10s"
+
+
+# How many completed utterances may wait behind the active turn. Three
+# covers "wait — no — the other one" without letting a noisy room queue
+# minutes of speech; past it the oldest is dropped, and logged.
+PENDING_UTTERANCE_LIMIT = 3
+# Whole-utterance stop words heard WITHOUT the wake word while a reply is
+# streaming. Failing toward "stopped" is safe, and only the entire
+# utterance matches, so dictation that merely contains "wait" is unaffected.
+INTERRUPT_WORDS = frozenset({
+    "stop", "stop it", "cancel", "cancel that", "wait", "hold on",
+    "never mind", "nevermind", "forget it", "that's enough", "thats enough",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedUtterance:
+    pcm: bytes
+    source: AudioSource | None
+    provenance: UtteranceProvenance | None
+    #: When VAD closed the utterance — the wearer's end of speech, which is
+    #: where their wait begins. Every latency stage counts from here.
+    endpointed_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Turn:
+    ordinal: int
+    started_at: float
+    prompt_revision: int
+    prompt_ticket: PromptTicket | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Transcribed:
+    turn: _Turn
+    transcript: Transcript
+    source: AudioSource | None
+    provenance: UtteranceProvenance | None
 
 
 class VoiceOrchestrator:
@@ -155,16 +197,19 @@ class VoiceOrchestrator:
             maxlen=self._vad.preroll_capacity,
         )
         self._utterance_frames: list[UtteranceProvenance] = []
-        # The voice path must stay single-flight: overlapping STT/reply work
-        # competes for the resident engines.  It must not, however, appear
-        # deaf while that work is in flight.  Keep exactly one *completed*
-        # utterance as a latest-wins handoff.  The bounded slot prevents a
-        # noisy room from creating an unbounded latency tail, while keeping
-        # the wearer's newest question (and its source provenance) available
-        # as soon as the active turn settles.
-        self._pending_utterance: tuple[
-            bytes, AudioSource | None, UtteranceProvenance | None,
-        ] | None = None
+        # STT and painting stay single-flight, but the voice path must not
+        # appear deaf while a reply streams (the audit's A3): a correction
+        # spoken over an answer used to wait behind that answer, and a third
+        # utterance replaced the second. Completed utterances now queue in
+        # order, bounded so a noisy room cannot build an unbounded latency
+        # tail; the worker transcribes the next one WHILE the current reply
+        # streams, and an addressed request or a bare stop word interrupts
+        # that reply instead of waiting for it.
+        self._pending_utterances: deque[_QueuedUtterance] = deque(
+            maxlen=PENDING_UTTERANCE_LIMIT,
+        )
+        self._pending_arrived = asyncio.Event()
+        self._stt_busy = 0
         self._utterance_worker: asyncio.Task[None] | None = None
 
     def attach(self) -> None:
@@ -330,20 +375,21 @@ class VoiceOrchestrator:
             # wake-word gate rather than making the wearer appear muted.
             log.info("ignored other-speaker utterance bytes=%d", len(utterance))
             return
+        queued = _QueuedUtterance(utterance, utterance_source, provenance, time.monotonic())
         if self._utterance_worker is not None and not self._utterance_worker.done():
-            replaced = self._pending_utterance is not None
-            self._pending_utterance = (utterance, utterance_source, provenance)
+            dropped = len(self._pending_utterances) == self._pending_utterances.maxlen
+            self._pending_utterances.append(queued)
             # Content-free: audio is transient, and diagnostics must not
-            # expose transcripts or raw voice.  A replacement means the
-            # newest completed utterance wins over an older queued one.
+            # expose transcripts or raw voice.
             log.info(
-                "%s pending utterance (%d bytes) while voice work is in flight",
-                "replaced" if replaced else "retained",
-                len(utterance),
+                "queued utterance (%d bytes, %d waiting%s) while voice work is in flight",
+                len(utterance), len(self._pending_utterances),
+                ", oldest dropped" if dropped else "",
             )
+            self._pending_arrived.set()
             return
         self._utterance_worker = asyncio.get_running_loop().create_task(
-            self._drain_utterances(utterance, utterance_source, provenance)
+            self._drain_utterances(queued)
         )
 
     @staticmethod
@@ -377,18 +423,19 @@ class VoiceOrchestrator:
 
     async def _drain_utterances(
         self,
-        utterance: bytes,
-        source: AudioSource | None,
+        first: _QueuedUtterance | bytes,
+        source: AudioSource | None = None,
         provenance: UtteranceProvenance | None = None,
     ) -> None:
-        """Run one voice turn at a time, then hand off the newest queued turn."""
-        current: tuple[bytes, AudioSource | None, UtteranceProvenance | None] | None = (
-            utterance, source, provenance,
-        )
+        """Run voice turns in order; transcribe ahead; let the wearer interrupt."""
+        if isinstance(first, bytes):
+            # The pre-queue calling shape (pcm, source[, provenance]).
+            first = _QueuedUtterance(first, source, provenance, time.monotonic())
+        current: _QueuedUtterance | None = first
         try:
             while current is not None:
                 try:
-                    await self._handle_utterance(*current)
+                    await self._run_turn(current)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -408,8 +455,9 @@ class VoiceOrchestrator:
                     # or a traceback containing private arguments.
                     log.error("voice turn failed error=%s", type(exc).__name__)
                     await self._say_turn_failed()
-                current = self._pending_utterance
-                self._pending_utterance = None
+                current = (
+                    self._pending_utterances.popleft() if self._pending_utterances else None
+                )
         finally:
             self._utterance_worker = None
 
@@ -438,36 +486,155 @@ class VoiceOrchestrator:
         source: AudioSource | None = None,
         provenance: UtteranceProvenance | None = None,
     ) -> None:
-        started_at = time.monotonic()
-        prompt_revision = self._prompt_revision
-        prompt_ticket = self._prompted_input.current_ticket if self._prompted_input else None
+        """One complete turn, serially — the entry the existing fixtures use."""
+        await self._run_turn(_QueuedUtterance(utterance, source, provenance, time.monotonic()))
+
+    def _begin_turn(self, endpointed_at: float) -> _Turn:
         self._voice_turn += 1
-        latency_turn = self._voice_turn
-        self._observe_latency(latency_turn, "utterance_ready", started_at)
+        turn = _Turn(
+            ordinal=self._voice_turn, started_at=endpointed_at,
+            prompt_revision=self._prompt_revision,
+            prompt_ticket=self._prompted_input.current_ticket if self._prompted_input else None,
+        )
+        # Measured from the END of speech (the audit's A6): this first bucket
+        # is the queue wait, which the old clock — started when the worker
+        # picked the utterance up — could never see.
+        self._observe_latency(turn.ordinal, "utterance_ready", turn.started_at)
+        return turn
+
+    async def _transcribe(self, turn: _Turn, utterance: bytes) -> Transcript | None:
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")
-            return
+            return None
+        self._stt_busy += 1
         try:
             # Acknowledge FIRST. Transcription takes seconds, and an
             # unchanged HUD for that long reads as "the assistant is dead" —
             # the wearer has no other signal that they were heard.
             await self._hud.status("JOAT · hearing you…")
-            self._observe_latency(latency_turn, "ack_sent", started_at)
+            self._observe_latency(turn.ordinal, "ack_sent", turn.started_at)
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
-            self._observe_latency(latency_turn, "stt_complete", started_at)
-            if transcript is None or not transcript.is_final or not transcript.text:
-                log.info("STT produced no text")
-                return
-            log.info("transcript received chars=%d", len(transcript.text))
-            if self._status is not None:
-                self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
-                self._status.bump("utterances")  # type: ignore[attr-defined]
+            self._observe_latency(turn.ordinal, "stt_complete", turn.started_at)
+        finally:
+            self._stt_busy -= 1
+        if transcript is None or not transcript.is_final or not transcript.text:
+            log.info("STT produced no text")
+            await self._restore_status()
+            return None
+        log.info("transcript received chars=%d", len(transcript.text))
+        if self._status is not None:
+            self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
+            self._status.bump("utterances")  # type: ignore[attr-defined]
+        return transcript
+
+    def _interrupts(self, text: str) -> str | None:
+        """Why speech heard over a streaming reply should cut it short, if at all.
+
+        "addressed": the wearer said JOAT again — a new or corrected request,
+        which replaces the answer in progress. "stop": a bare stop word,
+        heard without the wake word. Anything else is room talk or an answer
+        to a question on the glass, and waits its turn.
+        """
+        if self._strip_wake_word(text) is not None:
+            return "addressed"
+        lowered = re.sub(r"[^a-z' ]+", " ", text.lower().replace("’", "'"))
+        return "stop" if " ".join(lowered.split()) in INTERRUPT_WORDS else None
+
+    async def _restore_status(self) -> None:
+        # "hearing you" is transient. Empty STT, unaddressed room speech,
+        # a deterministic command, and a normal model reply must all
+        # return the chrome to its truthful idle state.
+        if self._stt_busy:
+            # A queued utterance is being transcribed over this turn's end;
+            # its own "hearing you…" is the truthful line right now.
+            return
+        active_status = (
+            self._sessions.active_status
+            if self._sessions is not None and self._sessions.active
+            else None
+        )
+        await self._hud.status(active_status or "JOAT · listening")
+
+    async def _run_turn(self, queued: _QueuedUtterance) -> None:
+        """One utterance: transcribe, then act — while listening for the next.
+
+        The reply runs as its own task. While it streams, the next queued
+        utterance is transcribed; an addressed request or a bare stop word
+        cancels the reply (which kills the CLI child) and takes its place.
+        Unaddressed speech is acted on after the reply, in arrival order, so
+        an answer to a question on the glass is never lost either.
+        """
+        turn = self._begin_turn(queued.endpointed_at)
+        transcript = await self._transcribe(turn, queued.pcm)
+        if transcript is None:
+            return
+        head = _Transcribed(turn, transcript, queued.source, queued.provenance)
+        backlog: list[_Transcribed] = []
+        loop = asyncio.get_running_loop()
+        act = loop.create_task(self._act(head))
+        act_started = time.monotonic()
+        try:
+            while not act.done():
+                if not self._pending_utterances:
+                    self._pending_arrived.clear()
+                    arrival = loop.create_task(self._pending_arrived.wait())
+                    try:
+                        await asyncio.wait({act, arrival}, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        if not arrival.done():
+                            arrival.cancel()
+                    if act.done() or not self._pending_utterances:
+                        continue
+                nxt = self._pending_utterances.popleft()
+                next_turn = self._begin_turn(nxt.endpointed_at)
+                next_transcript = await self._transcribe(next_turn, nxt.pcm)
+                if next_transcript is None:
+                    continue
+                item = _Transcribed(next_turn, next_transcript, nxt.source, nxt.provenance)
+                reason = None if act.done() else self._interrupts(next_transcript.text)
+                if reason == "addressed" and nxt.endpointed_at < act_started:
+                    # Finished speaking before any answer existed: a second
+                    # request in a row, not a correction of the first. Both
+                    # are answered, in order. Only speech that ENDS while the
+                    # answer is under way replaces it.
+                    reason = None
+                if reason is None:
+                    backlog.append(item)
+                    continue
+                act.cancel()
+                await asyncio.gather(act, return_exceptions=True)
+                self._observe_latency(head.turn.ordinal, "interrupted", head.turn.started_at)
+                log.info("voice turn interrupted (%s) by a newer utterance", reason)
+                if reason == "stop" and not (self._sessions is not None and self._sessions.active):
+                    # No session to hand the stop word to: acknowledge it
+                    # where the cut-off answer was, then let it settle.
+                    await self._hud.assistant("Stopped.", answers_wearer=True)
+                    await self._hud.settle_assistant(2_000)
+                head = item
+                act = loop.create_task(self._act(head))
+                act_started = time.monotonic()
+            await act
+        finally:
+            if not act.done():
+                act.cancel()
+                await asyncio.gather(act, return_exceptions=True)
+        for item in backlog:
+            await self._act(item)
+
+    async def _act(self, item: _Transcribed) -> None:
+        turn, transcript, source, provenance = item.turn, item.transcript, item.source, item.provenance
+        started_at = turn.started_at
+        latency_turn = turn.ordinal
+        prompt_revision = turn.prompt_revision
+        prompt_ticket = turn.prompt_ticket
+        try:
             if self._prompted_input is not None and await self._prompted_input.dispatch(
                 transcript, provenance,
             ):
                 # The typed owner received the exact transcript. Do not let
                 # greetings, command parsing or a second model reinterpret it.
+                self._observe_latency(latency_turn, "reply_complete", started_at)
                 return
             # A tap has explicitly armed the next glasses phrase as a
             # Brainstorm topic. This path intentionally runs before the normal
@@ -491,6 +658,7 @@ class VoiceOrchestrator:
                     # The narrow capability opener already owns its new
                     # surface and revision. Do not cover it with an assistant
                     # receipt or turn the request into a Brainstorm remark.
+                    self._observe_latency(latency_turn, "reply_complete", started_at)
                     return
             # SessionManager checks whether the current feature owns speech;
             # a background Brainstorm must not swallow another feature's input.
@@ -553,9 +721,13 @@ class VoiceOrchestrator:
                     if not self._reply_surface_current(prompt_revision, prompt_ticket):
                         return
                     await self._hud.assistant(answer)
+                    # A deterministic answer is a reply too; it was missing
+                    # from the receipt (the audit's A6).
+                    self._observe_latency(latency_turn, "first_reply_sent", started_at)
                     if not self._reply_surface_current(prompt_revision, prompt_ticket):
                         return
                     await self._hud.settle_assistant()
+                    self._observe_latency(latency_turn, "reply_complete", started_at)
                     return
             # The wearer's words go to their OWN region, so the reply no
             # longer erases the proof they were heard (HUD_DASHBOARD.md).
@@ -603,15 +775,7 @@ class VoiceOrchestrator:
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
-            # "hearing you" is transient. Empty STT, unaddressed room speech,
-            # a deterministic command, and a normal model reply must all
-            # return the chrome to its truthful idle state.
-            active_status = (
-                self._sessions.active_status
-                if self._sessions is not None and self._sessions.active
-                else None
-            )
-            await self._hud.status(active_status or "JOAT · listening")
+            await self._restore_status()
 
     def _reply_surface_current(self, revision: int, ticket: PromptTicket | None) -> bool:
         """Ordinary replies cannot paint while an input question owns the HUD.

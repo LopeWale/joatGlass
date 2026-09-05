@@ -234,12 +234,16 @@ docs/ARCHITECTURE.md §5. `debate` remains a compatibility voice trigger. Seats
 include:
 - `ProposerAgent`: `codex exec --json --output-schema plan.schema.json` (web_search=live, sandbox read-only).
 - `CriticAgent`: `claude -p --output-format json --allowedTools "WebSearch,WebFetch" --max-turns N`. Constructor takes an `AuthStrategy` (subscription binary | metered API key + `--max-budget-usd`) so the ToS fallback is a config change.
-- `JudgeAgent`: local MLX model; emits agreement score + blocking issues.
-- `OpenClawTerminalAgent`: paired private-WSS adapter. A **wearable
-  Brainstorm requires** its idle `ready`, isolated `hermes` seat; a terminal
-  that is already streaming is shown as busy, and when the seat is otherwise
-  unavailable, JOAT keeps the wearer on the retryable Agent Terminal surface
-  instead of starting a local-only round. Calendar proposals use the same
+- `JudgeAgent`: the worker seat (`WORKER_PERSONA` on its own CLI session, or
+  the resident MLX model through its task-only completion path); emits an
+  agreement score + blocking issues. The judge line on the glasses names
+  the seat that actually answered.
+- `OpenClawTerminalAgent`: paired private-WSS adapter. It is an **Agent
+  Terminal** worker only. Per [BRAINSTORM.md](BRAINSTORM.md) and
+  [ARCHITECTURE.md §5](ARCHITECTURE.md), Hermes and OpenClaw neither
+  participate in a Brainstorm nor gate whether one may start; an earlier
+  version of this document required a ready Hermes seat for a wearable
+  Brainstorm, and that requirement is withdrawn. Calendar proposals use the
   configured Mac-mini `hermes` agent through separate route-isolated session
   labels, key namespaces, connections, locks, and persistent transcript
   histories.
@@ -262,10 +266,10 @@ include:
 - JOAT.app owns and shuts down the local Python engine child; the healthcheck
   remains loopback-only, with structured logs that retain hashes rather than
   content where practical.
-- The required wearable-Brainstorm Hermes seat uses paired protocol-v4 WSS over
-  managed Tailscale Serve to the private Mac mini. A second JOAT connection uses the
-  same installed/configured `hermes` agent for Calendar proposals, without
-  installing another Hermes. Each connection adopts only its own exact
+- The Agent Terminal Hermes seat (not a Brainstorm requirement — see above)
+  uses paired protocol-v4 WSS over managed Tailscale Serve to the private Mac
+  mini. A second JOAT connection uses the same installed/configured `hermes`
+  agent for Calendar proposals, without installing another Hermes. Each connection adopts only its own exact
   route-isolated session, requires an empty effective tool inventory at
   admission and immediately before each send, and rejects the other JOAT
   namespace plus existing `main`/Telegram sessions. A local exact-shape RPC

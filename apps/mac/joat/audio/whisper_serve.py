@@ -31,12 +31,15 @@ from pathlib import Path
 from typing import Any
 
 from ..core.interfaces import SttEngine, Transcript
-from .whisperkit import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, WhisperKitEngine
+from .whisperkit import (
+    CHANNELS, DEFAULT_INFERENCE_DEADLINE_S, SAMPLE_RATE, SAMPLE_WIDTH, WhisperKitEngine,
+)
 
 log = logging.getLogger(__name__)
 
 MIN_UTTERANCE_BYTES = SAMPLE_RATE * SAMPLE_WIDTH // 4  # < 250 ms is a VAD blip
 DEFAULT_READY_TIMEOUT_S = 30.0
+DEFAULT_BATCH_DEADLINE_S = DEFAULT_INFERENCE_DEADLINE_S
 START_RETRY_DELAY_S = 30.0
 
 DEFAULT_MODEL_DIR = Path.home() / "Library/Application Support/JOAT/models"
@@ -177,11 +180,17 @@ class WhisperServeEngine(SttEngine):
         temperature_fallback_count: int = 0,
         without_timestamps: bool = True,
         model_dir: Path | None = None,
+        batch_deadline_s: float = DEFAULT_BATCH_DEADLINE_S,
     ) -> None:
         if temperature_fallback_count < 0:
             raise ValueError("temperature_fallback_count must be non-negative")
+        if batch_deadline_s <= 0:
+            raise ValueError("batch_deadline_s must be positive")
         self._binary = binary
         self._model = model
+        # The batch fallback (used while serve is still warming) inherits a
+        # deadline too; an unbounded child there is the same silent hang.
+        self._batch_deadline_s = batch_deadline_s
         self._model_dir = (
             model_dir if model_dir is not None
             else _existing_model_dir(DEFAULT_MODEL_DIR, model)
@@ -453,6 +462,7 @@ class WhisperServeEngine(SttEngine):
         # the next flush, never replays or splits an in-flight batch request.
         batch = WhisperKitEngine(
             binary=self._binary, model=self._model, model_dir=self._model_dir,
+            inference_deadline_s=self._batch_deadline_s,
         )
         await batch.feed(pcm)
         task = asyncio.create_task(batch.flush())

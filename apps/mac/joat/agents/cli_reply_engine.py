@@ -38,7 +38,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from ..core.interfaces import ReplyEngine
 from .grounding import Grounding
@@ -73,6 +73,40 @@ PERSONA = (
     "- Never invent the wearer's personal data: their messages, calendar, "
     "location, or device state. The facts block says what you have.\n"
     "\n"
+    "What you can do for the wearer, through the tools (the brain on the "
+    "Mac executes them; you decide):\n"
+    "- Open a feature on the glasses: Messages, Notifications, Brainstorm, "
+    "Agent Terminal, Planning, Navigation, QuickNotes, Activity, News, "
+    "Timer, Search. When they ask to see or open something, open it "
+    "rather than describing it.\n"
+    "- Read their messages in full (read_conversation), not just the "
+    "snippet from get_recent_messages, whenever they ask what someone said "
+    "or want a message read.\n"
+    "- Send or reply to a message: call prepare_message. The brain resolves "
+    "the contact and asks the wearer to confirm on the glasses; you never "
+    "send. If the recipient is a relationship ('my wife'), a nickname, or "
+    "ambiguous, call the tool anyway with what you have and relay its "
+    "question instead of asking your own first. A bare pronoun ('tell her') "
+    "means the conversation currently selected in Messages: use mode reply.\n"
+    "- Save a quick note, start or control the focus timer, start a "
+    "Brainstorm with the collaborators, send an instruction to a named "
+    "Agent Terminal session, read a news article in full, read their "
+    "notes, and start walking or cycling navigation to a spoken place.\n"
+    "- News means the wearer's own feed: call news_headlines (and "
+    "read_news_article for one story) before answering from anything "
+    "else. Use web_search for other recent events.\n"
+    "- A tool result that asks for input names the next call: continue "
+    "that same action (provide_message_input with the same action_id) "
+    "rather than starting a new one.\n"
+    "- The wearer's words are theirs. When a tool takes text the wearer "
+    "spoke (a message body, a note, a Brainstorm topic, a Terminal "
+    "instruction, a destination), pass it exactly as they said it: same "
+    "words, same order, same capitalisation and punctuation. Do not "
+    "reword, shorten, polish, or add a greeting or a full stop.\n"
+    "- One action per request. Do the tool call, then say in one sentence "
+    "what happened, using the tool's own result. If a tool reports an "
+    "error or asks for input, tell the wearer that, plainly.\n"
+    "\n"
     "How to speak:\n"
     "- Plain text only: no markdown, no lists, no headings, no emoji, no "
     "code blocks.\n"
@@ -81,6 +115,18 @@ PERSONA = (
     "asks for detail.\n"
     "- Direct and warm. No preamble, no disclaimers about being an AI, no "
     "restating the question."
+)
+
+# The mind doing JOAT's own chores — judging a Brainstorm round, writing
+# the synthesis, rewording a collaborator's answer on request. It runs in
+# its own CLI session, so the wearer's conversation never contains a
+# verdict prompt and a chore never waits behind a spoken question (the
+# audit's A7). No tools, no facts block: the material is in the prompt.
+WORKER_PERSONA = (
+    "You are the working mind behind JOAT, a personal assistant on the "
+    "wearer's smart glasses. Each message gives you one task over supplied "
+    "text. Do exactly that task and reply with the result only: plain text, "
+    "no markdown, no preamble, no commentary about the task."
 )
 
 FAILED_NOTICE = "That turn failed — say it again in a moment."
@@ -133,9 +179,13 @@ class _CliSeat(ReplyEngine):
         timeout_s: float = TURN_TIMEOUT_S,
         workdir: Path = DEFAULT_WORKDIR,
         on_account: AccountObserver | None = None,
+        persona: str = PERSONA,
+        session_ttl_s: float = SESSION_TTL_S,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout must be positive")
+        if session_ttl_s < 0:
+            raise ValueError("session_ttl_s must not be negative")
         self._binary = binary
         self._grounding = grounding
         self._model = model
@@ -144,6 +194,11 @@ class _CliSeat(ReplyEngine):
         self._timeout_s = timeout_s
         self._workdir = workdir
         self._on_account = on_account
+        # Who this seat is: the wearer's assistant, or JOAT's own worker.
+        self._persona = persona
+        # 0 = every turn is a fresh session (the caller supplies any history
+        # it wants honoured — the Even AI door does exactly that).
+        self._session_ttl_s = session_ttl_s
         self._account = "missing" if binary is None else "unknown"
         self._session_id: str | None = None
         self._session_used_at = 0.0
@@ -210,8 +265,9 @@ class _CliSeat(ReplyEngine):
 
     def _session_alive(self) -> bool:
         return (
-            self._session_id is not None
-            and time.monotonic() - self._session_used_at < SESSION_TTL_S
+            self._session_ttl_s > 0
+            and self._session_id is not None
+            and time.monotonic() - self._session_used_at < self._session_ttl_s
         )
 
     async def _degraded(self, text: str, notice: str) -> AsyncIterator[str]:
@@ -308,10 +364,10 @@ class ClaudeCliReplyEngine(_CliSeat):
 
     def _command(self, resuming: bool) -> list[str]:
         assert self._binary is not None and self._session_id is not None
-        system = PERSONA
+        system = self._persona
         live = self._live_context()
         if live:
-            system = f"{PERSONA}\n\n{live}"
+            system = f"{self._persona}\n\n{live}"
         command = [
             self._binary, "-p",
             "--tools", "",
@@ -402,7 +458,7 @@ class CodexCliReplyEngine(_CliSeat):
 
     def _prompt(self, text: str, resuming: bool) -> str:
         live = self._live_context()
-        head = "" if resuming else f"SYSTEM INSTRUCTIONS\n{PERSONA}\n\n"
+        head = "" if resuming else f"SYSTEM INSTRUCTIONS\n{self._persona}\n\n"
         facts = f"{live}\n\n" if live else ""
         return f"{head}{facts}WEARER: {text}"
 
@@ -550,6 +606,11 @@ class SeatSwitch(ReplyEngine):
     def seats(self) -> dict[str, ReplyEngine]:
         return dict(self._seats)
 
+    @property
+    def name(self) -> str:
+        """The seat that answered last — for labels such as the judge line."""
+        return self._last_pick or "none"
+
     def pick(self) -> tuple[str, ReplyEngine] | None:
         wanted = self._chosen() or ""
         candidates = [wanted, *[s for s in self._order if s != wanted]]
@@ -596,9 +657,40 @@ class SeatSwitch(ReplyEngine):
             yield chunk
 
 
+class LocalTaskEngine(ReplyEngine):
+    """The resident MLX weights as a worker seat: one task in, one result out.
+
+    Shares the loaded model with the conversational local seat but goes
+    through its persona-free, history-free ``complete`` path, so a judge
+    prompt can never become a remembered turn of the wearer's chat.
+    """
+
+    name = "local"
+    title = "Local"
+
+    def __init__(self, completer: Any, system: str) -> None:
+        self._completer = completer
+        self._system = system
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    async def reply(self, text: str) -> str | None:
+        result = await self._completer.complete(system=self._system, text=text)
+        return result or None
+
+    async def stream(self, text: str) -> AsyncIterator[str]:
+        result = await self.reply(text)
+        if result:
+            yield result
+
+
 __all__ = [
     "CHUNK_CHARS",
     "FAILED_NOTICE",
+    "LocalTaskEngine",
+    "WORKER_PERSONA",
     "FIRST_CHUNK_CHARS",
     "LIMIT_NOTICE",
     "MISSING_NOTICE",

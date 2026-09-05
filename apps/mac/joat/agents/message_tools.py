@@ -50,8 +50,48 @@ def _optional_text(arguments: dict[str, Any], key: str, maximum: int) -> str | N
     return value
 
 
+def _next_step(status: MessageActionStatus) -> str:
+    """What the mind should do with this result — said in the result itself.
+
+    Observed live on the Codex seat: told "I don't have a verified contact,
+    what is the name?", the model answered the wearer, then started a NEW
+    prepare_message with the name, which the single-flight controller
+    refused. The result now names the continuation, so no seat has to
+    infer the protocol from a description it read three turns ago.
+    """
+    if status.state == "awaiting_input":
+        if status.candidates:
+            return (
+                "Ask the wearer which one, then call provide_message_input with this same "
+                "action_id and that candidate's recipient_ref. Do not start a new prepare_message."
+            )
+        if status.needs_input == "recipient":
+            return (
+                "Ask the wearer for the contact's name, then call provide_message_input with "
+                "this same action_id and recipient_name. Do not start a new prepare_message."
+            )
+        if status.needs_input == "body":
+            return (
+                "Ask the wearer what to say, then call provide_message_input with this same "
+                "action_id and their words as body, verbatim. Do not start a new prepare_message."
+            )
+        return "Call provide_message_input with this same action_id."
+    if status.state == "awaiting_confirmation":
+        return (
+            "Nothing more from you: the wearer confirms or declines on the glasses. "
+            "Tell them the message is ready to confirm."
+        )
+    if status.state == "sending":
+        return "Nothing more from you; message_action_status reports the outcome."
+    if status.state == "failed":
+        return "This action is over; tell the wearer why. Start again only if they ask again."
+    return ""
+
+
 def _result(status: MessageActionStatus) -> str:
-    return json.dumps(asdict(status), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    payload = asdict(status)
+    payload["next_step"] = _next_step(status)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def message_tools(
