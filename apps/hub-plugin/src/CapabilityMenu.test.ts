@@ -162,7 +162,7 @@ describe('Brainstorm surface ownership', () => {
     await menu.toggle();
     expect(menu.mayPresentBrainstorm(previous)).toBe(false);
     expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
-    expect(surfaceEvents.at(-1)?.event).toEqual({ containerName: 'capability-lifecycle', selectedName: 'surface-home' });
+    expect(surfaceEvents[surfaceEvents.length - 1]?.event).toEqual({ containerName: 'capability-lifecycle', selectedName: 'surface-home' });
     await menu.openFromContextualMenu(CAPABILITIES.indexOf('Brainstorm'));
     expect(menu.mayPresentBrainstorm(previous)).toBe(false);
     expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(true);

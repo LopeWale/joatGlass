@@ -25,6 +25,7 @@ import {
 } from './PanelRail';
 import {
   CANVAS,
+  SPINE_LABEL_BOX,
   PANEL_TABS,
   type BrainstormHudModel,
   type HudContentKind,
@@ -46,29 +47,22 @@ import {
   type NavigationManeuver,
 } from './NavigationHud';
 
+import {
+  TYPE,
+  LEAD,
+  mono,
+  prose,
+  HINT_BASELINE_Y,
+  RAIL_HEIGHT,
+  upper,
+  PITCH,
+} from './HudTypography';
+
 const BRIGHT = 238;
 const SUPPORT = 170;
 const CHROME = 102;
 const QUIET = 68;
 const HAIRLINE = 51;
-const HUD_FONT = '"SF Mono", SFMono-Regular, Menlo, monospace';
-
-/** Prose face for the brainstorm/terminal surfaces.
-
- * The wearer, comparing this HUD against Even's own UI photos: "Why is
- * the font bold everywhere? … you see how they utilize spacing and not
- * wasting space?" The official G2 screens set light PROPORTIONAL type;
- * monospace at small sizes reads as bold slab on a phosphor display and
- * fits ~74 characters where a proportional face fits ~95. Weight is
- * pinned to 400 explicitly — canvas default weight on some hosts
- * renders these families heavier. Mono remains for the chrome/status
- * spine, where column alignment is the point.
- */
-const HUD_TEXT_FONT = '"Helvetica Neue", "SF Pro Text", Arial, sans-serif';
-// Flat feature pickers have two text roles. The selection rail carries
-// focus; changing face, weight or size must not masquerade as selection.
-const PICKER_BODY_FONT = `400 14px ${HUD_TEXT_FONT}`;
-const PICKER_META_FONT = `400 10px ${HUD_TEXT_FONT}`;
 
 /** Where content starts and stops on the 576px lens.
  *
@@ -82,8 +76,8 @@ const PICKER_META_FONT = `400 10px ${HUD_TEXT_FONT}`;
  * than one that never reached it. Everything between is content. */
 const HUD_EDGE = 14;
 const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
-/** Measured mean advance of HUD_TEXT_FONT at 11px: a 63-character row
- * rendered by the REAL simulator spans 326px → 5.18 px per character.
+/** Measured mean advance of the prose face (TYPE.transcript, 11px) — a
+ * 63-character row rendered by the REAL simulator spans 326px → 5.18 px per character.
  * Exported as code, not prose, because the wire's column budget
  * (`BRAINSTORM_ROW_COLUMNS` in core/protocol.py) is derived from it and a
  * cross-language test re-derives the equality — a number living only in a
@@ -127,7 +121,7 @@ export function navigationDecisionRows(optionCount: number): readonly Navigation
   return Array.from({ length: count }, (_, index) => {
     // A route choice is read in motion, so it gets the legible face rather
     // than the dense reading size a stationary list can use.
-    const baselineY = 128 + index * 34;
+    const baselineY = 128 + index * PITCH.boxed;
     return { baselineY, boxTopY: baselineY - 15, boxHeight: 30, fontSize: 15 };
   });
 }
@@ -157,7 +151,7 @@ export function assistantOverlayTextLayout(
   fontSize: number,
 ): AssistantOverlayTextLayout {
   const safeLineCount = Math.max(1, Math.min(4, Math.floor(lineCount)));
-  const lineHeight = Math.max(16, fontSize + 2);
+  const lineHeight = Math.max(LEAD.body, fontSize + 4);
   const bodyCenterY = (
     ASSISTANT_OVERLAY_GEOMETRY.bodyTopY + ASSISTANT_OVERLAY_GEOMETRY.bodyBottomY
   ) / 2;
@@ -214,7 +208,7 @@ export const OVERVIEW_DASHBOARD = {
   paneWidth: 230,
   labelBaselineY: 62,
   mainTopBaselineY: 92,
-  mainLineHeight: 21,
+  mainLineHeight: LEAD.primary,
   mainMaxLines: 4,
   contextLabelBaselineY: 196,
   contextValueBaselineY: 214,
@@ -372,7 +366,7 @@ export function confirmationReviewLayout(): {
     contentWidth: 504,
     promptTopBaselineY: 104,
     promptFontSize: 16,
-    promptLineHeight: 20,
+    promptLineHeight: LEAD.primary,
     promptMaxLines: 4,
     footerBaselineY: 267,
   };
@@ -599,7 +593,8 @@ export interface AgentTerminalTranscriptLayout {
  * output. Falls back to HERMES only when no lane is named. */
 export function agentTerminalFocusLabel(topic: string | undefined): string {
   const named = ((topic ?? '').split(' · ')[0] ?? '').trim();
-  return (named || 'HERMES').slice(0, 24).toUpperCase();
+  const cut = named.length > 24 ? `${named.slice(0, 23)}…` : named;
+  return upper(cut || 'HERMES');
 }
 
 export function agentTerminalTranscriptLayout(
@@ -650,7 +645,7 @@ export function brainstormStateLabel(state: BrainstormHudModel['state']): string
     case 'settled': return 'DONE';
     case 'approval_required': return 'NEEDS APPROVAL';
     case 'unavailable': return 'OFFLINE';
-    default: return state.replace(/_/g, ' ').toUpperCase();
+    default: return upper(state.replace(/_/g, ' '));
   }
 }
 
@@ -717,7 +712,7 @@ export function planningMonthSelectionRail(selectedWeek: number): {
   height: number;
 } {
   const week = Math.min(5, Math.max(0, Math.floor(selectedWeek)));
-  return { x: 28, y: 87 + week * 22, width: 3, height: 22 };
+  return { x: 28, y: 87 + week * PITCH.week, width: 3, height: PITCH.week };
 }
 
 /** The graphical calendar owns only the six week action rows. Month controls
@@ -744,13 +739,13 @@ export const PLANNING_DASHBOARD = {
   gridRight: 262,
   headerBaselineY: 58,
   firstRowCenterY: 82,
-  rowPitch: 26,
+  rowPitch: PITCH.monthBand,
   dividerX: 276.5,
   paneLeft: 292,
   paneRight: 556,
   paneHeadingY: 58,
   paneFirstRowY: 84,
-  paneRowPitch: 24,
+  paneRowPitch: PITCH.paneRow,
   paneRowCapacity: 6,
 } as const;
 
@@ -920,7 +915,7 @@ function parseStatus(status: string): StatusParts {
   state = state.replace(/^JOAT\s*[·-]?\s*/i, '').trim();
   return {
     time,
-    state: `JOAT · ${(state || 'READY').toUpperCase()}`,
+    state: `JOAT · ${upper(state || 'READY')}`,
     ...(battery ? { battery } : {}),
   };
 }
@@ -1105,7 +1100,7 @@ export interface MessagesConversationTranscript {
 
 /** Seven transcript rows use the vertical budget between the Mac-owned
  * heading (y58) and the footer hint: 84 + 22·7 = 238. */
-export const MESSAGES_CONVERSATION_ROW_CAPACITY = 8;
+export const MESSAGES_CONVERSATION_ROW_CAPACITY = 7;
 
 /** Conversation frames are deliberately not rendered as notification rows.
  * The Mac owns the text; this parser only distinguishes the already-labeled
@@ -1166,17 +1161,15 @@ export function messagesFullTextContent(items: readonly string[]): {
 }
 
 /** Keep every truthful Messages action label visible on the fixed G2 footer.
- * Dense transcript screens can expose paging, reading, reply, and Back at
- * once, so they use the small but still legible footer face. */
-export function messagesConversationFooterFontSize(hint: string): 8 | 9 {
-  return hint.length > 42 ? 8 : 9;
-}
-
 /** A full message uses the lens body, while preserving its status footer. */
 export const MESSAGES_READER_BODY_LINE_CAPACITY = 10;
 
-/** 62 mono columns at 14px fit the 548px reader. Two UTF-16 units remain
- * available for CRLF in exact Note wire rows (SDK item limit: 64). */
+/** 62 mono columns fit BOTH reader widths: TYPE.readerBody is 14px SF Mono
+ * (0.6em advance = 8.4px), so 62 x 8.4 = 520.8px — under the 526px
+ * rail-cleared panel reader and the 548px full-width one. Two UTF-16 units
+ * remain available for CRLF in exact Note wire rows (SDK item limit: 64).
+ * The char-count wrap below is CORRECT only because the role is monospace;
+ * services/reader.py pins the same 62 on the Mac side. */
 export const MESSAGES_READER_VISIBLE_COLUMNS = 62;
 
 export function messagesReaderBodyLines(text: string): string[] {
@@ -1287,7 +1280,7 @@ export function planningFocusRows(
   // rows start directly beneath it instead of under a second title bar.
   // That reclaimed band is a whole extra row of real content: ten per page.
   const firstBaselineY = 60;
-  const pitch = 20;
+  const pitch = PITCH.row;
   const lastBaselineY = 246;
   const capacity = Math.floor((lastBaselineY - firstBaselineY) / pitch) + 1;
   const count = Math.min(capacity, Math.max(0, Math.floor(itemCount)));
@@ -1527,7 +1520,7 @@ export function hudSpineLabel(frame: HudVisualFrame): string {
   const status = parseStatus(frame.status);
   const pageTitle = hudSpinePageTitle(frame);
   const resting = /(?:READY|MIC OFF)$/.test(status.state);
-  if (pageTitle && resting) return pageTitle.toUpperCase();
+  if (pageTitle && resting) return upper(pageTitle);
   return status.state.endsWith('MIC OFF') ? 'JOAT' : status.state;
 }
 
@@ -1779,7 +1772,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const status = parseStatus(statusText);
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
-    context.font = flat ? PICKER_META_FONT : `12px ${HUD_FONT}`;
+    context.font = TYPE.statusClock;
     context.textAlign = 'left';
     context.fillText(
       showTime ? (status.time || '--:--') : hudDateLabel(new Date()),
@@ -1789,12 +1782,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Use the same compact face as the surrounding clock and privacy
     // indicator. Keep the changing label inside the top-left tile so an
     // isolated status update dirties one tile, not both halves of the HUD.
-    context.font = flat ? PICKER_META_FONT : `10px ${HUD_FONT}`;
-    this.fitText(context, label, 100, HUD_VISUAL_GEOMETRY.statusBaselineY, 184);
+    context.font = TYPE.statusMeta;
+    this.fitText(context, label, SPINE_LABEL_BOX.x, HUD_VISUAL_GEOMETRY.statusBaselineY, SPINE_LABEL_BOX.width);
     this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
+    context.font = TYPE.statusMeta;
     context.textAlign = 'left';
     context.fillText(micOn ? 'ON' : 'OFF', 428, HUD_VISUAL_GEOMETRY.statusBaselineY);
     if (status.battery) {
+      context.font = TYPE.statusMeta;
       context.textAlign = 'right';
       context.fillText(`${status.battery}%`, 531, HUD_VISUAL_GEOMETRY.statusBaselineY);
       this.drawIcon(context, icons.battery, 538, 12, 20, SUPPORT);
@@ -1808,27 +1803,27 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawPromptQuestion(context: CanvasRenderingContext2D, question: string): void {
     let fitted: { lines: string[]; fontSize: number; lineHeight: number } | undefined;
     for (let fontSize = 14; fontSize >= 12; fontSize -= 1) {
-      context.font = `${fontSize}px ${HUD_FONT}`;
+      context.font = prose(fontSize);
       const lines = wrapPromptQuestion(question, HUD_CONTENT_WIDTH, (value) => context.measureText(value).width);
-      const lineHeight = fontSize + 3;
-      if (lines.length && 84 + (lines.length - 1) * lineHeight <= 237) {
+      const lineHeight = LEAD.body;
+      if (lines.length && 80 + (lines.length - 1) * lineHeight <= 237) {
         fitted = { lines, fontSize, lineHeight };
         break;
       }
     }
     if (!fitted) throw new Error('Complete question does not fit the readable HUD region');
     context.textAlign = 'left';
-    context.textBaseline = 'alphabetic';
+    context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
-    context.fillText('QUESTION', HUD_EDGE, 58);
+    context.font = TYPE.label;
+    context.fillText('QUESTION', HUD_EDGE, 55);
     context.fillStyle = gray(BRIGHT);
-    context.font = `${fitted.fontSize}px ${HUD_FONT}`;
+    context.font = prose(fitted.fontSize);
     fitted.lines.forEach((line, index) => {
-      context.fillText(line, HUD_EDGE, 84 + index * fitted.lineHeight);
+      context.fillText(line, HUD_EDGE, 80 + index * fitted.lineHeight);
     });
     context.fillStyle = gray(SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     context.fillText('speak your answer · left x2: cancel', 288, 267);
   }
@@ -1859,10 +1854,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(BRIGHT);
-    context.font = `11px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText('JOAT', 105, 78);
     context.fillStyle = gray(CHROME);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText('ASSISTANT', 150, 78);
     context.strokeStyle = gray(HAIRLINE);
     context.beginPath();
@@ -1871,12 +1866,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.stroke();
 
     context.fillStyle = gray(BRIGHT);
-    context.font = `17px ${HUD_FONT}`;
     context.textAlign = 'center';
     this.drawAssistantOverlayText(context, text);
 
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     context.fillText(
       ASSISTANT_OVERLAY_DISMISS_HINT,
@@ -1922,7 +1916,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // small clock to the big one below.
     const clock = hudClockParts(status.time);
     context.fillStyle = gray(BRIGHT);
-    context.font = `${layout.clockFontSize}px ${HUD_FONT}`;
+    context.font = mono(layout.clockFontSize);
     context.fillText(clock.hours, columnX, layout.hoursBaselineY);
     context.fillText(clock.minutes, columnX, layout.minutesBaselineY);
     context.textAlign = 'left';
@@ -1932,7 +1926,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Mac resolves it from the phone's own position and sends the words.
     const ambient = frame.ambient;
     if (ambient && (ambient.temperature || ambient.unread > 0)) {
-      context.font = `13px ${HUD_FONT}`;
+      context.font = TYPE.body;
       const unread = ambient.unread > 0 ? String(ambient.unread) : '';
       // Measure the whole row first so it centres under the clock rather
       // than starting wherever the left margin happened to be.
@@ -1977,7 +1971,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       if (frame.rail.activeTab !== 'notifications') {
         this.drawPanelPane(context, frame.rail, icons);
         context.fillStyle = gray(QUIET);
-        context.font = `9px ${HUD_FONT}`;
+        context.font = TYPE.hint;
         context.textAlign = 'center';
         context.fillText(PANEL_OVERVIEW_HINT, 288, 267);
         context.restore();
@@ -1987,22 +1981,22 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     if (overview.kind === 'empty') {
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
-      context.fillText(overview.title.toUpperCase(), paneX, layout.labelBaselineY);
+      context.font = TYPE.label;
+      context.fillText(upper(overview.title), paneX, layout.labelBaselineY);
       context.fillStyle = gray(SUPPORT);
-      context.font = `15px ${HUD_FONT}`;
+      context.font = TYPE.primary;
       this.drawWrappedText(
         context, overview.primary, paneX, layout.mainTopBaselineY,
         paneWidth, layout.mainLineHeight, 3, 'leading',
       );
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
+      context.font = TYPE.meta;
       this.drawWrappedText(
         context, overview.recovery, paneX, layout.contextValueBaselineY,
-        paneWidth, 14, 2, 'leading',
+        paneWidth, LEAD.meta, 2, 'leading',
       );
       context.fillStyle = gray(QUIET);
-      context.font = `9px ${HUD_FONT}`;
+      context.font = TYPE.hint;
       context.textAlign = 'center';
       context.fillText(frame.rail ? PANEL_OVERVIEW_HINT : overview.hint, 288, 267);
       context.restore();
@@ -2018,8 +2012,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const main = overview.main;
       const mainLevel = hudBrightnessGray(frame.mainBrightness);
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
-      context.fillText(main.label.toUpperCase(), paneX, cursorY);
+      context.font = TYPE.label;
+      context.fillText(upper(main.label), paneX, cursorY);
       context.fillStyle = gray(mainLevel);
       if (main.structured) {
         // A calendar/reminder value is one short fact — give it size, but
@@ -2028,15 +2022,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         // to 18px before it is ever truncated ("Design review · 4…" is not
         // a time the wearer can act on).
         cursorY += 28;
-        context.font = `21px ${HUD_FONT}`;
+        context.font = mono(21);
         if (context.measureText(main.value).width > paneWidth) {
-          context.font = `18px ${HUD_FONT}`;
+          context.font = mono(18);
         }
         this.fitText(context, main.value, paneX, cursorY, paneWidth);
         cursorY += 10;
       } else {
         cursorY += 24;
-        context.font = `15px ${HUD_FONT}`;
+        context.font = TYPE.primary;
         const drawn = this.drawWrappedText(
           context,
           main.value,
@@ -2054,11 +2048,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     if (overview.context) {
       cursorY += 22;
       context.fillStyle = gray(CHROME);
-      context.font = `9px ${HUD_FONT}`;
-      context.fillText(overview.context.label.toUpperCase(), paneX, cursorY);
+      context.font = TYPE.label;
+      context.fillText(upper(overview.context.label), paneX, cursorY);
       cursorY += 16;
       context.fillStyle = gray(SUPPORT);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = TYPE.secondary;
       this.fitText(context, overview.context.value, paneX, cursorY, paneWidth);
     }
 
@@ -2075,20 +2069,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         if (row.source) {
           this.drawIcon(context, icons.notifications, paneX, trayY - 7, 12, CHROME);
           context.fillStyle = gray(CHROME);
-          context.font = `9px ${HUD_FONT}`;
+          context.font = TYPE.micro;
           const label = row.age ? `${row.source} · ${row.age}` : row.source;
           this.fitText(context, label, paneX + 16, trayY, paneWidth - 16);
           trayY += 14;
         }
         context.fillStyle = gray(SUPPORT);
-        context.font = `12px ${HUD_FONT}`;
+        context.font = TYPE.body;
         this.fitText(context, row.headline, paneX + 16, trayY, paneWidth - 16);
         trayY += 20;
       }
     }
 
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     // One footer for every resting tab. The hint is centred on the tile
     // seam, so a footer that differed between the notifications tab and
@@ -2136,7 +2130,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         // The bracket: the lit tab attaches to the pane it opens.
         context.fillRect(x + rail.iconSize + 2, Math.round(centerY) - 1, 6, 2);
       } else {
-        context.fillRect(x - 7, Math.round(centerY) - 10, 3, 20);
+        context.fillRect(x - 7, Math.round(centerY) - 10, 3, RAIL_HEIGHT);
       }
     });
   }
@@ -2157,14 +2151,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     const label = (text: string): void => {
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
+      context.font = TYPE.label;
       this.fitText(context, text, paneX, layout.labelBaselineY, paneWidth);
     };
     const quiet = (lines: string[], startY: number): void => {
       context.fillStyle = gray(SUPPORT);
-      context.font = `12px ${HUD_FONT}`;
+      context.font = TYPE.body;
       lines.forEach((line, index) => {
-        this.drawWrappedText(context, line, paneX, startY + index * 36, paneWidth, 16, 2, 'leading');
+        this.drawWrappedText(context, line, paneX, startY + index * 36, paneWidth, LEAD.tight, 2, 'leading');
       });
     };
 
@@ -2182,7 +2176,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const now = Date.now();
       if (pomodoro.phase === 'idle') {
         context.fillStyle = gray(BRIGHT);
-        context.font = `21px ${HUD_FONT}`;
+        context.font = TYPE.primary;
         context.fillText('Ready', paneX, layout.mainTopBaselineY + 4);
         quiet([`${Math.round(pomodoro.lengthMs / 60_000)} min focus · tap to start`], layout.mainTopBaselineY + 34);
         return;
@@ -2190,18 +2184,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const remaining = pomodoroRemainingMs(pomodoro, now);
       const minutes = formatMinutesLeft(remaining);
       context.fillStyle = gray(BRIGHT);
-      context.font = `48px ${HUD_FONT}`;
+      context.font = mono(48);
       const number = minutes.split(' ')[0] ?? '0';
       context.fillText(number, paneX, layout.mainTopBaselineY + 22);
       const numberWidth = context.measureText(number).width;
       context.fillStyle = gray(SUPPORT);
-      context.font = `12px ${HUD_FONT}`;
+      context.font = TYPE.meta;
       context.fillText('min left', paneX + numberWidth + 8, layout.mainTopBaselineY + 30);
       context.fillStyle = gray(pomodoro.running ? SUPPORT : CHROME);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = TYPE.label;
       this.fitText(context, pomodoroBlockLabel(pomodoro), paneX, layout.mainTopBaselineY + 62, paneWidth);
       context.fillStyle = gray(CHROME);
-      context.font = `12px ${HUD_FONT}`;
+      context.font = TYPE.secondary;
       context.fillText(pomodoroCycleDots(pomodoro.completed), paneX, layout.mainTopBaselineY + 84);
       return;
     }
@@ -2215,19 +2209,19 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       let y = layout.mainTopBaselineY;
       if (content.headline) {
         context.fillStyle = gray(BRIGHT);
-        context.font = `13px ${HUD_FONT}`;
-        y += (this.drawWrappedText(context, content.headline, paneX, y, paneWidth, 17, 2, 'leading') - 1) * 17 + 24;
+        context.font = TYPE.body;
+        y += (this.drawWrappedText(context, content.headline, paneX, y, paneWidth, LEAD.tight, 2, 'leading') - 1) * LEAD.tight + 24;
       }
       for (const row of content.rows.slice(0, 3)) {
         if (y > OVERVIEW_TRAY_LAST_Y - 14) break;
         const parts = parseHudListItem(row);
         context.fillStyle = gray(SUPPORT);
-        context.font = `12px ${HUD_FONT}`;
-        const lines = this.drawWrappedText(context, parts.primary || row, paneX, y, paneWidth, 16, 2, 'leading');
+        context.font = TYPE.body;
+        const lines = this.drawWrappedText(context, parts.primary || row, paneX, y, paneWidth, LEAD.tight, 2, 'leading');
         y += lines * 16;
         if (parts.secondary) {
           context.fillStyle = gray(CHROME);
-          context.font = `9px ${HUD_FONT}`;
+          context.font = TYPE.micro;
           this.fitText(context, parts.secondary, paneX, y - 2, paneWidth);
           y += 12;
         }
@@ -2252,16 +2246,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const parts = parseHudListItem(row);
       this.drawIcon(context, icons.news, paneX, y - 7, 12, CHROME);
       context.fillStyle = gray(CHROME);
-      context.font = `9px ${HUD_FONT}`;
+      context.font = TYPE.micro;
       const source = [parts.secondary, parts.age].filter(Boolean).join(' · ');
       this.fitText(context, source || 'News', paneX + 16, y, paneWidth - 16);
       y += 14;
       context.fillStyle = gray(SUPPORT);
-      context.font = `12px ${HUD_FONT}`;
+      context.font = TYPE.body;
       const lines = this.drawWrappedText(
-        context, parts.primary || row, paneX + 16, y, paneWidth - 16, 16, 2, 'leading',
+        context, parts.primary || row, paneX + 16, y, paneWidth - 16, LEAD.tight, 2, 'leading',
       );
-      y += lines * 16 + 10;
+      y += lines * LEAD.tight + 10;
     }
   }
 
@@ -2281,26 +2275,26 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     if (content?.empty) {
       context.fillStyle = gray(SUPPORT);
-      context.font = `14px ${HUD_FONT}`;
+      context.font = TYPE.primary;
       this.fitText(context, content.headline ?? 'Timer unavailable', 52, 80, 496);
       context.fillStyle = gray(CHROME);
-      context.font = `12px ${HUD_FONT}`;
-      this.drawWrappedText(context, content.empty, 52, 106, 496, 17, 3, 'leading');
+      context.font = TYPE.body;
+      this.drawWrappedText(context, content.empty, 52, 106, 496, LEAD.body, 3, 'leading');
     } else if (!pomodoro) {
       context.fillStyle = gray(SUPPORT);
-      context.font = `14px ${HUD_FONT}`;
+      context.font = TYPE.primary;
       context.fillText('Say “JOAT, start a pomodoro”', 52, 96);
       context.fillStyle = gray(CHROME);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = TYPE.secondary;
       context.fillText('25 min focus, 5 min break, a long one after four.', 52, 120);
     } else {
       const now = Date.now();
       const remaining = pomodoroRemainingMs(pomodoro, now);
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
-      context.fillText(pomodoroBlockLabel(pomodoro).toUpperCase(), 52, 66);
+      context.font = TYPE.label;
+      context.fillText(upper(pomodoroBlockLabel(pomodoro)), 52, 66);
       context.fillStyle = gray(pomodoro.phase === 'idle' || !pomodoro.running ? SUPPORT : BRIGHT);
-      context.font = `56px ${HUD_FONT}`;
+      context.font = mono(56);
       context.textAlign = 'right';
       context.fillText(formatCountdown(remaining), 548, 108);
       context.textAlign = 'left';
@@ -2314,13 +2308,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(CHROME);
       context.fillRect(52, 135, Math.round(496 * fraction), 2);
       context.fillStyle = gray(CHROME);
-      context.font = `12px ${HUD_FONT}`;
+      context.font = TYPE.secondary;
       context.fillText(pomodoroCycleDots(pomodoro.completed), 52, 156);
     }
     // The controls are the list rows the Mac sent — Start, Pause, Reset —
     // in the one dense row language, under the timer.
     frame.items.forEach((item, index) => {
-      const baselineY = 184 + index * 20;
+      const baselineY = 184 + index * PITCH.row;
       const selected = frame.selectable && index === frame.selectedIndex;
       if (selected) {
         context.fillStyle = gray(BRIGHT);
@@ -2329,7 +2323,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       this.drawFocusListLine(context, item, baselineY, selected);
     });
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     context.fillText(frame.hint, 288, 267);
     context.textAlign = 'left';
@@ -2351,10 +2345,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     this.fitText(context, metadata, left, 58, HUD_CONTENT_RIGHT - left);
     context.fillStyle = gray(BRIGHT);
-    context.font = `14px ${HUD_FONT}`;
+    context.font = TYPE.readerBody;
     const lines = preparedLines ?? visibleHudLeadingLines(
       messagesReaderBodyLines(body), MESSAGES_READER_BODY_LINE_CAPACITY,
     );
@@ -2364,13 +2358,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         // interpret their line terminator and fixed-width tab for painting;
         // never trim, join, rewrap or replace body text with an ellipsis.
         const displayLine = line.replace(/\r\n$|[\r\n]$/u, '').replace(/\t/g, '        ');
-        context.fillText(displayLine, left, 84 + index * 17);
+        context.fillText(displayLine, left, 84 + index * LEAD.reader);
       } else {
-        this.fitText(context, line, left, 84 + index * 17, HUD_CONTENT_RIGHT - left);
+        this.fitText(context, line, left, 84 + index * LEAD.reader, HUD_CONTENT_RIGHT - left);
       }
     });
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     context.fillText(hint, 288, 267);
     context.textAlign = 'left';
@@ -2390,6 +2384,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         const detail = messagesFullTextContent(frame.items);
         this.drawTextReader(context, detail.metadata, detail.body, frame.hint,
           usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined, 36);
+        // 36, not HUD_EDGE: panel readers indent to clear the tab rail. The
+        // Mac's 62-column rows were measured for 548px; at 526px they rely on
+        // fitText — the durable fix is a per-width column budget on the wire.
       } else {
         this.drawPlanningFocusList(context, frame);
       }
@@ -2473,10 +2470,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       if (row.secondaryBaselineY !== undefined) {
         const { primary, secondary } = parseHudListItem(entry.item);
         context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-        context.font = PICKER_BODY_FONT;
+        context.font = TYPE.row;
         this.fitText(context, primary || entry.item, 52, row.primaryBaselineY, 488);
         context.fillStyle = gray(selected ? SUPPORT : CHROME);
-        context.font = PICKER_META_FONT;
+        context.font = TYPE.meta;
         this.fitText(context, secondary, 52, row.secondaryBaselineY, 488);
         return;
       }
@@ -2504,7 +2501,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
 
     context.fillStyle = gray(QUIET);
-    context.font = PICKER_META_FONT;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     this.fitText(context, frame.hint, 288, 267, 504);
     context.textAlign = 'left';
@@ -2523,7 +2520,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const trimmed = item.trim();
     if (!preservePreview && /^[A-Z][A-Z ]{1,18}$/.test(trimmed)) {
       context.fillStyle = gray(CHROME);
-      context.font = PICKER_META_FONT;
+      context.font = TYPE.label;
       context.fillText(trimmed, 52, baselineY);
       return;
     }
@@ -2532,7 +2529,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     let right = 540;
     if (age) {
       context.fillStyle = gray(CHROME);
-      context.font = PICKER_META_FONT;
+      context.font = TYPE.meta;
       context.textAlign = 'right';
       context.fillText(age, right, baselineY);
       right -= context.measureText(age).width + 12;
@@ -2545,14 +2542,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(
         marker.emphasis === 'content' ? (selected ? BRIGHT : SUPPORT) : CHROME,
       );
-      context.font = PICKER_BODY_FONT;
+      context.font = TYPE.row;
       context.fillText(marker.glyph, x, baselineY);
       x += 18;
     } else if (reserveMarker) {
       x += 18; // keep one shared title edge in lists that mix marked rows
     }
     context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-    context.font = PICKER_BODY_FONT;
+    context.font = TYPE.row;
     if (!secondary) {
       this.fitText(context, text, x, baselineY, right - x);
       return;
@@ -2560,7 +2557,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const primaryWidth = Math.min(context.measureText(text).width, 320, right - x);
     this.fitText(context, text, x, baselineY, primaryWidth);
     context.fillStyle = gray(selected ? SUPPORT : CHROME);
-    context.font = PICKER_META_FONT;
+    context.font = TYPE.meta;
     this.fitText(context, secondary, x + primaryWidth + 12, baselineY,
       Math.max(0, right - x - primaryWidth - 12));
   }
@@ -2573,17 +2570,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(BRIGHT);
-    context.font = `20px ${HUD_FONT}`;
+    context.font = TYPE.title;
     context.fillText('Navigation', 36, 64);
 
-    context.font = `15px ${HUD_FONT}`;
+    context.font = TYPE.primary;
     this.fitText(context, spokenStart, 36, 104, 504);
     context.fillStyle = gray(SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
+    context.font = TYPE.secondary;
     this.fitText(context, expectation, 36, 130, 504);
 
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     this.fitText(context, frame.hint, 288, 267, 500);
   }
@@ -2609,30 +2606,30 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         )
         : undefined;
       context.fillStyle = gray(CHROME);
-      context.font = `10px ${HUD_FONT}`;
+      context.font = TYPE.label;
       this.fitText(context, transcript.heading, 36, 58, 504);
 
       transcript.rows.forEach((parsed, row) => {
-        const y = 84 + row * 22;
+        const y = 84 + row * PITCH.labelled;
         const outgoing = parsed.kind === 'outgoing';
         const selected = row === selectedRow;
         if (selected) {
           context.fillStyle = gray(BRIGHT);
-          context.fillRect(36, y - 10, 3, 18);
+          context.fillRect(36, y - 10, 3, RAIL_HEIGHT);
         }
         // The wearer reads what the OTHER person wrote; their own words are
         // context. Incoming carries the weight, outgoing recedes — never one
         // uniform brightness across the transcript.
         context.fillStyle = gray(outgoing ? CHROME : SUPPORT);
-        context.font = `9px ${HUD_FONT}`;
+        context.font = TYPE.micro;
         this.fitText(context, parsed.label, selected ? 48 : 36, y, selected ? 42 : 54);
         context.fillStyle = gray(outgoing ? CHROME : selected ? BRIGHT : SUPPORT);
-        context.font = `12px ${HUD_FONT}`;
+        context.font = TYPE.row;
         this.fitText(context, parsed.body, 104, y, 436);
       });
 
       context.fillStyle = gray(QUIET);
-      context.font = `${messagesConversationFooterFontSize(frame.hint)}px ${HUD_FONT}`;
+      context.font = TYPE.hint;
       context.textAlign = 'center';
       this.fitText(context, frame.hint, 288, 267, 504);
       return;
@@ -2661,23 +2658,23 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const gridRight = 539;
     const cellWidth = (gridRight - gridLeft) / 7;
     const gridTop = 96;
-    const rowHeight = 22;
+    const rowHeight = PITCH.week;
     const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     const selectedWeek = frame.selectedIndex;
 
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(BRIGHT);
-    context.font = `19px ${HUD_FONT}`;
+    context.font = TYPE.title;
     context.fillText('Planning', 36, 60);
     context.textAlign = 'right';
     context.fillStyle = gray(SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     context.fillText(`${month.label.slice(0, 3)} ${month.year} · E EVENT · R REMINDER`, 540, 60);
 
     context.textAlign = 'center';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     weekdays.forEach((weekday, column) => {
       context.fillText(weekday, gridLeft + cellWidth * (column + 0.5), 80);
     });
@@ -2711,13 +2708,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
           ? row === selectedWeek ? BRIGHT : SUPPORT
           : QUIET;
         context.fillStyle = gray(level);
-        context.font = `${day.inMonth ? 13 : 11}px ${HUD_FONT}`;
+        context.font = mono(day.inMonth ? 13 : 11);
         const x = gridLeft + cellWidth * (column + 0.5);
         context.fillText(String(day.day), x, top - 1);
         const marker = cell ? planningGridMarker(cell) : '';
         if (marker) {
           context.fillStyle = gray(row === selectedWeek ? BRIGHT : SUPPORT);
-          context.font = `7px ${HUD_FONT}`;
+          context.font = TYPE.microMono;
           context.fillText(marker, x, top + 9);
         }
       }
@@ -2725,18 +2722,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     const selectedSummary = frame.items[selectedWeek]?.replace(/^.*? · /, '') ?? '';
     context.fillStyle = gray(SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText(
-      selectedSummary ? `TAP WEEK · ${selectedSummary.toUpperCase()}` : 'TAP WEEK · AGENDA',
+      selectedSummary ? `TAP WEEK · ${upper(selectedSummary)}` : 'TAP WEEK · AGENDA',
       288,
       243,
     );
-    const nextMonth = frame.items[7]?.replace(/^[‹›\s]+/, '').toUpperCase() ?? 'MONTH CONTROLS';
+    const nextMonth = upper(frame.items[7]?.replace(/^[‹›\s]+/, '') ?? 'MONTH CONTROLS');
     context.fillStyle = gray(CHROME);
-    context.font = `8px ${HUD_FONT}`;
+    context.font = TYPE.microMono;
     this.fitText(context, `WEEK ${selectedWeek + 1}/6 · NEXT ${nextMonth}`, 288, 257, 500);
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     this.fitText(context, frame.hint, 288, 267, 500);
   }
 
@@ -2762,11 +2759,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(BRIGHT);
-    context.font = `14px ${HUD_FONT}`;
+    context.font = TYPE.title;
     context.fillText('Planning', geometry.gridLeft + 2, geometry.headerBaselineY - 14);
     context.textAlign = 'right';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     context.fillText(
       `${month.label.slice(0, 3)} ${month.year}`,
       geometry.gridRight,
@@ -2775,7 +2772,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     context.textAlign = 'center';
     context.fillStyle = gray(CHROME);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     weekdays.forEach((weekday, column) => {
       context.fillText(
@@ -2802,7 +2799,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(
         isHovered ? BRIGHT : day.inMonth ? (busy ? SUPPORT : CHROME) : QUIET,
       );
-      context.font = `${day.inMonth ? 12 : 10}px ${HUD_FONT}`;
+      context.font = mono(day.inMonth ? 13 : 11);
       context.fillText(String(day.day), center.x, center.y);
     }
 
@@ -2817,7 +2814,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const paneWidth = geometry.paneRight - geometry.paneLeft;
     context.textAlign = 'left';
     context.fillStyle = gray(pane.focused ? BRIGHT : SUPPORT);
-    context.font = `12px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText(
       hovered ? planningDashboardHeading(hovered.day) : '',
       geometry.paneLeft,
@@ -2827,7 +2824,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const entries = hovered?.entries ?? [];
     if (entries.length === 0) {
       context.fillStyle = gray(CHROME);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = TYPE.secondary;
       context.fillText('Free', geometry.paneLeft, geometry.paneFirstRowY);
     }
     entries.slice(0, geometry.paneRowCapacity).forEach((entry, row) => {
@@ -2839,23 +2836,23 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       }
       let x = geometry.paneLeft;
       context.fillStyle = gray(selected ? SUPPORT : CHROME);
-      context.font = `9px ${HUD_FONT}`;
+      context.font = TYPE.microMono;
       context.fillText(`[${entry.time}]`, x, y);
       x += 52;
       if (entry.kind === 'reminder') {
         context.fillStyle = gray(CHROME);
-        context.font = `11px ${HUD_FONT}`;
+        context.font = TYPE.secondary;
         context.fillText('\u25a1', x, y);
       }
       x += 16;
       context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-      context.font = `12px ${HUD_FONT}`;
+      context.font = TYPE.row;
       this.fitText(context, entry.title, x, y, geometry.paneRight - x);
     });
     const total = (hovered?.eventCount ?? 0) + (hovered?.reminderCount ?? 0);
     if (total > entries.length && entries.length > 0) {
       context.fillStyle = gray(QUIET);
-      context.font = `9px ${HUD_FONT}`;
+      context.font = TYPE.micro;
       context.fillText(
         `+${total - entries.length} more`,
         geometry.paneLeft,
@@ -2864,7 +2861,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
 
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     this.fitText(context, frame.hint, 288, 267, 500);
     void paneWidth;
@@ -2879,7 +2876,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
+    context.font = TYPE.title;
     if (frame.reviewDomain) {
       const isCalendar = frame.reviewDomain === 'calendar';
       this.drawIcon(
@@ -2912,7 +2909,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.stroke();
 
     context.fillStyle = gray(BRIGHT);
-    context.font = `${reviewLayout.promptFontSize}px ${HUD_FONT}`;
+    context.font = prose(reviewLayout.promptFontSize);
     this.drawWrappedText(
       context,
       frame.prompt,
@@ -2926,7 +2923,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     context.textAlign = 'center';
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     this.fitText(
       context,
       confirmationActionHint(),
@@ -2976,7 +2973,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context, icon, ACTION_PILL.iconX, ACTION_PILL.iconY, ACTION_PILL.iconSize, BRIGHT,
     );
     context.fillStyle = gray(BRIGHT);
-    context.font = `13px ${HUD_FONT}`;
+    context.font = TYPE.body;
     this.fitText(
       context,
       headline,
@@ -2985,7 +2982,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       ACTION_PILL.x + ACTION_PILL.width - ACTION_PILL.headlineX - 16,
     );
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     this.fitText(
       context,
       model.title,
@@ -3017,7 +3014,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.textAlign = 'center';
     context.fillStyle = gray(BRIGHT);
-    context.font = `13px ${HUD_FONT}`;
+    context.font = TYPE.body;
     this.fitText(
       context,
       text.trim(),
@@ -3042,11 +3039,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     this.drawIcon(context, icon, 36, 49, 20, BRIGHT);
     context.fillStyle = gray(BRIGHT);
-    context.font = `15px ${HUD_FONT}`;
+    context.font = TYPE.title;
     context.fillText(label, 66, 60);
     context.textAlign = 'right';
     context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     context.fillText(phase, 540, 60);
     context.strokeStyle = gray(HAIRLINE);
     context.beginPath();
@@ -3056,21 +3053,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     context.textAlign = 'left';
     context.fillStyle = gray(BRIGHT);
-    context.font = `20px ${HUD_FONT}`;
+    context.font = TYPE.primary;
     const layout = productivityOutcomeLayout();
-    this.drawWrappedText(context, model.title, 36, layout.titleBaselineY, 504, 18, 2);
+    this.drawWrappedText(context, model.title, 36, layout.titleBaselineY, 504, LEAD.primary, 2);
 
     context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
     context.fillRect(36, layout.dividerY, 504, 1);
     context.fillStyle = gray(BRIGHT);
-    context.font = `14px ${HUD_FONT}`;
+    context.font = TYPE.body;
     this.fitText(context, model.primary, 36, layout.primaryBaselineY, 504);
     context.fillStyle = gray(SUPPORT);
-    context.font = `10px ${HUD_FONT}`;
-    this.drawWrappedText(context, model.secondary, 36, layout.secondaryBaselineY, 504, 14, 2);
+    context.font = TYPE.meta;
+    this.drawWrappedText(context, model.secondary, 36, layout.secondaryBaselineY, 504, LEAD.meta, 2);
 
     context.fillStyle = gray(QUIET);
-    context.font = `9px ${HUD_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     this.fitText(context, productivityActionHint(model), 288, layout.footerBaselineY, 500);
   }
@@ -3096,18 +3093,18 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       const layout = agentTerminalTranscriptLayout(model);
       this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
-      context.font = `400 11px ${HUD_TEXT_FONT}`;
+      context.font = TYPE.secondary;
       this.fitText(context, layout.summary, HUD_EDGE + 20, 58, HUD_CONTENT_WIDTH - 190);
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
-      context.font = `400 9px ${HUD_TEXT_FONT}`;
+      context.font = TYPE.micro;
       context.fillText(state, HUD_CONTENT_RIGHT, 58);
       context.textAlign = 'left';
       if (!layout.showRecoveryDetails) {
         // Each chip carries its lane's state ("work·run", "calendar·ask1")
         // so one glance covers every concurrent session.
         context.fillStyle = gray(SUPPORT);
-        context.font = `400 9px ${HUD_TEXT_FONT}`;
+        context.font = TYPE.micro;
         this.fitText(
           context,
           `LANES > ${model.collaborators.join('  |  ') || 'one session'}`,
@@ -3117,11 +3114,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         );
       } else {
         context.fillStyle = gray(SUPPORT);
-        context.font = `400 9px ${HUD_TEXT_FONT}`;
+        context.font = TYPE.micro;
         this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, HUD_EDGE, 72, HUD_CONTENT_WIDTH);
         context.fillStyle = gray(SUPPORT);
+        context.font = TYPE.micro;
         this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, HUD_EDGE, 88, HUD_CONTENT_WIDTH);
         context.fillStyle = gray(CHROME);
+        context.font = TYPE.micro;
         this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, HUD_EDGE, 104, HUD_CONTENT_WIDTH);
       }
       context.strokeStyle = gray(HAIRLINE);
@@ -3130,7 +3129,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.lineTo(HUD_CONTENT_RIGHT, layout.dividerY);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
-      context.font = `400 11px ${HUD_TEXT_FONT}`;
+      context.font = TYPE.transcript;
       this.drawBrainstormTranscript(
         context,
         model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
@@ -3142,7 +3141,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     } else {
       this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
-      context.font = `400 11px ${HUD_TEXT_FONT}`;
+      context.font = TYPE.secondary;
       this.fitText(
         context,
         model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
@@ -3152,7 +3151,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       );
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
-      context.font = `400 9px ${HUD_TEXT_FONT}`;
+      context.font = TYPE.micro;
       const liveNow = model.state === 'running' && model.activeSpeaker
         ? `${model.activeSpeaker} · ${state}`
         : state;
@@ -3164,7 +3163,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.lineTo(HUD_CONTENT_RIGHT, 66.5);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
-      context.font = `400 11px ${HUD_TEXT_FONT}`;
+      context.font = TYPE.transcript;
       this.drawBrainstormTranscript(
         context,
         model.activity
@@ -3185,7 +3184,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       }`
       : brainstormActionHint(model);
     context.fillStyle = gray(QUIET);
-    context.font = `400 9px ${HUD_TEXT_FONT}`;
+    context.font = TYPE.hint;
     context.textAlign = 'center';
     this.fitText(context, actionHint, 288, 267, HUD_CONTENT_WIDTH);
   }
@@ -3263,14 +3262,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
-    context.fillText((labels[navigation.view] ?? 'Navigation').toUpperCase(), 36, 59);
+    context.font = TYPE.label;
+    context.fillText(upper(labels[navigation.view] ?? 'Navigation'), 36, 59);
     context.fillStyle = gray(BRIGHT);
-    context.font = `16px ${HUD_FONT}`;
+    context.font = TYPE.primary;
     this.fitText(context, navigation.primary, 36, 84, 504);
     if (showNavigationSecondaryInHeader(navigation.view)) {
       context.fillStyle = gray(SUPPORT);
-      context.font = `11px ${HUD_FONT}`;
+      context.font = TYPE.secondary;
       this.fitText(context, navigation.secondary, 36, 106, 504);
     }
 
@@ -3297,7 +3296,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
           context.stroke();
         }
         context.fillStyle = gray(selected ? BRIGHT : CHROME);
-        context.font = `${row.fontSize}px ${HUD_FONT}`;
+        context.font = TYPE.row;
         this.fitText(
           context,
           option,
@@ -3311,8 +3310,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       // instruction. The mark indicates; it is not a poster centerpiece.
       this.drawWarningMark(context, 54, 130, SUPPORT);
       context.fillStyle = gray(SUPPORT);
-      context.font = `12px ${HUD_FONT}`;
-      this.drawWrappedText(context, navigation.secondary, 94, 122, 446, 16, 2);
+      context.font = TYPE.secondary;
+      this.drawWrappedText(context, navigation.secondary, 94, 122, 446, LEAD.tight, 2);
     }
     // 'destination' with no options ends at the header: the primary and
     // address ARE the page. The former pin + "CANONICAL PLACE" block only
@@ -3327,16 +3326,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText(`${navigation.mode === 'cycling' ? 'CYCLE' : 'WALK'} · ROUTE PREVIEW`, 36, 59);
     context.fillStyle = gray(BRIGHT);
-    context.font = `16px ${HUD_FONT}`;
+    context.font = TYPE.primary;
     this.fitText(context, navigation.primary, 36, 84, 504);
     // The Mac-authored secondary already carries distance · time · via. The
     // former fake route sketch and DISTANCE/ETA tiles drew the same numbers
     // again around a decorative polyline that never matched the real route.
     context.fillStyle = gray(SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
+    context.font = TYPE.secondary;
     this.fitText(context, navigation.secondary, 36, 106, 504);
     this.drawNavigationFooter(context, navigation.hint);
   }
@@ -3358,23 +3357,23 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 56);
 
     this.drawManeuver(context, navigation.maneuver ?? 'continue', 60, 102, BRIGHT);
     context.fillStyle = gray(BRIGHT);
-    context.font = `20px ${HUD_FONT}`;
+    context.font = mono(20);
     context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 98, 102);
 
     context.fillStyle = gray(BRIGHT);
-    context.font = `19px ${HUD_FONT}`;
+    context.font = TYPE.guide;
     this.fitText(context, navigation.primary, 36, 146, actWidth);
     context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
-    this.drawWrappedText(context, navigation.secondary, 36, 174, actWidth, 17, 2);
+    context.font = TYPE.body;
+    this.drawWrappedText(context, navigation.secondary, 36, 174, actWidth, LEAD.body, 2);
 
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     this.fitText(context, navigation.hint, 36, 210, actWidth);
 
     if (projection) this.drawNavigationMap(context, projection, panel);
@@ -3513,8 +3512,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.textAlign = 'center';
     context.fillStyle = gray(warning ? BRIGHT : SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
-    context.fillText(navigation.view.replace('_', ' ').toUpperCase(), 288, 63);
+    context.font = TYPE.label;
+    context.fillText(upper(navigation.view.replace('_', ' ')), 288, 63);
     if (navigation.view === 'wrong_way') {
       this.drawManeuver(context, 'u_turn', 288, 105, BRIGHT);
     } else if (navigation.view === 'rerouting') {
@@ -3523,13 +3522,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       this.drawWarningMark(context, 288, 105, warning ? BRIGHT : SUPPORT);
     }
     context.fillStyle = gray(BRIGHT);
-    context.font = `24px ${HUD_FONT}`;
+    context.font = TYPE.glance;
     context.fillText(navigation.primary, 288, 155);
     context.fillStyle = gray(SUPPORT);
-    context.font = `13px ${HUD_FONT}`;
+    context.font = TYPE.body;
     context.fillText(navigation.secondary, 288, 184);
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     context.fillText(navigation.hint, 288, 211);
     this.drawNavigationFooter(
       context,
@@ -3546,16 +3545,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = gray(CHROME);
-    context.font = `10px ${HUD_FONT}`;
+    context.font = TYPE.label;
     context.fillText('ARRIVED', 36, 59);
     // A small check aids recognition; the former 25px poster centerpiece
     // spent the page on it.
     this.drawArrivalMark(context, 47, 84, BRIGHT, 11);
     context.fillStyle = gray(BRIGHT);
-    context.font = `16px ${HUD_FONT}`;
+    context.font = TYPE.primary;
     this.fitText(context, navigation.primary, 68, 84, 472);
     context.fillStyle = gray(SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
+    context.font = TYPE.secondary;
     this.fitText(context, navigation.secondary, 36, 108, 504);
     this.drawNavigationFooter(context, navigation.hint);
   }
@@ -3579,10 +3578,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Left-aligned on the bottom band, not centred: it is a row of facts,
     // and facts line up with the content above them.
     context.fillStyle = gray(SUPPORT);
-    context.font = `11px ${HUD_FONT}`;
+    context.font = TYPE.meta;
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    this.fitText(context, copy, 36, 268, 504);
+    this.fitText(context, copy, 36, HINT_BASELINE_Y, 504);
   }
 
   private drawNavigationProgress(context: CanvasRenderingContext2D, progress: number): void {
@@ -3809,7 +3808,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // has. Continuation rows carry no tag and stay bright, so a wrapped
     // sentence reads as one block instead of restarting.
     lines.forEach((line, index) => {
-      const baselineY = y + index * 14;
+      const baselineY = y + index * LEAD.transcript;
       // Digits, em-dashes and dots belong in a tag: a REPAIR turn is
       // labelled "CODEX — REPAIR 1", and it rendered flat — no dim tag, no
       // bright body — on the one row where the split matters most, since a
@@ -3860,10 +3859,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     text: string,
   ): void {
     const fitted = fitHudWrappedText(text, 386, 4, (value, fontSize) => {
-      context.font = `${fontSize}px ${HUD_FONT}`;
+      context.font = prose(fontSize);
       return context.measureText(value).width;
     });
-    context.font = `${fitted.fontSize}px ${HUD_FONT}`;
+    context.font = prose(fitted.fontSize);
     const layout = assistantOverlayTextLayout(fitted.lines.length, fitted.fontSize);
     fitted.lines.forEach((line, index) => {
       context.fillText(line, 288, layout.firstBaselineY + index * layout.lineHeight);

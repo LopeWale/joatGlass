@@ -491,7 +491,10 @@ class NewsService:
             f"Headline: {headline.title}"
         )
         metadata = f"{headline.source} · {relative_age(headline.published_at, self._clock())}"
-        shown_title = shorten(title or headline.title, 40)
+        # No fixed pre-cut: the metadata row is clipped to one reader row
+        # downstream (panels), so a 40-char cap only threw away title the
+        # row could still show (2026-09-05 typography audit).
+        shown_title = title or headline.title
         return Reader(
             tab=self.tab,
             title="NEWS · ARTICLE",

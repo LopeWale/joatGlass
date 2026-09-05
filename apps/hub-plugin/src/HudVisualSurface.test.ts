@@ -53,7 +53,7 @@ describe('prompt exact paint', () => {
     }
   });
 
-  it.each(['before', 'spine', 'render', 'encode', 'first upload', 'last upload'] as const)(
+  it.each(['before', 'render', 'encode', 'first upload', 'last upload'] as const)(
     'rejects cancellation %s and does not issue later writes', async (boundary) => {
       let current = boundary !== 'before';
       let release!: () => void;
@@ -61,7 +61,6 @@ describe('prompt exact paint', () => {
       let reached = false;
       const uploads: number[] = [];
       const client = { require: () => ({
-        textContainerUpgrade: async () => { reached = true; await held; return true; },
         updateImageRawData: async (update: { containerID?: number }) => {
           uploads.push(update.containerID ?? -1);
           if ((boundary === 'first upload' && uploads.length === 1)
@@ -79,7 +78,7 @@ describe('prompt exact paint', () => {
       const surface = new HudVisualSurface(client, renderer, undefined, async (tile) => {
         if (boundary === 'encode' && !reached) { reached = true; await held; }
         return tile.pixels;
-      }, boundary === 'spine' ? { spineLabel: () => 'QUESTION' } : {});
+      }, {});
       const painting = exact(surface, frame('Say the message.'), () => current);
       try {
         if (boundary !== 'before') {
@@ -460,97 +459,16 @@ describe('HudVisualSurface', () => {
     }
   });
 
-  it('writes the spine word natively before any tile, and only when it changes', async () => {
-    // "listening → hearing you…" is a few bytes of textContainerUpgrade
-    // now, never a 0.5-2 s image tile — and it lands FIRST, so the wearer
-    // sees the word while the tiles that changed follow at BLE pace.
-    const calls: Array<{ kind: 'text' | 'tile'; content?: string; length?: number }> = [];
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async (update: { content?: string; contentLength?: number; containerID?: number; containerName?: string }) => {
-          expect(update.containerID).toBe(ContainerId.SpineLabel);
-          expect(update.containerName).toBe('spine-label');
-          calls.push({ kind: 'text', content: update.content, length: update.contentLength });
-          return true;
-        },
-        updateImageRawData: async () => {
-          calls.push({ kind: 'tile' });
-          return ImageRawDataUpdateResult.success;
-        },
-      }),
-    } as unknown as BridgeClient;
-    let pixel = 0;
-    const renderer: HudFrameRenderer = {
-      // Every frame differs in one tile, so a tile write follows each label.
-      render: async () => [
-        { containerId: ContainerId.Image, pixels: new Uint8Array([pixel += 1]) },
-        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(1) },
-        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(1) },
-        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(1) },
-      ],
-    };
-    const frame = (status: string): HudVisualFrame => ({
-      kind: 'overview', status, micOn: false, mainBrightness: 4,
-      main: '', context: '', tray: '', hint: '',
-    });
-    const surface = new HudVisualSurface(client, renderer, undefined, undefined, {
-      spineLabel: (candidate) => candidate.status,
-    });
-
-    expect(await surface.paint(frame('JOAT · LISTENING'))).toBe(true);
-    expect(calls[0]).toEqual({ kind: 'text', content: 'JOAT · LISTENING', length: 16 });
-    expect(calls.filter((call) => call.kind === 'tile')).toHaveLength(4);
-
-    calls.length = 0;
-    expect(await surface.paint(frame('JOAT · LISTENING'))).toBe(true);
-    expect(calls.filter((call) => call.kind === 'text')).toEqual([]);
-
-    calls.length = 0;
-    expect(await surface.paint(frame('JOAT · HEARING YOU…'))).toBe(true);
-    expect(calls[0]).toEqual({ kind: 'text', content: 'JOAT · HEARING YOU…', length: 19 });
-
-    // A shorter word still overwrites the whole longer one.
-    calls.length = 0;
-    expect(await surface.paint(frame('NEWS'))).toBe(true);
-    expect(calls[0]).toEqual({ kind: 'text', content: 'NEWS', length: 19 });
-  });
-
-  it('truncates the spine word to the native box with the firmware font metrics', async () => {
-    let written = '';
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async (update: { content?: string }) => {
-          written = update.content ?? '';
-          return true;
-        },
-        updateImageRawData: async () => ImageRawDataUpdateResult.success,
-      }),
-    } as unknown as BridgeClient;
-    const renderer: HudFrameRenderer = {
-      render: async () => [{ containerId: ContainerId.Image, pixels: new Uint8Array(1) }],
-    };
-    const long = 'JOAT · A STATE WORD FAR LONGER THAN THE SPINE BOX CAN HOLD';
-    const frame: HudVisualFrame = {
-      kind: 'overview', status: long, micOn: false, mainBrightness: 4,
-      main: '', context: '', tray: '', hint: '',
-    };
-    await new HudVisualSurface(client, renderer, undefined, undefined, {
-      spineLabel: (candidate) => candidate.status,
-    }).paint(frame);
-    expect(written.endsWith('...')).toBe(true);
-    expect(written.length).toBeLessThan(long.length);
-    expect(long.startsWith(written.slice(0, -3))).toBe(true);
-  });
-
-  it('releases first light to its fallback when native status text never settles', async () => {
+  it('releases first light to its fallback when the first tile upload never settles', async () => {
     vi.useFakeTimers();
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    let finishText!: (ok: boolean) => void;
-    const pendingText = new Promise<boolean>((resolve) => { finishText = resolve; });
-    const textContainerUpgrade = vi.fn().mockReturnValueOnce(pendingText).mockResolvedValue(true);
-    const updateImageRawData = vi.fn().mockResolvedValue(ImageRawDataUpdateResult.success);
+    let finishTile!: (result: ImageRawDataUpdateResult) => void;
+    const pendingTile = new Promise<ImageRawDataUpdateResult>((resolve) => { finishTile = resolve; });
+    const updateImageRawData = vi.fn()
+      .mockReturnValueOnce(pendingTile)
+      .mockResolvedValue(ImageRawDataUpdateResult.success);
     const client = {
-      require: () => ({ textContainerUpgrade, updateImageRawData }),
+      require: () => ({ updateImageRawData }),
     } as unknown as BridgeClient;
     const renderer: HudFrameRenderer = {
       render: async () => [{ containerId: ContainerId.Image, pixels: new Uint8Array([7]) }],
@@ -560,7 +478,7 @@ describe('HudVisualSurface', () => {
       main: '', context: '', tray: '', hint: '',
     };
     const surface = new HudVisualSurface(client, renderer, undefined, undefined, {
-      spineLabel: (candidate) => candidate.status, uploadTimeoutMs: 50,
+      uploadTimeoutMs: 50,
     });
     const fallback = { setStatus: vi.fn(async () => true) };
     let selected: string | undefined;
@@ -577,54 +495,18 @@ describe('HudVisualSurface', () => {
       expect(selected).toBe('text');
       await boot;
       expect(fallback.setStatus).toHaveBeenCalledWith('JOAT · connecting');
-      expect(updateImageRawData).not.toHaveBeenCalled();
 
       // A late success cannot retroactively acknowledge the timed-out paint
-      // or poison its cache. A new paint rewrites the label and completes.
-      finishText(true);
+      // or poison its cache. A new paint re-uploads the tile and completes.
+      finishTile(ImageRawDataUpdateResult.success);
       await Promise.resolve();
       expect(await surface.paint(frame)).toBe(true);
-      expect(textContainerUpgrade).toHaveBeenCalledTimes(2);
-      expect(updateImageRawData).toHaveBeenCalledTimes(1);
+      expect(updateImageRawData).toHaveBeenCalledTimes(2);
     } finally {
-      finishText(false);
+      finishTile(ImageRawDataUpdateResult.sendFailed);
       error.mockRestore();
       vi.useRealTimers();
     }
-  });
-
-  it('fails the frame when the spine container is gone, and rewrites the word after the page heals', async () => {
-    let textOk = false;
-    const writes: string[] = [];
-    let tiles = 0;
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async (update: { content?: string }) => {
-          writes.push(update.content ?? '');
-          return textOk;
-        },
-        updateImageRawData: async () => { tiles += 1; return ImageRawDataUpdateResult.success; },
-      }),
-    } as unknown as BridgeClient;
-    const renderer: HudFrameRenderer = {
-      render: async () => [{ containerId: ContainerId.Image, pixels: new Uint8Array([7]) }],
-    };
-    const frame: HudVisualFrame = {
-      kind: 'overview', status: 'JOAT · READY', micOn: false, mainBrightness: 4,
-      main: '', context: '', tray: '', hint: '',
-    };
-    const surface = new HudVisualSurface(client, renderer, undefined, undefined, {
-      spineLabel: (candidate) => candidate.status,
-    });
-
-    // The page is missing: no tile is attempted, the presenter will heal.
-    expect(await surface.paint(frame)).toBe(false);
-    expect(tiles).toBe(0);
-
-    textOk = true; // the presenter rebuilt the page
-    expect(await surface.paint(frame)).toBe(true);
-    expect(writes).toEqual(['JOAT · READY', 'JOAT · READY']);
-    expect(tiles).toBe(1);
   });
 
   it('paces successive tile calls past the host\'s 100 ms hold window', async () => {

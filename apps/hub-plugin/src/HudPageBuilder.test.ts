@@ -87,7 +87,6 @@ describe('HudPageBuilder invariants', () => {
     for (const page of [builder.visualStartup() as Page, builder.visualLayout() as Page]) {
       expect(page.textObject).toHaveLength(1);
       expect(page.textObject?.[0]).toMatchObject({content: ' ', isEventCapture: 1});
-      expect(page.textObject?.some((text) => text.containerID === ContainerId.SpineLabel)).toBe(false);
     }
   });
 
@@ -185,9 +184,9 @@ describe('HudPageBuilder invariants', () => {
     const hint = page.textObject?.find((c) => c.containerID === ContainerId.Hint);
 
     expect(page.containerTotalNum).toBe(4);
-    expect(title).toMatchObject({ yPosition: 32, height: 40, textColor: 4, content: 'CAPABILITIES' });
-    expect(list).toMatchObject({ yPosition: 72, height: 184 });
-    expect(hint).toMatchObject({ yPosition: 256, height: 32, textColor: 1 });
+    expect(title).toMatchObject({ yPosition: 39, height: 38, textColor: 4, content: 'CAPABILITIES' });
+    expect(list).toMatchObject({ yPosition: 77, height: 176 });
+    expect(hint).toMatchObject({ yPosition: 253, height: 35, textColor: 1 });
     expect(hint?.content).toBe('SWIPE move · TAP open · LEFT x2 back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
   });
@@ -199,7 +198,7 @@ describe('HudPageBuilder invariants', () => {
     expect(page.listObject).toBeUndefined();
     expect(page.containerTotalNum).toBe(5);
     expect(byId(ContainerId.Main)).toMatchObject({
-      yPosition: 32, height: 144, textColor: 4,
+      yPosition: 39, height: 144, textColor: 4,
       content: 'CONFIRM ACTION\n\nSend reply to Adele?',
     });
     expect(byId(ContainerId.Context)?.content).toBe('TAP · confirm   SWIPE · cancel');

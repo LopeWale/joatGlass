@@ -90,34 +90,16 @@ class Reader:
         self.index = selected
 
 
-def paginate(text: str, page_characters: int | None = None) -> tuple[str, ...]:
+def paginate(text: str) -> tuple[str, ...]:
     """Return exact source spans that fit the shared wearable reader.
 
-    The optional character budget remains available to existing callers;
-    whitespace belongs to one source span instead of being reconstructed
-    between pages. The default budget is the actual prepared display rows.
+    One page model: the prepared display rows (62 columns x 10 rows,
+    services/reader.py). A per-call character budget existed here but no
+    production caller ever passed one — retired 2026-09-05.
     """
-    if page_characters is not None and (
-        isinstance(page_characters, bool) or not isinstance(page_characters, int)
-        or page_characters <= 0
-    ):
-        raise ValueError("reader page character budget must be a positive integer")
     if not text:
         text = _EMPTY_READER_TEXT
-    source_pages: list[str] = []
-    start = 0
-    while start < len(text):
-        end = len(text) if page_characters is None else min(start + page_characters, len(text))
-        if end < len(text):
-            # Keep a complete word where one fits, including its following
-            # whitespace in this span. An unbroken word still makes progress.
-            boundary = next(
-                (index + 1 for index in range(end - 1, start, -1) if text[index].isspace()),
-                end,
-            )
-            end = boundary
-        source_pages.append(text[start:end])
-        start = end
+    source_pages: list[str] = [text]
     return tuple(
         "".join(rows)
         for source in source_pages

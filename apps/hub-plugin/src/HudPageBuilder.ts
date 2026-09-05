@@ -8,6 +8,7 @@ import {
   MenuContainerProperty,
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
+import { pxTruncate } from '@evenrealities/pretext';
 import {
   CANVAS,
   CAPABILITIES,
@@ -15,6 +16,21 @@ import {
   ContainerId,
   VisualContainerName,
 } from './types';
+
+/**
+ * The firmware renders text at a fixed 27px line height and list rows at a
+ * fixed 40px (font-measurement skill). Every container below is sized so its
+ * INNER height (height − 2×padding) is a whole number of those units — the
+ * 2026-09-05 audit found the previous 32px strips could not render a single
+ * line, and the confirmation body clipped its own 120-char maximum.
+ */
+const FIRMWARE_LINE = 27;
+const LIST_ROW = 40;
+const REGION_PAD = 4;
+/** Inner text width of a full-width region (576 − 2×REGION_PAD). */
+const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
+/** A list row's text width: container pad (8) + firmware row pad (12/side). */
+const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
 
 
 /**
@@ -40,7 +56,7 @@ export class HudPageBuilder {
       xPosition: 0,
       yPosition: 0,
       width: CANVAS.width,
-      height: 32,
+      height: FIRMWARE_LINE + 12, // 39: one firmware line inside 6px padding
       paddingLength: 6,
       borderWidth: 0,
       isEventCapture: 0,
@@ -68,10 +84,10 @@ export class HudPageBuilder {
       containerID: ContainerId.Main,
       containerName: 'main',
       xPosition: geometry.x ?? 0,
-      yPosition: geometry.y ?? 32,
+      yPosition: geometry.y ?? 39,
       width: geometry.width ?? CANVAS.width,
       height,
-      paddingLength: 8,
+      paddingLength: REGION_PAD,
       borderWidth: 0,
       isEventCapture,
       zOrderIndex: 2,
@@ -97,7 +113,7 @@ export class HudPageBuilder {
       yPosition: y,
       width: geometry.width ?? CANVAS.width,
       height,
-      paddingLength: 8,
+      paddingLength: REGION_PAD,
       borderWidth: 0,
       isEventCapture: geometry.isEventCapture ?? 0,
       zOrderIndex: z,
@@ -113,19 +129,19 @@ export class HudPageBuilder {
    * erased the reply. Regions also let the PLUGIN paint chrome (status,
    * hints) with no Mac attached, instead of a frozen screen.
    *
-   *   0   status  32   plugin: clock, link, mic, battery
-   *   32  main   128   Mac: reply / card / debate  <-- capture
-   *   160 context 64   Mac: what the wearer last said
-   *   224 tray    32   Mac: what is waiting
-   *   256 hint    32   plugin: gesture hints, blank at rest
+   *   0   status  39   plugin: clock, link, mic, battery   (1 line)
+   *   39  main   117   Mac: reply / card / debate  <-- capture (4 lines)
+   *   156 context 62   Mac: what the wearer last said        (2 lines)
+   *   218 tray    35   Mac: what is waiting                  (1 line)
+   *   253 hint    35   plugin: gesture hints, blank at rest  (1 line)
    */
   private dashboard(): TextContainerProperty[] {
     return [
       this.statusBar(),
-      this.main(128),
-      this.region(ContainerId.Context, 'context', 160, 64, 3, 3),
-      this.region(ContainerId.Tray, 'tray', 224, 32, 4, 2),
-      this.region(ContainerId.Hint, 'hint', 256, 32, 5, 1),
+      this.main(117),
+      this.region(ContainerId.Context, 'context', 156, 62, 3, 3),
+      this.region(ContainerId.Tray, 'tray', 218, 35, 4, 2),
+      this.region(ContainerId.Hint, 'hint', 253, 35, 5, 1),
     ];
   }
 
@@ -179,9 +195,11 @@ export class HudPageBuilder {
       yPosition: 0,
       width: CANVAS.width,
       height: CANVAS.height,
-      paddingLength: 8,
+      paddingLength: 9, // inner 270 = ten firmware lines exactly
       borderWidth: 0,
       isEventCapture: 1,
+      zOrderIndex: 1,
+      textColor: 4,
       content: 'JOAT\nStarting...',
     });
   }
@@ -290,35 +308,40 @@ export class HudPageBuilder {
   }
 
   /**
-   * Navigation is progressive disclosure, not the application's resting shell.
-   * Left double-click temporarily gives the left 160px to the firmware list;
-   * the current overview remains visible, dimmed, in the remaining 412px.
+   * The full-width firmware list page: status, one-line title, four visible
+   * 40px rows (the firmware scrolls the rest), one-line hint. Text is
+   * truncated by MEASURED pixels (@evenrealities/pretext), not characters —
+   * the audit showed a 64-char row spans 705-1024px against a 536px row.
    */
   listLayout(
     items: string[],
     chrome: { title?: string; hint?: string } = {},
   ): RebuildPageContainer {
-    const capped = items.slice(0, 20).map((s) => s.slice(0, 64));
-    const title = (chrome.title?.trim() || 'JOAT').slice(0, 46);
-    const hint = (chrome.hint?.trim() || 'left x2 overview').slice(0, 46);
+    const capped = items.slice(0, 20)
+      .map((s) => pxTruncate(s.slice(0, 64), LIST_ROW_TEXT_WIDTH));
+    const title = pxTruncate((chrome.title?.trim() || 'JOAT').slice(0, 46), REGION_TEXT_WIDTH);
+    // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
+    // below is the real bound; a tighter char pre-cut here silently dropped
+    // half the presenter's copy (2026-09-05 audit).
+    const hint = pxTruncate((chrome.hint?.trim() || 'left x2 overview').slice(0, 96), REGION_TEXT_WIDTH);
     return new RebuildPageContainer({
       containerTotalNum: 4,
       ...this.menuConfig(),
       // Capture moves OFF main and ONTO the list — see main()'s note.
       textObject: [
         this.statusBar(),
-        this.main(40, 0, 4, title),
-        this.region(ContainerId.Hint, 'hint', 256, 32, 4, 1, hint),
+        this.main(FIRMWARE_LINE + 2 * REGION_PAD + 3, 0, 4, title), // 38: one line
+        this.region(ContainerId.Hint, 'hint', 253, 35, 4, 1, hint),
       ],
       listObject: [
         new ListContainerProperty({
           containerID: ContainerId.List,
           containerName: 'list',
           xPosition: 0,
-          yPosition: 72,
+          yPosition: 77,
           width: CANVAS.width,
-          height: 184,
-          paddingLength: 6,
+          height: 4 * LIST_ROW + 16, // 176: four whole rows inside 8px padding
+          paddingLength: 8,
           // The capturing container for this layout: firmware scrolls the
           // highlight on swipe and reports the pick as `listEvent`.
           isEventCapture: 1,
@@ -334,7 +357,9 @@ export class HudPageBuilder {
     });
   }
 
-  /** Dedicated decision surface: one bright question, one horizontal CTA row. */
+  /** Dedicated decision surface: one bright question, one horizontal CTA row.
+   * The body holds FIVE firmware lines because its own 120-char maximum
+   * measures five ("CONFIRM ACTION" + blank + up to three wrapped lines). */
   confirmationLayout(prompt: string): RebuildPageContainer {
     const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
     return new RebuildPageContainer({
@@ -342,13 +367,13 @@ export class HudPageBuilder {
       ...this.menuConfig(),
       textObject: [
         this.statusBar(),
-        this.main(144, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`),
+        this.main(5 * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`), // 144
         this.region(
-          ContainerId.Context, 'context', 176, 48, 3, 3,
+          ContainerId.Context, 'context', 183, 35, 3, 3,
           'TAP · confirm   SWIPE · cancel',
         ),
-        this.region(ContainerId.Tray, 'tray', 224, 32, 4, 3, ''),
-        this.region(ContainerId.Hint, 'hint', 256, 32, 5, 1, '8 seconds · timeout cancels'),
+        this.region(ContainerId.Tray, 'tray', 218, 35, 4, 3, ''),
+        this.region(ContainerId.Hint, 'hint', 253, 35, 5, 1, '8 seconds · timeout cancels'),
       ],
     });
   }

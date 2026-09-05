@@ -1,9 +1,7 @@
 import {
   ImageRawDataUpdate,
   ImageRawDataUpdateResult,
-  TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
-import { pxTruncate } from '@evenrealities/pretext';
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
 import type { NavigationHudModel } from './NavigationHud';
@@ -11,8 +9,6 @@ import type { PanelRailVisual } from './PanelRail';
 import {
   CANVAS,
   ContainerId,
-  SPINE_LABEL_BOX,
-  SPINE_LABEL_NAME,
   VisualContainerName,
   type BrainstormHudModel,
   type HudContentKind,
@@ -237,14 +233,6 @@ export interface HudVisualSurfaceOptions {
   uploadTimeoutMs?: number;
   /** Minimum ms from one tile call to the next; 0 (the default) sends back to back. */
   tileGapMs?: number;
-  /**
-   * The spine's state word for this frame. When supplied, the word is
-   * written to the native SpineLabel container instead of being painted
-   * into a tile — Even's own guidance: "text updates are much faster than
-   * image updates; use text for anything that needs to feel instant".
-   * Omitted in fixtures that only exercise tiles.
-   */
-  spineLabel?: (frame: HudVisualFrame) => string;
 }
 
 function now(): number {
@@ -344,12 +332,8 @@ export class HudVisualSurface implements HudFramePainter {
   private frameNumber = 0;
   private readonly coalesceMs: number;
   private readonly uploadTimeoutMs: number;
-  private readonly spineLabel?: (frame: HudVisualFrame) => string;
   private readonly tileGapMs: number;
   private lastTileCallAt = Number.NEGATIVE_INFINITY;
-  /** What the SpineLabel container is showing right now. Empty means the
-   * page was (re)built and the container is back to its ' ' placeholder. */
-  private writtenSpineLabel = '';
   private pageRevision = 0;
   private displayActive = true;
   private displayRevision = 0;
@@ -363,7 +347,6 @@ export class HudVisualSurface implements HudFramePainter {
   ) {
     this.coalesceMs = Math.max(0, options.coalesceMs ?? 0);
     this.uploadTimeoutMs = Math.max(0, options.uploadTimeoutMs ?? TILE_UPLOAD_TIMEOUT_MS);
-    this.spineLabel = options.spineLabel;
     this.tileGapMs = Math.max(0, options.tileGapMs ?? 0);
   }
 
@@ -376,7 +359,6 @@ export class HudVisualSurface implements HudFramePainter {
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'forget-page', this.pageRevision);
     this.pageRevision += 1;
     this.deliveredTiles.clear();
-    this.writtenSpineLabel = '';
   }
 
   suspendDisplay(): void {
@@ -389,54 +371,6 @@ export class HudVisualSurface implements HudFramePainter {
 
   resumeDisplay(): void {
     this.displayActive = true;
-  }
-
-  /**
-   * Put the state word on the glass before anything else in the frame.
-   *
-   * This is the whole point of the native container: "listening" ->
-   * "hearing you..." -> a reply is a few bytes of textContainerUpgrade that
-   * lands immediately, where painting the same word into the top-left tile
-   * cost a 0.5-2 s image write per change (Even Realities' own figure) and
-   * put every other update behind it in the one paint lane.
-   *
-   * `contentLength` covers the LONGER of the old and new words: the
-   * firmware replaces a span, so a short word after a long one must erase
-   * the tail it is replacing rather than leave it standing.
-   *
-   * A false return means the container is not on the page — the host
-   * rebuilt it underneath us. Forget both the word and the delivered tiles
-   * and fail the frame, so the presenter heals the page and the next paint
-   * writes everything again.
-   */
-  private async writeSpineLabel(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean> {
-    if (!isCurrent()) return false;
-    if (!this.spineLabel) return true;
-    const label = pxTruncate(this.spineLabel(frame), SPINE_LABEL_BOX.width);
-    if (label === this.writtenSpineLabel) return true;
-    const contentLength = Math.max(this.writtenSpineLabel.length, label.length);
-    const write = this.client.require().textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: ContainerId.SpineLabel,
-        containerName: SPINE_LABEL_NAME,
-        contentOffset: 0,
-        contentLength,
-        content: label,
-      }),
-    );
-    // First light precedes MacLink.connect(). A host that never settles
-    // this native call must release the frame to the existing HUD fallback,
-    // just as a stalled tile upload does, instead of blocking all networking.
-    const ok = this.uploadTimeoutMs > 0
-      ? await settleWithin(write, this.uploadTimeoutMs, 'spine label write')
-      : await write;
-    if (!ok || !isCurrent()) {
-      this.writtenSpineLabel = '';
-      this.deliveredTiles.clear();
-      return false;
-    }
-    this.writtenSpineLabel = label;
-    return true;
   }
 
   scrollTranscript(direction: 'up' | 'down'): boolean {
@@ -508,9 +442,6 @@ export class HudVisualSurface implements HudFramePainter {
     const isCurrent = (): boolean => pageRevision === this.pageRevision && (guard?.() ?? true);
     let current: { order: number; tile: HudImageTile; startedAt: number; bytes: number } | undefined;
     try {
-      // The word first: it is the fastest thing on the page and the thing
-      // the wearer is waiting for. Tiles follow at BLE pace.
-      if (!(await this.writeSpineLabel(frame, isCurrent)) || !isCurrent()) return false;
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'render-start', frame.kind, pageRevision);
       const tiles = await this.renderer.render(frame);
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'render-result', frame.kind, tiles.length,
@@ -577,7 +508,6 @@ export class HudVisualSurface implements HudFramePainter {
         });
         if (outcome === 'failed') {
           this.deliveredTiles.clear();
-          this.writtenSpineLabel = '';
           return false;
         }
         this.deliveredTiles.set(tile.containerId, tile.pixels.slice());
@@ -599,7 +529,6 @@ export class HudVisualSurface implements HudFramePainter {
       return true;
     } catch (error) {
       this.deliveredTiles.clear();
-      this.writtenSpineLabel = '';
       if (current) {
         this.diagnostics?.record({
           type: 'tile_upload',

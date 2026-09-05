@@ -479,8 +479,11 @@ async function boot(): Promise<void> {
       if (exiting) return;
       link.resumeIfReplaced();
       location.setForeground(true);
-      // The host may have paused delivery while backgrounded; repaint so the
-      // wearer isn't looking at a stale frame.
+      // The host may have cleared the page while we were behind its own UI —
+      // the exit dialog's "No" was the measured case: the glasses stayed
+      // BLACK because only the status line repainted (wearer report,
+      // 2026-09-05). Repaint the whole restored surface, then the status.
+      void hud.repaintRestoredSurface();
       void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
     },
     onForegroundExit: () => {

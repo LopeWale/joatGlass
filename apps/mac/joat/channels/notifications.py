@@ -189,10 +189,14 @@ class NotificationChannel:
         status: object | None = None,
         policy: DeliveryPolicy | None = None,
         triage_timeout_s: float = 5.0,
+        enrich_body: Callable[[str, str, float], str | None] | None = None,
     ) -> None:
         if triage_timeout_s <= 0:
             raise ValueError("triage timeout must be positive")
         self._store = store
+        # (channel, preview, delivered_unix) -> full text, or None. Supplied
+        # by the Mac for channels whose authoritative store it can read.
+        self._enrich_body = enrich_body
         self._triage = triage
         self._deliver = deliver
         self._interval = poll_interval_s
@@ -236,6 +240,26 @@ class NotificationChannel:
 
     async def _handle(self, n: Notification) -> bool:
         raw = (n.body or n.subtitle or n.title).strip()
+        # macOS elides the banner body it renders, and the Accessibility
+        # watcher can only read what is on screen — so a long message arrives
+        # ALREADY cut, and no display budget can recover it. Where the Mac
+        # can read the authoritative store (chat.db for Messages), ask it for
+        # the whole text before anything downstream summarises or measures.
+        if self._enrich_body is not None and raw.rstrip().endswith(("…", "...")):
+            channel_hint = humanize_app(n.app)
+            try:
+                full = await asyncio.to_thread(
+                    self._enrich_body, channel_hint, raw, n.delivered_unix,
+                )
+            except Exception as exc:
+                log.info("notification enrichment failed (%s)", type(exc).__name__)
+                full = None
+            if full:
+                log.info(
+                    "notification enriched channel=%s preview_chars=%d full_chars=%d",
+                    channel_hint, len(raw), len(full),
+                )
+                raw = full.strip()
         level, summary = Urgency.NOTIFY, raw[:120]
         short = len(raw) <= self.VERBATIM_CHARS
         if self._triage is not None:
@@ -285,7 +309,7 @@ class NotificationChannel:
             summary = n.body or n.title
 
         card = self._policy.admit(Card(
-            source=source, channel=channel, summary=summary, urgency=level,
+            source=source, channel=channel, summary=summary, body=raw, urgency=level,
             event_class=classify_event_class(n.app, n.title), origin_id=n.native_id,
         ))
         if card is None:

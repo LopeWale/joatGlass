@@ -215,6 +215,73 @@ class IMessageStore:
         self._drain_after = last if len(rows) > _READ_PAGE_SIZE else None
         return out, last
 
+    def full_text_near(
+        self, preview: str, at: float, *, window_s: float = 300.0,
+    ) -> str | None:
+        """The complete message behind a TRUNCATED banner preview, or None.
+
+        macOS renders notification banners with an elided body ("Hey! Our
+        team could use…") and the Accessibility watcher can only read what is
+        rendered — so the wearer's own message arrived pre-cut, and no display
+        budget could undo that (their report, 2026-09-05: "Can I not see full
+        messages?"). chat.db has the whole text; this finds it.
+
+        Matched by PREFIX within a time window, not by id: an AX banner
+        carries no message identifier. A prefix that matches more than one
+        candidate is ambiguous and returns None rather than risk showing the
+        wrong person's message. Read-only, and nothing leaves the Mac that
+        the banner did not already carry.
+        """
+        head = preview.strip().rstrip("…").rstrip(".").strip()
+        # Too short to identify a message; a 3-character prefix would match
+        # half the archive.
+        if len(head) < 12 or at <= 0:
+            return None
+        # `message.date` is nanoseconds since the Apple epoch on modern
+        # macOS and SECONDS on older databases — _unix_time reads both, so
+        # the window must cover both or a seconds-schema store silently
+        # matches nothing (measured: candidates=0 on every lookup).
+        low_ns = int((at - window_s - APPLE_EPOCH) * 1e9)
+        high_ns = int((at + window_s - APPLE_EPOCH) * 1e9)
+        low_s = int(at - window_s - APPLE_EPOCH)
+        high_s = int(at + window_s - APPLE_EPOCH)
+        try:
+            with self._connect() as conn:
+                columns = self._columns(conn, "message")
+                body_expr, body_size_expr, visible_clause = self._body_sql(columns)
+                rows = conn.execute(
+                    f"""
+                    SELECT COALESCE(m.text, ''), {body_expr}, {body_size_expr}
+                    FROM message m
+                    WHERE m.is_from_me = 0
+                      AND (m.date BETWEEN ? AND ? OR m.date BETWEEN ? AND ?)
+                      AND {visible_clause}
+                    ORDER BY m.date DESC
+                    LIMIT 50
+                    """,
+                    (low_ns, high_ns, low_s, high_s),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            log.info("chat.db enrichment unavailable (%s)", type(exc).__name__)
+            return None
+
+        matches = []
+        for plain, body, body_size in rows:
+            text = decode_message_body(plain, body, attributed_size=int(body_size)).text
+            if text and text.startswith(head) and len(text) > len(preview.strip()):
+                matches.append(text)
+        if len(matches) != 1:
+            # Counts only — never the text. A silent decline here is
+            # indistinguishable from "no enrichment wired", which is the kind
+            # of blind spot that costs an afternoon.
+            log.info(
+                "chat.db enrichment declined candidates=%d matches=%d "
+                "head_chars=%d window_s=%.0f",
+                len(rows), len(matches), len(head), window_s,
+            )
+            return None
+        return matches[0]
+
     def recent(self, limit: int = 5) -> list[tuple[str, str, float]]:
         """Newest incoming message per sender: (sender, text, unix_time).
 

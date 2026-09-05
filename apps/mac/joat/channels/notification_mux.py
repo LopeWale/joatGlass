@@ -47,6 +47,7 @@ class NotificationMux:
         status: object | None = None,
         poll_interval_s: float = 1.0,
         authority_grace_s: float = 1.25,
+        enrich_body: Callable[[str, str, float], str | None] | None = None,
     ) -> None:
         if not lanes:
             raise ValueError("notification mux requires at least one source lane")
@@ -59,6 +60,7 @@ class NotificationMux:
             triage,
             deliver,
             status=status,
+            enrich_body=enrich_body,
         )
         self._status = status
         self._interval = poll_interval_s
