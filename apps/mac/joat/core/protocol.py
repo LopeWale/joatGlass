@@ -25,6 +25,10 @@ CANVAS_WIDTH = 576
 CANVAS_HEIGHT = 288
 CANVAS_GREY_LEVELS = 16
 
+# Private WebSocket close code agreed with types.ts (RFC 6455 section 7.4.2).
+# A replaced plugin yields instead of reconnecting and evicting its successor.
+PLUGIN_REPLACED_CLOSE_CODE = 4409
+
 # Request ids the MAC mints for voice-initiated surfaces. The plugin adopts a
 # list whose request id carries this prefix instead of dropping it as stale,
 # so "JOAT, show my messages" can paint without a preceding menu tap. Plugin
@@ -150,6 +154,8 @@ class Audio:
     """SDK 0.0.14 speaker attribution: self / other / unknown. Logged for
     calibration now; a future gate keeps non-wearer speech out of STT,
     which STRENGTHENS the explicit-invocation rule."""
+    audio_epoch: str | None = None
+    """Plugin prompt boundary, unchanged from capture; absent on legacy audio."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +206,18 @@ class Device:
     'streaming' at hello and never verify — a mic that failed to start was
     indistinguishable from a working one (observed live: a whole session
     with zero audio while the dashboard said streaming)."""
+    mic_source: AudioSource | None = None
+    """Selected microphone, including while muted; not PCM source evidence."""
+    mic_prompt_id: str | None = None
+    """Only an automatic prompt-owned stop names its retired microphone owner."""
+
+    def __post_init__(self) -> None:
+        if self.mic_source is not None and self.mic_source not in ("glasses", "phone"):
+            raise ProtocolError("device micSource is invalid")
+        if self.mic_prompt_id is not None:
+            _prompt_token(self.mic_prompt_id)
+            if self.mic is not False:
+                raise ProtocolError("device micPromptId requires mic false")
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,11 +383,43 @@ class ProductivityViewAck:
     outcome: Literal["accepted"]
 
 
+@dataclass(frozen=True, slots=True)
+class PromptAck:
+    """A presentation receipt, never permission to send or proof of attention.
+
+    Parsing checks its shape and internal epoch consistency. The gateway must
+    separately match the receipt to its pending authenticated connection.
+    """
+
+    prompt_id: str
+    presentation_binding: str
+    connection_generation: str
+    source: AudioSource
+    success: bool
+    audio_epoch: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptCancel:
+    """Retire one prompt on its original connection in either direction."""
+
+    prompt_id: str
+    connection_generation: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "prompt.cancel",
+            "promptId": _prompt_token(self.prompt_id),
+            "connectionGeneration": _prompt_token(self.connection_generation),
+        }
+
+
 UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
     | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ProductivityViewAck
+    | PromptAck | PromptCancel
 )
 
 
@@ -469,6 +519,35 @@ class AssistantOverlay:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptPresent:
+    """One exact application question requiring its own presentation receipt."""
+
+    prompt_id: str
+    question: str
+    presentation_binding: str
+    connection_generation: str
+    source: AudioSource
+    expires_in_ms: int
+    owner_kind: Literal["messages", "brainstorm", "terminal"]
+    owner_id: str
+    field: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "prompt.present",
+            "promptId": _prompt_token(self.prompt_id),
+            "question": _prompt_question(self.question),
+            "presentationBinding": _prompt_binding(self.presentation_binding),
+            "connectionGeneration": _prompt_token(self.connection_generation),
+            "source": _prompt_source(self.source),
+            "expiresInMs": _prompt_expiry(self.expires_in_ms),
+            "ownerKind": _prompt_owner_kind(self.owner_kind),
+            "ownerId": _prompt_owner_identifier(self.owner_id, maximum=256),
+            "field": _prompt_owner_identifier(self.field, maximum=64),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class HudRebuild:
     layout: Literal["default", "list", "image"] = "default"
     reason: Literal["brainstorm"] | None = None
@@ -535,6 +614,31 @@ class PlanningGridCell:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageUIView:
+    """An action receipt bound to the Messages visit which requested it."""
+
+    request_id: str
+    selection_id: str
+    action_id: str
+    state: Literal["preparing", "awaiting_input", "awaiting_confirmation", "sending", "cancelled", "sent", "failed", "uncertain"]
+    text: str
+
+    def to_wire(self) -> dict[str, Any]:
+        if not self.action_id.startswith("messages-ui-"):
+            raise ProtocolError("invalid Messages UI action identifier")
+        if self.state not in {"preparing", "awaiting_input", "awaiting_confirmation", "sending", "cancelled", "sent", "failed", "uncertain"}:
+            raise ProtocolError("invalid Messages UI action state")
+        return {
+            "kind": "message.ui",
+            "requestId": _prompt_owner_identifier(self.request_id, maximum=128),
+            "selectionId": _prompt_owner_identifier(self.selection_id, maximum=128),
+            "actionId": _prompt_owner_identifier(self.action_id, maximum=96),
+            "state": self.state,
+            "text": _prompt_question(self.text),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class HudList:
     items: list[str]
     title: str | None = None
@@ -554,7 +658,10 @@ class HudList:
         if self.title is not None:
             message["title"] = self.title[:46]
         if self.hint is not None:
-            message["hint"] = self.hint[:46]
+            # Compact raster footers can carry the full paging/read/reply/Back
+            # controls. The title budget is not a footer or SDK text limit.
+            # Keep in sync with HudPresenter.MAX_FOCUS_HINT_CHARS.
+            message["hint"] = self.hint[:96]
         if self.request_id is not None:
             message["requestId"] = self.request_id[:128]
         if self.planning_grid is not None:
@@ -706,6 +813,8 @@ class AgentTerminalHudView:
     #: Overloading one field for both made a tap ambiguous: approve the
     #: tool, or retry the daemon? The count answers it.
     approvals: int = 0
+    opening_request_id: str | None = None
+    opening_selection_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.state not in _BRAINSTORM_HUD_STATES:
@@ -714,6 +823,14 @@ class AgentTerminalHudView:
             raise ProtocolError("Agent Terminal approval count is invalid")
         if len(self.lanes) > 3:
             raise ProtocolError("Agent Terminal HUD has too many lanes")
+        opening: dict[str, str] = {}
+        if (self.opening_request_id is None) != (self.opening_selection_id is None):
+            raise ProtocolError("Agent Terminal opening requires both identifiers")
+        if self.opening_request_id is not None and self.opening_selection_id is not None:
+            opening = {
+                "openingRequestId": _brainstorm_text(self.opening_request_id, "opening request", 128),
+                "openingSelectionId": _brainstorm_text(self.opening_selection_id, "opening selection", 128),
+            }
         return {
             "kind": "agent_terminal.view",
             "terminal": {
@@ -734,6 +851,7 @@ class AgentTerminalHudView:
                 ),
                 "noToolsChecked": self.no_tools_checked,
                 "approvals": self.approvals,
+                **opening,
             },
         }
 
@@ -1230,6 +1348,7 @@ class ConfirmRequest:
     preview_digest: str
     expires_at_ms: int
     diagnostic_kind: Literal["messages"] | None = None
+    message_ui_action_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         wire = {
@@ -1244,6 +1363,10 @@ class ConfirmRequest:
         }
         if self.diagnostic_kind is not None:
             wire["diagnosticKind"] = self.diagnostic_kind
+        if self.message_ui_action_id is not None:
+            if self.diagnostic_kind != "messages" or not self.message_ui_action_id.startswith("messages-ui-"):
+                raise ProtocolError("invalid Messages confirmation owner")
+            wire["messageUIActionId"] = _prompt_owner_identifier(self.message_ui_action_id, maximum=96)
         return wire
 
 
@@ -1281,8 +1404,11 @@ DownlinkMessage = (
     AuthAccepted
     | HudText
     | AssistantOverlay
+    | PromptPresent
+    | PromptCancel
     | HudRebuild
     | HudList
+    | MessageUIView
     | BrainstormHudView
     | AgentTerminalHudView
     | ProductivityHudView
@@ -1317,6 +1443,69 @@ def _require(payload: dict[str, Any], key: str, kind: str) -> Any:
     if key not in payload:
         raise ProtocolError(f"{kind!r} message missing required field {key!r}")
     return payload[key]
+
+
+def _prompt_token(value: Any) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None:
+        raise ProtocolError("prompt token is invalid")
+    return value
+
+
+def _prompt_binding(value: Any) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ProtocolError("prompt presentation binding is invalid")
+    return value
+
+
+def _prompt_question(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 1000 or "\0" in value:
+        raise ProtocolError("prompt question is invalid")
+    try:
+        units = utf16_units(value)
+    except UnicodeEncodeError:
+        # A protocol rejection must never echo private question text through
+        # a chained codec exception or a gateway log.
+        raise ProtocolError("prompt question is invalid") from None
+    if units > 1000:
+        raise ProtocolError("prompt question is invalid")
+    return value
+
+
+def _prompt_expiry(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 45_000:
+        raise ProtocolError("prompt expiry is invalid")
+    return value
+
+
+def _prompt_owner_identifier(value: Any, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str) or not 1 <= len(value) <= maximum
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", value) is None
+    ):
+        raise ProtocolError("prompt owner identifier is invalid")
+    return value
+
+
+def _prompt_source(value: Any) -> AudioSource:
+    if not isinstance(value, str):
+        raise ProtocolError("prompt source is invalid")
+    if value == "glasses":
+        return "glasses"
+    if value == "phone":
+        return "phone"
+    raise ProtocolError("prompt source is invalid")
+
+
+def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "terminal"]:
+    if not isinstance(value, str):
+        raise ProtocolError("prompt owner kind is invalid")
+    if value == "messages":
+        return "messages"
+    if value == "brainstorm":
+        return "brainstorm"
+    if value == "terminal":
+        return "terminal"
+    raise ProtocolError("prompt owner kind is invalid")
 
 
 def _navigation_identifier(value: Any, name: str, maximum: int = 128) -> str:
@@ -1855,6 +2044,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 seq=int(_require(payload, "seq", kind)),
                 pcm=pcm,
                 speaker=str(speaker) if speaker is not None else None,
+                audio_epoch=_prompt_token(payload["audioEpoch"]) if "audioEpoch" in payload else None,
             )
         case "imu":
             return Imu(
@@ -2086,6 +2276,41 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 ),
                 reason=reason,
             )
+        case "prompt.cancel":
+            if set(payload) != {"kind", "promptId", "connectionGeneration"}:
+                raise ProtocolError("prompt cancellation fields are invalid")
+            return PromptCancel(
+                prompt_id=_prompt_token(payload["promptId"]),
+                connection_generation=_prompt_token(payload["connectionGeneration"]),
+            )
+        case "prompt.ack":
+            required = {
+                "kind", "promptId", "presentationBinding", "connectionGeneration", "source", "success",
+            }
+            if not required <= set(payload) <= required | {"audioEpoch"}:
+                raise ProtocolError("prompt acknowledgement fields are invalid")
+            prompt_id = _prompt_token(payload["promptId"])
+            prompt_binding = _prompt_binding(payload["presentationBinding"])
+            generation = _prompt_token(payload["connectionGeneration"])
+            source = _prompt_source(payload["source"])
+            success = payload["success"]
+            if not isinstance(success, bool):
+                raise ProtocolError("prompt acknowledgement success is invalid")
+            epoch = payload.get("audioEpoch")
+            if success:
+                epoch = _prompt_token(epoch)
+                if epoch != prompt_id:
+                    raise ProtocolError("prompt acknowledgement epoch does not match")
+            elif epoch is not None:
+                raise ProtocolError("failed prompt acknowledgement carries an epoch")
+            return PromptAck(
+                prompt_id=prompt_id,
+                presentation_binding=prompt_binding,
+                connection_generation=generation,
+                source=source,
+                success=success,
+                audio_epoch=epoch,
+            )
         case "reminder_due.ack":
             if set(payload) != {
                 "kind", "reminderDueId", "reminderDueAttemptId", "generation", "outcome",
@@ -2150,6 +2375,8 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 wearing=payload.get("wearing"),
                 charging=payload.get("charging"),
                 mic=payload.get("mic"),
+                mic_source=(_prompt_source(payload["micSource"]) if "micSource" in payload else None),
+                mic_prompt_id=(_prompt_token(payload["micPromptId"]) if "micPromptId" in payload else None),
             )
         case "confirm":
             action_id = _require(payload, "actionId", kind)

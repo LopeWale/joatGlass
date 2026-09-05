@@ -8,8 +8,12 @@ environment, not about a dict the test built for itself.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import stat
+import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -29,6 +33,8 @@ from joat.agents.cli_reply_engine import (
 )
 from joat.agents.grounding import Grounding, static_fact
 from joat.core.interfaces import ReplyEngine
+from joat.core.protocol import AssistantOverlay
+from joat.services.hud import HudWriter
 
 JOKE = "Why did the scarecrow win an award? Because he was outstanding in his field."
 
@@ -275,6 +281,320 @@ async def test_codex_warm_reads_login_status(tmp_path: Path, record_dir: Path) -
 
 
 # ── the seat switch ──────────────────────────────────────────────────────────
+
+FINAL_CODEX_REPLY = "The complete answer is ready."
+
+CODEX_COMPLETION_GATES = r'''
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+directory = Path(os.environ["RECORD_DIR"])
+mode = (directory / "mode").read_text()
+(directory / "pid").write_text(str(os.getpid()))
+(directory / "argv").write_text("\0".join(sys.argv[1:]) + "\0")
+
+def emit(event):
+    print(json.dumps(event, ensure_ascii=True), flush=True)
+
+def wait_for_gate(name):
+    deadline = time.monotonic() + 8
+    while not (directory / name).exists():
+        if time.monotonic() >= deadline:
+            sys.exit(9)
+        time.sleep(0.005)
+
+emit({"type": "thread.started", "thread_id": "01a06984-cdcb-7321-a21b-c6b2242ce193"})
+emit({"type": "turn.started"})
+emit({"type": "item.completed", "item": {"id": "reason", "type": "reasoning", "text": "Hidden reasoning"}})
+emit({"type": "item.completed", "item": {"id": "warning", "type": "error", "message": "Nonfatal warning"}})
+emit({"type": "item.completed", "item": {"id": "interim", "type": "agent_message", "text": "Interim commentary must not be the final reply."}})
+emit({"type": "item.updated", "item": {"id": "final", "type": "agent_message", "text": "Partial answer"}})
+answer = {"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": "The complete answer is ready."}}
+
+if mode == "unterminated-item":
+    sys.stdout.write(json.dumps(answer))
+    sys.stdout.flush()
+    sys.exit(0)
+if mode == "fragmented":
+    encoded = json.dumps(answer)
+    split = len(encoded) // 2
+    sys.stdout.write(encoded[:split])
+    sys.stdout.flush()
+    (directory / "fragment.ready").write_text("ready")
+    wait_for_gate("release-fragment")
+    sys.stdout.write(encoded[split:] + "\n")
+    sys.stdout.flush()
+else:
+    emit(answer)
+(directory / "item.ready").write_text("ready")
+
+if mode == "wait-turn":
+    wait_for_gate("release-turn")
+if mode in {"turn-failed", "stream-error"}:
+    if mode == "turn-failed":
+        emit({"type": "turn.failed", "error": {"message": "Synthetic fatal failure"}})
+    else:
+        emit({"type": "error", "message": "Synthetic fatal failure"})
+    sys.exit(0)
+
+completed = {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}
+(directory / "completed.at").write_text(str(time.monotonic()))
+if mode == "unterminated-completion":
+    sys.stdout.write(json.dumps(completed))
+    sys.stdout.flush()
+    sys.exit(0)
+emit(completed)
+if mode == "duplicate-completion":
+    emit(answer)
+    emit(completed)
+wait_for_gate("release-eof")
+(directory / "exiting.at").write_text(str(time.monotonic()))
+sys.exit(7 if mode == "late-nonzero" else 0)
+'''
+
+
+class CompletionTransport:
+    """Record the real HudWriter send boundary, not a physical paint receipt."""
+
+    def __init__(self) -> None:
+        self.sent: list[AssistantOverlay] = []
+        self.first_reply_at: float | None = None
+        self.first_reply = asyncio.Event()
+
+    async def send(self, message: object) -> None:
+        if isinstance(message, AssistantOverlay) and message.text:
+            self.sent.append(message)
+            if self.first_reply_at is None:
+                self.first_reply_at = time.monotonic()
+                self.first_reply.set()
+
+
+def completion_engine(
+    tmp_path: Path, record_dir: Path, *, mode: str = "held-eof",
+    fallback: ReplyEngine | None = None, timeout_s: float = 5,
+) -> CodexCliReplyEngine:
+    (record_dir / "mode").write_text(mode)
+    binary = script(tmp_path, "controlled-codex", f"#!{sys.executable}\n{CODEX_COMPLETION_GATES}")
+    return CodexCliReplyEngine(binary, workdir=tmp_path, fallback=fallback, timeout_s=timeout_s)
+
+
+async def wait_fixture_path(path: Path, timeout_s: float = 2) -> None:
+    async def wait() -> None:
+        while not path.exists():
+            await asyncio.sleep(0.005)
+    await asyncio.wait_for(wait(), timeout_s)
+
+
+def fixture_child_alive(record_dir: Path) -> bool:
+    pid_file = record_dir / "pid"
+    if not pid_file.exists():
+        return False
+    try:
+        os.kill(int(pid_file.read_text()), 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def wait_fixture_child_stopped(record_dir: Path) -> None:
+    async def wait() -> None:
+        while fixture_child_alive(record_dir):
+            await asyncio.sleep(0.005)
+    await asyncio.wait_for(wait(), 3)
+
+
+async def pump_completion_reply(
+    engine: CodexCliReplyEngine, transport: CompletionTransport, chunks: list[str],
+) -> None:
+    hud = HudWriter(transport)  # type: ignore[arg-type]
+    async for chunk in engine.stream("A synthetic question"):
+        await hud.assistant(chunk, append=bool(chunks))
+        chunks.append(chunk)
+
+
+async def release_completion_fixture(record_dir: Path, task: asyncio.Task[None]) -> None:
+    for name in ("release-turn", "release-fragment", "release-eof"):
+        (record_dir / name).write_text("released")
+    if not task.done():
+        task.cancel()
+    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 3)
+    await wait_fixture_child_stopped(record_dir)
+
+
+@pytest.mark.asyncio
+async def test_codex_completed_turn_reaches_hud_before_held_eof(
+    tmp_path: Path, record_dir: Path, record_property: Any,
+) -> None:
+    engine = completion_engine(tmp_path, record_dir)
+    transport, chunks = CompletionTransport(), []
+    task = asyncio.create_task(pump_completion_reply(engine, transport, chunks))
+    try:
+        await wait_fixture_path(record_dir / "completed.at")
+        await asyncio.wait_for(transport.first_reply.wait(), 0.5)
+        assert transport.sent[0].text == FINAL_CODEX_REPLY
+        assert fixture_child_alive(record_dir)
+        assert not task.done(), "reply delivery must not abandon child ownership"
+        assert not (record_dir / "exiting.at").exists()
+        assert transport.first_reply_at is not None
+        completed_at = float((record_dir / "completed.at").read_text())
+        latency_ms = (transport.first_reply_at - completed_at) * 1000
+        assert latency_ms >= 0
+        record_property("completed_event_to_first_hud_send_ms", latency_ms)
+        record_property("first_hud_send_before_eof_release", True)
+        (record_dir / "release-eof").write_text("released")
+        await asyncio.wait_for(task, 3)
+        assert chunks == [FINAL_CODEX_REPLY]
+        assert engine.account == "logged_in"
+        assert transport.first_reply_at < float((record_dir / "exiting.at").read_text())
+        # Successful cleanup preserves the CLI-owned conversation on the next turn.
+        assert await drain(engine, "Continue the synthetic conversation") == [FINAL_CODEX_REPLY]
+        argv = argv_of(record_dir)
+        assert argv[argv.index("resume") + 1] == "01a06984-cdcb-7321-a21b-c6b2242ce193"
+    finally:
+        await release_completion_fixture(record_dir, task)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "ready", "release"), [
+    ("wait-turn", "item.ready", "release-turn"),
+    ("fragmented", "fragment.ready", "release-fragment"),
+])
+async def test_codex_completed_item_waits_for_complete_turn_boundary(
+    tmp_path: Path, record_dir: Path, mode: str, ready: str, release: str,
+) -> None:
+    engine = completion_engine(tmp_path, record_dir, mode=mode)
+    transport, chunks = CompletionTransport(), []
+    task = asyncio.create_task(pump_completion_reply(engine, transport, chunks))
+    try:
+        await wait_fixture_path(record_dir / ready)
+        await asyncio.sleep(0.03)
+        assert transport.sent == [], "neither interim items nor incomplete JSON are a final answer"
+        (record_dir / release).write_text("released")
+        await wait_fixture_path(record_dir / "completed.at")
+        await asyncio.wait_for(transport.first_reply.wait(), 0.5)
+        assert transport.sent[0].text == FINAL_CODEX_REPLY
+        (record_dir / "release-eof").write_text("released")
+        await asyncio.wait_for(task, 3)
+        assert chunks == [FINAL_CODEX_REPLY]
+    finally:
+        await release_completion_fixture(record_dir, task)
+
+
+@pytest.mark.asyncio
+async def test_codex_duplicate_completion_does_not_repeat_delivered_reply(
+    tmp_path: Path, record_dir: Path,
+) -> None:
+    engine = completion_engine(tmp_path, record_dir, mode="duplicate-completion")
+    transport, chunks = CompletionTransport(), []
+    task = asyncio.create_task(pump_completion_reply(engine, transport, chunks))
+    try:
+        await wait_fixture_path(record_dir / "completed.at")
+        await asyncio.wait_for(transport.first_reply.wait(), 0.5)
+        (record_dir / "release-eof").write_text("released")
+        await asyncio.wait_for(task, 3)
+        assert chunks == [FINAL_CODEX_REPLY]
+    finally:
+        await release_completion_fixture(record_dir, task)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unterminated-item", "unterminated-completion"])
+async def test_codex_clean_eof_preserves_last_unterminated_event(
+    tmp_path: Path, record_dir: Path, mode: str,
+) -> None:
+    engine = completion_engine(tmp_path, record_dir, mode=mode)
+    assert await asyncio.wait_for(drain(engine, "Synthetic question"), 3) == [FINAL_CODEX_REPLY]
+    assert engine.account == "logged_in"
+    await wait_fixture_child_stopped(record_dir)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["turn-failed", "stream-error"])
+async def test_codex_fatal_stream_event_cannot_publish_candidate_answer(
+    tmp_path: Path, record_dir: Path, mode: str,
+) -> None:
+    fallback = LocalEngine("Fallback answer")
+    engine = completion_engine(tmp_path, record_dir, mode=mode, fallback=fallback)
+    assert await asyncio.wait_for(drain(engine, "Synthetic question"), 3) == ["Fallback answer"]
+    assert fallback.asked == ["Synthetic question"]
+    assert engine.account != "logged_in"
+    await wait_fixture_child_stopped(record_dir)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["late-nonzero", "held-eof"])
+async def test_codex_failure_after_delivery_never_runs_fallback_or_resumes_failed_turn(
+    tmp_path: Path, record_dir: Path, mode: str,
+) -> None:
+    fallback = LocalEngine("Fallback would repeat the turn")
+    engine = completion_engine(tmp_path, record_dir, mode=mode, fallback=fallback,
+                               timeout_s=0.8 if mode == "held-eof" else 5)
+    transport, chunks = CompletionTransport(), []
+    task = asyncio.create_task(pump_completion_reply(engine, transport, chunks))
+    try:
+        await wait_fixture_path(record_dir / "completed.at")
+        await asyncio.wait_for(transport.first_reply.wait(), 0.4)
+        assert transport.sent[0].text == FINAL_CODEX_REPLY
+        if mode == "late-nonzero":
+            (record_dir / "release-eof").write_text("released")
+        await asyncio.wait_for(task, 3)
+        assert chunks.count(FINAL_CODEX_REPLY) == 1
+        assert fallback.asked == []
+        assert engine.account != "logged_in"
+        await wait_fixture_child_stopped(record_dir)
+        # A late process failure must not make a new question resume an
+        # incompletely finalized turn, even though its answer was visible.
+        (record_dir / "mode").write_text("held-eof")
+        (record_dir / "release-eof").write_text("released")
+        assert await asyncio.wait_for(drain(engine, "Next question"), 3) == [FINAL_CODEX_REPLY]
+        assert "resume" not in argv_of(record_dir)
+    finally:
+        await release_completion_fixture(record_dir, task)
+
+
+@pytest.mark.asyncio
+async def test_codex_cancelling_after_first_hud_send_reaps_owned_child(
+    tmp_path: Path, record_dir: Path,
+) -> None:
+    fallback = LocalEngine("Fallback must not run")
+    engine = completion_engine(tmp_path, record_dir, fallback=fallback)
+    transport, chunks = CompletionTransport(), []
+    task = asyncio.create_task(pump_completion_reply(engine, transport, chunks))
+    try:
+        await wait_fixture_path(record_dir / "completed.at")
+        await asyncio.wait_for(transport.first_reply.wait(), 0.5)
+        assert fixture_child_alive(record_dir)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        await wait_fixture_child_stopped(record_dir)
+        assert fallback.asked == []
+        assert chunks == [FINAL_CODEX_REPLY]
+    finally:
+        await release_completion_fixture(record_dir, task)
+
+
+@pytest.mark.asyncio
+async def test_codex_closing_stream_after_first_yield_reaps_owned_child(
+    tmp_path: Path, record_dir: Path,
+) -> None:
+    fallback = LocalEngine("Fallback must not run")
+    engine = completion_engine(tmp_path, record_dir, fallback=fallback)
+    stream = engine.stream("Synthetic question")
+    try:
+        assert await asyncio.wait_for(anext(stream), 1) == FINAL_CODEX_REPLY
+        assert fixture_child_alive(record_dir)
+        await asyncio.wait_for(stream.aclose(), 3)
+        await wait_fixture_child_stopped(record_dir)
+        assert fallback.asked == []
+    finally:
+        (record_dir / "release-eof").write_text("released")
+        await asyncio.wait_for(stream.aclose(), 3)
+        await wait_fixture_child_stopped(record_dir)
+
 
 @pytest.mark.asyncio
 async def test_the_switch_honours_the_spoken_seat_and_skips_a_signed_out_one() -> None:

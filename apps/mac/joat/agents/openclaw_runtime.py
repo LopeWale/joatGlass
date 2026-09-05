@@ -13,7 +13,7 @@ import json
 import os
 import stat
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast
@@ -34,6 +34,7 @@ from .openclaw_gateway import (
 from .openclaw_terminal import (
     AgentTerminalConnection,
     OpenClawAgentTerminal,
+    OpenClawRunFailed,
     OpenClawToolInventoryUnsettled,
     OpenClawToolsEnabled,
     PendingApproval,
@@ -308,17 +309,39 @@ class OpenClawTerminalAgent:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _closed: bool = field(default=False, init=False)
     _stream_task: asyncio.Task[object] | None = field(default=None, init=False)
+    _initialization_task: asyncio.Task[object] | None = field(default=None, init=False)
+    _capture_generation: int = field(default=0, init=False)
 
     @property
     def initialized(self) -> bool:
         """Whether normal setup already owns a subscribed terminal connection."""
         return self._terminal is not None
 
+    @property
+    def capture_context_generation(self) -> int | None:
+        """Local incarnation of a ready, subscribed terminal destination."""
+        if self._closed or self._terminal is None:
+            return None
+        return self._capture_generation
+
     async def initialize(self) -> None:
+        async with self._lock:
+            await self._initialize_locked()
+
+    async def _initialize_locked(self) -> None:
         if self._closed:
             raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
         if self._terminal is not None:
             return
+        current_task = asyncio.current_task()
+        self._initialization_task = current_task
+        try:
+            await self._create_terminal()
+        finally:
+            if self._initialization_task is current_task:
+                self._initialization_task = None
+
+    async def _create_terminal(self) -> None:
         connection = await self.client.connect()
         if self._closed:
             await _safe_close(connection)
@@ -335,7 +358,7 @@ class OpenClawTerminalAgent:
                     connection=connection, agent_id=self.agent_id,
                     session_key=resume_key, session_id="", policy=self.policy,
                 ).list_sessions()
-                self._terminal = await OpenClawAgentTerminal.attach(
+                terminal = await OpenClawAgentTerminal.attach(
                     connection=connection,
                     agent_id=self.agent_id,
                     session_key=resume_key,
@@ -343,18 +366,26 @@ class OpenClawTerminalAgent:
                     recovery=recovery,
                     on_approval=self.on_approval,
                 )
+                if self._closed:
+                    raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+                self._terminal = terminal
+                self._capture_generation += 1
             except BaseException:
                 await _safe_close(connection)
                 raise
             return
         try:
-            self._terminal = await OpenClawAgentTerminal.create(
+            terminal = await OpenClawAgentTerminal.create(
                 connection=connection,
                 agent_id=self.agent_id,
                 policy=self.policy,
                 recovery=recovery,
                 on_approval=self.on_approval,
             )
+            if self._closed:
+                raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            self._terminal = terminal
+            self._capture_generation += 1
         except BaseException:
             await _safe_close(connection)
             raise
@@ -391,21 +422,46 @@ class OpenClawTerminalAgent:
                 await _safe_close(connection)
 
     async def stream(self, prompt: str) -> AsyncGenerator[str, None]:
+        async with aclosing(self._stream(prompt)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def stream_captured(
+        self, prompt: str, *, context_generation: int,
+    ) -> AsyncGenerator[str, None]:
+        """Submit only to the context that owned the spoken question."""
+        if type(context_generation) is not int:
+            raise OpenClawGatewayError("Captured Terminal context is unavailable")
+        async with aclosing(self._stream(prompt, context_generation)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def _stream(
+        self, prompt: str, context_generation: int | None = None,
+    ) -> AsyncGenerator[str, None]:
         async with self._lock:
             if self._closed:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
+            # Check after acquiring the same lock as adoption and submission.
+            # A queued capture cannot reconnect itself into a different target.
+            # Reject outside the stream cleanup block: stale input must not
+            # invalidate a healthy successor terminal.
+            if (context_generation is not None
+                    and self.capture_context_generation != context_generation):
+                raise OpenClawGatewayError("Captured Terminal context changed or is unavailable")
             current_task = asyncio.current_task()
             self._stream_task = current_task
             try:
-                await self.initialize()
+                await self._initialize_locked()
                 terminal = self._terminal
                 if terminal is None:  # defensive: initialize either sets or raises
                     raise OpenClawGatewayError(
                         "OpenClaw Agent Terminal is unavailable"
                     )
                 self._set_state("running", "")
-                async for chunk in terminal.stream(prompt):
-                    yield chunk
+                async with aclosing(terminal.stream(prompt)) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
             except OpenClawToolsEnabled:
                 await self._invalidate_terminal()
                 self._set_state("blocked", "tools_enabled")
@@ -421,6 +477,12 @@ class OpenClawTerminalAgent:
             except (OpenClawConnectionClosed, OSError):
                 await self._invalidate_terminal()
                 self._set_state("blocked", "connection_closed")
+                raise
+            except OpenClawRunFailed:
+                # A valid terminal chat event ends this run, not its proven
+                # session. The roster reports the fixed failure message; a
+                # later explicit instruction may reuse this exact context.
+                self._set_state("ready", "")
                 raise
             except OpenClawGatewayError:
                 await self._invalidate_terminal()
@@ -458,7 +520,7 @@ class OpenClawTerminalAgent:
         async with self._lock:
             if self._closed:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
-            await self.initialize()
+            await self._initialize_locked()
             terminal = self._terminal
             if terminal is None:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
@@ -469,7 +531,7 @@ class OpenClawTerminalAgent:
         async with self._lock:
             if self._closed:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
-            await self.initialize()
+            await self._initialize_locked()
             terminal = self._terminal
             if terminal is None:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
@@ -503,7 +565,7 @@ class OpenClawTerminalAgent:
         async with self._lock:
             if self._closed:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is closed")
-            await self.initialize()
+            await self._initialize_locked()
             terminal = self._terminal
             if terminal is None:
                 raise OpenClawGatewayError("OpenClaw Agent Terminal is unavailable")
@@ -512,12 +574,16 @@ class OpenClawTerminalAgent:
     async def close(self) -> None:
         self._closed = True
         stream_task = self._stream_task
+        initialization_task = self._initialization_task
         current_task = asyncio.current_task()
-        if stream_task is not None and stream_task is not current_task:
-            stream_task.cancel()
+        pending = {task for task in (stream_task, initialization_task)
+                   if task is not None and task is not current_task}
+        for task in pending:
+            task.cancel()
+        for task in pending:
             with suppress(asyncio.CancelledError):
-                await stream_task
-        if stream_task is current_task:
+                await task
+        if current_task in (stream_task, initialization_task):
             await self._invalidate_terminal()
             return
         async with self._lock:
@@ -525,6 +591,7 @@ class OpenClawTerminalAgent:
 
     async def _invalidate_terminal(self) -> None:
         terminal, self._terminal = self._terminal, None
+        self._capture_generation += 1
         if terminal is not None:
             terminal.recovery = None
             await _safe_close(terminal.connection)

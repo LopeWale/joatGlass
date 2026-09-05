@@ -13,9 +13,6 @@ import {
   CAPABILITIES,
   CAPABILITY_MENU_ID_BASE,
   ContainerId,
-  SPINE_LABEL_BOX,
-  SPINE_LABEL_BRIGHTNESS,
-  SPINE_LABEL_NAME,
   VisualContainerName,
 } from './types';
 
@@ -237,22 +234,6 @@ export class HudPageBuilder {
         zOrderIndex: 1,
         textColor: 0,
         content: ' ',
-      }), new TextContainerProperty({
-        // The state word, natively. Above every tile (larger zOrderIndex is
-        // in front) and never the capturer: input stays with the layer
-        // behind the tiles, exactly as before.
-        containerID: ContainerId.SpineLabel,
-        containerName: SPINE_LABEL_NAME,
-        xPosition: SPINE_LABEL_BOX.x,
-        yPosition: SPINE_LABEL_BOX.y,
-        width: SPINE_LABEL_BOX.width,
-        height: SPINE_LABEL_BOX.height,
-        paddingLength: 0,
-        borderWidth: 0,
-        isEventCapture: 0,
-        zOrderIndex: 6,
-        textColor: SPINE_LABEL_BRIGHTNESS,
-        content: ' ',
       })],
       imageObject: [
         new ImageContainerProperty({
@@ -281,7 +262,7 @@ export class HudPageBuilder {
 
   visualStartup(): CreateStartUpPageContainer {
     return new CreateStartUpPageContainer({
-      containerTotalNum: 6,
+      containerTotalNum: 5,
       ...this.visualObjects(),
       ...this.menuConfig(),
     });
@@ -289,7 +270,7 @@ export class HudPageBuilder {
 
   visualLayout(): RebuildPageContainer {
     return new RebuildPageContainer({
-      containerTotalNum: 6,
+      containerTotalNum: 5,
       ...this.visualObjects(),
       // Rebuild replaces a contextual menu wholesale when it is omitted.
       // Keep the same declared actions on the production image HUD as on the

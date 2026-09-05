@@ -544,6 +544,31 @@ _MIGRATION_10 = (
     """,
 )
 
+_MIGRATION_11 = (
+    """
+    CREATE TABLE pomodoro_checkpoint (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        phase TEXT NOT NULL CHECK (phase IN ('idle','focus','break','long_break')),
+        running INTEGER NOT NULL CHECK (running IN (0,1)),
+        remaining_ms INTEGER NOT NULL CHECK (remaining_ms >= 0),
+        length_ms INTEGER NOT NULL CHECK (length_ms BETWEEN 1 AND 86400000),
+        completed INTEGER NOT NULL CHECK (
+            (phase = 'idle' AND completed = 0) OR
+            (phase = 'focus' AND completed BETWEEN 0 AND 3) OR
+            (phase = 'break' AND completed BETWEEN 1 AND 3) OR
+            (phase = 'long_break' AND completed = 4)
+        ),
+        ends_at_unix_ms INTEGER CHECK (ends_at_unix_ms >= 0),
+        saved_at_unix_ms INTEGER NOT NULL CHECK (saved_at_unix_ms >= 0),
+        CHECK (remaining_ms <= length_ms),
+        CHECK (
+            (running = 1 AND phase != 'idle' AND ends_at_unix_ms IS NOT NULL) OR
+            (running = 0 AND ends_at_unix_ms IS NULL)
+        )
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -555,6 +580,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (8, "calendar_starting_soon_alerts", _MIGRATION_8),
     (9, "index_notification_observations_class_time", _MIGRATION_9),
     (10, "drop_calendar_starting_soon_alerts", _MIGRATION_10),
+    (11, "durable_pomodoro_checkpoint", _MIGRATION_11),
 )
 
 

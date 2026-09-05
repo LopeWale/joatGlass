@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 import urllib.parse
 import urllib.request
@@ -211,7 +212,15 @@ def messages_tool(store: "IMessageStore") -> Tool:
             limit = int(args.get("limit", 3))
         except (TypeError, ValueError):
             limit = 3
-        rows = await asyncio.to_thread(store.recent, limit)
+        try:
+            rows = await asyncio.to_thread(store.recent, limit)
+        except PermissionError:
+            return (
+                "Messages access unavailable. Check Mac Settings > Privacy & Security > "
+                "Full Disk Access, then retry. No messages were read."
+            )
+        except (OSError, sqlite3.Error):
+            return "Messages is temporarily unavailable. Retry shortly. No messages were read."
         if not rows:
             return "no recent messages"
         return "; ".join(

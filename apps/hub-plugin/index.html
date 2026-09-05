@@ -16,10 +16,13 @@
       dt { opacity: 0.55; }
       dd { margin: 0; }
       .hint { opacity: 0.45; font-size: 0.8rem; line-height: 1.5; }
+      button { font: inherit; color: inherit; background: #142219;
+               border: 1px solid currentColor; border-radius: 0.4rem;
+               padding: 0.55rem 0.9rem; cursor: pointer; }
     </style>
   </head>
   <body>
-    <!-- Status readout only — the real UI renders on the glasses HUD.
+    <!-- Connection status and recovery — feature UI renders on the glasses HUD.
          On boot FAILURE, main.ts replaces this whole body with the error. -->
     <main id="panel">
       <div class="brand">JOAT <span id="p-status">booting…</span></div>
@@ -29,6 +32,7 @@
         <dt>Resume policy</dt><dd id="p-policy">—</dd>
         <dt>Dial target</dt><dd id="p-url">—</dd>
       </dl>
+      <button id="p-reconnect" type="button" hidden>Reconnect this display</button>
       <p class="hint">This page is the plugin's status panel. The assistant's actual
 display is the glasses HUD — in the simulator, the “Glasses Display” window.</p>
     </main>

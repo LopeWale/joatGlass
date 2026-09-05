@@ -14,7 +14,7 @@ import type { PanelTab } from './types';
  * refreshes only at the top of an expanded tab.
  */
 
-function rig(activeTab: PanelTab = 'notifications') {
+function rig(activeTab: PanelTab = 'notifications', restorationResult: boolean | Promise<boolean> = true) {
   const rail = new PanelRail();
   rail.setActive(activeTab);
   const lists: Array<{ items: string[]; options?: Record<string, unknown> }> = [];
@@ -42,6 +42,10 @@ function rig(activeTab: PanelTab = 'notifications') {
     setSelection: vi.fn(async (index: number) => {
       selections.push(index);
       return true;
+    }),
+    restoreSelection: vi.fn(async (index: number) => {
+      selections.push(index);
+      return restorationResult;
     }),
     moveSelection: vi.fn(async () => true),
     setStatus: vi.fn(async () => true),
@@ -71,6 +75,53 @@ const pomodoroPush = (revision: number) => ({
 });
 
 describe('CapabilityMenu — the overview tab rail', () => {
+  it.each([true, false])('keeps Home after a pending News cursor restoration is cancelled (late result=%s)', async (lateResult) => {
+    let finishSelection!: (painted: boolean) => void;
+    const painting = new Promise<boolean>((resolve) => { finishSelection = resolve; });
+    const { menu, rail, selections, sent, defaults } = rig('news', painting);
+    rail.accept(newsPush(7, ['Story 01', 'Story 02']));
+    await menu.openPanelTab('news');
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick();
+    await menu.presentList('NEWS · ARTICLE', ['Story 02', 'Complete article.'], 'panel-news-7', false);
+    selections.length = 0;
+    const returning = menu.toggle();
+    try {
+      await vi.waitFor(() => expect(selections).toContain(1));
+      expect(menu.handleClick()).toBe(true);
+      expect(sent).toHaveLength(1);
+      await menu.toggle();
+      expect(menu.isOpen()).toBe(false);
+      expect(defaults()).toBe(1);
+      finishSelection(lateResult);
+      await returning;
+      expect(menu.isOpen()).toBe(false);
+      expect(menu.handleClick()).toBe(false);
+      expect(sent).toHaveLength(1);
+      expect(defaults()).toBe(1);
+    } finally {
+      finishSelection(lateResult);
+      await returning;
+      menu.releaseToLiveSession();
+    }
+  });
+
+  it('closes instead of enabling News taps after a failed cursor restoration', async () => {
+    const { menu, rail, sent, defaults } = rig('news', false);
+    rail.accept(newsPush(7, ['Story 01', 'Story 02']));
+    await menu.openPanelTab('news');
+    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    menu.handleClick();
+    await menu.presentList('NEWS · ARTICLE', ['Story 02', 'Complete article.'], 'panel-news-7', false);
+
+    await menu.toggle();
+
+    expect(menu.isOpen()).toBe(false);
+    expect(menu.handleClick()).toBe(false);
+    expect(sent).toHaveLength(1);
+    expect(defaults()).toBe(1);
+  });
+
   it('a resting swipe moves the rail and is consumed even at the ends', () => {
     const { menu, steps } = rig();
     expect(menu.handleOverviewSwipe(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);

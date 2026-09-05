@@ -8,10 +8,11 @@ agent's effective tool inventory is empty at the moment of the turn.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 from .openclaw_gateway import (
@@ -23,6 +24,30 @@ from .openclaw_gateway import (
 )
 
 
+log = logging.getLogger(__name__)
+# Official tools.effective notices. Unknown provider text is never diagnostic
+# output: it may contain private MCP names, connection details, or credentials.
+# https://docs.openclaw.ai/gateway/protocol#operator-helper-methods
+# Wire field: EffectiveToolInventoryNotice.id (OpenClaw v2026.7.1 and main),
+# src/agents/tools-effective-inventory.types.ts; message/server text stays private.
+# IDs: src/agents/tools-effective-inventory.ts and
+# src/gateway/server-methods/tools-effective.ts at those same revisions.
+TOOL_INVENTORY_NOTICE_CODES = frozenset({
+    "mcp-not-yet-connected", "mcp-not-yet-listed", "mcp-stale-catalog",
+    "browser-denied-by-policy", "browser-filtered-by-profile", "browser-plugin-not-allowed",
+})
+# Both tools-effective-inventory-build.ts and tools-effective-mcp-inventory.ts
+# emit unsupported-tool-schema:<toolName>. Only the fixed family is loggable.
+TOOL_SCHEMA_NOTICE_PREFIX = "unsupported-tool-schema:"
+# These notices explain a completed exclusion, not missing inventory. Their
+# exact severities come from buildToolInventoryNotices in OpenClaw v2026.7.1
+# src/agents/tools-effective-inventory.ts. MCP notices also use "info", so
+# accepting by severity alone would incorrectly admit undiscovered tools.
+SETTLED_TOOL_EXCLUSIONS = {
+    "browser-filtered-by-profile": "info",
+    "browser-denied-by-policy": "info",
+    "browser-plugin-not-allowed": "warning",
+}
 REQUIRED_METHODS = frozenset(
     {
         "tools.effective",
@@ -79,6 +104,57 @@ class OpenClawToolInventoryUnsettled(OpenClawGatewayError):
 
 class OpenClawToolsEnabled(OpenClawGatewayError):
     """The dedicated remote agent exposes at least one effective tool."""
+
+
+# OpenClaw v2026.7.1 packages/gateway-protocol/src/schema/logs-chat.ts
+# defines these coarse error kinds. Free-form provider errorMessage/message
+# fields are never exception text or log data in JOAT.
+_RUN_ERROR_MESSAGES = {
+    "refusal": "OpenClaw declined this instruction.",
+    "timeout": "OpenClaw run timed out. Try again.",
+    "rate_limit": "OpenClaw provider rate limit reached. Try again later.",
+    "context_length": "OpenClaw session context is too long. Shorten the instruction or start a new session.",
+    "unknown": "OpenClaw run failed. Check OpenClaw for details, then try again.",
+}
+# src/agents/run-termination.ts and agent-run-terminal-outcome.ts document
+# these stop literals. The wire permits other strings; keep those private.
+_RUN_STOP_REASONS = frozenset({"aborted", "restart", "timeout", "rpc", "stop"})
+
+
+class OpenClawRunFailed(OpenClawGatewayError):
+    """An owned run ended unsuccessfully without revoking its connection."""
+
+    def __init__(
+        self, state: Literal["error", "aborted"], *, kind: str, stop_reason: str,
+    ) -> None:
+        self.state = state
+        self.kind = kind if kind in _RUN_ERROR_MESSAGES else "unknown"
+        self.stop_reason = stop_reason if stop_reason in _RUN_STOP_REASONS else "unknown"
+        if state == "aborted":
+            if self.stop_reason == "restart":
+                message = "OpenClaw interrupted this run for restart. Try again when ready."
+            elif self.stop_reason in {"rpc", "stop"}:
+                message = "OpenClaw run was cancelled."
+            else:
+                message = "OpenClaw stopped this run before completion."
+        else:
+            kind = "timeout" if self.kind == "unknown" and self.stop_reason == "timeout" else self.kind
+            message = _RUN_ERROR_MESSAGES[kind]
+        super().__init__(message)
+
+
+def _run_failure(
+    payload: dict[str, object], state: Literal["error", "aborted"],
+) -> OpenClawRunFailed:
+    for name in ("errorMessage", "stopReason"):
+        if name in payload and not isinstance(payload[name], str):
+            raise OpenClawGatewayError("OpenClaw sent an invalid Agent Terminal run outcome")
+    kind = payload.get("errorKind", "unknown")
+    if not isinstance(kind, str) or kind not in _RUN_ERROR_MESSAGES:
+        raise OpenClawGatewayError("OpenClaw sent an invalid Agent Terminal error kind")
+    stop_reason = payload.get("stopReason", "unknown")
+    assert isinstance(stop_reason, str)  # Validated above, including explicit null.
+    return OpenClawRunFailed(state, kind=kind, stop_reason=stop_reason)
 
 
 class AgentTerminalConnection(Protocol):
@@ -361,7 +437,7 @@ class OpenClawAgentTerminal:
         await terminal._assert_isolated_session()
         await terminal._assert_tools_disabled()
 
-    async def stream(self, prompt: str) -> AsyncIterator[str]:
+    async def stream(self, prompt: str) -> AsyncGenerator[str, None]:
         if not prompt or len(prompt) > 100_000:
             raise ValueError("OpenClaw Agent Terminal prompt is invalid")
         if not self.attached:
@@ -494,11 +570,15 @@ class OpenClawAgentTerminal:
                             yield suffix
                     terminal_received = True
                     return
-                if state in {"aborted", "error"}:
+                if state == "aborted" or state == "error":
+                    failure = _run_failure(payload, state)
                     terminal_received = True
-                    raise OpenClawGatewayError(
-                        "OpenClaw Agent Terminal run did not complete"
+                    log.warning(
+                        "OpenClaw Agent Terminal run ended state=%s kind=%s stop=%s",
+                        failure.state, failure.kind, failure.stop_reason,
                     )
+                    raise failure
+                raise OpenClawGatewayError("OpenClaw sent an invalid Agent Terminal event state")
         except BaseException as exc:
             raised = exc
             raise
@@ -720,7 +800,8 @@ class OpenClawAgentTerminal:
             raise OpenClawGatewayError(
                 "OpenClaw returned an invalid effective tool inventory"
             )
-        if notices:
+        if any(not _is_settled_tool_exclusion(notice) for notice in notices):
+            _log_unsettled_tool_inventory(notices, groups)
             raise OpenClawToolInventoryUnsettled(
                 "OpenClaw effective tool inventory is unsettled"
             )
@@ -735,6 +816,58 @@ class OpenClawAgentTerminal:
                 raise OpenClawToolsEnabled(
                     "OpenClaw Agent Terminal tools are enabled"
                 )
+
+
+def _is_settled_tool_exclusion(notice: object) -> bool:
+    record = _record(notice)
+    notice_id = record.get("id") if record else None
+    if record is None or not isinstance(notice_id, str):
+        return False
+    severity = SETTLED_TOOL_EXCLUSIONS.get(notice_id)
+    message = record.get("message")
+    return (
+        severity is not None
+        and record.get("severity") == severity
+        and isinstance(message, str)
+        and bool(message.strip())
+    )
+
+
+def _log_unsettled_tool_inventory(notices: list[object], groups: list[object]) -> None:
+    """Describe the refusal without retaining any remote payload text."""
+    codes: set[str] = set()
+    unknown = malformed = 0
+    for notice in notices:
+        record = _record(notice)
+        code = record.get("id") if record else None
+        if not isinstance(code, str) or not code:
+            malformed += 1
+        elif code in TOOL_INVENTORY_NOTICE_CODES:
+            codes.add(code)
+        elif (code.startswith(TOOL_SCHEMA_NOTICE_PREFIX)
+              and len(code) > len(TOOL_SCHEMA_NOTICE_PREFIX)):
+            codes.add("unsupported-tool-schema")
+        else:
+            unknown += 1
+    tool_entries = malformed_groups = 0
+    for group in groups:
+        record = _record(group)
+        tools = record.get("tools") if record else None
+        if isinstance(tools, list):
+            tool_entries += len(tools)
+        else:
+            malformed_groups += 1
+    try:
+        log.warning(
+            "OpenClaw tool inventory unsettled notice_count=%d codes=%s "
+            "unknown_notices=%d malformed_notices=%d groups=%d "
+            "tool_entries=%d malformed_groups=%d",
+            len(notices), ",".join(sorted(codes)) or "none", unknown, malformed,
+            len(groups), tool_entries, malformed_groups,
+        )
+    except Exception:
+        # Diagnostics must not replace the original fail-closed exception.
+        pass
 
 
 def _parse_approval(payload: dict[str, object]) -> PendingApproval | None:

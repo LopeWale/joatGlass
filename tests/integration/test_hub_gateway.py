@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import logging
+import struct
 import time
 
 import pytest
@@ -26,7 +27,9 @@ from joat.agents.location_tools import wearer_location_tools
 from joat.agents.tools import ToolBelt, ToolCall
 from joat.channels.imessage import MessageThread
 from joat.core.navigation import NavigationCandidate, NavigationPoint
-from joat.core.interfaces import AudioFrame, MessageSender
+from joat.audio.router import AudioRouter
+from joat.audio.vad import RmsVad
+from joat.core.interfaces import AudioFrame, MessageSender, SttEngine, Transcript
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
     BrainstormAction,
@@ -47,6 +50,7 @@ from joat.core.protocol import (
 )
 from joat.services.message_reply import MessageReplyController
 from joat.services.g2_diagnostics import G2DiagnosticStore
+from joat.services.orchestrator import VoiceOrchestrator
 
 HOST = "127.0.0.1"
 
@@ -103,6 +107,67 @@ async def transport(unused_tcp_port: int):
 
 
 class TestConnection:
+    @pytest.mark.parametrize("replacement_seq", [0, 2])
+    async def test_voice_replacement_and_real_gap_never_splice_pcm(
+        self, transport, replacement_seq, caplog,
+    ) -> None:
+        class RecordingStt(SttEngine):
+            def __init__(self):
+                self.received = []
+
+            async def feed(self, pcm: bytes) -> Transcript | None:
+                self.received.append(pcm)
+                return None
+
+            async def flush(self) -> Transcript | None:
+                return None
+
+            def reset(self) -> None:
+                pass
+
+        t, url = transport
+        stt = RecordingStt()
+        frames: list[AudioFrame] = []
+        t.on_audio_frame(frames.append)
+        VoiceOrchestrator(
+            t, stt, frames=AudioRouter(t),
+            vad=RmsVad(adaptive=False, start_batches=1, hangover_batches=3),
+        ).attach()
+
+        async def send(ws, seq, amplitude):
+            await ws.send(json.dumps({
+                "kind": "audio", "source": "glasses", "seq": seq,
+                "pcm": [amplitude, -amplitude] * 1600,
+            }))
+
+        async with websockets.connect(url) as old:
+            await send(old, 0, 4000)
+            await send(old, 1, 4000)
+            await _wait_for(lambda: len(frames) == 2)
+            generation = frames[-1].connection_generation
+            async with websockets.connect(url) as replacement:
+                for seq, amplitude in enumerate([8000, 8000, 0, 0, 0], replacement_seq):
+                    await send(replacement, seq, amplitude)
+                await _wait_for(lambda: len(stt.received) == 1)
+                assert frames[-1].connection_generation != generation
+                assert "audio gap" not in caplog.text
+                # Within this connection the missing numbered batch is real.
+                # A partial prefix at seq+5 must not survive the hole at +6.
+                await send(replacement, replacement_seq + 5, 5000)
+                for seq, amplitude in enumerate([9000, 9000, 0, 0, 0], replacement_seq + 7):
+                    await send(replacement, seq, amplitude)
+                await _wait_for(lambda: len(stt.received) == 2)
+
+        def pcm(amplitude):
+            return struct.pack("<3200h", *([amplitude, -amplitude] * 1600))
+
+        assert stt.received == [
+            pcm(8000) * 2 + pcm(0) * 3,
+            pcm(9000) * 2 + pcm(0) * 3,
+        ]
+        assert "audio gap" in caplog.text
+        assert not t.physical_g2_connected
+
     async def test_unpaired_gateway_completes_the_auth_phase_before_hello(self, transport) -> None:
         """An isolated simulator uses no pairing store but still runs MacLink's
         application-auth handshake. Without auth.accepted it reconnects before
@@ -574,6 +639,74 @@ class TestUplink:
         assert got[0].connect == "connected"
 
 
+class TestPromptAudioSource:
+    async def test_prompt_audio_source_tracks_muted_preference_without_relabeling_pcm(self, transport) -> None:
+        t, url = transport
+        devices: list[Device] = []
+        frames: list[AudioFrame] = []
+        t.on_device(devices.append)
+        t.on_audio_frame(frames.append)
+        assert t.prompt_audio_source == "glasses"
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "device", "connect": "connected",
+                                      "mic": False, "micSource": "phone"}))
+            await _wait_for(lambda: len(devices) == 1)
+            assert devices[0].mic is False
+            assert t.prompt_audio_source == "phone"
+            # Battery/wearing updates do not overwrite the selected source.
+            await ws.send(json.dumps({"kind": "device", "connect": "connected", "battery": 80}))
+            await _wait_for(lambda: len(devices) == 2)
+            assert t.prompt_audio_source == "phone"
+            await ws.send(json.dumps({"kind": "audio", "source": "glasses", "seq": 1,
+                                      "pcm": [12, -12]}))
+            await _wait_for(lambda: len(frames) == 1)
+            assert frames[0].source == "glasses", "Preference is never PCM provenance"
+            await ws.send(json.dumps({"kind": "device", "connect": "connected",
+                                      "mic": True, "micSource": "glasses"}))
+            await _wait_for(lambda: len(devices) == 3)
+            assert t.prompt_audio_source == "glasses"
+
+    async def test_prompt_audio_source_resets_on_replacement_and_disconnect(self, transport) -> None:
+        t, url = transport
+        devices: list[Device] = []
+        t.on_device(devices.append)
+        async with websockets.connect(url) as first:
+            await first.send(json.dumps({"kind": "device", "connect": "connected",
+                                         "mic": False, "micSource": "phone"}))
+            await _wait_for(lambda: len(devices) == 1)
+            assert t.prompt_audio_source == "phone"
+            old_generation = t.audio_connection_generation
+            assert old_generation is not None
+            async with websockets.connect(url) as second:
+                await second.send(json.dumps({"kind": "device", "connect": "connected"}))
+                await _wait_for(lambda: len(devices) == 2)
+                assert t.audio_connection_generation != old_generation
+                assert t.prompt_audio_source == "glasses"
+                t._dispatch(json.dumps({"kind": "device", "connect": "connected",
+                                        "micSource": "phone"}), old_generation)
+                assert t.prompt_audio_source == "glasses"
+                await second.send(json.dumps({"kind": "device", "connect": "connected",
+                                              "mic": False, "micSource": "phone"}))
+                await _wait_for(lambda: len(devices) == 3)
+                assert t.prompt_audio_source == "phone"
+            await _wait_for(lambda: not t.connected)
+            assert t.prompt_audio_source == "glasses"
+
+    async def test_invalid_mic_source_does_not_replace_current_preference(self, transport) -> None:
+        t, url = transport
+        devices: list[Device] = []
+        t.on_device(devices.append)
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({"kind": "device", "connect": "connected", "micSource": "phone"}))
+            await _wait_for(lambda: len(devices) == 1)
+            await ws.send(json.dumps({"kind": "device", "connect": "connected", "micSource": "headset"}))
+            await ws.send(json.dumps({"kind": "device", "connect": "connected", "battery": 42}))
+            await _wait_for(lambda: len(devices) >= 2)
+            assert len(devices) == 2
+            assert devices[-1].battery == 42
+            assert t.prompt_audio_source == "phone"
+
+
 class TestDownlink:
     async def test_send_uses_camel_case_wire_format(self, transport) -> None:
         t, url = transport
@@ -747,6 +880,24 @@ class TestDownlink:
 
 
 class TestConfirm:
+    async def test_messages_ui_owner_survives_the_confirmation_wire(self, transport) -> None:
+        t, url = transport
+        async with websockets.connect(url) as ws:
+            await _wait_for(lambda: t.connected)
+            task = asyncio.create_task(t.request_confirmation(
+                "journal-action-id", "Send to Sam? Hello", timeout_s=1,
+                diagnostic_kind="messages", message_ui_action_id="messages-ui-draft"))
+            try:
+                request = json.loads(await asyncio.wait_for(ws.recv(), 1))
+                assert request["actionId"] == "journal-action-id"
+                assert request["messageUIActionId"] == "messages-ui-draft"
+                await ws.send(_confirm_reply(request, False))
+                result = await asyncio.wait_for(task, 1)
+                assert result is not None and result.accepted is False
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_explicit_decision_returns_bound_durable_evidence(self, transport) -> None:
         t, url = transport
         payload_digest = "ab" * 32
@@ -983,6 +1134,138 @@ async def _expect_auth_rejected(url: str, token: str | None) -> None:
         assert ws.close_code == 4401
     finally:
         await ws.close()
+
+
+class TestPluginReplacement:
+    async def test_authenticated_replacement_yields_old_peer_and_preserves_new_owner(
+        self, paired_transport,
+    ) -> None:
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        disconnects: list[bool] = []
+        t.on_disconnect(lambda: disconnects.append(True))
+        devices: list[Device] = []
+        t.on_device(devices.append)
+        async with websockets.connect(url) as first:
+            await _authenticate(first, token)
+            await _wait_for(lambda: t.connected)
+            generation = t.connection_generation
+            async with websockets.connect(url) as second:
+                await _authenticate(second, token)
+                await second.send(json.dumps({
+                    "kind": "device", "connect": "connected", "battery": 62,
+                }))
+                await _wait_for(lambda: len(devices) == 1)
+                await asyncio.wait_for(first.wait_closed(), 2)
+
+                assert first.close_code == 4409
+                assert first.close_reason == "plugin connection replaced"
+                assert t.connected and t.connection_generation == generation + 1
+                assert devices[0].battery == 62
+                assert disconnects == []
+                assert store.token == token
+
+                await t.send(HudText(text="Synthetic successor surface"))
+                assert json.loads(await asyncio.wait_for(second.recv(), 2)) == {
+                    "kind": "hud.text", "containerId": 2, "text": "Synthetic successor surface",
+                }
+            await _wait_for(lambda: not t.connected)
+            assert disconnects == [True]
+
+    async def test_unauthenticated_replacement_cannot_evict_or_change_generation(
+        self, paired_transport,
+    ) -> None:
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        async with websockets.connect(url) as trusted:
+            await _authenticate(trusted, token)
+            await _wait_for(lambda: t.connected)
+            active = t._conn
+            generation = t.connection_generation
+
+            await _expect_auth_rejected(url, "untrusted-replacement")
+
+            assert t._conn is active
+            assert t.connection_generation == generation
+            assert trusted.close_code is None
+            assert store.token == token
+            await t.send(HudText(text="Synthetic original surface"))
+            assert json.loads(await asyncio.wait_for(trusted.recv(), 2))["text"] == (
+                "Synthetic original surface"
+            )
+
+    async def test_concurrent_replacement_adopts_newest_before_waiting_for_old_close(
+        self, paired_transport, monkeypatch,
+    ) -> None:
+        """Hold a real socket's close handshake across two authenticated arrivals."""
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        peers = []
+        release_old_close = asyncio.Event()
+        old_close_started = asyncio.Event()
+        old_close_calls = 0
+        disconnects: list[bool] = []
+        t.on_disconnect(lambda: disconnects.append(True))
+        devices: list[Device] = []
+        t.on_device(devices.append)
+        try:
+            first = await websockets.connect(url)
+            peers.append(first)
+            await _authenticate(first, token)
+            await _wait_for(lambda: t.connected)
+            old = t._conn
+            assert old is not None
+            generation = t.connection_generation
+            original_close = type(old).close
+
+            async def held_close(conn, *args, **kwargs):
+                nonlocal old_close_calls
+                if conn is old:
+                    old_close_calls += 1
+                    old_close_started.set()
+                    await release_old_close.wait()
+                return await original_close(conn, *args, **kwargs)
+
+            monkeypatch.setattr(type(old), "close", held_close)
+            second = await websockets.connect(url)
+            peers.append(second)
+            await _authenticate(second, token)
+            await asyncio.wait_for(old_close_started.wait(), 2)
+            third = await websockets.connect(url)
+            peers.append(third)
+            await _authenticate(third, token)
+            # Both the broken double-close path and atomic adoption reach a
+            # deterministic checkpoint, without assuming which one exists.
+            await _wait_for(lambda: (
+                old_close_calls == 2 or t.connection_generation == generation + 2
+            ))
+
+            assert t._conn is not old, "Replacement must publish its owner before close awaits"
+            assert t._conn is not None and t._conn.remote_address == third.local_address
+            assert t.connection_generation == generation + 2
+            await third.send(json.dumps({
+                "kind": "device", "connect": "connected", "battery": 64,
+            }))
+            await _wait_for(lambda: len(devices) == 1)
+            assert second.close_code == 4409
+            assert second.close_reason == "plugin connection replaced"
+            current = t._conn
+
+            release_old_close.set()
+            await asyncio.wait_for(first.wait_closed(), 2)
+            assert first.close_code == 4409
+            assert t._conn is current
+            assert disconnects == []
+            await t.send(HudText(text="Synthetic newest surface"))
+            assert json.loads(await asyncio.wait_for(third.recv(), 2))["text"] == (
+                "Synthetic newest surface"
+            )
+        finally:
+            release_old_close.set()
+            await asyncio.gather(*(peer.close() for peer in peers), return_exceptions=True)
 
 
 class TestPairing:

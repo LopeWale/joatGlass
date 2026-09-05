@@ -1,195 +1,173 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
-import { HudPresenter, NATIVE_LIST_TITLES, usesNativeListPage } from './HudPresenter';
+import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
 import { ContainerId } from './types';
 
-/**
- * NEWS and SEARCH are firmware lists, not pixels. Even's display docs put
- * the reason plainly — "native scrollable lists, with scroll highlighting
- * handled in firmware" — so a swipe on them costs no BLE traffic at all,
- * where the four-tile page cost 2-4 image writes at 0.5-2 s each. These pin
- * every transition between the tiles and the list page.
- */
-
+/** News and Search use the same custom typography and banner as Messages.
+ * The old native-first contract changed both when a reader opened or Back
+ * restored a nonzero selection. Native lists remain a compatibility path
+ * only when there is no graphical renderer. */
 interface RebuiltPage {
   listObject?: unknown[];
   imageObject?: unknown[];
   textObject?: Array<{ containerID?: number; content?: string }>;
 }
 
-function harness() {
-  const rebuilds: Array<{ list: number; images: number; title?: string }> = [];
+function harness(withVisual = true) {
+  const rebuilds: RebuiltPage[] = [];
   const upgrades: TextContainerUpgrade[] = [];
   const frames: HudVisualFrame[] = [];
-  let forgotten = 0;
+  const state = { paintAccepted: true, rebuildAccepted: true };
   const client = {
     require: () => ({
-      textContainerUpgrade: async (update: TextContainerUpgrade) => {
-        upgrades.push(update);
-        return true;
-      },
-      rebuildPageContainer: async (page: RebuiltPage) => {
-        rebuilds.push({
-          list: page.listObject?.length ?? 0,
-          images: page.imageObject?.length ?? 0,
-          title: page.textObject?.find((text) => text.containerID === ContainerId.Main)?.content,
-        });
-        return true;
-      },
+      textContainerUpgrade: async (update: TextContainerUpgrade) => { upgrades.push(update); return true; },
+      rebuildPageContainer: async (page: RebuiltPage) => { rebuilds.push(page); return state.rebuildAccepted; },
     }),
   } as unknown as BridgeClient;
   const visual = {
-    paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    forgetPage: () => { forgotten += 1; },
+    paint: async (frame: HudVisualFrame) => { frames.push(frame); return state.paintAccepted; },
+    paintExact: async (frame: HudVisualFrame, current: () => boolean) => {
+      if (!current()) return false;
+      frames.push(frame);
+      return state.paintAccepted && current();
+    },
+    forgetPage: () => undefined,
   } as unknown as HudVisualSurface;
-  const hud = new HudPresenter(client, new HudPageBuilder(), visual);
-  return { hud, rebuilds, upgrades, frames, forgotten: () => forgotten };
+  const hud = new HudPresenter(client, new HudPageBuilder(), withVisual ? visual : undefined);
+  return { hud, rebuilds, upgrades, frames, state };
 }
 
-const NEWS = ['Rates hold · 2h', 'Launch slips · 3h', 'Quake felt · 5h'];
+const NEWS = ['Story 01 · 2h', 'Story 02 · 3h', 'Story 03 · 5h'];
+const NEWS_OPTIONS = {
+  title: 'NEWS', hint: 'tap: open · hold: refresh · left x2: back',
+  selectable: true, railTab: 'news' as const,
+};
 
 async function openNews(h: ReturnType<typeof harness>) {
   await h.hud.showText('9:41  JOAT ready  bat 87%', ContainerId.StatusBar);
-  await h.hud.showList(NEWS, {
-    title: 'NEWS', hint: 'tap: open · hold: refresh · left x2: back', selectable: true, railTab: 'news',
-  });
+  return h.hud.showList(NEWS, NEWS_OPTIONS);
 }
 
-describe('the firmware list page', () => {
-  it('names exactly the two pages the wearer traded the rail for', () => {
-    expect([...NATIVE_LIST_TITLES]).toEqual(['NEWS', 'SEARCH']);
-    const list = (title: string, railTab?: 'news' | 'search') => ({
-      kind: 'list' as const, items: ['x'], selectedIndex: 0,
-      options: { title, hint: '', selectable: true, ...(railTab ? { railTab } : {}) },
-    });
-    expect(usesNativeListPage(list('NEWS', 'news'))).toBe(true);
-    expect(usesNativeListPage(list('search', 'search'))).toBe(true);
-    // The readers those pages open stay pixels, and so does a NEWS list
-    // that is not the rail's own page.
-    expect(usesNativeListPage(list('NEWS · ARTICLE', 'news'))).toBe(false);
-    expect(usesNativeListPage(list('NEWS'))).toBe(false);
-    expect(usesNativeListPage({ kind: 'default' })).toBe(false);
-  });
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
-  it('opens NEWS as one rebuild carrying the rows, and paints no frame', async () => {
+describe('consistent custom News and Search surface', () => {
+  it.each([
+    ['NEWS', 'news'], ['SEARCH', 'search'],
+  ] as const)('opens %s with the existing custom banner, rows and rail', async (title, railTab) => {
     const h = harness();
-    await openNews(h);
-    const framesBefore = h.frames.length;
-    expect(h.rebuilds).toEqual([{ list: 1, images: 0, title: 'NEWS' }]);
-    expect(h.frames).toHaveLength(framesBefore);
-    // The page changed under the tiles and the spine word: forget them.
-    expect(h.forgotten()).toBe(1);
-    // The status line moved with the wearer, as native text.
-    const status = h.upgrades.filter((update) => update.containerID === ContainerId.StatusBar);
-    expect(status[status.length - 1]?.content).toBe('9:41  JOAT ready  bat 87%');
-  });
-
-  it('writes a new state word on the list page as native text, never a frame', async () => {
-    const h = harness();
-    await openNews(h);
-    const frames = h.frames.length;
-    const rebuilds = h.rebuilds.length;
-    await h.hud.showText('9:41  JOAT hearing you…  bat 87%', ContainerId.StatusBar);
-    expect(h.frames).toHaveLength(frames);
-    expect(h.rebuilds).toHaveLength(rebuilds);
-    const last = h.upgrades[h.upgrades.length - 1];
-    expect(last).toMatchObject({
-      containerID: ContainerId.StatusBar, content: '9:41  JOAT hearing you…  bat 87%',
+    h.hud.setMicState(true);
+    await h.hud.showText('9:41  JOAT ready  bat 87%', ContainerId.StatusBar);
+    expect(await h.hud.showList(NEWS, { ...NEWS_OPTIONS, title, railTab })).toBe(true);
+    expect(h.rebuilds).toEqual([]);
+    expect(h.upgrades).toEqual([]);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({
+      kind: 'list', title, items: NEWS, selectedIndex: 0, selectable: true,
+      status: '9:41  JOAT ready  bat 87%', micOn: true, rail: { activeTab: railTab },
     });
   });
 
-  it('moves the highlight without a rebuild: the firmware owns it', async () => {
+  it('keeps status and real microphone state on the same custom frame', async () => {
     const h = harness();
     await openNews(h);
-    const rebuilds = h.rebuilds.length;
-    const frames = h.frames.length;
+    h.hud.setMicState(false);
+    await h.hud.showText('9:42  JOAT hearing you…  bat 87%', ContainerId.StatusBar);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({
+      kind: 'list', title: 'NEWS', status: '9:42  JOAT hearing you…  bat 87%', micOn: false,
+    });
+    expect(h.rebuilds).toEqual([]);
+    expect(h.upgrades).toEqual([]);
+  });
+
+  it('paints actual selected rows on local scrolling without a page-type rebuild', async () => {
+    const h = harness();
+    await openNews(h);
+    const before = h.frames.length;
     expect(await h.hud.setSelection(2)).toBe(true);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', selectedIndex: 2 });
     expect(await h.hud.moveSelection(-1)).toBe(true);
-    expect(h.rebuilds).toHaveLength(rebuilds);
-    expect(h.frames).toHaveLength(frames);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', selectedIndex: 1 });
+    expect(h.frames).toHaveLength(before + 2);
+    expect(h.rebuilds).toEqual([]);
   });
 
-  it('rebuilds once when the Mac pushes fresh rows', async () => {
+  it.each([
+    ['NEWS', 'NEWS · ARTICLE', 'news'], ['SEARCH', 'SEARCH · RESULT', 'search'],
+  ] as const)('%s open-scroll-reader-Back-reopen preserves typography and the selected item', async (title, readerTitle, railTab) => {
     const h = harness();
-    await openNews(h);
-    const rebuilds = h.rebuilds.length;
-    await h.hud.showList([...NEWS, 'Markets open · 1m'], {
-      title: 'NEWS', hint: 'tap: open · hold: refresh · left x2: back', selectable: true, railTab: 'news',
+    const options = { ...NEWS_OPTIONS, title, railTab };
+    await h.hud.showList(NEWS, options);
+    await h.hud.moveSelection(1);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ title, selectedIndex: 1 });
+    await h.hud.showList([NEWS[1]!, 'Complete article body'], {
+      title: readerTitle, hint: 'left x2: back', railTab,
     });
-    expect(h.rebuilds).toHaveLength(rebuilds + 1);
-    expect(h.rebuilds[h.rebuilds.length - 1]).toMatchObject({ list: 1, images: 0 });
+    expect(h.frames[h.frames.length - 1]).toMatchObject({
+      kind: 'list', title: readerTitle, items: [NEWS[1], 'Complete article body'],
+    });
+    await h.hud.showList(NEWS, options);
+    expect(await h.hud.restoreSelection(1)).toBe(true);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title, selectedIndex: 1 });
+    await h.hud.showList([NEWS[1]!, 'Complete article body'], { title: readerTitle, railTab });
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ title: readerTitle, items: [NEWS[1], 'Complete article body'] });
+    expect(h.rebuilds).toEqual([]);
   });
 
-  it('brings the tiles back for the overview: one rebuild, then a frame', async () => {
+  it('refreshes rows and returns Home on the same custom display', async () => {
     const h = harness();
     await openNews(h);
-    const forgotten = h.forgotten();
+    const refreshed = [...NEWS, 'Story 04 · 1m'];
+    await h.hud.showList(refreshed, NEWS_OPTIONS);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', items: refreshed });
     await h.hud.showDefault();
-    const last = h.rebuilds[h.rebuilds.length - 1];
-    expect(last).toMatchObject({ list: 0, images: 4 });
-    expect(h.forgotten()).toBe(forgotten + 1);
     expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'overview' });
+    expect(h.rebuilds).toEqual([]);
   });
 
-  it('opens a headline as pixels again', async () => {
+  it('restores the selected News row after confirmation without entering a native page', async () => {
     const h = harness();
     await openNews(h);
-    const frames = h.frames.length;
-    await h.hud.showList(['Rates hold · Reuters · 2h', 'The central bank held…'], {
-      title: 'NEWS · ARTICLE', hint: 'left x2: back', railTab: 'news',
-    });
-    expect(h.rebuilds[h.rebuilds.length - 1]).toMatchObject({ list: 0, images: 4 });
-    expect(h.frames).toHaveLength(frames + 1);
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS · ARTICLE' });
-  });
-
-  it('treats SEARCH the same way and every other list as pixels', async () => {
-    const h = harness();
-    await h.hud.showList(['Result · site'], { title: 'SEARCH', railTab: 'search', selectable: true });
-    expect(h.rebuilds[h.rebuilds.length - 1]).toMatchObject({ list: 1, images: 0, title: 'SEARCH' });
-    const frames = h.frames.length;
-    await h.hud.showList(['Loading…'], { title: 'MESSAGES' });
-    expect(h.rebuilds[h.rebuilds.length - 1]).toMatchObject({ list: 0, images: 4 });
-    expect(h.frames).toHaveLength(frames + 1);
-  });
-
-  it('paints a confirmation as pixels over the list, and rebuilds the list when it closes', async () => {
-    const h = harness();
-    await openNews(h);
+    await h.hud.setSelection(1);
     expect(await h.hud.showConfirmation('Send this message?', 'gate-1')).toBe(true);
-    expect(h.rebuilds[h.rebuilds.length - 1]).toMatchObject({ list: 0, images: 4 });
     expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'confirmation' });
-    const frames = h.frames.length;
     await h.hud.dismissConfirmation('gate-1');
-    expect(h.rebuilds[h.rebuilds.length - 1]).toMatchObject({ list: 1, images: 0, title: 'NEWS' });
-    expect(h.frames).toHaveLength(frames);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
+    expect(h.rebuilds).toEqual([]);
   });
 
-  it('heals a refused write by rebuilding the list page, not the tiles', async () => {
-    const rebuilt: RebuiltPage[] = [];
-    let refuse = false;
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async () => {
-          if (refuse) { refuse = false; return false; }
-          return true;
-        },
-        rebuildPageContainer: async (page: RebuiltPage) => { rebuilt.push(page); return true; },
-      }),
-    } as unknown as BridgeClient;
-    const visual = {
-      paint: async () => true,
-      forgetPage: () => undefined,
-    } as unknown as HudVisualSurface;
-    const hud = new HudPresenter(client, new HudPageBuilder(), visual);
-    await hud.showList(NEWS, { title: 'NEWS', selectable: true, railTab: 'news' });
-    refuse = true;
-    expect(await hud.showText('9:41  JOAT ready', ContainerId.StatusBar)).toBe(true);
-    const healed = rebuilt[rebuilt.length - 1];
-    expect(healed?.listObject).toHaveLength(1);
-    expect(healed?.imageObject ?? []).toHaveLength(0);
+  it('keeps an exact question dominant over News updates and restores the current custom list on cancel', async () => {
+    const h = harness();
+    await openNews(h);
+    await h.hud.setSelection(1);
+    expect(await h.hud.showPromptQuestion('prompt-one', 'What should the message say?', () => true)).toBe(true);
+    await h.hud.showText('9:42  JOAT ready', ContainerId.StatusBar);
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'prompt_question', promptId: 'prompt-one' });
+    await h.hud.dismissPromptQuestion('prompt-one');
+    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
+    expect(h.rebuilds).toEqual([]);
+  });
+
+  it('heals a refused custom frame using the image layout, never a firmware News list', async () => {
+    const h = harness();
+    await openNews(h);
+    h.state.paintAccepted = false;
+    expect(await h.hud.setSelection(1)).toBe(false);
+    expect(h.rebuilds).toHaveLength(1);
+    expect(h.rebuilds[0]?.imageObject).toHaveLength(4);
+    expect(h.rebuilds[0]?.listObject).toBeUndefined();
+  });
+
+  it('retains native list compatibility when no custom renderer exists', async () => {
+    const h = harness(false);
+    expect(await openNews(h)).toBe(true);
+    expect(h.rebuilds).toHaveLength(1);
+    expect(h.rebuilds[0]?.listObject).toHaveLength(1);
+    expect(h.rebuilds[0]?.imageObject).toBeUndefined();
+    expect(h.frames).toEqual([]);
+    h.state.rebuildAccepted = false;
+    expect(await h.hud.showList(['Result'], { title: 'SEARCH', railTab: 'search' })).toBe(false);
   });
 });

@@ -4,6 +4,39 @@ import XCTest
 @testable import JOAT
 
 final class OpenClawCredentialServiceTests: XCTestCase {
+    func testWorkApprovalGrantRoundTripsWithoutAdmittingAdminOrPartialApprovalScopes() async throws {
+        let store = MemoryOpenClawSecretStore()
+        let service = OpenClawCredentialService(secretStore: store)
+        let profile = String(repeating: "e", count: 64)
+        let identity = try await service.identity(profileID: profile)
+        let workScopes = ["operator.read", "operator.write", "operator.approvals"]
+        try await service.storeToken(
+            profileID: profile, deviceID: identity.deviceID, role: "operator",
+            token: "work-grant", scopes: workScopes
+        )
+        let record = try await service.loadToken(
+            profileID: profile, deviceID: identity.deviceID, role: "operator"
+        )
+        XCTAssertEqual(record?.scopes, workScopes)
+        for scopes in [["operator.admin"], ["operator.approvals"],
+                       ["operator.read", "operator.approvals"],
+                       workScopes + ["operator.approvals"]] {
+            do {
+                try await service.storeToken(
+                    profileID: profile, deviceID: identity.deviceID, role: "operator",
+                    token: "invalid-grant", scopes: scopes
+                )
+                XCTFail("Unexpected grant accepted: \(scopes)")
+            } catch let error as NativeBridgeError {
+                XCTAssertEqual(error.code, "openclaw_token_invalid")
+            }
+        }
+        let preserved = try await service.loadToken(
+            profileID: profile, deviceID: identity.deviceID, role: "operator"
+        )
+        XCTAssertEqual(preserved?.token, "work-grant")
+    }
+
     func testIdentityIsStablePerCanonicalGatewayProfile() async throws {
         let store = MemoryOpenClawSecretStore()
         let service = OpenClawCredentialService(secretStore: store)

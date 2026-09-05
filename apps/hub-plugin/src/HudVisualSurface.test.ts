@@ -10,6 +10,131 @@ import {
 import { ContainerId } from './types';
 import { selectHudFirstLight } from './HudPageBootstrap';
 
+describe('prompt exact paint', () => {
+  const frame = (main: string): HudVisualFrame => ({
+    kind: 'overview', status: '', micOn: true, mainBrightness: 4,
+    main, context: '', tray: '', hint: '',
+  });
+  function exact(surface: HudVisualSurface, value: HudVisualFrame, isCurrent: () => boolean) {
+    return surface.paintExact(value, isCurrent);
+  }
+  const tiles = () => [4, 8, 9, 10].map((containerId) => ({
+    containerId, pixels: new Uint8Array([containerId]),
+  }));
+
+  it('delivers a queued question itself before resolving its receipt, not a coalesced successor', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const rendered: string[] = [];
+    let uploads = 0;
+    const client = { require: () => ({ updateImageRawData: async () => {
+      if (++uploads === 1) await held;
+      return ImageRawDataUpdateResult.success;
+    } }) } as unknown as BridgeClient;
+    const renderer: HudFrameRenderer = { render: async (value) => {
+      rendered.push(value.kind === 'overview' ? value.main : value.kind);
+      return tiles();
+    } };
+    const surface = new HudVisualSurface(client, renderer);
+    const first = surface.paint(frame('prior surface'));
+    let question: Promise<boolean> | undefined;
+    let successor: Promise<boolean> | undefined;
+    try {
+      await vi.waitFor(() => expect(uploads).toBe(1));
+      question = exact(surface, frame('Who should receive the message?'), () => true);
+      successor = surface.paint(frame('incidental update'));
+      release();
+      expect(await question).toBe(true);
+      await successor;
+      expect(rendered).toEqual(['prior surface', 'Who should receive the message?', 'incidental update']);
+    } finally {
+      release();
+      await Promise.all([first, question, successor]);
+    }
+  });
+
+  it.each(['before', 'spine', 'render', 'encode', 'first upload', 'last upload'] as const)(
+    'rejects cancellation %s and does not issue later writes', async (boundary) => {
+      let current = boundary !== 'before';
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let reached = false;
+      const uploads: number[] = [];
+      const client = { require: () => ({
+        textContainerUpgrade: async () => { reached = true; await held; return true; },
+        updateImageRawData: async (update: { containerID?: number }) => {
+          uploads.push(update.containerID ?? -1);
+          if ((boundary === 'first upload' && uploads.length === 1)
+            || (boundary === 'last upload' && uploads.length === 4)) {
+            reached = true;
+            await held;
+          }
+          return ImageRawDataUpdateResult.success;
+        },
+      }) } as unknown as BridgeClient;
+      const renderer: HudFrameRenderer = { render: async () => {
+        if (boundary === 'render') { reached = true; await held; }
+        return tiles();
+      } };
+      const surface = new HudVisualSurface(client, renderer, undefined, async (tile) => {
+        if (boundary === 'encode' && !reached) { reached = true; await held; }
+        return tile.pixels;
+      }, boundary === 'spine' ? { spineLabel: () => 'QUESTION' } : {});
+      const painting = exact(surface, frame('Say the message.'), () => current);
+      try {
+        if (boundary !== 'before') {
+          await vi.waitFor(() => expect(reached).toBe(true));
+          current = false;
+        }
+        release();
+        expect(await painting).toBe(false);
+        expect(uploads).toHaveLength(boundary === 'last upload' ? 4 : boundary === 'first upload' ? 1 : 0);
+      } finally {
+        current = false;
+        release();
+        await painting;
+      }
+    },
+  );
+
+  it('reuses accepted identical pixels only while current, and writes changed or forgotten page pixels', async () => {
+    const uploaded: number[] = [];
+    let changed = false;
+    const client = { require: () => ({ updateImageRawData: async (update: { containerID?: number }) => {
+      uploaded.push(update.containerID ?? -1);
+      return ImageRawDataUpdateResult.success;
+    } }) } as unknown as BridgeClient;
+    const surface = new HudVisualSurface(client, { render: async () => tiles().map((tile) => ({
+      ...tile, pixels: changed && tile.containerId === 4 ? new Uint8Array([99]) : tile.pixels,
+    })) });
+    await surface.paint(frame('Say the message.'));
+    expect(await exact(surface, frame('Say the message.'), () => true)).toBe(true);
+    expect(uploaded).toEqual([4, 8, 9, 10]);
+    expect(await exact(surface, frame('Say the message.'), () => false)).toBe(false);
+    expect(uploaded).toEqual([4, 8, 9, 10]);
+    changed = true;
+    expect(await exact(surface, frame('Say the message.'), () => true)).toBe(true);
+    expect(uploaded).toEqual([4, 8, 9, 10, 4]);
+    surface.forgetPage();
+    expect(await exact(surface, frame('Say the message.'), () => true)).toBe(true);
+    expect(uploaded).toEqual([4, 8, 9, 10, 4, 4, 8, 9, 10]);
+  });
+
+  it('never acknowledges a question with a failed tile', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let uploads = 0;
+    const client = { require: () => ({ updateImageRawData: async () => {
+      uploads += 1;
+      return uploads === 2 ? -1 : ImageRawDataUpdateResult.success;
+    } }) } as unknown as BridgeClient;
+    try {
+      const surface = new HudVisualSurface(client, { render: async () => tiles() });
+      expect(await exact(surface, frame('Say the message.'), () => true)).toBe(false);
+      expect(uploads).toBe(2);
+    } finally { error.mockRestore(); }
+  });
+});
+
 describe('splitGrayscaleTiles', () => {
   it('maps the raw Gray8 canvas into four ordered SDK images', () => {
     const pixels = new Uint8Array(576 * 288);

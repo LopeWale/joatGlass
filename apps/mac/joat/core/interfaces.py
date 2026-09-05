@@ -39,6 +39,8 @@ class AudioFrame:
     source: AudioSource
     speaker: str | None
     received_at_us: int
+    audio_epoch: str | None = None
+    """Optional prompt-bound plugin epoch; legacy frames cannot answer prompts."""
 
 
 AudioFrameCallback = Callable[[AudioFrame], None]
@@ -152,6 +154,10 @@ class MessageSender(ABC):
 
     @abstractmethod
     async def send(self, recipient: str, text: str) -> None: ...
+
+    async def send_chat(self, chat_guid: str, text: str) -> None:
+        """Send to an existing chat; adapters must never fall back to a person."""
+        raise NotImplementedError("This Messages adapter does not support chat targets")
 
 
 class ReplyEngine(ABC):

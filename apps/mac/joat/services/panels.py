@@ -18,7 +18,7 @@ Two rules keep the glasses fast:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from typing import Protocol
 
@@ -32,6 +32,7 @@ from ..core.protocol import (
     panel_request_id,
     parse_panel_request_id,
 )
+from .reader import paginate_reader_text
 
 log = logging.getLogger(__name__)
 
@@ -45,13 +46,7 @@ PANEL_TITLES: dict[str, str] = {
 }
 _TITLE_TABS = {title: tab for tab, title in PANEL_TITLES.items()}
 
-#: One reader page. The plugin re-wraps at 52 columns over ten lines
-#: (MESSAGES_READER_BODY_LINE_CAPACITY); this leaves a little slack so a
-#: page never spills a line the wearer cannot reach.
-READER_PAGE_CHARACTERS = 440
-#: HudList caps each item at 64 characters; the plugin joins the body
-#: items with spaces, so a page travels as short word-bounded chunks.
-_READER_CHUNK_CHARACTERS = 60
+_EMPTY_READER_TEXT = "No text is available for this page."
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,24 +72,57 @@ class Reader:
     #: bumps the tab's revision without closing the reader, so its page
     #: requests keep echoing THIS one and are answered, not refused.
     revision: int = 0
+    _prepared_pages: tuple[tuple[str, ...], ...] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # A provider may supply pages that predate the display row budget.
+        # Refine each independently: page boundaries are not permission to
+        # insert spaces, normalize newlines, or discard an overlong word.
+        prepared: list[tuple[str, ...]] = []
+        selected = 0
+        source_pages = self.pages or (_EMPTY_READER_TEXT,)
+        for index, source in enumerate(source_pages):
+            if index == self.index:
+                selected = len(prepared)
+            prepared.extend(paginate_reader_text(source))
+        self._prepared_pages = tuple(prepared)
+        self.pages = tuple("".join(rows) for rows in self._prepared_pages)
+        self.index = selected
 
 
-def paginate(text: str, page_characters: int = READER_PAGE_CHARACTERS) -> tuple[str, ...]:
-    """Split text at word boundaries into fixed reader pages."""
-    remaining = " ".join(text.split())
-    if not remaining:
-        return ("No text is available for this page.",)
-    pages: list[str] = []
-    while remaining:
-        if len(remaining) <= page_characters:
-            pages.append(remaining)
-            break
-        boundary = remaining.rfind(" ", 0, page_characters + 1)
-        if boundary <= 0:
-            boundary = page_characters
-        pages.append(remaining[:boundary].rstrip())
-        remaining = remaining[boundary:].lstrip()
-    return tuple(pages)
+def paginate(text: str, page_characters: int | None = None) -> tuple[str, ...]:
+    """Return exact source spans that fit the shared wearable reader.
+
+    The optional character budget remains available to existing callers;
+    whitespace belongs to one source span instead of being reconstructed
+    between pages. The default budget is the actual prepared display rows.
+    """
+    if page_characters is not None and (
+        isinstance(page_characters, bool) or not isinstance(page_characters, int)
+        or page_characters <= 0
+    ):
+        raise ValueError("reader page character budget must be a positive integer")
+    if not text:
+        text = _EMPTY_READER_TEXT
+    source_pages: list[str] = []
+    start = 0
+    while start < len(text):
+        end = len(text) if page_characters is None else min(start + page_characters, len(text))
+        if end < len(text):
+            # Keep a complete word where one fits, including its following
+            # whitespace in this span. An unbroken word still makes progress.
+            boundary = next(
+                (index + 1 for index in range(end - 1, start, -1) if text[index].isspace()),
+                end,
+            )
+            end = boundary
+        source_pages.append(text[start:end])
+        start = end
+    return tuple(
+        "".join(rows)
+        for source in source_pages
+        for rows in paginate_reader_text(source)
+    )
 
 
 def reader_hint(index: int, total: int) -> str:
@@ -257,13 +285,15 @@ class PanelPublisher:
         return reader
 
     async def _send_reader(self, tab: str, reader: Reader) -> None:
-        page = reader.pages[reader.index]
         total = len(reader.pages)
-        metadata = reader.metadata
-        if total > 1:
-            metadata = f"{metadata} · {reader.index + 1}/{total}"
+        counter = f"{reader.index + 1}/{total}"
+        label = " ".join(reader.metadata.split()) or ("Article" if tab == "news" else "Result")
+        metadata = f"{counter} · {label}"
+        # Counter-first metadata identifies prepared rows on the Hub. Only
+        # this preview may be shortened; the body rows are exact source spans.
+        metadata_row = paginate_reader_text(metadata)[0][0]
         await self._transport.send(HudList(
-            items=[metadata[:64], *_chunks(page)],
+            items=[metadata_row, *reader._prepared_pages[reader.index]],
             title=reader.title,
             hint=reader_hint(reader.index, total),
             # The plugin matches this against the id it opened the reader
@@ -276,27 +306,6 @@ class PanelPublisher:
     def _tab_for(name: str | None) -> str | None:
         family = (name or "").split("·")[0].strip().upper()
         return _TITLE_TABS.get(family)
-
-
-def _chunks(text: str) -> list[str]:
-    """Word-bounded pieces that fit HudList's per-item cap. At most 19 so
-    the metadata line and the chunks stay inside the 20-item cap."""
-    words = text.split()
-    chunks: list[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if len(candidate) <= _READER_CHUNK_CHARACTERS:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = word[:_READER_CHUNK_CHARACTERS]
-    if current:
-        chunks.append(current)
-    return chunks[:19] or ["No text is available for this page."]
-
-
 
 
 __all__ = [

@@ -4,7 +4,7 @@ import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
 import { phoneTimeZone } from './PhoneTimeZone';
-import { hudSpineLabel, HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
+import { HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
 import {
   encodeGray8TilePng,
   HudVisualSurface,
@@ -35,6 +35,7 @@ import { onBackgroundRestore, setBackgroundState } from './BackgroundState';
 import { LocationSessionManager } from './LocationSessionManager';
 import { MacLink } from './MacLink';
 import { AudioStreamer } from './AudioStreamer';
+import { PromptedInputController } from './PromptedInputController';
 import { ImuMonitor, imuReportPaceFromMs } from './ImuMonitor';
 import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
@@ -43,6 +44,7 @@ import { CapabilityMenu } from './CapabilityMenu';
 import {
   CAPABILITIES,
   ContainerId,
+  VOICE_REQUEST_PREFIX,
   type BrainstormHudModel,
   type DownlinkMessage,
   type ProductivityHudModel,
@@ -288,8 +290,29 @@ async function boot(): Promise<void> {
   // page exists, and must not paint into a page that is not there yet.
   let chromeRef: Chrome | undefined;
   let brainstormRef: BrainstormController | undefined;
+  let promptedInputRef: PromptedInputController | undefined;
+  let menuRef: CapabilityMenu | undefined;
+  let displayYielded = false;
+  let exiting = false;
+  const reconnectButton = document.getElementById('p-reconnect');
+  reconnectButton?.addEventListener('click', () => {
+    if (!exiting) link.resumeIfReplaced();
+  });
   link.onState((state) => {
-    setPanel('p-link', state);
+    if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'link', state);
+    setPanel('p-link', link.wasReplaced ? 'Another JOAT display connected. Use Reconnect to take over.' : state);
+    if (reconnectButton) reconnectButton.hidden = !link.wasReplaced;
+    if (link.wasReplaced) {
+      displayYielded = true;
+      chromeRef?.stop();
+      client.suspendDisplay();
+      hudRef?.suspendDisplay();
+    } else if (state === 'connected' && displayYielded) {
+      displayYielded = false;
+      client.resumeDisplay();
+      hudRef?.resumeDisplay();
+      chromeRef?.start();
+    }
     chromeRef?.setLink(state);
     setPanel('p-url', link.activeUrl); // failover rotation, made visible
     if (state === 'connected') {
@@ -303,6 +326,9 @@ async function boot(): Promise<void> {
       announce?.();
     }
     else {
+      promptedInputRef?.cancel('connection', false);
+      menuRef?.retireTerminalOpening(false);
+      menuRef?.retireMessageUI(false);
       // A disconnected or replacement brain no longer authorizes either
       // opt-in diagnostic path. A fresh authenticated session will send its
       // complete true/false state again.
@@ -369,10 +395,6 @@ async function boot(): Promise<void> {
           // A voice turn's chrome arrives as a burst of Mac messages; one
           // window renders them as one frame instead of shipping a tile twice.
           coalesceMs: PAINT_COALESCE_MS,
-          // The state word is native text, not pixels. Without this the
-          // canvas draws no word at all — it stopped painting one when the
-          // SpineLabel container took the job.
-          spineLabel: hudSpineLabel,
           // Tile calls are paced past the host's 100 ms hold window, so a
           // frame's last tile is never left waiting for the next frame.
           tileGapMs: TILE_CALL_GAP_MS,
@@ -403,6 +425,17 @@ async function boot(): Promise<void> {
     console.warn('[joat] rich HUD layouts unavailable; using live minimal recovery surface');
   }
   const audio = new AudioStreamer(client, link);
+  const promptedInput = new PromptedInputController({
+    presenter: hud, audio, link,
+    isOwnerCurrent: (message) => menuRef?.isMessagePromptCurrent(message) ?? false,
+    onCancel: (message, reason) => {
+      if (reason === 'back' && message.ownerKind === 'messages') {
+        menuRef?.cancelMessageAction(message.ownerId);
+      }
+    },
+  });
+  promptedInputRef = promptedInput;
+  audio.onPromptInvalidated = (promptId) => promptedInput.audioInvalidated(promptId);
   const imu = new ImuMonitor(client, link);
   audioRef = audio;
   imuRef = imu;
@@ -418,6 +451,7 @@ async function boot(): Promise<void> {
     set: (key, value) => client.require().setLocalStorage(key, value),
   });
   const menu = new CapabilityMenu(hud, settings, link);
+  menuRef = menu;
   const navigation = new NavigationController(hud, link, location, g2Diagnostics);
   const brainstorm = new BrainstormController(link);
   brainstormRef = brainstorm;
@@ -425,20 +459,26 @@ async function boot(): Promise<void> {
   menu.micIsOpen = () => audio.isOpen;
   // Mic truth leaves the phone on every change — the Mac's pill used to
   // latch "streaming" at hello and never verify.
-  audio.onState = (open) => {
+  audio.onState = (open, micPromptId) => {
+    if (!open && micPromptId === undefined) promptedInput.cancel('microphone');
     setPanel('p-mic', open ? 'streaming' : 'off');
     chromeRef?.setMic(open);
-    link.send({ kind: 'device', connect: 'connected', mic: open });
+    link.send({ kind: 'device', connect: 'connected', mic: open,
+      micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses',
+      ...(micPromptId === undefined ? {} : { micPromptId }) });
   };
 
   const lifecycle: LifecycleHandler = {
     onForegroundEnter: () => {
+      if (exiting) return;
+      link.resumeIfReplaced();
       location.setForeground(true);
       // The host may have paused delivery while backgrounded; repaint so the
       // wearer isn't looking at a stale frame.
       void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
     },
     onForegroundExit: () => {
+      promptedInput.cancel('background');
       location.setForeground(false);
       // Nothing to flush: Settings writes through on every change, so there is
       // no dirty state to lose. Deliberately a no-op rather than invented work.
@@ -464,6 +504,7 @@ async function boot(): Promise<void> {
     brainstorm,
     hud,
     (direction) => hud.scrollTranscript(direction),
+    promptedInput,
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -479,6 +520,35 @@ async function boot(): Promise<void> {
   devices.onBattery = (level, charging) => chromeRef?.setBattery(level, charging);
   devices.attach();
 
+  const terminalPreludeGuards = new WeakMap<DownlinkMessage, () => boolean>();
+  link.onMessageIngress((msg, context) => {
+    if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'ingress', msg.kind);
+    if (msg.kind === 'hud.list' && msg.selectable !== true
+      && msg.title?.trim().toUpperCase() === 'AGENT TERMINAL'
+      && msg.requestId?.startsWith(VOICE_REQUEST_PREFIX)) {
+      terminalPreludeGuards.set(msg, menu.captureTerminalPreludeGuard());
+    }
+    if (import.meta.env.DEV && msg.kind === 'agent_terminal.view') {
+      console.info('[blank-trace]', Date.now(), 'terminal-state', msg.terminal.state,
+        msg.terminal.activity.length, msg.terminal.activity.includes('[!]'));
+    }
+    if (msg.kind === 'message.ui'
+      && menu.observeMessageUI(msg, () => !context.signal.aborted)) {
+      promptedInput.isActive();
+    }
+    promptedInput.observe(msg, context);
+    const currentConfirmation = msg.kind === 'confirm.request'
+      && (msg.messageUIActionId === undefined || menu.isMessageActionCurrent(msg.messageUIActionId));
+    if (currentConfirmation || msg.kind === 'shutdown'
+      || msg.kind === 'hud.rebuild'
+      || (msg.kind === 'audio.control' && (!msg.open
+        || (msg.source !== undefined && (
+          msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses
+        ) !== audio.lastSource)))) {
+      promptedInput.cancel('surface-transition');
+    }
+  });
+
   link.onMessage(async (msg: DownlinkMessage, context) => {
     const ensureCurrent = (): void => {
       if (context.signal.aborted) {
@@ -492,6 +562,13 @@ async function boot(): Promise<void> {
     };
     ensureCurrent();
     switch (msg.kind) {
+      case 'message.ui':
+        await awaitCurrent(menu.presentMessageUI(msg, () => !context.signal.aborted));
+        break;
+      case 'prompt.present':
+      case 'prompt.cancel':
+        await awaitCurrent(promptedInput.handle(msg, context));
+        break;
       case 'g2.diagnostic.control':
         g2Diagnostics.setEnabled(msg.enabled);
         if (msg.enabled && !firstLightReceiptDelivered) {
@@ -554,6 +631,18 @@ async function boot(): Promise<void> {
           noToolsChecked: msg.terminal.noToolsChecked,
           approvals: msg.terminal.approvals,
         };
+        const openingRequestId = msg.terminal.openingRequestId;
+        const openingSelectionId = msg.terminal.openingSelectionId;
+        if (openingRequestId !== undefined || openingSelectionId !== undefined) {
+          if (openingRequestId === undefined || openingSelectionId === undefined) break;
+          if (await awaitCurrent(menu.presentTerminalOpening(
+            model, { requestId: openingRequestId, selectionId: openingSelectionId },
+            () => !context.signal.aborted,
+          ))) brainstorm.present(model);
+          break;
+        }
+        if (!menu.mayPresentUnboundTerminal()) break;
+        menu.retireTerminalOpening();
         await awaitCurrent(menu.beginLiveSession('brainstorm'));
         if (await awaitCurrent(hud.showBrainstorm(model))) {
           brainstorm.present(model);
@@ -653,7 +742,10 @@ async function boot(): Promise<void> {
           await awaitCurrent(hud.dismissAssistantOverlay());
         }
         break;
-      case 'hud.list':
+      case 'hud.list': {
+        const preludeCurrent = terminalPreludeGuards.get(msg);
+        terminalPreludeGuards.delete(msg);
+        if (preludeCurrent && !preludeCurrent()) break;
         // A data view REPLACES the Brainstorm on the glass, so the
         // controller must stop owning input for it. Without this, tapping
         // a Messages row after a terminal handoff was intercepted by
@@ -675,6 +767,7 @@ async function boot(): Promise<void> {
         }
         await awaitCurrent(menu.presentLifecycle(msg.title, msg.items, msg.hint));
         break;
+      }
       case 'hud.rebuild':
         if (msg.reason === 'brainstorm') {
           await awaitCurrent(menu.beginLiveSession('brainstorm'));
@@ -709,12 +802,16 @@ async function boot(): Promise<void> {
         imu.setTrace(msg.enabled);
         break;
       case 'confirm.request': {
-        const rendered = hud.showConfirmation(msg.prompt, msg.actionId, msg.diagnosticKind);
+        const ownerCurrent = () => !context.signal.aborted && (msg.messageUIActionId === undefined
+          || menu.isMessageActionCurrent(msg.messageUIActionId));
+        if (!ownerCurrent()) break;
+        const rendered = hud.showConfirmation(msg.prompt, msg.actionId, msg.diagnosticKind,
+          msg.messageUIActionId === undefined ? undefined : ownerCurrent);
         imu.prepare(msg.actionId, (accepted) => {
           void deliverAfterConfirmationDismissal({
             accepted,
             dismiss: () => hud.dismissConfirmation(msg.actionId),
-            isAborted: () => context.signal.aborted,
+            isAborted: () => !ownerCurrent(),
             deliver: () => link.send({
               kind: 'confirm',
               actionId: msg.actionId,
@@ -741,12 +838,15 @@ async function boot(): Promise<void> {
           if (context.signal.aborted) return;
           console.error('[joat] confirmation render failed:', err);
         }
-        if (visible) {
+        if (visible && ownerCurrent()) {
           // Content-free acceptance synchronization for the official desktop
           // simulator. Vite removes this branch from packed builds.
           if (import.meta.env.DEV) console.info('[joat] acceptance confirmation-visible');
           imu.activate(msg.actionId, 8000);
-        } else imu.cancel(msg.actionId);
+        } else {
+          imu.cancel(msg.actionId);
+          if (msg.messageUIActionId !== undefined) await hud.dismissConfirmation(msg.actionId);
+        }
         break;
       }
       case 'pairing.set':
@@ -805,6 +905,8 @@ async function boot(): Promise<void> {
     });
     // Announce the persisted policy so the Mac's session logic starts in sync.
     link.send({ kind: 'policy', resume: settings.resumePolicy });
+    link.send({ kind: 'device', connect: 'connected', mic: audio.isOpen,
+      micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses' });
   };
   announce();
 
@@ -815,13 +917,15 @@ async function boot(): Promise<void> {
   // EXPLICIT not-worn skips — unknown must not silence a working mic.
   const worn = device?.status?.isWearing;
   let micStatus: string;
-  if (worn === false) {
+  if (displayYielded || exiting) {
+    micStatus = 'JOAT · mic off';
+  } else if (worn === false) {
     micStatus = 'JOAT · mic off (glasses not worn)';
     setPanel('p-mic', 'off (not worn)');
   } else {
     let micOk = await audio.start(AudioInputSource.Glasses);
     let label = 'JOAT · listening';
-    if (!micOk) {
+    if (!micOk && !displayYielded && !exiting) {
       // The fallback ear: the phone mic, NAMED on the status
       // line — a silent source switch on a privacy surface is worse than
       // no fallback.
@@ -830,7 +934,7 @@ async function boot(): Promise<void> {
     }
     micStatus = micOk ? label : 'JOAT · mic unavailable';
   }
-  await imu.start();
+  if (!displayYielded && !exiting) await imu.start();
 
   // Deterministic official-simulator voice gate. Vite replaces DEV with false
   // and removes this branch from packed builds. The resolver independently
@@ -854,7 +958,12 @@ async function boot(): Promise<void> {
   chrome.setLink(link.linkState);
   chrome.setMic(audio.isOpen);
   chrome.setBattery(device?.status?.batteryLevel, device?.status?.isCharging === true);
-  chrome.start();
+  if (displayYielded) {
+    chrome.stop();
+    hud.suspendDisplay();
+  } else {
+    chrome.start();
+  }
 
   // Backgrounding the phone does not pause this page — the host snapshots it,
   // builds a NEW headless WebView, reloads this same URL, and replays the
@@ -863,6 +972,11 @@ async function boot(): Promise<void> {
   // Overview mid-task. Register before the first restore can arrive.
   setBackgroundState('joat.hud', () => hud.exportBackgroundState());
   onBackgroundRestore('joat.hud', (saved) => {
+    if (exiting) return;
+    // The host restores the original foreground WebView after its headless
+    // replacement has owned the connection. This explicit lifecycle event,
+    // not a retry timer, permits one takeover. A second callback is inert.
+    link.resumeIfReplaced();
     if (!hud.importBackgroundState(saved)) return;
     // Repaint ONCE, here — the reloaded page has already drawn its startup
     // frame, and the restored surface is what the wearer was actually
@@ -895,6 +1009,10 @@ async function boot(): Promise<void> {
   }
 
   async function teardown(): Promise<void> {
+    if (exiting) return;
+    exiting = true;
+    chromeRef?.stop();
+    promptedInput.cancel('exit');
     await audio.stop();
     imu.dispose();
     await imu.stop();
@@ -1019,12 +1137,6 @@ async function renderVisualState(
     if (state.endsWith('-expanded') || state === 'panel-article') {
       // Through the REAL drill-in, so simulator gestures drive the page.
       await menu.openPanelTab(tab);
-      if (state.endsWith('-expanded') && tab !== 'pomodoro') {
-        // NEWS and SEARCH expand into a FIRMWARE list page (HudPresenter's
-        // NATIVE_LIST_TITLES): the device shows the host's own list, and
-        // this canvas keeps the frame beneath it. Nothing to draw here.
-        console.info(`[joat] ${state}: a firmware list page on the device; the preview keeps the overview`);
-      }
       if (state === 'panel-article') {
         const article = panelArticleFixture();
         await menu.presentList(

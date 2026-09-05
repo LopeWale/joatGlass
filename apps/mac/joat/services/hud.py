@@ -9,6 +9,11 @@ and (later) surface arbitration in exactly one place.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import math
+import time
+from typing import Literal, Protocol, cast, runtime_checkable
+
 from ..core.interfaces import GlassesTransport
 from ..core.protocol import (
     AgentTerminalHudView,
@@ -17,7 +22,21 @@ from ..core.protocol import (
     ContainerId,
     HudRebuild,
     HudText,
+    PromptAck,
+    PromptPresent,
 )
+from .message_prompts import ActivatePrompt, PromptPresentationAck
+from .prompted_input import PromptTicket
+
+
+@runtime_checkable
+class _PromptTransport(Protocol):
+    async def request_prompt(
+        self, request: PromptPresent, *, on_presented: Callable[[PromptAck], bool],
+        on_revoked: Callable[[], None] | None = None, timeout_s: float = 5.0,
+    ) -> bool: ...
+
+    async def cancel_prompt(self, prompt_id: str | None = None) -> bool: ...
 
 
 class HudWriter:
@@ -25,6 +44,53 @@ class HudWriter:
 
     def __init__(self, transport: GlassesTransport) -> None:
         self._transport = transport
+
+    async def publish_prompt(
+        self, ticket: PromptTicket, question: str, activate: ActivatePrompt, *,
+        fence_audio: Callable[[], int], revoke: Callable[[str], object],
+    ) -> bool:
+        """Arm only inside an exact authenticated presentation receipt."""
+        transport = self._transport
+        if not isinstance(transport, _PromptTransport):
+            return False
+        remaining_ms = math.floor((ticket.expires_at - time.monotonic()) * 1000)
+        if remaining_ms <= 0 or ticket.source not in ("glasses", "phone"):
+            return False
+        if ticket.owner_kind not in ("messages", "brainstorm", "terminal"):
+            return False
+        request = PromptPresent(
+            prompt_id=ticket.prompt_id, question=question,
+            presentation_binding=ticket.presentation_binding,
+            connection_generation=ticket.connection_generation,
+            source="glasses" if ticket.source == "glasses" else "phone",
+            expires_in_ms=min(45_000, remaining_ms),
+            owner_kind=cast(Literal["messages", "brainstorm", "terminal"], ticket.owner_kind),
+            owner_id=ticket.owner_id, field=ticket.field,
+        )
+
+        def presented(ack: PromptAck) -> bool:
+            # No task/future boundary between this fence and owner activation:
+            # the next WebSocket PCM callback must already see the new lease.
+            return activate(PromptPresentationAck(
+                prompt_id=ack.prompt_id, success=ack.success,
+                presentation_binding=ack.presentation_binding,
+                connection_generation=ack.connection_generation,
+                audio_epoch=ack.audio_epoch or "", ingress_fence=fence_audio(),
+            ))
+
+        def retired() -> None:
+            revoke(ticket.prompt_id)
+
+        return await transport.request_prompt(
+            request, on_presented=presented, on_revoked=retired,
+            # Leave cleanup room inside the bridge's five-second publication
+            # budget. The question's separate expiry never renews on receipt.
+            timeout_s=min(4.5, remaining_ms / 1000),
+        )
+
+    async def cancel_prompt(self, prompt_id: str) -> bool:
+        transport = self._transport
+        return await transport.cancel_prompt(prompt_id) if isinstance(transport, _PromptTransport) else False
 
     async def begin_brainstorm(self) -> None:
         """Release any menu focus before the first live Brainstorm frame."""

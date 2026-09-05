@@ -42,6 +42,13 @@ export interface AssistantOverlayVisual {
 
 type HudVisualBaseFrame =
   | {
+    kind: 'prompt_question';
+    status: string;
+    micOn: boolean;
+    promptId: string;
+    question: string;
+  }
+  | {
     kind: 'overview';
     status: string;
     micOn: boolean;
@@ -119,12 +126,17 @@ export interface HudFramePainter {
    * only a device-side clock digit moved. It draws normally but is NOT
    * recorded as a wearer-visible frame receipt. */
   paint(frame: HudVisualFrame, localTick?: boolean): Promise<boolean>;
+  /** Receipt for this frame only. Cancellation and a page rebuild invalidate
+   * the result; accepted identical pixels on the same page may be reused. */
+  paintExact?(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean>;
   /** Move the brainstorm/terminal transcript window; true if it moved. */
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
   transcriptIsThinking?(): boolean;
   /** The page on the glass was rebuilt: nothing painted before is on it. */
   forgetPage?(): void;
+  suspendDisplay?(): void;
+  resumeDisplay?(): void;
 }
 
 /** Converts one raw raster tile into an image format the native bridge and
@@ -255,6 +267,8 @@ function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T>
 interface PendingPaint {
   frame: HudVisualFrame;
   localTick: boolean;
+  isCurrent?: () => boolean;
+  displayCurrent: () => boolean;
   resolve: Array<(painted: boolean) => void>;
 }
 
@@ -336,6 +350,9 @@ export class HudVisualSurface implements HudFramePainter {
   /** What the SpineLabel container is showing right now. Empty means the
    * page was (re)built and the container is back to its ' ' placeholder. */
   private writtenSpineLabel = '';
+  private pageRevision = 0;
+  private displayActive = true;
+  private displayRevision = 0;
 
   constructor(
     private readonly client: BridgeClient,
@@ -356,8 +373,22 @@ export class HudVisualSurface implements HudFramePainter {
    * the next frame writes the spine word and every tile again.
    */
   forgetPage(): void {
+    if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'forget-page', this.pageRevision);
+    this.pageRevision += 1;
     this.deliveredTiles.clear();
     this.writtenSpineLabel = '';
+  }
+
+  suspendDisplay(): void {
+    if (!this.displayActive) return;
+    this.displayActive = false;
+    this.displayRevision += 1;
+    this.forgetPage();
+    for (const pending of this.queue.splice(0)) pending.resolve.forEach((resolve) => resolve(false));
+  }
+
+  resumeDisplay(): void {
+    this.displayActive = true;
   }
 
   /**
@@ -378,7 +409,8 @@ export class HudVisualSurface implements HudFramePainter {
    * and fail the frame, so the presenter heals the page and the next paint
    * writes everything again.
    */
-  private async writeSpineLabel(frame: HudVisualFrame): Promise<boolean> {
+  private async writeSpineLabel(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean> {
+    if (!isCurrent()) return false;
     if (!this.spineLabel) return true;
     const label = pxTruncate(this.spineLabel(frame), SPINE_LABEL_BOX.width);
     if (label === this.writtenSpineLabel) return true;
@@ -398,7 +430,7 @@ export class HudVisualSurface implements HudFramePainter {
     const ok = this.uploadTimeoutMs > 0
       ? await settleWithin(write, this.uploadTimeoutMs, 'spine label write')
       : await write;
-    if (!ok) {
+    if (!ok || !isCurrent()) {
       this.writtenSpineLabel = '';
       this.deliveredTiles.clear();
       return false;
@@ -416,9 +448,23 @@ export class HudVisualSurface implements HudFramePainter {
   }
 
   paint(frame: HudVisualFrame, localTick = false): Promise<boolean> {
+    return this.enqueue(frame, localTick);
+  }
+
+  paintExact(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean> {
+    const pageRevision = this.pageRevision;
+    return this.enqueue(frame, false, () => pageRevision === this.pageRevision && isCurrent());
+  }
+
+  private enqueue(frame: HudVisualFrame, localTick: boolean, isCurrent?: () => boolean): Promise<boolean> {
+    const displayRevision = this.displayRevision;
+    const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
+    const displayCurrent = () => this.displayActive && this.displayRevision === displayRevision && bridgeCurrent();
+    if (!displayCurrent()) return Promise.resolve(false);
     return new Promise((resolve) => {
       const pending = this.queue[this.queue.length - 1];
-      if (pending && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation') {
+      if (pending && pending.displayCurrent() && !isCurrent && !pending.isCurrent
+        && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation') {
         // A full frame supersedes every older not-yet-started frame. Keeping
         // only the latest prevents streamed text/countdown ticks from building
         // a stale multi-second BLE backlog while preserving one command lane.
@@ -430,7 +476,7 @@ export class HudVisualSurface implements HudFramePainter {
         pending.localTick = pending.localTick && localTick;
         pending.resolve.push(resolve);
       } else {
-        this.queue.push({ frame, localTick, resolve: [resolve] });
+        this.queue.push({ frame, localTick, isCurrent, displayCurrent, resolve: [resolve] });
       }
       if (!this.painting) {
         this.painting = true;
@@ -448,42 +494,57 @@ export class HudVisualSurface implements HudFramePainter {
       }
       const next = this.queue.shift();
       if (!next) break;
-      const painted = await this.paintNow(next.frame, next.localTick);
+      const painted = await this.paintNow(
+        next.frame, next.localTick, () => next.displayCurrent() && (next.isCurrent?.() ?? true),
+      );
       next.resolve.forEach((resolve) => resolve(painted));
     }
     this.painting = false;
   }
 
-  private async paintNow(frame: HudVisualFrame, localTick = false): Promise<boolean> {
+  private async paintNow(frame: HudVisualFrame, localTick = false, guard?: () => boolean): Promise<boolean> {
     const frameNumber = ++this.frameNumber;
+    const pageRevision = this.pageRevision;
+    const isCurrent = (): boolean => pageRevision === this.pageRevision && (guard?.() ?? true);
     let current: { order: number; tile: HudImageTile; startedAt: number; bytes: number } | undefined;
     try {
       // The word first: it is the fastest thing on the page and the thing
       // the wearer is waiting for. Tiles follow at BLE pace.
-      if (!(await this.writeSpineLabel(frame))) return false;
+      if (!(await this.writeSpineLabel(frame, isCurrent)) || !isCurrent()) return false;
+      if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'render-start', frame.kind, pageRevision);
       const tiles = await this.renderer.render(frame);
+      if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'render-result', frame.kind, tiles.length,
+        tiles.map(t => t.pixels.reduce((n, v) => n + (v > 0 ? 1 : 0), 0)));
+      if (!isCurrent()) return false;
       // Navigation acknowledges an exact route generation only after four
       // bridge writes. Confirmation is an exclusive decision surface and may
       // never inherit a quadrant from the page beneath it.
       const requiresCompleteTransfer = frame.kind === 'confirmation' || frame.kind === 'navigation';
       for (const [order, tile] of tiles.entries()) {
+        if (!isCurrent()) return false;
         current = { order, tile, startedAt: now(), bytes: 0 };
         if (
           !requiresCompleteTransfer
           && pixelsEqual(this.deliveredTiles.get(tile.containerId), tile.pixels)
-        ) continue;
+        ) {
+          if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'cache-skip', tile.containerId);
+          continue;
+        }
         const containerName = VisualContainerName[tile.containerId];
         if (!containerName) throw new Error(`unknown visual container ${tile.containerId}`);
         const imageData = await this.imageEncoder(tile);
+        if (!isCurrent()) return false;
         current.bytes = imageData.length;
         if (this.tileGapMs > 0) {
           const wait = this.tileGapMs - (now() - this.lastTileCallAt);
           if (wait > 0) await new Promise<void>((resolve) => { setTimeout(resolve, wait); });
         }
+        if (!isCurrent()) return false;
         // Timed from the bridge call, not the encode: the phone's LZ4 and
         // the BLE hop are what the number has to expose.
         current.startedAt = now();
         this.lastTileCallAt = current.startedAt;
+        if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'upload-start', tile.containerId);
         const upload = this.client.require().updateImageRawData(
           new ImageRawDataUpdate({
             containerID: tile.containerId,
@@ -497,6 +558,13 @@ export class HudVisualSurface implements HudFramePainter {
         const result = this.uploadTimeoutMs > 0
           ? await settleWithin(upload, this.uploadTimeoutMs, `${containerName} upload`)
           : await upload;
+        if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'upload-result', tile.containerId, result);
+        if (!isCurrent()) {
+          // A late native write may have changed this tile even though its
+          // owner was cancelled. Never reuse the previous pixel cache for it.
+          this.deliveredTiles.delete(tile.containerId);
+          return false;
+        }
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';
         this.diagnostics?.record({
           type: 'tile_upload',
@@ -523,6 +591,7 @@ export class HudVisualSurface implements HudFramePainter {
       // MAX_RETAINED_EVENTS — and the whole receipt collapses to an empty
       // "fail" that names no cause. The counter still DRAWS; it just does
       // not claim the Mac told the lens anything new.
+      if (!isCurrent()) return false;
       if (localTick) return true;
       void completedVisualFrameReceipt(frame, tiles)
         .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })

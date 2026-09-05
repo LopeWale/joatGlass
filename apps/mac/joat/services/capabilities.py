@@ -64,7 +64,9 @@ from .planning import (
 )
 from .status import StatusPublisher
 from .message_reply import MessageReplyController
+from .message_ui import MessageUIController
 from .panels import PanelPublisher
+from .reader import paginate_reader_text
 
 log = logging.getLogger(__name__)
 
@@ -80,11 +82,6 @@ MESSAGES_RETRY_ITEMS = [
     "Tap to try Messages again.",
 ]
 NEW_MESSAGE_ROW = "New message · voice recipient + text"
-# Eight visual body lines leave a safe footer margin on the G2 lens. This is
-# deliberately a content page, not a short notification preview: ordinary
-# texts should be readable without an unnecessary second page.
-_MESSAGE_READER_PAGE_CHARACTERS = 320
-_MESSAGE_READER_DISPLAY_LINE_CHARACTERS = 52
 
 
 # These strings are the only explanation of a terminal health state that
@@ -205,26 +202,14 @@ class _NoteRow:
     text_note: QuickNote | None = None
 
 
-def _wrap_note_text(text: str, width: int = 60) -> list[str]:
-    """Greedy word wrap for HUD list rows; long words are hard-split."""
-    lines: list[str] = []
-    current = ""
-    for word in text.split():
-        while len(word) > width:
-            if current:
-                lines.append(current)
-                current = ""
-            lines.append(word[:width])
-            word = word[width:]
-        candidate = f"{current} {word}".strip()
-        if len(candidate) <= width:
-            current = candidate
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines or [""]
+@dataclass(slots=True)
+class _NoteReaderState:
+    title: str
+    label: str
+    pages: tuple[tuple[str, ...], ...]
+    trace_id: str
+    index: int = 0
+    page_pending: bool = False
 
 
 @dataclass(slots=True)
@@ -242,7 +227,7 @@ class _MessageDetailState:
 
     thread: MessageThread
     entry: MessageEntry
-    pages: tuple[str, ...]
+    pages: tuple[tuple[str, ...], ...]
     index: int = 0
 
 
@@ -321,6 +306,9 @@ class CapabilityRouter:
         brainstorm_recent: Callable[..., list[str]] | None = None,
         panels: PanelPublisher | None = None,
         wearer_zone: WearerZone | None = None,
+        terminal_open: Callable[[str, str | None, str, Callable[[], bool]], Awaitable[None]] | None = None,
+        terminal_current: Callable[[], str | None] | None = None,
+        message_ui: MessageUIController | None = None,
     ) -> None:
         self._hud = hud
         # Defaults to this Mac's zone, which is exactly the pre-wearer-zone
@@ -331,6 +319,7 @@ class CapabilityRouter:
         self._messages = messages
         self._cards = cards
         self._replies = replies
+        self._message_ui = message_ui
         self._personal_data = personal_data
         self._notes = notes
         self._voice_notes = voice_notes
@@ -348,6 +337,10 @@ class CapabilityRouter:
         self._brainstorm_rows: list[Any] = []
         self._terminal_rows = terminal_rows
         self._terminal_focus = terminal_focus
+        self._terminal_open = terminal_open
+        self._terminal_current = terminal_current
+        self._terminal_opening_revision = 0
+        self._terminal_selection_id: str | None = None
         self._terminal_busy = terminal_busy
         self._terminal_row_names: list[str] = []
         self._brainstorm_recent = brainstorm_recent
@@ -359,6 +352,7 @@ class CapabilityRouter:
         self._message_history: _MessageHistoryState | None = None
         self._message_detail: _MessageDetailState | None = None
         self._message_page_pending = False
+        self._message_selection_epoch = 0
         # The reply controller keeps its selected handle private. Mirror only
         # whether this router armed one, so a new wearer-visible picker can
         # reliably disarm it without clearing an unrelated controller state.
@@ -374,6 +368,7 @@ class CapabilityRouter:
         self._planning_scope = PlanningScope.MONTH
         self._planning_rows: list[_PlanningRow] = []
         self._note_rows: list[_NoteRow] = []
+        self._note_reader: _NoteReaderState | None = None
         self._activity_rows: list[ActionActivity] = []
         self._active_request_id: str | None = None
         self._active_capability: str | None = None
@@ -385,20 +380,59 @@ class CapabilityRouter:
     def on_input(self, event: InputEvent) -> None:
         """Transport callback — synchronous, so work is scheduled."""
         if event.container_name == "capmenu" and event.selected_name:
-            asyncio.get_running_loop().create_task(
-                self.open(
-                    event.selected_name,
+            self.clear_message_selection("capability-open")
+            self._terminal_opening_revision += 1
+            revision = self._terminal_opening_revision
+
+            async def open_requested() -> None:
+                if revision != self._terminal_opening_revision:
+                    return
+                await self.open(
+                    event.selected_name or "",
                     request_id=event.request_id,
                     planning_anchor_unix_ms=event.planning_anchor_unix_ms,
                 )
-            )
+
+            asyncio.get_running_loop().create_task(open_requested())
         elif event.container_name == "capdata" and event.selected_index is not None:
+            terminal_revision = None
+            message_epoch = None
+            if event.selected_name == "MESSAGES":
+                if (event.request_id != self._active_request_id
+                        or self._active_capability != "MESSAGES"):
+                    return
+                if self._message_ui is not None and self._message_ui.matches(event.request_id, event.trace_id):
+                    return
+                self._message_selection_epoch += 1
+                message_epoch = self._message_selection_epoch
+                if self._replies is not None and self._message_selection_active:
+                    self._replies.clear_selection("new-selection")
+                self._message_selection_active = False
+                self._message_history = None
+                self._message_detail = None
+                if self._message_ui is not None:
+                    epoch = message_epoch
+                    self._message_ui.select(event.request_id, event.trace_id or "hud",
+                        lambda: epoch == self._message_selection_epoch
+                        and event.request_id == self._active_request_id
+                        and self._active_capability == "MESSAGES")
+            if event.selected_name == "AGENT TERMINAL":
+                if (event.request_id != self._active_request_id
+                        or self._active_capability != "AGENT TERMINAL"):
+                    return
+                self._terminal_opening_revision += 1
+                terminal_revision = self._terminal_opening_revision
             asyncio.get_running_loop().create_task(self._select_capability_row(
                 event.selected_name or "",
                 event.selected_index,
                 event.trace_id or "hud",
                 event.request_id,
+                terminal_revision=terminal_revision,
+                message_epoch=message_epoch,
             ))
+        elif event.container_name == "message-cancel" and self._message_ui is not None:
+            if self._message_ui.matches(event.request_id, event.trace_id):
+                self._message_ui.cancel(event.selected_name or "")
         elif (
             event.container_name == "capgrid"
             and event.selected_index is not None
@@ -438,6 +472,18 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(
                 self._panels.page(event.selected_name, event.event_type, event.request_id)
             )
+        elif event.container_name == "cappage" and event.selected_name == "QUICKNOTES":
+            reader = self._note_reader
+            if (
+                reader is None or reader.page_pending
+                or self._active_capability != "QUICKNOTES"
+                or event.request_id != self._active_request_id
+                or event.trace_id != reader.trace_id
+                or event.selected_index != reader.index
+            ):
+                return
+            reader.page_pending = True
+            asyncio.get_running_loop().create_task(self._page_note_reader(reader, event))
         elif event.container_name == "cappage" and event.event_type is not None:
             if self._message_page_pending:
                 return
@@ -452,8 +498,28 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(self._repeat())
         elif (
             event.container_name == "capability-lifecycle"
+            and event.selected_name in ("quicknotes-list", "quicknotes-home")
+        ):
+            if event.request_id == self._active_request_id and self._active_capability == "QUICKNOTES":
+                self._note_reader = None
+                if event.selected_name == "quicknotes-home":
+                    self._note_rows = []
+        elif (
+            event.container_name == "capability-lifecycle"
+            and event.selected_name == "quicknotes-back"
+        ):
+            asyncio.get_running_loop().create_task(
+                self._cancel_note_discard(event.request_id)
+            )
+        elif (
+            event.container_name == "capability-lifecycle"
             and event.selected_name in ("messages-home", "messages-list", "messages-conversation")
         ):
+            if event.request_id is not None and (self._active_capability != "MESSAGES"
+                    or event.request_id != self._active_request_id
+                    or (self._message_ui is not None and self._message_ui.has_visit and event.trace_id is not None
+                        and not self._message_ui.matches(event.request_id, event.trace_id))):
+                return
             if event.selected_name == "messages-conversation":
                 # Hub Back is local and restores its retained conversation
                 # frame. Keep the selected thread armed, but retire the
@@ -464,23 +530,43 @@ class CapabilityRouter:
                 self.clear_message_selection(
                     "home" if event.selected_name == "messages-home" else "list"
                 )
+        elif (event.container_name == "capability-lifecycle"
+              and event.selected_name == "terminal-home"):
+            if (event.request_id == self._active_request_id
+                    and event.trace_id == self._terminal_selection_id):
+                self._terminal_opening_revision += 1
+                self._terminal_selection_id = None
         elif event.container_name == "menu" and event.selected_name == "closed":
+            self._terminal_opening_revision += 1
+            self._note_reader = None
             self.clear_message_selection("home")
             asyncio.get_running_loop().create_task(self.repaint_home())
 
     def clear_message_selection(self, reason: str) -> None:
         """Disarm a private reply target when its wearer-visible context ends."""
-        self._message_rows = []
+        # A pending read must not re-arm the recipient after Back or disconnect,
+        # even when the Hub retains the same request ID for its cached picker.
+        self._message_selection_epoch += 1
+        if self._message_ui is not None:
+            self._message_ui.retire()
+        # Back restores the same picker on the Hub. Its row mapping remains
+        # valid, while the private reply target and reader must be disarmed.
+        if reason != "list":
+            self._message_rows = []
         self._message_history = None
         self._message_detail = None
         self._message_page_pending = False
-        if self._replies is not None and self._message_selection_active:
+        # Conversational drafts can exist without a picker selection. The
+        # controller owns their lifetime, including pending confirmations.
+        if self._replies is not None:
             self._replies.clear_selection(reason)
         self._message_selection_active = False
 
     def on_disconnect(self) -> None:
         """Drop any Mac-private reply target when the glasses link disappears."""
+        self._terminal_opening_revision += 1
         self.clear_message_selection("disconnect")
+        self._note_reader = None
 
     async def open(
         self,
@@ -490,6 +576,10 @@ class CapabilityRouter:
         planning_anchor_unix_ms: int | None = None,
     ) -> None:
         """Open one list generation; stale concurrent generations cannot paint."""
+        self._terminal_opening_revision += 1
+        self._note_reader = None
+        if self._active_capability == "MESSAGES" and self._canonical_capability(name) != "MESSAGES":
+            self.clear_message_selection("capability-open")
         self._active_request_id = request_id
         self._active_capability = self._canonical_capability(name)
         token = self._request_context.set(request_id)
@@ -627,6 +717,11 @@ class CapabilityRouter:
                 selectable=True,
             )
             return
+        if self._terminal_open is not None and self._terminal_current is not None:
+            current = self._terminal_current()
+            if current is not None:
+                await self._open_terminal_lane(current, self._active_request_id or "hud")
+                return
         if self._terminal_view is not None:
             await self._terminal_view()
             return
@@ -687,10 +782,10 @@ class CapabilityRouter:
             selectable=True,
         ))
 
-    async def _select_terminal(self, index: int) -> None:
+    async def _select_terminal(self, index: int, trace_id: str = "hud") -> None:
         """Focus the work session the wearer tapped, and show it."""
         names = self._terminal_row_names
-        if not 0 <= index < len(names) or self._terminal_focus is None:
+        if not 0 <= index < len(names) or (self._terminal_focus is None and self._terminal_open is None):
             # A session can finish between the paint and the tap. Saying so
             # is the difference between "the list moved" and "the glasses
             # ignored me".
@@ -700,7 +795,71 @@ class CapabilityRouter:
                 answers_wearer=True,
             )
             return
-        await self._terminal_focus(names[index])
+        if self._terminal_open is not None:
+            await self._open_terminal_lane(names[index], trace_id)
+        elif self._terminal_focus is not None:
+            await self._terminal_focus(names[index])
+
+    def claim_terminal_voice(
+        self, request_id: str | None = None, selection_id: str | None = None,
+    ) -> Callable[[], bool]:
+        """A recognized spoken Terminal command starts a host-owned visit."""
+        self._terminal_opening_revision += 1
+        self._active_request_id = request_id
+        self._active_capability = "AGENT TERMINAL"
+        self._terminal_selection_id = selection_id
+        revision = self._terminal_opening_revision
+        return lambda: revision == self._terminal_opening_revision
+
+    @property
+    def view_revision(self) -> int:
+        """Navigation changes retire assistant overlays from the preceding view."""
+        return self._terminal_opening_revision
+
+    async def prepare_terminal_instruction(self, name: str, request_id: str) -> bool:
+        """Open one explicitly named lane through the normal owned visit."""
+        names = [lane for lane, _row in self._terminal_rows()] if self._terminal_rows else []
+        if (name not in names or self._terminal_open is None
+                or not request_id.startswith(VOICE_REQUEST_PREFIX)):
+            return False
+        self.clear_message_selection("terminal-open")
+        self._note_reader = None
+        current = self.claim_terminal_voice(request_id, request_id)
+        token = self._request_context.set(request_id)
+        try:
+            # The existing voice list establishes the same request/selection
+            # binding as a picker tap, before the first prepared lane frame.
+            await self._show_focus(
+                "AGENT TERMINAL", [f"Opening {name}…"], hint=BACK_HINT,
+            )
+            if not current():
+                return False
+            return await self._open_terminal_lane(name, request_id)
+        finally:
+            self._request_context.reset(token)
+
+    async def _open_terminal_lane(self, name: str, selection_id: str) -> bool:
+        self._terminal_opening_revision += 1
+        revision = self._terminal_opening_revision
+        request_id = self._active_request_id
+        self._terminal_selection_id = selection_id
+
+        def current() -> bool:
+            return (
+                revision == self._terminal_opening_revision
+                and request_id == self._active_request_id
+                and self._active_capability == "AGENT TERMINAL"
+            )
+
+        if self._terminal_open is not None and current():
+            try:
+                await self._terminal_open(name, request_id, selection_id, current)
+                return current()
+            except Exception:
+                log.exception("terminal opening failed")
+                if current():
+                    await self._hud.assistant("That session did not open. Tap retry.", answers_wearer=True)
+        return False
 
     async def _select_brainstorm(self, index: int) -> None:
         """Open the session the wearer picked.
@@ -735,14 +894,24 @@ class CapabilityRouter:
                  "Say “JOAT, brainstorm …” to start a new one."],
             )
 
-    async def _select_message(self, index: int, trace_id: str) -> None:
+    async def _select_message(self, index: int, trace_id: str, selection_epoch: int | None = None) -> None:
         if (
             self._messages is None
-            or self._replies is None
             or not 0 <= index <= len(self._message_rows)
         ):
             return
+        if selection_epoch is None:
+            self._message_selection_epoch += 1
+            selection_epoch = self._message_selection_epoch
+        if selection_epoch != self._message_selection_epoch:
+            return
         if index == 0:
+            if self._replies is None:
+                return
+            if self._message_ui is not None:
+                self._message_selection_active = True
+                await self._message_ui.begin_new()
+                return
             self._replies.begin_compose(trace_id)
             self._message_selection_active = True
             await self._send_list(HudList(
@@ -756,13 +925,6 @@ class CapabilityRouter:
             ))
             return
         thread = self._message_rows[index - 1]
-        if not thread.replyable:
-            # A refusal is a receipt: say it over the conversation list the
-            # wearer is reading instead of replacing it and charging them a
-            # Back to return.
-            await self._hud.assistant("Group thread · read-only for now.")
-            await self._hud.settle_assistant()
-            return
         try:
             page = await asyncio.to_thread(
                 # 8 entries = exactly one conversation window on the lens
@@ -772,18 +934,31 @@ class CapabilityRouter:
             )
         except (OSError, sqlite3.Error) as exc:
             log.warning("Messages history unavailable: %s", type(exc).__name__)
-            if not self._request_is_current():
+            if (
+                not self._request_is_current()
+                or selection_epoch != self._message_selection_epoch
+            ):
                 return
             self.clear_message_selection("access-denied")
             await self._show_messages_read_failure(exc)
             return
-        if not self._request_is_current():
+        if (
+            not self._request_is_current()
+            or selection_epoch != self._message_selection_epoch
+        ):
             return
-        self._replies.select(thread, trace_id)
-        self._message_selection_active = True
+        # The Mac-owned chat GUID targets the whole conversation. A group
+        # without that identity must never fall back to its latest sender.
+        can_reply = thread.reply_target is not None and self._replies is not None
+        if can_reply and self._replies is not None:
+            self._replies.select(thread, trace_id)
+        self._message_selection_active = can_reply
         self._message_history = _MessageHistoryState(thread=thread, pages=[page])
         self._message_detail = None
         await self._show_message_history_page()
+        if (can_reply and self._message_ui is not None and selection_epoch == self._message_selection_epoch
+                and self._request_is_current()):
+            self._message_ui.conversation_ready()
 
     async def _select_message_detail(
         self,
@@ -818,7 +993,7 @@ class CapabilityRouter:
             self._message_detail = _MessageDetailState(
                 thread=history.thread,
                 entry=entry,
-                pages=self._message_reader_pages(entry.text),
+                pages=paginate_reader_text(entry.text or "No text is available for this message."),
             )
             log.info("message detail trace=%s stage=page-visible page=0", trace_id)
             await self._show_message_detail()
@@ -867,6 +1042,11 @@ class CapabilityRouter:
                     )
                 except (OSError, sqlite3.Error) as exc:
                     log.warning("Messages history unavailable: %s", type(exc).__name__)
+                    if (
+                        request_id != self._active_request_id
+                        or self._message_history is not state
+                    ):
+                        return
                     self.clear_message_selection("access-denied")
                     token = self._request_context.set(request_id)
                     try:
@@ -934,21 +1114,29 @@ class CapabilityRouter:
                 "Latest messages — down for older"
                 if page.has_older else "Complete conversation on this Mac"
             )
-            # Paging is already spelled out in the Mac-authored heading.
-            # Keep the footer short enough to show every remaining action.
-            hint = "tap read · say reply · left x2: back"
         else:
             page_label = (
                 "Older messages — up newer, down older"
                 if page.has_older else "Older messages — up for newer"
             )
-            hint = "tap read · say reply · left x2: back"
+        # The Hub's boundary gesture gate consumes these paging affordances.
+        # Keep the wire hint and visible actions aligned with the cursor.
+        hint_parts = []
+        if state.index > 0:
+            hint_parts.append("up newer")
+        if page.has_older:
+            hint_parts.append("down older")
+        can_reply = state.thread.reply_target is not None and self._replies is not None
+        hint = " · ".join([
+            *hint_parts, "tap read", "say reply" if can_reply else "read-only", BACK_HINT,
+        ])
         context = [self._message_history_row(state.thread, entry) for entry in page.entries]
+        instructions = (
+            ['Say “JOAT, reply saying …”', "Mic off? Long press to enable."]
+            if can_reply else []
+        )
         await self._send_list(HudList(
-            items=[page_label, *context,
-                'Say “JOAT, reply saying …”',
-                "Mic off? Long press to enable.",
-            ],
+            items=[page_label, *context, *instructions],
             title="MESSAGES · CONVERSATION",
             hint=hint,
             selectable=bool(page.entries),
@@ -959,48 +1147,23 @@ class CapabilityRouter:
         if state is None:
             return
         total = len(state.pages)
-        if state.index == 0:
-            hint = (
-                "down more · say reply · left x2: back"
-                if total > 1 else "say reply · left x2: back"
-            )
-        elif state.index + 1 < total:
-            hint = "up previous · down more · say reply · left x2: back"
-        else:
-            hint = "up previous · say reply · left x2: back"
+        hint_parts = []
+        if state.index > 0:
+            hint_parts.append("up previous")
+        if state.index + 1 < total:
+            hint_parts.append("down more")
+        can_reply = state.thread.reply_target is not None and self._replies is not None
+        hint = " · ".join([
+            *hint_parts, "say reply" if can_reply else "read-only", BACK_HINT,
+        ])
         await self._send_list(HudList(
             items=[
                 self._message_detail_metadata(state.thread, state.entry, state.index, total),
-                *self._message_reader_pages(
-                    state.pages[state.index],
-                    _MESSAGE_READER_DISPLAY_LINE_CHARACTERS,
-                ),
+                *state.pages[state.index],
             ],
             title="MESSAGES · MESSAGE",
             hint=hint,
         ))
-
-    @staticmethod
-    def _message_reader_pages(
-        text: str,
-        maximum_characters: int = _MESSAGE_READER_PAGE_CHARACTERS,
-    ) -> tuple[str, ...]:
-        """Split text at word boundaries for fixed G2 reader pages or lines."""
-
-        remaining = " ".join(text.split())
-        if not remaining:
-            return ("No text is available for this message.",)
-        pages: list[str] = []
-        while remaining:
-            if len(remaining) <= maximum_characters:
-                pages.append(remaining)
-                break
-            boundary = remaining.rfind(" ", 0, maximum_characters + 1)
-            if boundary <= 0:
-                boundary = maximum_characters
-            pages.append(remaining[:boundary].rstrip())
-            remaining = remaining[boundary:].lstrip()
-        return tuple(pages)
 
     @staticmethod
     def _message_detail_metadata(
@@ -1010,7 +1173,7 @@ class CapabilityRouter:
         page_count: int,
     ) -> str:
         role = "To" if entry.from_me else "From"
-        sender = "you" if entry.from_me else thread.sender
+        sender = "you" if entry.from_me else CapabilityRouter._message_sender(thread, entry)
         details: list[str] = []
         if entry.unread:
             details.append("unread")
@@ -1018,8 +1181,15 @@ class CapabilityRouter:
             details.append(entry.delivery)
         if entry.attachment_count:
             details.append("attachment")
-        details.append(f"{page_index + 1}/{page_count}")
-        return f"{role} {sender} · {' · '.join(details)}"
+        metadata = " · ".join([f"{page_index + 1}/{page_count}", f"{role} {sender}", *details])
+        # Counter first identifies prepared rows even when a long sender
+        # fills the metadata budget. Never split an astral code point.
+        units = 0
+        for index, char in enumerate(metadata):
+            units += 2 if ord(char) > 0xFFFF else 1
+            if units > 64:
+                return metadata[:index]
+        return metadata
 
     async def _show_messages_read_failure(self, error: BaseException) -> None:
         """Keep a real permission denial distinct from a retryable DB blip.
@@ -1054,9 +1224,9 @@ class CapabilityRouter:
         # instead of a wordy "(unread)" that reads like body text.
         marker = "● " if thread.unread else ""
         label = f"[{_age(thread.at)}] {marker}{thread.sender}"
-        if not thread.replyable:
+        if thread.is_group or not thread.replyable:
             # No " · " inside the label: that token is the primary/secondary
-            # split on the lens. The READ ONLY page explains the constraint.
+            # split on the lens. Group identity is independent of reply support.
             label += " (group)"
         preview = thread.text
         if thread.attachment_count:
@@ -1068,8 +1238,14 @@ class CapabilityRouter:
         return f"{label} · {preview or 'Message unavailable'}"
 
     @staticmethod
+    def _message_sender(thread: MessageThread, entry: MessageEntry) -> str:
+        return entry.sender or (
+            "Participant" if thread.is_group or not thread.replyable else thread.sender
+        )
+
+    @staticmethod
     def _message_history_row(thread: MessageThread, entry: MessageEntry) -> str:
-        label = "You" if entry.from_me else thread.sender
+        label = "You" if entry.from_me else CapabilityRouter._message_sender(thread, entry)
         details: list[str] = []
         if entry.unread:
             details.append("Unread")
@@ -1093,7 +1269,14 @@ class CapabilityRouter:
         index: int,
         trace_id: str,
         request_id: str | None,
+        *,
+        terminal_revision: int | None = None,
+        message_epoch: int | None = None,
     ) -> None:
+        if message_epoch is not None and message_epoch != self._message_selection_epoch:
+            return
+        if terminal_revision is not None and terminal_revision != self._terminal_opening_revision:
+            return
         if self._panels is not None and self._panels.owns(name):
             # A panel row tap is validated against the tab's content
             # revision, not this router's request generation.
@@ -1111,9 +1294,9 @@ class CapabilityRouter:
                 case "BRAINSTORM":
                     await self._select_brainstorm(index)
                 case "AGENT TERMINAL":
-                    await self._select_terminal(index)
+                    await self._select_terminal(index, trace_id)
                 case "MESSAGES":
-                    await self._select_message(index, trace_id)
+                    await self._select_message(index, trace_id, message_epoch)
                 case "NOTIFICATIONS":
                     await self._select_notification(index)
                 # ``Reminders`` was a first-level name in an older installed
@@ -1123,7 +1306,7 @@ class CapabilityRouter:
                 case "PLANNING" | "CALENDAR" | "TASKS" | "REMINDERS":
                     await self._select_planning(index)
                 case "QUICKNOTES":
-                    await self._select_note(index)
+                    await self._select_note(index, trace_id)
                 case "ACTIVITY":
                     await self._select_activity(index)
         except Exception:
@@ -1554,6 +1737,7 @@ class CapabilityRouter:
         invisible. While a capture is live the page IS the recorder's control
         panel — the exclusive microphone means taps are the only controls.
         """
+        self._note_reader = None
         capture = self._voice_capture
         if capture is not None and capture.active:
             await self._show_recording_controls()
@@ -1599,6 +1783,20 @@ class CapabilityRouter:
             selectable=bool(rows),
         )
 
+    async def _cancel_note_discard(self, request_id: str | None) -> None:
+        if (
+            request_id != self._active_request_id
+            or self._active_capability != "QUICKNOTES"
+            or self._voice_capture is None
+            or not self._voice_capture.discard_pending
+        ):
+            return
+        token = self._request_context.set(request_id)
+        try:
+            await self._apply_recording_control("keep")
+        finally:
+            self._request_context.reset(token)
+
     async def _show_recording_controls(self) -> None:
         capture = self._voice_capture
         assert capture is not None
@@ -1630,7 +1828,7 @@ class CapabilityRouter:
             selectable=True,
         )
 
-    async def _select_note(self, index: int) -> None:
+    async def _select_note(self, index: int, trace_id: str) -> None:
         if not 0 <= index < len(self._note_rows):
             return
         row = self._note_rows[index]
@@ -1638,10 +1836,49 @@ class CapabilityRouter:
             await self._apply_recording_control(row.control or "")
             return
         if row.kind == "voice" and row.voice_note is not None:
-            await self._show_voice_note_detail(row.voice_note)
+            await self._show_voice_note_detail(row.voice_note, trace_id)
             return
         if row.text_note is not None:
-            await self._show_focus("QUICKNOTES · DETAIL", [row.text_note.text])
+            await self._open_note_reader("QUICKNOTES · DETAIL", "Exact text", row.text_note.text, trace_id)
+
+    async def _open_note_reader(self, title: str, label: str, text: str, trace_id: str) -> None:
+        self._note_reader = _NoteReaderState(title, label, paginate_reader_text(text), trace_id)
+        await self._show_note_reader()
+
+    async def _show_note_reader(self) -> None:
+        reader = self._note_reader
+        if reader is None:
+            return
+        hint = []
+        if reader.index > 0:
+            hint.append("up previous")
+        if reader.index + 1 < len(reader.pages):
+            hint.append("down more")
+        hint.append(BACK_HINT)
+        await self._show_focus(
+            reader.title,
+            [f"{reader.index + 1}/{len(reader.pages)} · {reader.label}"[:64], *reader.pages[reader.index]],
+            hint=" · ".join(hint),
+        )
+
+    async def _page_note_reader(self, reader: _NoteReaderState, event: InputEvent) -> None:
+        try:
+            if self._note_reader is not reader or event.request_id != self._active_request_id:
+                return
+            delta = -1 if event.event_type == EventType.SCROLL_TOP else (
+                1 if event.event_type == EventType.SCROLL_BOTTOM else 0
+            )
+            target = reader.index + delta
+            if delta == 0 or not 0 <= target < len(reader.pages):
+                return
+            reader.index = target
+            token = self._request_context.set(event.request_id)
+            try:
+                await self._show_note_reader()
+            finally:
+                self._request_context.reset(token)
+        finally:
+            reader.page_pending = False
 
     async def _apply_recording_control(self, action: str) -> None:
         capture = self._voice_capture
@@ -1676,7 +1913,7 @@ class CapabilityRouter:
         # or discard — the unified notes list itself.
         await self._show_notes()
 
-    async def _show_voice_note_detail(self, note: VoiceNote) -> None:
+    async def _show_voice_note_detail(self, note: VoiceNote, trace_id: str) -> None:
         store = self._voice_notes
         if store is None:
             return
@@ -1687,7 +1924,7 @@ class CapabilityRouter:
         meta = f"{sections} transcript section{'s' if sections != 1 else ''}"
         if note.gap_count:
             meta += f" · {note.gap_count} gap{'s' if note.gap_count != 1 else ''}"
-        rows: list[str] = [f"{title[:60]}", meta]
+        rows: list[str] = [title, meta]
         insights = store.insights(note.capture_id)
         latest = store.recent_retained(1)
         is_latest = bool(latest) and latest[0].capture_id == note.capture_id
@@ -1697,21 +1934,23 @@ class CapabilityRouter:
                 rows.append("Say: summarize the last note.")
         else:
             rows.append("SUMMARY")
-            rows.extend(_wrap_note_text(insights.summary)[:5])
+            rows.append(insights.summary)
             if insights.key_points:
                 rows.append("KEY POINTS")
-                rows.extend(f"– {point[:58]}" for point in insights.key_points[:6])
+                rows.extend(f"– {point}" for point in insights.key_points)
             if insights.todos:
                 rows.append("TODOS")
                 # □ reads as an unchecked box: these are the actionable rows,
                 # and "create reminders from the last note" consumes them.
-                rows.extend(f"□ {todo[:58]}" for todo in insights.todos[:4])
-        hint = (
-            "say: ask the last note … · left x2: back"
-            if is_latest
-            else BACK_HINT
-        )
-        await self._show_focus("QUICKNOTES · NOTE", rows[:20], hint=hint)
+                rows.extend(f"□ {todo}" for todo in insights.todos)
+        if is_latest:
+            rows.append("Say: ask the last note …")
+        rows.append("TRANSCRIPT")
+        segments = store.segments(note.capture_id)
+        rows.extend(segment.text for segment in segments if segment.kind in ("transcript", "gap"))
+        if not any(segment.kind == "transcript" for segment in segments):
+            rows.append("No transcript is available; retained audio may need recovery.")
+        await self._open_note_reader("QUICKNOTES · NOTE", "Recording", "\n".join(rows), trace_id)
 
     async def _show_navigation(self) -> None:
         """Give the wearer the next natural action, not a hidden CLI contract.

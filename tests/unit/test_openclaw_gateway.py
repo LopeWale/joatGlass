@@ -785,12 +785,29 @@ async def test_client_surfaces_pairing_request_from_real_websocket_exchange() ->
     assert received[0]["params"]["scopes"] == ["operator.read"]
 
 
+def test_scope_mismatch_is_a_recognized_grant_refusal_not_generic_offline(caplog: pytest.LogCaptureFixture) -> None:
+    gateway = importlib.import_module("joat.agents.openclaw_gateway")
+    with pytest.raises(gateway.OpenClawScopeMismatch):
+        gateway._read_connect_response(
+            {"type": "res", "id": "connect", "ok": False,
+             "error": {"code": "INVALID_REQUEST", "message": "private auth payload",
+                       "details": {"code": "AUTH_SCOPE_MISMATCH"}}},
+            request_id="connect", requested_scopes=("operator.read", "operator.write", "operator.approvals"),
+        )
+    assert "code=AUTH_SCOPE_MISMATCH" in caplog.text
+    assert "private auth payload" not in caplog.text
+
+
 @pytest.mark.asyncio
-async def test_client_persists_issued_device_token_and_uses_it_on_reconnect() -> None:
+@pytest.mark.parametrize("prior_token", [None, "issued-device-token", "rotated-old-token"])
+async def test_client_persists_issued_device_token_and_uses_it_on_reconnect(prior_token: str | None) -> None:
     """Regression caught: approval succeeds once, then JOAT forgets its pairing."""
     gateway = importlib.import_module("joat.agents.openclaw_gateway")
     identity = RecordingIdentity()
-    token_store = RecordingTokenStore()
+    prior_scopes = ("operator.read", "operator.write", "operator.approvals")
+    token_store = RecordingTokenStore(
+        StoredToken(prior_token, prior_scopes) if prior_token else None,
+    )
     received: list[dict[str, Any]] = []
 
     async def handler(connection: ServerConnection) -> None:
@@ -847,9 +864,14 @@ async def test_client_persists_issued_device_token_and_uses_it_on_reconnect() ->
         await second.close()
 
     assert token_store.record == StoredToken(
-        token="issued-device-token", scopes=("operator.read",)
+        token="issued-device-token", scopes=(
+            prior_scopes if prior_token == "issued-device-token" else ("operator.read",)
+        )
     )
-    assert "auth" not in received[0]["params"]
+    if prior_token is None:
+        assert "auth" not in received[0]["params"]
+    else:
+        assert received[0]["params"]["auth"]["deviceToken"] == prior_token
     assert received[1]["params"]["auth"] == {
         "token": "issued-device-token",
         "deviceToken": "issued-device-token",

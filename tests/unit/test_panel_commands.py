@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 import pytest
 
 from joat.core.protocol import DownlinkMessage, HudPanel
+from joat.persistence.pomodoro import PomodoroStore, PomodoroCheckpoint, PomodoroStateError
+from joat.persistence.store import DurableStore
 from joat.services.news import Headline, NewsService
 from joat.services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
 from joat.services.panels import PanelPublisher
@@ -14,6 +17,29 @@ from joat.services.pomodoro import PomodoroService
 from joat.services.search import SearchResult, SearchService
 
 NOW = 1_800_000_000.0
+
+
+@pytest.mark.parametrize('command', ['pause the timer', 'resume the timer', 'skip break'])
+async def test_timer_recovery_commands_reach_the_unavailable_service(tmp_path: Path, command: str) -> None:
+    class Unreadable(PomodoroStore):
+        def load(self) -> PomodoroCheckpoint | None:
+            raise PomodoroStateError('synthetic unreadable checkpoint')
+
+    with DurableStore(tmp_path / 'timer.sqlite3') as durable:
+        store = PomodoroStore(durable)
+        prior = PomodoroCheckpoint('focus', True, 60_000, 60_000, 0, 1_060_000, 1_000_000)
+        store.save(prior)
+        service = PomodoroService(store=Unreadable(durable), clock=lambda: 1_000.0)
+        commands = PomodoroCommands(service, PanelPublisher(Transport(), {'pomodoro': service}))
+        try:
+            assert 'recovery unavailable' in (await commands.handle_command(command) or '').lower()
+            assert store.load() == prior
+            assert await commands.handle_command('reset the timer') == 'Pomodoro reset.'
+            assert not service.recovery_unavailable
+            saved = store.load()
+            assert saved is not None and saved.phase == 'idle' and not saved.running
+        finally:
+            await service.aclose()
 
 
 class Transport:

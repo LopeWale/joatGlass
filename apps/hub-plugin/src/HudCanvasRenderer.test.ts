@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as HudCanvas from './HudCanvasRenderer';
 import type { HudVisualFrame } from './HudVisualSurface';
 import { SPINE_LABEL_BOX } from './types';
@@ -45,6 +45,80 @@ import {
   wrapHudText,
 } from './HudCanvasRenderer';
 
+describe('prompt question rendering', () => {
+  function canvasFixture() {
+    const text: Array<{ value: string; x: number; y: number; width: number; fontSize: number; font: string }> = [];
+    const state: Record<string, unknown> = { font: '12px monospace' };
+    const fontSize = () => Number(/([\d.]+)px/.exec(String(state.font))?.[1] ?? 12);
+    const width = (value: string) => Array.from(value).length * fontSize() * 0.6;
+    Object.assign(state, {
+      measureText: (value: string) => ({ width: width(value) }),
+      fillText: (value: string, x: number, y: number) => text.push({
+        value, x, y, width: width(value), fontSize: fontSize(), font: String(state.font),
+      }),
+      getImageData: () => ({ data: new Uint8ClampedArray(576 * 288 * 4) }),
+    });
+    const context = new Proxy(state, { get: (target, key) => target[String(key)] ?? (() => undefined) });
+    vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => context }) });
+    // Keep all production layout/drawing code; only image asset loading and
+    // the canvas raster backend are deterministic fixtures here.
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    Object.defineProperty(renderer, 'icons', { value: Promise.resolve({}) });
+    return { renderer, text };
+  }
+  const questionFrame = (question: string): HudVisualFrame => ({
+    kind: 'prompt_question', promptId: 'prompt-fixture', question,
+    status: '9:41 JOAT listening', micOn: true,
+  });
+
+  it('does not contradict a prompted answer with the resting wake-word instruction', async () => {
+    const { renderer, text } = canvasFixture();
+    try {
+      await renderer.render({...questionFrame('What should work do?'),
+        status: "9:41 JOAT ONLINE — SAY 'JOAT …'"});
+      expect(text.some(({ value }) => /say.*joat/i.test(value))).toBe(false);
+      expect(text.some(({ value }) => value === 'speak your answer · left x2: cancel')).toBe(true);
+      expect(text.some(({ value, y }) => value === 'JOAT' && y === 20)).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('keeps a short spoken question in the same compact monospace face as the rest of JOAT', async () => {
+    const { renderer, text } = canvasFixture();
+    try {
+      await renderer.render(questionFrame('Recipient Sam selected. Say the message.'));
+      const body = text.filter(({ y }) => y >= 80 && y <= 240);
+      expect(body.length).toBeGreaterThan(0);
+      expect(body.every(({ font, fontSize }) => font.includes('"SF Mono"')
+        && font.endsWith('monospace') && fontSize === 14)).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('draws the entire question including beginning, middle, Unicode and unbroken values at a readable size', async () => {
+    const { renderer, text } = canvasFixture();
+    const question = `FIRST ${Array.from({ length: 38 }, (_, index) => `clause${index + 1}`).join(' ')} `
+      + `漢字 😀 café ${'key'.repeat(28)} FINAL question?`;
+    try {
+      const tiles = await renderer.render(questionFrame(question));
+      const body = text.filter(({ y }) => y >= 80 && y <= 240);
+      expect(body.map(({ value }) => value).join('').replace(/\s/g, ''))
+        .toBe(question.replace(/\s/g, ''));
+      expect(body.every(({ fontSize, x, width }) => fontSize >= 12 && x >= 14 && x + width <= 562)).toBe(true);
+      expect(body.every(({ value }) => !value.includes('…'))).toBe(true);
+      expect(tiles.map(({ containerId }) => containerId)).toEqual([4, 8, 9, 10]);
+      expect(text.some(({ value }) => /confirm action|tap.*confirm/i.test(value))).toBe(false);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('fails rendering when the complete question cannot fit instead of keeping only its tail', async () => {
+    const { renderer } = canvasFixture();
+    try {
+      // The wire accepts up to 1000 UTF-16 units; admission is not a promise
+      // that every such value fits the optical region at a readable size.
+      await expect(renderer.render(questionFrame('W'.repeat(1000)))).rejects.toThrow();
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
 describe('hudBrightnessGray', () => {
   it('keeps routine and urgent Mac cards visually distinct', () => {
     expect(hudBrightnessGray(3)).toBeLessThan(hudBrightnessGray(4));
@@ -55,6 +129,14 @@ describe('hudBrightnessGray', () => {
 });
 
 describe('bounded HUD copy', () => {
+  it('does not reinterpret note punctuation as separately styled metadata', () => {
+    expect(parseHudListItem('[2m] Buy milk · oat milk preferred', true)).toEqual({
+      age: '2m', primary: 'Buy milk · oat milk preferred', secondary: '',
+    });
+    expect(parseHudListItem('SHOPPING LIST', true)).toEqual({
+      age: '', primary: 'SHOPPING LIST', secondary: '',
+    });
+  });
   it('keeps the beginning of an incoming notification preview visible', () => {
     expect(visibleHudLeadingLines(['Sender and subject', 'First sentence', 'Older tail'], 2))
       .toEqual(['Sender and subject', 'First sentence…']);
@@ -81,14 +163,44 @@ describe('Messages full-text reader', () => {
     expect(messagesReaderBodyLines(
       'Read reply with full reader detail with full reader detail',
     )).toEqual([
-      'Read reply with full reader detail with full reader',
-      'detail',
+      'Read reply with full reader detail with full reader detail',
     ]);
   });
 
   it('uses the compact footer face when all real conversation controls are present', () => {
     expect(messagesConversationFooterFontSize('down older · tap read · say reply · left x2: back')).toBe(8);
     expect(messagesConversationFooterFontSize('left x2: back')).toBe(9);
+  });
+});
+
+describe('QuickNotes exact reader', () => {
+  it('keeps older Mac detail lists in their legacy layout', () => {
+    expect(HudCanvas.usesQuickNotesReaderLayout('QUICKNOTES · DETAIL', ['Legacy note'])).toBe(false);
+    expect(HudCanvas.usesQuickNotesReaderLayout('QUICKNOTES · NOTE', ['Legacy title', 'SUMMARY'])).toBe(false);
+  });
+
+  it.each(['QUICKNOTES · DETAIL', 'QUICKNOTES · NOTE'])('draws %s prepared lines without altering their text', (title) => {
+    const painted: Array<{text: string; y: number}> = [];
+    const context = {
+      fillRect() {},
+      fillText(text: string, _x: number, y: number) { painted.push({text, y}); },
+      measureText(text: string) { return {width: Array.from(text).length * 8.4}; },
+    } as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as {
+      fitText(c: CanvasRenderingContext2D, text: string, x: number, y: number, width: number): void;
+      drawList(c: CanvasRenderingContext2D, frame: unknown, icons: unknown): void;
+    };
+    renderer.fitText = (c, text, x, y) => c.fillText(text, x, y);
+    const body = ['  leading  spaces\r\n', '\n', '漢😀e\u0301 👩\u200d💻  \r\n', 'x'.repeat(52), 'unbroken-ending\n', 'FINAL  '];
+    renderer.drawList(context, {
+      kind: 'list', title, items: ['1/1 · Exact text', ...body],
+      selectedIndex: 0, selectable: false, hint: 'left x2: back',
+    }, {});
+    expect(painted.filter(({y}) => y >= 84 && y <= 237)).toEqual(body.map((line, index) => ({
+      text: line.replace(/\r?\n$/, ''), y: 84 + index * 17,
+    })));
+    expect(painted).toContainEqual({text: '1/1 · Exact text', y: 58});
+    expect(painted).toContainEqual({text: 'left x2: back', y: 267});
   });
 });
 
@@ -462,7 +574,7 @@ describe('Brainstorm wearable actions', () => {
 
   it('labels terminal recovery states without implying an unrelated tool failure', () => {
     expect(agentTerminalSafetyLabel({ state: 'approval_required', noToolsChecked: false }))
-      .toBe('APPROVAL PENDING');
+      .toBe('APPROVAL REQUIRED');
     expect(agentTerminalSafetyLabel({ state: 'unavailable', noToolsChecked: false }))
       .toBe('CONNECTION UNAVAILABLE');
     expect(agentTerminalSafetyLabel({ state: 'blocked', noToolsChecked: false }))
@@ -1037,23 +1149,18 @@ describe('the spine\'s left slot', () => {
   });
 });
 
-describe('the spine\'s state word is native text, not pixels', () => {
-  // Every word the Mac says about a voice turn ("hearing you…") used to
-  // repaint the tile it sat in — centred on the seam, TWO tiles at 0.5-2 s
-  // each. Now a native text container carries it; the canvas must leave
-  // that box empty, and hudSpineLabel must say exactly what the canvas
-  // used to draw.
+describe('the compact JOAT banner uses the existing canvas font', () => {
   const SEAM = 288;
 
-  function shell(status: string): { texts: Array<{ text: string; x: number }>; icons: number[] } {
-    const texts: Array<{ text: string; x: number }> = [];
+  function shell(status: string): { texts: Array<{ text: string; x: number; font: string }>; icons: number[] } {
+    const texts: Array<{ text: string; x: number; font: string }> = [];
     const icons: number[] = [];
     const context = {
       fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
       measureText: (value: string) => ({ width: value.length * 5.18 }),
       save() {}, restore() {}, beginPath() {}, stroke() {},
       moveTo() {}, lineTo() {}, arcTo() {}, closePath() {},
-      fillText(text: string, x: number) { texts.push({ text, x }); },
+      fillText(this: {font: string}, text: string, x: number) { texts.push({ text, x, font: this.font }); },
     } as unknown as CanvasRenderingContext2D;
     const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
     const stub = renderer as never as {
@@ -1068,15 +1175,20 @@ describe('the spine\'s state word is native text, not pixels', () => {
     return { texts, icons };
   }
 
-  it('paints no state word into the tiles, and keeps the mic east of the seam', () => {
+  it('paints the state word in the compact banner and keeps the mic east of the seam', () => {
     const { texts, icons } = shell('9:41  JOAT hearing you…  bat 87%');
-    expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'ON', '87%']);
+    expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'JOAT · HEARING YOU…', 'ON', '87%']);
+    const label = texts.find((entry) => entry.text === 'JOAT · HEARING YOU…');
+    expect(label?.font).toContain('10px');
+    expect(label?.font).toContain('Helvetica Neue');
+    expect(texts.every((entry) => entry.font === label?.font)).toBe(true);
+    expect((label?.x ?? 0) + 'JOAT · HEARING YOU…'.length * 6).toBeLessThan(SEAM);
     const mic = texts.find((entry) => entry.text === 'ON');
     expect(mic?.x).toBeGreaterThanOrEqual(SEAM);
     const [micIcon, batteryIcon] = icons;
     expect(micIcon).toBeGreaterThanOrEqual(SEAM);
     expect(batteryIcon).toBeGreaterThanOrEqual(SEAM);
-    // Nothing the canvas draws in the spine may cross the native box.
+    // Clock and changing label remain separate inside the top-left tile.
     const clock = texts.find((entry) => entry.text === '9:41');
     expect((clock?.x ?? 0) + '9:41'.length * 7.2).toBeLessThan(SPINE_LABEL_BOX.x);
   });
@@ -1094,6 +1206,8 @@ describe('the spine\'s state word is native text, not pixels', () => {
     expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT ready  bat 87%'))).toBe('JOAT · READY');
     expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT hearing you…'))).toBe('JOAT · HEARING YOU…');
     expect(HudCanvas.hudSpineLabel(list('9:41  JOAT ready', 'NEWS'))).toBe('NEWS');
+    expect(HudCanvas.hudSpineLabel(list('9:41 JOAT mic off', 'NEWS'))).toBe('NEWS');
+    expect(HudCanvas.hudSpineLabel(overview('9:41 JOAT mic off'))).toBe('JOAT');
     // A degraded link outranks any page name.
     expect(HudCanvas.hudSpineLabel(list('9:41  JOAT connecting', 'NEWS'))).toBe('JOAT · CONNECTING');
   });
@@ -1194,5 +1308,72 @@ describe('the scrollback marker keeps the two-tone split', () => {
     expect(first.text).toBe('…CODEX ');
     expect(second.text.startsWith('position')).toBe(true);
     expect(first.style).not.toBe(second.style);
+  });
+});
+
+
+describe('reader width respects the active tab rail', () => {
+  it.each(['NEWS · ARTICLE', 'SEARCH · RESULT'])('%s keeps its leading letters clear of the rail', (title) => {
+    const text: Array<{value: string; x: number; y: number}> = [];
+    const state: Record<string, unknown> = {
+      font: '', textAlign: 'left',
+      measureText: (value: string) => ({width: value.length * 8.4}),
+      fillText: (value: string, x: number, y: number) => text.push({value, x, y}),
+    };
+    const context = new Proxy(state, {get: (target, key) => target[String(key)] ?? (() => undefined)});
+    const renderer = Object.create(HudCanvasRenderer.prototype) as any;
+    renderer.drawIcon = () => undefined;
+    renderer.drawList(context, {
+      kind: 'list', title, items: ['Story source', 'Opening letters must remain visible.'],
+      hint: 'left x2: back', selectable: false, selectedIndex: 0,
+      rail: {activeTab: 'news'},
+    }, {});
+    const body = text.filter(({y}) => y >= 78 && y <= 245);
+    expect(body.length).toBeGreaterThan(0);
+    expect(body.every(({x}) => x >= 36)).toBe(true);
+  });
+});
+
+describe('exact prepared readers across feature boundaries', () => {
+  function readerFixture() {
+    const painted: Array<{text: string; x: number; y: number; width: number}> = [];
+    const state: Record<string, unknown> = {font: ''};
+    const width = (text: string) => Array.from(text).reduce((sum, char) =>
+      sum + (/\p{Script=Han}/u.test(char) || char.codePointAt(0)! > 0xffff ? 2 : 1), 0) * 8.4;
+    Object.assign(state, {
+      measureText: (text: string) => ({width: width(text)}),
+      fillText: (text: string, x: number, y: number) => painted.push({text, x, y, width: width(text)}),
+    });
+    const context = new Proxy(state, {get: (target, key) => target[String(key)] ?? (() => undefined)});
+    const renderer = Object.create(HudCanvasRenderer.prototype) as any;
+    renderer.drawIcon = () => undefined;
+    return {painted, context, renderer};
+  }
+
+  it.each(['MESSAGES · MESSAGE', 'NEWS · ARTICLE', 'SEARCH · RESULT', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL'])(
+    '%s paints every prepared row at full width without merging or shortening it', (title) => {
+      const {painted, context, renderer} = readerFixture();
+      const panel = title.startsWith('NEWS') || title.startsWith('SEARCH');
+      const body = ['  leading  spaces\r\n', '\r\n', '漢'.repeat(31), '🙂'.repeat(31),
+        'x'.repeat(62), 'e\u0301 👩\u200d💻', '\taligned\r', 'middle', 'penultimate\n', 'FINAL  '];
+      renderer.drawList(context, {kind: 'list', title, items: ['1/2 · Source', ...body],
+        selectedIndex: 0, selectable: false, hint: 'down: next · left x2: back',
+        ...(panel ? {rail: {activeTab: title.startsWith('NEWS') ? 'news' : 'search'}} : {}),
+      }, {});
+      const bodyPainted = painted.filter(({y}) => y >= 84 && y <= 237);
+      expect(bodyPainted.map(({text}) => text)).toEqual(body.map(line =>
+        line.replace(/\r\n$|[\r\n]$/u, '').replace(/\t/g, '        ')));
+      expect(bodyPainted.every(({x, width}) => x === (panel ? 36 : 14) && x + width <= 562)).toBe(true);
+      expect(painted.find(({y}) => y === 58)?.text).toBe('1/2 · Source');
+      expect(painted.find(({y}) => y === 267)?.text).toBe('down: next · left x2: back');
+    },
+  );
+
+  it('rejects an overfull prepared page instead of replacing unseen content with an ellipsis', () => {
+    const {context, renderer} = readerFixture();
+    expect(() => renderer.drawList(context, {kind: 'list', title: 'MESSAGES · MESSAGE',
+      items: ['1/1 · Source', ...Array.from({length: 11}, (_, i) => `row ${i}`)],
+      selectedIndex: 0, selectable: false, hint: 'left x2: back',
+    }, {})).toThrow(/reader.*10.*rows/i);
   });
 });

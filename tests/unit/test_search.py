@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from joat.services.search import SearchResult, SearchService, ddgs_search
 
 
@@ -85,6 +87,19 @@ class TestOpen:
         reader = await svc.open(0)
         assert reader is not None
         assert reader.pages[0].startswith("A long snippet")
+
+    @pytest.mark.parametrize("body", [
+        "  First  paragraph\r\n\r\n" + "界" * 440 + "\r\n  LATER MARKER  ",
+        "🙂" * 320 + "  LATER MARKER\n",
+    ])
+    async def test_result_reader_retains_exact_fetched_text(self, body: str) -> None:
+        svc, _ = service()
+        svc._fetch_page = lambda url: ("Unicode result", body)  # type: ignore[assignment]
+        await svc.lookup("g2")
+        reader = await svc.open(0)
+        assert reader is not None
+        assert "".join(reader.pages) == body
+        assert len(reader.pages) > 1
 
 
 class TestRows:

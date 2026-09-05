@@ -257,6 +257,9 @@ class HudSink:
         self._head = ""
         self._body = ""
         self._placeholder = "JOAT > Preparing collaborators…"
+        # Claim the initial entry once. Ordinary streamed frames still yield
+        # to a menu the wearer opens later; they cannot supply this handoff.
+        await self._hud.begin_brainstorm()
         await self._paint("running")
 
     THINKING_MARKER = "Thinking…"

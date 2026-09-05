@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from joat.services.news import (
     CATEGORY_FEEDS,
     DEFAULT_CATEGORIES,
@@ -167,6 +169,20 @@ class TestService:
         reader = await svc.open(0)
         assert reader is not None
         assert "Paywalled" in reader.pages[0]
+
+    @pytest.mark.parametrize("body", [
+        "  First  paragraph\r\n\r\n" + "界" * 440 + "\r\n  LATER MARKER  ",
+        "🙂" * 320 + "  LATER MARKER\n",
+    ])
+    async def test_article_reader_retains_exact_fetched_text(self, tmp_path: Path, body: str) -> None:
+        bbc, _npr, _google = CATEGORY_FEEDS["technology"]
+        svc = service(tmp_path, {bbc: [headline("Unicode article")]})
+        svc._fetch_article = lambda url: ("Unicode article", body)  # type: ignore[assignment]
+        await svc.refresh_once()
+        reader = await svc.open(0)
+        assert reader is not None
+        assert "".join(reader.pages) == body
+        assert len(reader.pages) > 1
 
     async def test_the_config_is_reread_when_the_mac_app_changes_it(self, tmp_path: Path) -> None:
         bbc_tech = CATEGORY_FEEDS["technology"][0]

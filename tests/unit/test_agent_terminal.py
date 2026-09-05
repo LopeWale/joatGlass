@@ -11,10 +11,13 @@ terminal input.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
+
+import pytest
 
 from joat.core.protocol import AgentTerminalHudView
-from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster
+from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster, TerminalFrame, TerminalLane
 
 
 class FakeAgent:
@@ -1533,3 +1536,952 @@ class TestBrainstormMaterialReachesABusyLane:
             "CODEX-TEXT cache the synthesis",
         ]
         await manager.close()
+
+
+class _CaptureContextAgent(ResumingAgent):
+    """Controlled public adapter seam; no OpenClaw connection or process."""
+
+    def __init__(self, gate: asyncio.Event | None = None) -> None:
+        super().__init__(ROWS)
+        self._gate = gate
+        self.capture_context_generation: int | None = 1
+        self.scoped_calls: list[tuple[str, int]] = []
+        self.dispatch_gate = asyncio.Event()
+        self.dispatch_gate.set()
+        self.resume_started = asyncio.Event()
+        self.resume_release = asyncio.Event()
+        self.resume_release.set()
+
+    async def stream_captured(self, prompt: str, *, context_generation: int) -> AsyncIterator[str]:
+        self.scoped_calls.append((prompt, context_generation))
+        await self.dispatch_gate.wait()
+        if self.capture_context_generation != context_generation:
+            raise RuntimeError("Captured terminal context changed")
+        async for chunk in self.stream(prompt):
+            yield chunk
+
+    async def resume_session(self, session_key: str) -> None:
+        self.resume_started.set()
+        await self.resume_release.wait()
+        await super().resume_session(session_key)
+        assert self.capture_context_generation is not None
+        self.capture_context_generation += 1
+
+
+async def _terminal_until(predicate: Callable[[], bool]) -> None:
+    async with asyncio.timeout(1):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
+async def _terminal_idle(roster: AgentTerminalRoster) -> None:
+    await _terminal_until(lambda: not roster.busy and not any(lane.queued for lane in roster._lanes.values()))
+    # Let owned run completion callbacks perform their final repaint.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+async def _close_capture_fixture(roster: AgentTerminalRoster, *agents: _CaptureContextAgent) -> None:
+    for agent in agents:
+        agent.dispatch_gate.set()
+        agent.resume_release.set()
+        if agent._gate is not None:
+            agent._gate.set()
+    for lane in roster._lanes.values():
+        lane.queued = ""
+        if lane.task is not None and not lane.task.done():
+            lane.task.cancel()
+    tasks = [lane.task for lane in roster._lanes.values() if lane.task is not None]
+    if tasks:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+class TestTypedTerminalInstruction:
+    async def test_exact_text_enters_only_the_captured_adapter(self) -> None:
+        agent, other = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent, other=other)
+        literal = "  Café: keep BOTH spaces?!\n漢字 👋 Do not normalize this.  "
+        try:
+            result = r.admit_instruction("work", literal)
+            assert result.value == "accepted"
+            assert agent.scoped_calls == [], "admission must not wait for remote execution"
+            await _terminal_idle(r)
+            assert agent.scoped_calls == [(literal, 1)]
+            assert agent.prompts == [literal] and other.prompts == []
+            assert not r.busy, "existing task-settled handling must remain attached"
+        finally:
+            await _close_capture_fixture(r, agent, other)
+
+    @pytest.mark.parametrize("text", ["", " \n", "bad\x00input", "bad\ud800input", "a" * 4097])
+    async def test_invalid_input_never_starts_a_turn(self, text: str) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        try:
+            assert r.admit_instruction("work", text).value == "invalid"
+            assert not r.busy and agent.scoped_calls == []
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("name", ["other", "unknown", "WORK", " work", ""])
+    async def test_only_the_exact_focused_lane_is_admissible(self, name: str) -> None:
+        agent, other = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent, other=other)
+        try:
+            assert r.admit_instruction(name, "Keep target").value == "wrong_focus"
+            assert r.focused == "work" and not r.busy
+            assert agent.scoped_calls == other.scoped_calls == []
+        finally:
+            await _close_capture_fixture(r, agent, other)
+
+    @pytest.mark.parametrize("state", ["busy", "queued", "approval"])
+    async def test_admission_never_replaces_input_or_resolves_work_approval(self, state: str) -> None:
+        gate = asyncio.Event()
+        agent = _CaptureContextAgent(gate)
+        r = roster(work=agent)
+        try:
+            if state == "busy":
+                await r.send("Existing turn")
+                await _terminal_until(lambda: bool(agent.prompts))
+            elif state == "queued":
+                # A finished turn's settlement callback may still own this line.
+                r._lanes["work"].queued = "Existing queued instruction"
+            else:
+                r.note_approval("work", "existing-approval", "exec", "Existing request")
+            lane = r._lanes["work"]
+            previous = (lane.task, lane.queued, list(lane.approvals), list(lane.tail))
+
+            result = r.admit_instruction("work", "New instruction")
+
+            assert result.value == ("approval_required" if state == "approval" else "busy")
+            assert (lane.task, lane.queued, lane.approvals, list(lane.tail)) == previous
+            assert agent.scoped_calls == []
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_unready_or_stream_only_agent_cannot_receive_typed_input(self) -> None:
+        captured, legacy = _CaptureContextAgent(), FakeAgent()
+        captured.capture_context_generation = None
+        r = roster(work=captured, legacy=legacy)
+        try:
+            assert r.admit_instruction("work", "Question").value == "unavailable"
+            assert r.focus("legacy")
+            assert r.admit_instruction("legacy", "Question").value == "unavailable"
+            assert captured.prompts == legacy.prompts == [] and not r.busy
+        finally:
+            await _close_capture_fixture(r, captured)
+
+    async def test_changed_focus_between_capture_and_admission_is_rejected(self, monkeypatch) -> None:
+        agent, other = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent, other=other)
+        capture = r._capture_target
+
+        def changed_target():
+            target = capture()
+            r.focus("other")
+            return target
+
+        monkeypatch.setattr(r, "_capture_target", changed_target)
+        try:
+            assert r.admit_instruction("work", "Old target only").value == "context_changed"
+            assert not r.busy and agent.scoped_calls == other.scoped_calls == []
+        finally:
+            await _close_capture_fixture(r, agent, other)
+
+    @pytest.mark.parametrize("change", ["generation", "adapter"])
+    async def test_replaced_context_before_scheduled_task_never_receives_input(self, change: str) -> None:
+        agent, replacement = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent)
+        try:
+            assert r.admit_instruction("work", "Original context only").value == "accepted"
+            if change == "generation":
+                agent.capture_context_generation = 2
+            else:
+                r._lanes["work"].agent = replacement
+            await _terminal_idle(r)
+            assert agent.scoped_calls == replacement.scoped_calls == []
+            assert agent.prompts == replacement.prompts == []
+            assert r._lanes["work"].last_error == "Captured terminal context changed"
+        finally:
+            await _close_capture_fixture(r, agent, replacement)
+
+
+class TestScopedTerminalCapture:
+    async def test_exact_instruction_reaches_only_captured_lane_once(self) -> None:
+        agent, other = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent, other=other)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        literal = "  Keep BOTH spaces?!\nDo not normalize this.  "
+        try:
+            capture = c.begin_capture()
+            assert capture is not None and capture.lane_name == "work"
+            assert "work" in capture.question
+            assert await c.consume_capture(capture, literal) == "work ▸ sent."
+            assert c.current_capture is None
+            assert await c.consume_capture(capture, literal) is None
+            await _terminal_idle(r)
+            assert agent.prompts == [literal] and other.prompts == []
+            assert agent.scoped_calls == [(literal, 1)]
+        finally:
+            await _close_capture_fixture(r, agent, other)
+
+    async def test_typed_owner_never_arms_the_legacy_command_parser(self) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            capture = c.begin_capture()
+            assert await c.handle_command("explain the weather") is None
+            assert agent.prompts == [] and c.current_capture is capture
+            assert await c.consume_capture(capture, "Run the chosen task.") == "work ▸ sent."
+            await _terminal_idle(r)
+            assert agent.prompts == ["Run the chosen task."]
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("lifecycle", ["home", "reconnect"])
+    async def test_cleared_capture_cannot_claim_later_ordinary_speech(self, lifecycle: str) -> None:
+        """Host lifecycle wiring calls this same explicit owner exit."""
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            capture = c.begin_capture()
+            c.clear_capture()
+            assert await c.handle_command("explain this question") is None, lifecycle
+            assert await c.consume_capture(capture, "stale terminal instruction") is None
+            await _terminal_idle(r)
+            assert agent.prompts == [] and c.current_capture is None
+            # Addressed terminal commands remain available after leaving capture.
+            assert await c.handle_command("terminal deliberate new instruction") == "work ▸ sent."
+            await _terminal_idle(r)
+            assert agent.prompts == ["deliberate new instruction"]
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("change", ["focus_other", "focus_away_and_back", "cycle_away_and_back"])
+    async def test_focus_change_never_retargets_or_revives_old_instruction(self, change: str) -> None:
+        agent, other = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent, other=other)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            capture = c.begin_capture()
+            if change == "cycle_away_and_back":
+                await r.focus_next()
+                await r.focus_next()
+            else:
+                assert r.focus("other")
+                if change == "focus_away_and_back":
+                    assert r.focus("work")
+            assert await c.consume_capture(capture, "old focused instruction") is None
+            await _terminal_idle(r)
+            assert agent.prompts == other.prompts == []
+            assert c.current_capture is None
+        finally:
+            await _close_capture_fixture(r, agent, other)
+
+    @pytest.mark.parametrize("change", ["agent", "lane"])
+    async def test_same_named_replacement_cannot_inherit_a_capture(self, change: str) -> None:
+        original, replacement = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=original)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            capture = c.begin_capture()
+            if change == "agent":
+                r._lanes["work"].agent = replacement
+            else:
+                r._lanes["work"] = type(r._lanes["work"])(name="work", agent=replacement)
+            assert await c.consume_capture(capture, "for the old session only") is None
+            await _terminal_idle(r)
+            assert original.prompts == replacement.prompts == []
+        finally:
+            await _close_capture_fixture(r, original, replacement)
+
+    @pytest.mark.parametrize("phase", ["pending", "succeeded", "failed"])
+    async def test_resume_invalidates_before_its_first_await_even_if_it_fails(self, phase: str) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        pending: asyncio.Task[str] | None = None
+        try:
+            await r.discover()
+            capture = c.begin_capture()
+            if phase == "failed":
+                agent._resume_fail = "controlled refusal"
+            agent.resume_release.clear()
+            pending = asyncio.create_task(r.resume("nightly build"))
+            await asyncio.wait_for(agent.resume_started.wait(), 1)
+            if phase != "pending":
+                agent.resume_release.set()
+                await asyncio.wait_for(pending, 1)
+            assert await c.consume_capture(capture, "do not cross the resume boundary") is None
+            await _terminal_idle(r)
+            assert agent.prompts == []
+        finally:
+            agent.resume_release.set()
+            if pending is not None:
+                await asyncio.wait_for(asyncio.gather(pending, return_exceptions=True), 1)
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("settled", [False, True])
+    async def test_intervening_turn_never_revives_an_idle_capture(self, settled: bool) -> None:
+        gate = asyncio.Event()
+        agent = _CaptureContextAgent(gate)
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            capture = c.begin_capture()
+            await r.send("new explicit turn")
+            await _terminal_until(lambda: agent.prompts == ["new explicit turn"])
+            if settled:
+                gate.set()
+                await _terminal_idle(r)
+            assert await c.consume_capture(capture, "stale idle instruction") is None
+            assert r._lanes["work"].queued == ""
+            gate.set()
+            await _terminal_idle(r)
+            assert agent.prompts == ["new explicit turn"]
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_busy_capture_preserves_exact_one_line_steering(self) -> None:
+        gate = asyncio.Event()
+        agent = _CaptureContextAgent(gate)
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        literal = "  Keep the current run; then CHECK this?!  "
+        try:
+            await r.send("running turn")
+            await _terminal_until(lambda: bool(agent.prompts))
+            capture = c.begin_capture()
+            result = await c.consume_capture(capture, literal)
+            assert result is not None and "queued" in result
+            assert agent.prompts == ["running turn"]
+            assert r._lanes["work"].queued == literal
+            assert await c.consume_capture(capture, literal) is None
+            gate.set()
+            await _terminal_idle(r)
+            assert agent.prompts == ["running turn", literal]
+            assert agent.scoped_calls == [(literal, 1)]
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("change", ["settled", "new_queue"])
+    async def test_busy_capture_cannot_overwrite_a_newer_turn_or_queue(self, change: str) -> None:
+        gate = asyncio.Event()
+        agent = _CaptureContextAgent(gate)
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            await r.send("running turn")
+            await _terminal_until(lambda: bool(agent.prompts))
+            capture = c.begin_capture()
+            if change == "settled":
+                gate.set()
+                await _terminal_idle(r)
+            else:
+                await r.send("newer explicit queue")
+            assert await c.consume_capture(capture, "stale queued instruction") is None
+            gate.set()
+            await _terminal_idle(r)
+            expected = ["running turn"] + (["newer explicit queue"] if change == "new_queue" else [])
+            assert agent.prompts == expected
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("phase", ["before_consume", "scheduled", "queued"])
+    async def test_changed_adapter_context_never_receives_old_capture(self, phase: str) -> None:
+        gate = asyncio.Event() if phase == "queued" else None
+        agent = _CaptureContextAgent(gate)
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            if phase == "queued":
+                await r.send("running turn")
+                await _terminal_until(lambda: bool(agent.prompts))
+            capture = c.begin_capture()
+            if phase == "before_consume":
+                agent.capture_context_generation = 2
+                assert await c.consume_capture(capture, "old context only") is None
+            else:
+                agent.dispatch_gate.clear()
+                assert await c.consume_capture(capture, "old context only") is not None
+                # The adapter boundary can suspend after capture admission,
+                # or wait in the busy lane's queue. Both must retain its token.
+                await asyncio.sleep(0)
+                agent.capture_context_generation = 2
+                agent.dispatch_gate.set()
+                if gate is not None:
+                    gate.set()
+            await _terminal_idle(r)
+            assert agent.prompts == (["running turn"] if phase == "queued" else [])
+            assert c.current_capture is None
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_duplicate_tap_preserves_identity_and_original_deadline(self) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        now = [100.0]
+        c = AgentTerminalCommands(r, monotonic=lambda: now[0])
+        try:
+            capture = c.begin_capture()
+            assert capture is not None and capture.expires_at == 145.0
+            now[0] += 20
+            assert c.begin_capture() is capture
+            now[0] = capture.expires_at
+            assert await c.consume_capture(capture, "expired answer") is None
+            await _terminal_idle(r)
+            assert agent.prompts == [] and c.current_capture is None
+            fresh = c.begin_capture()
+            assert fresh is not None and fresh.capture_id != capture.capture_id
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_reconstructed_capture_cannot_borrow_the_live_owner(self) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            capture = c.begin_capture()
+            assert await c.consume_capture(replace(capture), "forged owner") is None
+            assert c.current_capture is capture
+            assert await c.consume_capture(capture, "real owner") == "work ▸ sent."
+            await _terminal_idle(r)
+            assert agent.prompts == ["real owner"]
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_uninitialized_context_never_offers_a_spoken_target(self) -> None:
+        agent = _CaptureContextAgent()
+        agent.capture_context_generation = None
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        try:
+            assert c.begin_capture() is None
+            assert await c.handle_command("ordinary speech") is None
+            assert agent.prompts == []
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_cancel_discards_captured_queue_after_turn_finishes_before_settlement(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        gate = asyncio.Event()
+        agent = _CaptureContextAgent(gate)
+        r = roster(work=agent)
+        c = AgentTerminalCommands(r, monotonic=lambda: 100.0)
+        settlement_started = asyncio.Event()
+        release_settlement = asyncio.Event()
+        settle = r._lane_settled
+
+        async def held_settlement(lane: TerminalLane, completed: asyncio.Task[None]) -> None:
+            settlement_started.set()
+            await release_settlement.wait()
+            await settle(lane, completed)
+
+        monkeypatch.setattr(r, "_lane_settled", held_settlement)
+        try:
+            await r.send("running turn")
+            await _terminal_until(lambda: agent.prompts == ["running turn"])
+            capture = c.begin_capture()
+            assert capture is not None
+            receipt = await c.consume_capture(capture, "captured queued instruction")
+            assert receipt is not None and "queued" in receipt
+            gate.set()
+            await asyncio.wait_for(settlement_started.wait(), 1)
+            assert not r.busy and r._lanes["work"].queued == "captured queued instruction"
+
+            cancellation = await r.cancel()
+            release_settlement.set()
+            await _terminal_idle(r)
+
+            assert agent.prompts == ["running turn"], "Cancelled queued capture streamed after settlement"
+            assert agent.scoped_calls == []
+            assert r._lanes["work"].queued == "" and r._lanes["work"].queued_context is None
+            assert "queue" in cancellation and "discard" in cancellation
+        finally:
+            release_settlement.set()
+            await _close_capture_fixture(r, agent)
+
+
+class _PreparingAgent(_CaptureContextAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.capture_context_generation = None
+        self.initialize_calls = 0
+        self.initialize_started = asyncio.Event()
+        self.initialize_release = asyncio.Event()
+        self.initialize_release.set()
+        self.initialize_finished = asyncio.Event()
+        self.initialize_cancelled = asyncio.Event()
+        self.initialize_tasks: list[asyncio.Task[object]] = []
+        self.fail = False
+        self.provide_context = True
+        self.ignore_cancel = False
+
+    async def initialize(self) -> None:
+        self.initialize_calls += 1
+        current = asyncio.current_task()
+        assert current is not None
+        self.initialize_tasks.append(current)
+        self.initialize_started.set()
+        try:
+            while not self.initialize_release.is_set():
+                try:
+                    await self.initialize_release.wait()
+                except asyncio.CancelledError:
+                    self.initialize_cancelled.set()
+                    if not self.ignore_cancel:
+                        raise
+            if self.fail:
+                raise RuntimeError("PRIVATE-INITIALIZATION-DETAIL must never reach the lenses")
+            if self.provide_context:
+                self.capture_context_generation = 2
+        finally:
+            self.initialize_finished.set()
+
+
+async def _initialization_entered(task: asyncio.Task[bool], agent: _PreparingAgent) -> None:
+    await _terminal_until(lambda: task.done() or agent.initialize_started.is_set())
+    assert agent.initialize_calls == 1, "Opening an unprepared lane never initialized its adapter"
+
+
+async def _close_preparing_fixture(
+    r: AgentTerminalRoster, agents: list[_PreparingAgent], tasks: list[asyncio.Task[bool]],
+) -> None:
+    for agent in agents:
+        agent.initialize_release.set()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1)
+    initializations = {task for agent in agents for task in agent.initialize_tasks}
+    if initializations:
+        await asyncio.wait_for(asyncio.gather(*initializations, return_exceptions=True), 1)
+    await _close_capture_fixture(r, *agents)
+
+
+class TestTerminalLanePreparation:
+    @pytest.mark.parametrize("scope_upgrade", [True, False])
+    async def test_recognized_pairing_scope_refusal_requests_access_instead_of_offline(self, scope_upgrade: bool) -> None:
+        from joat.agents.openclaw_gateway import OpenClawPairingRequired, OpenClawScopeMismatch
+
+        class ScopeLimitedAgent(_PreparingAgent):
+            async def initialize(self) -> None:
+                if scope_upgrade:
+                    raise OpenClawScopeMismatch("private remote diagnostic")
+                raise OpenClawPairingRequired(request_id="private request", reason="private remote diagnostic")
+
+        agent = ScopeLimitedAgent()
+        r = roster(work=agent)
+        try:
+            assert not await r.prepare_lane("work", is_current=lambda: True)
+            frame = r.frame()
+            assert frame.state == "approval_required"
+            assert frame.approvals == 0  # Connection grant, not a tool approval.
+            assert frame.reason == (
+                "Approve Work permissions in OpenClaw, then retry." if scope_upgrade
+                else "Approve this device in OpenClaw, then retry."
+            )
+            assert AgentTerminalCommands(r).begin_capture() is None
+            assert "private remote diagnostic" not in str(frame)
+        finally:
+            await _close_preparing_fixture(r, [agent], [])
+
+    async def test_setup_failure_reason_fits_the_actual_terminal_wire_with_a_long_lane_name(self, caplog: pytest.LogCaptureFixture) -> None:
+        from joat.core.protocol import AgentTerminalHudView
+
+        agent = _PreparingAgent()
+        agent.fail = True
+        name = "work-" + "x" * 70
+        r = AgentTerminalRoster([(name, agent)])
+        try:
+            assert await r.prepare_lane(name, is_current=lambda: True) is False
+            frame = r.frame()
+            wire = AgentTerminalHudView(
+                state=frame.state, focus=frame.topic, lanes=frame.lanes,
+                activity="\n".join(frame.lines), reason=frame.reason,
+            ).to_wire()
+            assert wire["terminal"]["terminalReason"].endswith("Tap retry.")
+            assert "PRIVATE-INITIALIZATION-DETAIL" not in str(wire)
+            assert "error=RuntimeError function=initialize" in caplog.text
+            assert "PRIVATE-INITIALIZATION-DETAIL" not in caplog.text
+        finally:
+            await _close_preparing_fixture(r, [agent], [])
+
+    def test_exact_lane_focus_wins_over_an_earlier_substring_match(self) -> None:
+        r = roster(work=_PreparingAgent(), **{"work-calendar": _PreparingAgent()})
+        assert r.focus("work-calendar")
+        assert r.focused == "work-calendar"
+        assert r.focus("switch to work")
+        assert r.focused == "work"
+
+    async def test_unprepared_lane_does_not_claim_readiness_or_reconnect_during_capture(self) -> None:
+        agent = _PreparingAgent()
+        r = roster(work=agent)
+        commands = AgentTerminalCommands(r)
+        try:
+            assert r.frame().state == "unavailable", "A never-initialized work lane was presented as ready"
+            assert "work" in r.frame().reason.lower()
+            assert "unprepared" in r.picker_rows()[0][1].lower()
+            assert commands.begin_capture() is None
+            assert agent.initialize_calls == 0
+        finally:
+            await _close_preparing_fixture(r, [agent], [])
+
+    async def test_first_open_prepares_selected_work_then_exact_capture_can_send(self) -> None:
+        work, hermes = _PreparingAgent(), _PreparingAgent()
+        r = roster(work=work, hermes=hermes)
+        frames: list[TerminalFrame] = []
+
+        async def paint(frame: TerminalFrame) -> None:
+            frames.append(frame)
+
+        try:
+            assert await r.prepare_lane("work", is_current=lambda: True, paint=paint)
+            assert work.initialize_calls == 1 and hermes.initialize_calls == 0
+            assert r.focused == "work" and r.frame().state == "ready"
+            assert frames[-1].state == "ready" and frames[-1].reason == ""
+            commands = AgentTerminalCommands(r)
+            capture = commands.begin_capture()
+            assert capture is not None
+            literal = "  First instruction; keep these words?!  "
+            assert await commands.consume_capture(capture, literal) == "work ▸ sent."
+            await _terminal_idle(r)
+            assert work.prompts == [literal] and work.scoped_calls == [(literal, 2)]
+            assert hermes.prompts == []
+        finally:
+            await _close_preparing_fixture(r, [work, hermes], [])
+
+    async def test_preparing_frame_has_no_ready_capture_until_context_exists(self) -> None:
+        agent = _PreparingAgent()
+        agent.initialize_release.clear()
+        r = roster(work=agent)
+        frames: list[TerminalFrame] = []
+
+        async def paint(frame: TerminalFrame) -> None:
+            frames.append(frame)
+
+        task = asyncio.create_task(r.prepare_lane("work", is_current=lambda: True, paint=paint))
+        try:
+            await _initialization_entered(task, agent)
+            assert r.frame().state == "unavailable"
+            assert "connecting" in r.frame().reason.lower()
+            assert "preparing" in r.picker_rows()[0][1].lower()
+            assert AgentTerminalCommands(r).begin_capture() is None
+            agent.initialize_release.set()
+            assert await asyncio.wait_for(task, 1)
+            assert frames[0].state == "unavailable" and frames[-1].state == "ready"
+        finally:
+            await _close_preparing_fixture(r, [agent], [task])
+
+    @pytest.mark.parametrize("failure", ["exception", "timeout", "missing_context"])
+    async def test_failed_preparation_stays_unavailable_and_retry_prepares_the_same_lane(self, failure: str) -> None:
+        work, hermes = _PreparingAgent(), _PreparingAgent()
+        work.fail = failure == "exception"
+        work.provide_context = failure != "missing_context"
+        if failure == "timeout":
+            work.initialize_release.clear()
+        r = roster(work=work, hermes=hermes)
+        frames: list[TerminalFrame] = []
+
+        async def paint(frame: TerminalFrame) -> None:
+            frames.append(frame)
+
+        try:
+            result = await asyncio.wait_for(r.prepare_lane(
+                "work", is_current=lambda: True, timeout_s=.02, paint=paint,
+            ), .5)
+            assert result is False
+            assert work.initialize_calls == 1 and hermes.initialize_calls == 0
+            assert r.frame().state == "unavailable" and AgentTerminalCommands(r).begin_capture() is None
+            reason = r.frame().reason.lower()
+            assert "work" in reason and "retry" in reason
+            if failure == "timeout":
+                assert "timed out" in reason and work.initialize_cancelled.is_set()
+            for frame in frames:
+                assert "PRIVATE-INITIALIZATION-DETAIL" not in str(frame)
+            work.fail = False
+            work.provide_context = True
+            work.initialize_release.set()
+            assert await r.prepare_lane("work", is_current=lambda: True, paint=paint)
+            assert work.initialize_calls == 2 and hermes.initialize_calls == 0
+            assert r.frame().state == "ready" and r.frame().reason == ""
+        finally:
+            await _close_preparing_fixture(r, [work, hermes], [])
+
+    @pytest.mark.parametrize("departure", ["cancel", "timeout"])
+    async def test_duplicate_open_shares_setup_and_one_departing_waiter_does_not_cancel_the_other(self, departure: str) -> None:
+        agent = _PreparingAgent()
+        agent.initialize_release.clear()
+        r = roster(work=agent)
+        first = asyncio.create_task(r.prepare_lane(
+            "work", is_current=lambda: True, timeout_s=.05 if departure == "timeout" else 8,
+        ))
+        tasks = [first]
+        try:
+            await _initialization_entered(first, agent)
+            second = asyncio.create_task(r.prepare_lane("work", is_current=lambda: True))
+            tasks.append(second)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert agent.initialize_calls == 1
+            if departure == "cancel":
+                first.cancel()
+                await asyncio.wait_for(asyncio.gather(first, return_exceptions=True), .5)
+            else:
+                assert await asyncio.wait_for(first, .5) is False
+            assert not agent.initialize_cancelled.is_set(), "One waiter cancelled shared setup still in use"
+            agent.initialize_release.set()
+            assert await asyncio.wait_for(second, 1)
+            assert agent.initialize_calls == 1 and r.frame().state == "ready"
+        finally:
+            await _close_preparing_fixture(r, [agent], tasks)
+
+
+    @pytest.mark.parametrize("exit_kind", ["home", "reconnect", "focus_other", "focus_round_trip", "agent_replaced"])
+    async def test_late_preparation_never_refocuses_or_repaints_a_superseded_opening(self, exit_kind: str) -> None:
+        work, other = _PreparingAgent(), _PreparingAgent()
+        work.initialize_release.clear()
+        r = roster(work=work, other=other)
+        current = [True]
+        frames: list[TerminalFrame] = []
+
+        async def paint(frame: TerminalFrame) -> None:
+            frames.append(frame)
+
+        task = asyncio.create_task(r.prepare_lane("work", is_current=lambda: current[0], paint=paint))
+        try:
+            await _initialization_entered(task, work)
+            painted_before_exit = len(frames)
+            if exit_kind in {"home", "reconnect"}:
+                current[0] = False
+            elif exit_kind == "agent_replaced":
+                r._lanes["work"].agent = other
+            else:
+                assert r.focus("other")
+                if exit_kind == "focus_round_trip":
+                    assert r.focus("work")
+            expected_focus = r.focused
+            work.initialize_release.set()
+            assert await asyncio.wait_for(task, 1) is False
+            assert r.focused == expected_focus
+            assert len(frames) == painted_before_exit, "Old setup painted a ready/error frame after its owner left"
+            assert work.prompts == other.prompts == []
+        finally:
+            await _close_preparing_fixture(r, [work, other], [task])
+
+    async def test_stale_open_is_inert_before_focus_or_setup(self) -> None:
+        work, other = _PreparingAgent(), _PreparingAgent()
+        r = roster(work=work, other=other)
+        painted: list[TerminalFrame] = []
+
+        async def paint(frame: TerminalFrame) -> None:
+            painted.append(frame)
+
+        try:
+            assert await r.prepare_lane("other", is_current=lambda: False, paint=paint) is False
+            assert r.focused == "work" and painted == []
+            assert work.initialize_calls == other.initialize_calls == 0
+        finally:
+            await _close_preparing_fixture(r, [work, other], [])
+
+    def test_public_focus_generation_preserves_round_trip_invalidation(self) -> None:
+        r = roster(work=_PreparingAgent(), other=_PreparingAgent())
+        generation = r.focus_generation
+        assert type(generation) is int, "Opening guards need the roster's actual focus revision"
+        assert r.focus("work") and r.focus_generation == generation
+        assert r.focus("other") and r.focus_generation > generation
+        changed = r.focus_generation
+        assert r.focus("work") and r.focus_generation > changed
+        with pytest.raises(AttributeError):
+            r.focus_generation = generation
+
+    async def test_opening_prepared_busy_lane_never_waits_for_or_reinitializes_its_turn(self) -> None:
+        agent = _PreparingAgent()
+        agent.capture_context_generation = 7
+        agent._gate = asyncio.Event()
+        r = roster(work=agent)
+        try:
+            await r.send("ongoing work")
+            await _terminal_until(lambda: agent.prompts == ["ongoing work"])
+            assert await asyncio.wait_for(r.prepare_lane("work", is_current=lambda: True), .1)
+            assert agent.initialize_calls == 0 and r.busy and r.frame().state == "running"
+            assert AgentTerminalCommands(r).begin_capture() is not None
+            assert agent.prompts == ["ongoing work"]
+        finally:
+            await _close_preparing_fixture(r, [agent], [])
+
+    async def test_last_waiter_timeout_bounds_cleanup_and_does_not_launch_parallel_setup(self) -> None:
+        agent = _PreparingAgent()
+        agent.initialize_release.clear()
+        agent.ignore_cancel = True
+        r = roster(work=agent)
+        current = [True]
+        first = asyncio.create_task(r.prepare_lane("work", is_current=lambda: current[0], timeout_s=.02))
+        tasks = [first]
+        try:
+            await _initialization_entered(first, agent)
+            assert await asyncio.wait_for(first, .5) is False
+            assert agent.initialize_cancelled.is_set() and not agent.initialize_finished.is_set()
+            second = asyncio.create_task(r.prepare_lane("work", is_current=lambda: current[0], timeout_s=.02))
+            tasks.append(second)
+            assert await asyncio.wait_for(second, .5) is False
+            assert agent.initialize_calls == 1, "Abandoned initialization lost ownership and a second one started"
+            assert AgentTerminalCommands(r).begin_capture() is None
+            current[0] = False
+        finally:
+            await _close_preparing_fixture(r, [agent], tasks)
+
+
+class TestExplicitTerminalViewOwnership:
+    @pytest.mark.parametrize(("phrase", "operation"), [
+        ("terminal sessions", "overview"),
+        ("switch terminal to other", "focus"),
+        ("terminal cancel", "cancel"),
+        ("terminal approvals", "approvals_view"),
+        ("terminal discover", "discover"),
+        ("terminal resume nightly build", "resume"),
+        ("terminal approve 1", "decide"),
+        ("terminal tail", "tail"),
+        ("terminal history", "history"),
+        ("terminal send claude's reply to other", "focus"),
+        ("terminal Keep this punctuation?!", "send"),
+    ])
+    async def test_each_recognized_branch_acquires_once_before_its_first_roster_effect(
+        self, phrase: str, operation: str, monkeypatch,
+    ) -> None:
+        agent, other = _CaptureContextAgent(), _CaptureContextAgent()
+        r = roster(work=agent, other=other)
+        await r.discover()
+        events: list[str] = []
+
+        def acquire() -> None:
+            assert r.focused == "work", "The command changed focus before acquiring its view"
+            events.append("view")
+
+        def last_reply(who: str | None) -> tuple[str, str]:
+            assert events == ["view"], "Reply lookup preceded the explicit view boundary"
+            return "CLAUDE (critic)", "Exact collaborator reply."
+
+        commands = AgentTerminalCommands(r, last_reply=last_reply, on_explicit_view=acquire)
+        original = getattr(r, operation)
+
+        def record_effect() -> None:
+            assert events == ["view"], "The command performed a roster effect before acquiring its view"
+            events.append(operation)
+
+        if operation in {"cancel", "discover", "resume", "decide", "history", "send"}:
+            async def tracked(*args, **kwargs):
+                record_effect()
+                return await original(*args, **kwargs)
+        else:
+            def tracked(*args, **kwargs):
+                record_effect()
+                return original(*args, **kwargs)
+
+        monkeypatch.setattr(r, operation, tracked)
+        try:
+            answer = await commands.handle_command(phrase)
+            await _terminal_idle(r)
+            assert answer is not None
+            assert events == ["view", operation]
+        finally:
+            await _close_capture_fixture(r, agent, other)
+
+    @pytest.mark.parametrize("phrase", ["keep this instruction", "cancel", "never mind"])
+    async def test_legacy_armed_answer_acquires_before_disarm_or_send(self, phrase: str) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        observed_armed: list[bool] = []
+        commands = AgentTerminalCommands(
+            r, on_explicit_view=lambda: observed_armed.append(commands.armed),
+        )
+        try:
+            commands.arm()
+            assert observed_armed == []
+            assert await commands.handle_command(phrase) is not None
+            await _terminal_idle(r)
+            assert observed_armed == [True]
+            assert not commands.armed
+            assert agent.prompts == ([] if phrase in {"cancel", "never mind"} else [phrase])
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("phrase", [
+        "", "   ", "what is the weather", "switch to decaf",
+        "hello terminal", "I use the terminal", "send a joke to my wife",
+    ])
+    async def test_unrecognized_speech_does_not_acquire_display_rights(self, phrase: str) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        acquired: list[bool] = []
+        commands = AgentTerminalCommands(r, on_explicit_view=lambda: acquired.append(True))
+        try:
+            assert await commands.handle_command(phrase) is None
+            assert acquired == [] and agent.prompts == []
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("exit_kind", ["blank", "expired", "cleared"])
+    async def test_an_unaccepted_legacy_answer_does_not_reopen_terminal(self, exit_kind: str) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        acquired: list[bool] = []
+        now = [100.0]
+        commands = AgentTerminalCommands(
+            r, monotonic=lambda: now[0], on_explicit_view=lambda: acquired.append(True),
+        )
+        try:
+            commands.arm()
+            if exit_kind == "expired":
+                now[0] += 46
+            elif exit_kind == "cleared":
+                commands.clear_capture()
+            phrase = " " if exit_kind == "blank" else "an ordinary answer"
+            assert await commands.handle_command(phrase) is None
+            assert acquired == [] and agent.prompts == []
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    async def test_scoped_capture_keeps_its_existing_owner_without_a_legacy_view_lease(self) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        acquired: list[bool] = []
+        commands = AgentTerminalCommands(r, on_explicit_view=lambda: acquired.append(True))
+        try:
+            capture = commands.begin_capture()
+            assert capture is not None
+            literal = "  This exact scoped answer?!  "
+            assert await commands.consume_capture(capture, literal) == "work ▸ sent."
+            assert await commands.consume_capture(capture, literal) is None
+            await _terminal_idle(r)
+            assert acquired == [] and agent.prompts == [literal]
+        finally:
+            await _close_capture_fixture(r, agent)
+
+    @pytest.mark.parametrize("reply_available", [False, True])
+    async def test_direct_explicit_reply_handoff_acquires_once_even_when_no_reply_exists(
+        self, reply_available: bool,
+    ) -> None:
+        agent = _CaptureContextAgent()
+        r = roster(work=agent)
+        acquired: list[bool] = []
+
+        def last_reply(who: str | None) -> tuple[str, str] | None:
+            assert acquired == [True]
+            return ("CLAUDE (critic)", "The chosen reply.") if reply_available else None
+
+        commands = AgentTerminalCommands(
+            r, last_reply=last_reply, on_explicit_view=lambda: acquired.append(True),
+        )
+        try:
+            assert await commands.route_reply("claude", None)
+            await _terminal_idle(r)
+            assert acquired == [True]
+            assert agent.prompts == (["The chosen reply."] if reply_available else [])
+        finally:
+            await _close_capture_fixture(r, agent)

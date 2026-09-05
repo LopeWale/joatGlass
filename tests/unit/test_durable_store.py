@@ -222,3 +222,58 @@ def test_a_later_migration_can_retire_earlier_schema(tmp_path) -> None:  # type:
         assert "calendar_event_alerts" not in names
         # A table the migrations still create is untouched.
         assert "notification_observations" in names
+
+
+def test_timer_migration_preserves_all_ten_released_statement_checksums() -> None:
+    from joat.persistence import store as store_module
+
+    # Frozen from the pre-Timer migration statements with the ledger's exact
+    # checksum canonicalization. Appending migration 11 must not rewrite them.
+    expected = [
+        "b74c950879bc6f7f86db08371a5a089d664bdf9797569377ef988dcfe313fff5",
+        "e940bcbcb0012a50466e410444c743859b1d7febad3fa25a62dc1f3b580e7566",
+        "52bedaef3d63afb258e20176eff734e5daecf305f337c5e59b3e0ddade95be0f",
+        "036de989f396a8a603251e486ba13d34fd80924018c92c917f6a4ffb56cf8b53",
+        "e4652dfb37870cd53b0acb6cd320e2a01f9778ad37c5e773cdc407d8d14d070f",
+        "a7c95f4737e2fd06112313890ed5e399cedf1c9291714dac6aa40e19952379c8",
+        "767eb2127a60b51909551fab9cf16cff6873095c89fedb9f59ef931afa18e601",
+        "46bf6fa9aaab2b9451e31c8faa48457577fe792abdae359f5ccb94a81a6f66e4",
+        "fbfc7fd2706c04a834918cf49f1878703e52142b4e73054483780dfb235924d2",
+        "db3740442e244b6c7e95dc09fbf4f03db4b565aff9cba23ddd3b1f9a63d5c764",
+    ]
+    assert [version for version, _, _ in store_module._MIGRATIONS[:10]] == list(range(1, 11))
+    assert [store_module._migration_checksum(sql).hex()
+            for _, _, sql in store_module._MIGRATIONS[:10]] == expected
+
+
+def test_timer_migration_upgrades_v10_without_changing_existing_data_or_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from joat.persistence import store as store_module
+    from joat.persistence.notes import NoteSource, NoteStore
+
+    path = tmp_path / "timer-upgrade.sqlite3"
+    current = store_module._MIGRATIONS
+    with monkeypatch.context() as baseline:
+        baseline.setattr(store_module, "_MIGRATIONS", current[:10])
+        with DurableStore(path) as db:
+            assert db.schema_version == 10
+            note = NoteStore(db).create(note_id="retained", idempotency_key="retained-key",
+                text="  Retained note\r\nwith exact spacing.  ", source=NoteSource("test"), now_us=10)
+            db.execute(
+                "INSERT INTO actions(action_id,kind,schema_version,canonicalizer_version,state,"
+                "payload_digest,target_digest,idempotency_key,created_at_us,updated_at_us) "
+                "VALUES ('retained-action','test',1,1,'drafted',?,?,'retained-action-key',10,10)",
+                (b"p" * 32, b"t" * 32),
+            )
+            ledger = db.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+            action = db.execute("SELECT * FROM actions WHERE action_id='retained-action'").fetchone()
+            tables = db.execute("SELECT name,sql FROM sqlite_schema WHERE type='table' ORDER BY name").fetchall()
+    with DurableStore(path) as db:
+        assert db.schema_version == 11, "Timer checkpoints require an append-only version-11 migration"
+        assert db.execute("SELECT * FROM schema_migrations WHERE version<=10 ORDER BY version").fetchall() == ledger
+        assert NoteStore(db).get("retained") == note
+        assert db.execute("SELECT * FROM actions WHERE action_id='retained-action'").fetchone() == action
+        assert db.execute("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name!='pomodoro_checkpoint' ORDER BY name").fetchall() == tables
+        assert db.execute("SELECT count(*) FROM pomodoro_checkpoint").fetchone() == (0,)
+        assert db.check_integrity() == ("ok", ())

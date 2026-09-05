@@ -5,7 +5,9 @@ import type { MacLink } from './MacLink';
 import {
   PANEL_EXPANDED_HINT,
   POMODORO_EXPANDED_HINT,
+  parseMessagesConversationRow,
   parsePlanningMonthTitle,
+  usesQuickNotesReaderLayout,
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
@@ -13,6 +15,9 @@ import {
   CAPABILITIES,
   VOICE_REQUEST_PREFIX,
   type InputEventPayload,
+  type MessageUIMessage,
+  type PromptPresentMessage,
+  type BrainstormHudModel,
   type PanelContentTab,
   type PlanningGridCell,
   type ProductivityHudModel,
@@ -43,6 +48,67 @@ interface DataSurfaceSnapshot {
   /** An expanded panel tab keeps its rail lit, on the page and on the
    * list Back restores; without this the rail vanished on return. */
   railTab?: PanelContentTab;
+}
+
+interface TerminalOpeningBinding {
+  requestId: string;
+  selectionId: string;
+}
+
+interface MessageSelectionBinding {
+  readonly requestId: string;
+  readonly selectionId: string;
+  readonly retiredActionIds: Set<string>;
+  action?: { message: Readonly<MessageUIMessage>; readonly isCurrent: () => boolean };
+}
+
+const MESSAGE_UI_PREFIX = 'messages-ui-';
+const MESSAGE_UI_STATES: readonly string[] = [
+  'preparing', 'awaiting_input', 'awaiting_confirmation', 'sending',
+  'cancelled', 'sent', 'failed', 'uncertain',
+];
+const MESSAGE_UI_KEYS = ['kind', 'requestId', 'selectionId', 'actionId', 'state', 'text'] as const;
+
+function messageFinished(state: MessageUIMessage['state']): boolean {
+  return state === 'cancelled' || state === 'sent' || state === 'failed' || state === 'uncertain';
+}
+
+function parseMessageUI(value: unknown): MessageUIMessage | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const data = value as Record<string, unknown>;
+  if (Object.keys(data).length !== MESSAGE_UI_KEYS.length
+    || !MESSAGE_UI_KEYS.every((key) => Object.prototype.hasOwnProperty.call(data, key))
+    || data.kind !== 'message.ui'
+    || typeof data.requestId !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(data.requestId)
+    || typeof data.selectionId !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(data.selectionId)
+    || typeof data.actionId !== 'string' || !data.actionId.startsWith(MESSAGE_UI_PREFIX)
+    || !/^[A-Za-z0-9._:-]{1,96}$/.test(data.actionId)
+    || typeof data.state !== 'string' || !MESSAGE_UI_STATES.includes(data.state)
+    || typeof data.text !== 'string' || data.text.length > 1000
+    || /\0|[\uD800-\uDFFF]/u.test(data.text)) return;
+  return {
+    kind: 'message.ui', requestId: data.requestId, selectionId: data.selectionId,
+    actionId: data.actionId, state: data.state as MessageUIMessage['state'], text: data.text,
+  };
+}
+
+/** Short literal rows stay within even the compact list's secondary-column
+ * budget. All status characters remain reachable through its existing scroll;
+ * no text is passed through a lossy ellipsis or native 20-row fallback. */
+function messageStatusRows(text: string): string[] {
+  const rows: string[] = [];
+  for (const line of text.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g) ?? []) {
+    let row = '';
+    let width = 0;
+    for (const character of line) {
+      const cost = character === '\t' ? 8 : /[\r\n]/.test(character) ? 0 : character.length;
+      if (row && width + cost > 24) { rows.push(row); row = ''; width = 0; }
+      row += character;
+      width += cost;
+    }
+    if (row) rows.push(row);
+  }
+  return rows.length ? rows : [''];
 }
 
 const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
@@ -125,6 +191,7 @@ export class CapabilityMenu {
   private messagesScreen?: MessagesScreen;
   private dataHint?: string;
   private dataPagePending = false;
+  private noteReaderTraceId?: string;
   /** Messages has two real read levels (conversation then full message), so
    * retain those exact Mac-authored frames for contextual Back. */
   private dataSurface?: DataSurfaceSnapshot;
@@ -132,6 +199,14 @@ export class CapabilityMenu {
   private dataGrandparent?: DataSurfaceSnapshot;
   private pendingTitle?: string;
   private pendingRequestId?: string;
+  /** One capability visit and its particular lane choice. Keep this owner
+   * across connecting/ready frames after the picker gives up input. */
+  private terminalOpening?: TerminalOpeningBinding;
+  private terminalPaintRevision = 0;
+  private terminalPreludeRevision = 0;
+  private messageSelection?: MessageSelectionBinding;
+  private messageLifecycleBinding?: TerminalOpeningBinding;
+  private messagePaintRevision = 0;
   private responseTimeout?: ReturnType<typeof setTimeout>;
   private productivityReturn?: 'Planning';
   private productivityAnchorUnixMs?: number;
@@ -177,28 +252,219 @@ export class CapabilityMenu {
     return this.pendingRequestId !== undefined;
   }
 
+  /** Synchronous ingress reserves a typed action only for the row we sent. */
+  observeMessageUI(value: unknown, isCurrent: () => boolean): boolean {
+    const message = parseMessageUI(value);
+    const selection = this.messageSelection;
+    if (!message || !selection || !this.messageSelectionIsCurrent(selection)
+      || message.requestId !== selection.requestId || message.selectionId !== selection.selectionId) return false;
+    try { if (!isCurrent()) return false; } catch { return false; }
+    const action = selection.action;
+    if (message.state === 'preparing') {
+      if (selection.retiredActionIds.has(message.actionId)
+        || selection.retiredActionIds.size >= 256
+        || (action && !messageFinished(action.message.state))) return false;
+      selection.action = { message: Object.freeze(message), isCurrent };
+    } else {
+      if (!action || action.message.actionId !== message.actionId
+        || messageFinished(action.message.state)) return false;
+      try { if (!action.isCurrent()) return false; } catch { return false; }
+      action.message = Object.freeze(message);
+    }
+    if (messageFinished(message.state)) selection.retiredActionIds.add(message.actionId);
+    this.messagePaintRevision += 1;
+    this.clearResponseTimeout();
+    return true;
+  }
+
+  isMessagePromptCurrent(message: Readonly<PromptPresentMessage>): boolean {
+    if (!message.ownerId.startsWith(MESSAGE_UI_PREFIX)) return true;
+    return message.ownerKind === 'messages' && this.isMessageActionCurrent(message.ownerId);
+  }
+
+  isMessageActionCurrent(actionId: string): boolean {
+    const selection = this.messageSelection;
+    const action = selection?.action;
+    if (!selection || !action
+      || !this.messageSelectionIsCurrent(selection)
+      || action.message.actionId !== actionId || messageFinished(action.message.state)) return false;
+    try { return action.isCurrent(); } catch { return false; }
+  }
+
+  cancelMessageAction(actionId?: string): boolean {
+    const selection = this.messageSelection;
+    const action = selection?.action;
+    if (!selection || !action || !this.messageSelectionIsCurrent(selection)
+      || (actionId !== undefined && action.message.actionId !== actionId)
+      || messageFinished(action.message.state)) return false;
+    try { if (!action.isCurrent()) return false; } catch { return false; }
+    selection.retiredActionIds.add(action.message.actionId);
+    selection.action = undefined;
+    this.messagePaintRevision += 1;
+    this.clearResponseTimeout();
+    this.dataSelectionPending = false;
+    this.sendMessageCancel(selection, action.message.actionId);
+    return true;
+  }
+
+  /** Disconnect retires locally; explicit departure also cancels its draft. */
+  retireMessageUI(notifyMac = false): void {
+    const selection = this.messageSelection;
+    this.messageSelection = undefined;
+    this.messagePaintRevision += 1;
+    if (selection) this.clearResponseTimeout();
+    if (!notifyMac) this.messageLifecycleBinding = undefined;
+    if (notifyMac && selection?.action && !messageFinished(selection.action.message.state)) {
+      this.sendMessageCancel(selection, selection.action.message.actionId);
+    }
+  }
+
+  private sendMessageCancel(selection: MessageSelectionBinding, actionId: string): void {
+    this.link.send({ kind: 'input', event: {
+      containerName: 'message-cancel', selectedName: actionId,
+      requestId: selection.requestId, traceId: selection.selectionId,
+    } });
+  }
+
+  private messagesLifecycle(selectedName: string, binding = this.messageLifecycleBinding): void {
+    this.link.send({ kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName,
+      ...(binding ? { requestId: binding.requestId, traceId: binding.selectionId } : {}),
+    } });
+  }
+
+  private leaveMessages(): void {
+    const leaving = this.pendingTitle === 'MESSAGES';
+    const binding = this.messageLifecycleBinding;
+    this.retireMessageUI(true);
+    this.messageLifecycleBinding = undefined;
+    if (leaving) this.messagesLifecycle('messages-home', binding);
+  }
+
+  private messageSelectionIsCurrent(selection: MessageSelectionBinding): boolean {
+    return this.messageSelection === selection && this.view !== 'closed'
+      && this.pendingTitle === 'MESSAGES' && this.pendingRequestId === selection.requestId;
+  }
+
+  async presentMessageUI(message: MessageUIMessage, isCurrent: () => boolean): Promise<boolean> {
+    const selection = this.messageSelection;
+    const action = selection?.action;
+    if (!selection || !action || !this.messageSelectionIsCurrent(selection)
+      || !MESSAGE_UI_KEYS.every((key) => action.message[key] === message[key])) return false;
+    const accepted = action.message;
+    const revision = this.messagePaintRevision;
+    const current = () => {
+      try {
+        return this.messageSelectionIsCurrent(selection) && selection.action === action
+          && action.message === accepted && this.messagePaintRevision === revision
+          && action.isCurrent() && isCurrent();
+      } catch { return false; }
+    };
+    if (!current()) return false;
+    // Questions and confirmation own intermediate states. Only final receipts
+    // replace the underlying feature, and Back retains its actual Mac rows.
+    if (!messageFinished(accepted.state)) return true;
+    let parent = this.dataSurface;
+    let grandparent = this.dataReturn;
+    if (this.messagesScreen === 'message_detail' || this.messagesScreen === 'compose'
+      || this.messagesScreen === 'read_only') {
+      parent = this.dataReturn;
+      grandparent = this.dataGrandparent;
+    }
+    if (parent === this.dataSurface && parent) parent = { ...parent, selectedIndex: this.selectedIndex };
+    const rows = messageStatusRows(accepted.text);
+    const title = `MESSAGES · ${accepted.state.toUpperCase()}`;
+    const hint = 'swipe: read · left x2: back';
+    const transition = this.beginTransition();
+    const stillCurrent = () => current() && this.transitionId === transition;
+    const shown = await this.hud.showList(rows, { title, hint, selectable: false }, stillCurrent);
+    if (!stillCurrent()) return false;
+    this.view = 'data';
+    if (!shown) return false;
+    this.dataReturn = parent;
+    this.dataGrandparent = grandparent;
+    this.selectedIndex = 0;
+    this.dataRowsSelectable = false;
+    this.dataItemCount = rows.length;
+    this.dataSelectionPending = false;
+    this.dataPagePending = false;
+    this.messagesRetry = false;
+    this.messagesScreen = 'read_only';
+    this.dataHint = hint;
+    this.dataSurface = { title, items: rows, hint, selectable: false, selectedIndex: 0, messagesRetry: false, messagesScreen: 'read_only' };
+    return true;
+  }
+
+  /** Older Macs can answer an initial Terminal request without opening IDs.
+   * Once a roster or bound session owns the screen, an untagged update has
+   * no authority to replace it. Ordinary handoffs remain available at Home. */
+  mayPresentUnboundTerminal(): boolean {
+    if (this.view === 'closed') return this.terminalOpening === undefined;
+    return this.view === 'data'
+      && this.pendingTitle === 'AGENT TERMINAL'
+      && this.pendingRequestId !== undefined
+      && this.dataItemCount === 0
+      && this.terminalOpening?.requestId === this.pendingRequestId
+      && this.terminalOpening.selectionId === this.pendingRequestId;
+  }
+
+  /** Capture at socket ingress, then check once before a queued voice list
+   * adopts its visit. Only local navigation or disconnect retires this
+   * guard; painting an earlier server frame must not reject a later one. */
+  captureTerminalPreludeGuard(): () => boolean {
+    const revision = this.terminalPreludeRevision;
+    return () => this.terminalPreludeRevision === revision;
+  }
+
+  /** The request is reused by picker rows; only their trace IDs distinguish
+   * two selections within the same visit. Never infer one from a frame. */
+  async presentTerminalOpening(
+    model: BrainstormHudModel,
+    binding: TerminalOpeningBinding,
+    isCurrent: () => boolean,
+  ): Promise<boolean> {
+    const opening = this.terminalOpening;
+    if (
+      !opening || model.screen !== 'agent_terminal'
+      || !binding.requestId || !binding.selectionId
+      || opening.requestId !== binding.requestId
+      || opening.selectionId !== binding.selectionId
+      || !isCurrent()
+    ) return false;
+
+    const revision = ++this.terminalPaintRevision;
+    const stillCurrent = () => this.terminalOpening === opening
+      && this.terminalPaintRevision === revision && isCurrent();
+    const shown = await this.hud.showBrainstorm(model, undefined, stillCurrent);
+    if (!shown || !stillCurrent()) return false;
+    // Commit input ownership only after the exact frame paints. A failed
+    // paint leaves the picker and its bounded response timeout available.
+    // Releasing the menu must retain this opening for its later ready frame.
+    this.releaseMenuToLiveSession();
+    return true;
+  }
+
+  /** Local departure wins synchronously, including an in-flight paint. A
+   * disconnected link must retire locally without queuing a lifecycle event. */
+  retireTerminalOpening(notifyMac = true): void {
+    if (!notifyMac) this.terminalPreludeRevision += 1;
+    const opening = this.terminalOpening;
+    this.terminalOpening = undefined;
+    if (!opening || !notifyMac) return;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle', selectedName: 'terminal-home',
+        requestId: opening.requestId, traceId: opening.selectionId,
+      },
+    });
+  }
+
   async beginLiveSession(session: 'brainstorm'): Promise<void> {
     void session;
-    this.clearResponseTimeout();
-    this.dashboard = undefined;
-    this.clearProductivityReturn();
-    this.transitionId += 1;
-    this.view = 'closed';
-    this.selectedIndex = 0;
-    this.pendingTitle = undefined;
-    this.pendingRequestId = undefined;
-    this.dataItemCount = 0;
-    this.dataRowsSelectable = false;
-    this.dataSelectionPending = false;
-    this.messagesRetry = false;
-    this.messagesScreen = undefined;
-    this.dataHint = undefined;
-    this.dataPagePending = false;
-    this.dataSurface = undefined;
-    this.dataReturn = undefined;
-    this.dataGrandparent = undefined;
-    this.planningDrillDown = false;
-    await this.hud.showDefault();
+    // The caller immediately paints its live frame. Painting Overview here
+    // doubled tile traffic and exposed unrelated quadrants between updates.
+    this.releaseToLiveSession();
   }
 
   /** An external live surface (Navigation) is taking the lenses. Clear menu
@@ -208,7 +474,13 @@ export class CapabilityMenu {
    * response timeout armed for the menu request from later repainting a
    * retry list over the live session's frame. */
   releaseToLiveSession(): void {
-    const leavingMessages = this.pendingTitle === 'MESSAGES';
+    this.retireTerminalOpening();
+    this.releaseMenuToLiveSession();
+  }
+
+  private releaseMenuToLiveSession(): void {
+    this.retireQuickNotesReader('home');
+    this.leaveMessages();
     this.clearResponseTimeout();
     this.dashboard = undefined;
     this.clearProductivityReturn();
@@ -230,19 +502,13 @@ export class CapabilityMenu {
     this.dataSurface = undefined;
     this.dataReturn = undefined;
     this.dataGrandparent = undefined;
-    if (leavingMessages) {
-      // The Mac clears its private reply-target consent on this lifecycle
-      // signal, exactly as a close() away from Messages does.
-      this.link.send({
-        kind: 'input',
-        event: { containerName: 'capability-lifecycle', selectedName: 'messages-home' },
-      });
-    }
   }
 
   /** Contextual-menu entry: settings remains reachable without consuming one
    * of the five 576x288 sidebar rows. */
   async openSettings(): Promise<void> {
+    this.leaveMessages();
+    this.retireQuickNotesReader('home');
     this.pendingTitle = undefined;
     this.pendingRequestId = undefined;
     const transition = this.beginTransition();
@@ -281,6 +547,13 @@ export class CapabilityMenu {
     hint?: string,
     planningGrid?: PlanningGridCell[],
   ): Promise<boolean> {
+    // A reader response is always answering a row tap in this visit. Check
+    // before voice-generation adoption so a late page cannot reopen it.
+    if (usesQuickNotesReaderLayout(title ?? '', items)
+      && (!this.noteReaderTraceId || requestId !== this.pendingRequestId)) return false;
+    const conversationalTerminal = title?.trim().toUpperCase() === 'AGENT TERMINAL'
+      && !selectable && requestId?.startsWith(VOICE_REQUEST_PREFIX)
+      && requestId !== this.pendingRequestId;
     // A voice-prefixed generation is the Mac acting on the wearer's spoken
     // request ("show my messages", "start a quicknote"). Adopt it instead of
     // dropping it as stale — voice must not require a preceding menu tap.
@@ -334,17 +607,28 @@ export class CapabilityMenu {
     }
     const expectedRequestId = this.pendingRequestId;
     const transition = this.beginTransition();
+    if (conversationalTerminal && requestId) {
+      // Bind after beginTransition retires the old view, and before awaiting
+      // paint so a local Home can synchronously revoke this new visit.
+      this.terminalOpening = { requestId, selectionId: requestId };
+    }
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
     // An opened headline or result is still inside its tab: the rail
     // stays on the reader so the wearer sees where they are.
     const railTab = panelTabForTitle(this.pendingTitle);
+    const messageRows = messagesState?.screen === 'conversation' && effectiveSelectable
+      && this.hud.usesCustomListSelection?.()
+      ? items.flatMap((item, index) => parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : [])
+      : [];
+    const initialSelection = messageRows[0] ?? 0;
     const shown = await this.hud.showList(items, {
       title,
       hint: effectiveHint,
       selectable: effectiveSelectable,
       planningGrid,
       planningPane: this.dashboardPane(),
+      ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
     });
     if (
@@ -365,18 +649,19 @@ export class CapabilityMenu {
     this.messagesScreen = messagesState?.screen;
     this.dataHint = effectiveHint;
     this.dataPagePending = false;
-    this.selectedIndex = 0;
+    this.selectedIndex = initialSelection;
     this.dataSurface = {
       title,
       items: [...items],
       selectable: effectiveSelectable,
       hint: effectiveHint,
       planningGrid: planningGrid ? [...planningGrid] : undefined,
-      selectedIndex: 0,
+      selectedIndex: initialSelection,
       messagesRetry: this.messagesRetry,
       messagesScreen: this.messagesScreen,
       ...(railTab ? { railTab } : {}),
     };
+    if (conversationalTerminal && requestId) this.armResponseTimeout('AGENT TERMINAL', requestId);
     return true;
   }
 
@@ -389,6 +674,7 @@ export class CapabilityMenu {
     hint?: string,
   ): Promise<boolean> {
     if (!isActionLifecycleTitle(title)) return false;
+    this.leaveMessages();
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
@@ -414,6 +700,7 @@ export class CapabilityMenu {
     productivity: ProductivityHudModel,
     onVisible?: () => void,
   ): Promise<boolean> {
+    this.leaveMessages();
     this.clearResponseTimeout();
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
@@ -474,6 +761,7 @@ export class CapabilityMenu {
    * firmware contextual menu (tap, then long-press); this gesture never
    * draws a second one. On the overview there is no level left to leave. */
   async toggle(): Promise<void> {
+    this.terminalPreludeRevision += 1;
     if (this.view === 'closed') {
       return;
     } else if (this.view === 'productivity' && this.productivityReturn) {
@@ -495,6 +783,29 @@ export class CapabilityMenu {
     ) {
       this.planningDrillDown = false;
       await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
+    } else if (
+      this.view === 'data'
+      && this.pendingTitle === 'QUICKNOTES'
+      && this.dataSurface?.title.trim().toUpperCase() === 'QUICKNOTES · DISCARD?'
+      && this.pendingRequestId
+    ) {
+      if (this.dataSelectionPending) return;
+      // Recording controls are state changes, not read-only detail pages.
+      // The Mac must cancel discard and publish its current action mapping
+      // before a row can be selected again.
+      this.dataReturn = undefined;
+      this.dataGrandparent = undefined;
+      this.dataRowsSelectable = false;
+      this.dataSelectionPending = true;
+      this.link.send({
+        kind: 'input',
+        event: {
+          containerName: 'capability-lifecycle',
+          selectedName: 'quicknotes-back',
+          requestId: this.pendingRequestId,
+        },
+      });
+      this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
     } else if (this.view === 'data' && this.dataReturn) {
       await this.returnToDataSurface();
     } else {
@@ -525,8 +836,22 @@ export class CapabilityMenu {
         );
         return true;
       }
+      const messageRows = this.customMessageRows();
+      if (messageRows) {
+        // Some hosts report a hidden native cursor for the custom text
+        // capture. A differing report must never replace the visible cursor.
+        if (eventType !== OsEventTypeList.CLICK_EVENT) return this.handleScroll(eventType);
+        const reported = list.currentSelectItemIndex;
+        if (reported !== undefined && reported !== 0 && reported !== this.selectedIndex) return true;
+        this.dataSelectionUsesStaleNativeIndex = false;
+        return this.selectDataRow();
+      }
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
       if (eventType !== OsEventTypeList.CLICK_EVENT) {
+        if (this.isQuickNotesReader()) {
+          this.requestQuickNotesPage(eventType);
+          return true;
+        }
         // Native List containers move their own highlight before reporting a
         // scroll. Mirror that index so a second swipe at an actual endpoint
         // reaches the Mac-owned conversation pager. This is intentionally
@@ -608,6 +933,10 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
+      if (this.isQuickNotesReader()) {
+        this.requestQuickNotesPage(eventType);
+        return true;
+      }
       if (this.dashboard) {
         this.dashboardScroll(delta);
         return true;
@@ -627,7 +956,10 @@ export class CapabilityMenu {
       // Access/setup has one real G2 action: retry. Keep its first row
       // highlighted while the second row remains Mac Settings guidance.
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
-      const next = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
+      const messageRows = this.customMessageRows();
+      const next = messageRows
+        ? messageRows[Math.max(0, Math.min(messageRows.length - 1, messageRows.indexOf(this.selectedIndex) + delta))]!
+        : Math.max(0, Math.min(maximum, this.selectedIndex + delta));
       const applied = next - this.selectedIndex;
       this.selectedIndex = next;
       if (applied !== 0) void this.hud.moveSelection(applied);
@@ -750,8 +1082,22 @@ export class CapabilityMenu {
     const random = globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const traceId = `hud-${random}`;
+    if (this.pendingTitle === 'AGENT TERMINAL' && this.pendingRequestId) {
+      this.retireTerminalOpening();
+      this.terminalOpening = { requestId: this.pendingRequestId, selectionId: traceId };
+    }
+    if (this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.title.trim().toUpperCase() === 'QUICKNOTES') {
+      this.noteReaderTraceId = traceId;
+    }
     const readingMessage = this.pendingTitle === 'MESSAGES'
       && this.messagesScreen === 'conversation';
+    if (this.pendingTitle === 'MESSAGES' && !readingMessage && this.pendingRequestId) {
+      this.retireMessageUI(true);
+      this.messageSelection = {
+        requestId: this.pendingRequestId, selectionId: traceId, retiredActionIds: new Set(),
+      };
+      this.messageLifecycleBinding = { requestId: this.pendingRequestId, selectionId: traceId };
+    }
     const stage = readingMessage
       ? 'message-read-requested'
       : this.pendingTitle === 'MESSAGES'
@@ -774,7 +1120,8 @@ export class CapabilityMenu {
     // drops the response: every selectable data surface (Messages,
     // Planning drill-downs, Notifications, Activity, QuickNotes) reuses the
     // same truthful retry state as an initial menu request.
-    if (this.pendingTitle && this.pendingRequestId) {
+    if (this.pendingTitle && this.pendingRequestId
+      && !(this.pendingTitle === 'MESSAGES' && this.messageSelection?.action)) {
       this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
     }
     return true;
@@ -821,6 +1168,7 @@ export class CapabilityMenu {
   async openFromContextualMenu(index: number): Promise<void> {
     const picked = CAPABILITIES[index];
     if (picked === undefined) return;
+    this.terminalPreludeRevision += 1;
     if (picked === 'Settings') {
       await this.openSettings();
       return;
@@ -916,7 +1264,9 @@ export class CapabilityMenu {
    * `capdata` carrying the cached revision, and the Mac answers an opened
    * row with a `hud.list` titled "<TAB> · …" that presentList matches.
    */
-  async openPanelTab(tab: PanelContentTab): Promise<void> {
+  async openPanelTab(tab: PanelContentTab, keepSelection = 0): Promise<void> {
+    this.leaveMessages();
+    this.retireQuickNotesReader('home');
     this.dashboard = undefined;
     this.clearResponseTimeout();
     this.messagesRetry = false;
@@ -944,8 +1294,11 @@ export class CapabilityMenu {
     if (this.hud.rail.requestId(tab) !== requestId) {
       // The cache moved on while the page painted; what is on the glass is
       // already stale. Paint once more from the new cache.
-      return this.openPanelTab(tab);
+      return this.openPanelTab(tab, keepSelection);
     }
+    const selectedIndex = await this.restorePanelSelection(keepSelection, items.length, transition);
+    if (selectedIndex === undefined || !this.isCurrentTransition(transition)) return;
+    if (this.hud.rail.requestId(tab) !== requestId) return this.openPanelTab(tab, keepSelection);
     this.view = 'data';
     this.pendingTitle = title;
     this.pendingRequestId = requestId;
@@ -956,13 +1309,13 @@ export class CapabilityMenu {
     this.messagesScreen = undefined;
     this.dataHint = hint;
     this.dataPagePending = false;
-    this.selectedIndex = 0;
+    this.selectedIndex = selectedIndex;
     this.dataSurface = {
       title,
       items: [...items],
       selectable,
       hint,
-      selectedIndex: 0,
+      selectedIndex,
       messagesRetry: false,
       railTab: tab,
     };
@@ -979,20 +1332,25 @@ export class CapabilityMenu {
   async presentPanelContent(tab: PanelContentTab): Promise<boolean> {
     if (!this.isPanelExpanded() || panelTabForTitle(this.pendingTitle) !== tab) return false;
     const keep = this.selectedIndex;
-    await this.openPanelTab(tab);
-    this.restorePanelSelection(tab, keep);
+    await this.openPanelTab(tab, keep);
     return true;
   }
 
   /** After a repaint from the cache, put the wearer's row back, clamped
    * to the rows that exist now. */
-  private restorePanelSelection(tab: PanelContentTab, keep: number): void {
-    if (this.view !== 'data' || panelTabForTitle(this.pendingTitle) !== tab) return;
-    const clamped = Math.max(0, Math.min(Math.max(0, this.dataItemCount - 1), keep));
-    if (clamped === 0) return;
-    this.selectedIndex = clamped;
-    if (this.dataSurface) this.dataSurface.selectedIndex = clamped;
-    void this.hud.setSelection(clamped);
+  private async restorePanelSelection(
+    keep: number, itemCount: number, transition: number,
+  ): Promise<number | undefined> {
+    const clamped = Math.max(0, Math.min(Math.max(0, itemCount - 1), keep));
+    if (clamped > 0) {
+      const painted = await this.hud.restoreSelection(clamped);
+      if (!this.isCurrentTransition(transition)) return undefined;
+      if (!painted) {
+        await this.close();
+        return undefined;
+      }
+    }
+    return clamped;
   }
 
   /** The reader for an opened headline or result: the Mac owns the page
@@ -1033,11 +1391,45 @@ export class CapabilityMenu {
     this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
   }
 
+  private isQuickNotesReader(): boolean {
+    return this.view === 'data' && this.pendingTitle === 'QUICKNOTES'
+      && this.dataSurface !== undefined
+      && usesQuickNotesReaderLayout(this.dataSurface.title, this.dataSurface.items);
+  }
+
+  private requestQuickNotesPage(eventType: number): void {
+    if (!this.isQuickNotesReader() || this.dataPagePending || !this.noteReaderTraceId
+      || !this.pendingRequestId || !this.hintOffersPage(eventType)) return;
+    const counter = /^(\d+)\/(\d+) · /.exec(this.dataSurface?.items[0] ?? '');
+    if (!counter) return;
+    this.dataPagePending = true;
+    this.link.send({kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'QUICKNOTES',
+      selectedIndex: Number(counter[1]) - 1,
+      eventType, requestId: this.pendingRequestId, traceId: this.noteReaderTraceId,
+    }});
+    this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
+  }
+
+  private retireQuickNotesReader(destination: 'list' | 'home'): void {
+    if (this.pendingTitle === 'QUICKNOTES' && this.noteReaderTraceId && this.pendingRequestId) {
+      this.link.send({kind: 'input', event: {
+        containerName: 'capability-lifecycle', selectedName: `quicknotes-${destination}`,
+        requestId: this.pendingRequestId,
+      }});
+    }
+    this.noteReaderTraceId = undefined;
+  }
+
   private async openCapability(
     picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'> | 'Notifications',
     index: number,
     planningAnchorUnixMs?: number,
   ): Promise<void> {
+    // Retrying an unopened Messages picker replaces its request on the Mac.
+    // There is no selected conversation or draft requiring a second Home.
+    if (picked !== 'Messages' || this.messageLifecycleBinding) this.leaveMessages();
+    this.retireQuickNotesReader('home');
     if (picked === 'Planning') this.planningDrillDown = false;
     this.dashboard = undefined;
     this.clearResponseTimeout();
@@ -1057,6 +1449,11 @@ export class CapabilityMenu {
     this.view = 'data';
     this.pendingTitle = title;
     this.pendingRequestId = requestId;
+    if (picked === 'Agent Terminal') {
+      // A busy lane opens directly without a picker row, so the request
+      // itself identifies this explicit selection on both sides of the wire.
+      this.terminalOpening = { requestId, selectionId: requestId };
+    }
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
     this.dataSelectionPending = false;
@@ -1096,6 +1493,9 @@ export class CapabilityMenu {
     const family = (title.split('·')[0] ?? '').trim().toUpperCase();
     const known = CAPABILITIES.some((name) => name.toUpperCase() === family);
     if (!known) return;
+    this.leaveMessages();
+    this.retireTerminalOpening();
+    this.retireQuickNotesReader('home');
     this.clearResponseTimeout();
     this.clearProductivityReturn();
     this.view = 'data';
@@ -1167,6 +1567,9 @@ export class CapabilityMenu {
       return;
     }
     this.messagesRetry = isMessagesRetry;
+    // The timeout page has replaced the old controls. Back must never
+    // interpret an abandoned discard dialog as the still-visible surface.
+    this.dataSurface = undefined;
     this.dataRowsSelectable = isMessagesRetry;
     this.dataItemCount = isMessagesRetry ? 1 : 0;
     this.messagesScreen = isMessagesRetry ? 'retry' : undefined;
@@ -1194,8 +1597,10 @@ export class CapabilityMenu {
     const isReader = this.messagesScreen === 'message_detail';
     if (this.messagesScreen !== 'conversation' && !isReader) return false;
     if (isReader) return this.hintOffersPage(eventType);
-    const atTop = this.selectedIndex === 0;
-    const atBottom = this.selectedIndex === Math.max(0, this.dataItemCount - 1);
+    const messageRows = this.customMessageRows();
+    const atTop = this.selectedIndex === (messageRows?.[0] ?? 0);
+    const atBottom = this.selectedIndex === (messageRows?.[messageRows.length - 1]
+      ?? Math.max(0, this.dataItemCount - 1));
     if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
       return atTop && this.dataHint?.includes('up newer') === true;
     }
@@ -1203,6 +1608,15 @@ export class CapabilityMenu {
       return atBottom && this.dataHint?.includes('down older') === true;
     }
     return false;
+  }
+
+  private customMessageRows(): number[] | undefined {
+    if (this.messagesScreen !== 'conversation' || !this.dataRowsSelectable
+      || !this.hud.usesCustomListSelection?.()) return undefined;
+    const rows = this.dataSurface?.items.flatMap((item, index) =>
+      parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : []) ?? [];
+    // Older arbitrary-row payloads retain their established index contract.
+    return rows.length ? rows : undefined;
   }
 
   private requestMessagePage(eventType: number): void {
@@ -1227,6 +1641,7 @@ export class CapabilityMenu {
   }
 
   private beginTransition(): number {
+    this.retireTerminalOpening();
     this.clearProductivityReturn();
     this.view = 'transition';
     this.transitionId += 1;
@@ -1237,6 +1652,16 @@ export class CapabilityMenu {
     if (!this.pendingTitle || !this.dataSurface) return undefined;
     const current = this.dataSurface.title.trim().toUpperCase();
     const next = nextTitle.trim().toUpperCase();
+    if (
+      this.pendingTitle === 'QUICKNOTES'
+      && [current, next].some((title) => [
+        'QUICKNOTES · RECORDING', 'QUICKNOTES · PAUSED', 'QUICKNOTES · DISCARD?',
+      ].includes(title))
+    ) {
+      this.dataReturn = undefined;
+      this.dataGrandparent = undefined;
+      return undefined;
+    }
     if (current === next || next === this.pendingTitle) return undefined;
     if (!next.startsWith(`${this.pendingTitle} ·`)) return undefined;
     return {
@@ -1251,6 +1676,11 @@ export class CapabilityMenu {
   private async returnToDataSurface(): Promise<void> {
     const parent = this.dataReturn;
     if (!parent) return;
+    const messagesBinding = this.messageLifecycleBinding;
+    if (this.pendingTitle === 'MESSAGES' && parent.title.trim().toUpperCase() === 'MESSAGES') {
+      this.retireMessageUI(true);
+    }
+    if (this.pendingTitle === 'QUICKNOTES') this.retireQuickNotesReader('list');
     if (parent.railTab) {
       // Back from an opened row lands on the tab's CURRENT rows. The Mac
       // pushes every poll, so the list the wearer left may have moved on
@@ -1258,8 +1688,7 @@ export class CapabilityMenu {
       const keep = parent.selectedIndex;
       this.dataReturn = undefined;
       this.dataGrandparent = undefined;
-      await this.openPanelTab(parent.railTab);
-      this.restorePanelSelection(parent.railTab, keep);
+      await this.openPanelTab(parent.railTab, keep);
       return;
     }
     this.dataReturn = this.dataGrandparent;
@@ -1289,6 +1718,16 @@ export class CapabilityMenu {
       await this.close();
       return;
     }
+    // Rebuilding a list resets its visible cursor. Restore that cursor before
+    // accepting a tap, so the highlighted row and the target stay identical.
+    if (parent.selectedIndex > 0 && !this.dashboard) {
+      const selected = await this.hud.setSelection(parent.selectedIndex);
+      if (!this.isCurrentTransition(transition)) return;
+      if (!selected) {
+        await this.close();
+        return;
+      }
+    }
     this.view = 'data';
     this.dataItemCount = parent.items.length;
     this.dataRowsSelectable = parent.selectable;
@@ -1302,15 +1741,9 @@ export class CapabilityMenu {
     if (this.pendingTitle === 'MESSAGES') {
       const returnedTitle = parent.title.trim().toUpperCase();
       if (returnedTitle === 'MESSAGES') {
-        this.link.send({
-          kind: 'input',
-          event: { containerName: 'capability-lifecycle', selectedName: 'messages-list' },
-        });
+        this.messagesLifecycle('messages-list', messagesBinding);
       } else if (returnedTitle === 'MESSAGES · CONVERSATION') {
-        this.link.send({
-          kind: 'input',
-          event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation' },
-        });
+        this.messagesLifecycle('messages-conversation', messagesBinding);
       }
     }
   }
@@ -1372,7 +1805,9 @@ export class CapabilityMenu {
   }
 
   private async close(): Promise<void> {
-    const leavingMessages = this.pendingTitle === 'MESSAGES';
+    this.retireTerminalOpening();
+    this.retireQuickNotesReader('home');
+    this.leaveMessages();
     this.dashboard = undefined;
     this.clearResponseTimeout();
     this.clearProductivityReturn();
@@ -1394,15 +1829,6 @@ export class CapabilityMenu {
     this.dataSurface = undefined;
     this.dataReturn = undefined;
     this.dataGrandparent = undefined;
-    if (leavingMessages) {
-      this.link.send({
-        kind: 'input',
-        event: {
-          containerName: 'capability-lifecycle',
-          selectedName: 'messages-home',
-        },
-      });
-    }
     // Restore a LIVE home, not a souvenir of the menu — a stale status line
     // over a blank page reads as a dead assistant (observed on hardware).
     await this.hud.showDefault();

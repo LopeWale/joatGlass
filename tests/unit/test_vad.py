@@ -154,3 +154,153 @@ class TestDebounceAndAdaptiveFloor:
         assert vad.floor > low_floor * 3
         # and the noisy room itself must NOT count as speech
         assert rms(noisy_room) < vad.trigger
+
+
+class TestPromptFence:
+    def test_preroll_capacity_reports_the_actual_pcm_ring(self) -> None:
+        vad = RmsVad(preroll_batches=1)
+        # The current PCM deque remains three callbacks regardless of this
+        # legacy configuration field. Provenance must follow actual capacity.
+        assert vad.preroll_capacity == 3
+
+    def test_idle_fence_removes_old_preroll_from_the_next_utterance(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=2, hangover_batches=2)
+        old_quiet = batch(70)
+        first, second, closing = batch(9_000), batch(10_000), batch(25)
+        vad.feed(old_quiet)
+        vad.feed(old_quiet)
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is False
+        assert vad.feed(first) is None
+        assert vad.feed(second) is None
+        assert vad.feed(closing) is None
+        assert vad.feed(closing) == first + second + closing + closing
+
+    def test_debounce_started_before_fence_discards_its_entire_tail(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=2, hangover_batches=2)
+        assert vad.feed(LOUD) is None
+        assert vad.in_speech is False
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is True
+        for _ in range(4):
+            assert vad.feed(LOUD) is None
+            assert vad.prompt_discarding is True
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is True
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is False
+        fresh, closing = batch(12_000), batch(20)
+        assert vad.feed(fresh) is None
+        assert vad.feed(fresh) is None
+        assert vad.feed(closing) is None
+        assert vad.feed(closing) == fresh + fresh + closing + closing
+
+    def test_active_speech_is_discarded_without_emitting_an_old_fragment(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=1, hangover_batches=2)
+        vad.feed(LOUD)
+        vad.feed(LOUD)
+        assert vad.in_speech is True
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is True
+        assert vad.in_speech is False
+        assert vad.feed(LOUD) is None
+        assert vad.feed(QUIET) is None
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is False
+
+    def test_discard_requires_a_full_quiet_boundary_after_resumed_speech(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=1, hangover_batches=2)
+        vad.feed(LOUD)
+        vad.fence_prompt()
+
+        assert vad.feed(QUIET) is None
+        assert vad.feed(LOUD) is None
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is True
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is False
+
+    def test_discard_hangover_uses_sample_duration_not_callback_count(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=1, hangover_batches=2)
+        vad.feed(LOUD)
+        vad.fence_prompt()
+        assert vad.prompt_discarding is True
+
+        for _ in range(3):
+            assert vad.feed(batch(25, 1_600)) is None
+            assert vad.prompt_discarding is True
+        assert vad.feed(b"") is None
+        assert vad.prompt_discarding is True
+        assert vad.feed(batch(25, 1_600)) is None
+        assert vad.prompt_discarding is False
+
+    def test_maximum_duration_cut_is_not_a_quiet_boundary_for_new_prompt(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=1, hangover_batches=2, max_utterance_s=0.6)
+        assert vad.feed(LOUD) is None
+        assert vad.feed(LOUD) is None
+        completed = vad.feed(LOUD)
+        assert completed == LOUD * 3
+        assert vad.in_speech is False
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is True
+        for _ in range(12):
+            assert vad.feed(LOUD) is None
+            assert vad.prompt_discarding is True
+        assert vad.feed(QUIET) is None
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is False
+        assert completed == LOUD * 3  # earlier completed work stays intact
+
+    def test_repeated_fences_do_not_turn_a_discarded_tail_into_a_new_start(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=2, hangover_batches=2)
+        vad.feed(LOUD)
+        vad.fence_prompt()
+        vad.feed(LOUD)
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is True
+        assert vad.feed(LOUD) is None
+        assert vad.feed(QUIET) is None
+        assert vad.feed(QUIET) is None
+        assert vad.prompt_discarding is False
+
+    def test_actual_quiet_after_a_cap_allows_an_idle_fence(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=1, hangover_batches=2, max_utterance_s=0.6)
+        vad.feed(LOUD)
+        vad.feed(LOUD)
+        assert vad.feed(LOUD) is not None
+        assert vad.feed(QUIET) is None
+        assert vad.feed(QUIET) is None
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is False
+        fresh, closing = batch(12_000), batch(20)
+        assert vad.feed(fresh) is None
+        assert vad.feed(closing) is None
+        assert vad.feed(closing) == fresh + closing + closing
+
+    def test_fence_and_reset_preserve_noise_floor_but_reset_clears_partial_discard(self) -> None:
+        vad = RmsVad(start_batches=1, hangover_batches=2)
+        for _ in range(40):
+            vad.feed(batch(120))
+        before = vad.floor
+        vad.feed(LOUD)
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is True
+        assert vad.floor == before
+        vad.reset()
+        assert vad.prompt_discarding is False
+        assert vad.in_speech is False
+        assert vad.floor == before

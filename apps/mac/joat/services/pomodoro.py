@@ -22,6 +22,7 @@ import time
 
 from ..channels.cards import Card, Urgency
 from ..core.protocol import HudPanelPomodoro
+from ..persistence.pomodoro import PomodoroCheckpoint, PomodoroStore
 from .panels import PanelSnapshot, Reader
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,8 @@ class PomodoroLengths:
 
 OnChange = Callable[[], Awaitable[None]]
 Notify = Callable[[Card], None]
+_LOAD_FAILURE = "Timer recovery unavailable. Reset to start a new timer."
+_SAVE_FAILURE = "Timer change failed. Previous state kept. Retry or reset."
 
 
 class PomodoroService:
@@ -66,18 +69,84 @@ class PomodoroService:
         clock: Callable[[], float] = time.time,
         on_change: OnChange | None = None,
         notify: Notify | None = None,
+        store: PomodoroStore | None = None,
     ) -> None:
         self._lengths = lengths
         self._clock = clock
         self._on_change = on_change
         self._notify = notify
+        self._store = store
         self._phase: Phase = "idle"
         self._running = False
         self._remaining_ms = lengths.focus_ms
         self._length_ms = lengths.focus_ms
         self._completed = 0
         self._ends_at: float | None = None
+        self._ends_at_unix_ms: int | None = None
         self._timer: asyncio.TimerHandle | None = None
+        self._publications: set[asyncio.Task[None]] = set()
+        self._closed = False
+        self._restored: PomodoroCheckpoint | None = None
+        self._activated = False
+        self._load_failed = False
+        self._error: str | None = None
+        self._error_announced = False
+        self._recovery_notice: str | None = None
+        if store is not None:
+            try:
+                self._restored = store.load()
+            except Exception:
+                # Do not reset an unreadable checkpoint or stop unrelated
+                # engine features. Only an explicit, durable Reset replaces it.
+                self._load_failed = True
+                self._error = _LOAD_FAILURE
+            if self._restored is not None:
+                self._adopt(self._restored)
+
+    def activate_restored(self) -> None:
+        """Activate after callbacks are composed; construction never schedules.
+
+        Only the recorded deadline can expire while the engine was away.
+        Its successor is persisted paused, so another restart cannot invent
+        an offline sequence of completed focus blocks.
+        """
+        if self._closed or self._activated:
+            return
+        self._activated = True
+        if self._load_failed:
+            self._report_failure(_LOAD_FAILURE)
+            return
+        restored = self._restored
+        if restored is None or not restored.running:
+            return
+        if self._ends_at is not None and self._clock() < self._ends_at:
+            self._arm_timer()
+            return
+        finished = self._phase
+        next_phase, completed = self._next_phase()
+        checkpoint = self._phase_checkpoint(next_phase, completed=completed, running=False)
+        if not self._commit(checkpoint):
+            self._activated = False
+            return
+        finished_label = {"focus": "Focus", "break": "Break", "long_break": "Long break"}[finished]
+        next_label = {"focus": "Focus", "break": "Short break", "long_break": "Long break"}[next_phase]
+        self._recovery_notice = (
+            f"{finished_label} deadline passed while JOAT was away. {next_label} is paused."
+        )
+        if self._notify is not None:
+            self._notify(Card(source="Timer recovered", channel="Pomodoro",
+                summary=self._recovery_notice, urgency=Urgency.NOTIFY, event_class="pomodoro.phase"))
+
+    async def aclose(self) -> None:
+        """Stop this process's callbacks without pausing or resetting storage."""
+        self._closed = True
+        self._cancel_timer()
+        current = asyncio.current_task()
+        pending = [task for task in self._publications if task is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ── Observation ──────────────────────────────────────────────────────
 
@@ -93,9 +162,13 @@ class PomodoroService:
     def completed(self) -> int:
         return self._completed
 
+    @property
+    def recovery_unavailable(self) -> bool:
+        return self._load_failed
+
     def remaining_ms(self) -> int:
         if self._running and self._ends_at is not None:
-            return max(0, int(round((self._ends_at - self._clock()) * 1000)))
+            return min(self._length_ms, max(0, int(round((self._ends_at - self._clock()) * 1000))))
         return self._remaining_ms
 
     def state(self) -> HudPanelPomodoro:
@@ -105,15 +178,13 @@ class PomodoroService:
             remaining_ms=min(self.remaining_ms(), self._length_ms),
             length_ms=self._length_ms,
             completed=self._completed,
-            ends_at_unix_ms=(
-                int(self._ends_at * 1000)
-                if self._running and self._ends_at is not None
-                else None
-            ),
+            ends_at_unix_ms=self._ends_at_unix_ms if self._running else None,
         )
 
     def rows(self) -> tuple[str, ...]:
         """The control rows the expanded tab shows; a tap acts, by index."""
+        if self._load_failed:
+            return ("Reset",)
         if self._phase == "idle":
             return ("▶ Start a focus block",)
         if not self._running:
@@ -124,66 +195,68 @@ class PomodoroService:
 
     def status_text(self) -> str:
         """What JOAT says for "how long is left"."""
+        if self._error is not None:
+            return self._error
+        prefix = f"{self._recovery_notice} " if self._recovery_notice else ""
         if self._phase == "idle":
             minutes = self._lengths.focus_ms // 60_000
             return f"No pomodoro running. Say start to begin a {minutes} minute focus block."
-        minutes = max(1, -(-self.remaining_ms() // 60_000))
+        minutes = max(0, -(-self.remaining_ms() // 60_000))
         what = {
             "focus": f"focus block {min(BLOCKS_PER_SET, self._completed + 1)} of {BLOCKS_PER_SET}",
             "break": "short break",
             "long_break": "long break",
         }.get(self._phase, self._phase)
         state = "" if self._running else "Paused. "
-        return f"{state}{minutes} minute{'s' if minutes != 1 else ''} left in your {what}."
+        return f"{prefix}{state}{minutes} minute{'s' if minutes != 1 else ''} left in your {what}."
 
     # ── Mutation ─────────────────────────────────────────────────────────
 
     def start(self) -> str:
         """Idle → focus; paused → resume; running → a truthful no-op."""
+        if not self._can_control():
+            return self.status_text()
         if self._phase == "idle":
-            self._begin("focus")
+            if not self._begin("focus"):
+                return self.status_text()
             return f"Focus block {self._completed + 1} of {BLOCKS_PER_SET}. {self._lengths.focus_ms // 60_000} minutes."
         if not self._running:
             return self.resume()
         return "The timer is already running. " + self.status_text()
 
     def pause(self) -> str:
+        if not self._can_control():
+            return self.status_text()
         if self._phase == "idle" or not self._running:
-            return "Nothing is running."
-        self._remaining_ms = self.remaining_ms()
-        self._running = False
-        self._ends_at = None
-        self._cancel_timer()
-        self._changed()
+            return self._error or "Nothing is running."
+        self._commit(self._checkpoint(running=False, remaining_ms=self.remaining_ms(), ends_at=None))
         return self.status_text()
 
     def resume(self) -> str:
+        if not self._can_control():
+            return self.status_text()
         if self._phase == "idle":
             return self.start()
         if self._running:
-            return "It is already running."
-        self._running = True
-        self._ends_at = self._clock() + self._remaining_ms / 1000
-        self._arm_timer()
-        self._changed()
+            return self._error or "It is already running."
+        if not self._commit(self._checkpoint(running=True, remaining_ms=self._remaining_ms,
+                ends_at=self._now_ms() + self._remaining_ms)):
+            return self.status_text()
         return "Resumed. " + self.status_text()
 
     def skip(self) -> str:
         """End the current phase now and move on."""
+        if not self._can_control():
+            return self.status_text()
         if self._phase == "idle":
             return self.start()
         self._advance(skipped=True)
         return self.status_text()
 
     def reset(self) -> str:
-        self._cancel_timer()
-        self._phase = "idle"
-        self._running = False
-        self._completed = 0
-        self._length_ms = self._lengths.focus_ms
-        self._remaining_ms = self._lengths.focus_ms
-        self._ends_at = None
-        self._changed()
+        self._ensure_open()
+        if not self._commit(self._phase_checkpoint("idle", completed=0, running=False)):
+            return self.status_text()
         return "Pomodoro reset."
 
     def control(self, index: int) -> str:
@@ -205,7 +278,8 @@ class PomodoroService:
     # ── PanelProvider ────────────────────────────────────────────────────
 
     def snapshot(self) -> PanelSnapshot:
-        return PanelSnapshot(rows=self.rows(), pomodoro=self.state())
+        headline = ("Timer unavailable" if self._load_failed else "Timer change failed") if self._error else None
+        return PanelSnapshot(rows=self.rows(), headline=headline, empty=self._error, pomodoro=self.state())
 
     async def refresh(self) -> None:
         # A hold on the timer page asks for nothing new; the next push is
@@ -218,31 +292,85 @@ class PomodoroService:
 
     # ── Internals ────────────────────────────────────────────────────────
 
-    def _begin(self, phase: Phase) -> None:
-        self._phase = phase
-        self._length_ms = self._lengths.for_phase(phase)
-        self._remaining_ms = self._length_ms
-        self._running = True
-        self._ends_at = self._clock() + self._length_ms / 1000
+    def _now_ms(self) -> int:
+        return int(round(self._clock() * 1000))
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Pomodoro service is closed")
+
+    def _can_control(self) -> bool:
+        self._ensure_open()
+        if self._load_failed:
+            self._report_failure(_LOAD_FAILURE)
+            return False
+        return True
+
+    def _checkpoint(self, *, running: bool, remaining_ms: int, ends_at: int | None) -> PomodoroCheckpoint:
+        return PomodoroCheckpoint(self._phase, running, remaining_ms, self._length_ms,
+            self._completed, ends_at, self._now_ms())
+
+    def _phase_checkpoint(self, phase: Phase, *, completed: int, running: bool) -> PomodoroCheckpoint:
+        length = self._lengths.for_phase(phase)
+        now = self._now_ms()
+        return PomodoroCheckpoint(phase, running, length, length, completed,
+            now + length if running else None, now)
+
+    def _adopt(self, checkpoint: PomodoroCheckpoint) -> None:
+        self._phase = checkpoint.phase
+        self._running = checkpoint.running
+        self._remaining_ms = checkpoint.remaining_ms
+        self._length_ms = checkpoint.length_ms
+        self._completed = checkpoint.completed
+        self._ends_at_unix_ms = checkpoint.ends_at_unix_ms
+        self._ends_at = checkpoint.ends_at_unix_ms / 1000 if checkpoint.ends_at_unix_ms is not None else None
+
+    def _commit(self, checkpoint: PomodoroCheckpoint) -> bool:
+        self._ensure_open()
+        if self._store is not None:
+            try:
+                self._store.save(checkpoint)
+            except Exception:
+                self._report_failure(_LOAD_FAILURE if self._load_failed else _SAVE_FAILURE)
+                return False
+        # No timer, logical state, success receipt or phase card precedes the
+        # transaction. Failed writes leave the previous checkpoint untouched.
+        self._cancel_timer()
+        self._adopt(checkpoint)
+        self._restored = None
+        self._activated = True
+        self._load_failed = False
+        self._error = None
+        self._error_announced = False
+        self._recovery_notice = None
         self._arm_timer()
         self._changed()
+        return True
+
+    def _report_failure(self, message: str) -> None:
+        self._error = message
+        log.warning("pomodoro durable state unavailable")
+        if not self._error_announced and self._notify is not None:
+            self._error_announced = True
+            self._notify(Card(source="Timer unavailable" if self._load_failed else "Timer change failed",
+                channel="Pomodoro", summary=message, urgency=Urgency.NOTIFY, event_class="pomodoro.error"))
+        self._changed()
+
+    def _begin(self, phase: Phase) -> bool:
+        return self._commit(self._phase_checkpoint(phase, completed=self._completed, running=True))
+
+    def _next_phase(self) -> tuple[Phase, int]:
+        if self._phase == "focus":
+            completed = self._completed + 1
+            return ("long_break" if completed >= BLOCKS_PER_SET else "break"), completed
+        return "focus", 0 if self._phase == "long_break" else self._completed
 
     def _advance(self, *, skipped: bool = False) -> None:
         """The current phase is over: count it, start what follows."""
-        self._cancel_timer()
         finished = self._phase
-        if finished == "focus":
-            self._completed += 1
-            if self._completed >= BLOCKS_PER_SET:
-                next_phase: Phase = "long_break"
-            else:
-                next_phase = "break"
-        else:
-            if finished == "long_break":
-                self._completed = 0
-            next_phase = "focus"
-        self._begin(next_phase)
-        self._announce(finished, next_phase, skipped)
+        next_phase, completed = self._next_phase()
+        if self._commit(self._phase_checkpoint(next_phase, completed=completed, running=True)):
+            self._announce(finished, next_phase, skipped)
 
     def _announce(self, finished: Phase, next_phase: Phase, skipped: bool) -> None:
         if self._notify is None:
@@ -267,7 +395,7 @@ class PomodoroService:
 
     def _arm_timer(self) -> None:
         self._cancel_timer()
-        if not self._running or self._ends_at is None:
+        if self._closed or not self._running or self._ends_at is None:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -279,14 +407,17 @@ class PomodoroService:
         self._timer = loop.call_later(delay, self._on_timer)
 
     def _on_timer(self) -> None:
-        self._timer = None
-        if not self._running:
+        self._cancel_timer()
+        if self._closed or not self._running or self._ends_at is None:
+            return
+        if self._clock() < self._ends_at:
+            self._arm_timer()
             return
         self._advance()
 
     def tick(self) -> None:
         """Test seam: fire the phase end if the clock says it has passed."""
-        if self._running and self._ends_at is not None and self._clock() >= self._ends_at:
+        if not self._closed and self._running and self._ends_at is not None and self._clock() >= self._ends_at:
             self._advance()
 
     def _cancel_timer(self) -> None:
@@ -295,13 +426,15 @@ class PomodoroService:
             self._timer = None
 
     def _changed(self) -> None:
-        if self._on_change is None:
+        if self._closed or self._on_change is None:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._publish())
+        task = loop.create_task(self._publish())
+        self._publications.add(task)
+        task.add_done_callback(self._publications.discard)
 
     async def _publish(self) -> None:
         if self._on_change is None:

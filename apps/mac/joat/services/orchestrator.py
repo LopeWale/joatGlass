@@ -14,6 +14,7 @@ async transcribe/send work as a task.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import difflib
 import logging
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,7 @@ from ..audio.vad import RmsVad
 from ..core.interfaces import AudioFrame, AudioFrameSource, GlassesTransport, ReplyEngine, SttEngine
 from ..core.protocol import AudioControl, AudioSource, ContainerId, HudText
 from .hud import HudWriter
+from .prompted_input import PromptedInputDispatcher, PromptTicket, UtteranceProvenance
 from .session import SessionManager
 
 log = logging.getLogger(__name__)
@@ -72,12 +74,18 @@ class VoiceOrchestrator:
         fuzzy_threshold: float = 0.86,
         latency_observer: LatencyObserver | None = None,
         frames: AudioFrameSource | None = None,
+        prompted_input: PromptedInputDispatcher | None = None,
+        selected_message_reply: Callable[[str, UtteranceProvenance], Awaitable[bool]] | None = None,
+        surface_revision: Callable[[], int] | None = None,
     ) -> None:
         self._transport = transport
         # An interposed source (the AudioRouter) lets an exclusive Voice Note
         # capture own the microphone; the orchestrator hears nothing while a
         # meeting is being recorded and resumes when the capture lane closes.
         self._frames = frames
+        self._prompted_input = prompted_input
+        self._selected_message_reply = selected_message_reply
+        self._surface_revision = surface_revision or (lambda: 0)
         self._commands = commands
         self._hud = HudWriter(transport)
         self._sessions = sessions
@@ -135,16 +143,16 @@ class VoiceOrchestrator:
         # timestamp, wearer, device, or cross-run identifier.
         self._voice_turn = 0
         self._last_seq: int | None = None
-        # A G2-armed topic capture is allowed to consume exactly one glasses
-        # utterance. Keep its provenance through VAD/STT rather than inferring
-        # it later from the currently connected device.
-        self._utterance_sources: set[AudioSource] = set()
-        # The SDK labels speaker role with an app-side classifier, not a
-        # firmware identity assertion.  Keep the entire observed set so only
-        # an utterance classified *exclusively* as ``other`` is removed from
-        # the scarce STT lane; self, unknown, legacy, and mixed frames remain
-        # eligible for the normal explicit-invocation gate.
-        self._utterance_speaker_roles: set[str] = set()
+        self._connection_generation: str | None = None
+        self._ingress_ordinal = 0
+        self._prompt_revision = 0
+        # Mirror VAD's actual pre-roll, rather than retaining every idle
+        # microphone/source label since the preceding utterance. These
+        # immutable receipts follow exactly the chunks admitted into VAD.
+        self._audio_preroll: deque[UtteranceProvenance] = deque(
+            maxlen=self._vad.preroll_capacity,
+        )
+        self._utterance_frames: list[UtteranceProvenance] = []
         # The voice path must stay single-flight: overlapping STT/reply work
         # competes for the resident engines.  It must not, however, appear
         # deaf while that work is in flight.  Keep exactly one *completed*
@@ -152,7 +160,9 @@ class VoiceOrchestrator:
         # noisy room from creating an unbounded latency tail, while keeping
         # the wearer's newest question (and its source provenance) available
         # as soon as the active turn settles.
-        self._pending_utterance: tuple[bytes, AudioSource | None] | None = None
+        self._pending_utterance: tuple[
+            bytes, AudioSource | None, UtteranceProvenance | None,
+        ] | None = None
         self._utterance_worker: asyncio.Task[None] | None = None
 
     def attach(self) -> None:
@@ -227,6 +237,18 @@ class VoiceOrchestrator:
                 HudText(text=active_status, container_id=ContainerId.STATUS_BAR)
             )
 
+    def fence_prompt_audio(self) -> int:
+        """Fence partial ingress after the matching prompt presentation.
+
+        Completed STT and the pending turn keep their original receipts.
+        A maximum-duration cut does not turn ongoing speech into an answer.
+        """
+        self._vad.fence_prompt()
+        self._audio_preroll.clear()
+        self._utterance_frames.clear()
+        self._prompt_revision += 1
+        return self._ingress_ordinal
+
     def on_audio(self, pcm: bytes, seq: int) -> None:
         self._ingest_audio(pcm, seq, source=None, speaker=None)
 
@@ -236,6 +258,8 @@ class VoiceOrchestrator:
             frame.seq,
             source=frame.source,
             speaker=frame.speaker,
+            connection_generation=frame.connection_generation,
+            audio_epoch=frame.audio_epoch,
         )
 
     def _ingest_audio(
@@ -245,32 +269,58 @@ class VoiceOrchestrator:
         *,
         source: AudioSource | None,
         speaker: str | None,
+        connection_generation: str | None = None,
+        audio_epoch: str | None = None,
     ) -> None:
+        self._ingress_ordinal += 1
+        if connection_generation != self._connection_generation:
+            # Sequence comparisons are scoped to a plugin connection. A restart is
+            # not evidence of a missing numbered batch; even a coincidentally
+            # consecutive number must not join speech across connections.
+            if self._last_seq is not None:
+                log.info("audio stream changed: resetting partial utterance")
+                self._reset_partial_utterance()
+            self._connection_generation = connection_generation
+            self._last_seq = None
         if self._last_seq is not None and seq != self._last_seq + 1:
-            # Frames were shed upstream; never splice across the hole.
+            # Discontinuity within one stream (including a mic pause).
+            # Never splice across the hole, regardless of its size.
             log.warning("audio gap (seq %d → %d): resetting utterance", self._last_seq, seq)
-            self._vad.reset()
-            self._stt.reset()
-            self._utterance_sources.clear()
-            self._utterance_speaker_roles.clear()
+            self._reset_partial_utterance()
         self._last_seq = seq
 
-        if source is not None:
-            self._utterance_sources.add(source)
-        if speaker in _SPEAKER_ROLES:
-            self._utterance_speaker_roles.add(speaker)
-
+        receipt = UtteranceProvenance(
+            source=source, connection_generation=connection_generation,
+            audio_epoch=audio_epoch,
+            first_ingress_ordinal=self._ingress_ordinal,
+            last_ingress_ordinal=self._ingress_ordinal,
+            speaker_roles=frozenset({speaker}) if speaker in _SPEAKER_ROLES else frozenset(),
+        )
+        was_in_speech = self._vad.in_speech
+        was_discarding = self._vad.prompt_discarding
+        if was_in_speech:
+            self._utterance_frames.append(receipt)
+        else:
+            self._audio_preroll.append(receipt)
         utterance = self._vad.feed(pcm)
+        if was_discarding or self._vad.prompt_discarding:
+            # The final quiet chunk of a fence is discarded too. Do not let
+            # its old source/epoch contaminate the next fresh utterance.
+            self._audio_preroll.clear()
+            self._utterance_frames.clear()
+            return
+        if not was_in_speech and (self._vad.in_speech or utterance is not None):
+            self._utterance_frames = list(self._audio_preroll)
+            self._audio_preroll.clear()
         if utterance is None:
             return
-        utterance_source = (
-            next(iter(self._utterance_sources))
-            if len(self._utterance_sources) == 1
-            else None
+        provenance = self._completed_provenance(self._utterance_frames)
+        utterance_source: AudioSource | None = (
+            "glasses" if provenance.source == "glasses"
+            else "phone" if provenance.source == "phone" else None
         )
-        only_other_speaker = self._utterance_speaker_roles == {"other"}
-        self._utterance_sources.clear()
-        self._utterance_speaker_roles.clear()
+        only_other_speaker = provenance.speaker_roles == {"other"}
+        self._utterance_frames.clear()
         if only_other_speaker:
             # Do not transcribe a completed utterance the host classified as
             # someone else.  This is a capacity hint, never identity proof:
@@ -280,7 +330,7 @@ class VoiceOrchestrator:
             return
         if self._utterance_worker is not None and not self._utterance_worker.done():
             replaced = self._pending_utterance is not None
-            self._pending_utterance = (utterance, utterance_source)
+            self._pending_utterance = (utterance, utterance_source, provenance)
             # Content-free: audio is transient, and diagnostics must not
             # expose transcripts or raw voice.  A replacement means the
             # newest completed utterance wins over an older queued one.
@@ -291,23 +341,55 @@ class VoiceOrchestrator:
             )
             return
         self._utterance_worker = asyncio.get_running_loop().create_task(
-            self._drain_utterances(utterance, utterance_source)
+            self._drain_utterances(utterance, utterance_source, provenance)
         )
+
+    @staticmethod
+    def _completed_provenance(frames: list[UtteranceProvenance]) -> UtteranceProvenance:
+        sources = {frame.source for frame in frames}
+        generations = {frame.connection_generation for frame in frames}
+        epochs = {frame.audio_epoch for frame in frames}
+        return UtteranceProvenance(
+            source=next(iter(sources)) if len(sources) == 1 else None,
+            connection_generation=next(iter(generations)) if len(generations) == 1 else None,
+            audio_epoch=next(iter(epochs)) if len(epochs) == 1 else None,
+            first_ingress_ordinal=frames[0].first_ingress_ordinal,
+            last_ingress_ordinal=frames[-1].last_ingress_ordinal,
+            speaker_roles=frozenset(role for frame in frames for role in frame.speaker_roles),
+            mixed=any(len(values) > 1 for values in (sources, generations, epochs)),
+        )
+
+    def _reset_partial_utterance(self) -> None:
+        if self._prompted_input is not None and self._prompted_input.current_ticket is not None:
+            self._vad.fence_prompt()
+        else:
+            self._vad.reset()
+        self._audio_preroll.clear()
+        self._utterance_frames.clear()
+        # STT receives only completed, contiguous utterances, owned by the
+        # single-flight worker. A gap in NEW ingress must not erase an older
+        # complete turn while feed()/flush() is suspended. The pending slot
+        # likewise contains a complete utterance and needs no reset.
+        if self._utterance_worker is None or self._utterance_worker.done():
+            self._stt.reset()
 
     async def _drain_utterances(
         self,
         utterance: bytes,
         source: AudioSource | None,
+        provenance: UtteranceProvenance | None = None,
     ) -> None:
         """Run one voice turn at a time, then hand off the newest queued turn."""
-        current: tuple[bytes, AudioSource | None] | None = (utterance, source)
+        current: tuple[bytes, AudioSource | None, UtteranceProvenance | None] | None = (
+            utterance, source, provenance,
+        )
         try:
             while current is not None:
                 try:
                     await self._handle_utterance(*current)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
                     # A voice turn must not die into a bare task. This was
                     # `try/finally` with no `except`, so ANY handler that
                     # raised — a session factory whose binary vanished, a
@@ -319,7 +401,10 @@ class VoiceOrchestrator:
                     # a long think. The loop already survives (the queue
                     # drains, the next utterance is served); only the
                     # wearer was left out.
-                    log.exception("voice turn failed")
+                    # Owner/provider exceptions can include the raw prompted
+                    # answer. Keep the class for diagnostics, not its message
+                    # or a traceback containing private arguments.
+                    log.error("voice turn failed error=%s", type(exc).__name__)
                     await self._say_turn_failed()
                 current = self._pending_utterance
                 self._pending_utterance = None
@@ -334,6 +419,8 @@ class VoiceOrchestrator:
         provider payload, none of which belongs on the lenses or in a log
         the wearer reads aloud.
         """
+        if self._prompted_input is not None and self._prompted_input.current_ticket is not None:
+            return
         try:
             await self._hud.assistant(
                 "Something went wrong with that — say it again.",
@@ -347,8 +434,11 @@ class VoiceOrchestrator:
         self,
         utterance: bytes,
         source: AudioSource | None = None,
+        provenance: UtteranceProvenance | None = None,
     ) -> None:
         started_at = time.monotonic()
+        prompt_revision = self._prompt_revision
+        prompt_ticket = self._prompted_input.current_ticket if self._prompted_input else None
         self._voice_turn += 1
         latency_turn = self._voice_turn
         self._observe_latency(latency_turn, "utterance_ready", started_at)
@@ -364,20 +454,27 @@ class VoiceOrchestrator:
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
             self._observe_latency(latency_turn, "stt_complete", started_at)
-            if transcript is None or not transcript.text:
+            if transcript is None or not transcript.is_final or not transcript.text:
                 log.info("STT produced no text")
                 return
             log.info("transcript received chars=%d", len(transcript.text))
             if self._status is not None:
                 self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
                 self._status.bump("utterances")  # type: ignore[attr-defined]
+            if self._prompted_input is not None and await self._prompted_input.dispatch(
+                transcript, provenance,
+            ):
+                # The typed owner received the exact transcript. Do not let
+                # greetings, command parsing or a second model reinterpret it.
+                return
             # A tap has explicitly armed the next glasses phrase as a
             # Brainstorm topic. This path intentionally runs before the normal
             # wake-word gate: requiring the wearer to say JOAT again would
             # contradict the HUD instruction. SessionManager rejects phone,
             # mixed, and legacy-source utterances while the capture is armed.
             if (
-                self._sessions is not None
+                self._prompted_input is None
+                and self._sessions is not None
                 and self._sessions.topic_capture_armed
                 and self._sessions.handle_transcript(
                     transcript.text,
@@ -410,10 +507,20 @@ class VoiceOrchestrator:
             # not a prompt.
             addressed = self._strip_wake_word(transcript.text)
             if addressed is None:
+                if (
+                    self._selected_message_reply is not None
+                    and provenance is not None
+                    and await self._selected_message_reply(transcript.text, provenance)
+                ):
+                    return
                 log.info("unaddressed speech ignored chars=%d", len(transcript.text))
                 return
             if not addressed:
+                if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                    return
                 await self._hud.assistant("Yes?")
+                if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                    return
                 await self._hud.settle_assistant(4_000)
                 return
             query = addressed
@@ -428,17 +535,49 @@ class VoiceOrchestrator:
             if self._commands is not None:
                 answer = await self._commands(query)
                 if answer is not None:
+                    if answer == "":
+                        # The command handled its own surface or question.
+                        return
+                    if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                        return
                     await self._hud.context(f"you  {query}")
+                    if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                        return
                     await self._hud.assistant(answer)
+                    if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                        return
                     await self._hud.settle_assistant()
                     return
             # The wearer's words go to their OWN region, so the reply no
             # longer erases the proof they were heard (HUD_DASHBOARD.md).
+            session_revision = getattr(self._sessions, "session_revision", 0)
+            surface_revision = self._surface_revision()
+
+            def reply_is_current() -> bool:
+                # A model tool can start a session during this very stream.
+                # Its receipt no longer owns the HUD, even if that session
+                # finishes before the model returns its first chunk. An
+                # unchanged existing session may still allow ordinary chat.
+                return (
+                    self._reply_surface_current(prompt_revision, prompt_ticket)
+                    and getattr(self._sessions, "session_revision", 0) == session_revision
+                    and self._surface_revision() == surface_revision
+                )
+
+            if not reply_is_current():
+                return
             await self._hud.context(f"you  {query}")
-            if self._replier is None:
+            if self._replier is None or not reply_is_current():
                 return
             parts: list[str] = []
             async for chunk in self._replier.stream(query):
+                if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                    return
+                if not reply_is_current():
+                    # The tool handed off the display successfully. Drain
+                    # the assistant turn so its CLI can finish and retain
+                    # conversation continuity; only painting is obsolete.
+                    continue
                 if parts:
                     await self._hud.assistant(chunk, append=True)
                 else:
@@ -446,6 +585,8 @@ class VoiceOrchestrator:
                     self._observe_latency(latency_turn, "first_reply_sent", started_at)
                 parts.append(chunk)
             if parts:
+                if not reply_is_current():
+                    return
                 reply_text = "".join(parts)
                 await self._hud.settle_assistant()
                 self._observe_latency(latency_turn, "reply_complete", started_at)
@@ -462,6 +603,19 @@ class VoiceOrchestrator:
                 else None
             )
             await self._hud.status(active_status or "JOAT · listening")
+
+    def _reply_surface_current(self, revision: int, ticket: PromptTicket | None) -> bool:
+        """Ordinary replies cannot paint while an input question owns the HUD.
+
+        Queued audio may start STT after publication, so an unchanged snapshot
+        of a live ticket is not permission to cover that question. Accepted
+        prompted answers already return through their typed owner above.
+        """
+        return (
+            revision == self._prompt_revision
+            and ticket is None
+            and (self._prompted_input is None or self._prompted_input.current_ticket is None)
+        )
 
     def _observe_latency(self, turn: int, stage: str, started_at: float) -> None:
         """Emit one opt-in, fixed-vocabulary, coarsely bucketed stage."""

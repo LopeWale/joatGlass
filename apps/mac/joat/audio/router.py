@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..core.interfaces import (
     AudioCallback,
     AudioFrame,
@@ -28,9 +30,13 @@ class AudioRouter(AudioFrameSource):
     duration — a live meeting recording must not also drive assistant replies.
     """
 
-    def __init__(self, source: AudioFrameSource) -> None:
+    def __init__(
+        self, source: AudioFrameSource, *,
+        on_capture_started: Callable[[], None] | None = None,
+    ) -> None:
         self._capture: AudioFrameCallback | None = None
         self._capture_exclusive = False
+        self._on_capture_started = on_capture_started
         self._conversation: list[AudioCallback] = []
         self._conversation_frames: list[AudioFrameCallback] = []
         source.on_audio_frame(self._route)
@@ -56,6 +62,17 @@ class AudioRouter(AudioFrameSource):
             raise AudioRouteConflictError("an audio capture is already active")
         self._capture = callback
         self._capture_exclusive = exclusive
+        try:
+            # Recording changes the wearer's input context even if it begins
+            # and ends before another conversation frame or state read.
+            # Retire old questions synchronously; completed STT keeps running.
+            if self._on_capture_started is not None:
+                self._on_capture_started()
+        except Exception:
+            # A failed acquisition must not leave an unreported recorder.
+            self._capture = None
+            self._capture_exclusive = False
+            raise
 
     def end_capture(self, callback: AudioFrameCallback) -> None:
         if self._capture is not callback:

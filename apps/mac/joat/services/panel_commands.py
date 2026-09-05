@@ -137,19 +137,19 @@ class PomodoroCommands:
             await self._panels.activate("pomodoro")
             return reply
         if _POMODORO_PAUSE.fullmatch(normalized):
-            if self._pomodoro.phase == "idle":
+            if self._pomodoro.phase == "idle" and not self._pomodoro.recovery_unavailable:
                 return None if normalized == "pause" else "Nothing is running."
             return self._pomodoro.pause()
         if _POMODORO_RESUME.fullmatch(normalized):
-            if self._pomodoro.phase == "idle":
+            if self._pomodoro.phase == "idle" and not self._pomodoro.recovery_unavailable:
                 return None if normalized == "resume" else self._pomodoro.start()
             return self._pomodoro.resume()
         if _POMODORO_SKIP.fullmatch(normalized):
-            if self._pomodoro.phase == "idle":
+            if self._pomodoro.phase == "idle" and not self._pomodoro.recovery_unavailable:
                 return "Nothing is running."
             return self._pomodoro.skip()
         if _POMODORO_RESET.fullmatch(normalized):
-            if self._pomodoro.phase == "idle":
+            if self._pomodoro.phase == "idle" and not self._pomodoro.recovery_unavailable:
                 return "No pomodoro is running."
             return self._pomodoro.reset()
         if _POMODORO_STATUS.fullmatch(normalized):
