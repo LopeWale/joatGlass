@@ -2,6 +2,50 @@
 
 ## 2026-09-05
 
+- Gave the HUD one typography system, and gave notifications their whole
+  message back. A typography audit of every surface found no system to
+  break: 128 canvas font sites across 18 fixed pixel sizes and two families,
+  eleven different leadings, and the wearer's own ruling ("official G2
+  screens set light proportional type; mono reads as a bold slab")
+  implemented on two surfaces out of twenty. `HudTypography.ts` is now the
+  single source: sixteen named roles, six leadings, four row pitches, one
+  hint baseline, one selection-rail height, one `upper()` for draw-time case.
+  Every font site resolves to a role; a fresh sweep finds zero hardcoded font
+  strings, leadings, pitches or case transforms left. Values were chosen to
+  preserve the existing hierarchy — nothing grew "large for no reason".
+  Defects the audit surfaced and this closes: a 20px title wrapped at 18px
+  leading (overlapping lines), a dead 17px assignment the autofit overwrote,
+  a row capacity contradicting its own comment, chrome that inherited
+  whatever font was set last, and a footer hint drawn five different ways.
+- Sized the firmware containers to the firmware's own grid. The status bar
+  (32px tall, 6px padding = 20px inner) could not render a single 27px line;
+  neither could the tray or hint strips, and the list title box was 3px
+  short. The confirmation body overflowed at the exact 120-character maximum
+  the code enforces. Containers are now whole multiples of the firmware's
+  27px line and 40px row, and list rows, titles and hints are truncated by
+  MEASURED pixels (`@evenrealities/pretext`) instead of character counts —
+  that library shipped imported-but-unreachable, in a native spine-label path
+  no layout declared and no caller wired, which is now removed rather than
+  left looking load-bearing.
+- Stopped notifications arriving pre-truncated. macOS renders banners with an
+  elided body and the Accessibility watcher can only read what is on screen,
+  so a long message reached the glasses already cut — no display budget could
+  undo it ("Can I not see full messages?"). Cards now carry the full text
+  alongside the glance summary, the detail page renders it through the
+  reader's measured rows instead of reusing the two-line glance card, and a
+  Messages banner ending in an ellipsis is recovered from chat.db by prefix
+  within a five-minute window. Ambiguous matches are refused rather than risk
+  showing the wrong person's message, and a decline logs its reason with
+  counts only, never content. Measured live: a 47-character banner became the
+  full 152-character message on the glasses. Two bugs a green suite would
+  have hidden: the lookup window covered only nanosecond Apple dates when the
+  schema also uses seconds, and the decline was silent.
+- Wire text is now bounded in UTF-16 units, the way the SDK counts. A Python
+  code-point slice let emoji-bearing rows carry up to 128 units past a
+  64-unit cap. The transcript's column budget derives in code from the
+  measured advance (548px / 5.18px = 105) instead of restating it, and the
+  budgets that are payload bounds rather than layout say so.
+
 - Made the mind able to use every feature by ordinary conversation (audit A1,
   M8, N2, NAV1, part of Q3 and T2). New belt tools: `read_conversation` (whole
   messages from one thread, not an 80-character snippet), `read_news_article`,

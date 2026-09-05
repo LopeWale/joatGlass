@@ -200,10 +200,13 @@ class TestRefreshAndPaging:
 
 
 class TestPagination:
-    def test_pages_break_on_words_and_never_exceed_the_budget(self) -> None:
+    def test_pages_are_exact_source_spans_of_the_prepared_rows(self) -> None:
+        # One page model: 62 columns x 10 prepared rows (services/reader.py).
+        # The per-call character budget was retired 2026-09-05 — no
+        # production caller ever passed one.
         text = " ".join(f"word{i}" for i in range(300))
-        pages = paginate(text, 100)
-        assert all(len(page) <= 100 for page in pages)
+        pages = paginate(text)
+        assert len(pages) > 1
         assert "".join(pages) == text
         assert paginate("   ") == ("   ",)
         assert paginate("") == ("No text is available for this page.",)

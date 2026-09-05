@@ -11,8 +11,11 @@ HUD's two-line shape. This module owns all three decisions so the channel
 stays about plumbing.
 
 Constraints that drive the design (docs/RULES.md): the HUD is 576x288
-monochrome green — roughly 46 characters per line at the status font, and
-a glance is one or two lines. Anything longer is not read while walking.
+monochrome green and a glance is one or two lines — anything longer is not
+read while walking. 46 chars per card line is measured, not folklore: cards
+render through the assistant overlay's 386px body (HudTypography TYPE.body,
+14px proportional, ~6.6px mean advance → ~58 chars), so 46 keeps a full
+line visible with margin even in the overlay's narrowest fit.
 """
 
 from __future__ import annotations
@@ -98,6 +101,14 @@ class Card:
     source: str          # who/what: "Dele", "Battery"
     channel: str         # where from: "Messages", "Calendar"
     summary: str
+    # The FULL notification text, untruncated. Glance surfaces (tray row,
+    # overlay card) draw from `summary` through their measured budgets; the
+    # NOTIFICATIONS · DETAIL page reads THIS, because "the HUD is glanced
+    # at" was never a licence to cut the wearer's message to 46 chars on a
+    # ten-row page (wearer's report, 2026-09-05: "Our message is cutting
+    # off. Why? Can I not see full messages?"). Empty means summary is all
+    # the source had.
+    body: str = ""
     urgency: Urgency = Urgency.NOTIFY
     count: int = 1       # coalesced siblings
     at: float = field(default_factory=time.time)
@@ -171,7 +182,7 @@ class DeliveryPolicy:
             # still the same kind of event, and positional construction
             # would silently drop them.
             return Card(card.source, card.channel, card.summary,
-                        card.urgency, count, now,
+                        body=card.body, urgency=card.urgency, count=count, at=now,
                         event_class=card.event_class, origin_id=card.origin_id)
         self._last_by_source[key] = (now, 1)
 

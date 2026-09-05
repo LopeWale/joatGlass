@@ -42,6 +42,19 @@ def utf16_units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def utf16_slice(text: str, units: int) -> str:
+    """Truncate to at most `units` UTF-16 code units, never splitting a
+    surrogate pair. The SDK's 64-per-row cap counts JavaScript String.length,
+    so a Python [:64] slice can smuggle up to 128 units of astral text
+    (emoji) past it — found by the 2026-09-05 typography audit."""
+    total = 0
+    for index, char in enumerate(text):
+        total += 2 if ord(char) > 0xFFFF else 1
+        if total > units:
+            return text[:index]
+    return text
+
+
 class ContainerId(IntEnum):
     """Stable across rebuilds so text upgrades can target them."""
 
@@ -575,7 +588,7 @@ class PlanningGridEntry:
         return {
             "time": self.time[:8],
             "kind": self.kind if self.kind in ("event", "reminder") else "event",
-            "title": self.title[:64],
+            "title": utf16_slice(self.title, 64),
         }
 
 
@@ -652,16 +665,16 @@ class HudList:
         # plugin silently drop the overflow.
         message: dict[str, Any] = {
             "kind": "hud.list",
-            "items": [s[:64] for s in self.items[:20]],
+            "items": [utf16_slice(s, 64) for s in self.items[:20]],
             "selectable": self.selectable,
         }
         if self.title is not None:
-            message["title"] = self.title[:46]
+            message["title"] = utf16_slice(self.title, 46)
         if self.hint is not None:
             # Compact raster footers can carry the full paging/read/reply/Back
             # controls. The title budget is not a footer or SDK text limit.
             # Keep in sync with HudPresenter.MAX_FOCUS_HINT_CHARS.
-            message["hint"] = self.hint[:96]
+            message["hint"] = utf16_slice(self.hint, 96)
         if self.request_id is not None:
             message["requestId"] = self.request_id[:128]
         if self.planning_grid is not None:
@@ -684,7 +697,24 @@ _PRODUCTIVITY_HUD_PHASES = frozenset({
 _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
-BRAINSTORM_ROW_COLUMNS = 105
+HUD_TEXT_MEAN_ADVANCE_PX = 5.18
+"""Mean advance of the transcript face, measured on the real renderer.
+
+Mirrors HUD_TEXT_MEAN_ADVANCE_PX in the plugin's HudCanvasRenderer, which
+is measured against HudTypography's TYPE.transcript. Every character budget
+for a PROPORTIONAL surface below divides a pixel width by this — the
+2026-09-05 audit found 96, 48 and 60 sitting beside it as folklore."""
+
+HUD_CONTENT_WIDTH_PX = 548
+"""The lens content width the plugin draws into (576 less 14px per edge)."""
+
+
+def _columns_for(width_px: float) -> int:
+    """Characters of the transcript face that fit a pixel width."""
+    return int(width_px // HUD_TEXT_MEAN_ADVANCE_PX)
+
+
+BRAINSTORM_ROW_COLUMNS = _columns_for(HUD_CONTENT_WIDTH_PX)
 BRAINSTORM_SCROLLBACK_ROWS = 40
 BRAINSTORM_ACTIVITY_MAX = (
     BRAINSTORM_ROW_COLUMNS * BRAINSTORM_SCROLLBACK_ROWS
@@ -1272,13 +1302,14 @@ class HudPanel:
             "tab": self.tab,
             "revision": self.revision,
             "rows": [
-                row[:PANEL_ROW_CHARACTERS] for row in self.rows[:PANEL_ROW_LIMIT]
+                utf16_slice(row, PANEL_ROW_CHARACTERS)
+                for row in self.rows[:PANEL_ROW_LIMIT]
             ],
         }
         if self.headline is not None:
-            wire["headline"] = self.headline[:PANEL_ROW_CHARACTERS]
+            wire["headline"] = utf16_slice(self.headline, PANEL_ROW_CHARACTERS)
         if self.empty is not None:
-            wire["empty"] = self.empty[:PANEL_ROW_CHARACTERS]
+            wire["empty"] = utf16_slice(self.empty, PANEL_ROW_CHARACTERS)
         if self.pomodoro is not None:
             wire["pomodoro"] = self.pomodoro.to_wire()
         if self.activate:

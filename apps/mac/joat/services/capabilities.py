@@ -1490,10 +1490,14 @@ class CapabilityRouter:
         if not 0 <= index < len(self._notification_rows):
             return
         card = self._notification_rows[index]
-        await self._show_focus(
-            "NOTIFICATIONS · DETAIL",
-            card.render().splitlines() or ["Notification content unavailable."],
-        )
+        # The glance card is two 46-char lines; the detail page is a whole
+        # screen. Show the FULL text through the reader's 62-column rows —
+        # the focus list scrolls, so nothing is thrown away.
+        header = card.render().splitlines()[:1]
+        full = card.body or card.summary
+        body_rows = [row for page in paginate_reader_text(full) for row in page]
+        rows = [*header, *body_rows][:19] or ["Notification content unavailable."]
+        await self._show_focus("NOTIFICATIONS · DETAIL", rows)
 
     async def _show_planning(self) -> None:
         """Show the one calendar-shaped view of native events and reminders.

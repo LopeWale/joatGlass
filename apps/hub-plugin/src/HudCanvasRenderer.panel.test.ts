@@ -78,7 +78,7 @@ describe('timer recovery failure presentation', () => {
     expect(text).not.toContain('25:00');
     expect(painted.every((entry) => !/^(?:48|56)px/.test(entry.font))).toBe(true);
     expect(painted.filter((entry) => /Timer unavailable|Saved timer/.test(entry.text))
-      .every((entry) => /(?:SFMono|Menlo)/.test(entry.font))).toBe(true);
+      .every((entry) => /Helvetica Neue/.test(entry.font))).toBe(true);
   });
 
   it('keeps the normal idle overview ready when recovery has no error', () => {

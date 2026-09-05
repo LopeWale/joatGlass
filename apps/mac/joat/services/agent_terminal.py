@@ -56,10 +56,16 @@ them, are what BRAINSTORM_ACTIVITY_MAX is: the wire bound and the shipped
 scrollback cannot drift apart because they are now the same arithmetic."""
 
 HUD_TOPIC_COLUMNS = 96
-"""The wire's bound on the header line."""
+"""The wire's PAYLOAD bound on the header line — not a layout budget.
+
+Layout is decided at draw time by measured pixels (the renderer's fitText),
+because the header is set in a proportional face where a character count
+cannot predict a width. This number only stops an unbounded string reaching
+the phone. Same for HUD_LANE_COLUMNS below. Contrast HUD_COLUMNS, which IS
+a layout budget and therefore derives from the measured advance."""
 
 HUD_LANE_COLUMNS = 48
-"""The wire's bound on one lane chip."""
+"""The wire's PAYLOAD bound on one lane chip; see HUD_TOPIC_COLUMNS."""
 
 SETUP_LANE_COLUMNS = 20
 """Leave room for complete retry guidance in the 64-character reason."""

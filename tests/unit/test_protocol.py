@@ -626,6 +626,17 @@ class TestDownlinkWire:
         assert len(wire["items"]) == 20
         assert all(len(s) <= 64 for s in wire["items"])
 
+    def test_hud_list_row_cap_counts_utf16_units_like_the_sdk(self) -> None:
+        # The SDK's 64-per-row cap is JavaScript String.length. An astral
+        # glyph is TWO units there, so a code-point slice would smuggle up
+        # to 128 units past the cap and truncate on the glasses instead.
+        from joat.core.protocol import utf16_units
+
+        wire = HudList(items=["\U0001F4C5" * 64]).to_wire()
+        assert utf16_units(wire["items"][0]) <= 64
+        # A surrogate pair is never split at the boundary.
+        assert not wire["items"][0].endswith("\ud83d")
+
     def test_hud_list_carries_a_bounded_focus_page_header_and_hint(self) -> None:
         wire = HudList(
             items=["Messages"],

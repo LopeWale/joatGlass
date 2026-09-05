@@ -107,12 +107,13 @@ class HudSink:
     ROW_COLUMNS = BRAINSTORM_ROW_COLUMNS
     """Character budget for a COLLAPSED turn's single row.
 
-    Was 74, derived for the old monospace face. The surface now sets
-    light proportional type (Helvetica Neue at 12px, ~5.2px average
-    advance over a 504px column ≈ 96 characters), and the wearer caught
-    the stale budget on screen within minutes: collapsed rows ended in
-    "…" with a quarter of the width still empty — "why are some words
-    being cut off when there is obviously room on the right?"
+    Was 74 (old monospace face), then 96 (proportional over the old
+    504px column). Now BRAINSTORM_ROW_COLUMNS = 105: the transcript role
+    (HudTypography TYPE.transcript, 11px proportional, 5.18px measured
+    mean advance) over the full 548px content width. The wearer caught
+    the first stale budget on screen within minutes: collapsed rows
+    ended in "…" with a quarter of the width still empty — "why are some
+    words being cut off when there is obviously room on the right?"
 
     An estimate, deliberately: the engine cannot measure pixels. A
     glyph-wide row that overruns simply wraps at paint time — the
@@ -485,6 +486,9 @@ class DebateSnapshot:
         return f"Brainstorm · {self.verdict}" if self.verdict else "Brainstorm"
 
     def rows(self, width: int = 60, limit: int = 8) -> list[str]:
+        # 60: a settled-recap row on the picker, which the renderer clamps to
+        # 320px and then truncates by measured pixels. The count is a payload
+        # bound, not the layout — see agent_terminal.HUD_TOPIC_COLUMNS.
         """Newest-last list rows for the HUD's fixed 40px list layout.
 
         The dashboard renders each capability as ROWS, not prose — the

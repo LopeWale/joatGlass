@@ -165,7 +165,7 @@ class SearchService:
         return Reader(
             tab=self.tab,
             title="SEARCH · RESULT",
-            metadata=f"{result.domain} · {shorten(title or result.title, 44)}",
+            metadata=f"{result.domain} · {title or result.title}",
             pages=paginate(body),
         )
 

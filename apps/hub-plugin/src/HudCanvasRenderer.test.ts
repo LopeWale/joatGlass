@@ -20,7 +20,6 @@ import {
   parseHudLabeledValue,
   parseHudListItem,
   parseMessagesConversationRow,
-  messagesConversationFooterFontSize,
   messagesReaderBodyLines,
   messagesFullTextContent,
   MESSAGES_READER_BODY_LINE_CAPACITY,
@@ -82,14 +81,14 @@ describe('prompt question rendering', () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it('keeps a short spoken question in the same compact monospace face as the rest of JOAT', async () => {
+  it('keeps a short spoken question in the prose reading face at its full autofit size', async () => {
     const { renderer, text } = canvasFixture();
     try {
       await renderer.render(questionFrame('Recipient Sam selected. Say the message.'));
-      const body = text.filter(({ y }) => y >= 80 && y <= 240);
+      const body = text.filter(({ y }) => y >= 76 && y <= 240);
       expect(body.length).toBeGreaterThan(0);
-      expect(body.every(({ font, fontSize }) => font.includes('"SF Mono"')
-        && font.endsWith('monospace') && fontSize === 14)).toBe(true);
+      expect(body.every(({ font, fontSize }) => font.includes('Helvetica Neue')
+        && font.startsWith('400 ') && fontSize === 14)).toBe(true);
     } finally { vi.unstubAllGlobals(); }
   });
 
@@ -165,11 +164,6 @@ describe('Messages full-text reader', () => {
     )).toEqual([
       'Read reply with full reader detail with full reader detail',
     ]);
-  });
-
-  it('uses the compact footer face when all real conversation controls are present', () => {
-    expect(messagesConversationFooterFontSize('down older · tap read · say reply · left x2: back')).toBe(8);
-    expect(messagesConversationFooterFontSize('left x2: back')).toBe(9);
   });
 });
 
@@ -457,8 +451,8 @@ describe('assistant overlay text fitting', () => {
 
     expect(layout).toMatchObject({
       dividerY: 92,
-      firstGlyphTopY: 109,
-      lastGlyphBottomY: 183,
+      firstGlyphTopY: 106,
+      lastGlyphBottomY: 186,
       footerBaselineY: 214,
     });
     expect(layout.firstGlyphTopY).toBeGreaterThan(layout.dividerY);
@@ -871,7 +865,7 @@ describe('parseMessagesConversationRow', () => {
     ], 8);
 
     expect(transcript.rows.map(({ body }) => body)).toEqual([
-      'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+      'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
     ]);
   });
 });
@@ -1180,8 +1174,11 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
     expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'JOAT · HEARING YOU…', 'ON', '87%']);
     const label = texts.find((entry) => entry.text === 'JOAT · HEARING YOU…');
     expect(label?.font).toContain('10px');
-    expect(label?.font).toContain('Helvetica Neue');
-    expect(texts.every((entry) => entry.font === label?.font)).toBe(true);
+    expect(label?.font).toContain('SF Mono');
+    const spineClock = texts.find((entry) => entry.text === '9:41');
+    expect(spineClock?.font).toContain('12px');
+    expect(texts.filter((entry) => entry !== spineClock)
+      .every((entry) => entry.font === label?.font)).toBe(true);
     expect((label?.x ?? 0) + 'JOAT · HEARING YOU…'.length * 6).toBeLessThan(SEAM);
     const mic = texts.find((entry) => entry.text === 'ON');
     expect(mic?.x).toBeGreaterThanOrEqual(SEAM);

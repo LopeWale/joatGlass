@@ -1703,6 +1703,16 @@ async def main() -> None:
                 "usernoted-db", NotificationStore(), "notifications.banner", "best_effort",
                 "healthy_best_effort", "best_effort",
             ))
+        def full_message_text(channel: str, preview: str, at: float) -> str | None:
+            """Recover a macOS-elided Messages banner from chat.db.
+
+            Only Messages: it is the one channel whose authoritative store
+            this Mac can read. Everything else keeps the rendered preview.
+            """
+            if channel != "Messages" or not imessage.available:
+                return None
+            return imessage.full_text_near(preview, at)
+
         notification_mux = NotificationMux(
             lanes,
             NotificationObservationStore(durable_store),
@@ -1713,6 +1723,7 @@ async def main() -> None:
             deliver=sessions.notify_and_wait,
             status=status,
             poll_interval_s=1.0,
+            enrich_body=full_message_text,
         )
         notif_task = asyncio.get_running_loop().create_task(notification_mux.run())
 
