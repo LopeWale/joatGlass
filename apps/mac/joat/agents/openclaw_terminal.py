@@ -578,7 +578,26 @@ class OpenClawAgentTerminal:
                         failure.state, failure.kind, failure.stop_reason,
                     )
                     raise failure
-                raise OpenClawGatewayError("OpenClaw sent an invalid Agent Terminal event state")
+                # A chat event that is neither text nor an ending. The live
+                # gateway sends `state: "status"` mid-run (captured 2026-09-05,
+                # seq=2), and the protocol reference describes the chat family
+                # as carrying "transcript-only chat events" beyond deltas and
+                # finals. Treating those as protocol violations killed every
+                # real Hermes run at its first status line. Skipping is safe:
+                # text enters ONLY through delta/final, both still guarded by
+                # the divergence checks, and a stream that ends without a
+                # terminal event still raises (connection closed, or the
+                # recovery contract) with the run aborted in the finally —
+                # so an unknown TERMINAL state degrades to a truthful
+                # failure rather than a hang or a false success. The token
+                # is protocol vocabulary, not
+                # wearer content; bounded anyway in case a broken peer sends
+                # prose.
+                log.info(
+                    "OpenClaw chat event skipped (informational state=%.40r seq=%s)",
+                    state, seq,
+                )
+                continue
         except BaseException as exc:
             raised = exc
             raise

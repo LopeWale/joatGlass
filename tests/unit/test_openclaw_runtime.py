@@ -1086,7 +1086,10 @@ async def test_run_outcome_keeps_ready_context_for_a_followup_captured_run(outco
     {"state": "error", "errorKind": "PRIVATE_NEW_KIND"},
     {"state": "error", "errorMessage": {"private": "synthetic secret"}},
     {"state": "error", "stopReason": False},
-    {"state": "PRIVATE_NEW_STATE"},
+    # An unknown state token is no longer a protocol failure: the live
+    # gateway sends informational states ("status", captured 2026-09-05)
+    # mid-run, so the adapter skips them — see the status-event tests in
+    # test_openclaw_terminal.py.
 ])
 async def test_run_outcome_malformed_event_still_invalidates_runtime(invalid: dict[str, object]) -> None:
     connection = RunOutcomeConnection(invalid)
