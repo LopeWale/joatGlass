@@ -12,6 +12,7 @@ from joat.agents.openclaw_gateway import (
     BRAINSTORM_TERMINAL_POLICY,
     CALENDAR_PROPOSAL_TERMINAL_POLICY,
     AgentTerminalPolicy,
+    OpenClawConnectionClosed,
     OpenClawEventSequenceGap,
     OpenClawGatewayError,
 )
@@ -941,6 +942,107 @@ async def test_terminal_stream_completes_on_matching_final_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_skips_informational_status_events_and_still_completes() -> None:
+    """The live gateway sends `state: "status"` mid-run (captured 2026-09-05).
+
+    Treating it as a protocol violation killed every real Hermes run at its
+    first status line. Informational chat events carry no assistant text and
+    are not an ending; they are skipped, and the run completes on `final`.
+    """
+    connection = FakeConnection(
+        events=[
+            {
+                "type": "event",
+                "event": "chat",
+                "payload": {
+                    "runId": "run-1",
+                    "sessionKey": "agent:hermes:joat-123",
+                    "state": "delta",
+                    "seq": 0,
+                    "deltaText": "re",
+                },
+            },
+            {
+                "type": "event",
+                "event": "chat",
+                "payload": {
+                    "runId": "run-1",
+                    "sessionKey": "agent:hermes:joat-123",
+                    "state": "status",
+                    "seq": 1,
+                },
+            },
+            {
+                "type": "event",
+                "event": "chat",
+                "payload": {
+                    "runId": "run-1",
+                    "sessionKey": "agent:hermes:joat-123",
+                    "state": "delta",
+                    "seq": 2,
+                    "deltaText": "ady.",
+                },
+            },
+            {
+                "type": "event",
+                "event": "chat",
+                "payload": {
+                    "runId": "run-1",
+                    "sessionKey": "agent:hermes:joat-123",
+                    "state": "final",
+                    "seq": 3,
+                },
+            },
+        ]
+    )
+    terminal = await OpenClawAgentTerminal.create(connection=connection, agent_id="hermes")
+
+    chunks = [chunk async for chunk in terminal.stream("Say ready")]
+
+    assert chunks == ["re", "ady."]
+    assert not any(method == "sessions.abort" for method, _ in connection.calls)
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_without_terminal_event_still_fails_after_unknown_states() -> None:
+    """Skipping informational states must not turn a dead run into a hang or
+    a success: a stream that ends without final/aborted/error still raises,
+    and the run is aborted."""
+    connection = FakeConnection(
+        events=[
+            {
+                "type": "event",
+                "event": "chat",
+                "payload": {
+                    "runId": "run-1",
+                    "sessionKey": "agent:hermes:joat-123",
+                    "state": "status",
+                    "seq": 0,
+                },
+            },
+            {
+                "type": "event",
+                "event": "chat",
+                "payload": {
+                    "runId": "run-1",
+                    "sessionKey": "agent:hermes:joat-123",
+                    "state": "someday-a-new-state",
+                    "seq": 1,
+                },
+            },
+            OpenClawConnectionClosed("synthetic close"),
+        ]
+    )
+    terminal = await OpenClawAgentTerminal.create(connection=connection, agent_id="hermes")
+
+    with pytest.raises(OpenClawConnectionClosed):
+        async for _chunk in terminal.stream("Say ready"):
+            pass
+
+    assert connection.calls[-1][0] == "sessions.abort"
+
+
+@pytest.mark.asyncio
 async def test_terminal_ignores_duplicate_sequence_and_uses_final_message_suffix() -> None:
     connection = FakeConnection(
         events=[
@@ -1274,7 +1376,10 @@ async def test_run_outcome_unknown_freeform_stop_reason_is_never_echoed(
     {"errorKind": None}, {"errorKind": 3}, {"errorKind": []},
     {"errorMessage": {"private": "synthetic secret"}},
     {"stopReason": {"private": "synthetic secret"}},
-    {"state": "PRIVATE_UNRECOGNIZED_STATE"},
+    # An unknown state token is no longer a protocol failure: the live
+    # gateway sends informational states ("status", captured 2026-09-05)
+    # mid-run, so unknown states are skipped — covered by the dedicated
+    # status-event tests above.
     {"seq": True},
 ])
 async def test_run_outcome_malformed_fields_remain_protocol_failure(invalid: dict[str, object]) -> None:

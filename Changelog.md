@@ -2,6 +2,23 @@
 
 ## 2026-09-05
 
+- Fixed the live Hermes protocol failure and restarted the engine onto HEAD.
+  The wearer's own gateway sends a chat event with `state: "status"` mid-run
+  (captured live at seq=2 after adding a state-token log); the Terminal
+  adapter treated every unknown state as a protocol violation, so every real
+  Hermes run died at its first status line. Informational chat states are now
+  skipped: text still enters only through delta/final with the divergence
+  checks intact, and a stream that ends without a terminal event still raises
+  and aborts, so an unknown terminal state degrades to a truthful failure,
+  never a hang or a false success. After the fix the same instruction ran past
+  the status event and surfaced the provider's own error truthfully — the Mac
+  mini's model provider is rate-limited right now, so the completed spoken
+  answer remains pending on that quota, not on JOAT. Also verified live on the
+  restarted engine: all 22 MCP tools served, a streamed Even AI door turn with
+  history answered the correct local time in 2.8 s, the utterance queue and
+  the disconnect close-code log emitted their first production lines, and the
+  official simulator reconnected through the replacement protocol.
+
 - Gave the HUD one typography system, and gave notifications their whole
   message back. A typography audit of every surface found no system to
   break: 128 canvas font sites across 18 fixed pixel sizes and two families,
