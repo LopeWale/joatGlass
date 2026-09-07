@@ -28,7 +28,9 @@ from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
-from ..agents.openclaw_gateway import OpenClawPairingRequired, OpenClawScopeMismatch
+from ..agents.openclaw_gateway import (
+    OpenClawPairingRequired, OpenClawScopeMismatch, classify_gateway_dial_failure,
+)
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +107,24 @@ class TerminalFrame:
     approvals: int = 0
     #: Safe lane-specific setup guidance; never an adapter exception.
     reason: str = ""
+
+
+def _dial_failure_sentence(label: str, exc: BaseException) -> str:
+    """The lane frame's one recovery sentence for a failed connection.
+
+    Fixed copy keyed on the classified reason — never the exception text,
+    which can carry the endpoint host or a remote payload. An unclassified
+    failure keeps the generic sentence so nothing invents a cause.
+    """
+    cause: BaseException | None = exc
+    while cause is not None and not isinstance(cause, OSError | TimeoutError):
+        cause = cause.__cause__ or cause.__context__
+    reason = classify_gateway_dial_failure(cause if cause is not None else exc).reason_code
+    if reason == "endpoint_refused":
+        return f"{label}: the home brain refused — restore its Tailscale Serve, then tap retry."
+    if reason == "host_unreachable":
+        return f"{label}: home brain unreachable — check Tailscale on both Macs, then tap retry."
+    return f"Could not connect to {label}. Tap retry."
 
 
 def _one_row(text: str, columns: int) -> str:
@@ -699,6 +719,13 @@ class AgentTerminalRoster:
                     if isinstance(exc, OpenClawScopeMismatch)
                     else "Approve this device in OpenClaw, then retry."
                 )
+            else:
+                # Say which way the dial died (2026-09-06): the lane frame
+                # read "Could not connect to work. Tap retry." whether the
+                # tailnet was gone or the home brain answered and refused —
+                # opposite remedies. The classifier reads the exception's
+                # own distinction; a wrapped cause counts too.
+                attempt.reason = _dial_failure_sentence(label, exc)
             ready = False
         if (
             self._lanes.get(lane.name) is not lane or lane.agent is not attempt.agent
@@ -708,7 +735,7 @@ class AgentTerminalRoster:
         if ready:
             attempt.reason = ""
             lane.last_error = ""
-        elif not attempt.requires_authorization:
+        elif not attempt.requires_authorization and not attempt.reason:
             attempt.reason = f"Could not connect to {label}. Tap retry."
         return ready
 
