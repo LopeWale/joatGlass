@@ -71,8 +71,9 @@ _SAFE_REASONS = frozenset({
     "write_scope_required",
     "gateway_not_ready",
     # The dial classifier's split of "gateway_not_ready" (2026-09-06): the
-    # host refused the port, versus the host cannot be reached at all.
-    "gateway_stopped",
+    # host refused the port (its Serve front is down; the gateway behind
+    # it may be alive), versus the host cannot be reached at all.
+    "endpoint_refused",
     "host_unreachable",
     "dedicated_session_not_proven",
     "tools_enabled",
