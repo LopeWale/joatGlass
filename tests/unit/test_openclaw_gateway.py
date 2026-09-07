@@ -1054,3 +1054,38 @@ async def _accept_gateway(
             },
         },
     }))
+
+
+from joat.agents.openclaw_gateway import classify_gateway_dial_failure  # noqa: E402
+
+
+class TestGatewayDialFailureClassification:
+    """One outage, two remedies (2026-09-06): `gaierror` while the tailnet
+    was down, then `ConnectionRefusedError` once it was back but the mini's
+    gateway service was not. Both used to surface as "gateway_not_ready"."""
+
+    def test_refused_means_the_service_is_stopped(self) -> None:
+        failure = classify_gateway_dial_failure(ConnectionRefusedError(61, "refused"))
+        assert failure.reason_code == "gateway_stopped"
+        assert failure.detail == "ConnectionRefusedError"
+
+    def test_name_resolution_means_the_host_is_unreachable(self) -> None:
+        import socket as socket_module
+
+        failure = classify_gateway_dial_failure(socket_module.gaierror(8, "nodename"))
+        assert failure.reason_code == "host_unreachable"
+
+    @pytest.mark.parametrize("exc", [
+        TimeoutError(), OSError(51, "network unreachable"), ConnectionResetError(54, "reset"),
+    ])
+    def test_other_socket_family_failures_read_as_unreachable(self, exc: BaseException) -> None:
+        assert classify_gateway_dial_failure(exc).reason_code == "host_unreachable"
+
+    def test_non_network_failures_keep_the_generic_reason(self) -> None:
+        failure = classify_gateway_dial_failure(RuntimeError("endpoint host: secret"))
+        assert failure.reason_code == "gateway_not_ready"
+
+    def test_detail_is_a_class_name_never_message_text(self) -> None:
+        # Socket errors can embed the endpoint host in their message.
+        failure = classify_gateway_dial_failure(ConnectionRefusedError("wss://private-host"))
+        assert "private-host" not in failure.detail
