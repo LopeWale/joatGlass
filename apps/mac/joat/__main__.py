@@ -1112,16 +1112,17 @@ async def main() -> None:
             OSError,
             TimeoutError,
         ) as exc:
-            reason = (
-                "native_credentials_unavailable"
-                if isinstance(exc, (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable))
-                else "gateway_not_ready"
-            )
+            if isinstance(exc, (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable)):
+                reason = "native_credentials_unavailable"
+            else:
+                reason = classify_gateway_dial_failure(exc).reason_code
             status.set_openclaw(
                 state="failed", endpoint_host=endpoint_host, scopes=(), reason=reason,
             )
-            status.set_agent_terminal(state="unavailable", reason="gateway_not_ready")
-            await show_terminal_retry_view("Hermes is unavailable; retry when the Mac connection recovers.")
+            status.set_agent_terminal(state="unavailable", reason=reason)
+            await show_terminal_retry_view(wearer_terminal_reason({
+                "state": "unavailable", "reason": reason, "endpoint_host": endpoint_host,
+            }))
         else:
             openclaw_terminal = candidate
             status.set_openclaw(
@@ -1352,10 +1353,17 @@ async def main() -> None:
     # Agent Terminal roster: the wearer's existing OpenClaw work sessions,
     # by spoken name. Strictly NOT Brainstorm — these lanes never join the
     # round table, and a missing daemon just means an empty roster.
+    # The hermes lane exists whether or not the boot-time dial succeeded
+    # (2026-09-06): it used to be registered only from a successful boot
+    # connection, so a refused dial at startup left the roster with no
+    # hermes row at all, and a gateway that came back later needed an
+    # engine restart before the wearer could reach it. The retry candidate
+    # is the same lazily-initialisable agent the glasses "retry" tap uses;
+    # like the work lane, a row tap prepares it on demand.
     terminal_lanes: list[tuple[str, object]] = [
         (name, agent) for name, agent in (
             ("work", openclaw_work_terminal),
-            ("hermes", openclaw_terminal),
+            ("hermes", openclaw_terminal or openclaw_retry_candidate),
             ("calendar", openclaw_calendar_terminal),
         ) if agent is not None
     ]
