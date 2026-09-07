@@ -55,6 +55,14 @@ function rig(activeTab: PanelTab = 'notifications', restorationResult: boolean |
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
     menu, rail, lists, steps, selections, sent,
+    // Surface announcements ("which page owns the glass") travel the same
+    // uplink as content requests but mean the opposite thing: they RETIRE
+    // ownership on the Mac. A test asking "did this gesture ask the Mac for
+    // anything?" must count requests, not every frame of bookkeeping.
+    requests: () => sent.filter(
+      (message) => (message.event as { containerName?: string } | undefined)
+        ?.containerName !== 'capability-lifecycle',
+    ),
     defaults: () => defaults,
     failNextList: () => { listResult = false; },
     whilePainting: (hook: () => void) => { duringPaint = hook; },
@@ -78,7 +86,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
   it.each([true, false])('keeps Home after a pending News cursor restoration is cancelled (late result=%s)', async (lateResult) => {
     let finishSelection!: (painted: boolean) => void;
     const painting = new Promise<boolean>((resolve) => { finishSelection = resolve; });
-    const { menu, rail, selections, sent, defaults } = rig('news', painting);
+    const { menu, rail, selections, requests, defaults } = rig('news', painting);
     rail.accept(newsPush(7, ['Story 01', 'Story 02']));
     await menu.openPanelTab('news');
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
@@ -89,7 +97,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
     try {
       await vi.waitFor(() => expect(selections).toContain(1));
       expect(menu.handleClick()).toBe(true);
-      expect(sent).toHaveLength(1);
+      expect(requests()).toHaveLength(1);
       await menu.toggle();
       expect(menu.isOpen()).toBe(false);
       expect(defaults()).toBe(1);
@@ -97,7 +105,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
       await returning;
       expect(menu.isOpen()).toBe(false);
       expect(menu.handleClick()).toBe(false);
-      expect(sent).toHaveLength(1);
+      expect(requests()).toHaveLength(1);
       expect(defaults()).toBe(1);
     } finally {
       finishSelection(lateResult);
@@ -107,7 +115,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
   });
 
   it('closes instead of enabling News taps after a failed cursor restoration', async () => {
-    const { menu, rail, sent, defaults } = rig('news', false);
+    const { menu, rail, requests, defaults } = rig('news', false);
     rail.accept(newsPush(7, ['Story 01', 'Story 02']));
     await menu.openPanelTab('news');
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
@@ -118,7 +126,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
 
     expect(menu.isOpen()).toBe(false);
     expect(menu.handleClick()).toBe(false);
-    expect(sent).toHaveLength(1);
+    expect(requests()).toHaveLength(1);
     expect(defaults()).toBe(1);
   });
 
@@ -131,7 +139,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
   });
 
   it('a click on Notifications still asks the Mac; on News it expands the cache', async () => {
-    const { menu, rail, lists, sent } = rig();
+    const { menu, rail, lists, sent, requests } = rig();
     await menu.openActiveTab();
     expect(lists[0]?.options?.title).toBe('NOTIFICATIONS');
     expect(sent.some((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toBe(true);
@@ -143,7 +151,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
     const page = lists[lists.length - 1]!;
     expect(page.items).toEqual(['[2m] Rates hold · BBC', '[5m] Rover lands · NPR']);
     expect(page.options).toMatchObject({ title: 'NEWS', selectable: true, railTab: 'news' });
-    expect(sent).toEqual([]); // painted from memory, no round trip
+    expect(requests()).toEqual([]); // painted from memory, no round trip
     expect(menu.isOpen()).toBe(true);
     expect(menu.isPanelExpanded()).toBe(true);
     // The overview swipe is no longer a rail swipe: the page owns scrolls.
