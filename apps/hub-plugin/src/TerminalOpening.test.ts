@@ -271,15 +271,22 @@ describe('Terminal opening ownership', () => {
     const before = fixture.sent.length;
     const releaseList = fixture.holdList();
     const replacement = fixture.menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
+    // Opening a new capability announces the incoming surface too. What this
+    // test pins is the RETIREMENT: exactly one, carrying the exact pair the
+    // Mac bound, so a late Terminal frame cannot paint over the new page.
+    const retirements = () => fixture.sent.slice(before).filter(
+      (message) => ((message as { event?: { selectedName?: string } }).event
+        ?.selectedName ?? '').startsWith('terminal-'),
+    );
     try {
-      expect(fixture.sent.slice(before)).toEqual([{
+      expect(retirements()).toEqual([{
         kind: 'input', event: {
           containerName: 'capability-lifecycle', selectedName: 'terminal-home',
           requestId: binding.requestId, traceId: binding.selectionId,
         },
       }]);
       fixture.retire();
-      expect(fixture.sent.slice(before)).toHaveLength(1);
+      expect(retirements()).toHaveLength(1);
       expect(await fixture.present(terminal(), binding)).toBe(false);
     } finally {
       releaseList();

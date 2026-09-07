@@ -611,10 +611,11 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
-  it('a left single on a live Brainstorm neither opens a menu nor ends it', () => {
-    // Mid-session menu access is the firmware contextual menu (tap, then
-    // long-press), registered on every page. A plain left single must not
-    // cancel, must not open anything, and must not drill into notifications.
+  it('a left single on a live Brainstorm is the footer action, not menu or cancel', () => {
+    // Even's input reference gives BOTH temples the same gesture set (the
+    // audit's O3): a left single is the same footer tap as a right single.
+    // It must not cancel, must not open anything, and — once the surface
+    // consumes it — must not also be relayed as a second, generic input.
     const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
     fire({
       sysEvent: {
@@ -625,6 +626,24 @@ describe('EventRouter — text and list', () => {
     expect(menu.toggle).not.toHaveBeenCalled();
     expect(menu.openNotifications).not.toHaveBeenCalled();
     expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(brainstorm.handleClick).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]); // consumed by the surface, not double-delivered
+  });
+
+  it('a left single the live Brainstorm declines still reaches the Mac', () => {
+    // The surface owning the page does not own every tap: when its footer
+    // has nothing armed (handleClick() false), the input must keep its
+    // pre-O3 path and be relayed for the Mac to decide.
+    const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
+    brainstorm.handleClick.mockReturnValue(false);
+    fire({
+      sysEvent: {
+        eventType: OsEventTypeList.CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+      },
+    });
+    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(menu.toggle).not.toHaveBeenCalled();
     expect(sent).toHaveLength(1); // relayed, the Mac decides
   });
 
@@ -936,12 +955,23 @@ describe('EventRouter — production Messages menu composition', () => {
     } as unknown as ImuMonitor;
     new EventRouter(client, link, audio, imu, menu).attach();
 
-    // The wearer picks Messages in the firmware contextual menu.
+    // The wearer picks Messages in the firmware contextual menu. The OS then
+    // closes its overlay and delivers a foreground-exit — without replaying
+    // it, the router's overlay boundary rightly swallows every later input.
     dispatch({ menuItemClickEvent: {
       itemID: CAPABILITY_MENU_ID_BASE,
     } } as EvenHubEvent);
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    const request = sent[0] as Extract<UplinkMessage, { kind: 'input' }>;
+    dispatch({ sysEvent: {
+      eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT,
+    } } as EvenHubEvent);
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    // Opening a capability first tells the Mac which surface owns the glass
+    // (navigation ownership), then asks for that capability's content.
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'surface-feature' },
+    });
+    const request = sent[1] as Extract<UplinkMessage, { kind: 'input' }>;
     expect(request.event).toMatchObject({
       containerName: 'capmenu', selectedName: 'Messages', selectedIndex: 0,
     });
@@ -957,7 +987,7 @@ describe('EventRouter — production Messages menu composition', () => {
       eventType: OsEventTypeList.CLICK_EVENT,
       currentSelectItemIndex: 1,
     } } as EvenHubEvent);
-    expect(sent[1]).toMatchObject({
+    expect(sent[2]).toMatchObject({
       kind: 'input',
       event: {
         containerName: 'capdata',
@@ -980,8 +1010,8 @@ describe('EventRouter — production Messages menu composition', () => {
     await vi.waitFor(() => expect(hud.showList).toHaveBeenCalledTimes(4));
     // The list call starts before its restored highlight has finished.
     // A second deliberate Back belongs after the visible picker is ready.
-    const selection = sent[1] as Extract<UplinkMessage, { kind: 'input' }>;
-    await vi.waitFor(() => expect(sent[2]).toEqual({
+    const selection = sent[2] as Extract<UplinkMessage, { kind: 'input' }>;
+    await vi.waitFor(() => expect(sent[3]).toEqual({
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId: request.event.requestId, traceId: selection.event.traceId },
     }));
@@ -990,7 +1020,7 @@ describe('EventRouter — production Messages menu composition', () => {
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
     } } as EvenHubEvent);
     await vi.waitFor(() => expect(hud.showDefault).toHaveBeenCalledTimes(1));
-    expect(sent[2]).toEqual({
+    expect(sent[3]).toEqual({
       kind: 'input',
       event: {
         containerName: 'capability-lifecycle',
@@ -999,7 +1029,15 @@ describe('EventRouter — production Messages menu composition', () => {
         traceId: selection.event.traceId,
       },
     });
-    expect(sent[3]).toEqual({
+    // Walking back to Home retires ownership twice, and both halves matter
+    // to the Mac (services/capabilities.py): the Messages-scoped retirement
+    // clears the bound message selection, and the surface-level one clears
+    // the active capability so no later response can paint over Home.
+    expect(sent[4]).toEqual({
+      kind: 'input',
+      event: { containerName: 'capability-lifecycle', selectedName: 'surface-home' },
+    });
+    expect(sent[5]).toEqual({
       kind: 'input',
       event: {
         containerName: 'capability-lifecycle',

@@ -226,9 +226,18 @@ function conversationSelectionRig(native = false) {
       return true;
     },
   });
-  const link = { send: (message: Record<string, unknown>) => sent.push(message) } as unknown as MacLink;
+  // Same split as the main rig above: surface announcements retire ownership
+  // on the Mac and are not requests. Counting them here would make every
+  // "how many times did we ask the Mac?" assertion drift with page routing.
+  const surfaceEvents: Array<Record<string, unknown>> = [];
+  const link = { send: (message: Record<string, unknown>) => {
+    const event = message.event as { containerName?: string; selectedName?: string } | undefined;
+    if (event?.containerName === 'capability-lifecycle' && event.selectedName?.startsWith('surface-')) {
+      surfaceEvents.push(message);
+    } else sent.push(message);
+  } } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
-  return { menu, hud, sent, frames, hooks, completed: () => completed };
+  return { menu, hud, sent, surfaceEvents, frames, hooks, completed: () => completed };
 }
 
 async function openConversationSelection(r: ReturnType<typeof conversationSelectionRig>) {
@@ -411,7 +420,9 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
     expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back' });
-    expect(operations).toEqual(['list']);
+    // Ownership is announced BEFORE the loading frame paints: the Mac must
+    // know Home no longer owns the glass before any response can arrive.
+    expect(operations).toEqual(['surface-feature', 'list']);
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: { containerName: 'capmenu', eventType: 0, selectedIndex: 0, selectedName: 'Messages' },
@@ -1549,7 +1560,14 @@ describe('CapabilityMenu', () => {
         return true;
       },
     });
-    const link = { send: (message: Record<string, unknown>) => sent.push(message) } as unknown as MacLink;
+    // Surface announcements are ownership bookkeeping, not requests; this
+    // test counts what the row tap ASKED the Mac for.
+    const link = { send: (message: Record<string, unknown>) => {
+      const event = message.event as { containerName?: string; selectedName?: string } | undefined;
+      if (event?.containerName === 'capability-lifecycle'
+        && event.selectedName?.startsWith('surface-')) return;
+      sent.push(message);
+    } } as unknown as MacLink;
     const menu = new CapabilityMenu(hud, new Settings(), link);
     hud.rail.accept({ kind: 'hud.panel', tab: 'news', revision: 7, rows: ['Story 01', 'Story 02'] });
     await menu.openPanelTab('news');

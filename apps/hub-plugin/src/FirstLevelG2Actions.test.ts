@@ -148,9 +148,15 @@ async function openSettingsFromFirmwareMenu(
   harness: ReturnType<typeof rig>,
 ): Promise<void> {
   // The wearer's menu is the firmware contextual menu; picking Settings
-  // arrives as its OS -> APP action item click event.
+  // arrives as its OS -> APP action item click event, and the OS closing
+  // its overlay then delivers a foreground-exit. Replaying both matters:
+  // until the exit arrives, the router's overlay boundary swallows every
+  // scroll and press, exactly as it must on hardware.
   harness.fire({ menuItemClickEvent: {
     itemID: CAPABILITY_MENU_ID_BASE + CAPABILITIES.indexOf('Settings'),
+  } } as EvenHubEvent);
+  harness.fire({ sysEvent: {
+    eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT,
   } } as EvenHubEvent);
   await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
 }
@@ -166,11 +172,23 @@ describe('wearer G2 actions through Settings', () => {
     for (let index = 0; index < 3; index += 1) harness.fire(scrollDown());
     harness.fire(rightPress());
 
+    // Opening Settings announces the surface, Repeat rides the Mac-held
+    // last-reply contract, and closing announces Home again. All three are
+    // load-bearing: services/capabilities.py retires capability ownership on
+    // the surface messages, so dropping them strands the previous page.
     await vi.waitFor(() => expect(sockets[0]?.sent).toEqual([
       JSON.stringify({ kind: 'auth', token: null }),
       JSON.stringify({
         kind: 'input',
+        event: { containerName: 'capability-lifecycle', selectedName: 'surface-settings' },
+      }),
+      JSON.stringify({
+        kind: 'input',
         event: { containerName: 'sysmenu', selectedIndex: 1 },
+      }),
+      JSON.stringify({
+        kind: 'input',
+        event: { containerName: 'capability-lifecycle', selectedName: 'surface-home' },
       }),
     ]));
   });
