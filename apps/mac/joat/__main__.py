@@ -750,9 +750,9 @@ async def main() -> None:
                 else:
                     # Keep the exception's own distinction (the audit's
                     # reconnection item): refused means the mini answered
-                    # and its gateway service is stopped; unresolvable
-                    # means the tailnet or the host is gone. Both used to
-                    # collapse into "gateway_not_ready".
+                    # and its Serve front is down; unresolvable means the
+                    # tailnet or the host is gone. Both used to collapse
+                    # into "gateway_not_ready".
                     reason = classify_gateway_dial_failure(exc).reason_code
                 status.set_openclaw(
                     state="failed",
@@ -995,10 +995,13 @@ async def main() -> None:
             return "Approve the JOAT device in OpenClaw, then tap retry."
         if state == "unavailable" and reason == "endpoint_missing":
             return "Hermes is not configured on this home brain."
-        if state == "unavailable" and reason == "gateway_stopped":
-            # The host answered and refused: the service is down, not the
-            # network. The wearer's fix is on the home brain, not here.
-            return "The home brain's gateway is stopped — start it there, then tap retry."
+        if state == "unavailable" and reason == "endpoint_refused":
+            # The host answered and refused: the mini's Tailscale Serve
+            # front is down. The gateway process behind it may be alive
+            # (it kept answering Telegram through the 2026-09-06 outage),
+            # so the copy must not tell the wearer to restart the wrong
+            # thing.
+            return "The home brain refused the connection — restore its Tailscale Serve, then tap retry."
         if state == "unavailable" and reason == "host_unreachable":
             return "The home brain is unreachable — check Tailscale on both Macs, then tap retry."
         if state == "unavailable" and reason == "native_credentials_unavailable":

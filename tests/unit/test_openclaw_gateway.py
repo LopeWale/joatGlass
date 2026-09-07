@@ -1064,9 +1064,11 @@ class TestGatewayDialFailureClassification:
     was down, then `ConnectionRefusedError` once it was back but the mini's
     gateway service was not. Both used to surface as "gateway_not_ready"."""
 
-    def test_refused_means_the_service_is_stopped(self) -> None:
+    def test_refused_names_the_endpoint_not_the_gateway_process(self) -> None:
+        """A refusal proves the Serve front is gone, nothing more: through
+        the same outage the gateway behind it kept answering Telegram."""
         failure = classify_gateway_dial_failure(ConnectionRefusedError(61, "refused"))
-        assert failure.reason_code == "gateway_stopped"
+        assert failure.reason_code == "endpoint_refused"
         assert failure.detail == "ConnectionRefusedError"
 
     def test_name_resolution_means_the_host_is_unreachable(self) -> None:

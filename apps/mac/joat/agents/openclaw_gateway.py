@@ -236,7 +236,7 @@ class OpenClawPairingRequired(OpenClawGatewayError):
         self.reason = reason
 
 
-GatewayDialReason = Literal["host_unreachable", "gateway_stopped", "gateway_not_ready"]
+GatewayDialReason = Literal["host_unreachable", "endpoint_refused", "gateway_not_ready"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,11 +245,15 @@ class GatewayDialFailure:
 
     The 2026-09-06 outage sat in the log as two different exceptions —
     `gaierror` while Tailscale was down, then `ConnectionRefusedError`
-    once the tailnet was back but the mini's gateway service was not —
-    and both surfaced to the wearer as the same "gateway_not_ready",
-    which points at nothing. The distinction IS in the exception; this
-    keeps it. `detail` is a class name, never message text: socket
-    errors can embed the endpoint host.
+    once the tailnet was back — and both surfaced to the wearer as the
+    same "gateway_not_ready", which points at nothing. The distinction
+    IS in the exception; this keeps it. A refusal is deliberately named
+    for the ENDPOINT, not the gateway process: the mini fronts the
+    gateway with Tailscale Serve on 443 (MAC_APP.md §Private Tailnet
+    transport), so a refused dial proves only that the Serve listener is
+    gone — the gateway behind it kept answering Telegram through the
+    whole 2026-09-06 incident. `detail` is a class name, never message
+    text: socket errors can embed the endpoint host.
     """
 
     reason_code: GatewayDialReason
@@ -262,13 +266,13 @@ def classify_gateway_dial_failure(exc: BaseException) -> GatewayDialFailure:
     Order matters inside OSError: name resolution failing means the host
     itself cannot be found (the tailnet or the name is wrong); an active
     refusal means the host answered and nothing is listening on the
-    gateway port — opposite remedies, one exception hierarchy.
+    dialled port — opposite remedies, one exception hierarchy.
     """
     detail = type(exc).__name__
     if isinstance(exc, socket.gaierror | socket.herror):
         return GatewayDialFailure("host_unreachable", detail)
     if isinstance(exc, ConnectionRefusedError):
-        return GatewayDialFailure("gateway_stopped", detail)
+        return GatewayDialFailure("endpoint_refused", detail)
     if isinstance(exc, TimeoutError | OSError):
         # Everything else in the socket family — unreachable network,
         # reset, timeout — reads as "cannot reach the host" to the wearer.
