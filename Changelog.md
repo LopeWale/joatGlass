@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-09-06
+
+- A dead gateway now says which way it is dead (the audit's reconnection
+  item, continued). The 2026-09-06 outage surfaced as one blind
+  "gateway_not_ready" through two different failures: `gaierror` while
+  Tailscale on this Mac was stopped, then `ConnectionRefusedError` once the
+  tailnet was restored but the mini's gateway service was not. A dial-failure
+  classifier in the gateway module (`classify_gateway_dial_failure`, frozen
+  dataclass result, class-name detail only — socket errors can embed the
+  endpoint host) folds those into `host_unreachable` vs `gateway_stopped`;
+  the status allowlist accepts both, and the glasses recovery copy names the
+  remedy ("start it there, then tap retry" vs "check Tailscale on both
+  Macs"). Executed live: restarting the engine against the refused port put
+  `gateway_stopped` in status.json and the classified pair in the log.
+  Context: the mini's Hermes manager (port 9443) is up and reports
+  `gateway_running: false`; its start/restart API is session-token-gated and
+  JOAT deliberately never connects to that dashboard
+  (HERMES_CONTROL_DASHBOARD_PORT guard), so starting the gateway is a
+  dashboard click on the mini's console, not an engine capability.
+
 ## 2026-09-05
 
 - Fixed the live Hermes protocol failure and restarted the engine onto HEAD.

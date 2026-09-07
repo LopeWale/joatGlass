@@ -11,10 +11,11 @@ import asyncio
 import json
 import logging
 import re
+import socket
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -233,6 +234,46 @@ class OpenClawPairingRequired(OpenClawGatewayError):
         super().__init__("OpenClaw device approval is required")
         self.request_id = request_id
         self.reason = reason
+
+
+GatewayDialReason = Literal["host_unreachable", "gateway_stopped", "gateway_not_ready"]
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayDialFailure:
+    """Why the Gateway could not be dialled, as a fixed reason code.
+
+    The 2026-09-06 outage sat in the log as two different exceptions —
+    `gaierror` while Tailscale was down, then `ConnectionRefusedError`
+    once the tailnet was back but the mini's gateway service was not —
+    and both surfaced to the wearer as the same "gateway_not_ready",
+    which points at nothing. The distinction IS in the exception; this
+    keeps it. `detail` is a class name, never message text: socket
+    errors can embed the endpoint host.
+    """
+
+    reason_code: GatewayDialReason
+    detail: str
+
+
+def classify_gateway_dial_failure(exc: BaseException) -> GatewayDialFailure:
+    """Fold a dial exception into the reason the wearer can act on.
+
+    Order matters inside OSError: name resolution failing means the host
+    itself cannot be found (the tailnet or the name is wrong); an active
+    refusal means the host answered and nothing is listening on the
+    gateway port — opposite remedies, one exception hierarchy.
+    """
+    detail = type(exc).__name__
+    if isinstance(exc, socket.gaierror | socket.herror):
+        return GatewayDialFailure("host_unreachable", detail)
+    if isinstance(exc, ConnectionRefusedError):
+        return GatewayDialFailure("gateway_stopped", detail)
+    if isinstance(exc, TimeoutError | OSError):
+        # Everything else in the socket family — unreachable network,
+        # reset, timeout — reads as "cannot reach the host" to the wearer.
+        return GatewayDialFailure("host_unreachable", detail)
+    return GatewayDialFailure("gateway_not_ready", detail)
 
 
 def _harvest_listed_keys(result: object) -> set[str]:

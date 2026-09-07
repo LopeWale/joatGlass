@@ -43,6 +43,7 @@ from .agents.openclaw_gateway import (
     OpenClawGatewayClient,
     OpenClawGatewayError,
     OpenClawPairingRequired,
+    classify_gateway_dial_failure,
 )
 from .agents.openclaw_native import NativeOpenClawCredentials
 from .agents.openclaw_terminal import PendingApproval
@@ -741,14 +742,18 @@ async def main() -> None:
                 OSError,
                 TimeoutError,
             ) as exc:
-                reason = (
-                    "native_credentials_unavailable"
-                    if isinstance(
-                        exc,
-                        (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable),
-                    )
-                    else "gateway_not_ready"
-                )
+                if isinstance(
+                    exc,
+                    (NativeBridgeError, NativeBridgeProtocolError, NativeBridgeUnavailable),
+                ):
+                    reason = "native_credentials_unavailable"
+                else:
+                    # Keep the exception's own distinction (the audit's
+                    # reconnection item): refused means the mini answered
+                    # and its gateway service is stopped; unresolvable
+                    # means the tailnet or the host is gone. Both used to
+                    # collapse into "gateway_not_ready".
+                    reason = classify_gateway_dial_failure(exc).reason_code
                 status.set_openclaw(
                     state="failed",
                     endpoint_host=endpoint_host,
@@ -757,9 +762,12 @@ async def main() -> None:
                 )
                 status.set_agent_terminal(
                     state="unavailable",
-                    reason="gateway_not_ready",
+                    reason=reason,
                 )
-                log.warning("OpenClaw Agent Terminal unavailable (%s)", type(exc).__name__)
+                log.warning(
+                    "OpenClaw Agent Terminal unavailable (%s -> %s)",
+                    type(exc).__name__, reason,
+                )
             else:
                 openclaw_terminal = candidate
                 status.set_openclaw(
@@ -987,6 +995,14 @@ async def main() -> None:
             return "Approve the JOAT device in OpenClaw, then tap retry."
         if state == "unavailable" and reason == "endpoint_missing":
             return "Hermes is not configured on this home brain."
+        if state == "unavailable" and reason == "gateway_stopped":
+            # The host answered and refused: the service is down, not the
+            # network. The wearer's fix is on the home brain, not here.
+            return "The home brain's gateway is stopped — start it there, then tap retry."
+        if state == "unavailable" and reason == "host_unreachable":
+            return "The home brain is unreachable — check Tailscale on both Macs, then tap retry."
+        if state == "unavailable" and reason == "native_credentials_unavailable":
+            return "JOAT's gateway credentials are unavailable — restart JOAT on the Mac."
         if state == "unavailable":
             return "Hermes is unavailable; retry when the Mac connection recovers."
         if state == "blocked" and reason == "tools_enabled":
