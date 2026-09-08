@@ -51,6 +51,18 @@ CONNECTION_CLOSE_TIMEOUT_S = 1.0
 HERMES_CONTROL_DASHBOARD_PORT = 9443
 
 
+def _gateway_host_label(gateway_url: str) -> str:
+    """A short, wearer-readable name for the Mac behind a gateway URL.
+
+    The tailnet already names these machines; the first DNS label of
+    "home-mac.example-tailnet.ts.net" is what the wearer calls it, and
+    the rest is tailnet plumbing that would eat the whole HUD row. Falls
+    back to the full hostname when there is no dot to cut on.
+    """
+    host = (urlsplit(gateway_url).hostname or "").strip().lower()
+    return host.split(".", 1)[0] if host else ""
+
+
 def terminal_ready_activity(*, reverified: bool) -> str:
     """Return the short wearable confirmation for terminal readiness."""
     if reverified:
@@ -66,17 +78,50 @@ class OpenClawHistoryRecoveryRequired(OpenClawGatewayError):
 class OpenClawRuntimeConfig:
     profile: GatewayProfile
     agent_id: str
+    host: str = ""
+    """Wearer-facing name for the Mac behind `profile`.
+
+    Empty for a single-host install, where every lane name is already
+    unique and a host on the row would be chrome. Derived from the gateway
+    hostname when several hosts are configured, so the wearer never has to
+    invent labels for machines Tailscale has already named.
+    """
 
     @classmethod
-    def load(
+    def _one(cls, entry: dict[str, object], *, host: str = "") -> OpenClawRuntimeConfig:
+        """Validate one host binding. Unchanged rules, applied per host."""
+        gateway_url = entry.get("gateway_url")
+        agent_id = entry.get("agent_id")
+        if (
+            not isinstance(gateway_url, str)
+            or not isinstance(agent_id, str)
+            or agent_id != AGENT_TERMINAL_AGENT_ID
+        ):
+            raise ValueError("OpenClaw runtime config is invalid")
+        profile = GatewayProfile(gateway_url)
+        if urlsplit(profile.url).port == HERMES_CONTROL_DASHBOARD_PORT:
+            raise ValueError(
+                "OpenClaw runtime config must point to the Gateway, not the Hermes dashboard"
+            )
+        return cls(profile=profile, agent_id=agent_id, host=host)
+
+    @classmethod
+    def load_all(
         cls,
         path: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
-    ) -> OpenClawRuntimeConfig | None:
-        """Load a small, secret-free, owner-only Gateway binding."""
+    ) -> list[OpenClawRuntimeConfig]:
+        """Every configured Gateway binding, owner-only and secret-free.
+
+        Two accepted shapes. The original single-host object still means
+        exactly what it meant, with no host label. A `{"hosts": [...]}`
+        list configures several Macs; each entry is validated by the same
+        rules, and each takes its label from its own gateway hostname —
+        the Hermes dashboard port stays refused on every one of them.
+        """
         try:
             info = path.lstat()
         except FileNotFoundError:
-            return None
+            return []
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.geteuid()
@@ -89,22 +134,40 @@ class OpenClawRuntimeConfig:
             raw: object = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ValueError("OpenClaw runtime config is invalid") from exc
-        if not isinstance(raw, dict) or set(raw) != {"gateway_url", "agent_id"}:
+        if not isinstance(raw, dict):
             raise ValueError("OpenClaw runtime config is invalid")
-        gateway_url = raw.get("gateway_url")
-        agent_id = raw.get("agent_id")
-        if (
-            not isinstance(gateway_url, str)
-            or not isinstance(agent_id, str)
-            or agent_id != AGENT_TERMINAL_AGENT_ID
-        ):
+        if set(raw) == {"gateway_url", "agent_id"}:
+            return [cls._one(raw)]
+        if set(raw) != {"hosts"}:
             raise ValueError("OpenClaw runtime config is invalid")
-        profile = GatewayProfile(gateway_url)
-        if urlsplit(profile.url).port == HERMES_CONTROL_DASHBOARD_PORT:
-            raise ValueError(
-                "OpenClaw runtime config must point to the Gateway, not the Hermes dashboard"
-            )
-        return cls(profile=profile, agent_id=agent_id)
+        hosts = raw["hosts"]
+        if not isinstance(hosts, list) or not 1 <= len(hosts) <= 16:
+            raise ValueError("OpenClaw runtime config is invalid")
+        entries = []
+        for entry in hosts:
+            if not isinstance(entry, dict) or set(entry) != {"gateway_url", "agent_id"}:
+                raise ValueError("OpenClaw runtime config is invalid")
+            entries.append(entry)
+        # A single configured host is still a single-host install, label and
+        # all: the list form must not start printing hosts on every row.
+        if len(entries) == 1:
+            return [cls._one(entries[0])]
+        loaded = [
+            cls._one(entry, host=_gateway_host_label(str(entry["gateway_url"])))
+            for entry in entries
+        ]
+        if len({config.profile.url for config in loaded}) != len(loaded):
+            raise ValueError("OpenClaw runtime config repeats a gateway")
+        return loaded
+
+    @classmethod
+    def load(
+        cls,
+        path: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
+    ) -> OpenClawRuntimeConfig | None:
+        """The first configured binding, for single-host callers."""
+        configs = cls.load_all(path)
+        return configs[0] if configs else None
 
 
 class OpenClawConnectionFactory(Protocol):

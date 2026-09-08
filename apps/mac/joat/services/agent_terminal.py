@@ -240,20 +240,76 @@ def _session_host(key: object) -> str:
     return parts[1] if len(parts) >= 3 and parts[1] else ""
 
 
-def _listed_name(row: dict[str, str], rows: Sequence[dict[str, str]]) -> str:
-    """How one discovered session is NAMED to the wearer.
+def qualified_name(label: str, host: str, *, occurrences: int) -> str:
+    """The roadmap's naming rule, in the one place both callers read it.
 
-    Bare label when it is unique — the roadmap is explicit that host names
-    appear ONLY when two rows otherwise cannot be distinguished, and a host
-    on every row is chrome on a surface that cannot afford it. When a label
-    repeats, every row carrying it gains its host, because showing it on
-    one and not the other would be worse than showing neither.
+    Bare label when it is unique — AGENT_TERMINAL_ROADMAP.md is explicit
+    that host names appear ONLY when two rows otherwise cannot be
+    distinguished, and a host on every row is chrome on a surface that
+    cannot afford it. When a label repeats, every row carrying it gains its
+    host, because showing it on one and not the other would be worse than
+    showing neither.
+
+    Discovered sessions have obeyed this since the roster could list them.
+    Configured LANES could not disobey it while one host was the only host;
+    with several, two Macs can each offer a "work" lane, and the rule has
+    to hold for both kinds of row or the wearer sees one "work" where two
+    exist.
     """
+    return f"{label} ({host})" if occurrences > 1 and host else label
+
+
+def _listed_name(row: dict[str, str], rows: Sequence[dict[str, str]]) -> str:
+    """How one discovered session is NAMED to the wearer."""
     label = row.get("label") or row.get("key") or "?"
-    if sum(1 for other in rows if (other.get("label") or "") == row.get("label")) < 2:
-        return label
-    host = _session_host(row.get("key"))
-    return f"{label} ({host})" if host else label
+    return qualified_name(
+        label,
+        _session_host(row.get("key")),
+        occurrences=sum(
+            1 for other in rows if (other.get("label") or "") == row.get("label")
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LaneAddress:
+    """Where one addressable session lives.
+
+    `name` is the spoken handle ("work", "hermes"); `host` is the Mac whose
+    gateway runs it, empty when only one host is configured. The PAIR is
+    the identity: two hosts may each offer a lane called "work", so a bare
+    name is a display concern, never a key.
+    """
+
+    name: str
+    host: str = ""
+
+    @property
+    def key(self) -> str:
+        """Unique across hosts. Internal — never shown to the wearer."""
+        return f"{self.name}@{self.host}" if self.host else self.name
+
+
+@dataclass(frozen=True, slots=True)
+class LaneResolution:
+    """What a spoken lane name resolved to: one lane, several, or none.
+
+    A bool could not express the middle case, and the middle case is the
+    whole point of a multi-host roster: the roadmap requires that a spoken
+    name matching more than one session NAMES the candidates rather than
+    silently taking the first.
+    """
+
+    key: str = ""
+    candidates: tuple[str, ...] = ()
+
+    @property
+    def found(self) -> bool:
+        return bool(self.key)
+
+    @property
+    def ambiguous(self) -> bool:
+        return not self.key and len(self.candidates) > 1
 
 
 def _is_roster_lane(lane: "TerminalLane") -> bool:
@@ -280,8 +336,10 @@ class TerminalLane:
     """One Hermes/OpenClaw session the wearer can address by name."""
 
     name: str
-    """Spoken handle: 'hermes', 'calendar'."""
+    """Spoken handle: 'hermes', 'calendar'. Not unique across hosts."""
     agent: TerminalAgentLike
+    host: str = ""
+    """The Mac running it; empty when a single host is configured."""
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=200))
     """Bounded output history — enough for 'terminal tail' and the future
     dense HUD surface, small enough to never become an unbounded transcript
@@ -298,6 +356,16 @@ class TerminalLane:
     approvals: list[tuple[str, str, str]] = field(default_factory=list)
     """Pending (id, kind, summary) — tool calls waiting on the wearer."""
     preparation: _LanePreparation | None = None
+
+    @property
+    def address(self) -> LaneAddress:
+        return LaneAddress(self.name, self.host)
+
+    @property
+    def key(self) -> str:
+        """Identity within the roster; the display label is the roster's
+        business, because it depends on every OTHER lane's name."""
+        return self.address.key
 
     @property
     def busy(self) -> bool:
@@ -380,13 +448,20 @@ class AgentTerminalRoster:
 
     def __init__(
         self,
-        lanes: Sequence[tuple[str, TerminalAgentLike]],
+        lanes: Sequence[tuple[str | LaneAddress, TerminalAgentLike]],
         announce: Announce | None = None,
         paint: Paint | None = None,
     ) -> None:
-        self._lanes: dict[str, TerminalLane] = {
-            name: TerminalLane(name=name, agent=agent) for name, agent in lanes
-        }
+        # A plain string stays a hostless lane, so every single-host caller
+        # (and every existing test) keeps its exact previous meaning.
+        self._lanes: dict[str, TerminalLane] = {}
+        for named, agent in lanes:
+            address = named if isinstance(named, LaneAddress) else LaneAddress(named)
+            lane = TerminalLane(name=address.name, agent=agent, host=address.host)
+            # First registration wins: a duplicated key is a config mistake, and
+            # dropping the engine over it would cost the wearer every OTHER
+            # working lane on the roster.
+            self._lanes.setdefault(lane.key, lane)
         self._announce = announce
         self._paint = paint
         self._focus: str | None = next(iter(self._lanes), None)
@@ -402,6 +477,57 @@ class AgentTerminalRoster:
     @property
     def focused(self) -> str | None:
         return self._focus
+
+    def label(self, lane: TerminalLane) -> str:
+        """What the wearer is shown for this lane.
+
+        Computed against the whole roster, never cached: lanes are fixed at
+        boot today, but a label that went stale would silently rename a
+        session mid-run, which is worse than recomputing a dict lookup.
+        """
+        return qualified_name(
+            lane.name,
+            lane.host,
+            occurrences=sum(
+                1 for other in self._lanes.values() if other.name == lane.name
+            ),
+        )
+
+    def labels(self) -> list[str]:
+        """Every lane's display label, in roster order."""
+        return [self.label(lane) for lane in self._lanes.values()]
+
+    def lane(self, key: str) -> TerminalLane | None:
+        return self._lanes.get(key)
+
+    def resolve(self, said: str) -> LaneResolution:
+        """Match a spoken lane name, refusing to guess between equals.
+
+        Tried most precise first: the internal key, then the display label
+        (which already carries a host when one is needed), then the bare
+        name, then loose containment. The first tier that matches EXACTLY
+        one lane wins; a tier matching several stops the search and returns
+        those candidates, because falling through to a looser tier after an
+        ambiguous hit would pick an arbitrary lane by a worse rule.
+        """
+        spoken = said.strip().lower()
+        if not spoken:
+            return LaneResolution()
+        tiers: tuple[Callable[[TerminalLane], bool], ...] = (
+            lambda lane: lane.key.lower() == spoken,
+            lambda lane: self.label(lane).lower() == spoken,
+            lambda lane: lane.name.lower() == spoken,
+            lambda lane: lane.name.lower() in spoken,
+        )
+        for matches in tiers:
+            hits = [lane for lane in self._lanes.values() if matches(lane)]
+            if len(hits) == 1:
+                return LaneResolution(key=hits[0].key)
+            if len(hits) > 1:
+                return LaneResolution(
+                    candidates=tuple(self.label(lane) for lane in hits),
+                )
+        return LaneResolution()
 
     @property
     def focus_generation(self) -> int:
@@ -422,7 +548,7 @@ class AgentTerminalRoster:
         )
 
     def _context_is_current(self, lane: TerminalLane, context: _CapturedContext) -> bool:
-        if self._lanes.get(lane.name) is not lane or lane.agent is not context.agent:
+        if self._lanes.get(lane.key) is not lane or lane.agent is not context.agent:
             return False
         try:
             generation = context.agent.capture_context_generation
@@ -433,7 +559,7 @@ class AgentTerminalRoster:
     def _capture_target_is_current(self, target: _TerminalCaptureTarget) -> bool:
         lane = target.lane
         return (
-            self._focus == lane.name and self._focus_revision == target.focus_revision
+            self._focus == lane.key and self._focus_revision == target.focus_revision
             and lane.capture_revision == target.lane_revision
             and lane.task is target.task and lane.busy == target.busy
             and self._context_is_current(lane, target.context)
@@ -468,14 +594,14 @@ class AgentTerminalRoster:
         """
         rows: list[tuple[str, str]] = []
         for lane in self._lanes.values():
-            mark = "▸ " if lane.name == self._focus else "  "
+            mark = "▸ " if lane.key == self._focus else "  "
             last = (lane.tail[-1] if lane.tail else "").strip()
             waiting = (f" · {len(lane.approvals)} waiting"
                        if lane.approvals else "")
             detail = f" · {last}" if last else ""
             rows.append((
-                lane.name,
-                _one_row(f"{mark}{lane.name} · {lane.state}{waiting}{detail}",
+                lane.key,
+                _one_row(f"{mark}{self.label(lane)} · {lane.state}{waiting}{detail}",
                          HUD_COLUMNS),
             ))
         return rows
@@ -486,11 +612,11 @@ class AgentTerminalRoster:
             return "No terminal sessions are configured on this Mac."
         rows = []
         for lane in self._lanes.values():
-            mark = "▸" if lane.name == self._focus else " "
+            mark = "▸" if lane.key == self._focus else " "
             last = lane.tail[-1] if lane.tail else "—"
             waiting = f" · {len(lane.approvals)} approval(s) waiting" \
                 if lane.approvals else ""
-            rows.append(f"{mark} {lane.name}: {lane.state}{waiting} · {last}")
+            rows.append(f"{mark} {self.label(lane)}: {lane.state}{waiting} · {last}")
         return "\n".join(rows)
 
     def frame(self) -> TerminalFrame:
@@ -506,7 +632,7 @@ class AgentTerminalRoster:
                 topic="Agent Terminal"[:HUD_TOPIC_COLUMNS], state="unavailable",
                 lanes=[], lines=["No terminal sessions on this Mac."],
             )
-        header = f"{lane.name} · {lane.state}"
+        header = f"{self.label(lane)} · {lane.state}"
         if lane.approvals:
             header += f" · {len(lane.approvals)} waiting"
         # Bounded HERE, where the frame is built, so an over-long frame
@@ -728,7 +854,7 @@ class AgentTerminalRoster:
                 attempt.reason = _dial_failure_sentence(label, exc)
             ready = False
         if (
-            self._lanes.get(lane.name) is not lane or lane.agent is not attempt.agent
+            self._lanes.get(lane.key) is not lane or lane.agent is not attempt.agent
             or lane.preparation is not attempt or attempt.abandoned
         ):
             return False
@@ -740,20 +866,23 @@ class AgentTerminalRoster:
         return ready
 
     def focus(self, name: str) -> bool:
-        """Switch focus. Never touches any lane's running work."""
-        said = name.strip().lower()
-        if said in self._lanes:
-            if self._focus != said:
+        """Switch focus. Never touches any lane's running work.
+
+        Ambiguity reads as "not found" here on purpose: a caller holding a
+        bool cannot offer candidates, and silently taking one of two real
+        sessions is the failure this roster exists to prevent. Callers that
+        can say more use `resolve()`.
+        """
+        return self.focus_resolved(self.resolve(name)).found
+
+    def focus_resolved(self, resolution: LaneResolution) -> LaneResolution:
+        """Apply an already-computed resolution, so a caller can inspect the
+        ambiguous case without resolving twice."""
+        if resolution.found:
+            if self._focus != resolution.key:
                 self._focus_revision += 1
-            self._focus = said
-            return True
-        for lane_name in self._lanes:
-            if lane_name in said:
-                if self._focus != lane_name:
-                    self._focus_revision += 1
-                self._focus = lane_name
-                return True
-        return False
+            self._focus = resolution.key
+        return resolution
 
     async def focus_next(self) -> str:
         """Move focus to the next lane and repaint — the gesture switch.
@@ -940,7 +1069,7 @@ class AgentTerminalRoster:
         focused lane happened to speak. This runs after the task is done.
         """
         # An old completion cannot take a newer turn's queued instruction.
-        if lane.task is not completed or self._lanes.get(lane.name) is not lane:
+        if lane.task is not completed or self._lanes.get(lane.key) is not lane:
             return
         queued, context = lane.queued, lane.queued_context
         lane.queued, lane.queued_context = "", None
@@ -1014,7 +1143,7 @@ class AgentTerminalRoster:
         # anything, so the strip showed whatever it happened to say when
         # the focused lane last spoke. A state change is ONE chip, not a
         # stream: repaint on the transition, never on the line.
-        if lane.name != self._focus:
+        if lane.key != self._focus:
             mark = self._mark(lane)
             if self._marks.get(lane.name) != mark:
                 self._marks[lane.name] = mark
@@ -1494,8 +1623,17 @@ class AgentTerminalCommands:
             # "go to the work terminal" name the lane in different places.
             name = (m.group("name") or m.group("named") or "").strip()
             self._acquire_explicit_view()
-            if self._roster.focus(name):
-                return f"Focused on {self._roster.focused}."
+            resolution = self._roster.focus_resolved(self._roster.resolve(name))
+            if resolution.found:
+                lane = self._roster.lane(resolution.key)
+                return f"Focused on {self._roster.label(lane)}." if lane else "Focused."
+            if resolution.ambiguous:
+                # Two hosts really can both run a "work" session. Naming them
+                # costs one spoken line; guessing costs the wearer's next
+                # instruction, delivered to the wrong Mac.
+                return (f"{name} names {len(resolution.candidates)} sessions: "
+                        + ", ".join(resolution.candidates)
+                        + ". Say the one you mean.")
             return f"No terminal session called {name}. " + self._roster.overview()
         if said in ("terminal cancel", "terminal stop", "cancel the terminal"):
             self._acquire_explicit_view()

@@ -17,7 +17,9 @@ from dataclasses import replace
 import pytest
 
 from joat.core.protocol import AgentTerminalHudView
-from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster, TerminalFrame, TerminalLane
+from joat.services.agent_terminal import (
+    AgentTerminalCommands, AgentTerminalRoster, LaneAddress, TerminalFrame, TerminalLane,
+)
 
 
 class FakeAgent:
@@ -2340,7 +2342,10 @@ class TestTerminalLanePreparation:
 class TestExplicitTerminalViewOwnership:
     @pytest.mark.parametrize(("phrase", "operation"), [
         ("terminal sessions", "overview"),
-        ("switch terminal to other", "focus"),
+        # focus_resolved, not focus: switching resolves first so an
+        # ambiguous name can list its candidates, and the roster effect
+        # this invariant guards is the one that MOVES focus.
+        ("switch terminal to other", "focus_resolved"),
         ("terminal cancel", "cancel"),
         ("terminal approvals", "approvals_view"),
         ("terminal discover", "discover"),
@@ -2485,3 +2490,94 @@ class TestExplicitTerminalViewOwnership:
             assert agent.prompts == (["The chosen reply."] if reply_available else [])
         finally:
             await _close_capture_fixture(r, agent)
+
+
+class TestMultiHostRoster:
+    """A roster spanning several Macs.
+
+    AGENT_TERMINAL_ROADMAP.md wants one unified roster across configured
+    Tailscale Macs, with host labels shown ONLY on ambiguity, and a spoken
+    name matching two sessions naming the candidates instead of guessing.
+    """
+
+    def test_a_single_host_roster_shows_no_host_labels(self) -> None:
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "studio"), FakeAgent()),
+            (LaneAddress("calendar", "studio"), FakeAgent()),
+        ])
+        # Every name is unique, so the host is chrome the 576x288 canvas
+        # cannot afford — even though both lanes carry one.
+        assert r.labels() == ["work", "calendar"]
+        assert "studio" not in r.overview()
+
+    def test_a_repeated_name_gains_its_host_on_every_row(self) -> None:
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "mini"), FakeAgent()),
+            (LaneAddress("work", "studio"), FakeAgent()),
+            (LaneAddress("calendar", "mini"), FakeAgent()),
+        ])
+        # Both "work" rows qualify; showing the host on one and not the
+        # other would be worse than showing neither. "calendar" is still
+        # unique, so it stays bare.
+        assert r.labels() == ["work (mini)", "work (studio)", "calendar"]
+
+    def test_two_hosts_offering_one_name_are_two_lanes(self) -> None:
+        first, second = FakeAgent(), FakeAgent()
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "mini"), first),
+            (LaneAddress("work", "studio"), second),
+        ])
+        # The pair is the identity: a name collision must not collapse two
+        # real sessions on two real Macs into one row.
+        assert len(r.names()) == 2
+        assert r.lane("work@mini") is not r.lane("work@studio")
+
+    def test_an_ambiguous_spoken_name_names_the_candidates(self) -> None:
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "mini"), FakeAgent()),
+            (LaneAddress("work", "studio"), FakeAgent()),
+        ])
+        resolution = r.resolve("work")
+        assert not resolution.found
+        assert resolution.ambiguous
+        assert set(resolution.candidates) == {"work (mini)", "work (studio)"}
+        # And it must not silently take the first, which is exactly what
+        # the roadmap says a repeated label used to do.
+        assert r.focus("work") is False
+
+    def test_the_qualified_name_resolves_to_exactly_one_lane(self) -> None:
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "mini"), FakeAgent()),
+            (LaneAddress("work", "studio"), FakeAgent()),
+        ])
+        assert r.focus("work (studio)") is True
+        assert r.focused == "work@studio"
+
+    def test_an_unambiguous_name_still_resolves_bare(self) -> None:
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "mini"), FakeAgent()),
+            (LaneAddress("calendar", "studio"), FakeAgent()),
+        ])
+        assert r.focus("calendar") is True
+        assert r.focused == "calendar@studio"
+
+    def test_hostless_lanes_keep_their_exact_previous_identity(self) -> None:
+        # Every single-host caller passes plain strings; their keys must
+        # stay the bare names so nothing downstream has to learn a new one.
+        r = AgentTerminalRoster([("work", FakeAgent()), ("hermes", FakeAgent())])
+        assert r.names() == ["work", "hermes"]
+        assert r.labels() == ["work", "hermes"]
+        assert r.focus("hermes") is True and r.focused == "hermes"
+
+    async def test_an_ambiguous_switch_asks_which_mac(self) -> None:
+        r = AgentTerminalRoster([
+            (LaneAddress("work", "mini"), FakeAgent()),
+            (LaneAddress("work", "studio"), FakeAgent()),
+        ])
+        answer = await AgentTerminalCommands(r).handle_command(
+            "switch terminal to work",
+        )
+        assert answer is not None
+        assert "mini" in answer and "studio" in answer
+        # Focus did not move to an arbitrary Mac.
+        assert r.focused == "work@mini"
