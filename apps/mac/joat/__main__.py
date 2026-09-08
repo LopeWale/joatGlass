@@ -139,6 +139,7 @@ from .services.terminal_opening import TerminalOpeningController
 from .services.agent_terminal import (
     AgentTerminalCommands,
     AgentTerminalRoster,
+    LaneAddress,
     TerminalFrame,
 )
 from .services.commands import VoiceCommandRouter
@@ -811,6 +812,59 @@ async def main() -> None:
                     log.info(
                         "OpenClaw Calendar proposals ready in a separate session"
                     )
+
+    # Every OTHER configured Mac contributes its own work lane
+    # (AGENT_TERMINAL_ROADMAP.md: "one unified session roster across
+    # Hermes, OpenClaw, and configured Tailscale Macs").
+    #
+    # Constructed, never dialled: make_work_terminal_agent() builds the
+    # client without connecting, so a second Mac that is asleep costs an
+    # unprepared row the wearer can tap, not a boot failure and not a
+    # delay on the Mac that IS awake. That is the same lesson the hermes
+    # lane taught — a lane the wearer cannot see is a lane they cannot
+    # retry.
+    extra_host_lanes: list[tuple[LaneAddress, object]] = []
+    if openclaw_config is not None and personal_data is not None:
+        try:
+            every_host = OpenClawRuntimeConfig.load_all()
+        except ValueError:
+            every_host = []
+        for host_config in every_host:
+            if host_config.profile.url == openclaw_config.profile.url:
+                continue  # already registered above, without a host label
+            try:
+                host_credentials = await NativeOpenClawCredentials.open(
+                    bridge=personal_data, profile=host_config.profile,
+                )
+            except (
+                OpenClawGatewayError,
+                NativeBridgeError,
+                NativeBridgeProtocolError,
+                NativeBridgeUnavailable,
+                RuntimeError,
+                OSError,
+                TimeoutError,
+            ) as exc:
+                # One unreachable Mac must not cost the wearer the others.
+                log.warning(
+                    "OpenClaw host %s unavailable (%s)",
+                    host_config.host, type(exc).__name__,
+                )
+                continue
+            extra_host_lanes.append((
+                LaneAddress("work", host_config.host),
+                make_work_terminal_agent(
+                    profile=host_config.profile,
+                    credentials=host_credentials,
+                    agent_id=host_config.agent_id,
+                    state_changed=None,
+                    on_approval=on_work_approval,
+                ),
+            ))
+        if extra_host_lanes:
+            log.info(
+                "Agent Terminal spans %d Macs", len(extra_host_lanes) + 1,
+            )
     seats: list[tuple[str, str, object]] = [
         ("codex", "proposer", proposer(models.provider("codex"))),
         ("claude", "critic", critic(models.provider("claude"))),
@@ -1360,13 +1414,18 @@ async def main() -> None:
     # engine restart before the wearer could reach it. The retry candidate
     # is the same lazily-initialisable agent the glasses "retry" tap uses;
     # like the work lane, a row tap prepares it on demand.
-    terminal_lanes: list[tuple[str, object]] = [
+    # This Mac's own lanes stay hostless, so a single-host install shows
+    # exactly the bare names it always showed. Other Macs carry their host,
+    # and the roster prints it only where a name would otherwise be
+    # ambiguous — which, for a second "work" lane, is immediately.
+    terminal_lanes: list[tuple[str | LaneAddress, object]] = [
         (name, agent) for name, agent in (
             ("work", openclaw_work_terminal),
             ("hermes", openclaw_terminal or openclaw_retry_candidate),
             ("calendar", openclaw_calendar_terminal),
         ) if agent is not None
     ]
+    terminal_lanes.extend(extra_host_lanes)
 
     async def terminal_announce(line: str) -> None:
         # The SessionManager owns the HUD while a session runs; terminal

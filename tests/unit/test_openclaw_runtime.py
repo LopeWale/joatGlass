@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import asyncio
 from collections import deque
 
@@ -1107,3 +1108,93 @@ async def test_run_outcome_malformed_event_still_invalidates_runtime(invalid: di
         assert "PRIVATE_" not in str(failed.value)
     finally:
         await agent.close()
+
+
+def _write(path, payload: str):
+    path.write_text(payload)
+    path.chmod(0o600)
+    return path
+
+
+def test_multi_host_config_labels_each_mac_from_its_own_gateway(tmp_path) -> None:
+    path = _write(tmp_path / "openclaw.json", json.dumps({"hosts": [
+        {"gateway_url": "wss://admins-mac-mini.tail3a3363.ts.net", "agent_id": "hermes"},
+        {"gateway_url": "wss://emmanuels-macbook-pro.tail3a3363.ts.net", "agent_id": "hermes"},
+    ]}))
+
+    configs = OpenClawRuntimeConfig.load_all(path)
+
+    # Tailscale already named these machines; the first DNS label is what
+    # the wearer calls them, and the tailnet suffix would eat the HUD row.
+    assert [config.host for config in configs] == [
+        "admins-mac-mini", "emmanuels-macbook-pro",
+    ]
+
+
+def test_a_single_configured_host_carries_no_label_in_either_shape(tmp_path) -> None:
+    listed = OpenClawRuntimeConfig.load_all(_write(
+        tmp_path / "listed.json",
+        json.dumps({"hosts": [
+            {"gateway_url": "wss://only.ts.net", "agent_id": "hermes"},
+        ]}),
+    ))
+    plain = OpenClawRuntimeConfig.load_all(_write(
+        tmp_path / "plain.json",
+        '{"gateway_url":"wss://only.ts.net","agent_id":"hermes"}',
+    ))
+
+    # One Mac is a single-host install however it was spelled: the list
+    # form must not start printing a host on every row.
+    assert [config.host for config in listed] == [""]
+    assert [config.host for config in plain] == [""]
+
+
+def test_the_dashboard_port_stays_refused_on_every_host(tmp_path) -> None:
+    path = _write(tmp_path / "openclaw.json", json.dumps({"hosts": [
+        {"gateway_url": "wss://good.ts.net", "agent_id": "hermes"},
+        {"gateway_url": "wss://admins-mac-mini.tail3a3363.ts.net:9443", "agent_id": "hermes"},
+    ]}))
+
+    # The Hermes control dashboard is off-limits to JOAT. A second host
+    # entry is not a way around that.
+    with pytest.raises(ValueError, match="Gateway"):
+        OpenClawRuntimeConfig.load_all(path)
+
+
+@pytest.mark.parametrize("payload", [
+    '{"hosts":[]}',
+    '{"hosts":{}}',
+    '{"hosts":[{"gateway_url":"wss://a.ts.net","agent_id":"hermes","token":"s"}]}',
+    '{"hosts":[{"gateway_url":"wss://a.ts.net","agent_id":"main"}]}',
+    '{"hosts":[{"gateway_url":"wss://a.ts.net","agent_id":"hermes"}],"agent_id":"hermes"}',
+])
+def test_multi_host_config_rejects_malformed_shapes(tmp_path, payload: str) -> None:
+    with pytest.raises(ValueError):
+        OpenClawRuntimeConfig.load_all(_write(tmp_path / "openclaw.json", payload))
+
+
+def test_a_repeated_gateway_is_refused_rather_than_shown_twice(tmp_path) -> None:
+    path = _write(tmp_path / "openclaw.json", json.dumps({"hosts": [
+        {"gateway_url": "wss://same.ts.net", "agent_id": "hermes"},
+        {"gateway_url": "wss://same.ts.net", "agent_id": "hermes"},
+    ]}))
+
+    # Two entries for one Mac would paint two identical rows the wearer
+    # cannot tell apart, and the host label could not separate them.
+    with pytest.raises(ValueError, match="repeats a gateway"):
+        OpenClawRuntimeConfig.load_all(path)
+
+
+def test_load_still_answers_single_host_callers_from_a_list(tmp_path) -> None:
+    path = _write(tmp_path / "openclaw.json", json.dumps({"hosts": [
+        {"gateway_url": "wss://first.ts.net", "agent_id": "hermes"},
+        {"gateway_url": "wss://second.ts.net", "agent_id": "hermes"},
+    ]}))
+
+    config = OpenClawRuntimeConfig.load(path)
+
+    assert config is not None and config.profile.url == "wss://first.ts.net"
+
+
+def test_a_missing_config_is_no_hosts_not_an_error(tmp_path) -> None:
+    assert OpenClawRuntimeConfig.load_all(tmp_path / "absent.json") == []
