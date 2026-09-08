@@ -515,15 +515,9 @@ async def _consume_hermes(
     logged, hashed, or written to the evidence file.
     """
 
-    def terminal_projection() -> dict[str, str | bool]:
-        return {
-            "state": "running",
-            "reason": "",
-            "endpoint_host": "",
-            "no_tools_checked": True,
-        }
-
-    sink = HudSink(HudWriter(gateway), terminal_projection)
+    # HudSink stopped taking a terminal projection in 8bb5cc1; passing one
+    # made the hardware acceptance run fail at construction.
+    sink = HudSink(HudWriter(gateway))
     before = len(events)
     await sink.open("Acceptance run", ["Hermes"])
     await _next_running_frame_sha256(events, after=before, timeout_s=action_timeout_s)
