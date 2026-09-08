@@ -118,7 +118,10 @@ schema errors settled in seconds what the prose had wrong.
   RENDER model behind one shared renderer keeps a `screen` discriminator;
   that is a plugin-internal drawing detail, not the wire.
 - **Concurrency beyond the configured lanes.** Lanes are fixed at boot; a
-  resumed session replaces a lane's target rather than adding a row.
+  resumed session replaces a lane's target rather than adding a row. Several
+  MACS are configurable as of 2026-09-08 (`{"hosts": [...]}`), each
+  contributing its own work lane; what stays fixed is the set of lanes per
+  host, not the number of hosts.
 - **A2A.** Unchanged, unenabled, and still not the terminal transport.
 
 ## Runtime contract required before implementation
@@ -151,7 +154,11 @@ host selection, and Tailscale origin approval remain per-host setup boundaries.
 
 ## Future acceptance gates
 
-- Real multi-host roster with host labels only on ambiguity.
+- ~~Real multi-host roster with host labels only on ambiguity.~~ Done
+  2026-09-08. A lane's identity is its (name, host) pair, a name stays bare
+  while it is unique, and a spoken name matching two sessions answers with
+  both rather than taking the first. Proven by mutation against the shipping
+  loader; a second Mac has not yet been stood up to prove it on hardware.
 - Two concurrent sessions continue while focus changes.
 - History, streaming, steering, cancellation, and approval flows use direct
   runtime receipts rather than inferred UI state.

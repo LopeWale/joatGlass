@@ -1,5 +1,56 @@
 # Changelog
 
+## 2026-09-08
+
+- **The Agent Terminal roster spans several Macs.** The roadmap's standing
+  acceptance gate was "real multi-host roster with host labels only on
+  ambiguity"; lanes were bound to one gateway, so a second Mac could not
+  appear at all. `openclaw.json` gains a `{"hosts": [...]}` shape beside the
+  original single-host object, which still means exactly what it meant. Each
+  entry is validated by the same rules — the Hermes control dashboard port
+  stays refused on every one, and a repeated gateway is rejected rather than
+  painted as two rows nothing could tell apart. A lane's identity became the
+  (name, host) pair, because two Macs really can both offer "work"; the
+  display label is computed against the whole roster, so a unique name stays
+  bare and every row carrying a repeated one gains its host. That rule had
+  governed discovered sessions only, and now lives in one function both
+  surfaces call. Spoken resolution stops guessing: matched
+  most-precise-first, a tier matching several lanes returns those candidates
+  instead of falling through to a looser rule, so "switch terminal to work"
+  across two Macs names both and moves focus nowhere. Other Macs are
+  constructed but never dialled at boot — an asleep Mac costs an unprepared
+  row the wearer can tap, not a boot failure, which is the lesson ddbe0ef
+  taught. Mutation-checked: never qualifying a label fails 6 tests, and
+  silently taking the first of an ambiguous pair fails 2.
+
+- **The Even AI door is reachable from the phone.** It had been serving on
+  loopback 8788 while this Mac's Tailscale Serve published only `/glasses`,
+  so Even AI could never actually reach the brain — A8 was true on the
+  engine and unreachable from the glasses. Published at `/agent`; verified
+  end to end over the tailnet with history (a name given one turn, recalled
+  the next) and real streamed SSE deltas.
+
+- **A tree that had been failing since 8bb5cc1 is green again.** Twelve unit
+  tests and strict mypy were red on HEAD from four unrelated causes, none of
+  them cosmetic: both acceptance harnesses still passed HudSink a terminal
+  projection it stopped taking, and so could not construct a sink at all;
+  both read the new `HudRebuild` layout message as if it were a view and
+  asked it for a `state`; `Card` gained a `body` field ahead of `urgency`,
+  so tests passing urgency positionally rendered URGENT cards without the
+  "!!" they existed to prove; and the topic-capture arm binds its clock at
+  construction, so a test patching the module's `time.monotonic` was
+  measuring nothing while claiming to prove the arm expires. Also narrowed
+  this session's own message-supersession fix, which could evict a draft
+  whose question was already armed on the glass.
+
+- **996 plugin tests pass.** The suite had been red across two releases
+  because `pack.sh` runs typecheck, not vitest. Repairs pinned navigation
+  ownership by name instead of raw uplink counts, replayed the OS
+  foreground-exit that closes the contextual menu (without it the router
+  correctly swallowed every press, so Settings opened dead), and corrected a
+  test still asserting the opposite of the O3 both-temples fix.
+
+
 ## 2026-09-06
 
 - A dead gateway dial now says which way it is dead — and says only what it
