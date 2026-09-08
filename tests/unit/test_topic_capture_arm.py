@@ -10,9 +10,6 @@ the same reason and with the same number.
 
 from __future__ import annotations
 
-import time
-from unittest.mock import patch
-
 from joat.services.session import SessionManager
 
 
@@ -21,8 +18,26 @@ class FakeHud:
     async def show_brainstorm(self, *a: object, **k: object) -> None: ...
 
 
-def manager() -> SessionManager:
-    return SessionManager(FakeHud(), lambda topic: None)  # type: ignore[arg-type]
+class Clock:
+    """The manager's injected monotonic source.
+
+    SessionManager takes its clock as a constructor argument and binds it
+    once, so patching joat.services.session.time.monotonic afterwards could
+    never move this manager's idea of "now" — the arm looked eternal to a
+    test that was really measuring nothing. Drive the real seam instead.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def manager(clock: Clock | None = None) -> SessionManager:
+    return SessionManager(  # type: ignore[arg-type]
+        FakeHud(), lambda topic: None, monotonic=clock or Clock(),
+    )
 
 
 class TestTheArmExpires:
@@ -30,14 +45,15 @@ class TestTheArmExpires:
         assert manager().topic_capture_armed is False
 
     def test_arming_holds_inside_the_window_and_lapses_after(self) -> None:
-        m = manager()
+        clock = Clock()
+        m = manager(clock)
+        armed_at = clock.now
         m._arm_topic_capture()
         assert m.topic_capture_armed is True
         for delta, expected in ((m.TOPIC_CAPTURE_WINDOW_S - 1, True),
                                 (m.TOPIC_CAPTURE_WINDOW_S + 1, False)):
-            with patch("joat.services.session.time.monotonic",
-                       return_value=time.monotonic() + delta):
-                assert m.topic_capture_armed is expected, delta
+            clock.now = armed_at + delta
+            assert m.topic_capture_armed is expected, delta
 
     def test_disarm_is_immediate(self) -> None:
         m = manager()

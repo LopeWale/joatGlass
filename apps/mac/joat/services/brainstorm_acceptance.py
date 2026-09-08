@@ -663,13 +663,11 @@ class InAppBrainstormAcceptance:
         return _sha256(frame.get("sha256"), "stream frame SHA-256")
 
     async def _consume_hermes(self, terminal: HermesStream) -> None:
-        def terminal_projection() -> dict[str, str | bool]:
-            return {
-                "state": "running", "reason": "", "endpoint_host": "",
-                "no_tools_checked": True,
-            }
-
-        sink = HudSink(HudWriter(self._transport), terminal_projection)
+        # HudSink stopped taking a terminal projection in 8bb5cc1; this
+        # harness kept passing one, so the acceptance run could not even
+        # construct its sink. The sink reads terminal state through its own
+        # collaborators now, and this run never had a real one to report.
+        sink = HudSink(HudWriter(self._transport))
         self._require_isolated()
         before = len(self._events)
         await sink.open("Acceptance run", ["Hermes"])

@@ -40,7 +40,7 @@ class TestShorten:
 
 class TestRender:
     def test_person_card_leads_with_the_person(self) -> None:
-        c = Card("Dele", "Messages", "are you coming?", Urgency.URGENT)
+        c = Card("Dele", "Messages", "are you coming?", urgency=Urgency.URGENT)
         lines = c.render().split("\n")
         assert lines[0] == "!! Dele · Messages"
         assert lines[1] == "are you coming?"
@@ -50,7 +50,7 @@ class TestRender:
         assert c.render().split("\n")[0] == "Battery"   # not "Battery · Battery"
 
     def test_coalesced_count_is_shown(self) -> None:
-        c = Card("Dele", "Messages", "hi", Urgency.NOTIFY, count=3)
+        c = Card("Dele", "Messages", "hi", urgency=Urgency.NOTIFY, count=3)
         assert "(3)" in c.render().split("\n")[0]
 
 
@@ -87,11 +87,11 @@ class TestPolicy:
         for i in range(3):
             assert p.admit(Card(f"s{i}", "App", "x"), now=1000) is not None
         assert p.admit(Card("s4", "App", "routine"), now=1000) is None
-        assert p.admit(Card("s5", "App", "fire", Urgency.URGENT), now=1000) is not None
+        assert p.admit(Card("s5", "App", "fire", urgency=Urgency.URGENT), now=1000) is not None
 
     def test_ignore_never_reaches_the_glasses(self) -> None:
         p = DeliveryPolicy()
-        assert p.admit(Card("Promo", "App", "sale", Urgency.IGNORE)) is None
+        assert p.admit(Card("Promo", "App", "sale", urgency=Urgency.IGNORE)) is None
 
 
 class TestSystemish:

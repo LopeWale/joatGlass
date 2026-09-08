@@ -49,7 +49,15 @@ class FakeTransport:
     async def set_g2_diagnostics(self, store: object | None) -> None:
         self._g2_diagnostics = store
 
-    async def send(self, view: BrainstormHudView) -> None:
+    async def send(self, view: object) -> None:
+        # The transport carries every DownlinkMessage, not only view frames.
+        # begin_brainstorm() sends a HudRebuild to release menu focus before
+        # the first live frame, and a layout instruction has no `state` — it
+        # is not something the wearer SEES, so it is neither a visual frame
+        # to hash into the acceptance record nor a frame `sent` should count.
+        state = getattr(view, "state", None)
+        if not isinstance(state, str):
+            return
         self.sent.append(view)
         digest = hashlib.sha256(json.dumps(
             view.to_wire(), sort_keys=True, separators=(",", ":"),
@@ -58,7 +66,7 @@ class FakeTransport:
             "type": "visual_frame",
             "kind": "brainstorm",
             "surface": "brainstorm" if isinstance(view, BrainstormHudView) else "agent_terminal",
-            "state": view.state,
+            "state": state,
             "sha256": digest,
         }
         self.events.append({

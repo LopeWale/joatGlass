@@ -8,7 +8,7 @@ import stat
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import websockets
@@ -251,6 +251,21 @@ def test_receipt_writer_and_lens_digest_store_only_a_digest(tmp_path: Path) -> N
     assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
 
 
+async def _next_brainstorm(socket: Any) -> dict[str, Any]:
+    """The next BRAINSTORM frame off the wire.
+
+    begin_brainstorm() sends a `hud.rebuild` to release menu focus before
+    the first live frame. It is a real message on a real socket, so this
+    acceptance run receives it — it just is not a brainstorm view, and
+    reading it as one asserted against a key that was never there.
+    """
+    for _ in range(8):
+        message = json.loads(await socket.recv())
+        if "brainstorm" in message:
+            return cast(dict[str, Any], message)
+    raise AssertionError("no brainstorm frame arrived")
+
+
 async def _connect_when_ready(url: str) -> Any:
     for _ in range(100):
         try:
@@ -382,7 +397,7 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
         await socket.send(json.dumps({
             "kind": "hello", "sn": "not-retained", "model": "g2", "launchSource": "test",
         }))
-        ready = json.loads(await socket.recv())
+        ready = await _next_brainstorm(socket)
         assert ready["brainstorm"]["state"] == "ready"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("a"), "ready"),
@@ -392,12 +407,12 @@ async def test_capture_requires_real_action_sequence_for_a_content_free_hermes_r
             "kind": "g2.diagnostic", "event": _action("begin_topic_capture", "brainstorm"),
         }))
 
-        opening = json.loads(await socket.recv())
+        opening = await _next_brainstorm(socket)
         assert opening["brainstorm"]["activity"] == "JOAT > Preparing collaborators…"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("b")),
         }))
-        turn = json.loads(await socket.recv())
+        turn = await _next_brainstorm(socket)
         assert turn["brainstorm"]["activity"] == "HERMES > Thinking…"
         await socket.send(json.dumps({
             "kind": "g2.diagnostic", "event": _frame("brainstorm", _hash("c")),
