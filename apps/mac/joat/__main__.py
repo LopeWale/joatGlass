@@ -1697,6 +1697,45 @@ async def main() -> None:
     # (diagnostics-only) closes a reply's `first_reply_sent` with `painted`.
     transport.on_trace(orchestrator.on_paint_trace)
 
+    def log_paint_cost(event: dict[str, str | int]) -> None:
+        """How long the lens actually took, in the log, on every frame.
+
+        The plugin's trace stream defaults to OFF and only an acceptance run
+        ever turned it on, so a wearer reporting "the rendering is very slow"
+        produced no record of a single tile upload — the one number that
+        would settle it. Even's own guidance puts an image frame at 0.5-2s
+        over BLE and a 576x288 screen needs four of them, which is a claim
+        this line can now confirm or refute on THIS hardware.
+
+        Content-free: a container id, an outcome and a duration.
+        """
+        if event.get("type") != "tile_upload":
+            return
+        log.info(
+            "tile_upload container=%s outcome=%s %sms",
+            event.get("containerId"), event.get("outcome"),
+            event.get("durationMs"),
+        )
+
+    async def enable_paint_diagnostics() -> None:
+        # Wait for the plugin: the control message rides the same link, and
+        # a store set before connect would be silently unarmed on the glass.
+        for _ in range(60):
+            await asyncio.sleep(1.0)
+            if transport.connected:
+                break
+        else:
+            return
+        await transport.set_g2_diagnostics(
+            G2DiagnosticStore(observer=lambda events: None),
+        )
+        log.info("paint diagnostics armed — tile upload timings will be logged")
+
+    transport.on_trace(log_paint_cost)
+    paint_diagnostics_task = asyncio.get_running_loop().create_task(
+        enable_paint_diagnostics()
+    )
+
     # The resting dashboard's margin facts. Weather is not in the Even Hub
     # SDK, so JOAT resolves it on this Mac from the position the phone
     # already reports, and sends only the finished words.

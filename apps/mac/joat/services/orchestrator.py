@@ -954,6 +954,15 @@ class VoiceOrchestrator:
         """Emit one opt-in, fixed-vocabulary, coarsely bucketed stage."""
         if stage == "first_reply_sent":
             self._awaiting_paint = (turn, started_at)
+        # Say how long the wearer waited, in the log, always. The engine has
+        # always MEASURED every stage of that wait and then discarded all of
+        # it unless an acceptance harness happened to be attached — so "the
+        # response is very slow" could only ever be answered by inference.
+        # Elapsed seconds and a fixed stage name carry no transcript and no
+        # audio, which is the whole reason the observer was opt-in.
+        log.info(
+            "turn %d %s +%.2fs", turn, stage, time.monotonic() - started_at,
+        )
         if self._latency_observer is None:
             return
         try:
