@@ -128,6 +128,20 @@ export function navigationDecisionRows(optionCount: number): readonly Navigation
 
 /** The card's header, body, and footer are separate optical regions. Keeping
  * these anchors together prevents a long reply from sharing the divider row. */
+export const ASSISTANT_OVERLAY_FONT_PX = 14;
+/** One size for an answer, always.
+ *
+ * The card was the last draw site in the HUD still choosing its own
+ * number, sweeping 21px down to 12px per reply — so the same assistant
+ * rendered at three visibly different sizes depending on how much it had
+ * to say, which is exactly what the wearer reported. 14 is TYPE.body: the
+ * size the assistant PILL already used, and the size
+ * apps/mac/joat/channels/cards.py already computes its 46-char line
+ * budget against. HudTypography.ts states the rule this restores: "no
+ * draw site invents its own number any more".
+ */
+
+
 const ASSISTANT_OVERLAY_GEOMETRY = {
   dividerY: 92,
   bodyTopY: 108,
@@ -3858,13 +3872,29 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     text: string,
   ): void {
-    const fitted = fitHudWrappedText(text, 386, 4, (value, fontSize) => {
+    // Read from the BEGINNING. `fitHudWrappedText` falls back to
+    // `visibleHudTailLines`, which keeps the newest rows and prefixes "…"
+    // — correct for the Brainstorm transcript it was written for, wrong
+    // for an answer. Recorded on the wearer's lens 2026-09-08: a
+    // four-sentence reply rendered as "…daytime sky glows blue. At sunset
+    // the sun sits low … leaving t", its opening sentences deleted and its
+    // last line severed. They were shown the middle of their own answer
+    // and could not scroll to the rest.
+    //
+    // `visibleHudLeadingLines` is the helper this codebase already uses
+    // wherever the start is what matters (notification previews, News
+    // rows, the Messages reader). The "…" moves to the end, where it means
+    // "there is more" instead of "you missed the start".
+    const measure = (value: string, fontSize: number): number => {
       context.font = prose(fontSize);
       return context.measureText(value).width;
-    });
-    context.font = prose(fitted.fontSize);
-    const layout = assistantOverlayTextLayout(fitted.lines.length, fitted.fontSize);
-    fitted.lines.forEach((line, index) => {
+    };
+    const fontSize = ASSISTANT_OVERLAY_FONT_PX;
+    const wrapped = wrapHudText(text, 386, (value) => measure(value, fontSize));
+    const lines = visibleHudLeadingLines(wrapped, 4);
+    context.font = prose(fontSize);
+    const layout = assistantOverlayTextLayout(lines.length, fontSize);
+    lines.forEach((line, index) => {
       context.fillText(line, 288, layout.firstBaselineY + index * layout.lineHeight);
     });
   }

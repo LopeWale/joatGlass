@@ -479,7 +479,14 @@ class VoiceOrchestrator:
             self._utterance_frames.append(receipt)
         else:
             self._audio_preroll.append(receipt)
+        _was = self._vad.in_speech
         utterance = self._vad.feed(pcm)
+        if _was != self._vad.in_speech:
+            log.info("VADTRACE %s t=%.2f trigger=%.5f",
+                     "OPEN" if self._vad.in_speech else "close",
+                     time.monotonic(), self._vad.trigger)
+        if utterance is not None:
+            log.info("VADTRACE emit bytes=%d t=%.2f", len(utterance), time.monotonic())
         if was_discarding or self._vad.prompt_discarding:
             # The final quiet chunk of a fence is discarded too. Do not let
             # its old source/epoch contaminate the next fresh utterance.
@@ -937,29 +944,65 @@ class VoiceOrchestrator:
                 )
 
             if not reply_is_current():
+                log.info("addressed turn dropped: surface changed before the reply")
                 return
             await self._hud.context(f"you  {query}")
-            if self._replier is None or not reply_is_current():
+            if self._replier is None:
+                # No reply engine at all. The wearer addressed JOAT and is
+                # owed an answer, not a status line that says "listening".
+                log.warning("addressed turn dropped: no reply engine")
+                await self._answer_failed(prompt_revision, prompt_ticket)
+                return
+            if not reply_is_current():
+                log.info("addressed turn dropped: surface changed before streaming")
                 return
             parts: list[str] = []
             async for chunk in self._replier.stream(query):
                 if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                    log.info("addressed turn dropped: a question took the surface mid-reply")
                     return
                 if not reply_is_current():
                     # The tool handed off the display successfully. Drain
                     # the assistant turn so its CLI can finish and retain
                     # conversation continuity; only painting is obsolete.
                     continue
-                if parts:
-                    await self._hud.assistant(chunk, append=True)
-                else:
-                    await self._hud.assistant(chunk)
+                if not parts:
                     self._observe_latency(latency_turn, "first_reply_sent", started_at)
+                    # Progress goes in the status bar, which is a text
+                    # container updated in place. The answer itself does NOT
+                    # paint per chunk any more.
+                    #
+                    # Measured, not assumed: all six of the wearer's real
+                    # replies (123-214 chars) fit the card's four lines at
+                    # 14px, which holds 224. The truncation and the garbled
+                    # seam they reported ("you're leu're left", an answer
+                    # opening with "…wavelengths") were both captured in
+                    # MID-STREAM frames — a partial answer, re-wrapped and
+                    # re-fitted on every chunk, and shrunk toward 12px while
+                    # it grew. A settled answer has neither problem, and on
+                    # the real bridge each of those discarded frames also
+                    # cost four image tiles at ~414ms apiece.
+                    await self._hud.status("JOAT · answering…")
                 parts.append(chunk)
+            if not parts:
+                # The stream ended without a single token. Five separate
+                # exits in this method could end an ADDRESSED turn with
+                # nothing painted and nothing logged, and the wearer was
+                # left reading "listening" forever — watched live on
+                # 2026-09-08, turn 174: "Hey JOAT, what is the capital of
+                # France?" transcribed, addressed, and silently discarded.
+                # The engine already refused to let an EXCEPTION do this
+                # (see the handler in run_forever); an empty answer is the
+                # same failure wearing different clothes.
+                log.warning("addressed turn produced no reply")
+                await self._answer_failed(prompt_revision, prompt_ticket)
+                return
             if parts:
                 if not reply_is_current():
+                    log.info("addressed turn dropped: surface changed before painting")
                     return
                 reply_text = "".join(parts)
+                await self._hud.assistant(reply_text)
                 # JOAT just spoke to the wearer; a reply invites an answer.
                 self._conversation.open()
                 # Hold it long enough to READ, not a flat six seconds.
@@ -972,6 +1015,23 @@ class VoiceOrchestrator:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
             await self._restore_status()
+
+    async def _answer_failed(
+        self, prompt_revision: int, prompt_ticket: PromptTicket | None,
+    ) -> None:
+        """Say so on the lens when an addressed question produced nothing.
+
+        Silence is the one response the wearer cannot act on: it is
+        indistinguishable from a long think, so they wait, then repeat
+        themselves, then conclude the assistant is broken. Anything true is
+        better than the status line still reading "listening".
+        """
+        if not self._reply_surface_current(prompt_revision, prompt_ticket):
+            return
+        message = "I didn't get an answer for that — say it again."
+        await self._hud.assistant(message)
+        self._answer_until = time.monotonic() + HudWriter.reading_ms(message) / 1000
+        await self._hud.settle_assistant(HudWriter.reading_ms(message))
 
     def _reply_surface_current(self, revision: int, ticket: PromptTicket | None) -> bool:
         """Ordinary replies cannot paint while an input question owns the HUD.
@@ -1046,7 +1106,11 @@ class VoiceOrchestrator:
         could take the lens while the wearer was still reading the reply
         they asked for.
         """
-        return time.monotonic() < self._answer_until
+        # getattr, not attribute access: this runs on the addressing gate
+        # for EVERY utterance, and a missing attribute here would raise
+        # inside the voice path and lose the wearer's turn outright. A
+        # display-timing question must never be able to do that.
+        return time.monotonic() < getattr(self, "_answer_until", 0.0)
 
     def _continues(
         self, head: _Transcribed, previous_endpointed_at: float, nxt: _QueuedUtterance,
