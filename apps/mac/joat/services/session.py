@@ -412,10 +412,36 @@ class SessionManager:
             log.warning("scoped brainstorm availability failed error=%s", type(exc).__name__)
             return False
 
+    def set_answer_probe(self, probe: Callable[[], bool]) -> None:
+        """Let the session manager see whether a reply is still being read.
+
+        Late-bound because the orchestrator is built after this manager and
+        owns that clock; a constructor argument would force one of them to
+        exist twice.
+        """
+        self._answer_probe = probe
+
+    def _answer_being_read(self) -> bool:
+        probe = getattr(self, "_answer_probe", None)
+        try:
+            return bool(probe()) if probe is not None else False
+        except Exception:
+            return False  # never let a probe decide the HUD by failing
+
     def notify(self, card: Card) -> None:
         """Channel-event interrupt policy (SESSION_MODEL.md): an idle HUD
         shows the card now; an active session is never interrupted — cards
-        queue and drain the moment it ends."""
+        queue and drain the moment it ends.
+
+        An ANSWER the wearer is still reading is protected the same way. It
+        was not, so a message could take the lens mid-sentence — which the
+        wearer sees as the answer being replaced by a different screen.
+        """
+        if self._active is None and self._answer_being_read():
+            self._enqueue_card((card, None))
+            log.info("card queued behind an answer still being read")
+            self._drain_after_answer()
+            return
         if self._active is not None:
             self._enqueue_card((card, None))
             log.info("card queued behind active session urgency=%s", card.urgency.name)
@@ -468,6 +494,33 @@ class SessionManager:
         # The newest is the one just painted large; the rest stack below it.
         previous = list(reversed(recent[:-1]))[:2]
         await self._hud.tray("\n".join(card.home_row() for card in previous))
+
+    def _drain_after_answer(self) -> None:
+        """Deliver what waited, once the answer has had its reading time.
+
+        Only a session ENDING drained this queue, so a card held back for an
+        answer would have waited for a Brainstorm that may never come. The
+        wearer would simply never see the message.
+        """
+        existing = getattr(self, "_answer_drain", None)
+        if existing is not None and not existing.done():
+            return
+
+        async def wait_then_drain() -> None:
+            # Poll rather than sleep on a computed deadline: the answer's
+            # hold can be extended by a new reply arriving behind it.
+            for _ in range(240):  # 15s max hold, generous ceiling
+                await asyncio.sleep(0.25)
+                if self._closed:
+                    return
+                if self._active is not None or self._answer_being_read():
+                    continue
+                self._drain_cards()
+                return
+            if not self._closed and self._active is None:
+                self._drain_cards()
+
+        self._answer_drain = asyncio.get_running_loop().create_task(wait_then_drain())
 
     def _enqueue_card(self, entry: tuple[Card, asyncio.Future[None] | None]) -> None:
         """Queue one card behind the active session, bounded.

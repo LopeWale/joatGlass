@@ -83,6 +83,16 @@ its true start and the real silence between two fragments.
 
 BYTES_PER_SECOND = 16_000 * 2
 
+SPLIT_REQUEST_WINDOW_S = 6.0
+"""How long an ignored fragment waits to be claimed by the rest of itself.
+
+Measured from the shredding it exists to repair: consecutive pieces of one
+sentence were endpointed 1.4-3.0s apart, so six seconds covers a badly cut
+request without reaching back to unrelated speech. The rejoined text still
+has to pass the wake gate, so the window cannot admit anything the gate
+would not have admitted anyway.
+"""
+
 CONVERSATION_WINDOW_S = 30.0
 """How long JOAT keeps listening after it has finished answering.
 
@@ -286,6 +296,11 @@ class VoiceOrchestrator:
             tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
         )
         self._conversation = ConversationWindow(conversation_window_s)
+        # Until when an answer is still meant to be readable on the lens.
+        self._answer_until = 0.0
+        # The last utterance that was NOT for JOAT, kept only long enough to
+        # find out whether it was the front half of one that was.
+        self._unaddressed_tail: tuple[str, float] | None = None
         self._stt = stt
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
@@ -790,7 +805,20 @@ class VoiceOrchestrator:
                 )
             ):
                 return
-            addressed = self._addressed(transcript.text)
+            heard = transcript.text
+            tail = self._unaddressed_tail
+            self._unaddressed_tail = None
+            addressed = self._addressed(heard)
+            if addressed is None and tail is not None and (
+                time.monotonic() - tail[1] < SPLIT_REQUEST_WINDOW_S
+            ):
+                rejoined = f"{tail[0].rstrip()} {heard.lstrip()}".strip()
+                addressed = self._addressed(rejoined)
+                if addressed is not None:
+                    log.info(
+                        "rejoined a split request (%d + %d chars)",
+                        len(tail[0]), len(heard),
+                    )
             if addressed and self._feature_navigation is not None:
                 navigation = await self._feature_navigation(addressed)
                 if navigation is not None:
@@ -829,6 +857,20 @@ class VoiceOrchestrator:
                     and await self._selected_message_reply(transcript.text, provenance)
                 ):
                     return
+                # Keep it, briefly. The VAD cuts on 1.0s of quiet, so one
+                # spoken request routinely arrives in pieces — observed on
+                # the simulator 2026-09-08, "Hey JOAT, why is the sky blue?"
+                # became five utterances of 10, 1, 23 and 4 characters, and
+                # every one was discarded for carrying no wake word. The
+                # in-flight join in _run_turn cannot help here: an ignored
+                # fragment finishes instantly, so the next piece always
+                # arrives after its turn is over.
+                #
+                # Rejoining is safe because the result must still pass the
+                # SAME wake gate. Two pieces of room talk stay two pieces of
+                # room talk; only a request whose name landed in an earlier
+                # piece is recovered.
+                self._unaddressed_tail = (transcript.text, time.monotonic())
                 log.info("unaddressed speech ignored chars=%d", len(transcript.text))
                 return
             if not addressed:
@@ -872,7 +914,10 @@ class VoiceOrchestrator:
                     self._observe_latency(latency_turn, "first_reply_sent", started_at)
                     if not self._reply_surface_current(prompt_revision, prompt_ticket):
                         return
-                    await self._hud.settle_assistant()
+                    # A spoken command's answer is read like any other.
+                    hold_ms = HudWriter.reading_ms(answer)
+                    self._answer_until = time.monotonic() + hold_ms / 1000
+                    await self._hud.settle_assistant(hold_ms)
                     self._observe_latency(latency_turn, "reply_complete", started_at)
                     return
             # The wearer's words go to their OWN region, so the reply no
@@ -917,7 +962,10 @@ class VoiceOrchestrator:
                 reply_text = "".join(parts)
                 # JOAT just spoke to the wearer; a reply invites an answer.
                 self._conversation.open()
-                await self._hud.settle_assistant()
+                # Hold it long enough to READ, not a flat six seconds.
+                hold_ms = HudWriter.reading_ms(reply_text)
+                self._answer_until = time.monotonic() + hold_ms / 1000
+                await self._hud.settle_assistant(hold_ms)
                 self._observe_latency(latency_turn, "reply_complete", started_at)
                 log.info("reply emitted chars=%d", len(reply_text))
                 if self._status is not None:
@@ -990,6 +1038,16 @@ class VoiceOrchestrator:
             if lag > warn_s:
                 log.warning("event loop stalled %.2fs — replies delayed by at least this", lag)
 
+    def answer_on_screen(self) -> bool:
+        """Is an answer still sitting on the lens, waiting to be read?
+
+        A notification card interrupts whatever is displayed. Sessions were
+        already protected from that; a plain answer was not, so a message
+        could take the lens while the wearer was still reading the reply
+        they asked for.
+        """
+        return time.monotonic() < self._answer_until
+
     def _continues(
         self, head: _Transcribed, previous_endpointed_at: float, nxt: _QueuedUtterance,
     ) -> bool:
@@ -1039,10 +1097,26 @@ class VoiceOrchestrator:
         spoken = self._strip_wake_word(text)
         if spoken is not None:
             return spoken
-        if self._conversation.is_open:
-            log.info("follow-up heard inside the conversation window")
-            return text
-        return None
+        if not self._conversation.is_open:
+            return None
+        # An answer still inside its reading time is being READ, not talked
+        # over. Admitting bare speech here is how the wearer's own answer
+        # got destroyed: observed on the simulator 2026-09-08, three stray
+        # 23/23/10-character fragments of mic echo were each taken as
+        # follow-ups and each painted over the reply being read — the model
+        # itself called the last one "a stray bit of transcription", on top
+        # of the answer that had been asked for.
+        #
+        # Interjecting is still possible and still cheap: the wake word and
+        # the bare stop words both reach _interrupts ahead of this. What is
+        # refused is silent, unaddressed audio replacing visible words. Once
+        # the answer has had its reading time, ordinary follow-ups flow
+        # again, which is the whole point of the window.
+        if self.answer_on_screen():
+            log.info("held speech while an answer is still being read")
+            return None
+        log.info("follow-up heard inside the conversation window")
+        return text
 
     def _strip_wake_word(self, text: str) -> str | None:
         """None = not addressed to us; '' = wake word alone; else the query.

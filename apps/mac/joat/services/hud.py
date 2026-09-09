@@ -119,6 +119,32 @@ class HudWriter:
             answers_wearer=answers_wearer,
         ))
 
+    @staticmethod
+    def reading_ms(text: str) -> int:
+        """How long to leave an answer up, from how long it takes to READ.
+
+        Six seconds was a constant, applied to every answer whatever its
+        length, and it is not an SDK or firmware limit — @evenrealities/
+        even_hub_sdk 0.0.14 has no dismiss contract at all; the number was
+        ours. Measured against six real replies on the wearer's glasses,
+        five of them were taken off the lens before an average reader could
+        finish, and the two longest before a FAST reader could.
+
+        Brysbaert (2019), "How many words do we read per minute?" — 190
+        studies, 18,573 participants — puts English non-fiction silent
+        reading at 238 wpm, most adults between 175 and 300. This uses the
+        SLOW end of that range, because the cost of holding an answer a
+        second too long is nothing and the cost of taking it away early is
+        the wearer losing the answer entirely.
+
+        Clamped to the 1-15s the plugin accepts (HudPresenter validates the
+        range), with the old six seconds as the floor so nothing that fits
+        today gets shorter.
+        """
+        words = len(text) / 5.5  # ~5.5 chars/word incl. space, non-fiction
+        needed_ms = int(words / 175 * 60_000) + 1_500  # + a beat to look up
+        return max(6_000, min(15_000, needed_ms))
+
     async def settle_assistant(self, dismiss_after_ms: int = 6_000) -> None:
         """Leave the completed answer readable briefly, then reveal the same view."""
         await self._transport.send(AssistantOverlay(

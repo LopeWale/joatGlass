@@ -238,6 +238,14 @@ class NotificationChannel:
     # invents. Only longer content earns a model-written summary.
     VERBATIM_CHARS = 70
 
+    STALE_CARD_S = 120.0
+    """Older than this and a card no longer interrupts the lens.
+
+    Two minutes is deliberately generous: today's median delivery lag was
+    1.2s, so nothing arriving in the normal course is affected, and only
+    the backlog that drains after a reconnect is held back.
+    """
+
     async def _handle(self, n: Notification) -> bool:
         raw = (n.body or n.subtitle or n.title).strip()
         # macOS elides the banner body it renders, and the Accessibility
@@ -307,6 +315,25 @@ class NotificationChannel:
                 level = Urgency.NOTIFY
         if not summary.strip():
             summary = n.body or n.title
+
+        # A card interrupts whatever is on the lens. That is worth doing for
+        # something that just happened and never for something that did not:
+        # measured on the wearer's glasses 2026-09-08, 15 of 109 delivered
+        # cards were over a minute stale and the worst was 3.15 DAYS old,
+        # because a backlog drains up to 50 at a time (notification_mux)
+        # whenever the link returns. Those are what "a different screen
+        # replaces it" looks like from the wearer's side.
+        #
+        # Staleness is not suppression: the card still lands in the log and
+        # the notifications tray, where the wearer can read it on purpose.
+        # It just does not seize a screen minutes or days after the fact.
+        age_s = time.time() - n.delivered_unix if n.delivered_unix > 0 else 0.0
+        if age_s > self.STALE_CARD_S:
+            log.info(
+                "notification disposition=too_stale_to_interrupt channel=%s age_s=%.0f",
+                channel, age_s,
+            )
+            return False
 
         card = self._policy.admit(Card(
             source=source, channel=channel, summary=summary, body=raw, urgency=level,
