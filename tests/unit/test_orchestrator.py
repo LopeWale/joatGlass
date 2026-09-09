@@ -1031,7 +1031,7 @@ class TestStreamedReply:
 
         assert "hello" in [message.text for message in transport.sent]
 
-    async def test_chunks_stream_as_show_then_appends(self) -> None:
+    async def test_a_reply_paints_one_settled_frame_not_one_per_chunk(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("tell me a story")
         orch = VoiceOrchestrator(
             transport, engine, vad=TEST_VAD(), replier=StreamingReplier(["Once ", "upon ", "a time."])
@@ -1043,12 +1043,17 @@ class TestStreamedReply:
         await drain()
 
         hud = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
-        # Assistant output is its own overlay: it streams above the feature,
-        # then settles without rewriting that feature's main region.
+        # ONE frame, once, when there is a whole answer to show.
+        #
+        # Painting per chunk re-wrapped and re-fitted the answer on every
+        # token, and the renderer shrinks its font toward 12px as the text
+        # grows — so the wearer watched the words change size and re-flow,
+        # and a frame captured mid-append showed a corrupted seam
+        # ("you're leu're left") and an answer that opened with "…". A
+        # settled reply has neither: all six of the wearer's real replies
+        # (123-214 chars) fit the four-line card at 14px, which holds 224.
         assert [(m.text, m.operation) for m in hud] == [
-            ("Once ", "replace"),
-            ("upon ", "append"),
-            ("a time.", "append"),
+            ("Once upon a time.", "replace"),
             ("", "settle"),
         ]
         assert region(transport, ContainerId.CONTEXT) == ["you  tell me a story"]

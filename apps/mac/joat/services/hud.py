@@ -109,12 +109,27 @@ class HudWriter:
         """Status bar line (top 32px)."""
         await self._transport.send(HudText(text=text, container_id=ContainerId.STATUS_BAR))
 
+    #: The wire refuses overlay text longer than this
+    #: (core/protocol.py AssistantOverlay). Every producer goes through
+    #: assistant(), so the bound belongs here rather than in each of them.
+    MAX_OVERLAY_CHARS = 512
+
     async def assistant(
         self, text: str, *, append: bool = False, answers_wearer: bool = False,
     ) -> None:
-        """Show JOAT above the active feature without replacing its surface."""
+        """Show JOAT above the active feature without replacing its surface.
+
+        Bounded to the wire contract. This was unreachable while a reply
+        painted one chunk at a time — each frame was a few dozen characters
+        — and became reachable the moment a settled reply began arriving as
+        ONE frame. An over-long answer then raised ProtocolError out of the
+        voice turn, and the wearer was shown "Something went wrong with
+        that" instead of the answer that had been produced for them.
+        Keeping the opening 512 characters loses the tail of a rare long
+        reply; raising the error loses the whole thing.
+        """
         await self._transport.send(AssistantOverlay(
-            text=text,
+            text=text[:self.MAX_OVERLAY_CHARS],
             operation="append" if append else "replace",
             answers_wearer=answers_wearer,
         ))

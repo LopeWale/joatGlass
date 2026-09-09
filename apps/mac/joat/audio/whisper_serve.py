@@ -22,6 +22,7 @@ import difflib
 import io
 import json
 import logging
+import re
 import shutil
 import urllib.error
 import urllib.request
@@ -90,6 +91,34 @@ ECHO_RUN_CHARS = 24
 
 ECHO_COVERAGE = 0.6
 """...and how much of the TRANSCRIPT that run must account for."""
+
+
+_SOUND_EVENT = re.compile(
+    r"^[\s\-–—]*(?:"
+    r"\*[^*]*\*"        # *phone rings*, *sniff*
+    r"|\[[^\]]*\]"      # [BLANK_AUDIO], [Music]
+    r"|\([^)]*\)"        # (door closes)
+    r"|[\u266a\u266b\u2669\u266c]+[^\u266a\u266b\u2669\u266c]*[\u266a\u266b\u2669\u266c]*"
+    r")[\s\-–—.]*$",
+    re.IGNORECASE,
+)
+
+
+def is_sound_event(text: str) -> bool:
+    """True when Whisper described a NOISE instead of transcribing speech.
+
+    Whisper annotates non-speech audio in its own notation — "*phone
+    rings*", "*sniff*", "[BLANK_AUDIO]", "(door closes)", a musical note
+    run. Nothing downstream knew that convention, so an annotation was
+    treated as the wearer talking: seen on the wearer's lens as
+    `LAST QUERY  you  *phone rings*`, and seen answering itself when a
+    stray `*sniff*` opened a turn and painted over the reply being read.
+
+    Only a transcript that is ENTIRELY one annotation is dropped. Speech
+    that merely contains a parenthetical is the wearer talking, and the
+    wearer saying "call it (a) draft" must survive intact.
+    """
+    return bool(_SOUND_EVENT.fullmatch(text.strip())) if text.strip() else False
 
 
 def is_prompt_echo(text: str, prompt: str | None) -> bool:
@@ -424,6 +453,9 @@ class WhisperServeEngine(SttEngine):
             # This transcription is discarded specifically because it is not
             # wearer speech.  Do not turn it into durable diagnostic content.
             log.info("dropped prompt-echo hallucination chars=%d", len(transcript.text))
+            return None
+        if transcript is not None and is_sound_event(transcript.text):
+            log.info("dropped sound-event annotation chars=%d", len(transcript.text))
             return None
         return transcript
 
