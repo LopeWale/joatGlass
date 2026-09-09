@@ -1545,6 +1545,11 @@ async def main() -> None:
         surface_revision=lambda: capabilities.view_revision,
     )
     orchestrator.attach()
+    # A notification card must not take the lens while the wearer is still
+    # reading an answer. Sessions were already protected; a plain reply was
+    # not, and the orchestrator owns the clock that says how long the answer
+    # is meant to stay readable.
+    sessions.set_answer_probe(orchestrator.answer_on_screen)
 
     # The wearer's name from the host account (getUserInfo -> hello), unless
     # the CLI already set one. Grounded once — greet fires on every reconnect.
