@@ -32,7 +32,7 @@ from joat.core.protocol import (
     DownlinkMessage,
     HudText,
 )
-from joat.services.orchestrator import VoiceOrchestrator
+from joat.services.orchestrator import ConversationWindow, VoiceOrchestrator
 from joat.services.greetings import greeting_response
 from joat.services.hud import HudWriter
 from joat.channels.cards import CardLog
@@ -1570,3 +1570,74 @@ class TestAVoiceTurnThatRaisesDoesNotVanish:
         )
         with pytest.raises(asyncio.CancelledError):
             await orchestrator._drain_utterances(b"\x00" * 3200, None)
+
+
+class TestTheConversationWindow:
+    """After JOAT answers, the wearer keeps talking — not repeating its name.
+
+    The wearer's own log, 2026-09-08: an addressed request at 17:31:07 was
+    answered, then a 157-character follow-up at 17:31:23 and a 51-character
+    one at 17:31:43 were both discarded as unaddressed. "If I don't say it a
+    certain way, it's useless."
+    """
+
+    def gate(self, seconds: float = 30.0) -> tuple[VoiceOrchestrator, object]:
+        class Clock:
+            t = 1_000.0
+            def __call__(self) -> float:
+                return self.t
+        clock = Clock()
+        o = VoiceOrchestrator.__new__(VoiceOrchestrator)
+        o._wake_words = ("hey joat", "joat")
+        o._anchored_wake = ("jokes", "jot", "jolt")
+        o._anchor_window = 2
+        o._fuzzy_wake = ("joat", "jode", "jodh")
+        o._fuzzy_threshold = 0.86
+        o._conversation = ConversationWindow(seconds, clock)
+        return o, clock
+
+    def test_a_follow_up_after_a_reply_is_heard_without_the_name(self) -> None:
+        o, clock = self.gate()
+        assert o._addressed("JOAT what's on my calendar") == "what's on my calendar"
+        o._conversation.open()          # JOAT replied
+        clock.t += 16                   # the wearer's real pause
+        assert o._addressed("and what about tomorrow") == "and what about tomorrow"
+
+    def test_each_reply_re_opens_it_so_a_real_exchange_flows(self) -> None:
+        o, clock = self.gate()
+        o._conversation.open()
+        for pause, said in ((16, "and what about tomorrow"),
+                            (20, "move the second one to friday"),
+                            (25, "no the other one")):
+            clock.t += pause
+            assert o._addressed(said) == said, said
+            o._conversation.open()      # JOAT answered again
+
+    def test_silence_closes_it_and_room_speech_is_not_a_prompt(self) -> None:
+        o, clock = self.gate()
+        o._conversation.open()
+        clock.t += 31
+        # Past the window the wearer is no longer in a conversation, so the
+        # room is the room again. This is the boundary that keeps explicit
+        # invocation true (RULES.md) rather than a standing invitation.
+        assert o._addressed("so anyway I told him it was fine") is None
+
+    def test_it_never_opens_on_unaddressed_speech(self) -> None:
+        o, _ = self.gate()
+        # Nothing has addressed JOAT, so nothing may be heard — the window
+        # is a continuation of an invitation, never a substitute for one.
+        assert o._addressed("tokens was wasted on and you didn't get it done") is None
+        assert not o._conversation.is_open
+
+    def test_a_zero_window_restores_the_old_wake_every_time_rule(self) -> None:
+        o, _ = self.gate(seconds=0.0)
+        o._conversation.open()
+        assert not o._conversation.is_open
+        assert o._addressed("and what about tomorrow") is None
+
+    def test_an_open_window_lets_the_wearer_interrupt_a_streaming_reply(self) -> None:
+        o, _ = self.gate()
+        o._conversation.open()
+        # Cutting a long answer short is the most conversational act there
+        # is; it must not require the wake word either.
+        assert o._interrupts("actually never mind that, what about friday") == "addressed"

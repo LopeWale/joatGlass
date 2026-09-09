@@ -65,6 +65,55 @@ INTERRUPT_WORDS = frozenset({
 })
 
 
+CONVERSATION_WINDOW_S = 30.0
+"""How long JOAT keeps listening after it has finished answering.
+
+Measured against the wearer's own speech: the follow-ups this window
+exists to catch arrived 16s and 20s after the request JOAT had just
+answered, and were both discarded. Thirty seconds covers a normal pause
+for thought with margin, and still closes long before it could become a
+standing invitation to the room.
+"""
+
+
+class ConversationWindow:
+    """Whether JOAT is still in a conversation it was invited into.
+
+    Explicit invocation is the rule (RULES.md), and this does not weaken
+    it: the window opens ONLY after the wearer addressed JOAT by name and
+    JOAT answered. It never opens on room speech, it closes on its own,
+    and every reply re-opens it, so a real back-and-forth flows for as
+    long as the wearer keeps talking and lapses the moment they stop.
+
+    Its own object because "am I still being spoken to?" is a rule with a
+    lifetime, not a timestamp comparison to repeat at each call site — and
+    because the surface that TELLS the wearer it is open has to read the
+    same answer the gate acts on.
+    """
+
+    def __init__(
+        self,
+        seconds: float = CONVERSATION_WINDOW_S,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._seconds = seconds
+        self._monotonic = monotonic
+        self._open_until = 0.0
+
+    def open(self) -> None:
+        """JOAT just answered; keep listening."""
+        if self._seconds > 0:
+            self._open_until = self._monotonic() + self._seconds
+
+    def close(self) -> None:
+        """The exchange is over — the next words need the wake word again."""
+        self._open_until = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        return self._monotonic() < self._open_until
+
+
 @dataclass(frozen=True, slots=True)
 class _QueuedUtterance:
     pcm: bytes
@@ -114,6 +163,7 @@ class VoiceOrchestrator:
         anchored_wake: tuple[str, ...] = ("jokes", "jot", "jolt"),
         anchor_window: int = 2,
         fuzzy_threshold: float = 0.86,
+        conversation_window_s: float = CONVERSATION_WINDOW_S,
         latency_observer: LatencyObserver | None = None,
         frames: AudioFrameSource | None = None,
         prompted_input: PromptedInputDispatcher | None = None,
@@ -175,6 +225,7 @@ class VoiceOrchestrator:
         self._wake_words = (
             tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
         )
+        self._conversation = ConversationWindow(conversation_window_s)
         self._stt = stt
         self._vad = vad or RmsVad()
         self._stt_available = stt_available
@@ -540,7 +591,7 @@ class VoiceOrchestrator:
         heard without the wake word. Anything else is room talk or an answer
         to a question on the glass, and waits its turn.
         """
-        if self._strip_wake_word(text) is not None:
+        if self._addressed(text) is not None:
             return "addressed"
         lowered = re.sub(r"[^a-z' ]+", " ", text.lower().replace("’", "'"))
         return "stop" if " ".join(lowered.split()) in INTERRUPT_WORDS else None
@@ -558,7 +609,13 @@ class VoiceOrchestrator:
             if self._sessions is not None and self._sessions.active
             else None
         )
-        await self._hud.status(active_status or "JOAT · listening")
+        # Say which of the two states the wearer is actually in. "listening"
+        # was shown whether the next sentence would be heard or silently
+        # dropped, so the only safe habit it taught was to say the name
+        # every time — the habit that made this feel like a command line.
+        idle = ("JOAT · go on" if self._conversation.is_open
+                else "JOAT · listening")
+        await self._hud.status(active_status or idle)
 
     async def _run_turn(self, queued: _QueuedUtterance) -> None:
         """One utterance: transcribe, then act — while listening for the next.
@@ -655,7 +712,7 @@ class VoiceOrchestrator:
                 )
             ):
                 return
-            addressed = self._strip_wake_word(transcript.text)
+            addressed = self._addressed(transcript.text)
             if addressed and self._feature_navigation is not None:
                 navigation = await self._feature_navigation(addressed)
                 if navigation is not None:
@@ -699,6 +756,11 @@ class VoiceOrchestrator:
             if not addressed:
                 if not self._reply_surface_current(prompt_revision, prompt_ticket):
                     return
+                # "JOAT" alone is the wearer opening a conversation and
+                # waiting to be asked. Answering "Yes?" and then demanding
+                # the name again in the very next breath is the behaviour
+                # this window exists to end.
+                self._conversation.open()
                 await self._hud.assistant("Yes?")
                 if not self._reply_surface_current(prompt_revision, prompt_ticket):
                     return
@@ -726,7 +788,9 @@ class VoiceOrchestrator:
                         return
                     await self._hud.assistant(answer)
                     # A deterministic answer is a reply too; it was missing
-                    # from the receipt (the audit's A6).
+                    # from the receipt (the audit's A6), and it continues a
+                    # conversation for the same reason a model reply does.
+                    self._conversation.open()
                     self._observe_latency(latency_turn, "first_reply_sent", started_at)
                     if not self._reply_surface_current(prompt_revision, prompt_ticket):
                         return
@@ -773,6 +837,8 @@ class VoiceOrchestrator:
                 if not reply_is_current():
                     return
                 reply_text = "".join(parts)
+                # JOAT just spoke to the wearer; a reply invites an answer.
+                self._conversation.open()
                 await self._hud.settle_assistant()
                 self._observe_latency(latency_turn, "reply_complete", started_at)
                 log.info("reply emitted chars=%d", len(reply_text))
@@ -836,6 +902,22 @@ class VoiceOrchestrator:
             lag = loop.time() - before - interval_s
             if lag > warn_s:
                 log.warning("event loop stalled %.2fs — replies delayed by at least this", lag)
+
+    def _addressed(self, text: str) -> str | None:
+        """The wearer's request, or None if this speech was not for JOAT.
+
+        The wake word is how a conversation STARTS, not a toll charged on
+        every sentence of it. Once JOAT has answered, the wearer's next
+        words continue that exchange — which is what "conversation" means
+        and what the wake gate alone could never be.
+        """
+        spoken = self._strip_wake_word(text)
+        if spoken is not None:
+            return spoken
+        if self._conversation.is_open:
+            log.info("follow-up heard inside the conversation window")
+            return text
+        return None
 
     def _strip_wake_word(self, text: str) -> str | None:
         """None = not addressed to us; '' = wake word alone; else the query.
