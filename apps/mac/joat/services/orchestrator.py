@@ -65,6 +65,24 @@ INTERRUPT_WORDS = frozenset({
 })
 
 
+CONTINUATION_GAP_S = 1.6
+"""Resume within this long of the last utterance's audio ending and you are
+still saying the same thing.
+
+The VAD closes an utterance after 1.0s of quiet (vad.RmsVad.hangover_batches)
+because a longer hangover never closed one in a noisy room. That is a sound
+rule for cutting AUDIO and a terrible one for deciding a person has finished
+a THOUGHT: an ordinary mid-sentence pause ends the utterance, the engine
+answers the fragment, and the rest of the sentence arrives as a separate
+request. Observed live, 2026-09-08 17:40:44-17:40:50 — one spoken thought
+became transcripts of 262, 17 and 25 characters, each handled alone.
+
+Bytes are the clock: 16 kHz mono 16-bit, so a fragment's audio length gives
+its true start and the real silence between two fragments.
+"""
+
+BYTES_PER_SECOND = 16_000 * 2
+
 CONVERSATION_WINDOW_S = 30.0
 """How long JOAT keeps listening after it has finished answering.
 
@@ -138,6 +156,48 @@ class _Transcribed:
     transcript: Transcript
     source: AudioSource | None
     provenance: UtteranceProvenance | None
+
+
+def _joined(head: _Transcribed, tail: _Transcribed) -> _Transcribed:
+    """One request from two fragments of the same sentence.
+
+    The FIRST fragment's turn is kept, so the wearer's wait is still
+    measured from when they started speaking rather than restarting the
+    clock every time they take a breath.
+
+    The provenance is MERGED rather than inherited. It keeps the opening
+    fragment's identity — same source, same connection, same epoch, which
+    _continues has already proven — but its ingress span now ends where the
+    latest fragment ended. Inheriting the head's span unchanged made a third
+    fragment look like it had skipped every frame the second one carried, so
+    a sentence could be joined exactly twice and never more.
+    """
+    text = f"{head.transcript.text.rstrip()} {tail.transcript.text.lstrip()}".strip()
+    confidences = [c for c in (head.transcript.confidence, tail.transcript.confidence)
+                   if c is not None]
+    before, after = head.provenance, tail.provenance
+    provenance = before
+    if before is not None and after is not None:
+        provenance = UtteranceProvenance(
+            source=before.source,
+            connection_generation=before.connection_generation,
+            audio_epoch=before.audio_epoch,
+            first_ingress_ordinal=before.first_ingress_ordinal,
+            last_ingress_ordinal=after.last_ingress_ordinal,
+            speaker_roles=before.speaker_roles | after.speaker_roles,
+            mixed=before.mixed or after.mixed,
+        )
+    return _Transcribed(
+        turn=head.turn,
+        transcript=Transcript(
+            text=text,
+            is_final=tail.transcript.is_final,
+            # The joined request is only as trustworthy as its weakest part.
+            confidence=min(confidences) if confidences else None,
+        ),
+        source=head.source,
+        provenance=provenance,
+    )
 
 
 class VoiceOrchestrator:
@@ -631,6 +691,7 @@ class VoiceOrchestrator:
         if transcript is None:
             return
         head = _Transcribed(turn, transcript, queued.source, queued.provenance)
+        head_endpointed_at = queued.endpointed_at
         backlog: list[_Transcribed] = []
         loop = asyncio.get_running_loop()
         act = loop.create_task(self._act(head))
@@ -653,6 +714,22 @@ class VoiceOrchestrator:
                 if next_transcript is None:
                     continue
                 item = _Transcribed(next_turn, next_transcript, nxt.source, nxt.provenance)
+                if not act.done() and self._continues(head, head_endpointed_at, nxt):
+                    # The wearer never stopped talking; the VAD stopped
+                    # listening. Answering the fragment and then answering
+                    # the remainder separately is what "it responds before
+                    # I'm done" and "it drops context" both look like from
+                    # the outside. Take back the premature answer and ask
+                    # the whole sentence instead.
+                    act.cancel()
+                    await asyncio.gather(act, return_exceptions=True)
+                    log.info("joined a split utterance (%d + %d chars)",
+                             len(head.transcript.text), len(next_transcript.text))
+                    head = _joined(head, item)
+                    head_endpointed_at = nxt.endpointed_at
+                    act = loop.create_task(self._act(head))
+                    act_started = time.monotonic()
+                    continue
                 reason = None if act.done() else self._interrupts(next_transcript.text)
                 if reason == "addressed" and nxt.endpointed_at < act_started:
                     # Finished speaking before any answer existed: a second
@@ -673,6 +750,7 @@ class VoiceOrchestrator:
                     await self._hud.assistant("Stopped.", answers_wearer=True)
                     await self._hud.settle_assistant(2_000)
                 head = item
+                head_endpointed_at = nxt.endpointed_at
                 act = loop.create_task(self._act(head))
                 act_started = time.monotonic()
             await act
@@ -902,6 +980,44 @@ class VoiceOrchestrator:
             lag = loop.time() - before - interval_s
             if lag > warn_s:
                 log.warning("event loop stalled %.2fs — replies delayed by at least this", lag)
+
+    def _continues(
+        self, head: _Transcribed, previous_endpointed_at: float, nxt: _QueuedUtterance,
+    ) -> bool:
+        """Is this the rest of the sentence, or a new one?
+
+        Two things must both hold. The audio has to be continuous — measured
+        from the AUDIO, not from when transcription happened, because the
+        fragment's byte length gives when the wearer resumed speaking, and a
+        wall-clock comparison would read a slow transcription as a long
+        silence and split a sentence that was never split.
+
+        And it has to be the SAME capture. Audio either side of a reconnect
+        or a source change is not one sentence however close the timestamps
+        are: splicing across that boundary would attribute words to a
+        capture that never carried them, which is the thing the recovery
+        path exists to prevent.
+        """
+        before, after = head.provenance, nxt.provenance
+        if head.source != nxt.source:
+            return False
+        if before is not None and after is not None:
+            if (
+                before.source != after.source
+                or before.connection_generation != after.connection_generation
+                or before.audio_epoch != after.audio_epoch
+            ):
+                return False
+            # Contiguous ingress, or the silence between the fragments is
+            # not silence at all but audio that never arrived. Dropped
+            # frames are exactly the case where joining would invent the
+            # continuity it claims to have observed; the ordinals are the
+            # only place that loss is visible after the fact.
+            last, first = before.last_ingress_ordinal, after.first_ingress_ordinal
+            if last is not None and first is not None and first > last + 1:
+                return False
+        resumed_at = nxt.endpointed_at - (len(nxt.pcm) / BYTES_PER_SECOND)
+        return resumed_at - previous_endpointed_at < CONTINUATION_GAP_S
 
     def _addressed(self, text: str) -> str | None:
         """The wearer's request, or None if this speech was not for JOAT.

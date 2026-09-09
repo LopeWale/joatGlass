@@ -6,6 +6,7 @@ import asyncio
 import logging
 import struct
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,10 @@ from joat.core.protocol import (
     DownlinkMessage,
     HudText,
 )
-from joat.services.orchestrator import ConversationWindow, VoiceOrchestrator
+from joat.services.orchestrator import (
+    BYTES_PER_SECOND, ConversationWindow, VoiceOrchestrator,
+    _QueuedUtterance, _Transcribed, _Turn, _joined,
+)
 from joat.services.greetings import greeting_response
 from joat.services.hud import HudWriter
 from joat.channels.cards import CardLog
@@ -1497,7 +1501,6 @@ class TestAVoiceTurnThatRaisesDoesNotVanish:
             return None
 
         async def flush(self):
-            from joat.core.interfaces import Transcript
             return Transcript(
                 text="JOAT, brainstorm should we cache",
                 confidence=0.9, is_final=True,
@@ -1641,3 +1644,97 @@ class TestTheConversationWindow:
         # Cutting a long answer short is the most conversational act there
         # is; it must not require the wake word either.
         assert o._interrupts("actually never mind that, what about friday") == "addressed"
+
+
+class TestASentenceSplitByABreath:
+    """One thought, paused mid-sentence, is one request.
+
+    The wearer, 2026-09-08: "I won't get done talking before it responds...
+    it is still dropping context." Their log at 17:40:44-17:40:50 shows why
+    — one spoken thought arrived as transcripts of 262, 17 and 25
+    characters, each answered on its own, because the VAD closes an
+    utterance after 1.0s of quiet and an ordinary pause is longer than that.
+    """
+
+    def frag(
+        self, text: str, seconds: float, endpointed_at: float,
+        first: int, last: int, generation: str = "g1", epoch: str = "e1",
+    ) -> tuple[Any, Any]:
+        provenance = UtteranceProvenance(
+            "glasses", generation, epoch, first, last, frozenset({"self"}),
+        )
+        return (
+            _QueuedUtterance(
+                b"\0" * int(seconds * BYTES_PER_SECOND), "glasses",
+                provenance, endpointed_at,
+            ),
+            _Transcribed(
+                _Turn(1, endpointed_at, 0, None), Transcript(text, True),
+                "glasses", provenance,
+            ),
+        )
+
+    def orchestrator(self) -> VoiceOrchestrator:
+        return VoiceOrchestrator.__new__(VoiceOrchestrator)
+
+    def test_a_pause_mid_sentence_does_not_end_the_request(self) -> None:
+        o = self.orchestrator()
+        _, head = self.frag("JOAT check my calendar for tomorrow and also", 3.4, 100.0, 0, 20)
+        tail_q, _ = self.frag("tell me if I have anything", 1.2, 102.0, 21, 28)
+        assert o._continues(head, 100.0, tail_q)
+
+    def test_a_thought_may_be_joined_more_than_once(self) -> None:
+        o = self.orchestrator()
+        _, head = self.frag("JOAT check my calendar for tomorrow and also", 3.4, 100.0, 0, 20)
+        q2, t2 = self.frag("tell me if I have anything", 1.2, 102.0, 21, 28)
+        q3, t3 = self.frag("in the afternoon", 0.9, 103.4, 29, 34)
+        assert o._continues(head, 100.0, q2)
+        joined = _joined(head, t2)
+        # The merged provenance has to carry the ingress span forward, or a
+        # third fragment looks like it skipped everything the second one
+        # carried and the sentence can only ever be joined twice.
+        assert o._continues(joined, 102.0, q3)
+        joined = _joined(joined, t3)
+        assert joined.transcript.text == (
+            "JOAT check my calendar for tomorrow and also "
+            "tell me if I have anything in the afternoon"
+        )
+
+    def test_the_joined_request_keeps_the_opening_turn(self) -> None:
+        _, head = self.frag("JOAT check my calendar", 3.4, 100.0, 0, 20)
+        _, tail = self.frag("for tomorrow", 1.2, 102.0, 21, 28)
+        # The wearer's wait began when they started speaking; restarting the
+        # latency clock at every breath would report a fast reply to someone
+        # who had been waiting since the first word.
+        assert _joined(head, tail).turn is head.turn
+
+    def test_a_genuinely_new_request_is_not_glued_to_the_last_one(self) -> None:
+        o = self.orchestrator()
+        _, head = self.frag("JOAT check my calendar", 3.4, 100.0, 0, 20)
+        later, _ = self.frag("what's the weather", 1.0, 130.0, 60, 66)
+        assert not o._continues(head, 100.0, later)
+
+    def test_dropped_frames_are_never_spliced_over(self) -> None:
+        o = self.orchestrator()
+        _, head = self.frag("JOAT check my calendar", 3.4, 100.0, 0, 20)
+        # Ordinals jumped: audio between the fragments never arrived, so a
+        # join would invent the continuity it claims to have observed.
+        gapped, _ = self.frag("for tomorrow", 1.2, 102.0, 40, 46)
+        assert not o._continues(head, 100.0, gapped)
+
+    def test_a_reconnect_boundary_is_never_spliced_over(self) -> None:
+        o = self.orchestrator()
+        _, head = self.frag("JOAT check my calendar", 3.4, 100.0, 0, 20)
+        reconnected, _ = self.frag("for tomorrow", 1.2, 102.0, 21, 28, generation="g2")
+        assert not o._continues(head, 100.0, reconnected)
+        fresh_epoch, _ = self.frag("for tomorrow", 1.2, 102.0, 21, 28, epoch="e2")
+        assert not o._continues(head, 100.0, fresh_epoch)
+
+    def test_the_gap_is_measured_from_audio_not_from_transcription(self) -> None:
+        o = self.orchestrator()
+        _, head = self.frag("JOAT check my calendar", 3.4, 100.0, 0, 20)
+        # A long fragment endpointed far later is still continuous speech:
+        # nine seconds of talking, not nine seconds of silence. Comparing
+        # endpoint timestamps alone would split a sentence nobody paused in.
+        long_tail, _ = self.frag("for tomorrow and the day after", 9.0, 109.5, 21, 28)
+        assert o._continues(head, 100.0, long_tail)
