@@ -959,7 +959,7 @@ class SessionManager:
         if not text:
             return
         try:
-            await self._hud.assistant(text, answers_wearer=True)
+            await self._hud.receipt(text, answers_wearer=True)
         except Exception:
             log.warning("verb receipt not painted", exc_info=True)
 

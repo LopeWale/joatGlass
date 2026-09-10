@@ -189,6 +189,8 @@ class InputEvent:
     selected_name: str | None = None
     trace_id: str | None = None
     request_id: str | None = None
+    conversation_id: str | None = None
+    conversation_revision: int | None = None
     planning_anchor_unix_ms: int | None = None
 
     @property
@@ -497,6 +499,9 @@ class AssistantOverlay:
     text: str = ""
     operation: Literal["replace", "append", "settle", "dismiss"] = "replace"
     dismiss_after_ms: int | None = None
+    #: Visual meaning is explicit because a short answer (the recorded
+    #: ``Paris.`` case) is not a receipt merely because it has six letters.
+    presentation: Literal["answer", "receipt"] = "answer"
     #: This overlay ANSWERS something the wearer just asked on the surface
     #: they are looking at.
     #:
@@ -511,6 +516,8 @@ class AssistantOverlay:
     def to_wire(self) -> dict[str, Any]:
         if self.operation not in {"replace", "append", "settle", "dismiss"}:
             raise ProtocolError("assistant overlay operation is invalid")
+        if self.presentation not in {"answer", "receipt"}:
+            raise ProtocolError("assistant overlay presentation is invalid")
         if self.operation in {"replace", "append"}:
             if not self.text or len(self.text) > 512:
                 raise ProtocolError("assistant overlay text is invalid")
@@ -524,11 +531,88 @@ class AssistantOverlay:
         }
         if self.operation in {"replace", "append"}:
             message["text"] = self.text
+            message["presentation"] = self.presentation
         if self.dismiss_after_ms is not None:
             message["dismissAfterMs"] = self.dismiss_after_ms
         if self.answers_wearer:
             message["answersWearer"] = True
         return message
+
+
+_ASSISTANT_CONVERSATION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _assistant_conversation_identity(conversation_id: str, revision: int) -> None:
+    if not _ASSISTANT_CONVERSATION_ID.fullmatch(conversation_id):
+        raise ProtocolError("assistant conversation id is invalid")
+    if not isinstance(revision, int) or isinstance(revision, bool) or not 0 <= revision <= 2**53 - 1:
+        raise ProtocolError("assistant conversation revision is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantConversationTurn:
+    role: Literal["user", "assistant"]
+    text: str
+
+    def to_wire(self) -> dict[str, str]:
+        if self.role not in {"user", "assistant"}:
+            raise ProtocolError("assistant conversation turn role is invalid")
+        if not self.text or utf16_units(self.text) > 4_000:
+            raise ProtocolError("assistant conversation turn text is invalid")
+        return {"role": self.role, "text": self.text}
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantConversationView:
+    """One persistent native transcript shared by wearer and assistant."""
+
+    conversation_id: str
+    revision: int
+    state: Literal["thinking", "answering", "ready"]
+    turns: tuple[AssistantConversationTurn, ...]
+    continue_after_ms: int
+    earlier_turns_omitted: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        _assistant_conversation_identity(self.conversation_id, self.revision)
+        if self.state not in {"thinking", "answering", "ready"}:
+            raise ProtocolError("assistant conversation state is invalid")
+        if (
+            not isinstance(self.continue_after_ms, int)
+            or isinstance(self.continue_after_ms, bool)
+            or not 1_000 <= self.continue_after_ms <= 120_000
+        ):
+            raise ProtocolError("assistant conversation timeout is invalid")
+        if not 1 <= len(self.turns) <= 16:
+            raise ProtocolError("assistant conversation turn count is invalid")
+        turns = [turn.to_wire() for turn in self.turns]
+        if sum(utf16_units(turn["text"]) for turn in turns) > 16_000:
+            raise ProtocolError("assistant conversation transcript is invalid")
+        return {
+            "kind": "assistant.conversation",
+            "operation": "replace",
+            "conversationId": self.conversation_id,
+            "revision": self.revision,
+            "state": self.state,
+            "turns": turns,
+            "continueAfterMs": self.continue_after_ms,
+            "earlierTurnsOmitted": self.earlier_turns_omitted,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantConversationDismiss:
+    conversation_id: str
+    revision: int
+
+    def to_wire(self) -> dict[str, Any]:
+        _assistant_conversation_identity(self.conversation_id, self.revision)
+        return {
+            "kind": "assistant.conversation",
+            "operation": "dismiss",
+            "conversationId": self.conversation_id,
+            "revision": self.revision,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1435,6 +1519,8 @@ DownlinkMessage = (
     AuthAccepted
     | HudText
     | AssistantOverlay
+    | AssistantConversationView
+    | AssistantConversationDismiss
     | PromptPresent
     | PromptCancel
     | HudRebuild
@@ -2097,6 +2183,16 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 raise ProtocolError(
                     "input requestId must be a non-empty string of at most 128 characters"
                 )
+            conversation_id = raw.get("conversationId")
+            conversation_revision = raw.get("conversationRevision")
+            if (conversation_id is None) != (conversation_revision is None):
+                raise ProtocolError("input conversation identity must be complete")
+            if conversation_id is not None:
+                if not isinstance(conversation_id, str):
+                    raise ProtocolError("input conversation id is invalid")
+                if not isinstance(conversation_revision, int):
+                    raise ProtocolError("input conversation revision is invalid")
+                _assistant_conversation_identity(conversation_id, conversation_revision)
             try:
                 planning_anchor = _planning_anchor(
                     raw.get("planningAnchorUnixMs"),
@@ -2124,6 +2220,8 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     selected_name=raw.get("selectedName"),
                     trace_id=raw.get("traceId"),
                     request_id=request_id,
+                    conversation_id=conversation_id,
+                    conversation_revision=conversation_revision,
                     planning_anchor_unix_ms=planning_anchor,
                 )
             )

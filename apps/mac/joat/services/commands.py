@@ -2,10 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 from .greetings import greeting_response
 from .models import ModelRegistry, handle_model_command
+
+
+class CommandReply(str):
+    """A string-compatible command result with explicit display semantics."""
+
+    presentation: Literal["conversation", "receipt"]
+
+    def __new__(
+        cls, value: str, presentation: Literal["conversation", "receipt"],
+    ) -> "CommandReply":
+        reply = super().__new__(cls, value)
+        reply.presentation = presentation
+        return reply
+
+
+def _present(
+    value: str | None,
+    presentation: Literal["conversation", "receipt"],
+) -> CommandReply | None:
+    if value is None:
+        return None
+    if isinstance(value, CommandReply):
+        return value
+    return CommandReply(value, presentation)
 
 
 class CommandController(Protocol):
@@ -75,19 +99,19 @@ class VoiceCommandRouter:
         if self._message_replies.is_compose_armed():
             compose_result = await self._message_replies.handle_command(text)
             if compose_result is not None:
-                return compose_result
+                return _present(compose_result, "receipt")
         greeting_result = greeting_response(text)
         if greeting_result is not None:
-            return greeting_result
+            return _present(greeting_result, "conversation")
         reply_result = await self._message_replies.handle_command(text)
         if reply_result is not None:
-            return reply_result
+            return _present(reply_result, "receipt")
         # "Show my messages" / "open quicknotes" — deterministic surface
         # opens must never fall through to the general reply engine.
         if self._capability_opens is not None:
             open_result = await self._capability_opens.handle_command(text)
             if open_result is not None:
-                return open_result
+                return _present(open_result, "receipt")
         # The panel tabs: exact verbs with exact effects ("start a pomodoro",
         # "refresh the news", "look up …"). They answer from a cache or run
         # one bounded lookup, so they never need — or wait for — the model.
@@ -96,7 +120,7 @@ class VoiceCommandRouter:
                 continue
             panel_result = await panel.handle_command(text)
             if panel_result is not None:
-                return panel_result
+                return _present(panel_result, "receipt")
         if self._voice_notes is not None:
             voice_note_result = await self._voice_notes.handle_command(text)
             if voice_note_result is not None:
@@ -106,14 +130,14 @@ class VoiceCommandRouter:
                 # voice-prefixed generation this repaint arrives under).
                 if self._capability_opens is not None:
                     await self._capability_opens.reflect_quicknotes()
-                return voice_note_result
+                return _present(voice_note_result, "receipt")
         # Derived-note commands (summarize / ask / reminders / notes export)
         # sit between the recorder's exact lifecycle grammar and the broad
         # "note …" text prefix so neither can shadow them.
         if self._note_insights is not None:
             insight_result = await self._note_insights.handle_command(text)
             if insight_result is not None:
-                return insight_result
+                return _present(insight_result, "conversation")
         if self._notes is not None:
             note_result = await self._notes.handle_command(text)
             if note_result is not None:
@@ -123,11 +147,11 @@ class VoiceCommandRouter:
                 # page stale until the next visit.
                 if self._capability_opens is not None:
                     await self._capability_opens.reflect_quicknotes()
-                return note_result
+                return _present(note_result, "receipt")
         if self._productivity is not None:
             productivity_result = await self._productivity.handle_command(text)
             if productivity_result is not None:
-                return productivity_result
+                return _present(productivity_result, "receipt")
         # Agent Terminal claims only utterances that SAY "terminal", so it
         # sits late in the order: nothing broader can be shadowed by it.
         # "where are my brainstorms" — narrow, and only about Brainstorm's
@@ -135,13 +159,13 @@ class VoiceCommandRouter:
         if self._brainstorm_history is not None:
             history_result = await self._brainstorm_history.handle_command(text)
             if history_result is not None:
-                return history_result
+                return _present(history_result, "receipt")
         if self._terminal is not None:
             terminal_result = await self._terminal.handle_command(text)
             if terminal_result is not None:
-                return terminal_result
+                return _present(terminal_result, "receipt")
         if self._hermes is not None:
             hermes_result = await self._hermes.handle_command(text)
             if hermes_result is not None:
-                return hermes_result
-        return await handle_model_command(text, self._models)
+                return _present(hermes_result, "receipt")
+        return _present(await handle_model_command(text, self._models), "receipt")

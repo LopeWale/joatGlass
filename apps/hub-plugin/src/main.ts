@@ -742,16 +742,26 @@ async function boot(): Promise<void> {
       case 'assistant.overlay':
         if (msg.operation === 'replace' && msg.text) {
           await awaitCurrent(hud.showAssistantOverlay(
-            msg.text, false, msg.answersWearer === true,
+            msg.text, false, msg.answersWearer === true, msg.presentation ?? 'answer',
           ));
         } else if (msg.operation === 'append' && msg.text) {
           await awaitCurrent(hud.showAssistantOverlay(
-            msg.text, true, msg.answersWearer === true,
+            msg.text, true, msg.answersWearer === true, msg.presentation ?? 'answer',
           ));
         } else if (msg.operation === 'settle' && msg.dismissAfterMs !== undefined) {
           hud.settleAssistantOverlay(msg.dismissAfterMs);
         } else if (msg.operation === 'dismiss') {
           await awaitCurrent(hud.dismissAssistantOverlay());
+        }
+        break;
+      case 'assistant.conversation':
+        if (msg.operation === 'replace') {
+          await awaitCurrent(hud.showAssistantConversation(msg));
+        } else {
+          await awaitCurrent(hud.dismissAssistantConversation(
+            msg.conversationId,
+            msg.revision,
+          ));
         }
         break;
       case 'hud.list': {

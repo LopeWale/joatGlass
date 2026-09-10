@@ -57,7 +57,9 @@ class TestVoiceCommandRouter:
         replies = RecordingReplies()
         commands = VoiceCommandRouter(replies, ModelRegistry([]))
 
-        assert await commands("Good morning.") == "Good morning. How can I help?"
+        result = await commands("Good morning.")
+        assert result == "Good morning. How can I help?"
+        assert getattr(result, "presentation", None) == "conversation"
         assert replies.seen == []
 
     async def test_armed_new_message_compose_claims_a_greeting_shaped_body_before_greeting(self) -> None:
@@ -99,7 +101,9 @@ class TestVoiceCommandRouter:
             notes=notes,
         )
 
-        assert await commands("take a note exact") == "Saved QuickNote: exact"
+        result = await commands("take a note exact")
+        assert result == "Saved QuickNote: exact"
+        assert getattr(result, "presentation", None) == "receipt"
         assert notes.seen == ["take a note exact"]
         assert productivity.seen == []
 

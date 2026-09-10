@@ -32,9 +32,49 @@ export interface HudAmbientModel {
   unread: number;
 }
 
+export type AssistantOverlayPresentation = 'answer' | 'receipt';
+
 export interface AssistantOverlayVisual {
   text: string;
+  /** Answers own a readable card even when short; receipts may use the compact strip. */
+  presentation: AssistantOverlayPresentation;
+  /** Monotonic presenter identity so the same answer starts at page one when shown again. */
+  revision?: number;
 }
+
+/** The retained Even-style conversation composited into JOAT's existing
+ * four image tiles.  The controller resolves wrapping and scroll position;
+ * the renderer owns only the approved type, brightness, and panel geometry. */
+export interface AssistantConversationVisual {
+  conversationId: string;
+  revision: number;
+  state: 'thinking' | 'answering' | 'ready';
+  visibleLines: Array<{
+    role: 'user' | 'assistant' | 'separator';
+    text: string;
+  }>;
+  lineCapacity: number;
+  totalLines: number;
+  scrollFromTail: number;
+  maximumScrollFromTail: number;
+  indicatorFrame: number;
+  continuePrompt: boolean;
+}
+
+/** Geometry shared by wrapping and painting the raster conversation.  The
+ * fixed lower edge and one-row-at-a-time height are the observable Even AI
+ * behavior; the insets keep JOAT's 14px proportional face fully readable. */
+export const ASSISTANT_CONVERSATION_VISUAL_GEOMETRY = {
+  x: 36,
+  width: 504,
+  bottom: 260,
+  textInsetLeft: 18,
+  textInsetRight: 20,
+  lineHeight: 18,
+  maximumLines: 9,
+  topPadding: 13,
+  footerHeight: 28,
+} as const;
 
 type HudVisualBaseFrame =
   | {
@@ -108,10 +148,14 @@ type HudVisualBaseFrame =
  * truth states (failed/check/due) still arrive as a full productivity frame. */
 export type HudVisualFrame = HudVisualBaseFrame & {
   assistantOverlay?: AssistantOverlayVisual;
+  assistantConversation?: AssistantConversationVisual;
   actionOverlay?: { productivity: ProductivityHudModel };
 };
 
 export interface HudFrameRenderer {
+  measureAssistantConversationText?(text: string): number;
+  scrollAssistantOverlay?(direction: 'up' | 'down'): boolean;
+  assistantOverlayPageCount?(): number;
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   transcriptIsThinking?(): boolean;
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
@@ -125,12 +169,22 @@ export interface HudFramePainter {
   /** Receipt for this frame only. Cancellation and a page rebuild invalidate
    * the result; accepted identical pixels on the same page may be reused. */
   paintExact?(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean>;
+  /** Measure JOAT's authored assistant face, so controller wrapping and
+   * rendered pixels use one width contract rather than firmware text metrics. */
+  measureAssistantConversationText?(text: string): number;
+  /** Move a transient assistant answer between complete measured pages. */
+  scrollAssistantOverlay?(direction: 'up' | 'down'): boolean;
+  /** Page count from the most recently rendered assistant answer. */
+  assistantOverlayPageCount?(): number;
   /** Move the brainstorm/terminal transcript window; true if it moved. */
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
   transcriptIsThinking?(): boolean;
   /** The page on the glass was rebuilt: nothing painted before is on it. */
   forgetPage?(): void;
+  /** Stop queued tile work and wait until an already-started bridge write has
+   * observed cancellation before another native page definition is installed. */
+  preparePageTransition?(): Promise<void>;
   suspendDisplay?(): void;
   resumeDisplay?(): void;
 }
@@ -337,6 +391,7 @@ export class HudVisualSurface implements HudFramePainter {
   private pageRevision = 0;
   private displayActive = true;
   private displayRevision = 0;
+  private readonly idleWaiters: Array<() => void> = [];
 
   constructor(
     private readonly client: BridgeClient,
@@ -373,8 +428,33 @@ export class HudVisualSurface implements HudFramePainter {
     this.displayActive = true;
   }
 
+  async preparePageTransition(): Promise<void> {
+    if (!this.displayActive) return;
+    this.suspendDisplay();
+    if (this.painting) {
+      await new Promise<void>((resolve) => { this.idleWaiters.push(resolve); });
+    }
+    this.resumeDisplay();
+  }
+
   scrollTranscript(direction: 'up' | 'down'): boolean {
     return this.renderer.scrollTranscript?.(direction) ?? false;
+  }
+
+  scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
+    return this.renderer.scrollAssistantOverlay?.(direction) ?? false;
+  }
+
+  assistantOverlayPageCount(): number {
+    return this.renderer.assistantOverlayPageCount?.() ?? 1;
+  }
+
+  measureAssistantConversationText(text: string): number {
+    // A custom renderer may omit measurement. Eight pixels per code point is
+    // a conservative approximation for JOAT's 14px proportional body face;
+    // returning zero would disable wrapping and let a long turn overrun.
+    return this.renderer.measureAssistantConversationText?.(text)
+      ?? Array.from(text).length * 8;
   }
 
   transcriptIsThinking(): boolean {
@@ -434,6 +514,7 @@ export class HudVisualSurface implements HudFramePainter {
       next.resolve.forEach((resolve) => resolve(painted));
     }
     this.painting = false;
+    for (const resolve of this.idleWaiters.splice(0)) resolve();
   }
 
   private async paintNow(frame: HudVisualFrame, localTick = false, guard?: () => boolean): Promise<boolean> {

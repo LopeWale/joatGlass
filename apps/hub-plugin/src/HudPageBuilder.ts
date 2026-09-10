@@ -32,6 +32,45 @@ const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
 /** A list row's text width: container pad (8) + firmware row pad (12/side). */
 const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
 
+/** Native conversation geometry. The card is anchored at the same optical
+ * bottom while its top moves upward through bounded line-count stages. */
+export const ASSISTANT_CONVERSATION_GEOMETRY = {
+  cardLeft: 36,
+  cardWidth: 504,
+  cardBottom: 260,
+  transcriptLeft: 52,
+  transcriptWidth: 458,
+  footerLeft: 52,
+  footerWidth: 458,
+  scrollbarLeft: 516,
+  scrollbarWidth: 18,
+  lineHeight: 27,
+  cardTopPadding: 8,
+  footerGap: 5,
+  footerBottomInset: 4,
+} as const;
+
+/** Page-local ids. They intentionally do not enter the Mac wire protocol;
+ * only the Hub owns and updates these native containers. */
+export const AssistantConversationContainerId = {
+  Frame: 11,
+  WearerTurns: 12,
+  JoatTurns: 13,
+  ScrollPosition: 14,
+  Generation: 15,
+} as const;
+
+export interface AssistantConversationPage {
+  cardTop: number;
+  cardHeight: number;
+  transcriptTop: number;
+  transcriptHeight: number;
+  dimText: string;
+  brightText: string;
+  scrollbarText: string;
+  footerText: string;
+}
+
 
 /**
  * Declares HUD layouts against the 576x288 canvas.
@@ -305,6 +344,97 @@ export class HudPageBuilder {
    */
   visualCompatibilityLayout(): RebuildPageContainer {
     return this.visualLayout();
+  }
+
+  /**
+   * One Even-style native conversation card. Wearer and JOAT text occupy
+   * aligned transparent layers so the fixed firmware font can express role
+   * hierarchy with brightness even though it exposes no bold font weight.
+   * The border is the single event owner; the plugin moves both text layers
+   * together on scroll instead of asking one firmware container to scroll
+   * independently of the other.
+   */
+  assistantConversationLayout(view: AssistantConversationPage): RebuildPageContainer {
+    const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
+    const content = (value: string): string => value || ' ';
+    return new RebuildPageContainer({
+      containerTotalNum: 5,
+      ...this.menuConfig(),
+      textObject: [
+        new TextContainerProperty({
+          containerID: AssistantConversationContainerId.Frame,
+          containerName: 'conversation',
+          xPosition: geometry.cardLeft,
+          yPosition: view.cardTop,
+          width: geometry.cardWidth,
+          height: view.cardHeight,
+          paddingLength: 0,
+          borderWidth: 1,
+          borderColor: 12,
+          borderRadius: 4,
+          isEventCapture: 1,
+          zOrderIndex: 1,
+          textColor: 0,
+          content: ' ',
+        }),
+        new TextContainerProperty({
+          containerID: AssistantConversationContainerId.WearerTurns,
+          containerName: 'wearer-turns',
+          xPosition: geometry.transcriptLeft,
+          yPosition: view.transcriptTop,
+          width: geometry.transcriptWidth,
+          height: view.transcriptHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 2,
+          textColor: 2,
+          content: content(view.dimText),
+        }),
+        new TextContainerProperty({
+          containerID: AssistantConversationContainerId.JoatTurns,
+          containerName: 'joat-turns',
+          xPosition: geometry.transcriptLeft,
+          yPosition: view.transcriptTop,
+          width: geometry.transcriptWidth,
+          height: view.transcriptHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 3,
+          textColor: 4,
+          content: content(view.brightText),
+        }),
+        new TextContainerProperty({
+          containerID: AssistantConversationContainerId.ScrollPosition,
+          containerName: 'scroll-position',
+          xPosition: geometry.scrollbarLeft,
+          yPosition: view.transcriptTop,
+          width: geometry.scrollbarWidth,
+          height: view.transcriptHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 4,
+          textColor: 2,
+          content: content(view.scrollbarText),
+        }),
+        new TextContainerProperty({
+          containerID: AssistantConversationContainerId.Generation,
+          containerName: 'generation',
+          xPosition: geometry.footerLeft,
+          yPosition: geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight,
+          width: geometry.footerWidth,
+          height: geometry.lineHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 5,
+          textColor: 4,
+          content: content(view.footerText),
+        }),
+      ],
+    });
   }
 
   /**

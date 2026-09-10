@@ -1682,6 +1682,16 @@ async def main() -> None:
             belt.register(terminal_sessions_tool(agent_terminal))
 
     def on_capability_input(event: InputEvent) -> None:
+        if (
+            event.container_name == "assistant-conversation"
+            and event.selected_name in {"continue", "exit"}
+            and orchestrator.handle_conversation_action(
+                event.selected_name,
+                event.conversation_id,
+                event.conversation_revision,
+            )
+        ):
+            return
         departing = (
             event.container_name == "capability-lifecycle"
             and event.selected_name in {

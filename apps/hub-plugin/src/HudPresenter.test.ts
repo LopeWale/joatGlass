@@ -816,6 +816,49 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames[frames.length - 1]).not.toHaveProperty('assistantOverlay');
   });
 
+  it('repaints answer pages on swipes and does not auto-dismiss a multipage answer', async () => {
+    const frames: HudVisualFrame[] = [];
+    const visual = {
+      paint: vi.fn(async (frame: HudVisualFrame) => { frames.push(frame); return true; }),
+      scrollAssistantOverlay: vi.fn(() => true),
+      assistantOverlayPageCount: vi.fn(() => 2),
+    } as unknown as HudVisualSurface;
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+
+    await hud.showAssistantOverlay('A complete answer that needs a second page.');
+    expect(hud.scrollAssistantOverlay('down')).toBe(true);
+    await vi.runAllTimersAsync();
+    expect(visual.scrollAssistantOverlay).toHaveBeenCalledWith('down');
+    expect(frames[frames.length - 1]).toMatchObject({
+      assistantOverlay: {
+        text: 'A complete answer that needs a second page.',
+        presentation: 'answer',
+      },
+    });
+
+    expect(hud.settleAssistantOverlay(1_000)).toBe(true);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(hud.hasAssistantOverlay()).toBe(true);
+    await hud.dismissAssistantOverlay();
+  });
+
+  it('gives repeated identical answers distinct identities so each opens on page one', async () => {
+    const frames: HudVisualFrame[] = [];
+    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
+      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
+    });
+    const answer = 'The same long answer can be requested twice.';
+
+    await hud.showAssistantOverlay(answer);
+    await hud.showAssistantOverlay(answer);
+
+    const revisions = frames
+      .map((frame) => frame.assistantOverlay?.revision)
+      .filter((value): value is number => value !== undefined);
+    expect(revisions).toHaveLength(2);
+    expect(revisions[1]).toBeGreaterThan(revisions[0]!);
+  });
+
   it('bounds a streamed overlay burst to the active frame and one newest tail frame', async () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });

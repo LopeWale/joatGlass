@@ -1,7 +1,12 @@
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
-import { ContainerId, type HudContentKind } from './types';
+import { validAssistantConversationSnapshot } from './AssistantConversationSurface';
+import {
+  ContainerId,
+  type AssistantConversationSnapshot,
+  type HudContentKind,
+} from './types';
 
 /**
  * Last-resort presenter for hosts that accept only the one-container startup.
@@ -17,6 +22,9 @@ export class MinimalHudPresenter extends HudPresenter {
   private hint = 'Keep the phone foregrounded. Reopen JOAT to retry the visual HUD.';
   private assistant?: string;
   private assistantTimer?: ReturnType<typeof setTimeout>;
+  private conversation?: AssistantConversationSnapshot;
+  private conversationPrompt = false;
+  private conversationTimer?: ReturnType<typeof setTimeout>;
 
   constructor(client: BridgeClient, layouts: HudPageBuilder) {
     super(client, layouts);
@@ -57,6 +65,9 @@ export class MinimalHudPresenter extends HudPresenter {
    * above its retained content rather than silently dropping the answer. */
   override async showAssistantOverlay(text: string, append = false): Promise<boolean> {
     if (!text) return false;
+    this.clearConversationTimer();
+    this.conversation = undefined;
+    this.conversationPrompt = false;
     if (this.assistantTimer) clearTimeout(this.assistantTimer);
     this.assistant = append ? `${this.assistant ?? ''}${text}` : text;
     return this.paintComposed();
@@ -82,12 +93,135 @@ export class MinimalHudPresenter extends HudPresenter {
     return this.assistant !== undefined;
   }
 
+  override async showAssistantConversation(snapshot: AssistantConversationSnapshot): Promise<boolean> {
+    if (!validAssistantConversationSnapshot(snapshot)) return false;
+    const current = this.conversation;
+    if (current?.conversationId === snapshot.conversationId
+      && snapshot.revision < current.revision) return false;
+    this.conversation = {
+      ...snapshot,
+      turns: snapshot.turns.map((turn) => ({ ...turn })),
+    };
+    this.conversationPrompt = false;
+    this.assistant = undefined;
+    if (this.assistantTimer) clearTimeout(this.assistantTimer);
+    this.assistantTimer = undefined;
+    this.clearConversationTimer();
+    const painted = await this.paintComposed();
+    if (painted) this.armConversationTimer();
+    return painted;
+  }
+
+  override hasAssistantConversation(): boolean {
+    return this.conversation !== undefined;
+  }
+
+  override assistantConversationIdentity(): { conversationId: string; revision: number } | undefined {
+    const current = this.conversation;
+    return current
+      ? { conversationId: current.conversationId, revision: current.revision }
+      : undefined;
+  }
+
+  override isAssistantConversationContinuePromptVisible(): boolean {
+    return this.conversation !== undefined && this.conversationPrompt;
+  }
+
+  override scrollAssistantConversation(_direction: 'up' | 'down'): boolean {
+    // Compatibility mode owns the gesture even though its one text
+    // container cannot expose the rich transcript viewport.
+    return this.conversation !== undefined;
+  }
+
+  override async continueAssistantConversation(): Promise<boolean> {
+    if (!this.conversation || !this.conversationPrompt) return false;
+    this.conversationPrompt = false;
+    const painted = await this.paintComposed();
+    if (!painted) {
+      this.conversationPrompt = true;
+      return false;
+    }
+    this.armConversationTimer();
+    return true;
+  }
+
+  override async requestAssistantConversationExit(): Promise<'inactive' | 'prompted' | 'exited' | 'failed'> {
+    if (!this.conversation) return 'inactive';
+    if (!this.conversationPrompt) {
+      this.conversationPrompt = true;
+      this.clearConversationTimer();
+      return await this.paintComposed() ? 'prompted' : 'failed';
+    }
+    this.conversation = undefined;
+    this.conversationPrompt = false;
+    this.clearConversationTimer();
+    return await this.paintComposed() ? 'exited' : 'failed';
+  }
+
+  override async dismissAssistantConversation(
+    conversationId: string,
+    revision: number,
+  ): Promise<boolean> {
+    const current = this.conversation;
+    if (!current || current.conversationId !== conversationId || current.revision !== revision) {
+      return false;
+    }
+    this.conversation = undefined;
+    this.conversationPrompt = false;
+    this.clearConversationTimer();
+    return this.paintComposed();
+  }
+
+  override whenAssistantConversationIdle(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  override suspendDisplay(): void {
+    if (this.assistantTimer) clearTimeout(this.assistantTimer);
+    this.assistantTimer = undefined;
+    this.clearConversationTimer();
+    this.assistant = undefined;
+    this.conversation = undefined;
+    this.conversationPrompt = false;
+    super.suspendDisplay();
+  }
+
+  override repaintRestoredSurface(): Promise<boolean> {
+    return this.paintComposed();
+  }
+
   private paintComposed(textColor?: number, contentKind?: HudContentKind): Promise<boolean> {
     return super.showText(this.composed(), ContainerId.Main, textColor, contentKind);
   }
 
   private composed(): string {
+    if (this.conversation) {
+      const transcript = this.conversation.turns.map((turn) => (
+        `${turn.role === 'user' ? 'YOU' : 'JOAT'} · ${turn.text}`
+      )).join('\n\n');
+      const footer = this.conversationPrompt
+        ? 'Continue conversation? tap stays · x2 exits'
+        : this.conversation.state === 'ready' ? '■' : '■ □';
+      return `JOAT · compatibility conversation\n\n${transcript}\n\n${footer}`;
+    }
     const base = `${this.status}\n\n${this.main}\n\n${this.hint}`;
     return this.assistant ? `JOAT\n\n${this.assistant}\n\n${base}` : base;
+  }
+
+  private armConversationTimer(): void {
+    const current = this.conversation;
+    if (!current || current.state !== 'ready' || this.conversationPrompt) return;
+    this.clearConversationTimer();
+    this.conversationTimer = setTimeout(() => {
+      this.conversationTimer = undefined;
+      if (this.conversation !== current) return;
+      this.conversationPrompt = true;
+      void this.paintComposed();
+    }, current.continueAfterMs);
+  }
+
+  private clearConversationTimer(): void {
+    if (this.conversationTimer) clearTimeout(this.conversationTimer);
+    this.conversationTimer = undefined;
   }
 }

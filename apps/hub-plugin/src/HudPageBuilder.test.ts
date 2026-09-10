@@ -54,6 +54,16 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
   ['visual-startup', builder.visualStartup() as Page],
   ['visual', builder.visualLayout() as Page],
   ['visual-compatibility', builder.visualCompatibilityLayout() as Page],
+  ['assistant-conversation', builder.assistantConversationLayout({
+    cardTop: 128,
+    cardHeight: 132,
+    transcriptTop: 140,
+    transcriptHeight: 81,
+    dimText: 'Tell me a joke.\n \n ',
+    brightText: ' \nWhy did the byte cross the bus?\n ',
+    scrollbarText: '│\n█\n│',
+    footerText: '■ □',
+  }) as Page],
 ];
 
 describe('HudPageBuilder invariants', () => {
@@ -88,6 +98,41 @@ describe('HudPageBuilder invariants', () => {
       expect(page.textObject).toHaveLength(1);
       expect(page.textObject?.[0]).toMatchObject({content: ' ', isEventCapture: 1});
     }
+  });
+
+  it('builds the conversation as one bordered, bottom-anchored native surface', () => {
+    const page = builder.assistantConversationLayout({
+      cardTop: 128,
+      cardHeight: 132,
+      transcriptTop: 140,
+      transcriptHeight: 81,
+      dimText: 'Tell me a joke.\n \n ',
+      brightText: ' \nWhy did the byte cross the bus?\n ',
+      scrollbarText: '│\n█\n│',
+      footerText: '■ □',
+    }) as Page;
+    const byName = (name: string) => page.textObject?.find((entry) => entry.containerName === name);
+
+    expect(page.imageObject).toBeUndefined();
+    expect(page.textObject).toHaveLength(5);
+    expect(byName('conversation')).toMatchObject({
+      yPosition: 128,
+      height: 132,
+      borderWidth: 1,
+      isEventCapture: 1,
+    });
+    expect(byName('wearer-turns')).toMatchObject({ textColor: 2, content: expect.stringContaining('joke') });
+    expect(byName('joat-turns')).toMatchObject({ textColor: 4, content: expect.stringContaining('byte') });
+    expect(byName('generation')).toMatchObject({ content: '■ □' });
+    expect(byName('scroll-position')).toMatchObject({ content: '│\n█\n│' });
+
+    const frame = byName('conversation')!;
+    const transcript = byName('wearer-turns')!;
+    const footer = byName('generation')!;
+    expect((transcript.yPosition ?? 0) + (transcript.height ?? 0))
+      .toBeLessThanOrEqual(footer.yPosition ?? 0);
+    expect((footer.yPosition ?? 0) + (footer.height ?? 0))
+      .toBeLessThan((frame.yPosition ?? 0) + (frame.height ?? 0));
   });
 
   it('keeps every visual container name within the packaged-host limit', () => {

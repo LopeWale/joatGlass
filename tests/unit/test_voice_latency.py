@@ -18,6 +18,7 @@ async def test_receipt_is_bounded_content_free_and_keeps_a_turn_correlation(
 
     store.record(7, "utterance_ready", "lte250ms")
     store.record(7, "stt_complete", "5_10s")
+    store.record(7, "first_model_chunk", "5_10s")
     store.record(7, "first_reply_sent", "gt10s")
     await store.flush()
 
@@ -27,7 +28,8 @@ async def test_receipt_is_bounded_content_free_and_keeps_a_turn_correlation(
         "events": [
             {"sequence": 1, "turn": 7, "stage": "utterance_ready", "bucket": "lte250ms"},
             {"sequence": 2, "turn": 7, "stage": "stt_complete", "bucket": "5_10s"},
-            {"sequence": 3, "turn": 7, "stage": "first_reply_sent", "bucket": "gt10s"},
+            {"sequence": 3, "turn": 7, "stage": "first_model_chunk", "bucket": "5_10s"},
+            {"sequence": 4, "turn": 7, "stage": "first_reply_sent", "bucket": "gt10s"},
         ],
     }
     assert stat.S_IMODE(output.stat().st_mode) == 0o600

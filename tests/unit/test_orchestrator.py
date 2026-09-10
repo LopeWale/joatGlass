@@ -24,6 +24,8 @@ from joat.core.interfaces import (
     Transcript,
 )
 from joat.core.protocol import (
+    AssistantConversationTurn,
+    AssistantConversationView,
     AssistantOverlay,
     AudioControl,
     AudioSource,
@@ -41,6 +43,7 @@ from joat.services.greetings import greeting_response
 from joat.services.hud import HudWriter
 from joat.channels.cards import CardLog
 from joat.services.capabilities import CapabilityOpenController, CapabilityRouter
+from joat.services.commands import CommandReply
 from joat.services.prompted_input import PromptedInputDispatcher, UtteranceProvenance
 from joat.services.roundtable import Participant, RoundTable
 from joat.services.session import DebateSession, Session, SessionManager
@@ -216,8 +219,7 @@ class TestVoiceLoop:
             seq += 1
         await drain()
 
-        said = region(transport, ContainerId.CONTEXT)
-        assert said == ["you  turn on the lights"]
+        assert conversation_role_text(transport, "user") == ["turn on the lights"]
 
     async def test_other_speaker_audio_skips_stt_but_unknown_remains_eligible(self) -> None:
         transport, engine = FrameTransport(), FakeEngine("hello from an unknown speaker")
@@ -237,7 +239,7 @@ class TestVoiceLoop:
             sequence += 1
         await drain()
 
-        assert region(transport, ContainerId.CONTEXT) == ["you  hello from an unknown speaker"]
+        assert conversation_role_text(transport, "user") == ["hello from an unknown speaker"]
 
     async def test_seq_gap_resets_vad_and_engine(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
@@ -255,7 +257,7 @@ class TestVoiceLoop:
         for i, pcm in enumerate([QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, 8 + i)
         await drain()
-        assert len(region(transport, ContainerId.CONTEXT)) == 1
+        assert conversation_role_text(transport, "user") == [engine.text]
 
     @pytest.mark.parametrize("next_seq", [0, 2])
     async def test_new_connection_never_joins_partial_speech(
@@ -324,8 +326,8 @@ class TestVoiceLoop:
             engine.release.set()
 
         assert engine.flushed == [b"".join(complete), b"".join(recovered)]
-        assert region(transport, ContainerId.CONTEXT) == [
-            "you  recovery proof", "you  recovery proof",
+        assert conversation_role_text(transport, "user") == [
+            "recovery proof", "recovery proof",
         ]
 
     async def test_gap_clears_speaker_provenance_and_keeps_unaddressed_gate(self) -> None:
@@ -752,10 +754,10 @@ class TestReplyFlow:
             transport.audio_cb(pcm, i)
         await drain()
         assert assistant_text(transport) == ["It is 72 degrees."]
-        assert region(transport, ContainerId.CONTEXT) == ["you  what is the weather"]
+        assert conversation_role_text(transport, "user") == ["what is the weather"]
         assert replier.asked == ["what is the weather"]
 
-    async def test_assistant_reply_is_an_overlay_not_the_messages_main_region(self) -> None:
+    async def test_assistant_reply_is_one_persistent_transcript_not_a_timed_overlay(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("JOAT, what is next?")
         orch = VoiceOrchestrator(
             transport, engine, vad=TEST_VAD(), replier=FakeReplier("Design review at 4:30."),
@@ -767,13 +769,14 @@ class TestReplyFlow:
             transport.audio_cb(pcm, i)
         await drain()
 
-        overlays = [message for message in transport.sent if isinstance(message, AssistantOverlay)]
-        assert [(message.text, message.operation, message.dismiss_after_ms) for message in overlays] == [
-            ("Design review at 4:30.", "replace", None),
-            ("", "settle", 6_000),
-        ]
+        views = conversation_views(transport)
+        assert [view.state for view in views] == ["thinking", "answering", "ready"]
+        assert views[-1].turns == (
+            AssistantConversationTurn("user", "what is next?"),
+            AssistantConversationTurn("assistant", "Design review at 4:30."),
+        )
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
         assert region(transport, ContainerId.MAIN) == []
-        assert region(transport, ContainerId.CONTEXT) == ["you  what is next?"]
 
     async def test_replier_declining_leaves_transcript_standing(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hm")
@@ -785,7 +788,7 @@ class TestReplyFlow:
         await drain()
         # No reply: MAIN stays clear, but the wearer still sees they were heard.
         assert region(transport, ContainerId.MAIN) == []
-        assert region(transport, ContainerId.CONTEXT) == ["you  hm"]
+        assert conversation_role_text(transport, "user") == ["hm"]
 
     async def test_busy_voice_lane_keeps_latest_completed_glasses_utterance(self) -> None:
         transport = FrameTransport()
@@ -867,7 +870,7 @@ class TestReplyFlow:
         assert replier.asked[0] == "first question"
         assert "latest question" not in replier.asked  # captured, never a reply
         assert sessions.captured == [("latest question", "glasses")]
-        assert region(transport, ContainerId.CONTEXT)[0] == "you  first question"
+        assert conversation_role_text(transport, "user")[0] == "first question"
 
 
 class StreamingReplier(ReplyEngine):
@@ -884,7 +887,57 @@ class StreamingReplier(ReplyEngine):
             yield c
 
 
+class GatedStreamingReplier(ReplyEngine):
+    """Pause after a complete first sentence so visibility can be inspected."""
+
+    def __init__(self) -> None:
+        self.waiting_after_preview = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def reply(self, text: str) -> str | None:
+        raise AssertionError("stream owns this test")
+
+    async def stream(self, text: str):
+        yield "Why did the developer bring glasses? "
+        self.waiting_after_preview.set()
+        await self.release.wait()
+        yield "Because every bug deserved a closer look."
+
+
 class TestStreamedReply:
+    async def test_one_native_transcript_streams_cumulative_text_before_the_model_finishes(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("JOAT, tell me a joke")
+        replier = GatedStreamingReplier()
+        latency_events: list[tuple[int, str, str]] = []
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=replier, wake_words=WAKE,
+            latency_observer=lambda turn, stage, bucket: latency_events.append((turn, stage, bucket)),
+        )
+
+        turn = asyncio.create_task(orch._handle_utterance(LOUD))
+        await asyncio.wait_for(replier.waiting_after_preview.wait(), timeout=1)
+        visible = conversation_views(transport)
+        assert [message.state for message in visible] == ["thinking", "answering"]
+        assert visible[-1].turns == (
+            AssistantConversationTurn("user", "tell me a joke"),
+            AssistantConversationTurn("assistant", "Why did the developer bring glasses?"),
+        )
+        assert [stage for _turn, stage, _bucket in latency_events][-2:] == [
+            "first_model_chunk", "first_reply_sent",
+        ]
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
+
+        replier.release.set()
+        await asyncio.wait_for(turn, timeout=1)
+        visible = conversation_views(transport)
+        assert [message.state for message in visible] == [
+            "thinking", "answering", "answering", "ready",
+        ]
+        assert visible[-1].turns[-1].text == (
+            "Why did the developer bring glasses? Because every bug deserved a closer look."
+        )
+        assert len({message.conversation_id for message in visible}) == 1
+
     async def test_model_opened_terminal_keeps_its_view_and_finishes_the_reply(self) -> None:
         transport = FakeTransport()
         revision = 0
@@ -985,6 +1038,7 @@ class TestStreamedReply:
             "utterance_ready",
             "ack_sent",
             "stt_complete",
+            "first_model_chunk",
             "first_reply_sent",
             "reply_complete",
         ]
@@ -996,6 +1050,76 @@ class TestStreamedReply:
         assert all(bucket in allowed_buckets for _turn, _stage, bucket in latency_events)
         assert secret_query not in repr(latency_events)
         assert secret_reply not in repr(latency_events)
+
+    async def test_native_conversation_does_not_claim_an_unrelated_image_tile_as_its_paint(
+        self,
+    ) -> None:
+        latency_events: list[tuple[int, str, str]] = []
+        transport, engine = FakeTransport(), FakeEngine("JOAT, hello")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            replier=StreamingReplier(["Hello there."]),
+            wake_words=WAKE,
+            latency_observer=lambda turn, stage, bucket: latency_events.append((turn, stage, bucket)),
+        )
+
+        await orch._handle_utterance(LOUD)
+        orch.on_paint_trace({
+            "type": "tile_upload", "outcome": "success", "containerId": 4,
+        })
+
+        assert "painted" not in [stage for _turn, stage, _bucket in latency_events]
+
+    async def test_raster_receipt_still_correlates_its_next_successful_tile(self) -> None:
+        latency_events: list[tuple[int, str, str]] = []
+        surface_revision = [0]
+
+        async def receipt(_query: str) -> str:
+            # A successful feature/tool transition owns the page, so its
+            # compact acknowledgement is intentionally a raster receipt.
+            surface_revision[0] += 1
+            return CommandReply("Saved QuickNote.", presentation="receipt")
+
+        transport, engine = FakeTransport(), FakeEngine("JOAT, save that note")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            wake_words=WAKE,
+            commands=receipt,
+            surface_revision=lambda: surface_revision[0],
+            latency_observer=lambda turn, stage, bucket: latency_events.append((turn, stage, bucket)),
+        )
+
+        await orch._handle_utterance(LOUD)
+        orch.on_paint_trace({
+            "type": "tile_upload", "outcome": "success", "containerId": 4,
+        })
+
+        assert [stage for _turn, stage, _bucket in latency_events][-1] == "painted"
+
+    async def test_receipt_without_a_surface_handoff_remains_in_the_native_conversation(self) -> None:
+        async def receipt(_query: str) -> str:
+            return CommandReply("Saved QuickNote.", presentation="receipt")
+
+        transport, engine = FakeTransport(), FakeEngine("JOAT, save that note")
+        orch = VoiceOrchestrator(
+            transport,
+            engine,
+            vad=TEST_VAD(),
+            wake_words=WAKE,
+            commands=receipt,
+        )
+
+        await orch._handle_utterance(LOUD)
+
+        assert conversation_views(transport)[-1].turns == (
+            AssistantConversationTurn("user", "save that note"),
+            AssistantConversationTurn("assistant", "Saved QuickNote."),
+        )
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
 
     async def test_latency_observer_is_disabled_by_default(self, caplog) -> None:  # type: ignore[no-untyped-def]
         caplog.set_level(logging.INFO)
@@ -1029,12 +1153,13 @@ class TestStreamedReply:
 
         await orch._handle_utterance(LOUD)
 
-        assert "hello" in [message.text for message in transport.sent]
+        assert assistant_text(transport) == ["hello"]
 
-    async def test_a_reply_paints_one_settled_frame_not_one_per_chunk(self) -> None:
+    async def test_streamed_reply_frames_are_cumulative_and_finish_ready_without_a_settle_timer(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("tell me a story")
         orch = VoiceOrchestrator(
-            transport, engine, vad=TEST_VAD(), replier=StreamingReplier(["Once ", "upon ", "a time."])
+            transport, engine, vad=TEST_VAD(),
+            replier=StreamingReplier(["Once ", "upon ", "a time. \n"]),
         )
         orch.attach()
         assert transport.audio_cb is not None
@@ -1042,23 +1167,17 @@ class TestStreamedReply:
             transport.audio_cb(pcm, i)
         await drain()
 
-        hud = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
-        # ONE frame, once, when there is a whole answer to show.
-        #
-        # Painting per chunk re-wrapped and re-fitted the answer on every
-        # token, and the renderer shrinks its font toward 12px as the text
-        # grows — so the wearer watched the words change size and re-flow,
-        # and a frame captured mid-append showed a corrupted seam
-        # ("you're leu're left") and an answer that opened with "…". A
-        # settled reply has neither: all six of the wearer's real replies
-        # (123-214 chars) fit the four-line card at 14px, which holds 224.
-        assert [(m.text, m.operation) for m in hud] == [
-            ("Once upon a time.", "replace"),
-            ("", "settle"),
+        views = conversation_views(transport)
+        assert [view.state for view in views] == [
+            "thinking", "answering", "answering", "answering", "ready",
         ]
-        assert region(transport, ContainerId.CONTEXT) == ["you  tell me a story"]
+        assert [view.turns[-1].text for view in views[1:]] == [
+            "Once", "Once upon", "Once upon a time.", "Once upon a time.",
+        ]
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
+        assert conversation_role_text(transport, "user") == ["tell me a story"]
 
-    async def test_single_chunk_default_stream_still_replaces(self) -> None:
+    async def test_single_chunk_stream_has_thinking_answering_and_ready_states(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hi")
         orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD(), replier=FakeReplier("Hello!"))
         orch.attach()
@@ -1066,12 +1185,71 @@ class TestStreamedReply:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        hud = [m for m in transport.sent if isinstance(m, AssistantOverlay)]
-        assert [(m.text, m.operation) for m in hud] == [
-            ("Hello!", "replace"),
-            ("", "settle"),
-        ]
-        assert region(transport, ContainerId.CONTEXT) == ["you  hi"]
+        views = conversation_views(transport)
+        assert [view.state for view in views] == ["thinking", "answering", "ready"]
+        assert views[-1].turns[-1] == AssistantConversationTurn("assistant", "Hello!")
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
+        assert conversation_role_text(transport, "user") == ["hi"]
+
+    async def test_long_answer_and_follow_up_remain_in_one_ordered_conversation_without_512_loss(self) -> None:
+        transport = FakeTransport()
+        engine = FakeEngine("JOAT, explain the sky")
+        long_answer = "Blue light scatters through the atmosphere. " * 20
+
+        class Replies(ReplyEngine):
+            async def reply(self, text: str) -> str | None:
+                return None
+
+            async def stream(self, text: str):
+                yield long_answer if "sky" in text else "A photon checked into a hotel and had no luggage."
+
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=Replies(), wake_words=WAKE,
+        )
+        await orch._handle_utterance(LOUD)
+        current = conversation_views(transport)[-1]
+        assert orch.handle_conversation_action(
+            "continue", current.conversation_id, current.revision,
+        ) is True
+        engine.text = "and tell me a joke"
+        await orch._handle_utterance(LOUD)
+
+        views = conversation_views(transport)
+        assert len({view.conversation_id for view in views}) == 1
+        assert views[-1].turns == (
+            AssistantConversationTurn("user", "explain the sky"),
+            AssistantConversationTurn("assistant", long_answer.strip()),
+            AssistantConversationTurn("user", "and tell me a joke"),
+            AssistantConversationTurn(
+                "assistant", "A photon checked into a hotel and had no luggage.",
+            ),
+        )
+        assert len(views[-1].turns[1].text) > 512
+        assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
+
+    async def test_delayed_action_from_an_old_conversation_cannot_close_the_current_one(self) -> None:
+        transport = FakeTransport()
+        engine = FakeEngine("JOAT, first question")
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=FakeReplier("First answer"), wake_words=WAKE,
+        )
+        await orch._handle_utterance(LOUD)
+        old = conversation_views(transport)[-1]
+        assert orch.handle_conversation_action(
+            "exit", old.conversation_id, old.revision,
+        ) is True
+
+        engine.text = "JOAT, second question"
+        await orch._handle_utterance(LOUD)
+        current = conversation_views(transport)[-1]
+        assert current.conversation_id != old.conversation_id
+
+        assert orch.handle_conversation_action(
+            "exit", old.conversation_id, old.revision,
+        ) is False
+        assert orch.handle_conversation_action(
+            "continue", current.conversation_id, current.revision,
+        ) is True
 
 
 def region(transport, container: ContainerId) -> list[str]:
@@ -1080,12 +1258,20 @@ def region(transport, container: ContainerId) -> list[str]:
             if isinstance(m, HudText) and m.container_id is container]
 
 
+def conversation_views(transport) -> list[AssistantConversationView]:
+    return [m for m in transport.sent if isinstance(m, AssistantConversationView)]
+
+
+def conversation_role_text(transport, role: str) -> list[str]:
+    views = conversation_views(transport)
+    if not views:
+        return []
+    return [turn.text for turn in views[-1].turns if turn.role == role]
+
+
 def assistant_text(transport) -> list[str]:
-    """Visible reply copy, deliberately outside any feature-page region."""
-    return [
-        m.text for m in transport.sent
-        if isinstance(m, AssistantOverlay) and m.operation in {"replace", "append"}
-    ]
+    """Assistant rows retained in the latest one-page conversation."""
+    return conversation_role_text(transport, "assistant")
 
 
 WAKE = ("hey joat", "joat")
@@ -1111,10 +1297,10 @@ class TestAcknowledgement:
         hud = transport.sent
         status = [m for m in hud if isinstance(m, HudText) and m.container_id is ContainerId.STATUS_BAR]
         assert status, "no acknowledgement — the wearer sees a dead HUD while waiting"
-        # And it lands BEFORE the response reaches the assistant overlay.
+        # And it lands before the native transcript claims the page.
         assert hud.index(status[0]) < next(
             i for i, m in enumerate(hud)
-            if isinstance(m, AssistantOverlay) and m.operation == "replace")
+            if isinstance(m, AssistantConversationView))
 
 
 class TestWakeWordGate:
@@ -1128,10 +1314,8 @@ class TestWakeWordGate:
         for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
             transport.audio_cb(pcm, i)
         await drain()
-        # The wearer's words land in CONTEXT prefixed "you  "; the reply is
-        # in a separate overlay. Strip the prefix so these stay about wake.
-        said = [s.removeprefix("you  ") for s in region(transport, ContainerId.CONTEXT)]
-        return said + assistant_text(transport)
+        view = conversation_views(transport)
+        return [turn.text for turn in view[-1].turns] if view else []
 
     async def test_unaddressed_room_speech_is_fully_ignored(self) -> None:
         texts = await self._run("I'm so tired of repeating this to the team.")
@@ -1155,7 +1339,7 @@ class TestWakeWordGate:
 
     async def test_wake_word_alone_prompts(self) -> None:
         texts = await self._run("JOAT.")
-        assert texts == ["Yes?"]
+        assert texts == ["JOAT", "Yes?"]
 
     async def test_none_gate_answers_everything(self) -> None:
         texts = await self._run("any old speech", wake=None)

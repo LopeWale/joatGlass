@@ -1,5 +1,52 @@
 # Changelog
 
+## 2026-09-10
+
+- **Ordinary JOAT answers now remain in one Even-style conversation card.**
+  Research was triangulated across the current official Even AI tutorial and
+  support pages, current independent G2 through-lens reviews, the official
+  G1 demo repository as a version boundary, and all four supplied JOAT screen
+  recordings. The recordings showed one exchange split between dashboard
+  prompt, transient strip, and modal answer; a long answer beginning with an
+  invented ellipsis and ending before the requested fourth sentence; Up
+  dismissing rather than scrolling; answered text disappearing while the
+  prompt remained; and no persistent activity state. The replacement retains
+  wearer and JOAT turns under one conversation identity, grows upward from a
+  fixed lower edge one line at a time, uses the project's 14px proportional
+  face with dim regular wearer rows and brighter 500-weight JOAT rows, streams
+  partial answers in place, adds a narrow overflow scrollbar, and restores the
+  newest underlying JOAT feature only after an accepted exit. While active,
+  the conversation owns the complete content field below the status spine, so
+  dashboard clocks, cards, and feature panes cannot compete with the one-card
+  interaction; the retained underlay returns when the conversation closes. The
+  requested inactivity question is explicitly JOAT behavior; current Even
+  material did not establish a native labelled Continue control.
+
+- **Rendering feedback no longer competes needlessly with answer latency.**
+  The current official G2 reference uses one compact morphing glyph on the
+  card's lower rule, rather than a three-dot chat indicator. JOAT now cycles
+  through the observed bar, post, cross, and square silhouettes while
+  thinking. The glyph stays within one lower image tile instead of straddling
+  the x=288 seam, and streamed words receive priority: each answer update
+  resets the activity timer, with another glyph tick only after a two-second
+  streaming stall. The official-simulator acceptance at
+  `/tmp/joat-conversation-raster-20260910-w/receipt.json` exercised the
+  production Mac protocol, WebSocket, Hub plugin, Even SDK bridge, framebuffer,
+  and input endpoint. It retained the exact three-exchange transcript through
+  11 streamed revisions, visibly captured the joke setup before its punchline,
+  grew through 1/2/4/5/6/9-line states, recovered all 15 wrapped rows with six
+  swipes each way, restored the exact conversation-tail pixels, confined the
+  activity-only difference to tile region 9, accepted Continue at the Mac,
+  restored the underlay pixel-for-pixel outside the live clock, read eight
+  declared rows from the actual SDK container, visibly opened five populated
+  menu bands, and rebuilt no native page during the journey. The evidence
+  harness was hardened after visual review caught false status-only,
+  whole-frame, underlay, and menu assertions: captures now require matching
+  card geometry, ignore unrelated live status changes, and compare the exact
+  region, tile, menu structure, or underlay pixels owned by each claim.
+  Physical-G2 BLE timing, optical brightness, source-specific left-temple
+  double press, package parity, and deployment remain separate evidence gates.
+
 ## 2026-09-08
 
 - **The Agent Terminal roster spans several Macs.** The roadmap's standing

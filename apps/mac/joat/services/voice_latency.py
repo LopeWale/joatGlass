@@ -29,11 +29,14 @@ STAGES = frozenset({
     "utterance_ready",
     "ack_sent",
     "stt_complete",
+    # Provider output exists, but it is not yet necessarily on the HUD.
+    "first_model_chunk",
     "first_reply_sent",
     "reply_complete",
     "interrupted",
-    # The plugin's first successful tile upload after first_reply_sent —
-    # a host-side paint receipt, only while G2 diagnostics are enabled.
+    # The plugin's first successful tile upload after a raster receipt's
+    # first_reply_sent — a host-side paint receipt, only while G2 diagnostics
+    # are enabled. Native conversation text has no image-tile paint stage.
     "painted",
 })
 BUCKETS = frozenset({

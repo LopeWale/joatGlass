@@ -21,6 +21,9 @@ export const PROSE_FAMILY = '"Helvetica Neue", "SF Pro Text", Arial, sans-serif'
 
 export const mono = (px: number): string => `${px}px ${MONO_FAMILY}`;
 export const prose = (px: number): string => `400 ${px}px ${PROSE_FAMILY}`;
+/** Assistant turns keep JOAT's approved proportional family while gaining
+ * the restrained emphasis the Even AI transcript gives its answers. */
+export const assistantProse = (px: number): string => `500 ${px}px ${PROSE_FAMILY}`;
 
 /**
  * The roles. One job, one font. Sizes are the fewest that preserve the
@@ -41,6 +44,8 @@ export const TYPE = {
   glance: prose(24),
   /** Reading body and pills. */
   body: prose(14),
+  /** Assistant answer inside the retained conversation transcript. */
+  assistant: assistantProse(14),
   /** A selectable row (focus lists, conversations, day entries). */
   row: prose(14),
   /** Secondary line under a primary — on STATIC pages (decision, preview,
