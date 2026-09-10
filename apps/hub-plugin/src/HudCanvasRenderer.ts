@@ -34,7 +34,11 @@ import {
   type ProductivityHudModel,
 } from './types';
 import {
+  ASSISTANT_CONVERSATION_VISUAL_GEOMETRY,
   splitGrayscaleTiles,
+  type AssistantConversationVisual,
+  type AssistantOverlayPresentation,
+  type AssistantOverlayVisual,
   type HudFrameRenderer,
   type HudImageTile,
   type HudVisualFrame,
@@ -84,7 +88,8 @@ const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
  * comment cannot fail a build when the font changes. */
 export const HUD_TEXT_MEAN_ADVANCE_PX = 5.18;
 const HUD_CONTENT_RIGHT = 576 - HUD_EDGE;       // 562
-export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP OR SWIPE TO DISMISS';
+export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP TO DISMISS';
+export const ASSISTANT_OVERLAY_PAGE_HINT = 'UP / DOWN TO READ · TAP TO DISMISS';
 export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
 
 /** Error recovery copy belongs in its warning card; repeating it in the
@@ -810,14 +815,18 @@ export const ACTION_PILL = {
   detailY: 229,
 } as const;
 
-/** A one-line answer in a 460x183 card is the productivity-page mistake in
- * card form. "Reply sent.", "Reply cancelled.", a note receipt — anything
- * that fits the measured 46-character working line — renders as the same
- * slim strip, over the live page like the platform's own listening pill.
- * Real replies (multi-line, streamed) keep the card. */
-export function usesAssistantPillLayout(text: string): boolean {
+/** A compact strip is an explicit receipt, never a guess based on length.
+ * The recorded `Paris.` answer is six characters too, yet putting it in the
+ * low receipt strip stamped it across the dashboard clock. */
+export function usesAssistantPillLayout(
+  text: string,
+  presentation: AssistantOverlayPresentation,
+): boolean {
   const trimmed = text.trim();
-  return trimmed.length > 0 && trimmed.length <= 48 && !trimmed.includes('\n');
+  return presentation === 'receipt'
+    && trimmed.length > 0
+    && trimmed.length <= 48
+    && !trimmed.includes('\n');
 }
 
 export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): string {
@@ -1447,6 +1456,53 @@ export function visibleHudLeadingLines(
   return visible;
 }
 
+/** Split one bounded answer into measured pages without inventing ellipses or
+ * dropping either end. Joining every returned line with spaces reconstructs
+ * the whitespace-normalized input, which is the completeness invariant the
+ * recorded four-sentence answer previously violated. */
+export function assistantOverlayPages(
+  text: string,
+  maxWidth: number,
+  maximumLines: number,
+  measure: (value: string) => number,
+): string[][] {
+  const pageSize = Math.max(1, Math.floor(maximumLines));
+  const normalized = text.trim().replace(/\s+/g, ' ');
+  if (!normalized) return [[]];
+  const sentences: string[] = [];
+  let start = 0;
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (!'.!?'.includes(normalized[index] ?? '')) continue;
+    let end = index + 1;
+    if ('"\'’”'.includes(normalized[end] ?? '')) end += 1;
+    if (end < normalized.length && !/\s/.test(normalized[end] ?? '')) continue;
+    sentences.push(normalized.slice(start, end).trim());
+    while (end < normalized.length && /\s/.test(normalized[end] ?? '')) end += 1;
+    start = end;
+    index = end - 1;
+  }
+  if (start < normalized.length) sentences.push(normalized.slice(start).trim());
+
+  const pages: string[][] = [];
+  let page: string[] = [];
+  for (const sentence of sentences) {
+    const lines = wrapHudText(sentence, maxWidth, measure);
+    if (page.length > 0 && page.length + lines.length > pageSize) {
+      pages.push(page);
+      page = [];
+    }
+    for (const line of lines) {
+      if (page.length === pageSize) {
+        pages.push(page);
+        page = [];
+      }
+      page.push(line);
+    }
+  }
+  if (page.length > 0) pages.push(page);
+  return pages;
+}
+
 export interface FittedHudText {
   fontSize: number;
   lines: string[];
@@ -1686,12 +1742,52 @@ export function projectNavigationMap(
 
 export class HudCanvasRenderer implements HudFrameRenderer {
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
+  private assistantMeasureContext?: CanvasRenderingContext2D;
+  private assistantPageKey = '';
+  private assistantPages: string[][] = [];
+  private assistantPageIndex = 0;
 
   constructor() {
     this.icons = Promise.all(
       (Object.entries(ICON_SOURCES) as Array<[HudIconName, string]>)
         .map(async ([name, source]) => [name, await loadSvg(source)] as const),
     ).then((entries) => Object.fromEntries(entries) as Record<HudIconName, HTMLImageElement>);
+  }
+
+  measureAssistantConversationText(text: string): number {
+    if (!this.assistantMeasureContext) {
+      const canvas = document.createElement('canvas');
+      this.assistantMeasureContext = canvas.getContext('2d', { alpha: false }) ?? undefined;
+    }
+    const context = this.assistantMeasureContext;
+    if (!context) return Number.POSITIVE_INFINITY;
+    // The answer is the slightly wider role. Measuring every turn with it
+    // guarantees the dim wearer line cannot overrun the shared text edge.
+    context.font = TYPE.assistant;
+    return context.measureText(text).width;
+  }
+
+  scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
+    const pages = this.assistantPages ?? [];
+    if (pages.length < 2) return false;
+    const current = this.assistantPageIndex ?? 0;
+    const next = Math.max(0, Math.min(
+      pages.length - 1,
+      current + (direction === 'down' ? 1 : -1),
+    ));
+    if (next === current) return false;
+    this.assistantPageIndex = next;
+    return true;
+  }
+
+  assistantOverlayPageCount(): number {
+    return Math.max(1, this.assistantPages?.length ?? 0);
+  }
+
+  private clearAssistantOverlayPages(): void {
+    this.assistantPageKey = '';
+    this.assistantPages = [];
+    this.assistantPageIndex = 0;
   }
 
   async render(frame: HudVisualFrame): Promise<readonly HudImageTile[]> {
@@ -1751,8 +1847,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
     // impossible fifth image container or replacing the feature underneath.
-    if (frame.kind !== 'prompt_question' && frame.assistantOverlay) {
-      this.drawAssistantOverlay(context, frame.assistantOverlay.text, icons);
+    if (frame.kind !== 'prompt_question' && frame.assistantConversation) {
+      this.clearAssistantOverlayPages();
+      this.drawAssistantConversation(context, frame.assistantConversation);
+    } else if (frame.kind !== 'prompt_question' && frame.assistantOverlay) {
+      this.drawAssistantOverlay(context, frame.assistantOverlay, icons);
+    } else {
+      this.clearAssistantOverlayPages();
     }
 
     const rgba = context.getImageData(0, 0, CANVAS.width, CANVAS.height).data;
@@ -1844,13 +1945,32 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
   private drawAssistantOverlay(
     context: CanvasRenderingContext2D,
-    text: string,
+    overlay: AssistantOverlayVisual,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    if (usesAssistantPillLayout(text)) {
+    const { text, presentation } = overlay;
+    if (usesAssistantPillLayout(text, presentation)) {
+      this.assistantPageKey = `${overlay.revision ?? 0}\u0000${presentation}\u0000${text}`;
+      this.assistantPages = [[text.trim()]];
+      this.assistantPageIndex = 0;
       this.drawAssistantPill(context, text);
       return;
     }
+    context.font = prose(ASSISTANT_OVERLAY_FONT_PX);
+    const key = `${overlay.revision ?? 0}\u0000${presentation}\u0000${text}`;
+    if (this.assistantPageKey !== key) {
+      this.assistantPageKey = key;
+      this.assistantPages = assistantOverlayPages(
+        text,
+        386,
+        4,
+        (value) => context.measureText(value).width,
+      );
+      this.assistantPageIndex = 0;
+    }
+    const pageCount = Math.max(1, this.assistantPages.length);
+    this.assistantPageIndex = Math.max(0, Math.min(this.assistantPageIndex, pageCount - 1));
+    const lines = this.assistantPages[this.assistantPageIndex] ?? [];
     context.save();
     // The assistant preserves the feature *state*, but temporarily owns the
     // complete content field beneath the status spine. A smaller card leaves
@@ -1872,7 +1992,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillText('JOAT', 105, 78);
     context.fillStyle = gray(CHROME);
     context.font = TYPE.label;
-    context.fillText('ASSISTANT', 150, 78);
+    context.fillText('ANSWER', 150, 78);
     context.strokeStyle = gray(HAIRLINE);
     context.beginPath();
     context.moveTo(82, ASSISTANT_OVERLAY_GEOMETRY.dividerY);
@@ -1881,16 +2001,162 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     context.fillStyle = gray(BRIGHT);
     context.textAlign = 'center';
-    this.drawAssistantOverlayText(context, text);
+    this.drawAssistantOverlayText(context, lines);
 
     context.fillStyle = gray(QUIET);
     context.font = TYPE.hint;
     context.textAlign = 'center';
     context.fillText(
-      ASSISTANT_OVERLAY_DISMISS_HINT,
+      pageCount > 1
+        ? `${this.assistantPageIndex + 1}/${pageCount} · ${ASSISTANT_OVERLAY_PAGE_HINT}`
+        : ASSISTANT_OVERLAY_DISMISS_HINT,
       288,
       ASSISTANT_OVERLAY_GEOMETRY.footerBaselineY,
     );
+    context.restore();
+  }
+
+  /** One retained conversation card, composited into the page JOAT already
+   * owns.  Its lower edge never moves; each added line extends only the top.
+   * This keeps the dashboard/feature alive underneath and lets the four-tile
+   * cache transmit only quadrants whose pixels actually changed. */
+  private drawAssistantConversation(
+    context: CanvasRenderingContext2D,
+    conversation: AssistantConversationVisual,
+  ): void {
+    const geometry = ASSISTANT_CONVERSATION_VISUAL_GEOMETRY;
+    const lineCapacity = Math.max(1, Math.min(
+      geometry.maximumLines,
+      Math.floor(conversation.lineCapacity),
+    ));
+    const height = geometry.topPadding
+      + lineCapacity * geometry.lineHeight
+      + geometry.footerHeight;
+    const top = geometry.bottom - height;
+    const right = geometry.x + geometry.width;
+    const textX = geometry.x + geometry.textInsetLeft;
+    const textWidth = geometry.width
+      - geometry.textInsetLeft
+      - geometry.textInsetRight;
+
+    context.save();
+    // The conversation temporarily owns the complete content field beneath
+    // the status spine. Leaving the dashboard clock or a feature sentence
+    // visible above a short card makes one exchange read as two simultaneous
+    // interfaces. Presenter state remains intact and is restored exactly when
+    // conversation ownership ends.
+    context.fillStyle = gray(0);
+    context.fillRect(3, 37, CANVAS.width - 6, CANVAS.height - 40);
+    context.fillStyle = gray(0);
+    roundedRect(context, geometry.x, top, geometry.width, height, 6);
+    context.fill();
+    context.strokeStyle = gray(CHROME);
+    context.lineWidth = 1;
+    context.stroke();
+
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    const firstBaseline = top + geometry.topPadding + 7;
+    conversation.visibleLines.slice(0, lineCapacity).forEach((line, index) => {
+      if (line.role === 'separator') return;
+      context.fillStyle = gray(line.role === 'assistant' ? BRIGHT : CHROME);
+      context.font = line.role === 'assistant' ? TYPE.assistant : TYPE.body;
+      this.fitText(
+        context,
+        line.text,
+        textX,
+        firstBaseline + index * geometry.lineHeight,
+        textWidth,
+      );
+    });
+
+    if (conversation.totalLines > lineCapacity) {
+      const trackX = right - 14;
+      const trackTop = top + geometry.topPadding;
+      const trackHeight = lineCapacity * geometry.lineHeight;
+      const thumbHeight = Math.max(
+        10,
+        Math.round((lineCapacity / conversation.totalLines) * trackHeight),
+      );
+      const travel = Math.max(0, trackHeight - thumbHeight);
+      const maximum = Math.max(1, conversation.maximumScrollFromTail);
+      const startFromTop = maximum - Math.max(
+        0,
+        Math.min(maximum, conversation.scrollFromTail),
+      );
+      const thumbTop = trackTop + Math.round((startFromTop / maximum) * travel);
+      context.fillStyle = gray(QUIET);
+      context.fillRect(trackX, trackTop, 2, trackHeight);
+      context.fillStyle = gray(SUPPORT);
+      context.fillRect(trackX, thumbTop, 2, thumbHeight);
+    }
+
+    // The marker occupies a deliberate break in the bottom rule. Current G2
+    // footage shows one compact glyph morphing through bar, cross, post, and
+    // square silhouettes while Even AI is working; keep that motion local to
+    // the glyph so transcript pixels remain stable between activity ticks.
+    // The physical image bridge serializes tile writes. The exact optical
+    // centre is also the x=288 tile seam, where an animation would make every
+    // tick upload both lower tiles and could delay answer pixels. A compact
+    // 8-10px glyph centred five pixels left remains optically central while
+    // keeping every changing activity pixel in one tile.
+    const markerCenter = geometry.x + geometry.width / 2;
+    const activityCenter = markerCenter - 5;
+    context.fillStyle = gray(0);
+    context.fillRect(markerCenter - 42, geometry.bottom - 2, 84, 5);
+    if (conversation.continuePrompt) {
+      context.fillStyle = gray(SUPPORT);
+      context.font = TYPE.hint;
+      context.textAlign = 'center';
+      this.fitText(
+        context,
+        'Continue?  tap stay · left x2 exit',
+        markerCenter,
+        geometry.bottom - 11,
+        310,
+      );
+    } else if (conversation.state === 'ready') {
+      context.fillStyle = gray(SUPPORT);
+      context.beginPath();
+      context.arc(markerCenter, geometry.bottom, 2.25, 0, Math.PI * 2);
+      context.fill();
+    } else {
+      context.fillStyle = gray(BRIGHT);
+      const frame = conversation.indicatorFrame % 8;
+      switch (frame) {
+        case 0: // wide H
+          context.fillRect(activityCenter - 5, geometry.bottom - 5, 2, 10);
+          context.fillRect(activityCenter + 3, geometry.bottom - 5, 2, 10);
+          context.fillRect(activityCenter - 3, geometry.bottom - 1, 6, 3);
+          break;
+        case 1: // two close posts
+          context.fillRect(activityCenter - 4, geometry.bottom - 4, 2, 8);
+          context.fillRect(activityCenter + 2, geometry.bottom - 4, 2, 8);
+          break;
+        case 2: // cross
+          context.fillRect(activityCenter - 1, geometry.bottom - 6, 3, 12);
+          context.fillRect(activityCenter - 5, geometry.bottom - 1, 10, 3);
+          break;
+        case 3: // horizontal bar
+          context.fillRect(activityCenter - 5, geometry.bottom - 2, 10, 5);
+          break;
+        case 4: // separated points
+          context.fillRect(activityCenter - 3, geometry.bottom - 1, 3, 3);
+          context.fillRect(activityCenter + 2, geometry.bottom - 1, 3, 3);
+          break;
+        case 5: // vertical bar
+          context.fillRect(activityCenter - 2, geometry.bottom - 6, 4, 12);
+          break;
+        case 6: // open square
+          context.lineWidth = 2;
+          context.strokeStyle = gray(BRIGHT);
+          context.strokeRect(activityCenter - 4, geometry.bottom - 5, 7, 10);
+          break;
+        default: // solid square, the quietest active phase
+          context.fillRect(activityCenter - 4, geometry.bottom - 4, 8, 8);
+          break;
+      }
+    }
     context.restore();
   }
 
@@ -3870,28 +4136,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
   private drawAssistantOverlayText(
     context: CanvasRenderingContext2D,
-    text: string,
+    lines: readonly string[],
   ): void {
-    // Read from the BEGINNING. `fitHudWrappedText` falls back to
-    // `visibleHudTailLines`, which keeps the newest rows and prefixes "…"
-    // — correct for the Brainstorm transcript it was written for, wrong
-    // for an answer. Recorded on the wearer's lens 2026-09-08: a
-    // four-sentence reply rendered as "…daytime sky glows blue. At sunset
-    // the sun sits low … leaving t", its opening sentences deleted and its
-    // last line severed. They were shown the middle of their own answer
-    // and could not scroll to the rest.
-    //
-    // `visibleHudLeadingLines` is the helper this codebase already uses
-    // wherever the start is what matters (notification previews, News
-    // rows, the Messages reader). The "…" moves to the end, where it means
-    // "there is more" instead of "you missed the start".
-    const measure = (value: string, fontSize: number): number => {
-      context.font = prose(fontSize);
-      return context.measureText(value).width;
-    };
+    // The caller passes one measured page. No ellipsis is synthesized here:
+    // every wrapped row belongs to exactly one reachable page, including the
+    // opening and final sentences from the recorded four-sentence answer.
     const fontSize = ASSISTANT_OVERLAY_FONT_PX;
-    const wrapped = wrapHudText(text, 386, (value) => measure(value, fontSize));
-    const lines = visibleHudLeadingLines(wrapped, 4);
     context.font = prose(fontSize);
     const layout = assistantOverlayTextLayout(lines.length, fontSize);
     lines.forEach((line, index) => {

@@ -21,12 +21,22 @@ import logging
 from collections.abc import Awaitable, Callable
 import re
 import time
+from typing import Literal
+from uuid import uuid4
 
 from ..audio.vad import RmsVad
 from ..core.interfaces import (
     AudioFrame, AudioFrameSource, GlassesTransport, ReplyEngine, SttEngine, Transcript,
 )
-from ..core.protocol import AudioControl, AudioSource, ContainerId, HudText
+from ..core.protocol import (
+    AssistantConversationTurn,
+    AudioControl,
+    AudioSource,
+    ContainerId,
+    HudText,
+    utf16_slice,
+    utf16_units,
+)
 from .hud import HudWriter
 from .prompted_input import PromptedInputDispatcher, PromptTicket, UtteranceProvenance
 from .session import SessionManager
@@ -136,6 +146,11 @@ class ConversationWindow:
     def close(self) -> None:
         """The exchange is over — the next words need the wake word again."""
         self._open_until = 0.0
+
+    @property
+    def continue_after_ms(self) -> int:
+        """The display and speech gate share one inactivity boundary."""
+        return min(120_000, max(1_000, round(self._seconds * 1_000)))
 
     @property
     def is_open(self) -> bool:
@@ -296,6 +311,11 @@ class VoiceOrchestrator:
             tuple(sorted(wake_words, key=len, reverse=True)) if wake_words else None
         )
         self._conversation = ConversationWindow(conversation_window_s)
+        self._assistant_conversation_id = ""
+        self._assistant_conversation_revision = 0
+        self._assistant_conversation_turns: list[AssistantConversationTurn] = []
+        self._assistant_conversation_omitted = False
+        self._assistant_conversation_visible = False
         # Until when an answer is still meant to be readable on the lens.
         self._answer_until = 0.0
         # The last utterance that was NOT for JOAT, kept only long enough to
@@ -337,9 +357,10 @@ class VoiceOrchestrator:
         self._pending_arrived = asyncio.Event()
         self._stt_busy = 0
         self._utterance_worker: asyncio.Task[None] | None = None
-        # The reply whose first words were sent but not yet seen painted:
-        # (turn ordinal, end of speech). The next successful tile upload
-        # the plugin reports closes it with the `painted` stage.
+        # A raster receipt whose first words were sent but not yet seen
+        # painted: (turn ordinal, end of speech). Native conversations use
+        # text-container writes and must never be correlated to a later,
+        # unrelated image tile.
         self._awaiting_paint: tuple[int, float] | None = None
 
     def attach(self) -> None:
@@ -769,7 +790,7 @@ class VoiceOrchestrator:
                 if reason == "stop" and not (self._sessions is not None and self._sessions.active):
                     # No session to hand the stop word to: acknowledge it
                     # where the cut-off answer was, then let it settle.
-                    await self._hud.assistant("Stopped.", answers_wearer=True)
+                    await self._hud.receipt("Stopped.", answers_wearer=True)
                     await self._hud.settle_assistant(2_000)
                 head = item
                 head_endpointed_at = nxt.endpointed_at
@@ -887,11 +908,10 @@ class VoiceOrchestrator:
                 # waiting to be asked. Answering "Yes?" and then demanding
                 # the name again in the very next breath is the behaviour
                 # this window exists to end.
+                self._begin_assistant_conversation("JOAT")
+                self._set_assistant_conversation_answer("Yes?")
+                await self._publish_assistant_conversation("ready")
                 self._conversation.open()
-                await self._hud.assistant("Yes?")
-                if not self._reply_surface_current(prompt_revision, prompt_ticket):
-                    return
-                await self._hud.settle_assistant(4_000)
                 return
             query = addressed
             # Trigger phrases ("debate <topic>") now see only ADDRESSED text.
@@ -903,6 +923,7 @@ class VoiceOrchestrator:
             # model to interpret — and because the LLM would otherwise
             # cheerfully claim to have switched a model it cannot touch.
             if self._commands is not None:
+                command_surface_revision = self._surface_revision()
                 answer = await self._commands(query)
                 if answer is not None:
                     if answer == "":
@@ -910,10 +931,40 @@ class VoiceOrchestrator:
                         return
                     if not self._reply_surface_current(prompt_revision, prompt_ticket):
                         return
-                    await self._hud.context(f"you  {query}")
-                    if not self._reply_surface_current(prompt_revision, prompt_ticket):
+                    if getattr(answer, "presentation", "conversation") == "receipt":
+                        if self._surface_revision() == command_surface_revision:
+                            # A command that stayed on this page still belongs
+                            # to the same chat. Rendering it as a detached
+                            # receipt would hide it behind an already-active
+                            # conversation and split one exchange across two
+                            # incompatible gesture owners.
+                            self._begin_assistant_conversation(query)
+                            self._set_assistant_conversation_answer(str(answer))
+                            await self._publish_assistant_conversation("ready")
+                            self._conversation.open()
+                            hold_ms = HudWriter.reading_ms(str(answer))
+                            self._answer_until = time.monotonic() + hold_ms / 1000
+                            self._observe_latency(
+                                latency_turn, "first_reply_sent", started_at,
+                            )
+                            self._observe_latency(latency_turn, "reply_complete", started_at)
+                            return
+                        # A command that opened another JOAT feature keeps its
+                        # compact transactional receipt on that destination.
+                        await self._hud.receipt(str(answer), answers_wearer=True)
+                        hold_ms = HudWriter.reading_ms(str(answer))
+                        await self._hud.settle_assistant(hold_ms)
+                        self._observe_latency(
+                            latency_turn,
+                            "first_reply_sent",
+                            started_at,
+                            awaits_tile_paint=True,
+                        )
+                        self._observe_latency(latency_turn, "reply_complete", started_at)
                         return
-                    await self._hud.assistant(answer)
+                    self._begin_assistant_conversation(query)
+                    self._set_assistant_conversation_answer(str(answer))
+                    await self._publish_assistant_conversation("ready")
                     # A deterministic answer is a reply too; it was missing
                     # from the receipt (the audit's A6), and it continues a
                     # conversation for the same reason a model reply does.
@@ -922,9 +973,8 @@ class VoiceOrchestrator:
                     if not self._reply_surface_current(prompt_revision, prompt_ticket):
                         return
                     # A spoken command's answer is read like any other.
-                    hold_ms = HudWriter.reading_ms(answer)
+                    hold_ms = HudWriter.reading_ms(str(answer))
                     self._answer_until = time.monotonic() + hold_ms / 1000
-                    await self._hud.settle_assistant(hold_ms)
                     self._observe_latency(latency_turn, "reply_complete", started_at)
                     return
             # The wearer's words go to their OWN region, so the reply no
@@ -946,7 +996,8 @@ class VoiceOrchestrator:
             if not reply_is_current():
                 log.info("addressed turn dropped: surface changed before the reply")
                 return
-            await self._hud.context(f"you  {query}")
+            self._begin_assistant_conversation(query)
+            await self._publish_assistant_conversation("thinking")
             if self._replier is None:
                 # No reply engine at all. The wearer addressed JOAT and is
                 # owed an answer, not a status line that says "listening".
@@ -957,7 +1008,14 @@ class VoiceOrchestrator:
                 log.info("addressed turn dropped: surface changed before streaming")
                 return
             parts: list[str] = []
+            stream_produced = False
+            first_model_chunk_seen = False
+            first_reply_sent = False
             async for chunk in self._replier.stream(query):
+                stream_produced = True
+                if not first_model_chunk_seen:
+                    first_model_chunk_seen = True
+                    self._observe_latency(latency_turn, "first_model_chunk", started_at)
                 if not self._reply_surface_current(prompt_revision, prompt_ticket):
                     log.info("addressed turn dropped: a question took the surface mid-reply")
                     return
@@ -966,25 +1024,22 @@ class VoiceOrchestrator:
                     # the assistant turn so its CLI can finish and retain
                     # conversation continuity; only painting is obsolete.
                     continue
-                if not parts:
-                    self._observe_latency(latency_turn, "first_reply_sent", started_at)
-                    # Progress goes in the status bar, which is a text
-                    # container updated in place. The answer itself does NOT
-                    # paint per chunk any more.
-                    #
-                    # Measured, not assumed: all six of the wearer's real
-                    # replies (123-214 chars) fit the card's four lines at
-                    # 14px, which holds 224. The truncation and the garbled
-                    # seam they reported ("you're leu're left", an answer
-                    # opening with "…wavelengths") were both captured in
-                    # MID-STREAM frames — a partial answer, re-wrapped and
-                    # re-fitted on every chunk, and shrunk toward 12px while
-                    # it grew. A settled answer has neither problem, and on
-                    # the real bridge each of those discarded frames also
-                    # cost four image tiles at ~414ms apiece.
-                    await self._hud.status("JOAT · answering…")
                 parts.append(chunk)
+                accumulated = "".join(parts).strip()
+                if accumulated:
+                    self._set_assistant_conversation_answer(accumulated)
+                    await self._publish_assistant_conversation("answering")
+                    if not first_reply_sent:
+                        first_reply_sent = True
+                        self._observe_latency(latency_turn, "first_reply_sent", started_at)
             if not parts:
+                if stream_produced:
+                    # A model tool intentionally transferred the display to
+                    # another surface. The stream was real but its prose was
+                    # obsolete; do not paint a false "no answer" card over
+                    # the successful tool/session view.
+                    log.info("addressed turn completed after its surface changed")
+                    return
                 # The stream ended without a single token. Five separate
                 # exits in this method could end an ADDRESSED turn with
                 # nothing painted and nothing logged, and the wearer was
@@ -1001,20 +1056,109 @@ class VoiceOrchestrator:
                 if not reply_is_current():
                     log.info("addressed turn dropped: surface changed before painting")
                     return
-                reply_text = "".join(parts)
-                await self._hud.assistant(reply_text)
+                # Normalize presentation-only stream whitespace before the
+                # final ready state. Every preceding frame was cumulative,
+                # so a dropped update cannot corrupt the next one.
+                reply_text = "".join(parts).strip()
+                if not reply_text:
+                    log.warning("addressed turn produced only whitespace")
+                    await self._answer_failed(prompt_revision, prompt_ticket)
+                    return
+                self._set_assistant_conversation_answer(reply_text)
+                await self._publish_assistant_conversation("ready")
+                if not first_reply_sent:
+                    self._observe_latency(latency_turn, "first_reply_sent", started_at)
                 # JOAT just spoke to the wearer; a reply invites an answer.
                 self._conversation.open()
                 # Hold it long enough to READ, not a flat six seconds.
                 hold_ms = HudWriter.reading_ms(reply_text)
                 self._answer_until = time.monotonic() + hold_ms / 1000
-                await self._hud.settle_assistant(hold_ms)
                 self._observe_latency(latency_turn, "reply_complete", started_at)
                 log.info("reply emitted chars=%d", len(reply_text))
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
             await self._restore_status()
+
+    @staticmethod
+    def _conversation_text(text: str) -> str:
+        clean = text.strip()
+        if utf16_units(clean) <= 4_000:
+            return clean
+        # Make the loss visible. A silent slice would recreate the exact
+        # rendering defect this transcript replaces.
+        return f"{utf16_slice(clean, 3_999)}…"
+
+    def _trim_conversation(self) -> None:
+        def units() -> int:
+            return sum(utf16_units(turn.text) for turn in self._assistant_conversation_turns)
+
+        while len(self._assistant_conversation_turns) > 16 or units() > 16_000:
+            removed = self._assistant_conversation_turns.pop(0)
+            if (
+                removed.role == "user"
+                and self._assistant_conversation_turns
+                and self._assistant_conversation_turns[0].role == "assistant"
+            ):
+                self._assistant_conversation_turns.pop(0)
+            self._assistant_conversation_omitted = True
+
+    def _begin_assistant_conversation(self, query: str) -> None:
+        if not self._conversation.is_open or not self._assistant_conversation_turns:
+            self._assistant_conversation_id = f"voice-{uuid4().hex}"
+            self._assistant_conversation_revision = 0
+            self._assistant_conversation_turns = []
+            self._assistant_conversation_omitted = False
+        self._assistant_conversation_turns.append(AssistantConversationTurn(
+            "user", self._conversation_text(query),
+        ))
+        self._trim_conversation()
+
+    def _set_assistant_conversation_answer(self, text: str) -> None:
+        turn = AssistantConversationTurn("assistant", self._conversation_text(text))
+        if self._assistant_conversation_turns and self._assistant_conversation_turns[-1].role == "assistant":
+            self._assistant_conversation_turns[-1] = turn
+        else:
+            self._assistant_conversation_turns.append(turn)
+        self._trim_conversation()
+
+    async def _publish_assistant_conversation(
+        self, state: Literal["thinking", "answering", "ready"],
+    ) -> None:
+        self._assistant_conversation_revision += 1
+        await self._hud.conversation(
+            self._assistant_conversation_id,
+            self._assistant_conversation_revision,
+            state,
+            tuple(self._assistant_conversation_turns),
+            continue_after_ms=self._conversation.continue_after_ms,
+            earlier_turns_omitted=self._assistant_conversation_omitted,
+        )
+        self._assistant_conversation_visible = True
+
+    def handle_conversation_action(
+        self,
+        action: str,
+        conversation_id: str | None,
+        revision: int | None,
+    ) -> bool:
+        """Apply the Hub's bound Continue/Exit choice to the speech gate."""
+        if (
+            not self._assistant_conversation_visible
+            or conversation_id != self._assistant_conversation_id
+            or revision != self._assistant_conversation_revision
+        ):
+            return False
+        if action == "continue":
+            self._conversation.open()
+            self._answer_until = 0.0
+            return True
+        if action == "exit":
+            self._conversation.close()
+            self._assistant_conversation_visible = False
+            self._answer_until = 0.0
+            return True
+        return False
 
     async def _answer_failed(
         self, prompt_revision: int, prompt_ticket: PromptTicket | None,
@@ -1029,9 +1173,10 @@ class VoiceOrchestrator:
         if not self._reply_surface_current(prompt_revision, prompt_ticket):
             return
         message = "I didn't get an answer for that — say it again."
-        await self._hud.assistant(message)
+        self._set_assistant_conversation_answer(message)
+        await self._publish_assistant_conversation("ready")
+        self._conversation.open()
         self._answer_until = time.monotonic() + HudWriter.reading_ms(message) / 1000
-        await self._hud.settle_assistant(HudWriter.reading_ms(message))
 
     def _reply_surface_current(self, revision: int, ticket: PromptTicket | None) -> bool:
         """Ordinary replies cannot paint while an input question owns the HUD.
@@ -1058,10 +1203,19 @@ class VoiceOrchestrator:
         self._awaiting_paint = None
         self._observe_latency(turn, "painted", started_at)
 
-    def _observe_latency(self, turn: int, stage: str, started_at: float) -> None:
+    def _observe_latency(
+        self,
+        turn: int,
+        stage: str,
+        started_at: float,
+        *,
+        awaits_tile_paint: bool = False,
+    ) -> None:
         """Emit one opt-in, fixed-vocabulary, coarsely bucketed stage."""
         if stage == "first_reply_sent":
-            self._awaiting_paint = (turn, started_at)
+            self._awaiting_paint = (
+                (turn, started_at) if awaits_tile_paint else None
+            )
         # Say how long the wearer waited, in the log, always. The engine has
         # always MEASURED every stage of that wait and then discarded all of
         # it unless an acceptance harness happened to be attached — so "the

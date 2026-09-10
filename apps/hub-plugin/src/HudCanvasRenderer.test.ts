@@ -4,10 +4,12 @@ import type { HudVisualFrame } from './HudVisualSurface';
 import { SPINE_LABEL_BOX } from './types';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
+  ASSISTANT_OVERLAY_PAGE_HINT,
   NOTIFICATION_DISMISS_HINT,
   agentTerminalSafetyLabel,
   agentTerminalFocusLabel,
   agentTerminalTranscriptLayout,
+  assistantOverlayPages,
   assistantOverlayTextLayout,
   brainstormTranscriptLines,
   brainstormTranscriptRowCount,
@@ -297,8 +299,9 @@ describe('selected visual geometry', () => {
 });
 
 describe('semantic HUD chrome', () => {
-  it('labels the assistant overlay with actions that actually dismiss it', () => {
-    expect(ASSISTANT_OVERLAY_DISMISS_HINT).toBe('TAP OR SWIPE TO DISMISS');
+  it('labels taps as dismissal and swipes as reading', () => {
+    expect(ASSISTANT_OVERLAY_DISMISS_HINT).toBe('TAP TO DISMISS');
+    expect(ASSISTANT_OVERLAY_PAGE_HINT).toBe('UP / DOWN TO READ · TAP TO DISMISS');
   });
 
   it('does not advertise the right-temple exit gesture as notification navigation', () => {
@@ -446,6 +449,29 @@ describe('compact productivity outcome geometry', () => {
 });
 
 describe('assistant overlay text fitting', () => {
+  function assistantCanvasFixture() {
+    const text: Array<{ value: string; x: number; y: number; width: number }> = [];
+    const state: Record<string, unknown> = { font: '14px Helvetica Neue' };
+    const fontSize = () => Number(/([\d.]+)px/.exec(String(state.font))?.[1] ?? 14);
+    const width = (value: string) => Array.from(value).length * fontSize() * 0.6;
+    Object.assign(state, {
+      measureText: (value: string) => ({ width: width(value) }),
+      fillText: (value: string, x: number, y: number) => text.push({ value, x, y, width: width(value) }),
+      getImageData: () => ({ data: new Uint8ClampedArray(576 * 288 * 4) }),
+    });
+    const context = new Proxy(state, { get: (target, key) => target[String(key)] ?? (() => undefined) });
+    vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => context }) });
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    Object.defineProperty(renderer, 'icons', { value: Promise.resolve({}) });
+    return { renderer, text };
+  }
+
+  const overviewWithAnswer = (text: string, revision = 1): HudVisualFrame => ({
+    kind: 'overview', status: '9:41 JOAT answering', micOn: true,
+    main: '07\n32', mainBrightness: 4, context: '', tray: '', hint: '',
+    assistantOverlay: { text, presentation: 'answer', revision },
+  });
+
   it('keeps a four-line assistant reply below the header divider and above its footer', () => {
     const layout = assistantOverlayTextLayout(4, 17);
 
@@ -471,6 +497,72 @@ describe('assistant overlay text fitting', () => {
     expect(fitted.lines).toHaveLength(4);
     expect(fitted.lines[0]).toMatch(/^…/);
     expect(fitted.lines.join(' ')).toContain('fourteen');
+  });
+
+  it('accounts for every word of the recorded four-sentence answer across readable pages', () => {
+    const answer = 'Sunlight contains many colors, and Earth’s atmosphere scatters shorter blue '
+      + 'wavelengths more strongly than longer red wavelengths, making the daytime sky look blue. '
+      + 'At sunset, sunlight travels through more atmosphere, so most blues are scattered away '
+      + 'before the light reaches you. The remaining direct light is richer in reds and oranges, '
+      + 'which paints the Sun and nearby sky in warm colors. Dust, smoke, clouds, and pollution '
+      + 'can intensify or mute those sunset colors.';
+    // 7.2px matches the production Helvetica face closely enough to retain
+    // the nine-line simulator case that once produced a one-word page 3.
+    const pages = assistantOverlayPages(answer, 386, 4, (value) => Array.from(value).length * 7.2);
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages[0]?.join(' ')).toMatch(/^Sunlight contains many colors/);
+    expect(pages[0]?.join(' ')).toMatch(/sky look blue\.$/);
+    expect(pages[1]?.join(' ')).toMatch(/^At sunset/);
+    expect(pages[pages.length - 1]?.join(' ')).toMatch(/sunset colors\.$/);
+    expect(pages.flat().join(' ').replace(/\s+/g, ' ').trim()).toBe(answer);
+    expect(pages.flat().some((line) => line.includes('…'))).toBe(false);
+    expect(Math.max(...pages.map((page) => page.length))
+      - Math.min(...pages.map((page) => page.length))).toBeLessThanOrEqual(2);
+    expect(pages[pages.length - 1]?.length).toBeGreaterThan(1);
+  });
+
+  it('renders Paris as an answer above the old pill region and exposes the final long-answer page', async () => {
+    const { renderer, text } = assistantCanvasFixture();
+    const answer = 'FIRST opening words explain the blue daytime sky with enough detail to wrap. '
+      + 'Second sentence explains that sunset light travels through more atmosphere. '
+      + 'Third sentence explains that shorter wavelengths scatter away from the viewer. '
+      + 'FINAL words say the remaining reds and oranges become visible.';
+    try {
+      await renderer.render(overviewWithAnswer('Paris.'));
+      expect(text.find(({ value }) => value === 'Paris.')?.y).toBeLessThan(196);
+
+      text.length = 0;
+      const frame = overviewWithAnswer(answer);
+      await renderer.render(frame);
+      expect(text.some(({ value }) => value.startsWith('FIRST opening words'))).toBe(true);
+      for (let page = 0; page < 10 && renderer.scrollAssistantOverlay('down'); page += 1) {
+        // Move to the final bounded page before the next production render.
+      }
+      text.length = 0;
+      await renderer.render(frame);
+      expect(text.some(({ value }) => value.includes('FINAL words'))).toBe(true);
+      expect(text.some(({ value }) => /\d+\/\d+/.test(value))).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('opens a repeated answer on page one instead of retaining the prior reading position', async () => {
+    const { renderer, text } = assistantCanvasFixture();
+    const answer = 'FIRST sentence is deliberately long enough to make this answer span several pages. '
+      + 'Second sentence carries more explanation for the reader. '
+      + 'FINAL sentence confirms that the repeated answer is complete.';
+    try {
+      await renderer.render(overviewWithAnswer(answer, 1));
+      expect(renderer.scrollAssistantOverlay('down')).toBe(true);
+      text.length = 0;
+      await renderer.render(overviewWithAnswer(answer, 1));
+      expect(text.some(({ value }) => value.startsWith('FIRST sentence'))).toBe(false);
+
+      text.length = 0;
+      await renderer.render(overviewWithAnswer(answer, 2));
+      expect(text.some(({ value }) => value.startsWith('FIRST sentence'))).toBe(true);
+      expect(text.some(({ value }) => value.startsWith('1/'))).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
   });
 });
 
@@ -986,26 +1078,24 @@ describe('navigation map projection', () => {
   });
 });
 
-describe('short spoken receipts are strips, not cards', () => {
-  it('pills a one-line acknowledgement and keeps the card for a real reply', () => {
-    // The same wearer ruling applied to Messages and note receipts: these
-    // arrive as command answers through the assistant overlay, and a
-    // 460x183 card for "Reply sent." is the productivity-page mistake again.
+describe('assistant answer and receipt semantics', () => {
+  it('uses an explicit receipt type instead of guessing from string length', () => {
     for (const text of [
       'Reply sent.',
       'Reply cancelled.',
       'New message cancelled.',
       'Saved QuickNote: Ship it today.',
     ]) {
-      expect(HudCanvas.usesAssistantPillLayout(text)).toBe(true);
+      expect(HudCanvas.usesAssistantPillLayout(text, 'receipt')).toBe(true);
     }
-    // A genuine assistant answer still earns the full card.
+    expect(HudCanvas.usesAssistantPillLayout('Paris.', 'answer')).toBe(false);
     expect(HudCanvas.usesAssistantPillLayout(
       'I checked the calendar and reminders. Your design review is next, '
       + 'and reminder monitoring is armed for this evening.',
+      'answer',
     )).toBe(false);
-    expect(HudCanvas.usesAssistantPillLayout('line one\nline two')).toBe(false);
-    expect(HudCanvas.usesAssistantPillLayout('   ')).toBe(false);
+    expect(HudCanvas.usesAssistantPillLayout('line one\nline two', 'receipt')).toBe(false);
+    expect(HudCanvas.usesAssistantPillLayout('   ', 'receipt')).toBe(false);
   });
 });
 

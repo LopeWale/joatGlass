@@ -74,6 +74,19 @@ export type ResumePolicy = 'auto' | 'mac' | 'confirm';
 export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system';
 /** A transient JOAT response is never a Messages, Brainstorm, or Hermes page. */
 export type AssistantOverlayOperation = 'replace' | 'append' | 'settle' | 'dismiss';
+export type AssistantConversationState = 'thinking' | 'answering' | 'ready';
+export interface AssistantConversationTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+export interface AssistantConversationSnapshot {
+  conversationId: string;
+  revision: number;
+  state: AssistantConversationState;
+  turns: AssistantConversationTurn[];
+  continueAfterMs: number;
+  earlierTurnsOmitted: boolean;
+}
 export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
 export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
 export type NavigationRoutePlan = import('./NavigationProgress').NavigationRoutePlan;
@@ -455,11 +468,20 @@ export type DownlinkMessage =
     operation: AssistantOverlayOperation;
     text?: string;
     dismissAfterMs?: number;
+    /** Explicit visual meaning; older Mac brains omit it and default to an answer. */
+    presentation?: 'answer' | 'receipt';
     /** This overlay ANSWERS something the wearer just asked on the surface
      * they are looking at, so the Brainstorm refusal does not apply. That
      * refusal exists to stop unrelated queued chatter stamping itself over
      * a synthesis — not to silence the reply to an instruction. */
     answersWearer?: boolean;
+  }
+  | ({ kind: 'assistant.conversation'; operation: 'replace' } & AssistantConversationSnapshot)
+  | {
+    kind: 'assistant.conversation';
+    operation: 'dismiss';
+    conversationId: string;
+    revision: number;
   }
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
   | {
@@ -568,6 +590,9 @@ export interface InputEventPayload {
   traceId?: string;
   /** Binds a row selection to the exact list generation that was rendered. */
   requestId?: string;
+  /** Binds Continue/Exit to the exact assistant transcript the wearer saw. */
+  conversationId?: string;
+  conversationRevision?: number;
   /** Content-free instant supplied only when returning from a productivity outcome. */
   planningAnchorUnixMs?: number;
 }

@@ -466,6 +466,41 @@ describe('MacLink navigation delivery', () => {
   });
 });
 
+describe('MacLink assistant conversation action delivery', () => {
+  const action = {
+    kind: 'input' as const,
+    event: {
+      containerName: 'assistant-conversation',
+      selectedName: 'exit',
+      conversationId: 'voice-old',
+      conversationRevision: 9,
+    },
+  };
+
+  it('drops an offline conversation action instead of replaying it after reconnect', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    expect(link.sendConversationAction(action)).toBe(false);
+
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    expect(sockets[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: null }),
+    ]);
+  });
+
+  it('sends an exact conversation action only on the authenticated socket', () => {
+    const link = new MacLink({ urls: ['ws://m:1/g'] });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+
+    expect(link.sendConversationAction(action)).toBe(true);
+    expect(sockets[0]!.sent).toContain(JSON.stringify(action));
+  });
+});
+
 describe('MacLink downlink ordering', () => {
   it('coalesces adjacent queued assistant appends before the HUD renders them', async () => {
     const link = new MacLink({ urls: ['ws://m:1/g'] });

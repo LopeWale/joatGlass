@@ -59,7 +59,14 @@ export interface BrainstormInputOwner {
  * always-available microphone privacy control. */
 export interface AssistantOverlayInputOwner {
   hasAssistantOverlay(): boolean;
+  scrollAssistantOverlay(direction: 'up' | 'down'): boolean;
   dismissAssistantOverlay(): Promise<boolean>;
+  hasAssistantConversation(): boolean;
+  assistantConversationIdentity(): { conversationId: string; revision: number } | undefined;
+  isAssistantConversationContinuePromptVisible(): boolean;
+  scrollAssistantConversation(direction: 'up' | 'down'): boolean;
+  continueAssistantConversation(): Promise<boolean>;
+  requestAssistantConversationExit(): Promise<'inactive' | 'prompted' | 'exited' | 'failed'>;
   hasVisibleNotification(): boolean;
   dismissVisibleNotification(): Promise<boolean>;
 }
@@ -264,6 +271,7 @@ export class EventRouter {
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
       if (this.handlePromptInput(event.textEvent.eventType)) return;
+      if (this.handleAssistantConversation(event.textEvent.eventType)) return;
       if (this.dismissAssistantOverlayFor(event.textEvent.eventType)) return;
       if (this.dismissVisibleNotificationFor(event.textEvent.eventType)) return;
       if (this.navigation?.isActive()) {
@@ -332,6 +340,7 @@ export class EventRouter {
       this.recordGesture(this.classify(event.listEvent.eventType), 'list');
       if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
       if (this.handlePromptInput(event.listEvent.eventType)) return;
+      if (this.handleAssistantConversation(event.listEvent.eventType)) return;
       if (this.dismissAssistantOverlayFor(event.listEvent.eventType)) return;
       // Some G2 firmware represents a Home-tile tap as a List event. A
       // transient notification must own that ordinary tap before the hidden
@@ -489,6 +498,7 @@ export class EventRouter {
     }
 
     if (this.handlePromptInput(type, this.isBackSource(source))) return;
+    if (this.handleAssistantConversation(type, this.isBackSource(source))) return;
     if (this.dismissAssistantOverlayFor(type)) return;
     if (this.dismissVisibleNotificationFor(type)) return;
 
@@ -623,13 +633,69 @@ export class EventRouter {
   private dismissAssistantOverlayFor(eventType: number | undefined): boolean {
     if (!this.assistantOverlay?.hasAssistantOverlay()) return false;
     const type = eventType ?? OsEventTypeList.CLICK_EVENT;
+    if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
+      this.assistantOverlay.scrollAssistantOverlay('up');
+      return true;
+    }
+    if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      this.assistantOverlay.scrollAssistantOverlay('down');
+      return true;
+    }
     if (
       type !== OsEventTypeList.CLICK_EVENT
       && type !== OsEventTypeList.DOUBLE_CLICK_EVENT
-      && type !== OsEventTypeList.SCROLL_TOP_EVENT
-      && type !== OsEventTypeList.SCROLL_BOTTOM_EVENT
     ) return false;
     void this.assistantOverlay.dismissAssistantOverlay();
+    return true;
+  }
+
+  private handleAssistantConversation(
+    eventType: number | undefined,
+    backAllowed = true,
+  ): boolean {
+    const owner = this.assistantOverlay;
+    if (!owner?.hasAssistantConversation()) return false;
+    const identity = owner.assistantConversationIdentity();
+    if (!identity) return true;
+    const type = eventType ?? OsEventTypeList.CLICK_EVENT;
+    if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
+      owner.scrollAssistantConversation('up');
+      return true;
+    }
+    if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      owner.scrollAssistantConversation('down');
+      return true;
+    }
+    if (type === OsEventTypeList.CLICK_EVENT) {
+      if (owner.isAssistantConversationContinuePromptVisible()) {
+        void owner.continueAssistantConversation().then((continued) => {
+          if (!continued) return;
+          this.link.sendConversationAction({
+            kind: 'input',
+            event: {
+              containerName: 'assistant-conversation',
+              selectedName: 'continue',
+              conversationId: identity.conversationId,
+              conversationRevision: identity.revision,
+            },
+          });
+        });
+      }
+      return true;
+    }
+    if (type !== OsEventTypeList.DOUBLE_CLICK_EVENT || !backAllowed) return false;
+    void owner.requestAssistantConversationExit().then((result) => {
+      if (result !== 'exited') return;
+      this.link.sendConversationAction({
+        kind: 'input',
+        event: {
+          containerName: 'assistant-conversation',
+          selectedName: 'exit',
+          conversationId: identity.conversationId,
+          conversationRevision: identity.revision,
+        },
+      });
+    });
     return true;
   }
 

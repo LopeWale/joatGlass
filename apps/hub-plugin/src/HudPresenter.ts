@@ -1,8 +1,19 @@
 import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
-import type { AssistantOverlayVisual, HudFramePainter, HudVisualFrame } from './HudVisualSurface';
+import type {
+  AssistantConversationVisual,
+  AssistantOverlayPresentation,
+  AssistantOverlayVisual,
+  HudFramePainter,
+  HudVisualFrame,
+} from './HudVisualSurface';
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
+import {
+  AssistantConversationSurface,
+  validAssistantConversationSnapshot,
+  type ConversationExitResult,
+} from './AssistantConversationSurface';
 import { usesActionPillLayout } from './HudCanvasRenderer';
 import type { NavigationHudModel } from './NavigationHud';
 import {
@@ -15,6 +26,7 @@ import {
   CONFIRM_PROMPT_MAX_UNITS,
   ContainerId,
   type BrainstormHudModel,
+  type AssistantConversationSnapshot,
   type HudContentKind,
   type PanelContentTab,
   type PanelTab,
@@ -253,6 +265,7 @@ export class HudPresenter {
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private assistantOverlay?: AssistantOverlayState;
+  private assistantOverlayRevision = 0;
   private promptQuestion?: PromptQuestionState;
   private promptQuestionPaint?: Promise<boolean>;
   private actionOverlay?: ActionOverlayState;
@@ -265,13 +278,54 @@ export class HudPresenter {
   private micOn = false;
   private displayActive = true;
   private displayRevision = 0;
+  private readonly assistantConversation: AssistantConversationSurface;
+  private restoringAssistantConversation = false;
 
   constructor(
     private readonly client: BridgeClient,
     private readonly layouts: HudPageBuilder,
     private readonly visual?: HudFramePainter,
     private readonly diagnostics?: G2DiagnosticTrace,
-  ) {}
+  ) {
+    this.assistantConversation = new AssistantConversationSurface(
+      client,
+      layouts,
+      () => this.restoreAfterAssistantConversation(),
+      {
+        ...(visual ? {
+          paintView: (view: AssistantConversationVisual, isCurrent: () => boolean) => (
+            this.paintAssistantConversationView(view, isCurrent)
+          ),
+        } : {}),
+        ...(visual?.measureAssistantConversationText ? {
+          measureTextWidth: (text: string) => visual.measureAssistantConversationText!(text),
+        } : {}),
+      },
+    );
+  }
+
+  private async paintAssistantConversationView(
+    conversation: AssistantConversationVisual,
+    isConversationCurrent: () => boolean,
+  ): Promise<boolean> {
+    const visual = this.visual;
+    if (!visual) return false;
+    const displayCurrent = this.captureDisplayGuard();
+    const isCurrent = () => displayCurrent() && isConversationCurrent();
+    if (!isCurrent()) return false;
+    const frame: HudVisualFrame = {
+      ...this.visualFrame(),
+      assistantConversation: conversation,
+    };
+    try {
+      const painted = visual.paintExact
+        ? await visual.paintExact(frame, isCurrent)
+        : await visual.paint(frame);
+      return painted && isCurrent();
+    } catch {
+      return false;
+    }
+  }
 
   /** Stop this document's painters, including delayed native fallback work. */
   suspendDisplay(): void {
@@ -289,6 +343,7 @@ export class HudPresenter {
     this.assistantOverlayPaint = undefined;
     if (this.assistantOverlay?.dismissTimer !== undefined) clearTimeout(this.assistantOverlay.dismissTimer);
     this.assistantOverlay = undefined;
+    this.assistantConversation.retireForHandoff();
     this.clearActionOverlay();
     this.promptQuestion = undefined;
     this.promptQuestionPaint = undefined;
@@ -418,6 +473,11 @@ export class HudPresenter {
   showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean): Promise<boolean> {
     if (!this.visual?.paintExact || this.confirmation || !promptId
       || !question.trim() || question.length > 1000) return Promise.resolve(false);
+    if (this.assistantConversation.isActive()) {
+      return this.prepareAssistantConversationHandoff().then((ready) => (
+        ready ? this.showPromptQuestion(promptId, question, isCurrent) : false
+      ));
+    }
     const existing = this.promptQuestion;
     if (existing?.id === promptId) {
       return existing.question === question && this.isPromptCurrent(existing)
@@ -481,7 +541,10 @@ export class HudPresenter {
   /** JOAT replies leave the current feature intact; a question or consent
    * surface has priority over incidental assistant content. */
   async showAssistantOverlay(
-    text: string, append = false, answersWearer = false,
+    text: string,
+    append = false,
+    answersWearer = false,
+    presentation: AssistantOverlayPresentation = 'answer',
   ): Promise<boolean> {
     // Not over a brainstorm/terminal page — UNLESS it answers something
     // the wearer just asked there. Seen live in the simulator: a queued
@@ -497,9 +560,21 @@ export class HudPresenter {
     // An answer is not an interruption.
     if (this.surface.kind === 'brainstorm' && !answersWearer) return false;
     if (!text) return false;
+    // A receipt must be visible, not merely recorded behind the native
+    // conversation page. Quiesce that page first; the retained conversation
+    // may resume later under the same Mac identity.
+    if (this.assistantConversation.isActive()
+      && !await this.prepareAssistantConversationHandoff()) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
-    this.assistantOverlay = { text: append ? `${current?.text ?? ''}${text}` : text };
+    const revision = append && current
+      ? current.revision
+      : ++this.assistantOverlayRevision;
+    this.assistantOverlay = {
+      text: append ? `${current?.text ?? ''}${text}` : text,
+      presentation: append ? (current?.presentation ?? presentation) : presentation,
+      revision,
+    };
     if (this.confirmation) return true;
     if (append || this.assistantOverlayPaint) {
       this.scheduleAssistantOverlayPaint();
@@ -508,12 +583,101 @@ export class HudPresenter {
     return this.paintAssistantOverlayNow();
   }
 
+  /** Install and retain one Even-style conversation surface. The live
+   * JOAT feature model keeps accepting updates underneath it and is painted
+   * at its newest state when the wearer leaves the conversation. */
+  async showAssistantConversation(snapshot: AssistantConversationSnapshot): Promise<boolean> {
+    if (!this.displayActive || this.confirmation || this.promptQuestion
+      || !validAssistantConversationSnapshot(snapshot)) return false;
+    const entering = !this.assistantConversation.isActive();
+    if (entering) {
+      const displayCurrent = this.captureDisplayGuard();
+      this.clearActionOverlay();
+      this.cancelAssistantOverlayPaintTimer();
+      this.assistantOverlayPaintDirty = false;
+      if (this.assistantOverlay?.dismissTimer !== undefined) {
+        clearTimeout(this.assistantOverlay.dismissTimer);
+      }
+      this.assistantOverlay = undefined;
+      this.clearPanelTicker();
+      if (this.thinkingTicker !== undefined) clearTimeout(this.thinkingTicker);
+      this.thinkingTicker = undefined;
+      if (!displayCurrent()) return false;
+    }
+    const presented = await this.assistantConversation.present(snapshot);
+    if (!presented && entering) {
+      this.assistantConversation.retireForHandoff();
+      await this.restoreAfterAssistantConversation();
+    }
+    return presented;
+  }
+
+  hasAssistantConversation(): boolean {
+    return this.assistantConversation.isActive();
+  }
+
+  isAssistantConversationContinuePromptVisible(): boolean {
+    return this.assistantConversation.isContinuePromptVisible();
+  }
+
+  scrollAssistantConversation(direction: 'up' | 'down'): boolean {
+    return this.assistantConversation.scroll(direction);
+  }
+
+  continueAssistantConversation(): Promise<boolean> {
+    return this.assistantConversation.continueConversation();
+  }
+
+  assistantConversationIdentity(): { conversationId: string; revision: number } | undefined {
+    return this.assistantConversation.currentIdentity();
+  }
+
+  requestAssistantConversationExit(): Promise<ConversationExitResult> {
+    return this.assistantConversation.requestExit();
+  }
+
+  dismissAssistantConversation(conversationId: string, revision: number): Promise<boolean> {
+    return this.assistantConversation.dismiss(conversationId, revision);
+  }
+
+  whenAssistantConversationIdle(): Promise<void> {
+    return this.assistantConversation.whenIdle();
+  }
+
+  private async prepareAssistantConversationHandoff(): Promise<boolean> {
+    if (!this.assistantConversation.isActive()) return true;
+    if (!await this.assistantConversation.pauseForHandoff()) return false;
+    try {
+      if (this.visual) {
+        // Paint the retained feature before relinquishing conversation
+        // ownership. This is the rollback point: if the exact underlay does
+        // not reach the bridge, the same conversation resumes in place.
+        const displayCurrent = this.captureDisplayGuard();
+        const painted = this.visual.paintExact
+          ? await this.visual.paintExact(this.visualFrame(), displayCurrent)
+          : await this.visual.paint(this.visualFrame());
+        if (!painted || !displayCurrent()) {
+          await this.assistantConversation.resumeAfterFailedHandoff();
+          return false;
+        }
+      }
+      return this.assistantConversation.completeHandoff();
+    } catch {
+      await this.assistantConversation.resumeAfterFailedHandoff();
+      return false;
+    }
+  }
+
   settleAssistantOverlay(dismissAfterMs: number): boolean {
     const overlay = this.assistantOverlay;
     if (!overlay || !Number.isInteger(dismissAfterMs) || dismissAfterMs < 1_000 || dismissAfterMs > 15_000) {
       return false;
     }
     if (overlay.dismissTimer !== undefined) clearTimeout(overlay.dismissTimer);
+    // A multipage answer must remain until the wearer explicitly dismisses
+    // it. Starting a timer on page one recreates the recorded loss even when
+    // the hidden rows technically exist.
+    if ((this.visual?.assistantOverlayPageCount?.() ?? 1) > 1) return true;
     overlay.dismissTimer = setTimeout(() => {
       if (this.assistantOverlay === overlay) void this.dismissAssistantOverlay();
     }, dismissAfterMs);
@@ -613,6 +777,16 @@ export class HudPresenter {
     return this.assistantOverlay !== undefined;
   }
 
+  /** Swipes belong to the answer reader. Boundary swipes remain consumed so
+   * they can never operate the obscured feature or dismiss unread copy. */
+  scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
+    if (!this.assistantOverlay) return false;
+    if (this.visual?.scrollAssistantOverlay?.(direction)) {
+      void this.paintAssistantOverlayNow();
+    }
+    return true;
+  }
+
   /** Only a fully visible Home card is tappable. Focus pages keep incoming
    * notifications deferred, assistant overlays keep their higher priority,
    * and confirmations remain exclusive. */
@@ -670,6 +844,7 @@ export class HudPresenter {
   async showList(
     items: string[], options: ListSurfaceOptions = {}, isCurrent?: () => boolean,
   ): Promise<boolean> {
+    if (!await this.prepareAssistantConversationHandoff()) return false;
     if (isCurrent) return this.renderBoundList(items, options, isCurrent);
     const resolved = this.resolveListOptions(options);
     const surface: HudSurface = {
@@ -755,6 +930,7 @@ export class HudPresenter {
    * this presenter only gives it exclusive focus and exact restoration. */
   async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual) return false;
+    if (!await this.prepareAssistantConversationHandoff()) return false;
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
       kind: 'navigation',
@@ -841,6 +1017,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (!this.visual || this.confirmation || (isCurrent && !isCurrent())) return false;
+    if (!await this.prepareAssistantConversationHandoff()) return false;
     this.clearActionOverlay();
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
@@ -889,6 +1066,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (!this.visual) return false;
+    if (!await this.prepareAssistantConversationHandoff()) return false;
     if (usesActionPillLayout(productivity.phase)) {
       return this.showActionPill(productivity, onDeferredProductivityVisible);
     }
@@ -1224,6 +1402,7 @@ export class HudPresenter {
   async showDefault(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    if (!await this.prepareAssistantConversationHandoff()) return false;
     if (this.confirmation) {
       this.confirmation.surface = { kind: 'default' };
       if (this.focusReturn) {
@@ -1322,6 +1501,11 @@ export class HudPresenter {
     if (safePrompt.length > CONFIRM_PROMPT_MAX_UNITS) {
       console.error('[HudPresenter] exact confirmation preview exceeds HUD capacity');
       return Promise.resolve(false);
+    }
+    if (this.assistantConversation.isActive()) {
+      return this.prepareAssistantConversationHandoff().then((ready) => (
+        ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent) : false
+      ));
     }
     // Asking for text never survives a transition into write consent.
     this.promptQuestion = undefined;
@@ -1641,6 +1825,7 @@ export class HudPresenter {
   private async paint(containerId: number): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
     if (this.visual) return this.paintVisual();
     // No custom renderer: retain native text compatibility updates.
     // The text compatibility surface owns the same transient reply as the
@@ -1902,7 +2087,14 @@ export class HudPresenter {
       };
     }
     if (this.assistantOverlay) {
-      out = { ...out, assistantOverlay: { text: this.assistantOverlay.text } };
+      out = {
+        ...out,
+        assistantOverlay: {
+          text: this.assistantOverlay.text,
+          presentation: this.assistantOverlay.presentation,
+          revision: this.assistantOverlay.revision,
+        },
+      };
     }
     return out;
   }
@@ -1911,12 +2103,50 @@ export class HudPresenter {
    * the reloaded page already drew its startup frame, and the BLE lane is
    * serialized, so a second repaint would queue behind this one for nothing. */
   async repaintRestoredSurface(): Promise<boolean> {
+    if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
     return this.paintVisual();
+  }
+
+  private async restoreAfterAssistantConversation(): Promise<boolean> {
+    this.restoringAssistantConversation = true;
+    try {
+      if (this.visual) {
+        // Conversation is another composite of the existing visual page.
+        // Restoring it is one ordinary frame paint, so the tile cache keeps
+        // unchanged quadrants and the OS-owned contextual menu stays mounted.
+        const painted = await this.visual.paint(this.visualFrame());
+        if (painted) {
+          this.armThinkingTicker();
+          this.armPanelTicker();
+        }
+        return painted;
+      }
+
+      const surface = this.surface;
+      const rebuilt = surface.kind === 'list'
+        ? await this.client.require().rebuildPageContainer(
+          this.layouts.listLayout(surface.items, surface.options),
+        )
+        : await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+      if (!rebuilt) return false;
+      this.lastLength.clear();
+      let painted = true;
+      const ids = surface.kind === 'list'
+        ? [ContainerId.StatusBar]
+        : [ContainerId.StatusBar, ContainerId.Main, ContainerId.Context, ContainerId.Tray, ContainerId.Hint];
+      for (const id of ids) {
+        if (this.streams.has(id)) painted = (await this.paint(id)) && painted;
+      }
+      return painted;
+    } finally {
+      this.restoringAssistantConversation = false;
+    }
   }
 
   private async paintVisual(localTick = false): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
     if (!this.visual) return false;
     const confirmation = this.confirmation;
     if (confirmation?.isCurrent) {

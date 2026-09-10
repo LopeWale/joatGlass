@@ -505,6 +505,29 @@ export class MacLink {
     }
   }
 
+  /** Conversation choices are bound to pixels from one authenticated Mac
+   * session. Replaying Exit or Continue after reconnect could target a
+   * successor conversation, so these actions are deliberately lossy. */
+  sendConversationAction(msg: Extract<UplinkMessage, { kind: 'input' }>): boolean {
+    const event = msg.event;
+    if (
+      event.containerName !== 'assistant-conversation'
+      || (event.selectedName !== 'continue' && event.selectedName !== 'exit')
+      || typeof event.conversationId !== 'string'
+      || !/^[A-Za-z0-9_-]{1,64}$/.test(event.conversationId)
+      || !Number.isSafeInteger(event.conversationRevision)
+      || (event.conversationRevision ?? -1) < 0
+      || this.socket?.readyState !== WebSocket.OPEN
+      || !this.authenticated
+    ) return false;
+    try {
+      this.rawSend(msg);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   close(): void {
     this.replaced = false;
     this.halt();

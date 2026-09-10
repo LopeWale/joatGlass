@@ -88,7 +88,16 @@ function make(
   };
   const assistantOverlay = {
     hasAssistantOverlay: vi.fn(() => assistantOverlayVisible),
+    scrollAssistantOverlay: vi.fn(() => assistantOverlayVisible),
     dismissAssistantOverlay: vi.fn(async () => true),
+    hasAssistantConversation: vi.fn(() => false),
+    assistantConversationIdentity: vi.fn((): { conversationId: string; revision: number } | undefined => undefined),
+    isAssistantConversationContinuePromptVisible: vi.fn(() => false),
+    scrollAssistantConversation: vi.fn(() => false),
+    continueAssistantConversation: vi.fn(async () => false),
+    requestAssistantConversationExit: vi.fn(async (): Promise<
+      'inactive' | 'prompted' | 'exited' | 'failed'
+    > => 'inactive'),
     hasVisibleNotification: vi.fn(() => notificationVisible),
     dismissVisibleNotification: vi.fn(async () => true),
   };
@@ -101,6 +110,10 @@ function make(
   };
   const link = {
     send: (message: UplinkMessage) => sent.push(message),
+    sendConversationAction: (message: UplinkMessage) => {
+      sent.push(message);
+      return true;
+    },
     connect: vi.fn(),
     wasReplaced: false,
   };
@@ -542,6 +555,98 @@ describe('EventRouter — lifecycle', () => {
 });
 
 describe('EventRouter — text and list', () => {
+  it('keeps conversation gestures on the one persistent surface and asks before Back exits', async () => {
+    const { fire, sent, menu, assistantOverlay } = make();
+    assistantOverlay.hasAssistantConversation.mockReturnValue(true);
+    assistantOverlay.assistantConversationIdentity.mockReturnValue({
+      conversationId: 'voice-a', revision: 7,
+    });
+    assistantOverlay.scrollAssistantConversation.mockReturnValue(true);
+    assistantOverlay.requestAssistantConversationExit
+      .mockResolvedValueOnce('prompted')
+      .mockResolvedValueOnce('exited');
+
+    fire({ textEvent: { containerName: 'conversation', eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    fire({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } });
+    await Promise.resolve();
+    fire({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+    } });
+    await Promise.resolve();
+
+    expect(assistantOverlay.scrollAssistantConversation).toHaveBeenCalledWith('up');
+    expect(assistantOverlay.requestAssistantConversationExit).toHaveBeenCalledTimes(2);
+    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(sent).toContainEqual({
+      kind: 'input', event: {
+        containerName: 'assistant-conversation', selectedName: 'exit',
+        conversationId: 'voice-a', conversationRevision: 7,
+      },
+    });
+  });
+
+  it('continues from the visible inactivity question only after the footer repaint succeeds', async () => {
+    const { fire, sent, assistantOverlay } = make();
+    assistantOverlay.hasAssistantConversation.mockReturnValue(true);
+    assistantOverlay.assistantConversationIdentity.mockReturnValue({
+      conversationId: 'voice-a', revision: 7,
+    });
+    assistantOverlay.isAssistantConversationContinuePromptVisible.mockReturnValue(true);
+    assistantOverlay.continueAssistantConversation.mockResolvedValue(true);
+
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    await Promise.resolve();
+
+    expect(assistantOverlay.continueAssistantConversation).toHaveBeenCalledTimes(1);
+    expect(assistantOverlay.requestAssistantConversationExit).not.toHaveBeenCalled();
+    expect(sent).toContainEqual({
+      kind: 'input', event: {
+        containerName: 'assistant-conversation', selectedName: 'continue',
+        conversationId: 'voice-a', conversationRevision: 7,
+      },
+    });
+  });
+
+  it('does not acknowledge Continue when its visible footer replacement fails', async () => {
+    const { fire, sent, assistantOverlay } = make();
+    assistantOverlay.hasAssistantConversation.mockReturnValue(true);
+    assistantOverlay.assistantConversationIdentity.mockReturnValue({
+      conversationId: 'voice-a', revision: 7,
+    });
+    assistantOverlay.isAssistantConversationContinuePromptVisible.mockReturnValue(true);
+    assistantOverlay.continueAssistantConversation.mockResolvedValue(false);
+
+    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    await Promise.resolve();
+
+    expect(sent).toEqual([]);
+  });
+
+  it('treats a protobuf-zero left tap as Continue on the visible conversation', async () => {
+    const { fire, sent, assistantOverlay } = make();
+    assistantOverlay.hasAssistantConversation.mockReturnValue(true);
+    assistantOverlay.assistantConversationIdentity.mockReturnValue({
+      conversationId: 'voice-left', revision: 4,
+    });
+    assistantOverlay.isAssistantConversationContinuePromptVisible.mockReturnValue(true);
+    assistantOverlay.continueAssistantConversation.mockResolvedValue(true);
+
+    fire({ sysEvent: { eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L } });
+    await Promise.resolve();
+
+    expect(sent).toContainEqual({
+      kind: 'input', event: {
+        containerName: 'assistant-conversation', selectedName: 'continue',
+        conversationId: 'voice-left', conversationRevision: 4,
+      },
+    });
+  });
+
   it('dismisses a visible assistant reply before a hidden feature receives a tap', () => {
     const { fire, sent, menu, navigation, assistantOverlay } = make(
       false, undefined, true, false, true,
@@ -555,14 +660,15 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
-  it('dismisses a visible assistant reply before a hidden Brainstorm swipe action', () => {
+  it('pages a visible assistant reply before a hidden Brainstorm swipe action', () => {
     const { fire, sent, brainstorm, assistantOverlay } = make(
       false, undefined, false, true, true,
     );
 
     fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
 
-    expect(assistantOverlay.dismissAssistantOverlay).toHaveBeenCalledTimes(1);
+    expect(assistantOverlay.scrollAssistantOverlay).toHaveBeenCalledWith('down');
+    expect(assistantOverlay.dismissAssistantOverlay).not.toHaveBeenCalled();
     expect(brainstorm.handleCancel).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });

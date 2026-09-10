@@ -18,6 +18,9 @@ from joat.core.protocol import (
     AgentTerminalHudView,
     Auth,
     AssistantOverlay,
+    AssistantConversationDismiss,
+    AssistantConversationTurn,
+    AssistantConversationView,
     AuthAccepted,
     Audio,
     AudioControl,
@@ -235,6 +238,29 @@ class TestParseUplink:
         msg = parse_uplink({"kind": "input"})
         assert isinstance(msg, Input)
         assert msg.event.container_id is None
+
+    def test_conversation_input_is_bound_to_the_exact_visible_revision(self) -> None:
+        msg = parse_uplink({
+            "kind": "input",
+            "event": {
+                "containerName": "assistant-conversation",
+                "selectedName": "exit",
+                "conversationId": "voice-chat-7",
+                "conversationRevision": 12,
+            },
+        })
+        assert isinstance(msg, Input)
+        assert msg.event.conversation_id == "voice-chat-7"
+        assert msg.event.conversation_revision == 12
+
+        for event in (
+            {"conversationId": "voice-chat-7"},
+            {"conversationRevision": 12},
+            {"conversationId": "bad id", "conversationRevision": 12},
+            {"conversationId": "voice-chat-7", "conversationRevision": -1},
+        ):
+            with pytest.raises(ProtocolError, match="conversation"):
+                parse_uplink({"kind": "input", "event": event})
 
     def test_brainstorm_action_is_bounded_and_typed(self) -> None:
         message = parse_uplink({"kind": "brainstorm.action", "action": "cancel"})
@@ -618,8 +644,57 @@ class TestDownlinkWire:
             "kind": "assistant.overlay",
             "text": "On it.",
             "operation": "replace",
+            "presentation": "answer",
             "dismissAfterMs": 6_000,
         }
+
+        assert AssistantOverlay(
+            text="Reply sent.", presentation="receipt",
+        ).to_wire()["presentation"] == "receipt"
+
+    def test_assistant_conversation_keeps_prompt_and_answer_in_one_bounded_transcript(self) -> None:
+        answer = "The sky appears blue because shorter blue wavelengths scatter more strongly. " * 12
+        wire = AssistantConversationView(
+            conversation_id="voice-chat-7",
+            revision=3,
+            state="ready",
+            turns=(
+                AssistantConversationTurn("user", "Why is the sky blue?"),
+                AssistantConversationTurn("assistant", answer),
+            ),
+            continue_after_ms=30_000,
+        ).to_wire()
+
+        assert wire == {
+            "kind": "assistant.conversation",
+            "operation": "replace",
+            "conversationId": "voice-chat-7",
+            "revision": 3,
+            "state": "ready",
+            "turns": [
+                {"role": "user", "text": "Why is the sky blue?"},
+                {"role": "assistant", "text": answer},
+            ],
+            "continueAfterMs": 30_000,
+            "earlierTurnsOmitted": False,
+        }
+        assert len(wire["turns"][1]["text"]) > 512
+        assert AssistantConversationDismiss("voice-chat-7", 3).to_wire() == {
+            "kind": "assistant.conversation",
+            "operation": "dismiss",
+            "conversationId": "voice-chat-7",
+            "revision": 3,
+        }
+
+    def test_assistant_conversation_rejects_unmarked_loss_instead_of_silently_truncating(self) -> None:
+        with pytest.raises(ProtocolError, match="turn text"):
+            AssistantConversationView(
+                conversation_id="voice-chat-7",
+                revision=1,
+                state="ready",
+                turns=(AssistantConversationTurn("assistant", "x" * 4_001),),
+                continue_after_ms=30_000,
+            ).to_wire()
 
     def test_hud_list_enforces_sdk_caps(self) -> None:
         wire = HudList(items=[f"item {i}" * 20 for i in range(30)]).to_wire()

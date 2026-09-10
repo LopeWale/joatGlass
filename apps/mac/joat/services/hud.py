@@ -17,6 +17,9 @@ from typing import Literal, Protocol, cast, runtime_checkable
 from ..core.interfaces import GlassesTransport
 from ..core.protocol import (
     AgentTerminalHudView,
+    AssistantConversationDismiss,
+    AssistantConversationTurn,
+    AssistantConversationView,
     AssistantOverlay,
     BrainstormHudView,
     ContainerId,
@@ -115,7 +118,12 @@ class HudWriter:
     MAX_OVERLAY_CHARS = 512
 
     async def assistant(
-        self, text: str, *, append: bool = False, answers_wearer: bool = False,
+        self,
+        text: str,
+        *,
+        append: bool = False,
+        answers_wearer: bool = False,
+        presentation: Literal["answer", "receipt"] = "answer",
     ) -> None:
         """Show JOAT above the active feature without replacing its surface.
 
@@ -132,6 +140,41 @@ class HudWriter:
             text=text[:self.MAX_OVERLAY_CHARS],
             operation="append" if append else "replace",
             answers_wearer=answers_wearer,
+            presentation=presentation,
+        ))
+
+    async def receipt(self, text: str, *, answers_wearer: bool = False) -> None:
+        """Show a compact acknowledgement without guessing from its length."""
+        await self.assistant(
+            text,
+            answers_wearer=answers_wearer,
+            presentation="receipt",
+        )
+
+    async def conversation(
+        self,
+        conversation_id: str,
+        revision: int,
+        state: Literal["thinking", "answering", "ready"],
+        turns: tuple[AssistantConversationTurn, ...],
+        *,
+        continue_after_ms: int,
+        earlier_turns_omitted: bool = False,
+    ) -> None:
+        """Replace the one persistent assistant transcript."""
+        await self._transport.send(AssistantConversationView(
+            conversation_id=conversation_id,
+            revision=revision,
+            state=state,
+            turns=turns,
+            continue_after_ms=continue_after_ms,
+            earlier_turns_omitted=earlier_turns_omitted,
+        ))
+
+    async def dismiss_conversation(self, conversation_id: str, revision: int) -> None:
+        await self._transport.send(AssistantConversationDismiss(
+            conversation_id=conversation_id,
+            revision=revision,
         ))
 
     @staticmethod

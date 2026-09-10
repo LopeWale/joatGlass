@@ -1965,7 +1965,7 @@ class CapabilityRouter:
             # the transient band rather than building a page for it.
             if self._request_is_current():
                 self._note_rows = []
-            await self._hud.assistant("Saving quicknote…")
+            await self._hud.receipt("Saving quicknote…")
             return
         if not self._request_is_current():
             return
@@ -2064,7 +2064,7 @@ class CapabilityRouter:
             # one transient line is waste (the wearer's ruling). It goes out
             # as the same slim band Even AI uses for "listening": the page
             # underneath stays, and the band replaces itself on completion.
-            await self._hud.assistant("Saving quicknote…")
+            await self._hud.receipt("Saving quicknote…")
             receipt = await capture.control_stop()
         elif action == "pause":
             receipt = capture.control_pause()
@@ -2080,7 +2080,7 @@ class CapabilityRouter:
             log.info("quicknote control %s: %s", action, receipt)
             # The receipt itself is the band's final word; it settles on its
             # own rather than occupying the lens until the wearer dismisses.
-            await self._hud.assistant(receipt)
+            await self._hud.receipt(receipt)
             await self._hud.settle_assistant()
         # Re-render whatever is now true: updated controls, or — after a save
         # or discard — the unified notes list itself.
@@ -2168,7 +2168,7 @@ class CapabilityRouter:
         item = self._activity_rows[index]
         # The row already reads "{label} · {state}"; a whole page to repeat it
         # plus a truncated action id is the page this list was meant to avoid.
-        await self._hud.assistant(
+        await self._hud.receipt(
             f"{self._action_label(item.kind)} · "
             f"{item.state.replace('_', ' ').title()} · "
             f"ref {item.action_id[:8]}",

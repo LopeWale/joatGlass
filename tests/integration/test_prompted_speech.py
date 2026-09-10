@@ -389,7 +389,7 @@ async def test_prompt_owner_exception_does_not_log_literal_input_or_retry_it(
 
 
 async def test_older_model_answer_cannot_overwrite_a_new_input_question() -> None:
-    from joat.core.protocol import AssistantOverlay
+    from joat.core.protocol import AssistantConversationView
 
     journey = Journey("JOAT tell me a joke")
     try:
@@ -400,7 +400,7 @@ async def test_older_model_answer_cannot_overwrite_a_new_input_question() -> Non
         marker = len(journey.transport.sent)
         journey.replier.release.set()
         await journey.idle()
-        assert not any(isinstance(message, AssistantOverlay)
+        assert not any(isinstance(message, AssistantConversationView)
                        for message in journey.transport.sent[marker:])
         assert journey.dispatcher.is_armed
     finally:
@@ -410,7 +410,7 @@ async def test_older_model_answer_cannot_overwrite_a_new_input_question() -> Non
 async def test_prompt_published_during_command_context_send_blocks_the_old_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from joat.core.protocol import AssistantOverlay, ContainerId, HudText
+    from joat.core.protocol import AssistantConversationView
 
     journey = Journey("JOAT open News")
     entered, release = asyncio.Event(), asyncio.Event()
@@ -421,7 +421,7 @@ async def test_prompt_published_during_command_context_send_blocks_the_old_answe
 
     async def send(message: DownlinkMessage) -> None:
         await original_send(message)
-        if isinstance(message, HudText) and message.container_id == ContainerId.CONTEXT:
+        if isinstance(message, AssistantConversationView) and message.state == "ready":
             entered.set()
             await release.wait()
 
@@ -437,7 +437,7 @@ async def test_prompt_published_during_command_context_send_blocks_the_old_answe
 
         assert journey.dispatcher.current_ticket is ticket and journey.dispatcher.is_armed
         assert not any(
-            isinstance(message, AssistantOverlay)
+            isinstance(message, AssistantConversationView)
             for message in journey.transport.sent[marker:]
         )
     finally:
@@ -448,7 +448,7 @@ async def test_prompt_published_during_command_context_send_blocks_the_old_answe
 async def test_prompt_published_during_wake_answer_send_blocks_the_old_settle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from joat.core.protocol import AssistantOverlay
+    from joat.core.protocol import AssistantConversationView
 
     journey = Journey("JOAT")
     entered, release = asyncio.Event(), asyncio.Event()
@@ -456,7 +456,7 @@ async def test_prompt_published_during_wake_answer_send_blocks_the_old_settle(
 
     async def send(message: DownlinkMessage) -> None:
         await original_send(message)
-        if isinstance(message, AssistantOverlay) and message.operation == "replace":
+        if isinstance(message, AssistantConversationView) and message.state == "ready":
             entered.set()
             await release.wait()
 
@@ -471,7 +471,7 @@ async def test_prompt_published_during_wake_answer_send_blocks_the_old_settle(
 
         assert journey.dispatcher.current_ticket is ticket and journey.dispatcher.is_armed
         assert not any(
-            isinstance(message, AssistantOverlay) and message.operation == "settle"
+            isinstance(message, AssistantConversationView)
             for message in journey.transport.sent[marker:]
         )
     finally:
