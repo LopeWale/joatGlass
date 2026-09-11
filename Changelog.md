@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-09-11 — Authenticated Agent Terminal A2A connections
+
+- Added separate editable OpenClaw/Hermes profiles and endpoint-bound Keychain credentials in the signed Mac app. The engine verifies saved credentials at startup and adds both peers to the existing terminal roster; the earlier Gateway session remains distinct.
+- Implemented task submission, real task-envelope decoding, bounded polling, input-required continuation, owned-task cancellation, explicit recovery and new-conversation commands. Uncertain submissions are not replayed and cancellation requires a remote task receipt.
+- Parent review rejected the first adapter's simplified response fixtures and replaced them with real TLS contract tests. Live testing then caught a completed OpenClaw follow-up that forgot the conversation; bounded local history fixed it. Both peers subsequently completed real diagnostic and memory follow-up requests.
+- Validation: 283 focused Python tests, three Swift A2A tests, five owned Python modules type-checked, signed installed app, native Keychain authentication for both peers, and actual Settings edit/save/reload/restore/restart interaction. Physical HUD delivery remains blocked by missing relay pairing; no pairing reset or bypass was performed. See `docs/AGENT_TERMINAL_ROADMAP.md` and `docs/MAC_CONTROLS_ACCEPTANCE.md` for exact acceptance boundaries.
+
+
+## 2026-09-11 — Live A2A prerequisites verified
+
+- Independently verified OpenClaw A2A over the supplied Tailscale HTTPS endpoint: unauthenticated rejection and a dedicated-peer `message/send` task completed with the exact expected artifact. Token stayed out of source and receipts. Hermes's agent card and unauthenticated rejection were verified; authenticated Hermes execution remains user-reported because SSH credential retrieval is unavailable.
+- Found OpenClaw's public agent card advertising a loopback interface and omitting bearer-auth metadata. Updated `docs/AGENT_TERMINAL_ROADMAP.md` to distinguish now-live external endpoints from the still-unimplemented JOAT A2A adapter, and recorded ordered connection/acceptance work without substituting A2A for the session terminal or glasses relay.
+
+## 2026-09-11 — Mini Gateway recovery and connection labels
+
+- Verified that the saved Mini port-443 Gateway is reachable and speaks OpenClaw; a real JOAT restart authenticated the existing paired identity and returned Agent Terminal to ready. The prior refusal was the retained 13:40 attempt, not a new probe of the recovered service.
+- Traced the shown plugin to a Vite simulator configured only for the isolated localhost:18870 fixture, distinct from the installed app. Verified that the Mini `/glasses` path currently serves OpenClaw Control and direct JOAT port 8787 refuses, so merely adding the Mini to that selector would not establish a JOAT relay.
+- Renamed the Mac editor to OpenClaw connection / Agent Gateways / Add Gateway, clarified its distinction from phone JOAT-host selection, and added an existing-engine Restart and Reconnect action for a non-connected live state. Refusal guidance now describes the last attempt rather than asserting the remote Mac is currently down.
+
+## 2026-09-11 — Working Mac controls and acceptance correction
+
+- Replaced Run's disabled design preview with the working Developer ID-signed app at `/Applications/JOAT.app`; the canonical installer retains the previous app and the launcher waits for graceful shutdown before opening the replacement. Launch verification explicitly rejects preview mode and does not claim UI acceptance.
+- Exercised the actual Hermes Settings form: Add Mac, editable input, dashboard-address rejection, Save, Reload Saved, Remove, restore, and Restart to Apply. Independently read the live saved roster through the production Python loader; restored the original one-host configuration before restart and confirmed child replacement/prompt clearing.
+- Added backup-and-reset recovery for unreadable connection files, invalid/duplicate feed guidance, honest login-item/diagnostic feedback, and a Go menu with Command–1 through Command–6. Added targeted filesystem regression checks for recovery, symlink refusal, and externally repaired files.
+- Source suite: 81 checks pass. News/sidebar switching still breaks the native automation connection; remaining input journeys and physical-glasses outcomes are explicitly unverified. See `docs/MAC_CONTROLS_ACCEPTANCE.md` for the complete control map, missing command paths, and actual acceptance evidence. The earlier preview delivery below is superseded.
+
+## 2026-09-11 — Mac workspace redesign
+
+- Replaced the single long Mac status/settings panel with native Overview, Glasses, Intelligence, News, Access, and Diagnostics destinations. Added system Liquid Glass toolbar grouping and a primary glass action, restored navigation selection, and separated current service status from last-known conversation output.
+- Connected the Mac Hermes editor to the engine's existing multi-Mac configuration. It retains all configured hosts, shares drafts between Settings and the workspace, rejects duplicate/invalid Gateways, protects against external edits, and uses owner-only atomic persistence. A compiled Swift writer and the production Python loader verified the exact two-host contract without changing live settings.
+- News saves now commit the displayed selection only after persistence succeeds and retain drafts on failure/navigation. Denied Mac permissions lead to their corresponding privacy settings. Restart now waits for child termination, Stop cancels pending recovery, and old shutdown timeouts cannot kill replacement children.
+- Bounded read-only agents traced existing transport and reviewed the redesign; parent verification rejected the suggestion to use the plugin WebSocket as a desktop client because it would replace the phone session. The review's stale restart-needed prompt and continuity/density concerns were corrected.
+- Mac suite: 79 tests pass. A signed Xcode Debug preview was built and its first Overview screenshot inspected. Further native UI interaction was blocked by repeated Computer Use native-pipe failures; final layout, navigation, keyboard, and live controls remain visually unverified. The installed app, phone/plugin work, and live configuration remain unchanged. See `docs/MAC_APP_REDESIGN.md` for the control map, evidence boundaries, and ordered direct-control bridge plan.
+
 ## 2026-09-10
 
 - **Released private Hub build 0.1.84 and visually evaluated Navigation, Messages and Planning.** Implementation `daafac8`, package source `ca0c213`; portal submission confirmed after reload. The evaluation reproduced contradictory Navigation states during sequential quadrant updates, documented Planning date-context loss after operations and Messages reading-context/type differences, and retained working menu, paging and fixture action journeys. Obsolete or unrelated captures were rejected; physical-device and real-service behavior remain unverified. No new feature fixes were made. See `docs/audits/2026-09-10-navigation-messages-planning-visual-evaluation.md`.

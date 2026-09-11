@@ -27,7 +27,7 @@ DEFAULT_PATH = Path(
 ).expanduser()
 
 _RESERVED_SAFE_PROJECTIONS = frozenset({
-    "openclaw", "agent_terminal", "brainstorm", "personal_data",
+    "openclaw", "agent_terminal", "brainstorm", "personal_data", "a2a_connections",
 })
 _OPENCLAW_STATES = frozenset({
     "not_configured",
@@ -120,6 +120,7 @@ class StatusPublisher:
             # facts. This fixed-state projection deliberately carries no
             # socket path, error string, calendar/list identity, or content.
             "personal_data": {"state": "checking"},
+            "a2a_connections": {},
             "last_transcript": "",
             "last_reply": "",
             "last_card": "",
@@ -183,6 +184,25 @@ class StatusPublisher:
         if reason not in _SAFE_REASONS:
             raise ValueError("invalid Agent Terminal reason")
         self._state["agent_terminal"] = {"state": state, "reason": reason}
+        self.flush()
+
+    def set_a2a_connection(self, profile_id: str, *, state: str, reason: str = "") -> None:
+        """Fixed connection metadata only; never peer secrets or remote text."""
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", profile_id):
+            raise ValueError("invalid A2A profile identity")
+        if state not in {"unprepared", "checking", "ready", "running", "input_required",
+                         "auth_required", "failed", "unknown", "cancelled", "closed"}:
+            raise ValueError("invalid A2A state")
+        # Unknown adapter reasons degrade to a fixed code. A future adapter
+        # cannot accidentally persist a provider payload as status text.
+        allowed = {"", "credentials_missing", "authentication_failed", "input_required",
+                   "auth_required", "outcome_unknown", "cancel_unconfirmed", "cancelled",
+                   "task_failed", "task_rejected", "protocol_error", "unreachable",
+                   "timeout", "unsupported", "context_changed", "configuration_invalid"}
+        safe_reason = reason if reason in allowed else "protocol_error"
+        connections = dict(self._state["a2a_connections"])
+        connections[profile_id] = {"state": state, "reason": safe_reason}
+        self._state["a2a_connections"] = connections
         self.flush()
 
     def set_brainstorm(self, *, state: str, seat_count: int, phase: str) -> None:

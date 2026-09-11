@@ -7,7 +7,10 @@ never uses Codex CLI or Claude Code.
 Status: the wearer-facing control surface and its gateway policy lane are
 implemented, and as of 2026-08-31 the engine REACHES A LIVE GATEWAY — the
 connect handshake is accepted and all three lanes (work, brainstorm,
-calendar) construct without error. A2A remains untouched and unenabled.
+calendar) construct without error. As of 2026-09-11, JOAT also contains an
+authenticated A2A task adapter for OpenClaw and native Hermes. See the current
+implementation and acceptance section below; direct Gateway session operations
+and A2A task conversations have separate capability boundaries.
 
 What that does and does not settle: the transport, the identity handshake
 and the policy boundary are now exercised against a real deployment. The
@@ -122,7 +125,7 @@ schema errors settled in seconds what the prose had wrong.
   MACS are configurable as of 2026-09-08 (`{"hosts": [...]}`), each
   contributing its own work lane; what stays fixed is the set of lanes per
   host, not the number of hosts.
-- **A2A.** Unchanged, unenabled, and still not the terminal transport.
+- **A2A acceptance remaining.** The task adapter is implemented and real replies have been observed from both peers. Physical G2 delivery, live remote cancellation, provider-wide session discovery, remote approval resolution, and streaming/push support remain unverified or unimplemented; task completion does not establish them.
 
 ## Runtime contract required before implementation
 
@@ -148,8 +151,8 @@ enabled and verified in the future, is an explicit Hermes-to-OpenClaw or
 OpenClaw-to-Hermes delegation operation; it is not the terminal transport and
 is not inferred from ordinary session speech.
 
-The currently inactive/unverified A2A services are a future live prerequisite,
-not something this Brainstorm slice configures. Runtime credentials, pairing,
+The external A2A services are now reachable; this changes the live prerequisite,
+not the existing direct-session terminal contract. Runtime credentials, pairing,
 host selection, and Tailscale origin approval remain per-host setup boundaries.
 
 ## Future acceptance gates
@@ -165,3 +168,43 @@ host selection, and Tailscale origin approval remain per-host setup boundaries.
 - No cross-host queued speech, approval, or transcript replay after reconnect.
 - Official simulator visual/gesture flow and separate physical-G2 lens/source
   proof.
+
+## Earlier A2A prerequisite verification — 2026-09-11
+
+Historical prerequisite check; the later implementation section supersedes its missing-credential and unimplemented-adapter statements.
+
+User-provided deployment update was verified from this Mac over Tailscale HTTPS:
+
+- **OpenClaw** at `https://home-mac.example-tailnet.ts.net:8443/a2a/v1`: unauthenticated `tasks/get` rejected with HTTP 401. One authenticated `message/send` using the dedicated glasses peer returned HTTP 200, `TASK_STATE_COMPLETED`, and one artifact containing exactly the requested diagnostic response. Elapsed time was 8.46 seconds. The request asked for no tools, file access, or external communications. This proves this submitted task's result, not an attestation that tools are disabled for every A2A task. The peer token was supplied through hidden input, retained only in process memory, and omitted from source and the receipt.
+- **Hermes** at `https://home-mac.example-tailnet.ts.net:9900/`: public agent card returned HTTP 200 and unauthenticated `tasks/get` returned HTTP 401. Authenticated Hermes completion is user-reported and has not been independently repeated here: SSH to the Mini on port 22 returned connection refused, so its pre-existing bearer credential could not be retrieved through the supplied route. OpenClaw's peer token was not reused for Hermes.
+- Both cards advertise JSONRPC protocol 1.0. OpenClaw advertises no streaming or push notifications; Hermes advertises both. Those advertised capabilities require their own authenticated acceptance tests before the app enables them.
+- **Discovery defect:** OpenClaw's public `supportedInterfaces[0].url` advertises `http://127.0.0.1:18789/a2a/v1`. Remote discovery must advertise the public `https://home-mac.example-tailnet.ts.net:8443/a2a/v1` address. The diagnostic explicitly used the supplied public endpoint and did not follow the loopback URL. The card also omits bearer security metadata despite the API requiring it. No remote configuration was modified.
+
+Local content-free receipt: `dist/mac-workspace/control-audit/a2a-openclaw.json`. Existing port-443 OpenClaw WebSocket pairing is a separate authenticated connection and remains configured.
+
+### Ordered connection work
+
+1. Correct OpenClaw's advertised public interface and bearer-auth metadata; retain exact endpoint binding in the client and never forward a token to an address taken uncritically from an agent card or redirect.
+2. Introduce explicit connection kinds in the Mac app: JOAT host, OpenClaw session Gateway, and A2A task endpoint. Store A2A bearer secrets in the Mac Keychain; configuration and phone/HUD state contain only non-secret profiles and capability/status projections.
+3. Implement the A2A task adapter through the existing engine owner: submit once, retain returned task/context identity, normalize result artifacts, poll only known submitted tasks when supported, and handle failed/rejected/cancelled/input-required/auth-required/timeout states. Never retry a possibly submitted message as a fresh task after an uncertain response.
+4. Expose an explicit delegated-task action and a real connection test in the Mac interface, with honest progress for non-streaming OpenClaw and capability-gated Hermes streaming. Keep session listing/history/steering/approval controls on their existing direct-runtime transport until separately implemented and verified.
+5. Verify unauthenticated rejection, authenticated completion, wrong token, exact destination binding, malformed/error responses, nonterminal tasks, cancellation acknowledgement, reconnect without duplicate sends, and physical HUD delivery. A completed connection-check task does not establish those other capabilities.
+
+The phone's JOAT-host dropdown remains a list of glasses relay candidates; A2A endpoints cannot be inserted as substitute `/glasses` transports.
+
+
+## A2A implementation and current acceptance — 2026-09-11
+
+The installed signed `/Applications/JOAT.app` now has editable Agent Terminal profiles in Settings and Intelligence. OpenClaw and Hermes have distinct HTTPS endpoints and endpoint-bound Keychain credentials; neither secret is stored in the JSON configuration or projected to the phone. The app-launched engine is the only process authorized to retrieve credentials through the native bridge. Enabled profiles receive a bounded authenticated startup check without submitting work. Save, Reload, enable/disable, remove, and restart controls are wired; saved changes do not claim readiness before restart.
+
+The existing Agent Terminal roster includes `openclaw` and `hermes`. The earlier no-tool Gateway lane is retained as `hermes session`; its policy does not apply to native Hermes A2A. The A2A adapter sends JSON-RPC 2.0 `message/send`, handles actual `status.state` task envelopes, polls only its task, retains context identity, and supplies at most eight prior local turns/12,000 text characters for peers that echo context IDs without remembering previous turns. `terminal history` explicitly describes local conversation history. `terminal recover` checks an uncertain known task without replaying the instruction; reopening/retrying an uncertain lane also performs that owned-task check; `terminal new conversation` resets local context only when no known running/interrupted task remains. Cancellation reports remote success only after a matching canceled task receipt.
+
+Evidence:
+
+- Installed engine and native Keychain bridge: both profiles reported `ready` after authenticated `tasks/get` probes. Unauthenticated requests to both live endpoints returned HTTP 401. Separate test processes were rejected by the native bridge's engine-PID boundary.
+- Real production adapter/roster against Tailscale: OpenClaw completed the diagnostic in 9.03 seconds and remembered the preceding phrase on follow-up in 8.54 seconds; Hermes completed both turns in 3.76 seconds each. Each returned a completed task, expected text, preserved context ID, and terminal completion announcement. These were separate diagnostic roster instances using hidden-input credentials; they are not physical HUD delivery receipts.
+- The first live OpenClaw follow-up returned the wrong phrase despite a matching context ID and completed task. Bounded local history corrected the behavior, and the identical follow-up was repeated successfully. A state-envelope-only assertion would have missed this defect.
+- 283 focused Python tests pass, including real local TLS contract tests for malformed envelopes, authentication, redirects, task/context ownership, input-required continuation, uncertain submission without replay, recovery and cancellation acknowledgements. Five owned Python modules pass type checking. Three Swift A2A model/native-bridge tests pass. These checks do not establish physical-device behavior or live cancellation support.
+- Actual installed Settings interaction: editable name field, changed Save enabling, Save persisted a temporary name verified by the production Python loader, Reload reproduced it, and the original name was restored and saved. Restart to Apply was clicked; the prompt cleared and both profiles returned to Connected in the actual UI. No secret was displayed during the interaction.
+
+Remaining acceptance: the private relay has no saved glasses pairing credential and rejected the simulated connection with HTTP 403. No pairing was reset or bypassed. Real plugin/physical-G2 selection, speech, rendered replies, and cancellation must still be exercised after normal pairing. Existing remote session discovery, approvals, forking, and streaming/push are not supplied by this A2A task adapter. The phone's Mac selector continues to choose JOAT relay hosts, not A2A agents.

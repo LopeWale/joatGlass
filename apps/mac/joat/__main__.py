@@ -13,7 +13,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .agents.builtin_tools import conversation_tool, messages_tool, notifications_tool
+from .agents.a2a_config import load_a2a_profiles, native_token_loader
+from .agents.a2a_terminal import A2ATerminalAgent
 from .agents.feature_tools import feature_tools, quicknote_reader_tool, terminal_sessions_tool
 from .agents.message_tools import message_tools
 from .agents.grounding import (
@@ -1427,6 +1429,50 @@ async def main() -> None:
     ]
     terminal_lanes.extend(extra_host_lanes)
 
+    # A2A peers are explicit additional terminal connections. Their bearer
+    # credentials come from the Mac's endpoint-bound Keychain bridge; neither
+    # the phone nor the glasses receives one. Keep direct Gateway sessions
+    # available, with distinct names when an A2A connection shares a label.
+    try:
+        a2a_profiles = [profile for profile in load_a2a_profiles() if profile.enabled]
+    except ValueError:
+        a2a_profiles = []
+        status.set_a2a_connection("configuration", state="failed", reason="configuration_invalid")
+        log.warning("A2A configuration invalid; repair it in Mac settings")
+    a2a_agents: dict[str, A2ATerminalAgent] = {}
+
+    def a2a_state_callback(identity: str) -> Callable[[str, str], None]:
+        def changed(state: str, reason: str) -> None:
+            status.set_a2a_connection(identity, state=state, reason=reason)
+        return changed
+
+    for profile in a2a_profiles:
+        name = profile.label.casefold()
+        agent = A2ATerminalAgent(
+            endpoint=profile.endpoint, label=profile.label,
+            token_loader=native_token_loader(profile, personal_data),
+            state_changed=a2a_state_callback(profile.id),
+        )
+        a2a_agents[name] = agent
+        status.set_a2a_connection(profile.id, state="unprepared")
+    if a2a_agents:
+        renamed: list[tuple[str | LaneAddress, object]] = []
+        used = set(a2a_agents)
+        for address, existing_agent in terminal_lanes:
+            key = address.key if isinstance(address, LaneAddress) else address
+            if key.casefold() in used:
+                address = f"{key} session"
+                while address.casefold() in used:
+                    address += " session"
+            used.add(address.key if isinstance(address, LaneAddress) else address)
+            renamed.append((address, existing_agent))
+        terminal_lanes = list(a2a_agents.items()) + renamed
+
+    # Check enabled credentials without submitting work or requiring glasses.
+    # Each adapter owns its bounded, authenticated probe and truthful status.
+    # A failed peer must not prevent the other peers or the engine starting.
+    await asyncio.gather(*(agent.initialize() for agent in a2a_agents.values()), return_exceptions=True)
+
     async def terminal_announce(line: str) -> None:
         # The SessionManager owns the HUD while a session runs; terminal
         # narration must never fight a live Brainstorm for the lenses. The
@@ -1453,14 +1499,15 @@ async def main() -> None:
         if not capabilities.terminal_view_current:
             return
         terminal = status.agent_terminal_projection()
+        focused_a2a = a2a_agents.get(agent_terminal.focused or "")
         await hud.show_agent_terminal(AgentTerminalHudView(
             state=frame.state,
             focus=frame.topic,
             lanes=frame.lanes,
             activity="\n".join(frame.lines),
-            endpoint_host=str(terminal["endpoint_host"]),
+            endpoint_host="" if focused_a2a is not None else str(terminal["endpoint_host"]),
             reason=frame.reason,
-            no_tools_checked=bool(terminal["no_tools_checked"]),
+            no_tools_checked=False if focused_a2a is not None else bool(terminal["no_tools_checked"]),
             approvals=frame.approvals,
             opening_request_id=opening_request_id,
             opening_selection_id=opening_selection_id,
@@ -1930,6 +1977,8 @@ async def main() -> None:
         await message_replies.aclose()
         await message_ui.aclose()
         await prompted_speech.aclose()
+        await asyncio.gather(*(agent_terminal.cancel(name) for name in a2a_agents), return_exceptions=True)
+        await asyncio.gather(*(agent.close() for agent in a2a_agents.values()), return_exceptions=True)
         await transport.stop()
         if notif_task is not None:
             if notification_mux is not None:

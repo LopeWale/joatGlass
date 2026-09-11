@@ -3,38 +3,62 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>JOAT · Hub Plugin</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>JOAT</title>
     <style>
-      html, body { margin: 0; height: 100%; background: #000; color: #7CFC98;
-                   font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
-      body { display: flex; align-items: center; justify-content: center;
-             padding: 1rem; text-align: left; white-space: pre-wrap; }
-      main { max-width: 26rem; width: 100%; }
-      .brand { font-size: 1.2rem; margin-bottom: 1rem; }
-      .brand span { opacity: 0.8; font-size: 0.9rem; margin-left: 0.5rem; }
-      dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0 0 1.25rem; }
-      dt { opacity: 0.55; }
-      dd { margin: 0; }
-      .hint { opacity: 0.45; font-size: 0.8rem; line-height: 1.5; }
-      button { font: inherit; color: inherit; background: #142219;
-               border: 1px solid currentColor; border-radius: 0.4rem;
-               padding: 0.55rem 0.9rem; cursor: pointer; }
+      :root { font: 16px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; color: #202124; background: #f2f2f7; --surface: #fff; --line: #e5e5ea; --secondary: #636366; --control: #f2f2f7; }
+      @media (prefers-color-scheme: dark) { :root { color: #f5f5f7; background: #101012; --surface: #1c1c1e; --line: #38383a; --secondary: #ababaf; --control: #2c2c2e; } }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); }
+      main { max-width: 480px; margin: auto; }
+      header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; gap: 16px; }
+      h1 { font-size: 24px; letter-spacing: -.04em; font-weight: 650; margin: 0; }
+      #p-link { color: var(--secondary); font-size: 13px; text-align: right; }
+      h2 { font-size: 12px; font-weight: 500; color: var(--secondary); margin: 20px 14px 7px; text-transform: uppercase; letter-spacing: .04em; }
+      .group { background: var(--surface); border-radius: 12px; overflow: hidden; }
+      .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 50px; padding: 10px 14px; }
+      .row + .row { border-top: 1px solid var(--line); }
+      label { flex-shrink: 0; font-size: 15px; }
+      select, button { font: inherit; color: inherit; }
+      select { min-width: 0; max-width: 72%; border: 0; background: transparent; text-align: right; font-size: 14px; min-height: 32px; }
+      button { border: 0; background: transparent; cursor: pointer; min-height: 44px; padding: 10px 14px; font-size: 15px; }
+      .action { width: 100%; text-align: left; border-top: 1px solid var(--line); font-weight: 500; }
+      button:disabled, select:disabled { opacity: .45; }
+      :focus-visible { outline: 2px solid currentColor; outline-offset: -3px; border-radius: 5px; }
+      .support, .feedback { margin: 8px 14px 0; color: var(--secondary); font-size: 12px; }
+      .feedback:empty { display: none; }
+      details { margin-top: 22px; font-size: 13px; }
+      summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; color: var(--secondary); }
+      summary::after { content: '›'; font-size: 20px; } details[open] summary::after { transform: rotate(90deg); }
+      dl { margin: 0; padding: 8px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; font-size: 12px; }
+      dt { color: var(--secondary); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+      details .support { padding-bottom: 12px; }
     </style>
   </head>
   <body>
-    <!-- Connection status and recovery — feature UI renders on the glasses HUD.
-         On boot FAILURE, main.ts replaces this whole body with the error. -->
     <main id="panel">
-      <div class="brand">JOAT <span id="p-status">booting…</span></div>
-      <dl>
-        <dt>Mac link</dt><dd id="p-link">idle</dd>
-        <dt>Mic</dt><dd id="p-mic">off</dd>
-        <dt>Resume policy</dt><dd id="p-policy">—</dd>
-        <dt>Dial target</dt><dd id="p-url">—</dd>
-      </dl>
-      <button id="p-reconnect" type="button" hidden>Reconnect this display</button>
-      <p class="hint">This page is the plugin's status panel. The assistant's actual
-display is the glasses HUD — in the simulator, the “Glasses Display” window.</p>
+      <header><h1>JOAT</h1><span id="p-link" role="status">Starting…</span></header>
+      <section aria-labelledby="connection-title">
+        <h2 id="connection-title">Connection</h2>
+        <div class="group">
+          <div class="row"><label for="p-brain">Mac</label><select id="p-brain" disabled aria-describedby="brain-help"></select></div>
+          <button id="p-connect" class="action" disabled type="button">Reconnect</button>
+        </div>
+        <p id="brain-help" class="support">Uses another approved connection if this Mac is unavailable.</p>
+        <p id="p-action" class="feedback" role="status"></p>
+      </section>
+      <section aria-labelledby="voice-title">
+        <h2 id="voice-title">Listening</h2>
+        <div class="group"><div class="row"><label for="p-resume">After an interruption</label><select id="p-resume" disabled><option value="confirm">Ask first</option><option value="auto">Resume automatically</option><option value="mac">Let Mac decide</option></select></div></div>
+        <p class="support">Controls when the microphone resumes after a pause.</p>
+      </section>
+      <details class="group">
+        <summary>Troubleshooting</summary>
+        <dl><dt>Mac</dt><dd id="p-active-brain">—</dd><dt>Address</dt><dd id="p-url">—</dd><dt>Plugin</dt><dd id="p-status">Starting…</dd><dt>Microphone</dt><dd id="p-mic">Off</dd><dt>Resume policy</dt><dd id="p-policy">—</dd></dl>
+        <p id="p-recovery" class="support">Open this page in Even Hub to connect.</p>
+        <button id="p-location-check" class="action" disabled type="button">Check phone location</button>
+        <p id="p-location-result" class="support" role="status"></p>
+      </details>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

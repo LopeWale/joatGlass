@@ -5,6 +5,8 @@ description = "J.A.R.V.I.S. brain for the Even Realities G2 — Mac Studio side.
 requires-python = ">=3.12"
 dependencies = [
     "websockets>=13.0",
+    # A2A terminal requests need bounded asynchronous HTTP and cancellation.
+    "aiohttp>=3.10,<4",
     # Decode Messages attributedBody archives without executing native objects.
     "pytypedstream==0.1.0",
     # Street surroundings for the guidance HUD are rendered on this Mac.
