@@ -2,6 +2,8 @@
 
 ## 2026-09-10
 
+- **Released private Hub build 0.1.84 and visually evaluated Navigation, Messages and Planning.** Implementation `daafac8`, package source `ca0c213`; portal submission confirmed after reload. The evaluation reproduced contradictory Navigation states during sequential quadrant updates, documented Planning date-context loss after operations and Messages reading-context/type differences, and retained working menu, paging and fixture action journeys. Obsolete or unrelated captures were rejected; physical-device and real-service behavior remain unverified. No new feature fixes were made. See `docs/audits/2026-09-10-navigation-messages-planning-visual-evaluation.md`.
+
 - **Ordinary JOAT answers now remain in one Even-style conversation card.**
   Research was triangulated across the current official Even AI tutorial and
   support pages, current independent G2 through-lens reviews, the official
