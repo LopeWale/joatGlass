@@ -16,6 +16,7 @@ struct EngineStatus: Decodable {
     var debate = "off"
     var openClaw: OpenClaw = .init()
     var agentTerminal: AgentTerminal = .init()
+    var a2aConnections: [String: A2AConnection] = [:]
     var brainstorm: Brainstorm = .init()
     var personalData: PersonalData = .init()
     var lastTranscript = ""
@@ -58,6 +59,11 @@ struct EngineStatus: Decodable {
             scopes = (try? c.decodeIfPresent([String].self, forKey: .scopes)) ?? []
             reason = (try? c.decodeIfPresent(String.self, forKey: .reason)) ?? "endpoint_missing"
         }
+    }
+
+    struct A2AConnection: Decodable {
+        let state: String
+        let reason: String
     }
 
     struct AgentTerminal: Decodable {
@@ -114,6 +120,7 @@ struct EngineStatus: Decodable {
         case at, glasses, device, mic, notifications, stt, llm, debate, brainstorm
         case openClaw = "openclaw"
         case agentTerminal = "agent_terminal"
+        case a2aConnections = "a2a_connections"
         case personalData = "personal_data"
         case lastTranscript = "last_transcript"
         case lastReply = "last_reply"
@@ -138,6 +145,7 @@ struct EngineStatus: Decodable {
         debate = s(.debate, "off")
         openClaw = (try? c.decodeIfPresent(OpenClaw.self, forKey: .openClaw)) ?? .init()
         agentTerminal = (try? c.decodeIfPresent(AgentTerminal.self, forKey: .agentTerminal)) ?? .init()
+        a2aConnections = (try? c.decodeIfPresent([String: A2AConnection].self, forKey: .a2aConnections)) ?? [:]
         brainstorm = (try? c.decodeIfPresent(Brainstorm.self, forKey: .brainstorm)) ?? .init()
         personalData = (try? c.decodeIfPresent(PersonalData.self, forKey: .personalData)) ?? .init()
         lastTranscript = s(.lastTranscript, "")

@@ -12,6 +12,7 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
         case invalidFile
         case unsafeDestination
         case writeFailed
+        case invalidHostList
 
         var errorDescription: String? {
             switch self {
@@ -27,6 +28,8 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
                 "JOAT will not overwrite a non-file or symbolic-link configuration."
             case .writeFailed:
                 "JOAT could not save the Hermes Gateway configuration."
+            case .invalidHostList:
+                "Configure between one and sixteen distinct Gateways."
             }
         }
     }
@@ -52,10 +55,19 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
         from url: URL = defaultURL,
         fileManager: FileManager = .default
     ) throws -> OpenClawRuntimeConfiguration? {
+        try loadAll(from: url, fileManager: fileManager).first
+    }
+
+    /// Matches OpenClawRuntimeConfig.load_all on the engine. A Mac editor
+    /// must retain the complete roster, not overwrite it with its first host.
+    static func loadAll(
+        from url: URL = defaultURL,
+        fileManager: FileManager = .default
+    ) throws -> [OpenClawRuntimeConfiguration] {
         guard (try? fileManager.destinationOfSymbolicLink(atPath: url.path)) == nil else {
             throw ConfigurationError.invalidFile
         }
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
         let resourceValues = try url.resourceValues(forKeys: [.isRegularFileKey])
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
         let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
@@ -69,15 +81,24 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
         }
         let data = try Data(contentsOf: url)
         guard data.count >= 2, data.count <= 65_536,
-              let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(raw.keys) == ["gateway_url", "agent_id"],
-              let gatewayURL = raw["gateway_url"] as? String,
-              let agentID = raw["agent_id"] as? String,
-              agentID == Self.hermesAgentID
+              let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             throw ConfigurationError.invalidFile
         }
-        return try OpenClawRuntimeConfiguration(gatewayURL: gatewayURL)
+        let entries: [[String: Any]]
+        if Set(raw.keys) == ["hosts"], let hosts = raw["hosts"] as? [[String: Any]] {
+            entries = hosts
+        } else if Set(raw.keys) == ["gateway_url", "agent_id"] {
+            entries = [raw]
+        } else { throw ConfigurationError.invalidFile }
+        let configurations = try entries.map { entry in
+            guard Set(entry.keys) == ["gateway_url", "agent_id"],
+                  entry["agent_id"] as? String == hermesAgentID,
+                  let gatewayURL = entry["gateway_url"] as? String else { throw ConfigurationError.invalidFile }
+            return try OpenClawRuntimeConfiguration(gatewayURL: gatewayURL)
+        }
+        try validateHosts(configurations)
+        return configurations
     }
 
     /// Save by replacement so the Python process observes either the previous
@@ -86,6 +107,20 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
         to url: URL = defaultURL,
         fileManager: FileManager = .default
     ) throws {
+        // Legacy single-host callers may update a single host, but cannot
+        // silently collapse a multi-Mac roster.
+        if let existing = try? Self.loadAll(from: url, fileManager: fileManager), existing.count > 1 {
+            throw ConfigurationError.invalidHostList
+        }
+        try Self.saveAll([self], to: url, fileManager: fileManager)
+    }
+
+    static func saveAll(
+        _ configurations: [OpenClawRuntimeConfiguration],
+        to url: URL = defaultURL,
+        fileManager: FileManager = .default
+    ) throws {
+        try validateHosts(configurations)
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(
             at: directory,
@@ -108,10 +143,8 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
             }
         }
 
-        let payload: [String: String] = [
-            "gateway_url": gatewayURL,
-            "agent_id": agentID,
-        ]
+        let entries = configurations.map { ["gateway_url": $0.gatewayURL, "agent_id": $0.agentID] }
+        let payload: [String: Any] = entries.count == 1 ? entries[0] : ["hosts": entries]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let temporaryURL = directory.appendingPathComponent(
             ".openclaw.json.\(UUID().uuidString)",
@@ -151,6 +184,13 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
             [.posixPermissions: 0o600],
             ofItemAtPath: url.path
         )
+    }
+
+    private static func validateHosts(_ configurations: [OpenClawRuntimeConfiguration]) throws {
+        guard (1...16).contains(configurations.count),
+              Set(configurations.map(\.gatewayURL)).count == configurations.count else {
+            throw ConfigurationError.invalidHostList
+        }
     }
 
     private static func canonicalGatewayURL(_ rawValue: String) throws -> String {

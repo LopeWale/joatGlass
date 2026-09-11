@@ -110,10 +110,18 @@ final class EngineController: ObservableObject {
     /// short-lived host would request Files & Folders access for a disposable
     /// Debug identity and make its prompt look like the installed JOAT app.
     nonisolated static func shouldRunAppServices(
-        environment: [String: String]
+        environment: [String: String],
+        previewBundle: Bool = false
     ) -> Bool {
-        environment["XCTestConfigurationFilePath"] == nil
+        !previewBundle && environment["XCTestConfigurationFilePath"] == nil && environment["JOAT_SHELL_PREVIEW"] != "1"
     }
+
+    nonisolated static var isDesignPreviewBundle: Bool {
+        let value = Bundle.main.object(forInfoDictionaryKey: "JOATDesignPreview")
+        return (value as? Bool == true) || (value as? String)?.uppercased() == "YES"
+    }
+
+    let isPreview = isDesignPreviewBundle || ProcessInfo.processInfo.environment["JOAT_SHELL_PREVIEW"] == "1"
 
     static let enginePort =
         (UserDefaults.standard.object(forKey: "EnginePort") as? Int)
@@ -124,7 +132,10 @@ final class EngineController: ObservableObject {
         ?? defaultSttPort(bundleIdentifier: Bundle.main.bundleIdentifier)
 
     @Published var state: State = .stopped
+    @Published private(set) var isTransitioning = false
+    @Published private(set) var lastStartedAt: Date?
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @Published var launchAtLoginNotice: String?
     @Published var accessibilityTrusted = false
     @Published var pairingNotice: String?
     @Published var calendarAccess = "not determined"
@@ -137,6 +148,7 @@ final class EngineController: ObservableObject {
     private var userStopped = false
     private var recentCrashes: [Date] = []
     private var pendingStopCompletion: (() -> Void)?
+    private var scheduledRecovery: Task<Void, Never>?
 
     private let defaults = UserDefaults.standard
     private let g2DiagnosticsKey = "G2DiagnosticsEnabled"
@@ -157,7 +169,8 @@ final class EngineController: ObservableObject {
         g2DiagnosticsEnabled = UserDefaults.standard.bool(forKey: "G2DiagnosticsEnabled")
         privateTailnetGateway = UserDefaults.standard.bool(forKey: "PrivateTailnetGateway")
         guard Self.shouldRunAppServices(
-            environment: ProcessInfo.processInfo.environment
+            environment: ProcessInfo.processInfo.environment,
+            previewBundle: Self.isDesignPreviewBundle
         ) else { return }
         accessibilityTrusted = AXIsProcessTrusted()
         do {
@@ -178,10 +191,12 @@ final class EngineController: ObservableObject {
     }
 
     func requestAccessibility() {
+        guard !isPreview else { return }
         NotificationWatcher.shared.requestAccess()
     }
 
     func refreshPersonalDataAccess() {
+        guard !isPreview else { return }
         Task { @MainActor in
             let snapshot = await NativeBridgeServer.shared.authorizationSnapshot()
             calendarAccess = display(snapshot.calendar)
@@ -198,6 +213,7 @@ final class EngineController: ObservableObject {
     }
 
     private func requestPersonalDataAccess(entity: String) {
+        guard !isPreview else { return }
         Task { @MainActor in
             do {
                 let snapshot = try await NativeBridgeServer.shared.requestFullAccess(entity: entity)
@@ -285,6 +301,7 @@ final class EngineController: ObservableObject {
     }
 
     func chooseRepo() {
+        guard !isPreview else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -317,7 +334,9 @@ final class EngineController: ObservableObject {
     }
 
     func start() {
-        guard process == nil else { return }
+        guard !isPreview, process == nil, !isTransitioning else { return }
+        scheduledRecovery?.cancel()
+        scheduledRecovery = nil
         guard let repo = repoURL() else {
             fail(repoDiagnosis())
             chooseRepo()
@@ -364,6 +383,7 @@ final class EngineController: ObservableObject {
             try p.run()
             NativeBridgeServer.shared.authorizePeerProcessID(p.processIdentifier)
             process = p
+            lastStartedAt = Date()
             state = .running
         } catch {
             fail("engine spawn failed: \(error.localizedDescription)")
@@ -371,33 +391,43 @@ final class EngineController: ObservableObject {
     }
 
     func stop(completion: (() -> Void)? = nil) {
+        scheduledRecovery?.cancel()
+        scheduledRecovery = nil
         userStopped = true
+        // A later Stop (including Quit) supersedes a pending Restart.
+        pendingStopCompletion = completion
         guard let p = process else {
+            isTransitioning = false
             state = .stopped
+            pendingStopCompletion = nil
             completion?()
             return
         }
-        pendingStopCompletion = completion
-        p.terminate()
+        guard !isTransitioning else { return }
+        isTransitioning = true
+        if p.isRunning { p.terminate() }
         // Escalate if the engine ignores SIGTERM (audit §C2).
         let pid = p.processIdentifier
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            if self?.process != nil { kill(pid, SIGKILL) }
+            // Never let an old stop timeout kill a replacement process.
+            if self?.process === p, p.isRunning { kill(pid, SIGKILL) }
         }
     }
 
     func restart() {
-        stop()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
+        guard !isTransitioning else { return }
+        stop { [weak self] in self?.start() }
     }
 
     private func engineExited(code: Int32) {
         NativeBridgeServer.shared.authorizePeerProcessID(nil)
         process = nil
+        isTransitioning = false
         if userStopped {
             state = .stopped
-            pendingStopCompletion?()
+            let completion = pendingStopCompletion
             pendingStopCompletion = nil
+            completion?()
             return
         }
         state = .crashed(code)
@@ -405,7 +435,12 @@ final class EngineController: ObservableObject {
         recentCrashes.append(Date())
         recentCrashes.removeAll { $0 < Date().addingTimeInterval(-300) }
         if recentCrashes.count <= 5 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.start() }
+            scheduledRecovery = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(3)) }
+                catch { return }
+                guard let self, !self.userStopped else { return }
+                self.start()
+            }
         }
     }
 
@@ -442,6 +477,7 @@ final class EngineController: ObservableObject {
     /// Python gateway fails closed when the token is absent or corrupt unless
     /// this marker exists, so deleting pairing.json can never authorize a peer.
     func openPairingWindow() {
+        guard !isPreview else { return }
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/JOAT")
         do {
@@ -459,6 +495,7 @@ final class EngineController: ObservableObject {
     /// restarts the child so the authenticated gateway can inform the plugin;
     /// ordinary HUD rendering remains on its production path throughout.
     func setG2DiagnosticsEnabled(_ enabled: Bool) {
+        guard !isPreview else { return }
         guard enabled != g2DiagnosticsEnabled else { return }
         if enabled {
             do {
@@ -472,7 +509,9 @@ final class EngineController: ObservableObject {
         defaults.set(enabled, forKey: g2DiagnosticsKey)
         g2DiagnosticsEnabled = enabled
         g2DiagnosticNotice = enabled
-            ? "G2 diagnostic trace is on. The engine restarted for this support capture."
+            ? (state == .running
+               ? "G2 diagnostic trace is selected. Restarting the engine to begin this capture."
+               : "G2 diagnostic trace is selected. Start the engine to begin this capture.")
             : "G2 diagnostic trace is off. The redacted capture remains available to export."
         appendLog(enabled ? "G2 diagnostic trace enabled" : "G2 diagnostic trace disabled")
         if state == .running { restart() }
@@ -482,6 +521,7 @@ final class EngineController: ObservableObject {
     /// restart a live wearer session: the choice is applied by the next normal
     /// engine start, when the Mini's Tailscale Serve route is ready.
     func setPrivateTailnetGateway(_ enabled: Bool) {
+        guard !isPreview else { return }
         guard enabled != privateTailnetGateway else { return }
         defaults.set(enabled, forKey: privateTailnetGatewayKey)
         privateTailnetGateway = enabled
@@ -513,12 +553,18 @@ final class EngineController: ObservableObject {
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        guard !isPreview else { return }
         do {
             if enabled { try SMAppService.mainApp.register() }
             else { try SMAppService.mainApp.unregister() }
-            launchAtLogin = enabled
+            launchAtLogin = SMAppService.mainApp.status == .enabled
+            launchAtLoginNotice = SMAppService.mainApp.status == .requiresApproval
+                ? "Approve JOAT in System Settings → General → Login Items to finish enabling launch at login."
+                : nil
+            if SMAppService.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
         } catch {
             launchAtLogin = SMAppService.mainApp.status == .enabled
+            launchAtLoginNotice = "Could not change launch at login: \(error.localizedDescription)"
             if SMAppService.mainApp.status == .requiresApproval {
                 // The user disabled us in System Settings — send them there
                 // instead of silently snapping the toggle back (audit §4).

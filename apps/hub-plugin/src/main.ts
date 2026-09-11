@@ -40,6 +40,7 @@ import { ImuMonitor, imuReportPaceFromMs } from './ImuMonitor';
 import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
+import { PhoneControlPanel } from './PhoneControlPanel';
 import { CapabilityMenu } from './CapabilityMenu';
 import {
   CAPABILITIES,
@@ -294,14 +295,11 @@ async function boot(): Promise<void> {
   let menuRef: CapabilityMenu | undefined;
   let displayYielded = false;
   let exiting = false;
-  const reconnectButton = document.getElementById('p-reconnect');
-  reconnectButton?.addEventListener('click', () => {
-    if (!exiting) link.resumeIfReplaced();
-  });
+  let phonePanel: PhoneControlPanel | undefined;
   link.onState((state) => {
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'link', state);
     setPanel('p-link', link.wasReplaced ? 'Another JOAT display connected. Use Reconnect to take over.' : state);
-    if (reconnectButton) reconnectButton.hidden = !link.wasReplaced;
+    phonePanel?.updateLink(state);
     if (link.wasReplaced) {
       displayYielded = true;
       chromeRef?.stop();
@@ -443,7 +441,41 @@ async function boot(): Promise<void> {
   const settings = new Settings();
   settings.load();
   setPanel('p-policy', settings.resumePolicy);
-  settings.onChange((policy) => setPanel('p-policy', policy));
+  settings.onChange((policy) => {
+    setPanel('p-policy', policy);
+    phonePanel?.updatePolicy(policy);
+  });
+  phonePanel = new PhoneControlPanel({
+    link,
+    urls: MAC_WS_URLS,
+    settings,
+    canReconnect: () => !exiting,
+    selectBrain: async (url) => {
+      if (exiting || !MAC_WS_URLS.includes(url)) return false;
+      // Explicit phone migration retires every old actionable surface before
+      // the next Mac can authorize input. Automatic reconnect is unchanged.
+      link.close();
+      menuRef?.releaseToLiveSession();
+      chromeRef?.stop();
+      hud.suspendDisplay();
+      let stopTimer: ReturnType<typeof setTimeout> | undefined;
+      const stopped = await Promise.race([
+        Promise.all([audio.stop(), imu.stop(), navigationRef?.stopAll()]).then(() => true),
+        new Promise<false>((resolve) => { stopTimer = setTimeout(() => resolve(false), 5000); }),
+      ]).finally(() => { if (stopTimer !== undefined) clearTimeout(stopTimer); });
+      if (!stopped || exiting) return false;
+      hud.resumeDisplay();
+      const cleared = await hud.showDefault();
+      if (!cleared || exiting) return false;
+      chromeRef?.start();
+      return link.selectUrl(url);
+    },
+    checkLocation: () => location.requestNavigationOrigin(),
+    changePolicy: (policy) => {
+      settings.setResumePolicy(policy);
+      link.send({ kind: 'policy', resume: policy });
+    },
+  });
   // Durable resume policy: the Even host's storage survives Android WebView
   // kills and is shared across the dev/packed origins, unlike the browser
   // localStorage mirror. Best-effort and async — boot never waits on it.
@@ -1329,6 +1361,12 @@ function productivityLifecycleFixture(
 }
 
 void boot().catch((err) => {
-  // Surface boot failures somewhere visible — the WebView has no console UI.
-  document.body.textContent = `boot failed: ${err instanceof Error ? err.message : String(err)}`;
+  // Keep recovery readable on a phone, without presenting disconnected
+  // controls as usable or dumping native error details into the page.
+  console.error('[joat] boot failed', err);
+  setPanel('p-status', 'Could not start');
+  setPanel('p-link', 'Even Hub initialization incomplete');
+  setPanel('p-recovery', 'Close and reopen JOAT in Even Hub. Check that your glasses are connected in the Even app. If this repeats, reopen the JOAT Mac app and check its connection status.');
+  document.querySelectorAll<HTMLButtonElement | HTMLSelectElement>('#panel button, #panel select')
+    .forEach((control) => { control.disabled = true; });
 });

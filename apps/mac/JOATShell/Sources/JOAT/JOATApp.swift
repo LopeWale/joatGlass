@@ -7,8 +7,11 @@ import SwiftUI
 /// `.terminateLater` + reply, not fire-and-forget SIGTERM.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
         guard EngineController.shouldRunAppServices(
-            environment: ProcessInfo.processInfo.environment
+            environment: ProcessInfo.processInfo.environment,
+            previewBundle: EngineController.isDesignPreviewBundle
         ) else { return }
         // Reference established unconditionally at launch — never in a lazy
         // menu's onAppear, which may not run before logout (audit §C1).
@@ -21,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let engine = EngineController.shared
+        if engine.isPreview { return .terminateNow }
         guard engine.state == .running else {
             NativeBridgeServer.shared.stop()
             return .terminateNow
@@ -48,7 +52,10 @@ struct JOATApp: App {
         Window("JOAT", id: "main") {
             MainWindowView(engine: engine)
         }
-        .defaultSize(width: 560, height: 480)
+        .defaultSize(width: 1080, height: 780)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
+        .commands { MacNavigationCommands() }
 
         MenuBarExtra {
             MenuContent(engine: engine)
@@ -74,11 +81,13 @@ struct MenuContent: View {
                 openWindow(id: "main")
                 NSApp.activate()
             }
-            if engine.state == .running {
-                Button("Stop Listening") { engine.stop() }
-                Button("Restart Engine") { engine.restart() }
+            if engine.isPreview {
+                Text("Read-only design preview")
+            } else if engine.state == .running {
+                Button("Stop Engine") { engine.stop() }.disabled(engine.isTransitioning)
+                Button("Restart Engine") { engine.restart() }.disabled(engine.isTransitioning)
             } else {
-                Button("Start Engine") { engine.start() }
+                Button("Start Engine") { engine.start() }.disabled(engine.isTransitioning)
             }
             Button("Open Log") { engine.openLog() }
             Divider()
@@ -92,103 +101,46 @@ struct MenuContent: View {
 
 struct SettingsView: View {
     @ObservedObject var engine: EngineController
-    @State private var hermesGatewayURL = ""
-    @State private var hermesConfigurationMessage: String?
 
     var body: some View {
         Form {
-            Toggle("Launch at Login", isOn: Binding(
-                get: { engine.launchAtLogin },
-                set: { engine.setLaunchAtLogin($0) }
-            ))
-            Toggle("Private Tailnet home brain", isOn: Binding(
-                get: { engine.privateTailnetGateway },
-                set: { engine.setPrivateTailnetGateway($0) }
-            ))
-            Text(
-                "For an unattended home Mac behind private Tailscale Serve. "
-                + "JOAT listens only on loopback and still requires G2 pairing. "
-                + "Restart JOAT after changing this setting."
-            )
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-
-            Section("Hermes on your Mac mini") {
-                TextField("Gateway URL", text: $hermesGatewayURL)
-                    .textFieldStyle(.roundedBorder)
-                    .fontDesign(.monospaced)
-                    .accessibilityLabel("Hermes Gateway URL")
-                LabeledContent("Agent Terminal agent", value: "Hermes (fixed)")
-                Text(
-                    "Use the authenticated Tailscale Gateway origin, for example "
-                    + "wss://your-mac-mini.tailnet.ts.net. Port 9443 is the Hermes "
-                    + "control dashboard, not this Gateway."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                HStack {
-                    Button("Save Hermes Connection") {
-                        saveHermesConnection()
-                    }
-                    .disabled(!hermesGatewayCanSave)
-                    Button("Reload") {
-                        loadHermesConnection()
-                    }
+            Section("General") {
+                Toggle("Launch at Login", isOn: Binding(
+                    get: { engine.launchAtLogin },
+                    set: { engine.setLaunchAtLogin($0) }
+                ))
+                if let notice = engine.launchAtLoginNotice {
+                    Text(notice).font(.caption).foregroundStyle(.secondary)
                 }
-                if let hermesConfigurationMessage {
-                    Text(hermesConfigurationMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            }
+            Section("Home Mac") {
+                Toggle("Private Tailnet home brain", isOn: Binding(
+                    get: { engine.privateTailnetGateway },
+                    set: { engine.setPrivateTailnetGateway($0) }
+                ))
+                Text("Use this for a home Mac behind private Tailscale Serve. The engine listens locally and still requires glasses pairing. Restart the engine after changing this setting.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Restart Engine") { engine.restart() }
+                    .disabled(engine.state != .running || engine.isTransitioning)
+            }
+            Section("Agent Terminal · OpenClaw and Hermes") {
+                A2AConnectionSettings(engine: engine)
+            }
+            Section("OpenClaw session Gateway") {
+                HermesConnectionSettings(engine: engine)
+            }
+            Section("Advanced") {
+                LabeledContent("Engine folder") {
+                    Text(engine.repoURL()?.path ?? "Not selected")
+                        .truncationMode(.middle).lineLimit(1)
                 }
-                Text(
-                    "Saving stores no token. Restart the engine to connect; a new "
-                    + "Gateway endpoint uses its own signed device identity and may "
-                    + "need a visible pairing approval."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                Button("Change Engine Folder…") { engine.chooseRepo() }
+                    .disabled(engine.isTransitioning)
             }
-            LabeledContent("Engine repo") {
-                Text(engine.repoURL()?.path ?? "not found")
-                    .truncationMode(.middle)
-                    .lineLimit(1)
-            }
-            Button("Change Repo Folder…") { engine.chooseRepo() }
         }
-        .padding(20)
-        .frame(width: 520)
-        .onAppear {
-            engine.refreshLaunchAtLogin()
-            loadHermesConnection()
-        }
-    }
-
-    private var hermesGatewayCanSave: Bool {
-        (try? OpenClawRuntimeConfiguration(gatewayURL: hermesGatewayURL)) != nil
-    }
-
-    private func loadHermesConnection() {
-        do {
-            guard let configuration = try OpenClawRuntimeConfiguration.load() else {
-                hermesGatewayURL = ""
-                hermesConfigurationMessage = "No Hermes Gateway is configured yet."
-                return
-            }
-            hermesGatewayURL = configuration.gatewayURL
-            hermesConfigurationMessage = "Saved Gateway loaded."
-        } catch {
-            hermesConfigurationMessage = error.localizedDescription
-        }
-    }
-
-    private func saveHermesConnection() {
-        do {
-            let configuration = try OpenClawRuntimeConfiguration(gatewayURL: hermesGatewayURL)
-            try configuration.save()
-            hermesGatewayURL = configuration.gatewayURL
-            hermesConfigurationMessage = "Gateway saved. Restart Engine to connect."
-        } catch {
-            hermesConfigurationMessage = error.localizedDescription
-        }
+        .formStyle(.grouped)
+        .disabled(engine.isPreview)
+        .frame(width: 560, height: 630)
+        .onAppear { engine.refreshLaunchAtLogin() }
     }
 }

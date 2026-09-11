@@ -4,13 +4,16 @@ import Foundation
 actor BridgeRouter {
     private let eventKit: EventKitService
     private let openClawCredentials: any OpenClawCredentialServicing
+    private let a2aCredentials: any A2ATokenServicing
 
     init(
         eventKit: EventKitService = EventKitService(),
-        openClawCredentials: any OpenClawCredentialServicing = OpenClawCredentialService()
+        openClawCredentials: any OpenClawCredentialServicing = OpenClawCredentialService(),
+        a2aCredentials: any A2ATokenServicing = A2ACredentialService()
     ) {
         self.eventKit = eventKit
         self.openClawCredentials = openClawCredentials
+        self.a2aCredentials = a2aCredentials
     }
 
     func start() async {
@@ -90,6 +93,14 @@ actor BridgeRouter {
                     )
                 ))
                 commitPhase = "local_secret_operation"
+            case "a2a.token.load":
+                let body = try BridgeContract.decode(A2ATokenLoadRequest.self, from: request.body)
+                if let token = try a2aCredentials.loadToken(profileID: body.profileID, endpoint: body.endpoint) {
+                    result = try BridgeContract.encode(A2ATokenDTO(token: token))
+                } else {
+                    result = .null
+                }
+                commitPhase = "local_secret_read"
             case "openclaw.token.load":
                 let body = try BridgeContract.decode(OpenClawTokenRequest.self, from: request.body)
                 result = try await BridgeContract.encode(openClawCredentials.loadToken(

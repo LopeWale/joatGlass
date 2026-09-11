@@ -41,10 +41,13 @@ struct NewsConfig: Codable, Equatable {
     var normalized: NewsConfig {
         var copy = self
         let known = Set(NewsConfig.categories.map(\.id))
-        copy.categories = categories.filter { known.contains($0) }
+        var seenCategories = Set<String>()
+        var seenFeeds = Set<String>()
+        copy.categories = categories.filter { known.contains($0) && seenCategories.insert($0).inserted }
         copy.customFeeds = customFeeds
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.hasPrefix("https://") || $0.hasPrefix("http://") }
+            .filter { seenFeeds.insert($0).inserted }
         if copy.categories.isEmpty && copy.customFeeds.isEmpty {
             copy.categories = NewsConfig.defaultCategories
         }

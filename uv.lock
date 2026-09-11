@@ -957,6 +957,7 @@ name = "joat-g2"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "ddgs" },
     { name = "feedparser" },
     { name = "pillow" },
@@ -982,6 +983,7 @@ nli = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'nli'", specifier = ">=0.30" },
+    { name = "aiohttp", specifier = ">=3.10,<4" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "feedparser", specifier = ">=6.0" },
     { name = "minicheck", marker = "extra == 'nli'", git = "https://github.com/Liyan06/MiniCheck.git?rev=main" },

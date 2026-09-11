@@ -159,6 +159,18 @@ export class MacLink {
     return this.opts.urls[this.urlIndex % this.opts.urls.length] as string;
   }
 
+  /** Explicit phone selection stays within the package's approved candidates.
+   * Retire queued input before changing origins; credentials remain per-origin. */
+  selectUrl(url: string): boolean {
+    const index = this.opts.urls.indexOf(url);
+    if (index < 0) return false;
+    this.halt();
+    this.urlIndex = index;
+    this.attempt = 0;
+    this.connect();
+    return true;
+  }
+
   /** A replaced display yields until its user explicitly reconnects it. */
   get wasReplaced(): boolean {
     return this.replaced;

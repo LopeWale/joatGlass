@@ -28,6 +28,7 @@ from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
+from ..core.a2a import A2AError, A2AErrorCode
 from ..agents.openclaw_gateway import (
     OpenClawPairingRequired, OpenClawScopeMismatch, classify_gateway_dial_failure,
 )
@@ -380,6 +381,8 @@ class TerminalLane:
             return setup
         if self.last_error:
             return "needs recovery"
+        if getattr(getattr(self.agent, "last_outcome", None), "requires_input", False):
+            return "needs input"
         return "idle"
 
     @property
@@ -821,6 +824,16 @@ class AgentTerminalRoster:
     async def _initialize_lane(self, lane: TerminalLane, attempt: _LanePreparation) -> bool:
         label = _one_row(lane.name, SETUP_LANE_COLUMNS)
         try:
+            # The existing HUD retry reopens this captured lane. For an
+            # uncertain A2A task, read its owned task before reconnecting;
+            # never turn a retry gesture into another message/send.
+            recovery = getattr(attempt.agent, "recover", None)
+            if getattr(attempt.agent, "needs_recovery", False) and recovery is not None:
+                recovered = str(await recovery())
+                if lane.agent is attempt.agent and lane.preparation is attempt and not attempt.abandoned:
+                    lane.tail.extend(recovered.splitlines())
+                    if _capture_context(attempt.agent) is not None:
+                        lane.last_error = ""
             await attempt.agent.initialize()
             ready = _capture_context(attempt.agent) is not None
         except Exception as exc:
@@ -838,7 +851,15 @@ class AgentTerminalRoster:
                 origin.tb_frame.f_code.co_name if origin is not None else "unknown",
                 origin.tb_lineno if origin is not None else 0,
             )
-            if isinstance(exc, (OpenClawScopeMismatch, OpenClawPairingRequired)):
+            if isinstance(exc, A2AError):
+                if exc.code in {A2AErrorCode.CREDENTIALS_MISSING, A2AErrorCode.AUTHENTICATION_FAILED, A2AErrorCode.AUTH_REQUIRED}:
+                    attempt.requires_authorization = True
+                    attempt.reason = "Update this agent's token in JOAT on the Mac, then retry."
+                elif exc.code in {A2AErrorCode.OUTCOME_UNKNOWN, A2AErrorCode.SUBMISSION_UNCERTAIN}:
+                    attempt.reason = "Previous task outcome unknown. Check the agent before resending."
+                else:
+                    attempt.reason = "Agent connection failed. Check its endpoint on the Mac, then retry."
+            elif isinstance(exc, (OpenClawScopeMismatch, OpenClawPairingRequired)):
                 attempt.requires_authorization = True
                 attempt.reason = (
                     "Approve Work permissions in OpenClaw, then retry."
@@ -934,6 +955,8 @@ class AgentTerminalRoster:
             reason = str(exc) or exc.__class__.__name__
             return f"{lane.name}: history unavailable — {reason}"
         if not rows:
+            if getattr(lane.agent, "history_scope", None):
+                return f"{lane.name}: no history in this JOAT conversation yet."
             return f"{lane.name}: the runtime reports no history yet."
         out = []
         for role, text in rows:
@@ -945,6 +968,9 @@ class AgentTerminalRoster:
             if len(flat) > 400:
                 flat = flat[:399].rstrip() + "…"
             out.append(f"{prefix}{flat}")
+        scope = getattr(lane.agent, "history_scope", None)
+        if scope == "this JOAT conversation":
+            out.insert(0, f"{lane.name} — this JOAT conversation:")
         return "\n".join(out)
 
     def tail(self, name: str | None = None, lines: int = 6) -> str:
@@ -1110,8 +1136,22 @@ class AgentTerminalRoster:
                 await self._narrate(lane, pending)
             await self._narrate(lane, f"{lane.name} ▸ done.")
         except asyncio.CancelledError:
-            lane.tail.append("[cancelled]")
+            lane.tail.append("[local wait stopped]" if hasattr(lane.agent, "cancellation_status") else "[cancelled]")
             raise
+        except A2AError as exc:
+            if exc.code == A2AErrorCode.INPUT_REQUIRED:
+                lane.last_error = ""
+                question = getattr(exc, "text", "")
+                if isinstance(question, str) and question.strip():
+                    for line in question.splitlines():
+                        lane.tail.append(line)
+                        await self._narrate(lane, line)
+                await self._narrate(lane, f"{lane.name} ▸ waiting for your input.")
+            else:
+                lane.last_error = str(exc)
+                lane.tail.append(f"[!] {lane.last_error}")
+                log.warning("terminal A2A failed lane=%s code=%s", lane.name, exc.code.value)
+                await self._narrate(lane, f"{lane.name} ▸ {lane.last_error}")
         except Exception as exc:  # runtime already classified it; keep the line
             # The adapter invalidates itself on any protocol doubt — that is
             # its receipt discipline, not ours to soften. The wearer gets
@@ -1391,6 +1431,14 @@ class AgentTerminalRoster:
         # an instruction after the wearer has cancelled it.
         lane.queued, lane.queued_context = "", None
         if not lane.busy or lane.task is None:
+            cancel_remote = getattr(lane.agent, "cancel_task", None)
+            if cancel_remote is not None:
+                try:
+                    await cancel_remote()
+                except A2AError as exc:
+                    return str(exc)
+                lane.last_error = ""
+                return f"{lane.name} ▸ cancellation confirmed by the agent."
             if discarded_queue:
                 return f"{lane.name} ▸ queued instruction discarded; no turn is running."
             return f"{lane.name} has nothing running."
@@ -1399,8 +1447,57 @@ class AgentTerminalRoster:
             await lane.task
         except (asyncio.CancelledError, Exception):
             pass
+        remote_status = getattr(lane.agent, "cancellation_status", None)
+        if remote_status == "confirmed":
+            lane.last_error = ""
+            return f"{lane.name} ▸ cancellation confirmed by the agent."
+        if remote_status in {"uncertain", "unsupported", "none"}:
+            lane.last_error = "Remote stop unconfirmed; check the agent before sending again."
+            lane.tail.append(lane.last_error)
+            return f"{lane.name} ▸ stopped waiting locally; remote cancellation is unconfirmed."
         lane.last_error = lane.last_error or "cancelled — needs recovery"
         return f"{lane.name} ▸ cancelled; the session will re-verify on next send."
+
+    async def recover_task(self) -> str:
+        lane = self._lanes.get(self._focus or "")
+        recovery = getattr(lane.agent, "recover", None) if lane else None
+        if lane is None or recovery is None:
+            return "This session uses Gateway recovery. Open it again to retry."
+        if lane.busy:
+            return "The current instruction is still running."
+        try:
+            async with asyncio.timeout(8):
+                result = str(await recovery())
+        except A2AError as exc:
+            return str(exc)
+        except TimeoutError:
+            return "The status check timed out. No instruction was sent."
+        lane.last_error = ""
+        for line in result.splitlines():
+            lane.tail.append(line)
+        return result
+
+    async def new_conversation(self) -> str:
+        lane = self._lanes.get(self._focus or "")
+        reset = getattr(lane.agent, "reset_conversation", None) if lane else None
+        if lane is None or reset is None:
+            return "Choose an A2A agent to start a new conversation."
+        if lane.busy:
+            return "Cancel or finish the current instruction before starting a new conversation."
+        unknown = getattr(lane.agent, "capture_context_generation", None) is None
+        try:
+            await reset()
+        except A2AError as exc:
+            return str(exc)
+        lane.capture_revision += 1
+        lane.queued, lane.queued_context = "", None
+        lane.last_error = ""
+        lane.tail.clear()
+        result = f"{lane.name} ▸ new conversation."
+        if unknown:
+            result += " Any previous unconfirmed task may still be running."
+        lane.tail.append(result)
+        return result
 
 
 # The word "terminal" is REQUIRED in every phrasing: an optional prefix
@@ -1638,6 +1735,12 @@ class AgentTerminalCommands:
         if said in ("terminal cancel", "terminal stop", "cancel the terminal"):
             self._acquire_explicit_view()
             return await self._roster.cancel()
+        if said in ("terminal recover", "terminal check task", "terminal task status"):
+            self._acquire_explicit_view()
+            return await self._roster.recover_task()
+        if said in ("terminal new conversation", "terminal start over"):
+            self._acquire_explicit_view()
+            return await self._roster.new_conversation()
         if said in ("terminal approvals", "terminal pending"):
             self._acquire_explicit_view()
             return self._roster.approvals_view()
