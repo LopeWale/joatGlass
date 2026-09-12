@@ -613,6 +613,17 @@ class VoiceNoteStore:
 
     _RETAINED_STATES = ("saved", "saved_degraded", "interrupted")
 
+    def retained(self) -> tuple[VoiceNote, ...]:
+        """Complete retained collection for a stable, Mac-owned archive visit."""
+        placeholders = ",".join("?" for _ in self._RETAINED_STATES)
+        rows = self._store.execute(
+            f"SELECT {self._NOTE_COLUMNS} FROM voice_notes "
+            f"WHERE state IN ({placeholders}) AND title IS NOT NULL "
+            "ORDER BY updated_at_us DESC,capture_id DESC",
+            self._RETAINED_STATES,
+        ).fetchall()
+        return tuple(self._note(row) for row in rows)
+
     def recent_retained(self, limit: int = 5) -> tuple[VoiceNote, ...]:
         """Newest titled, non-discarded terminal notes for the HUD list."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:

@@ -486,7 +486,16 @@ export type DownlinkMessage =
   | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
   | {
     kind: 'hud.list';
+    /** Opaque reader visit and source-page cursor, separate from reply ownership. */
+    readerPage?: { id: string; index: number; count: number };
+    /** Mac-owned archive page identity; note IDs never cross this boundary. */
+    quickNotesPage?: { index: number; count: number };
     items: string[];
+    /** Display context only, independent of routing and private action targets. */
+    contextLabel?: string;
+    /** First navigation/view control in the unchanged Mac-owned row array. */
+    controlStartIndex?: number;
+    planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>;
     title?: string;
     hint?: string;
     requestId?: string;
@@ -579,6 +588,7 @@ export type DownlinkMessage =
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
 export interface InputEventPayload {
+  quickNotesPageIndex?: number;
   containerId?: number;
   containerName?: string;
   eventType?: number;
