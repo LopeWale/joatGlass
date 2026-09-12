@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-12 — JOAT 0.1.88 package built
+
+- Built the canonical apps/hub-plugin/joat.ehpk from a temporary export of committed source 482fd0a (completed Agent Terminal implementation 29184ba plus version metadata). Release checks and TypeScript compilation passed; temporary export removed. No developer environment or simulator fixtures were packaged.
+- Preserved released candidate order: secure MacBook Pro /glasses route, then secure Mac Mini /glasses route. Minimum Even App 2.2.9 / SDK 0.0.14. Package size 150304 bytes; SHA-256 9a05dbd35002ca9cb159b55c455078ee77cd21906d6a0f77e4c5332e2d1ae4c4.
+- Replaced the existing canonical package only. No portal upload, physical installation, pairing change, or installed Mac engine restart performed.
+
 ## 2026-09-11 — Continuous Agent Terminal conversations
 
 - Preserve full user and agent messages in a stable per-agent conversation, replacing the one-row-per-paragraph display loss. Retain up to 64 messages / 262144 UTF-8 bytes in memory; evict whole oldest messages with an explicit history notice.
