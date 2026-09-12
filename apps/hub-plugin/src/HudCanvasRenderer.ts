@@ -529,53 +529,24 @@ export function brainstormActionHint(
     }
     return 'swipe: scroll · left x2: menu · long-press: mic';
   }
-  // The Agent Terminal surface. These must mirror handleClick(), which
-  // branches on terminalState — NOT state — once no lane is running.
-  //
-  // Two of these were lying. handleClick was corrected so a tap here arms
-  // TERMINAL INPUT ("it used to send begin_topic_capture — i.e. the Agent
-  // Terminal's primary gesture started a Brainstorm, a different feature")
-  // and this hint was never updated, so the glass still told the wearer
-  // that tapping the terminal begins a Brainstorm. And a lane waiting on
-  // an approval fell through to "tap: retry Hermes" — the wrong action,
-  // with the only useful one ("terminal approve") never shown at all.
-  // A pending tool request outranks every state, because that is the
-  // CONTROLLER's order: handleClick answers the approval and handleSwipe
-  // denies it whenever approvals > 0, whatever the connection looks like.
-  // The hint's job is to promise what the gesture actually does — a hint
-  // keyed on state alone said 'swipe: scroll' on a busy lane holding an
-  // approval, where the swipe in fact DENIES a tool. The one state where
-  // a wrong hint performs a consequential action is the one it must never
-  // be wrong in.
+  // Match the terminal controller: approval wins, busy taps stay here,
+  // and double-click returns to the agent choices through navigation.
   if ((model.approvals ?? 0) > 0) {
-    return 'tap: approve · swipe: deny · left x2: menu';
+    return 'tap: approve · swipe: deny · double-click: back';
   }
   if (model.state === 'approval_required') {
-    // No pending tool request, so approval_required means the CONNECTION
-    // is waiting on device approval in OpenClaw — remedy: retry. (A
-    // branch keyed on the render model's old `terminalState` twin claimed
-    // a voice-only wording here; that twin mirrored `state`, making the
-    // branch statically unreachable — it never showed once.)
-    return 'approve in OpenClaw · tap: retry · left x2: menu';
+    return 'approve in OpenClaw · tap: retry · double-click: back';
   }
   if (model.state === 'running') {
-    // The tap is NAMED now — but only where it does something. It cycles
-    // the focused lane ("switch among sessions" without speaking, the
-    // complaint that produced the picker), and on a ONE-LANE Mac there is
-    // nothing to cycle to: the roster answers "the only session". Naming
-    // it there would be the same defect this surface was just cleaned of,
-    // a hint promising an effect the code does not produce — caught on a
-    // real simulator render showing "LANES > one session" under a footer
-    // advertising the switch. The lane chips ride `collaborators` on the
-    // terminal frame, so their count is the honest test.
-    const lanes = model.collaborators?.length ?? 0;
-    return lanes > 1
-      ? 'tap: next session · swipe: scroll · say "terminal cancel"'
-      : 'swipe: scroll · say "terminal cancel" · left x2: menu';
+    return 'swipe: scroll · say "terminal cancel" · double-click: back';
   }
-  return model.state === 'ready'
-    ? 'tap: speak to the terminal · left x2: menu'
-    : 'tap: retry Hermes · left x2: menu';
+  if (model.state === 'ready') {
+    return 'tap: speak · swipe: scroll · double-click: back';
+  }
+  if (model.state === 'blocked' || model.state === 'unavailable') {
+    return 'tap: retry connection · double-click: back';
+  }
+  return 'swipe: scroll · double-click: back';
 }
 
 /** The terminal's policy row must distinguish a pending device approval or
@@ -587,9 +558,8 @@ export function agentTerminalSafetyLabel(
   if (model.state === 'approval_required') return 'APPROVAL REQUIRED';
   if (model.state === 'unavailable') return 'CONNECTION UNAVAILABLE';
   if (model.state === 'blocked') return 'TERMINAL BLOCKED';
-  return model.noToolsChecked
-    ? 'NO TOOLS CHECKED BEFORE SEND'
-    : 'TOOL STATE NOT CLEARED';
+  // A missing no-tools attestation is not a connection or policy failure.
+  return '';
 }
 
 /** A live terminal is a transcript, not a connection-status dashboard.
@@ -613,7 +583,7 @@ export interface AgentTerminalTranscriptLayout {
 export function agentTerminalFocusLabel(topic: string | undefined): string {
   const named = ((topic ?? '').split(' · ')[0] ?? '').trim();
   const cut = named.length > 24 ? `${named.slice(0, 23)}…` : named;
-  return upper(cut || 'HERMES');
+  return upper(cut || 'AGENT TERMINAL');
 }
 
 export function agentTerminalTranscriptLayout(
@@ -626,14 +596,14 @@ export function agentTerminalTranscriptLayout(
   // the same four rows (HOST, POLICY, SESSION, and a title) over a mostly
   // empty lens, and the wearer asked whether "the mac mini tailscale and
   // shit" was needed there. It is not: when nothing is wrong, one summary
-  // row carries the state and the safety attestation, and the rest of the
+  // row carries the connection state, and the rest of the
   // glass belongs to the transcript.
   const needsRecovery = model.state === 'blocked'
     || model.state === 'approval_required'
     || model.state === 'unavailable';
   if (!needsRecovery) {
     return {
-      summary: `${focus} > ${state} · ${agentTerminalSafetyLabel(model)}`,
+      summary: `${focus} > ${state}`,
       // Dense by demand: the wearer's words were "stop wasting so much
       // place on things that do not affect functionality". Header and
       // LANES are two tight rows; everything else is transcript.
@@ -3387,7 +3357,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context.font = TYPE.micro;
         this.fitText(
           context,
-          `LANES > ${model.collaborators.join('  |  ') || 'one session'}`,
+          'AGENT TERMINAL',
           HUD_EDGE,
           72,
           HUD_CONTENT_WIDTH,
@@ -3455,12 +3425,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       );
     }
     const actionHint = scroll.offset > 0
-      // Cancel is a Brainstorm fact: handleCancel refuses every
-      // agent_terminal frame (left-double opens the menu there), so this
-      // override — keyed on state alone — promised a cancel the router
-      // would never perform on the terminal.
-      ? `▼ ${scroll.offset} newer — swipe down · left x2: ${
-        model.screen === 'brainstorm' && model.state === 'running' ? 'cancel' : 'menu'
+      // Scrolling changes the transcript position, not the destination of Back.
+      ? `▼ ${scroll.offset} newer — swipe down · double-click: ${
+        model.screen === 'agent_terminal' ? 'back'
+          : model.state === 'running' ? 'cancel' : 'menu'
       }`
       : brainstormActionHint(model);
     context.fillStyle = gray(QUIET);

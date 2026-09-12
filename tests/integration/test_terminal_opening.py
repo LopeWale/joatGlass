@@ -861,3 +861,16 @@ async def test_feature_tap_retires_brainstorm_before_async_open(rig: OpeningRig)
     rig.router.on_input(InputEvent(container_name="capmenu", selected_name="Messages", request_id="messages"))
     assert not rig.router.brainstorm_view_current
     await asyncio.sleep(0)
+
+
+async def test_cycle_from_hidden_internal_session_returns_to_visible_agent():
+    roster = AgentTerminalRoster(
+        [(name, InitializingAgent()) for name in ("work", "openclaw", "hermes")],
+        visible_lanes=("openclaw", "hermes"))
+    async def paint(frame, request, selection):
+        pass
+    opening = TerminalOpeningController(roster, paint=paint,
+                                        connection_generation=lambda: "isolated")
+    await opening.open("work", "request", "selection", lambda: True)
+    await opening.cycle()
+    assert roster.focused == "openclaw"

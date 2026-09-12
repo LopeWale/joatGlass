@@ -1515,6 +1515,7 @@ async def main() -> None:
 
     agent_terminal = AgentTerminalRoster(
         terminal_lanes,  # type: ignore[arg-type]
+        visible_lanes=tuple(a2a_agents),
         announce=terminal_announce,
         paint=lambda frame: terminal_opening.paint(frame),
     )

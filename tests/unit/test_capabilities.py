@@ -2310,29 +2310,26 @@ class TestTheTerminalShowsItsSessions:
         await router._select_terminal(1)
         assert focused == ["calendar"]
 
-    async def test_live_output_is_never_hidden_behind_a_picker(
-        self, tmp_path,
-    ) -> None:  # type: ignore[no-untyped-def]
-        """The wearer opened the terminal to WATCH work. A chooser drawn
-        over a running session hides the thing they came for."""
-        painted: list[str] = []
-
-        async def view() -> None:
+    async def test_explicit_entry_always_shows_agent_choices_even_while_busy(self, tmp_path):
+        painted = []
+        async def view():
             painted.append("live")
-
-        # The roster is ASKED, not parsed. This test used to pass
-        # "▸ work · running" and match on the word — but the state word the
-        # roster emits is "working", so the guard never fired and the
-        # picker would have drawn straight over live output. A fixture that
-        # invents a string production never sends proves nothing.
-        rows = [("work", "▸ work · working · run the audit")]
+        rows = [("openclaw", "OpenClaw · Working"), ("hermes", "Hermes · Ready")]
         router, transport, _ = make_router(
             tmp_path, terminal_rows=lambda: rows, terminal_view=view,
             terminal_busy=lambda: True)
         await router.open("Agent Terminal")
+        assert painted == []
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert lists[-1].items == [row for _, row in rows]
+        assert lists[-1].selectable is True
 
-        assert painted == ["live"]
-        assert not [m for m in transport.sent if isinstance(m, HudList)]
+    async def test_empty_configured_agents_shows_setup_not_legacy_terminal(self, tmp_path):
+        router, transport, _ = make_router(tmp_path, terminal_rows=lambda: [])
+        await router.open("Agent Terminal")
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert lists[-1].items[0] == "Add an agent in JOAT on your Mac."
+        assert lists[-1].selectable is False
 
 
 class TestARowTapCrossesTheRealGuards:

@@ -806,6 +806,10 @@ export class CapabilityMenu {
   async toggle(): Promise<void> {
     this.terminalPreludeRevision += 1;
     if (this.view === 'closed') {
+      if (this.terminalOpening) {
+        this.retireTerminalOpening();
+        await this.openCapability('Agent Terminal', CAPABILITIES.indexOf('Agent Terminal'));
+      }
       return;
     } else if (this.view === 'productivity' && this.productivityReturn) {
       const capability = this.productivityReturn;

@@ -665,8 +665,11 @@ describe('Brainstorm wearable actions', () => {
       .toBe('CONNECTION UNAVAILABLE');
     expect(agentTerminalSafetyLabel({ state: 'blocked', noToolsChecked: false }))
       .toBe('TERMINAL BLOCKED');
-    expect(agentTerminalSafetyLabel({ state: 'ready', noToolsChecked: true }))
-      .toBe('NO TOOLS CHECKED BEFORE SEND');
+    for (const state of ['ready', 'running'] as const) {
+      for (const noToolsChecked of [false, true]) {
+        expect(agentTerminalSafetyLabel({ state, noToolsChecked })).toBe('');
+      }
+    }
   });
 
   it('makes a running Agent Terminal a transcript-first surface', () => {
@@ -676,7 +679,7 @@ describe('Brainstorm wearable actions', () => {
       .toEqual({
         // LIVE, not RUNNING: the wearer asked what our state words meant,
         // so the glass speaks theirs.
-        summary: 'HERMES > LIVE · NO TOOLS CHECKED BEFORE SEND',
+        summary: 'HERMES > LIVE',
         // Dense: header + LANES in two tight rows, 12 transcript rows.
         dividerY: 78.5,
         transcriptBaselineY: 92,
@@ -703,15 +706,15 @@ describe('Brainstorm wearable actions', () => {
     // gateway session read someone else's name above their own output.
     expect(agentTerminalTranscriptLayout({
       state: 'running', noToolsChecked: false, topic: 'calendar · running · 2 waiting',
-    }).summary).toBe('CALENDAR > LIVE · TOOL STATE NOT CLEARED');
+    }).summary).toBe('CALENDAR > LIVE');
     expect(agentTerminalFocusLabel('agent:hermes:nightly · running'))
       .toBe('AGENT:HERMES:NIGHTLY');
     // A gateway key we do not choose must not run off the spine.
     expect(agentTerminalFocusLabel(`${'x'.repeat(90)} · running`).length)
       .toBeLessThanOrEqual(24);
     // No lane named yet: the house default, not an empty prefix.
-    expect(agentTerminalFocusLabel(undefined)).toBe('HERMES');
-    expect(agentTerminalFocusLabel('')).toBe('HERMES');
+    expect(agentTerminalFocusLabel(undefined)).toBe('AGENT TERMINAL');
+    expect(agentTerminalFocusLabel('')).toBe('AGENT TERMINAL');
   });
 
   it('discloses scroll, terminal handoff, the verb layer, and cancel', () => {
@@ -1462,5 +1465,33 @@ describe('exact prepared readers across feature boundaries', () => {
       items: ['1/1 · Source', ...Array.from({length: 11}, (_, i) => `row ${i}`)],
       selectedIndex: 0, selectable: false, hint: 'left x2: back',
     }, {})).toThrow(/reader.*10.*rows/i);
+  });
+});
+
+
+describe('terminal conversation footer transitions', () => {
+  it('repaints speak after an answer and keeps Back while reading older output', () => {
+    const painted: string[] = [];
+    const context = new Proxy({
+      fillText: (text: string) => painted.push(text),
+      measureText: (text: string) => ({width: text.length * 4}),
+    }, {get: (target, key) => Reflect.get(target, key) ?? (() => undefined)});
+    const renderer = Object.create(HudCanvasRenderer.prototype) as any;
+    renderer.drawIcon = () => undefined;
+    renderer.drawBrainstormTranscript = () => undefined;
+    renderer.fitText = (ctx: any, text: string) => ctx.fillText(text);
+    let offset = 0;
+    renderer.transcriptScrollFor = () => ({offset});
+    const model = {screen: 'agent_terminal', state: 'running',
+      topic: 'OpenClaw · running', collaborators: [], activity: 'Answer', noToolsChecked: false};
+    renderer.drawBrainstorm(context, model, {});
+    expect(painted[painted.length - 1]).toContain('terminal cancel');
+    renderer.drawBrainstorm(context, {...model, state: 'ready', topic: 'OpenClaw · ready'}, {});
+    expect(painted[painted.length - 1]).toContain('tap: speak');
+    expect(painted[painted.length - 1]).not.toContain('terminal cancel');
+    offset = 3;
+    renderer.drawBrainstorm(context, {...model, state: 'ready'}, {});
+    expect(painted[painted.length - 1]).toContain('double-click: back');
+    expect(painted[painted.length - 1]).not.toContain('menu');
   });
 });
