@@ -2581,3 +2581,15 @@ class TestMultiHostRoster:
         assert "mini" in answer and "studio" in answer
         # Focus did not move to an arbitrary Mac.
         assert r.focused == "work@mini"
+
+
+def test_agent_choices_exclude_internal_sessions_without_deleting_them():
+    names = ["openclaw", "hermes", "work", "hermes session", "calendar"]
+    r = AgentTerminalRoster([(name, FakeAgent()) for name in names],
+                            visible_lanes=("openclaw", "hermes"))
+    assert [name for name, _ in r.picker_rows()] == ["openclaw", "hermes"]
+    assert r.lane("calendar") is not None
+    assert r.lane("work") is not None
+    assert len(r.frame().lanes) == 2
+    empty = AgentTerminalRoster([("work", FakeAgent())], visible_lanes=())
+    assert empty.picker_rows() == []

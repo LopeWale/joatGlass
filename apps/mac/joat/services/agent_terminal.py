@@ -454,6 +454,8 @@ class AgentTerminalRoster:
         lanes: Sequence[tuple[str | LaneAddress, TerminalAgentLike]],
         announce: Announce | None = None,
         paint: Paint | None = None,
+        *,
+        visible_lanes: Sequence[str] | None = None,
     ) -> None:
         # A plain string stays a hostless lane, so every single-host caller
         # (and every existing test) keeps its exact previous meaning.
@@ -465,6 +467,7 @@ class AgentTerminalRoster:
             # dropping the engine over it would cost the wearer every OTHER
             # working lane on the roster.
             self._lanes.setdefault(lane.key, lane)
+        self._visible_lanes = None if visible_lanes is None else frozenset(visible_lanes)
         self._announce = announce
         self._paint = paint
         self._focus: str | None = next(iter(self._lanes), None)
@@ -597,7 +600,19 @@ class AgentTerminalRoster:
         """
         rows: list[tuple[str, str]] = []
         for lane in self._lanes.values():
+            if self._visible_lanes is not None and lane.key not in self._visible_lanes:
+                continue
             mark = "▸ " if lane.key == self._focus else "  "
+            if self._visible_lanes is not None:
+                name = str(getattr(lane.agent, "label", lane.name))
+                state = {
+                    "idle": "Ready", "working": "Working", "unprepared": "Tap to connect",
+                    "preparing": "Connecting", "approval_required": "Needs approval",
+                    "failed": "Connection failed", "needs recovery": "Needs attention",
+                    "needs input": "Needs your answer",
+                }.get(lane.state, "Needs attention")
+                rows.append((lane.key, _one_row(f"{name} · {state}", HUD_COLUMNS)))
+                continue
             last = (lane.tail[-1] if lane.tail else "").strip()
             waiting = (f" · {len(lane.approvals)} waiting"
                        if lane.approvals else "")
@@ -671,7 +686,8 @@ class AgentTerminalRoster:
             # approval and the frame looked identical. Each lane now
             # carries its state, so a glance covers the whole roster.
             lanes=[_one_row(f"{name}·{self._mark(other)}", HUD_LANE_COLUMNS)
-                   for name, other in list(self._lanes.items())[:3]],
+                   for name, other in [(key, value) for key, value in self._lanes.items()
+                                      if self._visible_lanes is None or key in self._visible_lanes][:3]],
             lines=body,
         )
 

@@ -150,7 +150,7 @@ describe('BrainstormController', () => {
     expect(sent).toEqual([{ kind: 'brainstorm.action', action: 'retry_terminal' }]);
   });
 
-  it('returns from a live terminal overlay to the same active Brainstorm', () => {
+  it('keeps a busy terminal conversation visible on tap', () => {
     const { controller, sent } = make();
     controller.present(model({
       screen: 'agent_terminal',
@@ -158,7 +158,7 @@ describe('BrainstormController', () => {
     }));
 
     expect(controller.handleClick()).toBe(true);
-    expect(sent).toEqual([{ kind: 'brainstorm.action', action: 'show_brainstorm' }]);
+    expect(sent).toEqual([]);
   });
 
   it('drops ownership when another production surface replaces Brainstorm', () => {

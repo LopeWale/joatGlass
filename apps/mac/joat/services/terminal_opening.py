@@ -257,9 +257,12 @@ class TerminalOpeningController:
             if not self._is_current(opening):
                 return ""
             names = [name for name, _row in self._roster.picker_rows()]
-            if len(names) < 2:
-                return f"{opening.name} is the only session."
-            target = names[(names.index(opening.name) + 1) % len(names)]
+            if not names:
+                return "No agents are configured."
+            if len(names) == 1 and opening.name in names:
+                return f"{opening.name} is the only agent."
+            target = (names[(names.index(opening.name) + 1) % len(names)]
+                      if opening.name in names else names[0])
             await self.open(target, opening.request_id, opening.selection_id, opening.is_current)
             return self._roster.frame().topic if self.current else ""
 

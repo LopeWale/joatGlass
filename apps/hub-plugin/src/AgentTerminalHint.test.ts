@@ -72,28 +72,28 @@ describe('Agent Terminal action hints', () => {
   it('promises the tap that handleClick actually performs', () => {
     const cases: Array<{
       model: BrainstormHudModel;
-      action: string;
+      action: string | undefined;
       says: string;
     }> = [
       {
         model: terminal({ state: 'ready' }),
         action: 'begin_terminal_input',
-        says: 'speak to the terminal',
+        says: 'tap: speak',
       },
       {
         model: terminal({ state: 'running' }),
-        action: 'show_brainstorm',
+        action: undefined,
         says: 'scroll',
       },
       {
         model: terminal({ state: 'blocked' }),
         action: 'retry_terminal',
-        says: 'retry Hermes',
+        says: 'retry connection',
       },
       {
         model: terminal({ state: 'unavailable' }),
         action: 'retry_terminal',
-        says: 'retry Hermes',
+        says: 'retry connection',
       },
     ];
     for (const { model, action, says } of cases) {
@@ -172,29 +172,14 @@ describe('the ready Brainstorm tells you how to start one', () => {
   });
 });
 
-describe('the switch gesture is only promised where it works', () => {
-  // Caught on a real simulator render: the footer advertised "tap: next
-  // session" under a strip reading "LANES > one session", where the tap
-  // answers "the only session". A hint naming an effect the code does not
-  // produce is the exact defect this file exists to prevent — and I had
-  // just introduced a fresh one while fixing the others.
-  const lanes = (...names: string[]) => terminal({
-    state: 'running', collaborators: names,
-  });
-
-  it('names the tap when there is somewhere to cycle to', () => {
-    expect(brainstormActionHint(lanes('work·run', 'hermes·idle')))
-      .toContain('tap: next session');
-  });
-
-  it('says nothing about it on a one-lane Mac', () => {
-    const hint = brainstormActionHint(lanes('work·run'));
-    expect(hint).not.toContain('next session');
-    expect(hint).toContain('swipe: scroll');
-  });
-
-  it('says nothing about it when the frame carries no lanes at all', () => {
-    expect(brainstormActionHint(terminal({ state: 'running' })))
-      .not.toContain('next session');
+describe('a running terminal stays on the selected conversation', () => {
+  it('never advertises or sends an unrelated feature switch', () => {
+    for (const collaborators of [[], ['OpenClaw·run'], ['OpenClaw·run', 'Hermes·idle']]) {
+      const model = terminal({ state: 'running', collaborators });
+      expect(tapAction(model)).toBeUndefined();
+      expect(brainstormActionHint(model)).toContain('swipe: scroll');
+      expect(brainstormActionHint(model)).toContain('double-click: back');
+      expect(brainstormActionHint(model)).not.toContain('next session');
+    }
   });
 });

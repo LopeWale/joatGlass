@@ -1822,6 +1822,20 @@ describe('CapabilityMenu', () => {
     expect(shown).toHaveBeenCalledTimes(1);
   });
 
+  it('returns a terminal conversation to agent choices and rejects late old frames', async () => {
+    const { menu, hud, sent } = rig();
+    hud.showBrainstorm = vi.fn(async () => true);
+    await menu.presentList('AGENT TERMINAL', ['Opening Hermes…'], 'voice-terminal-back');
+    const model = { screen: 'agent_terminal' as const, state: 'ready' as const,
+      topic: 'Hermes', collaborators: ['Hermes'], activity: 'Reply' };
+    const binding = { requestId: 'voice-terminal-back', selectionId: 'voice-terminal-back' };
+    expect(await menu.presentTerminalOpening(model, binding, () => true)).toBe(true);
+    await menu.toggle();
+    expect(sent.some((message: any) => message.event?.containerName === 'capmenu'
+      && message.event?.selectedName === 'Agent Terminal')).toBe(true);
+    expect(await menu.presentTerminalOpening(model, binding, () => true)).toBe(false);
+  });
+
   it('offers retry if a conversational Terminal frame never paints', async () => {
     vi.useFakeTimers();
     try {

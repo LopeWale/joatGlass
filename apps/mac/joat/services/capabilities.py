@@ -741,25 +741,9 @@ class CapabilityRouter:
         ))
 
     async def _show_agent_terminal(self) -> None:
-        """Open the terminal on the wearer's actual work sessions.
-
-        The roster paints the real thing — which sessions exist, which is
-        focused, what each last said. Only when no roster is configured
-        does this fall back to the readiness/recovery card, which is all
-        this surface used to show.
-        """
-        # Sessions you can SEE and tap, not a phrase to memorise. The idle
-        # terminal said: Say "terminal sessions" to choose a work session —
-        # and the wearer's response was "why do I have to say something to
-        # choose a work session? WHAT DOES THAT EVEN MEAN?" Fair: a chooser
-        # that requires you to already know the words is not a chooser.
-        #
-        # Only when nothing is running. A lane with live output owns the
-        # lenses — the wearer opened the terminal to watch work, and a
-        # picker over the top of it would hide the thing they came for.
+        """Always open the agent chooser, including while another agent is busy."""
         rows = self._terminal_rows() if self._terminal_rows else []
-        working = self._terminal_busy() if self._terminal_busy else False
-        if rows and not working:
+        if rows:
             self._terminal_row_names = [name for name, _row in rows]
             await self._show_focus(
                 "AGENT TERMINAL",
@@ -767,8 +751,16 @@ class CapabilityRouter:
                 # Short enough to RENDER. The longer form
                 # ("terminal <instruction>") was cut mid-word on the lens —
                 # a hint that does not fit teaches nothing.
-                hint="tap: open · say “terminal …” to send",
+                hint="tap: choose agent · double-click: back",
                 selectable=True,
+            )
+            return
+        if self._terminal_rows is not None:
+            self._terminal_row_names = []
+            await self._show_focus(
+                "AGENT TERMINAL", ["Add an agent in JOAT on your Mac.",
+                                   "Intelligence → Agent connections"],
+                hint="double-click: back", selectable=False,
             )
             return
         if self._terminal_open is not None and self._terminal_current is not None:

@@ -107,7 +107,9 @@ export class BrainstormController {
     if ((model.approvals ?? 0) > 0) {
       return this.send('approve_terminal');
     }
-    if (model.state === 'running') return this.send('show_brainstorm');
+    // Keep the active conversation visible while its agent is answering.
+    // Back belongs to navigation; a tap must not jump to another feature.
+    if (model.state === 'running') return true;
     // A tap on the TERMINAL arms terminal input. It used to send
     // begin_topic_capture — i.e. the Agent Terminal's primary gesture
     // started a Brainstorm, a different feature with different
