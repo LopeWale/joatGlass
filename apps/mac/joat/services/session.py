@@ -267,6 +267,9 @@ class SessionManager:
         self._task: asyncio.Task[None] | None = None
         self._pending_cards: list[tuple[Card, asyncio.Future[None] | None]] = []
         self._card_log = card_log
+        self._home_notification_id: str | None = None
+        self._notification_refresh_task: asyncio.Task[None] | None = None
+        self._notification_refresh_pending = False
         self._terminal_capture = terminal_capture
         self._terminal_view_current = terminal_view_current
         self._brainstorm_view_current = brainstorm_view_current
@@ -476,23 +479,58 @@ class SessionManager:
             raise
 
     async def _show_card(self, card: Card) -> None:
-        await self._paint(card.render(), card.urgency)
         if self._card_log is not None:
-            self._card_log.add(card)
-            await self._publish_home_notifications()
+            self._card_log.begin_delivery(card.card_id)
+        try:
+            await self._paint(card.render(), card.urgency, trace_id=card.card_id)
+        except BaseException:
+            if self._card_log is not None:
+                self._card_log.finish_delivery(card, accepted=False)
+            raise
+        if self._card_log is not None:
+            self._home_notification_id = card.card_id
+            self._card_log.finish_delivery(card, accepted=True)
+            self._schedule_notification_refresh()
 
-    async def _publish_home_notifications(self) -> None:
-        """Put the RECENT cards on the resting screen, not a count.
+    def _schedule_notification_refresh(self) -> None:
+        """Tray presentation cannot change an already accepted Main delivery.
 
-        The newest card already owns the bright main region; these are the
-        ones behind it. Showing them here is what removes the need to open a
-        Notifications page to find out what happened.
+        One coalescing task also supports standalone SessionManager users.
+        Only new delivery events request another attempt; no polling/retry loop.
         """
+        if self._closed or self._card_log is None:
+            return
+        self._notification_refresh_pending = True
+        if self._notification_refresh_task is not None:
+            return
+
+        async def refresh() -> None:
+            try:
+                while self._notification_refresh_pending and not self._closed:
+                    self._notification_refresh_pending = False
+                    try:
+                        await self.publish_home_notifications()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.exception("notification tray refresh failed after accepted Main delivery")
+            finally:
+                self._notification_refresh_task = None
+
+        self._notification_refresh_task = asyncio.get_running_loop().create_task(refresh())
+
+    def reset_home_notification_identity(self) -> None:
+        """A new Hub connection has not retained an identified Main card."""
+        self._home_notification_id = None
+
+    async def publish_home_notifications(self) -> None:
+        """Republish only active cards; acknowledgment retains history elsewhere."""
         if self._card_log is None:
             return
-        recent = self._card_log.recent(3)
-        # The newest is the one just painted large; the rest stack below it.
-        previous = list(reversed(recent[:-1]))[:2]
+        active = self._card_log.active()
+        # The newest live card is represented by Main. If no live card
+        # remains, explicitly clear the tray rather than retain stale text.
+        previous = [card for card in reversed(active) if card.card_id != self._home_notification_id][:2]
         await self._hud.tray("\n".join(card.home_row() for card in previous))
 
     def _drain_after_answer(self) -> None:
@@ -537,13 +575,14 @@ class SessionManager:
                     RuntimeError("notification queue overflowed before HUD write")
                 )
 
-    async def _paint(self, rendered: str, urgency: Urgency) -> None:
+    async def _paint(self, rendered: str, urgency: Urgency, *, trace_id: str | None = None) -> None:
         # Urgency gets BRIGHTNESS from the enum the triage layer already
         # decided, rather than re-deriving it by sniffing rendered text.
         await self._hud.show_with_brightness(
             rendered,
             _CARD_BRIGHTNESS.get(urgency, 3),
             content_kind="notification",
+            trace_id=trace_id,
         )
 
     def _drain_cards(self) -> None:
@@ -556,26 +595,35 @@ class SessionManager:
                 future.set_exception(
                     RuntimeError("notification queue overflowed before HUD write")
                 )
-        combined = "\n".join(card.render() for card, _ in selected)
-        # One glance carries the batch, but history keeps each event: a
-        # drained batch logged as a single blob is unreadable afterwards.
+        visible_card = selected[-1][0]
+        # Main shows one identifiable card; the active tray/list retains
+        # the rest. A six-card concatenation could truncate unseen items.
         loudest = max((card.urgency for card, _ in selected), default=Urgency.NOTIFY)
 
         async def show_and_resolve() -> None:
             try:
-                await self._paint(combined, loudest)
+                if self._card_log is not None:
+                    self._card_log.begin_delivery(visible_card.card_id)
+                await self._paint(visible_card.render(), loudest, trace_id=visible_card.card_id)
             except BaseException as exc:
+                if self._card_log is not None:
+                    self._card_log.finish_delivery(visible_card, accepted=False)
                 for _, future in selected:
                     if future is not None and not future.done():
                         future.set_exception(exc)
                 log.exception("queued notification HUD write failed")
             else:
                 if self._card_log is not None:
-                    for card, _ in selected:
+                    for card, _ in selected[:-1]:
                         self._card_log.add(card)
+                    self._home_notification_id = visible_card.card_id
+                    self._card_log.finish_delivery(visible_card, accepted=True)
+                # Main acceptance fulfills durable delivery. A later tray
+                # failure or cancellation must not strand these futures.
                 for _, future in selected:
                     if future is not None and not future.done():
                         future.set_result(None)
+                self._schedule_notification_refresh()
 
         asyncio.get_running_loop().create_task(show_and_resolve())
 
@@ -1659,8 +1707,10 @@ class SessionManager:
         """Cancel and await the active session before transports close."""
         self._closed = True
         self._disarm_topic_capture()
+        self._notification_refresh_pending = False
         publications = tuple(
-            task for task in self._topic_publication_tasks if task is not asyncio.current_task()
+            task for task in (*self._topic_publication_tasks, self._notification_refresh_task)
+            if task is not None and task is not asyncio.current_task()
         )
         for publication in publications:
             publication.cancel()

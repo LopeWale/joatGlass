@@ -164,6 +164,10 @@ struct ReminderCreateRequest: Codable, Sendable {
     }
 }
 
+struct ReminderGetRequest: Codable, Sendable {
+    let calendarItemIdentifier: String
+}
+
 struct ReminderQueryRequest: Codable, Sendable {
     let calendarIdentifiers: [String]
     let includeCompleted: Bool

@@ -1835,3 +1835,10 @@ That run also exposed an unresolved display observation: after returning to Week
 Repeated the delayed Week-to-Day query/Back/release journey with both the actual macOS Glasses Display window and official simulator framebuffer captures. They agreed: Week retained Friday selection, including through an idle clock update. Eight consecutive framebuffer captures were stable. The earlier missing-pixel observation did not reproduce; its cause remains unresolved, and this is not atomic-rendering or physical-device acceptance. Rapid date movement followed by Back returned Month to Home without a residual child screen. Closed simulator and support sessions; verified ports9918/5208/18870 free. Captures and fixture code remained in memory.
 
 Independent source review found no new blocker in matched reader/archive metadata, ordered row selection, Planning civil dates or authoritative parent/revision handling. This closes the reviewed integration slice, not the full goal. The existing uploaded package still predates these changes.
+
+
+## 2026-09-11 — Mac notification delivery and selected-reminder lookup
+
+Integration review identified and repaired two gaps. SessionManager now resolves accepted Main notification delivery independently of tray refresh; one event-triggered coalescing refresh task contains tray errors and is cancelled on close. An in-memory injected failure check completed both standalone and batched delivery with two Main writes, two failed tray attempts, and no retained refresh task. This is diagnostic completion evidence, not a visual or device claim.
+
+Planning completion now uses a read-only reminders.get native bridge call backed by EventKit calendarItem(withIdentifier:), avoiding the mismatched global-first-500 query. Full Reminders permission, store generation checks, selected identity, explicit confirmation and write/readback gates remain. Older Mac bridges receive an update explanation. Swift sources compiled using the existing cache; Python checks passed. Updated native lookup still requires the matching installed app and connected journey replay. No native reminder was changed.

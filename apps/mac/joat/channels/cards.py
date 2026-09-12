@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -119,6 +121,8 @@ class Card:
     event_class: str = ""
     # The producing store's own id, for dedup across sources.
     origin_id: str | None = None
+    # JOAT presentation identity; never a native Messages/Notification identifier.
+    card_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def home_row(self, now: float | None = None) -> str:
         """One home-screen notification row: "Source · age · headline".
@@ -237,10 +241,63 @@ class CardLog:
     def __init__(self, keep: int = 10) -> None:
         self._keep = keep
         self._entries: list[Card] = []
+        self._acknowledged: set[str] = set()
+        self._delivering: set[str] = set()
+        self._early_acknowledged: set[str] = set()
+        self._on_change: Callable[[], None] | None = None
 
     def add(self, card: Card) -> None:
         self._entries.append(card)
         del self._entries[:-self._keep]
+        self._acknowledged.intersection_update(card.card_id for card in self._entries)
+        self._changed()
 
     def recent(self, limit: int = 5) -> list[Card]:
         return self._entries[-max(1, min(limit, self._keep)):]
+
+    def on_change(self, callback: Callable[[], None] | None) -> None:
+        """Notify the composition root when JOAT's active notification set changes."""
+        self._on_change = callback
+
+    def _changed(self) -> None:
+        if self._on_change is not None:
+            self._on_change()
+
+    def active(self) -> list[Card]:
+        """The same bounded pending cards used by the tray and its bell."""
+        return [card for card in self._entries if card.card_id not in self._acknowledged]
+
+    def active_count(self) -> int:
+        return len(self.active())
+
+    def acknowledge(self, card_id: str) -> bool:
+        """Read/dismiss only this JOAT card, retaining history for AI recall."""
+        if card_id in self._delivering:
+            self._early_acknowledged.add(card_id)
+            return True
+        if card_id in self._acknowledged or not any(c.card_id == card_id for c in self._entries):
+            return False
+        self._acknowledged.add(card_id)
+        self._changed()
+        return True
+
+    def begin_delivery(self, card_id: str) -> None:
+        """Permit an early tap without claiming an unsent card as delivered."""
+        self._delivering.add(card_id)
+
+    def finish_delivery(self, card: Card, *, accepted: bool) -> None:
+        self._delivering.discard(card.card_id)
+        acknowledged = card.card_id in self._early_acknowledged
+        self._early_acknowledged.discard(card.card_id)
+        if accepted:
+            if acknowledged:
+                self._acknowledged.add(card.card_id)
+            self.add(card)
+
+    def dismiss_snapshot(self, card_ids: list[str]) -> None:
+        """Clear the displayed snapshot, never arrivals received after it was shown."""
+        retained = {card.card_id for card in self._entries}
+        before = len(self._acknowledged)
+        self._acknowledged.update(retained.intersection(card_ids))
+        if len(self._acknowledged) != before:
+            self._changed()

@@ -1670,6 +1670,7 @@ async def main() -> None:
         replies=message_replies,
         message_ui=message_ui,
         personal_data=personal_data,
+        complete_reminder=productivity_actions.complete_reminder_by_identity,
         notes=note_store,
         voice_notes=voice_note_store,
         voice_capture=voice_capture,
@@ -1802,32 +1803,33 @@ async def main() -> None:
     # The resting dashboard's margin facts. Weather is not in the Even Hub
     # SDK, so JOAT resolves it on this Mac from the position the phone
     # already reports, and sends only the finished words.
-    # The dashboard's unread number is Messages.app's OWN unread count (the
-    # audit's O1: it used to count retained notification cards, battery
-    # cards included, and never fell when the wearer read a message on the
-    # phone). Counted off the loop thread on a slow cadence and cached: a
-    # COUNT over chat.db is not free, and the voice path must never wait on it.
-    unread_state = {"count": 0}
+    # One owner for the JOAT notification list and its bell. Messages.app's
+    # historical unread total is a different inbox and cannot be cleared here.
+    ambient = AmbientPublisher(transport, unread_count=card_log.active_count)
+    notifications_changed = asyncio.Event()
+    notifications_changed.set()
+    notification_loop = asyncio.get_running_loop()
+    card_log.on_change(lambda: notification_loop.call_soon_threadsafe(notifications_changed.set))
+    def refresh_notification_home_after_hello(_: Hello) -> None:
+        sessions.reset_home_notification_identity()
+        notifications_changed.set()
 
-    async def refresh_unread_count() -> None:
+    transport.on_hello(refresh_notification_home_after_hello)
+
+    async def refresh_notification_count() -> None:
         while True:
+            await notifications_changed.wait()
+            notifications_changed.clear()
             try:
-                unread_state["count"] = await asyncio.to_thread(imessage.unread_count)
+                await ambient.publish()
+                await sessions.publish_home_notifications()
             except asyncio.CancelledError:
                 raise
-            except PermissionError:
-                unread_state["count"] = 0  # no access means no claim, not a stale one
             except Exception as exc:
-                # A transient read failure keeps the last truthful value.
-                log.info("unread count unavailable (%s)", type(exc).__name__)
-            await asyncio.sleep(20.0)
+                log.info("JOAT notification count publish unavailable (%s)", type(exc).__name__)
 
     unread_task = asyncio.get_running_loop().create_task(
-        refresh_unread_count(), name="unread-count",
-    )
-    ambient = AmbientPublisher(
-        transport,
-        unread_count=lambda: unread_state["count"],
+        refresh_notification_count(), name="notification-count",
     )
 
     def on_location(fix: Location) -> None:
@@ -1960,6 +1962,7 @@ async def main() -> None:
         watchdog.cancel()
         lag_task.cancel()
         beat_task.cancel()
+        card_log.on_change(None)
         unread_task.cancel()
         task_monitor.stop()
         task_monitor_task.cancel()

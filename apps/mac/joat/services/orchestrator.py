@@ -1317,22 +1317,12 @@ class VoiceOrchestrator:
             return spoken
         if not self._conversation.is_open:
             return None
-        # An answer still inside its reading time is being READ, not talked
-        # over. Admitting bare speech here is how the wearer's own answer
-        # got destroyed: observed on the simulator 2026-09-08, three stray
-        # 23/23/10-character fragments of mic echo were each taken as
-        # follow-ups and each painted over the reply being read — the model
-        # itself called the last one "a stray bit of transcription", on top
-        # of the answer that had been asked for.
-        #
-        # Interjecting is still possible and still cheap: the wake word and
-        # the bare stop words both reach _interrupts ahead of this. What is
-        # refused is silent, unaddressed audio replacing visible words. Once
-        # the answer has had its reading time, ordinary follow-ups flow
-        # again, which is the whole point of the window.
-        if self.answer_on_screen():
-            log.info("held speech while an answer is still being read")
-            return None
+        # Reading time protects the retained answer from notification cards;
+        # it is not a microphone/addressing gate. A wearer can finish reading
+        # early and ask the next question while the same conversation is open.
+        # Follow-ups append to that conversation instead of replacing its log.
+        # Wake-word opening, inactivity expiry, speaker admission and prompt/
+        # feature ownership remain responsible for accepting this speech.
         log.info("follow-up heard inside the conversation window")
         return text
 
