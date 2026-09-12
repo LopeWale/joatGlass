@@ -192,6 +192,7 @@ class InputEvent:
     conversation_id: str | None = None
     conversation_revision: int | None = None
     planning_anchor_unix_ms: int | None = None
+    quick_notes_page_index: int | None = None
 
     @property
     def is_right_temple_click(self) -> bool:
@@ -743,6 +744,12 @@ class HudList:
     request_id: str | None = None
     selectable: bool = False
     planning_grid: tuple[PlanningGridCell, ...] | None = None
+    # Wearer-visible context only; never an action target or routing identity.
+    context_label: str | None = None
+    quick_notes_page: tuple[int, int] | None = None
+    reader_page: tuple[str, int, int] | None = None
+    control_start_index: int | None = None
+    planning_entries: tuple[PlanningGridEntry | None, ...] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -752,6 +759,12 @@ class HudList:
             "items": [utf16_slice(s, 64) for s in self.items[:20]],
             "selectable": self.selectable,
         }
+        if self.planning_entries is not None:
+            message["planningEntries"] = [
+                {"time": entry.time, "kind": entry.kind, "title": utf16_slice(entry.title, 200)}
+                if entry is not None else None
+                for entry in self.planning_entries[:20]
+            ]
         if self.title is not None:
             message["title"] = utf16_slice(self.title, 46)
         if self.hint is not None:
@@ -761,6 +774,16 @@ class HudList:
             message["hint"] = utf16_slice(self.hint, 96)
         if self.request_id is not None:
             message["requestId"] = self.request_id[:128]
+        if self.reader_page is not None:
+            identity, index, count = self.reader_page
+            message["readerPage"] = {"id": identity, "index": index, "count": count}
+        if self.quick_notes_page is not None:
+            index, count = self.quick_notes_page
+            message["quickNotesPage"] = {"index": index, "count": count}
+        if self.context_label is not None:
+            message["contextLabel"] = utf16_slice(self.context_label, 96)
+        if self.control_start_index is not None:
+            message["controlStartIndex"] = max(0, min(self.control_start_index, len(message["items"])))
         if self.planning_grid is not None:
             # A Planning month has a fixed Monday-first six-week grid. Keep
             # the payload redacted and bounded even if a caller misbehaves;
@@ -2183,6 +2206,13 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 raise ProtocolError(
                     "input requestId must be a non-empty string of at most 128 characters"
                 )
+            quick_notes_page_index = raw.get("quickNotesPageIndex")
+            if quick_notes_page_index is not None and (
+                isinstance(quick_notes_page_index, bool)
+                or not isinstance(quick_notes_page_index, int)
+                or quick_notes_page_index < 0
+            ):
+                raise ProtocolError("input quickNotesPageIndex must be a non-negative integer")
             conversation_id = raw.get("conversationId")
             conversation_revision = raw.get("conversationRevision")
             if (conversation_id is None) != (conversation_revision is None):
@@ -2223,6 +2253,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     conversation_id=conversation_id,
                     conversation_revision=conversation_revision,
                     planning_anchor_unix_ms=planning_anchor,
+                    quick_notes_page_index=quick_notes_page_index,
                 )
             )
         case "pairing":
