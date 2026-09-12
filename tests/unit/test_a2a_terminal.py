@@ -17,7 +17,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from joat.agents.a2a_terminal import A2AHttpTransport, A2ATerminalAgent, parse_result
-from joat.core.a2a import A2AError, A2AErrorCode as Code
+from joat.core.a2a import A2AError, A2AErrorCode as Code, A2ARequestResult
 from joat.services.agent_terminal import AgentTerminalRoster
 
 
@@ -34,10 +34,16 @@ def tls_contexts(tmp_path_factory: pytest.TempPathFactory) -> tuple[ssl.SSLConte
     return server, client
 
 
-def task(state: str, *, identity: str = "task-1", context: str = "context-1", text: str = "answer") -> dict[str, Any]:
+def task(state: str, *, identity: str = "task-1", context: str = "context-1", artifact_text: str = "answer",
+         text: str | None = None, status_text: str | None = None) -> dict[str, Any]:
+    if text is not None:
+        artifact_text = text
     # Actual deployed response contract: status.state, NOT task.state.
-    return {"id": identity, "contextId": context, "status": {"state": state},
-            "artifacts": [{"artifactId": "artifact-1", "parts": [{"kind": "text", "text": text}]}]}
+    payload: dict[str, Any] = {"id": identity, "contextId": context, "status": {"state": state},
+            "artifacts": [{"artifactId": "artifact-1", "parts": [{"kind": "text", "text": artifact_text}]}]}
+    if status_text is not None:
+        payload["status"]["message"] = {"role": "agent", "parts": [{"kind": "text", "text": status_text}]}
+    return payload
 
 
 class Peer:
@@ -145,6 +151,77 @@ async def test_submitted_task_is_polled_not_marked_done(peer: Peer) -> None:
     assert sum(r["method"] == "message/send" for r in peer.calls) == 1
 
 
+async def test_status_poll_snapshots_are_updates_only_not_answer_chunks(peer: Peer) -> None:
+    state_order = ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_WORKING", "TASK_STATE_COMPLETED"]
+    next_state = iter(state_order)
+
+    def followup(body: dict[str, Any]) -> dict[str, Any]:
+        if body["method"] == "message/send":
+            return task(next(next_state), text="submitted")
+        return task(next(next_state), text="ignored")
+
+    peer.reply = followup
+    agent = peer.agent()
+    updates: list[A2ARequestResult] = []
+
+    async def on_update(result: A2ARequestResult) -> None:
+        updates.append(result)
+
+    outputs: list[str] = []
+
+    async def collect_updates(generation: int) -> str:
+        async for chunk in agent.stream_task_captured("status polling", context_generation=generation, on_update=on_update):
+            outputs.append(chunk)
+        return "".join(outputs)
+
+    # stream_task_captured requires known generation, so initialize explicitly.
+    await agent.initialize()
+    generation = agent.capture_context_generation
+    assert generation is not None
+    output = await collect_updates(generation)
+    assert output == "ignored"
+    assert [result.state for result in updates] == ["submitted", "working", "completed"]
+
+
+async def test_progress_updates_include_task_context_and_dedupe(peer: Peer) -> None:
+    sequence: list[dict[str, Any]] = [
+        task("TASK_STATE_SUBMITTED", text="queued"),
+        task("TASK_STATE_WORKING", text="spin"),
+        task("TASK_STATE_WORKING", text="spin"),
+        task("TASK_STATE_COMPLETED", text="answer"),
+    ]
+    peer.reply = lambda body: sequence.pop(0) if body["method"] in {"message/send", "tasks/get"} else task("TASK_STATE_COMPLETED")
+    agent = peer.agent()
+    updates: list[tuple[str, str]] = []
+
+    async def on_update(result: A2ARequestResult) -> None:
+        updates.append((result.state, result.task_id or ""))
+
+    async def collect_updates(generation: int) -> str:
+        async for text in agent.stream_task_captured("Hello with progress", context_generation=generation, on_update=on_update):
+            return text
+        return ""
+
+    await agent.initialize()
+    output = await collect_updates(agent.capture_context_generation or 1)
+    assert output == "answer"
+    # submitted/working/completed progression captured once per distinct update.
+    assert updates == [("submitted", "task-1"), ("working", "task-1"), ("completed", "task-1")]
+
+
+async def test_input_required_prefers_status_text_over_artifacts(peer: Peer) -> None:
+    peer.reply = lambda body: task(
+        "TASK_STATE_INPUT_REQUIRED",
+        artifact_text="artifact should be ignored",
+        status_text="What city are you in?",
+    )
+    agent = peer.agent()
+    with pytest.raises(A2AError) as exc:
+        await collect(agent)
+    assert exc.value.code == Code.INPUT_REQUIRED
+    assert exc.value.text == "What city are you in?"
+
+
 async def test_failed_task_does_not_publish_done(peer: Peer) -> None:
     peer.reply = lambda _: task("TASK_STATE_FAILED", text="private failure context")
     roster = AgentTerminalRoster([("test", peer.agent())])
@@ -163,9 +240,7 @@ async def test_input_required_preserves_task_and_shows_question(peer: Peer) -> N
         nonlocal sends
         sends += 1
         if sends == 1:
-            result = task("TASK_STATE_INPUT_REQUIRED", text="")
-            result["artifacts"] = []
-            result["status"]["message"] = {"role": "agent", "parts": [{"kind": "text", "text": "Which city?"}]}
+            result = task("TASK_STATE_INPUT_REQUIRED", artifact_text="", status_text="Which city?")
             return result
         assert body["params"]["message"]["taskId"] == "task-1"
         assert body["params"]["message"]["contextId"] == "context-1"
@@ -294,3 +369,46 @@ async def test_reopening_uncertain_lane_recovers_owned_task_without_resubmitting
     assert not agent.needs_recovery
     assert 'Recovered answer' in roster.tail('test', 40)
     assert sum(call['method'] == 'message/send' for call in peer.calls) == 1
+
+
+async def test_send_clears_stale_last_outcome_before_new_submission(peer: Peer) -> None:
+    running = asyncio.Event()
+    states: list[str] = []
+    def state_changed(state: str, _reason: str) -> None:
+        if state == "running":
+            states.append(state)
+            if len(states) == 1:
+                running.set()
+
+    agent = peer.agent(state_changed=state_changed)
+    # Seed stale terminal outcome from prior turn.
+    assert await collect(agent) == "answer"
+    assert agent.last_outcome is not None
+    running.clear()
+    states.clear()
+
+    # Keep response intentionally slow so the running state is observed before
+    # the new task has any final output to publish.
+    async def delayed_send(_: object) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return task("TASK_STATE_COMPLETED", text="second")
+
+    peer.reply = delayed_send
+
+    async def pending_submit() -> str:
+        return await collect(agent, "New command")
+
+    send_task = asyncio.create_task(pending_submit())
+    await asyncio.wait_for(running.wait(), 1)
+    assert states == ["running"]
+    assert agent.last_outcome is None
+    assert await asyncio.wait_for(send_task, 1) == "second"
+
+
+async def test_recover_shows_input_required_question_from_status_text(peer: Peer) -> None:
+    agent = peer.agent()
+    assert await collect(agent) == "answer"
+    peer.reply = lambda _: task("TASK_STATE_INPUT_REQUIRED", artifact_text="", status_text="Which city are you in?")
+    result = await agent.recover()
+    assert result == "Which city are you in?"
+    assert ("agent", "Which city are you in?") in await agent.history()

@@ -28,7 +28,7 @@ from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
-from ..core.a2a import A2AError, A2AErrorCode
+from ..core.a2a import A2AError, A2AErrorCode, A2ARequestResult
 from ..core.terminal_conversation import TerminalConversation, TerminalMessage
 from ..agents.openclaw_gateway import (
     OpenClawPairingRequired, OpenClawScopeMismatch, classify_gateway_dial_failure,
@@ -113,6 +113,7 @@ class TerminalFrame:
     messages: tuple[TerminalMessage, ...] = ()
     history_truncated: bool = False
     input_required: bool = False
+    task_recovery: bool = False
 
 
 def _dial_failure_sentence(label: str, exc: BaseException) -> str:
@@ -165,6 +166,14 @@ class CapturedTerminalAgentLike(TerminalAgentLike, Protocol):
 
     def stream_captured(
         self, prompt: str, *, context_generation: int,
+    ) -> AsyncIterator[str]: ...
+
+
+@runtime_checkable
+class TaskUpdatingTerminalAgentLike(CapturedTerminalAgentLike, Protocol):
+    def stream_task_captured(
+        self, prompt: str, *, context_generation: int,
+        on_update: Callable[[A2ARequestResult], Awaitable[None]],
     ) -> AsyncIterator[str]: ...
 
 
@@ -363,6 +372,7 @@ class TerminalLane:
     """Pending (id, kind, summary) — tool calls waiting on the wearer."""
     preparation: _LanePreparation | None = None
     conversation: TerminalConversation = field(default_factory=TerminalConversation)
+    task_outcome: A2ARequestResult | None = None
 
     @property
     def address(self) -> LaneAddress:
@@ -379,9 +389,15 @@ class TerminalLane:
         return self.task is not None and not self.task.done()
 
     @property
+    def task_recovery(self) -> bool:
+        return not self.busy and bool(getattr(self.agent, "needs_recovery", False))
+
+    @property
     def state(self) -> str:
         if self.busy:
             return "working"
+        if self.task_recovery:
+            return "check task"
         setup, _ = self.preparation_status
         if setup != "ready":
             return setup
@@ -615,7 +631,7 @@ class AgentTerminalRoster:
                     "idle": "Ready", "working": "Working", "unprepared": "Tap to connect",
                     "preparing": "Connecting", "approval_required": "Needs approval",
                     "failed": "Connection failed", "needs recovery": "Needs attention",
-                    "needs input": "Needs your answer",
+                    "needs input": "Needs your answer", "check task": "Check task status",
                 }.get(lane.state, "Needs attention")
                 rows.append((lane.key, _one_row(f"{name} · {state}", HUD_COLUMNS)))
                 continue
@@ -679,6 +695,7 @@ class AgentTerminalRoster:
         setup, reason = lane.preparation_status
         state = (
             "running" if lane.busy
+            else "blocked" if lane.task_recovery
             else "approval_required" if lane.approvals or setup == "approval_required"
             else "unavailable" if setup != "ready"
             else "blocked" if lane.last_error
@@ -700,6 +717,7 @@ class AgentTerminalRoster:
             messages=conversation.messages if conversation else (),
             history_truncated=conversation.truncated if conversation else False,
             input_required=conversation is not None and not lane.busy and lane.state == "needs input",
+            task_recovery=conversation is not None and lane.task_recovery,
         )
 
     @staticmethod
@@ -1102,6 +1120,7 @@ class AgentTerminalRoster:
     ) -> str:
         """Schedule an admitted idle turn with the existing settlement hook."""
         lane.last_error = ""
+        lane.task_outcome = None
         lane.tail.append(f"> {text}")
         lane.conversation.append("user", text)
         task = asyncio.get_running_loop().create_task(
@@ -1146,11 +1165,52 @@ class AgentTerminalRoster:
         answer = ""
         answer_id: str | None = None
         retain_conversation = self._visible_lanes is not None and lane.key in self._visible_lanes
+        if context is None and isinstance(lane.agent, TaskUpdatingTerminalAgentLike):
+            context = _capture_context(lane.agent)
+        progress_id: str | None = None
+        progress_text = ""
+
+        def retain_progress(value: str) -> None:
+            nonlocal progress_id
+            if progress_id is not None and any(m.id == progress_id for m in lane.conversation.messages):
+                lane.conversation.replace(progress_id, value)
+            else:
+                progress_id = lane.conversation.append("status", value)
+
+        async def task_update(result: A2ARequestResult) -> None:
+            nonlocal progress_id, progress_text
+            if not retain_conversation or (context is not None and not self._context_is_current(lane, context)):
+                return
+            lane.task_outcome = result
+            labels = {"submitted": "Queued", "working": "Working", "completed": "Completed",
+                      "input-required": "Reply needed", "auth-required": "Authorization needed",
+                      "failed": "Task failed", "rejected": "Task declined", "canceled": "Stopped"}
+            if result.state not in {"submitted", "working"} and progress_id is None:
+                return
+            label = labels[result.state]
+            value = f"{label}: {result.status_text}" if result.state in {"submitted", "working"} and result.status_text else label
+            if value == progress_text:
+                return
+            retain_progress(value)
+            progress_text = value
+            if lane.key == self._focus:
+                # A display failure must not turn an accepted remote task into
+                # an uncertain submission or interrupt its status polling.
+                try:
+                    await self.repaint()
+                except Exception:
+                    log.warning("terminal task progress paint failed")
+
         try:
             if context is not None:
                 if not self._context_is_current(lane, context):
                     raise RuntimeError("Captured terminal context changed")
-                stream = context.agent.stream_captured(text, context_generation=context.generation)
+                if isinstance(context.agent, TaskUpdatingTerminalAgentLike):
+                    stream = context.agent.stream_task_captured(
+                        text, context_generation=context.generation, on_update=task_update,
+                    )
+                else:
+                    stream = context.agent.stream_captured(text, context_generation=context.generation)
             else:
                 stream = lane.agent.stream(text)
             try:
@@ -1180,11 +1240,17 @@ class AgentTerminalRoster:
                 await self._narrate(lane, pending)
             await self._narrate(lane, f"{lane.name} ▸ done.")
         except asyncio.CancelledError:
+            if progress_id is not None:
+                retain_progress("Stopped" if getattr(lane.agent, "cancellation_status", "") == "confirmed"
+                                else "Remote stop unconfirmed")
             stopped = "[local wait stopped]" if hasattr(lane.agent, "cancellation_status") else "[cancelled]"
             lane.tail.append(stopped)
-            lane.conversation.append("status", stopped)
+            if not hasattr(lane.agent, "cancellation_status"):
+                lane.conversation.append("status", stopped)
             raise
         except A2AError as exc:
+            if progress_id is not None and exc.code != A2AErrorCode.INPUT_REQUIRED:
+                retain_progress(str(exc))
             if exc.code == A2AErrorCode.INPUT_REQUIRED:
                 lane.last_error = ""
                 question = getattr(exc, "text", "")
@@ -1482,14 +1548,47 @@ class AgentTerminalRoster:
         # Clear its queue before checking busy so that callback cannot send
         # an instruction after the wearer has cancelled it.
         lane.queued, lane.queued_context = "", None
+        stopping_task, stopping_agent = lane.task, lane.agent
+        stop_id: str | None = None
+        if hasattr(lane.agent, "cancel_task") and (lane.busy or getattr(getattr(lane.agent, "last_outcome", None), "state", "")
+                                                   in {"submitted", "working", "input-required", "auth-required"}):
+            stop_id = lane.conversation.append("status", "Stop requested; waiting for the agent to confirm.")
+            try:
+                await self.repaint()
+            except Exception:
+                log.warning("terminal stop request paint failed")
+
+        def stopped_message(value: str) -> None:
+            if stop_id is not None and any(m.id == stop_id for m in lane.conversation.messages):
+                lane.conversation.replace(stop_id, value)
+            else:
+                lane.conversation.append("status", value)
+
+        if lane.task is not stopping_task or lane.agent is not stopping_agent:
+            result = "The original task changed before the stop request. No later task was cancelled."
+            stopped_message(result)
+            await self.repaint()
+            return result
+        current_outcome = (lane.task_outcome if lane.busy and isinstance(lane.agent, TaskUpdatingTerminalAgentLike)
+                           else getattr(lane.agent, "last_outcome", None))
+        if getattr(current_outcome, "state", "") in {"completed", "failed", "rejected", "canceled"}:
+            result = "The task finished before the stop request; no cancellation was sent."
+            stopped_message(result)
+            await self.repaint()
+            return result
         if not lane.busy or lane.task is None:
             cancel_remote = getattr(lane.agent, "cancel_task", None)
             if cancel_remote is not None:
                 try:
                     await cancel_remote()
                 except A2AError as exc:
+                    lane.last_error = str(exc)
+                    stopped_message(str(exc))
+                    await self.repaint()
                     return str(exc)
                 lane.last_error = ""
+                stopped_message("Cancellation confirmed by the agent.")
+                await self.repaint()
                 return f"{lane.name} ▸ cancellation confirmed by the agent."
             if discarded_queue:
                 return f"{lane.name} ▸ queued instruction discarded; no turn is running."
@@ -1502,12 +1601,14 @@ class AgentTerminalRoster:
         remote_status = getattr(lane.agent, "cancellation_status", None)
         if remote_status == "confirmed":
             lane.last_error = ""
-            lane.conversation.append("status", "Cancellation confirmed by the agent.")
+            stopped_message("Cancellation confirmed by the agent.")
+            await self.repaint()
             return f"{lane.name} ▸ cancellation confirmed by the agent."
         if remote_status in {"uncertain", "unsupported", "none"}:
             lane.last_error = "Remote stop unconfirmed; check the agent before sending again."
             lane.tail.append(lane.last_error)
-            lane.conversation.append("status", lane.last_error)
+            stopped_message(lane.last_error)
+            await self.repaint()
             return f"{lane.name} ▸ stopped waiting locally; remote cancellation is unconfirmed."
         lane.last_error = lane.last_error or "cancelled — needs recovery"
         return f"{lane.name} ▸ cancelled; the session will re-verify on next send."

@@ -69,7 +69,18 @@ class A2ARequestResult:
     context_id: str | None
     state: str
     text: str
+    status_text: str = ""
 
     @property
     def requires_input(self) -> bool:
         return self.state == "input-required"
+
+    @property
+    def final(self) -> bool:
+        return self.state in {"completed", "failed", "rejected", "canceled"}
+
+    @property
+    def display_text(self) -> str:
+        if self.state == "input-required" and self.status_text:
+            return self.status_text
+        return self.text or self.status_text

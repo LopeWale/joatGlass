@@ -47,3 +47,24 @@ The final replay includes SHA-256 fingerprints for 205 plugin and Mac source inp
 Cleanup verified ports 18980, 18981, 5298, and 9998 closed and the temporary TLS key removed. No physical or installed-engine connection was used.
 
 One OCR-only retry was needed: Vision confused the arbitrary fixture word “lantern” with “lantem.” The fixture fact was changed to “cobalt beacon,” preserving exact history, agent-separation, and follow-up assertions. No product behavior or acceptance condition was weakened.
+
+## Polled task lifecycle acceptance
+
+Run the separate lifecycle mode with the same isolated simulator and production routing:
+
+```sh
+PYTHONPATH=apps/mac .venv/bin/python scripts/simulator_agent_terminal_flow.py --lifecycle
+```
+
+Its artifacts go to `dist/mac-workspace/control-audit/agent-terminal-lifecycle/`. The persistent conversation mode remains available independently.
+
+For each agent the lifecycle provider admits exactly five sends across four task identities:
+
+- A submitted task returns changing working-status messages, repeated identical snapshots, and a completed result. Screenshots and wire messages must show a single stable progress entry, replacing repeated snapshots. Back returns to the chooser while the accepted task continues polling; reopening preserves its conversation and task.
+- A task returns `input-required` with both a status question and an artifact. The question must be visible and survive in continuation history. Acknowledged inline input must send the reply with the same task and context identities before the final answer appears.
+- A running task receives a stop request through `AgentTerminalCommands.handle_command('terminal stop')`, including the production explicit-view ownership callback. The local TLS provider holds its cancellation response so the simulator must first display “Stop requested,” then display confirmation only after the remote canceled receipt arrives.
+- Another task rejects cancellation. The UI must state that remote stopping is unconfirmed, refuse normal input until recovery, and avoid resending the instruction when the actual simulator taps “check task status.” That gesture must issue another `tasks/get` request without a new `message/send`.
+
+The stop text is supplied at the recognized-speech boundary, just as final transcripts are supplied for acknowledged input. The acceptance does not call roster or adapter cancellation directly. This isolates recognition while preserving production command dispatch, ownership, cancellation transport, and rendering.
+
+The provider rejects wrong task/context identities, duplicate sends, wrong next prompts, lost question context, and cross-agent history. Successful acceptance requires ten sends, four cancel calls, two initialization probes, observed continuing polls, and unchanged before/after production-source fingerprints.

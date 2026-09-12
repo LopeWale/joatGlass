@@ -686,6 +686,7 @@ async function boot(): Promise<void> {
           messages: msg.terminal.messages?.map(message => ({...message})),
           historyTruncated: msg.terminal.historyTruncated,
           inputRequired: msg.terminal.inputRequired,
+          taskRecovery: msg.terminal.taskRecovery,
         };
         const openingRequestId = msg.terminal.openingRequestId;
         const openingSelectionId = msg.terminal.openingSelectionId;

@@ -2639,3 +2639,204 @@ def test_agent_choices_exclude_internal_sessions_without_deleting_them():
     assert len(r.frame().lanes) == 2
     empty = AgentTerminalRoster([("work", FakeAgent())], visible_lanes=())
     assert empty.picker_rows() == []
+
+
+class TestTaskProgress:
+    async def test_poll_snapshots_replace_one_status_without_polluting_the_answer(self):
+        from joat.core.a2a import A2ARequestResult
+
+        class Updating(FakeAgent):
+            capture_context_generation = 1
+
+            async def stream_captured(self, prompt, *, context_generation):
+                raise AssertionError('Task updates must not use the plain stream')
+                yield ''
+
+            async def stream_task_captured(self, prompt, *, context_generation, on_update):
+                for state, status in [('submitted', ''), ('working', 'Scanning'),
+                                      ('working', 'Scanning'), ('working', 'Checking'), ('completed', '')]:
+                    await on_update(A2ARequestResult('task', 'context', state, 'partial artifact', status))
+                yield 'One final answer'
+
+        frames = []
+        async def paint(frame):
+            frames.append(frame)
+        r = AgentTerminalRoster([('OpenClaw', Updating())], visible_lanes=('OpenClaw',), paint=paint)
+        await r.send('Do the work')
+        await r.lane('OpenClaw').task
+        statuses = [m for f in frames for m in f.messages if m.role == 'status']
+        assert len({m.id for m in statuses}) == 1
+        assert sum(m.text == 'Working: Scanning' for m in statuses) == 1
+        assert {'Queued', 'Working: Scanning', 'Working: Checking', 'Completed'} <= {m.text for m in statuses}
+        assert [m.text for m in r.frame().messages if m.role == 'assistant'] == ['One final answer']
+        assert all('partial artifact' not in m.text for m in r.frame().messages)
+
+    async def test_progress_paint_failure_does_not_abort_an_accepted_task(self):
+        from joat.core.a2a import A2ARequestResult
+
+        class Updating(FakeAgent):
+            capture_context_generation = 1
+            async def stream_captured(self, prompt, *, context_generation):
+                yield 'unused'
+            async def stream_task_captured(self, prompt, *, context_generation, on_update):
+                await on_update(A2ARequestResult('task', 'context', 'working', '', 'Scanning'))
+                yield 'Completed despite a failed progress paint'
+
+        failed = False
+        async def paint(frame):
+            nonlocal failed
+            if not failed and any(m.text == 'Working: Scanning' for m in frame.messages):
+                failed = True
+                raise RuntimeError('display unavailable')
+        r = AgentTerminalRoster([('OpenClaw', Updating())], visible_lanes=('OpenClaw',), paint=paint)
+        await r.send('Do the work')
+        await r.lane('OpenClaw').task
+        assert any(m.text == 'Completed despite a failed progress paint' for m in r.frame().messages)
+
+
+class TestStopAndProgressOwnership:
+    async def test_stop_waiting_for_paint_never_cancels_a_later_turn(self):
+        from joat.core.a2a import A2ARequestResult
+
+        class Controlled(FakeAgent):
+            def __init__(self):
+                super().__init__()
+                self.started = [asyncio.Event(), asyncio.Event()]
+                self.release = [asyncio.Event(), asyncio.Event()]
+                self.last_outcome = None
+                self.cancel_calls = 0
+
+            async def stream(self, prompt):
+                index = len(self.prompts)
+                self.prompts.append(prompt)
+                self.last_outcome = A2ARequestResult(f'task-{index}', 'context', 'working', '')
+                self.started[index].set()
+                await self.release[index].wait()
+                self.last_outcome = A2ARequestResult(f'task-{index}', 'context', 'completed', 'answer')
+                yield f'Answer {index}'
+
+            async def cancel_task(self):
+                self.cancel_calls += 1
+
+        stop_visible, release_stop = asyncio.Event(), asyncio.Event()
+        held = False
+        async def paint(frame):
+            nonlocal held
+            if not held and any(m.text.startswith('Stop requested;') for m in frame.messages):
+                held = True
+                stop_visible.set()
+                await release_stop.wait()
+
+        agent = Controlled()
+        r = AgentTerminalRoster([('OpenClaw', agent)], visible_lanes=('OpenClaw',), paint=paint)
+        await r.send('first')
+        first = r.lane('OpenClaw').task
+        await asyncio.wait_for(agent.started[0].wait(), 2)
+        stop = asyncio.create_task(r.cancel())
+        await asyncio.wait_for(stop_visible.wait(), 2)
+        agent.release[0].set()
+        await first
+        await r.send('second')
+        second = r.lane('OpenClaw').task
+        await asyncio.wait_for(agent.started[1].wait(), 2)
+        release_stop.set()
+        receipt = await asyncio.wait_for(stop, 2)
+        assert 'No later task was cancelled' in receipt
+        assert second is not first and not second.done()
+        assert agent.cancel_calls == 0
+        agent.release[1].set()
+        await second
+        assert [m.text for m in r.frame().messages if m.role == 'assistant'] == ['Answer 0', 'Answer 1']
+
+    async def test_stop_does_not_interrupt_a_completed_task_waiting_for_its_paint(self):
+        from joat.core.a2a import A2ARequestResult
+
+        class Completing(FakeAgent):
+            capture_context_generation = 1
+            last_outcome = None
+            cancelled = False
+            cancel_calls = 0
+
+            async def stream_captured(self, prompt, *, context_generation):
+                yield 'unused'
+
+            async def stream_task_captured(self, prompt, *, context_generation, on_update):
+                try:
+                    self.last_outcome = A2ARequestResult('task', 'context', 'working', '')
+                    await on_update(self.last_outcome)
+                    self.last_outcome = A2ARequestResult('task', 'context', 'completed', 'Final answer')
+                    await on_update(self.last_outcome)
+                    yield 'Final answer'
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+
+            async def cancel_task(self):
+                self.cancel_calls += 1
+
+        final_paint, release_final = asyncio.Event(), asyncio.Event()
+        held = False
+        async def paint(frame):
+            nonlocal held
+            if not held and any(m.text == 'Completed' for m in frame.messages):
+                held = True
+                final_paint.set()
+                await release_final.wait()
+
+        agent = Completing()
+        r = AgentTerminalRoster([('OpenClaw', agent)], visible_lanes=('OpenClaw',), paint=paint)
+        await r.send('finish this')
+        task = r.lane('OpenClaw').task
+        await asyncio.wait_for(final_paint.wait(), 2)
+        assert not task.done()
+        receipt = await asyncio.wait_for(r.cancel(), 2)
+        assert 'finished before the stop request' in receipt
+        assert not agent.cancelled and agent.cancel_calls == 0
+        release_final.set()
+        await task
+        assert [m.text for m in r.frame().messages if m.role == 'assistant'] == ['Final answer']
+
+    @pytest.mark.parametrize('ending', ['completed', 'failed', 'cancelled'])
+    async def test_evicted_progress_does_not_abort_tracking_or_terminal_settlement(self, ending):
+        from joat.core.a2a import A2AError, A2AErrorCode, A2ARequestResult
+
+        class Updating(FakeAgent):
+            capture_context_generation = 1
+            cancellation_status = 'confirmed'
+
+            async def stream_captured(self, prompt, *, context_generation):
+                yield 'unused'
+
+            async def stream_task_captured(self, prompt, *, context_generation, on_update):
+                await on_update(A2ARequestResult('task', 'context', 'working', '', 'Scanning'))
+                lane = r.lane('OpenClaw')
+                # Whole-message retention may evict the transient progress row
+                # while the remote task is still owned and running.
+                for index in range(64):
+                    lane.conversation.append('status', f'Queued instruction replacement {index}')
+                assert not any(m.text == 'Working: Scanning' for m in lane.conversation.messages)
+                if ending == 'cancelled':
+                    raise asyncio.CancelledError
+                if ending == 'failed':
+                    raise A2AError(A2AErrorCode.OUTCOME_UNKNOWN)
+                await on_update(A2ARequestResult('task', 'context', 'working', '', 'Finishing'))
+                await on_update(A2ARequestResult('task', 'context', 'completed', 'Final answer'))
+                yield 'Final answer'
+
+        r = AgentTerminalRoster([('OpenClaw', Updating())], visible_lanes=('OpenClaw',))
+        await r.send('do work')
+        task = r.lane('OpenClaw').task
+        if ending == 'cancelled':
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert any(m.text == 'Stopped' for m in r.frame().messages)
+        else:
+            await task
+            messages = [m.text for m in r.frame().messages]
+            if ending == 'failed':
+                assert any('Task outcome unknown' in text for text in messages)
+            else:
+                assert 'Final answer' in messages and 'Completed' in messages
+                assert not r.lane('OpenClaw').last_error
+        assert r.frame().history_truncated
+        assert len(r.frame().messages) <= 64

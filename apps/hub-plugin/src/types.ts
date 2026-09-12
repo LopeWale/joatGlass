@@ -146,6 +146,7 @@ export interface TerminalConversationFields {
   messages?: TerminalConversationMessage[];
   historyTruncated?: boolean;
   inputRequired?: boolean;
+  taskRecovery?: boolean;
 }
 
 /** RENDER model, not a wire frame: the union one renderer draws. Built in

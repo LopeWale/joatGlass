@@ -1514,7 +1514,7 @@ async def main() -> None:
             conversation_id=frame.conversation_id,
             messages=frame.messages,
             history_truncated=frame.history_truncated,
-            input_required=frame.input_required,
+            input_required=frame.input_required, task_recovery=frame.task_recovery,
         ))
 
     agent_terminal = AgentTerminalRoster(
