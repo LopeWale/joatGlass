@@ -1,11 +1,57 @@
 # Changelog
 
+## 2026-09-11 — Display recovery integration follow-up
+
+- Independent source review found that an explicit display resume could reopen image submission during a pending native page replacement. Submission and in-flight guards now also require that no replacement owns the display, independently of the resume flag.
+- Three failed-feature rollback paths invalidated a restored notification's receipt but never renewed it after a successful direct repaint. They now use one bounded rollback helper, which stamps the same visible notification only after a successful current paint and does not start another recovery cycle.
+- Official simulator verification held a real SDK rebuild before dispatch, explicitly resumed the display, and requested a paint: the paint returned false with no image calls during the hold and the prior Home remained visible. Release allowed rebuild and repaint. A separate notification E scenario rejected the new feature paint and recovery, held the rollback upload, and verified an early tap sent no dismissal. After release, E was visually restored, its painted identity renewed, and a tap dismissed exactly E and restored Home.
+- TypeScript compilation and whitespace checks passed separately. The fault controls existed only in memory; this task closed the simulator, fixture, and Vite server and verified all three ports released. These controlled scenarios do not prove physical-glasses latency or atomic multi-tile rendering. The previously uploaded package does not contain these changes; the overall implementation goal remains active.
+
 ## 2026-09-11 — Agent Terminal chooser and isolated simulator acceptance
 
 - Show only configured OpenClaw/Hermes agents in Agent Terminal; retain legacy Work/Calendar/session owners internally. Entry always opens the same chooser, including during a request. Use explicit connection states and consistent double-click Back/cancel instructions.
 - Back retires the conversation binding and returns to the chooser; cancelling a question restores its selected conversation. Reject delayed retired-opening frames and handle cycling from an internal legacy session.
 - Independent UI and ownership reviews informed the fixes. The final clean committed-source replay through `859870b` passed both complete official-simulator journeys, cancellation and busy re-entry; all 14 stable frames were visually inspected. Local TLS agent responses and acknowledged synthetic final speech transcripts are explicit fixture boundaries.
 - TypeScript compilation, 255 scoped UI tests and 248 roster/opening tests passed separately. The runner closed its isolated processes/ports and removed its temporary TLS key. No installed engine, phone/glasses connection, pairing or remote credentials were accessed. See docs/audits/agent-terminal-simulator-flow.md.
+
+## 2026-09-11 — Notification replacement tap verification
+
+- In the official simulator, held the replacement notification's real SDK image call before dispatch. With card C still visible and card D pending, a tap neither removed the unseen replacement nor emitted a D dismissal. After release, D rendered and a later tap emitted only D's identity and restored Home. The first attempt armed too late and was excluded; the accepted attempt confirmed the hold before sending D.
+- This verifies the identified-card pending-paint tap guard, not the separate failed-confirmation rollback path or native Even notification clearing. The screenshots also exposed an incorrect double-click-menu footer on the Home card; removed that extra instruction so the card advertises only its dismissal action. The copy change was compiled after the run and is not a new visual receipt.
+- Closed this task's simulator, fixture and temporary Vite fault controls after verification. All fault controls remained in memory; the existing package was unchanged.
+
+## 2026-09-11 — Bounded SDK timeout simulator check
+
+- Official simulator ran current source with a temporary in-memory Vite transform that held one real SDK image call before dispatch and shortened the diagnostic reporting timeout to 500 ms. Initial wrapper incorrectly intercepted the display proxy and recursed; that run was rejected, stopped and replaced with a wrapper around the actual SDK method. Neither transform was written to source or package.
+- Corrected run recorded the held write, upload timeout and failed recovery attempts. No SDK rebuild call was dispatched while the write remained held; the previous Home frame remained visible. Releasing the held write allowed subsequent image calls; root visually inspected restored Messages and double-click back to Home. This verifies the controlled timeout ordering, not normal latency or atomic multi-tile presentation.
+- Committed reviewed EventRouter Back/routing hunks as `1621af9`, excluding notification interface/dismissal hunks that still need their targeted visual check. Coordinated that commit with the separate Agent Terminal task after its index was cleared.
+- Closed this task's simulator and stopped its fixture and temporary Vite server at the end of the check. No new artifact directory or duplicate package was created.
+
+## 2026-09-11 — Display ownership review corrections
+
+- Committed the shared Back policy, matching conversation hint and explicit Messaging review state as `9253e79`; remaining router/presenter integration is still local.
+- Independent review found that a timed-out image upload could outlive its JavaScript paint queue and race recovery's native page rebuild. HudVisualSurface now includes the actual pending SDK write in its idle boundary and suspends new image submissions across page replacement; every HudPresenter native rebuild uses that boundary. An unresolved old write aborts recovery instead of allowing a competing rebuild. Targeted simulator fault-path verification remains pending; atomic four-tile presentation is not claimed.
+- A second review found that logical notification replacement could make a tap dismiss an as-yet-unpainted card. Identified cards now require a completed paint identity before dismissal, and confirmation/snapshot rollbacks invalidate the old paint identity until restoration completes. These race corrections remain local and need runtime verification.
+
+## 2026-09-11 — Reviewed implementation commits
+
+- Committed notification cleanup thread ownership and bounded deletion as `5fbabb7`.
+- Committed matched Mac/Hub paging and display-context protocol fields plus complete retained voice-note access as `8e25ac2`. The new optional input field is appended to preserve existing constructor argument positions. Current TypeScript compilation and a focused in-memory protocol compatibility check passed; earlier simulator journey evidence remains separate from those diagnostics.
+- Shared feature controllers/rendering remain under integration review alongside a separate Agent Terminal task. These commits do not establish a completed release or physical-device acceptance. The canonical package was not rebuilt or uploaded during this step.
+
+## 2026-09-11 — QuickNote and Messaging connected regression
+
+- Visually inspected all six pages of a long fixture QuickNote through its final text, reverse paging, second-page Note 21 detail/Back, third-page Note 45 detail, and return to Home. The official simulator used the current plugin and capability router with in-memory fixture data; no saved user notes were touched.
+- Inspected a four-page fixture message through its final text, detail Back, older history and return through the conversation picker. Found and corrected outgoing detail metadata saying `To you` instead of `From you`; a read-only direct thread is no longer mislabeled as a group, and its sender fallback retains its named peer. Independent source review checked the real IMessageStore construction paths.
+- Selecting New message without an available reply controller now returns setup guidance instead of leaving the plugin waiting for a response timeout. The current Mac source was reloaded in the isolated fixture, and both that guidance and its double-click return were visually checked.
+- Partial tile transitions remain reproducible. This is fixture-backed visual evidence, not real Messages sending, installed-engine, or physical-glasses acceptance. No new package copy or upload was made.
+
+## 2026-09-11 — Planning connected-detail follow-up
+
+- Official simulator checks on the current plugin verified rapid Up inputs clamp at the first event; a tap during a three-Down burst opens the fourth event despite subsequent Down inputs; and event detail Back restores the selected parent row. These are fixture-backed simulator journeys, not physical-glasses acceptance.
+- Visual review caught uniform emphasis and duplicated Back copy on event details. Day and dashboard event entry points now share one Mac detail helper; the plugin uses the existing JOAT title emphasis, regular secondary metadata and one footer. The updated renderer was viewed in the official simulator with its event-detail Back journey. The Mac helper compiles but is not yet running in the installed engine.
+- Reviewed notification observation pruning: the shared SQLite connection stays on its owning thread, with at most 500 settled observations deleted per batch and a yield between batches. This does not establish that the wearer's old notification count is fixed; live engine cleanup remains unverified.
+- The existing `apps/hub-plugin/joat.ehpk` remains unchanged by this follow-up. No duplicate package, version folder or deleted `build/` directory was created. These latest local changes are not yet packaged or uploaded.
 
 ## 2026-09-11 — Authenticated Agent Terminal A2A connections
 
@@ -1702,3 +1748,90 @@ New Message and selected-conversation Reply now enter the typed acknowledged spe
 - Fresh current-source simulator inspection confirms compact News typography but rejects complete visual acceptance: emoji remain malformed, and an immediate conversation tap selects metadata and opens nothing. Earlier reader automation swiped first and missed that entry failure. Root and an independent reviewer inspected the screens; the new bounded repair targets first-message selection before tap. See `UI_STABILIZATION_REVIEW.md` for retained pixels and source hashes. Installed-app delivery remains unverified.
 - Fixed the reproduced inert first conversation tap: first actual message selected in the initial custom frame, informational rows skipped, conflicting hidden cursor indices rejected. Fresh simulator tap/Back/reopen reached the same full message twice with selection 1 (previously metadata index 0 opened nothing). All 960 Hub tests and build pass; 185 copied source hashes unchanged. Emoji appearance and installed-app acceptance remain open.
 - Reviewed the completed attributed-body parser experiment: nine public samples decoded (eight nonempty), while unchanged production readers exposed none of the synthetic rows. Two samples matched independent expected text; remaining decoded samples have structural/hash evidence. No decoder integration or runtime dependency installation occurred. Recorded in `MESSAGE_BODY_REPAIR.md`; UI stabilization remains the immediate priority.
+
+
+### 2026-09-11: JOAT glasses hierarchy, phone controls and notification lifecycle
+
+- Planning now carries a semantic content/control boundary from the Mac; the HUD distinguishes selected agenda content, date/time annotations and secondary navigation controls. Saved native-model results refresh the selected agenda immediately while retaining their receipt. Messages preserves conversation identity into transcript and full-text views.
+- The phone plugin WebView now provides approved Mac selection, reconnect, listening policy and SDK location diagnostics. Explicit switching retires the former Mac session through the existing display/audio/navigation owners.
+- JOAT notification count, active list and Home cards share CardLog state. Opaque card identities bind dismissal and targeted clears; historical Mac Messages unread totals no longer appear as the JOAT notification bell. Active cards can be cleared while bounded AI history remains available. Native Messages and native Even notifications are untouched.
+- Navigation setup/status text occupies one update region, and unchanged acknowledged regions can be skipped. Pending native image calls remain serialized with bounded failure; these changes do not establish zero end-to-end latency.
+- Validation uses direct Even simulator captures and production controllers with disposable data; compiler checks are diagnostic only. See docs/audits/2026-09-11-feature-repair-plan.md for evidence and remaining phone-control, left-temple and physical-device gaps. No release, Mac deployment or physical-device acceptance is claimed for this repair slice.
+
+- Follow-up correction: compact neutral phone settings replace the verbose green page; troubleshooting is disclosed on demand. Glasses policy/reconnect configuration is removed in favor of phone ownership, with Repeat last reply retained as a direct action. Simulator phone/menu inspected. Historical speech logs identified follow-up rejection during the answer reading hold; a local addressing correction awaits live microphone/echo verification because the real engine reports no connected glasses.
+
+- User-directed correction supersedes the preceding Repeat-menu and agenda-layout claims: removed the redundant visible menu item; rebuilt the DAY agenda around SF Mono-first typography, adjacent times, header date controls and a compact scope footer. Bounded DAY paging preserves controls beyond the20-row display limit. Direct simulator captures verify the ordinary agenda, menu ending Activity, three busy-day pages, Earlier return and Month selection. See feature-repair audit for receipts and remaining acceptance limits.
+
+- QuickList follow-up supersedes the SF Mono agenda and rejected native-font experiment: Day and Month task reading now reuse JOAT AI's proportional type roles, title-first hierarchy, smaller due information and bounded selected outlines. Full display metadata preserves title wrapping without changing Mac action ownership. Both Day and Month reminders reach the existing confirmed identity-bound completion path.
+- Connected simulator replay exposed and corrected cancellation restoring one visual row while tapping another, dropped rapid swipes, and host-menu restoration canceling an active paint and provoking a blank rebuild. Explicit right/ring Exit now uses a local JOAT confirmation before SDK shutdown0; Stay/timeout restore the feature. Left Back is preserved, not remapped to the simulator's right-only button.
+- Native simulator journeys with disposable service data verify the selected reminder through cancel, return, repeat tap and completion, plus the Month drill-in. Partial image transitions, physical left-temple gestures, unexercised view paths and real voice/device acceptance remain open. See feature-repair audit for rejected captures and retained evidence; no release/deployment claim.
+
+### Messaging, Planning and QuickNote connected repair — 2026-09-11
+
+- Corrected long Messages review ownership and review→confirmation routing; actual departure still cancels the draft.
+- Added proportional exact-source reader paging for QuickNotes and prepared Messages. Restored regular-content/selected-content hierarchy without changing approved JOAT AI typography.
+- Added Month Open day routing and ordered dashboard paint/input handling.
+- Root visually inspected retained U/V failure/comparison frames, W QuickNote four-page/reverse and Month→Day frames, and X Messages review→confirmation→cancel plus Planning typography. Independent specialist reviews covered Messages lifecycle, Planning ordering and QuickNote pagination.
+- This remains partial feature acceptance: older notes, full gesture/overflow coverage and partial tile transitions are open. No package upload or deployment. See docs/audits/2026-09-11-feature-repair-plan.md.
+
+### Consistent Back and simplified top bar — 2026-09-11
+
+- Added shared GesturePolicy for source-independent double-click Back across sys/text/list inputs; removed right/ring exit-confirmation branch. Retained actual host exit lifecycle.
+- Centralized Back owner dispatch and protected confirmation refusal, lifecycle/audio delivery, and visible navigation ownership.
+- Removed redundant top status wording from canvas/native paths while retaining micON/OFF, time/date andbattery; updated gesture hints and Home menu guidance.
+- Restored a reader parent’s saved selection in its first custom frame. Root visually exercised QuickNote, Messages and Planning returns/cancellation plus mic toggling in official simulator; independent reviewer found ordering gaps that were corrected. Retained Z/AB evidence, with partialtile rendering and physical-device proof still open.
+
+## 2026-09-11 — Rendering scheduling and JOAT 0.1.86 package
+
+- Removed idle batching from feature frames, pre-encoded changed tiles before serial transmission, cached two immutable encodings per tile container, and added development-only timing. Preserved custom typography, ownership guards and native write pacing. Independent source review found no new blocker.
+- Compiled and packaged reviewed working-tree version 0.1.86. Visually exercised connected Messaging, Planning and QuickNote journeys in the official simulator with disposable data. Intermediate frames still mix old/new tiles; no atomic or zero-latency rendering acceptance.
+- Private upload blocked before submission: Safari selected the exact package but kept Upload disabled. Last inspected private portal version remains 0.1.85. Package, hashes, sanitized receipt and visual evidence: build/rendering-release-0.1.86/. No physical-device or installed-build claim.
+
+## 2026-09-11 — JOAT 0.1.86 private portal confirmation
+
+- Live portal now shows JOAT v0.1.86 as the newest private build, superseding the earlier picker-blocked status. Submission actor and remote byte hash were not observed. No duplicate upload.
+- Independent current SDK review still finds no supported atomic presentation for the approved full-screen custom-font design; partial rendering remains unresolved. Retained local two-artifact Completion Receipt; no new production edits or rebuild.
+
+## 2026-09-11 — QuickNote archive paging candidate
+
+- Replaced eight-per-kind UI truncation with a stable merged text/recording archive and twenty-row wire pages. Added explicit page metadata and page-bound selection, older/newer boundary swipes, reverse last-row arrival and Home retirement while retaining custom typography and reader Back snapshots.
+- Current served-source simulator with56 disposable notes reaches oldest text and recording, reverses archive pages and returns from a long reader to the same selected item on page2. Empty/singlepage and pending-Home coverage remain outstanding; physical device and atomic rendering are not proven.
+- Corrected observer provenance: stale Vite on5208 invalidated candidateb/c/d. Candidatef checks the served archive module and owned Vite process. Messaging longreview retry was not admitted by its prompt gate and remains incomplete. These changes are not in private build0.1.86 yet.
+
+## 2026-09-11 — Connected reader and archive retirement repair
+
+- Fixed Messaging long-review paging and final-tap identity across Mac and Hub. Independent review added retired-reader rejection so delayed responses cannot reopen a cancelled draft. Fresh simulator visually reaches all five pages, reverses, opens confirmation, cancels, and retains conversation after a held response is released. Fixture sender remains unused.
+- Fixed archive cleanup on common Home departure. Empty/single-note journeys and held older-page response after Home visually verified in disposable fixtures.
+- Planning busy-day More/Earlier routes verified after selection queue settled; earlier intermediate capture was not evidence of a skipped paging row. Rendering coherence, physical input, live speech and new integrated release remain unproven.
+
+## 2026-09-11 — Existing JOAT package uploaded
+
+- Uploaded apps/hub-plugin/joat.ehpk to the existing JOAT project. Portal confirmed newest private build v0.1.87 after Add build and refresh (previous newest v0.1.86). Package: 147768 bytes; SHA-256 923d7673257493b4308deb8cebb1d2a7b691d2c242d58ab56d5e78cab11962c7. No physical install or matching Mac engine restart is claimed.
+- User intentionally removed build/ and requires updating the existing package in place; do not recreate build/ or versioned package copies. Earlier screenshot/receipt paths there no longer exist; transcript observations remain historical, not available local artifacts.
+
+## 2026-09-11 — Planning pending-selection and Back repair (local)
+
+- Replaced per-swipe awaited redraw chain with one in-flight paint and latest pending destination. Each input clamps independently; a queued tap freezes its target until successfully painted. No parallel presenter writes.
+- Read-only event-detail Back restores the retained agenda selection instead of starting a new list at row zero. Mutation/date/scope paths retain authoritative refresh.
+- Official simulator, actual served source: eight rapid Down inputs followed by tap opened Agenda09 (Mac capdata index8); Back restored Agenda09 selected; leaving during pending redraw retained Home. Screens viewed directly in chat without new artifact directories. These changes are not yet in uploaded v0.1.87.
+- Running Mac brain still predates the fixes; Restart Engine requested because native Computer Use could not access JOAT controls. Existing package path remains apps/hub-plugin/joat.ehpk.
+
+
+## 2026-09-11 — Shared row selection and authoritative Planning navigation
+
+Implemented one ordered custom-row driver for Planning, Messaging and the QuickNote archive. It retains permitted message row indices, defers taps until selection paint completes, and defers an authorized page-boundary gesture until its endpoint paints. Back retires pending row intents. Dashboard and list selection acknowledgements now reject foreground conversation/prompt/confirmation ownership.
+
+Planning grid actions now carry the published civil date as planningDay. The Mac validates it against the current grid; the final pane index opens the full day without starting a new visit. Actual productivity timestamps retain their prior absolute-instant semantics. Matched Python/TypeScript metadata planningNavigation supplies authoritative parent availability and restored selection. Bounded Mac parent frames distinguish child drill-down from peer scope/date/page controls; same-request Planning revisions retire delayed child publications.
+
+Current official-simulator run used current served source, disposable in-memory EventKit/Messages/45-note data and Pacific/Kiritimati (UTC+14). Visually inspected Month Sep11 → Open day → Sep11 Day; four rapid Down then tap opened Agenda05. Back refetched Day with Agenda05 selected, then the original Month/date. Day's Week scope control opened Sep7–13; Friday Day returned to Friday selected in Week, then Month, then Home. QuickNote four rapid Down+tap opened Note05; Back retained it, 16 rapid Down crossed to Note21 on archive page2, and Up restored Note20 at page1 endpoint. Messaging rapid three Down+tap opened Message09; Back retained it, boundary swipes opened older messages4–1, and Up restored latest conversation content.
+
+The first native-list injection referenced an unimported SDK enum and failed before dispatch; that attempt is excluded. A corrected SDK-enum replay opened the expected Messages conversation despite the hidden native index staying zero. Returning from older messages visibly restored the first speaker selection rail, with controller and presenter both at index1. Holding the actual Friday calendar query, double-clicking Back, then releasing it retained Week with Friday selected; the obsolete child did not reopen.
+
+That run also exposed an unresolved display observation: after returning to Week, screenshots intermittently omitted header/other pixels and later became blank; the next Up restored the complete screen. Independent console review found nonempty rendered tiles, zero changed uploads, and no recorded rebuild/failure in that interval. This does not identify whether native display retention or framebuffer capture diverged from the delivered-tile cache. Do not substitute a periodic repaint workaround or claim rendering acceptance. Interrupted dashboard and final Messages-review replay remain pending. No real message or native item was written. Simulator and all temporary support processes were closed; ports9918/5208/18870 were confirmed free. All fixture/control code remained in memory. Compilation was diagnostic, not acceptance; these changes are not yet in the uploaded package.
+
+
+## 2026-09-11 — Native-window comparison and integration review
+
+Repeated the delayed Week-to-Day query/Back/release journey with both the actual macOS Glasses Display window and official simulator framebuffer captures. They agreed: Week retained Friday selection, including through an idle clock update. Eight consecutive framebuffer captures were stable. The earlier missing-pixel observation did not reproduce; its cause remains unresolved, and this is not atomic-rendering or physical-device acceptance. Rapid date movement followed by Back returned Month to Home without a residual child screen. Closed simulator and support sessions; verified ports9918/5208/18870 free. Captures and fixture code remained in memory.
+
+Independent source review found no new blocker in matched reader/archive metadata, ordered row selection, Planning civil dates or authoritative parent/revision handling. This closes the reviewed integration slice, not the full goal. The existing uploaded package still predates these changes.

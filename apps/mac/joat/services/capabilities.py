@@ -20,7 +20,7 @@ import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone, tzinfo
@@ -137,10 +137,18 @@ class _PlanningRow:
     """One deliberate drill-down action in the native Planning projection."""
 
     label: str
-    action: Literal["scope", "previous", "next", "week", "day", "entry"]
+    action: Literal["scope", "previous", "next", "week", "day", "entry", "earlier_entries", "more_entries"]
     scope: PlanningScope | None = None
     day: date | None = None
     entry: PlanningEntry | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanningParent:
+    scope: PlanningScope
+    day: date
+    day_offset: int
+    selected_index: int
 
 
 class VoiceCaptureControls(Protocol):
@@ -200,6 +208,18 @@ class _NoteRow:
     control: str | None = None
     voice_note: VoiceNote | None = None
     text_note: QuickNote | None = None
+
+
+@dataclass(slots=True)
+class _NoteListState:
+    """Immutable collection for one visit; page indexes never identify notes."""
+
+    rows: tuple[_NoteRow, ...]
+    index: int = 0
+    page_pending: bool = False
+
+
+_NOTE_LIST_PAGE_SIZE = 20
 
 
 @dataclass(slots=True)
@@ -321,6 +341,7 @@ class CapabilityRouter:
         terminal_open: Callable[[str, str | None, str, Callable[[], bool]], Awaitable[None]] | None = None,
         terminal_current: Callable[[], str | None] | None = None,
         message_ui: MessageUIController | None = None,
+        complete_reminder: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         self._hud = hud
         # Defaults to this Mac's zone, which is exactly the pre-wearer-zone
@@ -330,6 +351,8 @@ class CapabilityRouter:
         self._status = status
         self._messages = messages
         self._cards = cards
+        self._complete_reminder = complete_reminder
+        self._planning_completion_active = False
         self._replies = replies
         self._message_ui = message_ui
         self._personal_data = personal_data
@@ -378,8 +401,20 @@ class CapabilityRouter:
         # week, then a day, instead of first having to navigate past a control
         # panel before seeing their month.
         self._planning_scope = PlanningScope.MONTH
+        self._planning_day_offset = 0
+        self._planning_page_day: date | None = None
         self._planning_rows: list[_PlanningRow] = []
+        self._planning_parents: list[_PlanningParent] = []
+        self._planning_selected_index = -1
+        self._planning_back_pending = False
+        self._planning_revision = 0
+        self._planning_context: ContextVar[int | None] = ContextVar(
+            f"planning_revision_{id(self)}", default=None,
+        )
+        self._planning_grid_entries: dict[date, tuple[PlanningEntry, ...]] = {}
+        self._planning_grid_request_id: str | None = None
         self._note_rows: list[_NoteRow] = []
+        self._note_list: _NoteListState | None = None
         self._note_reader: _NoteReaderState | None = None
         self._activity_rows: list[ActionActivity] = []
         self._active_request_id: str | None = None
@@ -392,7 +427,19 @@ class CapabilityRouter:
 
     def on_input(self, event: InputEvent) -> None:
         """Transport callback — synchronous, so work is scheduled."""
+        if event.container_name == "notification-dismiss":
+            if event.trace_id and self._cards.acknowledge(event.trace_id):
+                asyncio.get_running_loop().create_task(self._retire_notification(event.trace_id))
+            return
         if event.container_name == "capability-lifecycle":
+            if event.selected_name == "planning-back":
+                if (event.request_id is not None and event.request_id == self._active_request_id
+                        and self._active_capability in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}
+                        and self._planning_parents and not self._planning_back_pending
+                        and not self._planning_completion_active):
+                    self._planning_back_pending = True
+                    self._schedule_planning(self._back_planning(event.request_id))
+                return
             if event.selected_name in {"surface-context-menu-open", "surface-context-menu-closed"}:
                 self._contextual_menu_open = event.selected_name.endswith("-open")
                 return
@@ -406,6 +453,8 @@ class CapabilityRouter:
                 self._active_capability = None
                 self._active_request_id = None
                 self._note_reader = None
+                self._note_list = None
+                self._note_rows = []
                 self.clear_message_selection("surface-departure")
                 return
         if event.container_name == "capmenu" and event.selected_name:
@@ -424,7 +473,10 @@ class CapabilityRouter:
                     planning_anchor_unix_ms=event.planning_anchor_unix_ms,
                 )
 
-            asyncio.get_running_loop().create_task(open_requested())
+            if self._active_capability in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}:
+                self._schedule_planning(open_requested())
+            else:
+                asyncio.get_running_loop().create_task(open_requested())
         elif event.container_name == "capdata" and event.selected_index is not None:
             terminal_revision = None
             message_epoch = None
@@ -435,6 +487,11 @@ class CapabilityRouter:
                 and self._active_capability == reader.capability
                 and event.request_id == self._active_request_id
             ):
+                if reader.title == "MESSAGES · REVIEW" and (
+                    reader.page_pending or event.trace_id != reader.trace_id
+                    or event.selected_index != reader.index
+                ):
+                    return
                 # A tap inside an open reader is the reader's own action
                 # (continue this Brainstorm, confirm this draft) — never a
                 # row selection on the list underneath it.
@@ -465,13 +522,20 @@ class CapabilityRouter:
                     return
                 self._terminal_opening_revision += 1
                 terminal_revision = self._terminal_opening_revision
-            asyncio.get_running_loop().create_task(self._select_capability_row(
+            schedule = asyncio.get_running_loop().create_task
+            if event.selected_name in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}:
+                if (event.request_id != self._active_request_id or self._planning_back_pending
+                        or self._planning_completion_active):
+                    return
+                schedule = self._schedule_planning
+            schedule(self._select_capability_row(
                 event.selected_name or "",
                 event.selected_index,
                 event.trace_id or "hud",
                 event.request_id,
                 terminal_revision=terminal_revision,
                 message_epoch=message_epoch,
+                quick_notes_page_index=event.quick_notes_page_index,
             ))
         elif event.container_name == "message-cancel" and self._message_ui is not None:
             if self._message_ui.matches(event.request_id, event.trace_id):
@@ -479,17 +543,21 @@ class CapabilityRouter:
         elif (
             event.container_name == "capgrid"
             and event.selected_index is not None
-            and event.planning_anchor_unix_ms is not None
+            and (event.planning_day is not None or event.planning_anchor_unix_ms is not None)
         ):
             # Dashboard right-pane tap: the hovered DATE travels as the
             # planning anchor and the item's position as the index. No
             # calendar/reminder identifier crosses the wire — the entry is
             # re-resolved from a fresh authoritative DAY projection, so a
             # native edit between paint and tap can never open the wrong item.
-            asyncio.get_running_loop().create_task(self._select_grid_entry(
+            if (event.request_id != self._active_request_id or self._planning_back_pending
+                    or self._planning_completion_active):
+                return
+            self._schedule_planning(self._select_grid_entry(
                 event.planning_anchor_unix_ms,
                 event.selected_index,
                 event.request_id,
+                planning_day=event.planning_day,
             ))
         elif event.container_name == "capmessage" and event.selected_index is not None:
             asyncio.get_running_loop().create_task(self._select_message_detail(
@@ -515,6 +583,15 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(
                 self._panels.page(event.selected_name, event.event_type, event.request_id)
             )
+        elif event.container_name == "cappage" and event.selected_name == "QUICKNOTES · LIST":
+            state = self._note_list
+            if (state is None or state.page_pending or self._note_reader is not None
+                    or self._active_capability != "QUICKNOTES"
+                    or event.request_id != self._active_request_id
+                    or event.selected_index != state.index):
+                return
+            state.page_pending = True
+            asyncio.get_running_loop().create_task(self._page_note_list(state, event))
         elif (
             event.container_name == "cappage"
             and self._note_reader is not None
@@ -551,6 +628,7 @@ class CapabilityRouter:
                 self._note_reader = None
                 if event.selected_name == "quicknotes-home":
                     self._note_rows = []
+                    self._note_list = None
         elif (
             event.container_name == "capability-lifecycle"
             and event.selected_name == "quicknotes-back"
@@ -573,6 +651,8 @@ class CapabilityRouter:
                 # reader cursor so the next page gesture addresses history.
                 self._message_detail = None
                 self._message_page_pending = False
+                if self._note_reader is not None and self._note_reader.title == "MESSAGES · REVIEW":
+                    self._note_reader = None
             else:
                 self.clear_message_selection(
                     "home" if event.selected_name == "messages-home" else "list"
@@ -595,6 +675,8 @@ class CapabilityRouter:
 
     def clear_message_selection(self, reason: str) -> None:
         """Disarm a private reply target when its wearer-visible context ends."""
+        if self._note_reader is not None and self._note_reader.title == "MESSAGES · REVIEW":
+            self._note_reader = None
         # A pending read must not re-arm the recipient after Back or disconnect,
         # even when the Hub retains the same request ID for its cached picker.
         self._message_selection_epoch += 1
@@ -630,8 +712,17 @@ class CapabilityRouter:
         planning_anchor_unix_ms: int | None = None,
     ) -> None:
         """Open one list generation; stale concurrent generations cannot paint."""
+        planning_token = None
+        if (self._canonical_capability(name) in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}
+                and self._planning_context.get() is None):
+            self._planning_revision += 1
+            planning_token = self._planning_context.set(self._planning_revision)
         self._terminal_opening_revision += 1
         self._note_reader = None
+        self._note_list = None
+        self._planning_parents.clear()
+        self._planning_back_pending = False
+        self._planning_selected_index = -1
         if self._active_capability == "MESSAGES" and self._canonical_capability(name) != "MESSAGES":
             self.clear_message_selection("capability-open")
         self._active_request_id = request_id
@@ -670,6 +761,8 @@ class CapabilityRouter:
                     log.info("unknown capability requested: %s", name)
         finally:
             self._request_context.reset(token)
+            if planning_token is not None:
+                self._planning_context.reset(planning_token)
 
     async def _show_brainstorm(self) -> None:
         """Open Brainstorm on its LAST session, or on an invitation.
@@ -897,29 +990,38 @@ class CapabilityRouter:
         decided: asyncio.Future[bool] = loop.create_future()
 
         async def confirm_from_review() -> None:
-            if not decided.done():
+            reader = self._note_reader
+            if (reader is not None and reader.title == "MESSAGES · REVIEW"
+                    and reader.index == len(reader.pages) - 1 and not decided.done()):
                 decided.set_result(True)
 
-        request_id = voice_request_id()
-        self.clear_message_selection("message-review")
+        # Reviewing this draft is an internal step of the same action. A new
+        # request ID makes the Hub retire its selected-message owner; clearing
+        # selection here also cancels the prepared action calling this method.
+        request_id = (self._active_request_id if self._active_capability == "MESSAGES"
+                      and self._active_request_id else voice_request_id())
         self._active_capability = "MESSAGES"
         self._active_request_id = request_id
         token = self._request_context.set(request_id)
+        reader: _NoteReaderState | None = None
         try:
-            await self._open_note_reader(
-                "MESSAGES · REVIEW", f"To {recipient_label}", body, "message-review",
-                capability="MESSAGES", on_tap=confirm_from_review, tap_hint="tap: send",
+            reader = _NoteReaderState(
+                "MESSAGES · REVIEW", f"To {recipient_label}", paginate_reader_text(body), f"review-{secrets.token_hex(16)}",
+                capability="MESSAGES", on_tap=confirm_from_review, tap_hint="tap: confirm",
             )
+            self._note_reader = reader
+            await self._show_note_reader()
+            deadline = loop.time() + timeout_s
+            while not decided.done():
+                if (self._note_reader is not reader or loop.time() >= deadline
+                        or self._active_request_id != request_id or self._active_capability != "MESSAGES"):
+                    return False
+                await asyncio.sleep(0.2)
+            return decided.result()
         finally:
             self._request_context.reset(token)
-        reader = self._note_reader
-        deadline = loop.time() + timeout_s
-        while not decided.done():
-            if self._note_reader is not reader or loop.time() >= deadline:
-                return False
-            await asyncio.sleep(0.2)
-        self._note_reader = None
-        return decided.result()
+            if reader is not None and self._note_reader is reader:
+                self._note_reader = None
 
     async def open_terminal_from_brainstorm(self) -> bool:
         """Use the same picker and lane preparation as an ordinary Terminal open."""
@@ -1045,6 +1147,11 @@ class CapabilityRouter:
             return
         if index == 0:
             if self._replies is None:
+                await self._show_focus(
+                    "MESSAGES · COMPOSE",
+                    ["Sending is unavailable in this session.", "You can still read your conversations."],
+                    hint=BACK_HINT,
+                )
                 return
             if self._message_ui is not None:
                 self._message_selection_active = True
@@ -1144,6 +1251,11 @@ class CapabilityRouter:
         trace_id: str,
         request_id: str | None,
     ) -> None:
+        reader = self._note_reader
+        if reader is not None and reader.title == "MESSAGES · REVIEW":
+            # Review paging belongs exclusively to on_input's exact reader
+            # identity/index gate, never the generic history fallback.
+            return
         if (
             request_id != self._active_request_id
             or self._active_capability != "MESSAGES"
@@ -1276,6 +1388,7 @@ class CapabilityRouter:
         await self._send_list(HudList(
             items=[page_label, *context, *instructions],
             title="MESSAGES · CONVERSATION",
+            context_label=state.thread.sender,
             hint=hint,
             selectable=bool(page.entries),
         ))
@@ -1300,6 +1413,7 @@ class CapabilityRouter:
                 *state.pages[state.index],
             ],
             title="MESSAGES · MESSAGE",
+            context_label=state.thread.sender,
             hint=hint,
         ))
 
@@ -1310,7 +1424,6 @@ class CapabilityRouter:
         page_index: int,
         page_count: int,
     ) -> str:
-        role = "To" if entry.from_me else "From"
         sender = "you" if entry.from_me else CapabilityRouter._message_sender(thread, entry)
         details: list[str] = []
         if entry.unread:
@@ -1319,7 +1432,7 @@ class CapabilityRouter:
             details.append(entry.delivery)
         if entry.attachment_count:
             details.append("attachment")
-        metadata = " · ".join([f"{page_index + 1}/{page_count}", f"{role} {sender}", *details])
+        metadata = " · ".join([f"{page_index + 1}/{page_count}", f"From {sender}", *details])
         # Counter first identifies prepared rows even when a long sender
         # fills the metadata budget. Never split an astral code point.
         units = 0
@@ -1362,7 +1475,7 @@ class CapabilityRouter:
         # instead of a wordy "(unread)" that reads like body text.
         marker = "● " if thread.unread else ""
         label = f"[{_age(thread.at)}] {marker}{thread.sender}"
-        if thread.is_group or not thread.replyable:
+        if thread.is_group:
             # No " · " inside the label: that token is the primary/secondary
             # split on the lens. Group identity is independent of reply support.
             label += " (group)"
@@ -1378,7 +1491,7 @@ class CapabilityRouter:
     @staticmethod
     def _message_sender(thread: MessageThread, entry: MessageEntry) -> str:
         return entry.sender or (
-            "Participant" if thread.is_group or not thread.replyable else thread.sender
+            "Participant" if thread.is_group else thread.sender
         )
 
     @staticmethod
@@ -1410,6 +1523,7 @@ class CapabilityRouter:
         *,
         terminal_revision: int | None = None,
         message_epoch: int | None = None,
+        quick_notes_page_index: int | None = None,
     ) -> None:
         if message_epoch is not None and message_epoch != self._message_selection_epoch:
             return
@@ -1444,7 +1558,7 @@ class CapabilityRouter:
                 case "PLANNING" | "CALENDAR" | "TASKS" | "REMINDERS":
                     await self._select_planning(index)
                 case "QUICKNOTES":
-                    await self._select_note(index, trace_id)
+                    await self._select_note(index, trace_id, quick_notes_page_index)
                 case "ACTIVITY":
                     await self._select_activity(index)
         except Exception:
@@ -1464,32 +1578,58 @@ class CapabilityRouter:
             self._request_context.reset(token)
 
     async def _show_notifications(self) -> None:
-        entries = self._cards.recent(5)
+        entries = self._cards.active()
         if not self._request_is_current():
             return
         self._notification_rows = entries
         if not entries:
-            await self._show_focus("NOTIFICATIONS · EMPTY", ["Nothing shown recently."])
+            await self._show_focus("NOTIFICATIONS · EMPTY", ["No unread JOAT notifications."])
             return
         await self._send_list(HudList(
-            items=[f"[{_age(c.at)}] {c.render().splitlines()[0]}" for c in entries],
+            items=[f"[{_age(c.at)}] {c.render().splitlines()[0]}" for c in entries]
+            + ["Clear JOAT notifications"],
             title="NOTIFICATIONS",
-            hint=DETAIL_HINT,
+            control_start_index=len(entries),
+            hint="tap: read · left x2: back",
             selectable=True,
         ))
 
     async def _select_notification(self, index: int) -> None:
+        # Selection is admitted by the capability request/generation above.
+        # IDs bind the displayed snapshot; a new arrival cannot shift its target.
+        if not self._request_is_current():
+            return
+        if self._notification_rows and index == len(self._notification_rows):
+            snapshot_ids = [card.card_id for card in self._notification_rows]
+            active_ids = {card.card_id for card in self._cards.active()}
+            self._cards.dismiss_snapshot(snapshot_ids)
+            for card_id in snapshot_ids:
+                if card_id in active_ids:
+                    await self._retire_notification(card_id)
+            await self._show_notifications()
+            return
         if not 0 <= index < len(self._notification_rows):
             return
         card = self._notification_rows[index]
-        # The glance card is two 46-char lines; the detail page is a whole
-        # screen. Show the FULL text through the reader's 62-column rows —
-        # the focus list scrolls, so nothing is thrown away.
+        # A cached Back snapshot can legitimately reopen the same retained
+        # card. Reading it again is idempotent, not a dead tap or a shifted row.
+        if self._cards.acknowledge(card.card_id):
+            await self._retire_notification(card.card_id)
+        if not self._request_is_current():
+            return
         header = card.render().splitlines()[:1]
         full = card.body or card.summary
         body_rows = [row for page in paginate_reader_text(full) for row in page]
         rows = [*header, *body_rows][:19] or ["Notification content unavailable."]
         await self._show_focus("NOTIFICATIONS · DETAIL", rows)
+
+    async def _retire_notification(self, card_id: str) -> None:
+        """Retire only this JOAT card's current/deferred Hub presentation.
+
+        The opaque identity makes an interleaved newer notification safe;
+        an empty generic Main write would otherwise erase unrelated content.
+        """
+        await self._hud.show("", content_kind="notification", trace_id=card_id)
 
     async def _show_planning(self) -> None:
         """Show the one calendar-shaped view of native events and reminders.
@@ -1568,12 +1708,39 @@ class CapabilityRouter:
         # startup probe. It carries no planning content into the status file.
         self._status.set_personal_data(state="ready")
         self._planning_rows = self._planning_rows_for(projection)
+        # Mirror only entries actually published to each month pane. A tap
+        # supplies its position in THIS snapshot, not in a later native query.
+        self._planning_grid_entries = (
+            {day.day: day.entries[:6] for day in projection.days}
+            if projection.scope is PlanningScope.MONTH else {}
+        )
+        self._planning_grid_request_id = self._request_context.get()
+        if self._planning_selected_index < 0:
+            self._planning_selected_index = (
+                next((index for index, day in enumerate(projection.days)
+                      if day.day == projection.selected_day), 0)
+                if projection.scope is PlanningScope.MONTH else 0
+            )
+        day_delta = (projection.selected_day - datetime.now(self._planning_zone()).date()).days
+        day_label = "Today" if day_delta == 0 else "Tomorrow" if day_delta == 1 else projection.selected_day.strftime("%a %b %d")
         await self._show_focus(
             f"{origin} · {projection.title}",
             [row.label for row in self._planning_rows],
             hint=PLANNING_HINT,
             selectable=True,
             planning_grid=self._planning_grid_for(projection),
+            planning_entries=(
+                tuple(PlanningGridEntry(time=f"{day_label}, {row.entry.time_label}", kind=row.entry.kind, title=row.entry.title)
+                      if row.entry is not None else None for row in self._planning_rows)
+                if projection.scope is PlanningScope.DAY else None
+            ),
+            context_label=f"{origin.title()} · {projection.title.removeprefix('PLAN · ')}",
+            # Semantic Mac-owned actions define the boundary; localized text
+            # and the number of native agenda entries do not change it.
+            control_start_index=next((
+                index for index, row in enumerate(self._planning_rows)
+                if row.action in ("previous", "next", "scope")
+            ), len(self._planning_rows)),
         )
 
     @staticmethod
@@ -1617,6 +1784,12 @@ class CapabilityRouter:
         the Mac.  Keeping the action identity here makes that click a real
         navigation command, rather than asking the HUD to parse visible text.
         """
+
+        # A wire list has at most 20 rows. Keep the five date/scope actions
+        # reachable on every day page and bind entries to these exact rows.
+        if projection.scope is not PlanningScope.DAY or self._planning_page_day != projection.selected_day:
+            self._planning_day_offset = 0
+        self._planning_page_day = projection.selected_day if projection.scope is PlanningScope.DAY else None
 
         scope_rows = [
             _PlanningRow(
@@ -1693,7 +1866,17 @@ class CapabilityRouter:
         selected = projection.days[0]
         if not selected.entries:
             rows.append(_PlanningRow(label="Nothing planned", action="day", day=selected.day))
-        for entry in selected.entries:
+        total = len(selected.entries)
+        if total > 15:
+            last_offset = ((total - 1) // 13) * 13
+            self._planning_day_offset = min(max(0, self._planning_day_offset), last_offset)
+            page_entries = selected.entries[self._planning_day_offset:self._planning_day_offset + 13]
+        else:
+            self._planning_day_offset = 0
+            page_entries = selected.entries
+        if self._planning_day_offset:
+            rows.append(_PlanningRow(label="‹ Earlier entries", action="earlier_entries"))
+        for entry in page_entries:
             # Planning merges the two halves — calendar events and
             # reminders/tasks — so a row must say WHICH it is. DESIGN.md:
             # kind is a tiny aligned marker from the firmware-safe glyph set,
@@ -1711,6 +1894,8 @@ class CapabilityRouter:
                 action="entry",
                 entry=entry,
             ))
+        if self._planning_day_offset + len(page_entries) < total:
+            rows.append(_PlanningRow(label="More entries ›", action="more_entries"))
         rows.extend([
             _PlanningRow(
                 label=f"‹ {previous.strftime('%a').upper()} {previous.strftime('%b').upper()} {previous.day}",
@@ -1724,11 +1909,63 @@ class CapabilityRouter:
         ])
         return rows
 
+    def _schedule_planning(self, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        self._planning_revision += 1
+        revision = self._planning_revision
+
+        async def run() -> None:
+            token = self._planning_context.set(revision)
+            try:
+                if revision != self._planning_revision:
+                    work.close()
+                    return
+                await work
+            finally:
+                self._planning_context.reset(token)
+
+        return asyncio.get_running_loop().create_task(run())
+
+    def _push_planning_parent(self, selected_index: int) -> None:
+        self._planning_parents.append(_PlanningParent(
+            self._planning_scope, self._planning_selected_day,
+            self._planning_day_offset, selected_index,
+        ))
+        # Scope controls can revisit levels indefinitely; retain only bounded
+        # navigation context, never native records or confirmation authority.
+        self._planning_parents = self._planning_parents[-8:]
+        self._planning_selected_index = -1
+
+    async def _back_planning(self, request_id: str) -> None:
+        token = self._request_context.set(request_id)
+        try:
+            if request_id != self._active_request_id or not self._planning_parents:
+                return
+            parent = self._planning_parents.pop()
+            self._planning_scope = parent.scope
+            self._planning_selected_day = parent.day
+            self._planning_day_offset = parent.day_offset
+            self._planning_page_day = parent.day if parent.scope is PlanningScope.DAY else None
+            self._planning_selected_index = parent.selected_index
+            await self._show_planning()
+        finally:
+            self._planning_back_pending = False
+            self._request_context.reset(token)
+
     async def _select_planning(self, index: int) -> None:
         if not 0 <= index < len(self._planning_rows):
             return
+        if not self._request_is_current():
+            return
         row = self._planning_rows[index]
+        self._planning_selected_index = -1
+        if row.action in ("earlier_entries", "more_entries"):
+            self._planning_day_offset = max(
+                0, self._planning_day_offset + (-13 if row.action == "earlier_entries" else 13)
+            )
+            await self._show_planning()
+            return
         if row.action == "scope" and row.scope is not None:
+            self._planning_day_offset = 0
             self._planning_scope = row.scope
             await self._show_planning()
             return
@@ -1745,48 +1982,104 @@ class CapabilityRouter:
             await self._show_planning()
             return
         if row.action == "week" and row.day is not None:
+            self._push_planning_parent(
+                list(self._planning_grid_entries).index(row.day)
+                if row.day in self._planning_grid_entries else index
+            )
             self._planning_selected_day = row.day
             self._planning_scope = PlanningScope.WEEK
             await self._show_planning()
             return
         if row.action == "day" and row.day is not None:
+            if self._planning_scope is not PlanningScope.DAY:
+                self._push_planning_parent(index)
+            self._planning_day_offset = 0
             self._planning_selected_day = row.day
             self._planning_scope = PlanningScope.DAY
             await self._show_planning()
             return
         if row.action == "entry" and row.entry is not None:
+            self._push_planning_parent(index)
+            self._planning_rows = []
             entry = row.entry
+            if entry.kind == "reminder":
+                await self._complete_planning_reminder(entry)
+                return
+            await self._show_planning_event_detail(entry)
+
+    async def _complete_planning_reminder(self, entry: PlanningEntry) -> None:
+        if not self._request_is_current() or self._planning_completion_active:
+            return
+        if self._complete_reminder is None:
             await self._show_focus(
-                f"{self._planning_origin()} · {entry.kind.upper()}",
-                [
-                    entry.title,
-                    f"{entry.time_label} · {entry.kind.title()}",
-                    "Read-only native item · left x2 Planning",
-                ],
-                hint="left x2 Planning",
+                "PLANNING · REMINDER",
+                [row for page in paginate_reader_text(
+                    f"{entry.title}\nReminder completion is unavailable. Open JOAT on the Mac."
+                ) for row in page][:19],
             )
+            return
+        self._planning_completion_active = True
+        try:
+            explanation = await self._complete_reminder(entry.native_identifier)
+            if explanation and self._request_is_current():
+                await self._show_focus(
+                    "PLANNING · REMINDER",
+                    [row for page in paginate_reader_text(f"{entry.title}\n{explanation}") for row in page][:19],
+                    context_label=f"Planning · {self._planning_selected_day.strftime('%a %b %d')}",
+                )
+        finally:
+            self._planning_completion_active = False
 
     async def _select_grid_entry(
         self,
-        anchor_unix_ms: int,
+        anchor_unix_ms: int | None,
         entry_index: int,
         request_id: str | None,
+        *,
+        planning_day: str | None = None,
     ) -> None:
         """Open one entry tapped on the dashboard's right pane.
 
-        The wire carries only the date and the item's position. The entry is
-        re-resolved from a fresh authoritative DAY projection — the same
-        never-stale rule every Planning read follows — so a native edit
-        between the month paint and the tap opens current truth or nothing.
+        The wire carries a date and index into the published month pane.
+        Re-resolve that snapshot identity in current native data; a reorder
+        must not change which reminder the wearer asked to complete.
         """
         client = self._personal_data
-        if client is None or not (0 <= anchor_unix_ms <= 32_503_680_000_000):
+        if client is None:
             return
-        selected_day = datetime.fromtimestamp(
-            anchor_unix_ms / 1_000, tz=timezone.utc
-        ).astimezone(self._planning_zone()).date()
+        if request_id != self._active_request_id or request_id != self._planning_grid_request_id:
+            return
+        try:
+            if planning_day is not None:
+                selected_day = date.fromisoformat(planning_day)
+            elif (not isinstance(anchor_unix_ms, bool) and isinstance(anchor_unix_ms, int)
+                  and 0 <= anchor_unix_ms <= 32_503_680_000_000):
+                selected_day = datetime.fromtimestamp(
+                    anchor_unix_ms / 1_000, tz=self._planning_zone()
+                ).date()
+            else:
+                return
+        except (ValueError, OverflowError, OSError):
+            return
+        if selected_day not in self._planning_grid_entries:
+            return
+        displayed = self._planning_grid_entries.get(selected_day, ())
         token = self._request_context.set(request_id)
         try:
+            if not self._request_is_current():
+                return
+            if entry_index == len(displayed):
+                # The final pane row is Open day, including on empty dates.
+                self._push_planning_parent(list(self._planning_grid_entries).index(selected_day))
+                self._planning_selected_day = selected_day
+                self._planning_scope = PlanningScope.DAY
+                self._planning_day_offset = 0
+                await self._show_planning()
+                return
+            if not 0 <= entry_index < len(displayed):
+                await self._show_focus("PLANNING · REFRESH", ["This item is no longer in the displayed agenda.", "Open Planning again."])
+                return
+            selected_entry = displayed[entry_index]
             try:
                 projection = await load_native_planning(
                     client,
@@ -1803,23 +2096,37 @@ class CapabilityRouter:
             if not self._request_is_current():
                 return
             entries = projection.days[0].entries if projection.days else ()
-            if not 0 <= entry_index < len(entries):
-                log.info("dashboard entry index stale; leaving the month view")
+            matches = [entry for entry in entries
+                       if entry.native_identifier == selected_entry.native_identifier
+                       and entry.kind == selected_entry.kind]
+            if len(matches) != 1:
+                await self._show_focus(
+                    "PLANNING · REFRESH",
+                    [row for page in paginate_reader_text(
+                        f"{selected_entry.title}\nThis item changed or is no longer on this day. Refresh Planning."
+                    ) for row in page][:19],
+                )
                 return
-            # Anchor follow-up Back navigation on the tapped day.
+            self._push_planning_parent(list(self._planning_grid_entries).index(selected_day))
+            self._planning_rows = []
+            self._planning_grid_entries = {}
+            # Anchor follow-up Back navigation and completion on the tapped day.
             self._planning_selected_day = selected_day
-            entry = entries[entry_index]
-            await self._show_focus(
-                f"{self._planning_origin()} · {entry.kind.upper()}",
-                [
-                    entry.title,
-                    f"{entry.time_label} · {entry.kind.title()}",
-                    "Read-only native item · left x2 Planning",
-                ],
-                hint="left x2 Planning",
-            )
+            entry = matches[0]
+            if entry.kind == "reminder":
+                await self._complete_planning_reminder(entry)
+                return
+            await self._show_planning_event_detail(entry)
         finally:
             self._request_context.reset(token)
+
+    async def _show_planning_event_detail(self, entry: PlanningEntry) -> None:
+        """Use the same read-only event presentation from every Planning view."""
+        await self._show_focus(
+            f"{self._planning_origin()} · {entry.kind.upper()}",
+            [entry.title, f"{entry.time_label} · {entry.kind.title()}"],
+            hint="left x2 Planning",
+        )
 
     def _planning_origin(self) -> str:
         """Name the current menu contract while accepting old package aliases."""
@@ -1853,6 +2160,8 @@ class CapabilityRouter:
         except (OverflowError, OSError, ValueError):
             return
         self._planning_selected_day = selected
+        self._planning_day_offset = 0
+        self._planning_page_day = selected
         self._planning_scope = PlanningScope.DAY
 
     def _planning_zone(self) -> tzinfo:
@@ -1880,6 +2189,7 @@ class CapabilityRouter:
         panel — the exclusive microphone means taps are the only controls.
         """
         self._note_reader = None
+        self._note_list = None
         capture = self._voice_capture
         if capture is not None and capture.active:
             await self._show_recording_controls()
@@ -1893,11 +2203,10 @@ class CapabilityRouter:
             )
             return
         rows: list[_NoteRow] = []
-        # Eight recordings plus eight text notes fits the 20-row wire list
-        # with the recording controls; the surface scrolls, so older notes
-        # are reachable on the glasses (the audit's Q3 found four and four).
+        # Snapshot every retained note, then send bounded pages. Storage kind
+        # never partitions the wearer's chronological collection.
         if self._voice_notes is not None:
-            for note in self._voice_notes.recent_retained(8):
+            for note in self._voice_notes.retained():
                 age = _age(note.updated_at_us / 1_000_000)
                 suffix = "" if note.state == "saved" else " · gaps"
                 title = note.title or "Untitled"
@@ -1909,7 +2218,7 @@ class CapabilityRouter:
                     voice_note=note,
                 ))
         if self._notes is not None:
-            for text_note in list(self._notes.active()[:8]):
+            for text_note in self._notes.active():
                 rows.append(_NoteRow(
                     label=f"[{_age(text_note.updated_at_us / 1_000_000)}] {text_note.text}",
                     kind="text",
@@ -1917,16 +2226,58 @@ class CapabilityRouter:
                 ))
         if not self._request_is_current():
             return
+        def chronology(row: _NoteRow) -> tuple[int, str, str]:
+            note = row.voice_note or row.text_note
+            assert note is not None
+            identity = row.voice_note.capture_id if row.voice_note else row.text_note.note_id
+            return (-note.updated_at_us, row.kind, identity)
+        self._note_list = _NoteListState(tuple(sorted(rows, key=chronology)))
+        await self._show_note_list_page()
+
+    async def _show_note_list_page(self) -> None:
+        state = self._note_list
+        if state is None or not self._request_is_current():
+            return
+        start = state.index * _NOTE_LIST_PAGE_SIZE
+        rows = list(state.rows[start:start + _NOTE_LIST_PAGE_SIZE])
         self._note_rows = rows
+        count = max(1, (len(state.rows) + _NOTE_LIST_PAGE_SIZE - 1) // _NOTE_LIST_PAGE_SIZE)
+        hints = [DETAIL_HINT if rows else BACK_HINT]
+        if state.index:
+            hints.insert(0, "up newer")
+        if state.index + 1 < count:
+            hints.insert(0, "down older")
         await self._show_focus(
             "QUICKNOTES" if rows else "QUICKNOTES · EMPTY",
             [row.label for row in rows] or [
                 'Say “JOAT, start a quicknote …” to record.',
                 'Say “JOAT, note …” to save exact text.',
             ],
-            hint=DETAIL_HINT if rows else BACK_HINT,
+            hint=" · ".join(hints),
             selectable=bool(rows),
+            quick_notes_page=(state.index, count),
         )
+
+    async def _page_note_list(self, state: _NoteListState, event: InputEvent) -> None:
+        try:
+            if (self._note_list is not state or self._note_reader is not None
+                    or event.request_id != self._active_request_id
+                    or self._active_capability != "QUICKNOTES"):
+                return
+            delta = -1 if event.event_type == EventType.SCROLL_TOP else (
+                1 if event.event_type == EventType.SCROLL_BOTTOM else 0)
+            count = max(1, (len(state.rows) + _NOTE_LIST_PAGE_SIZE - 1) // _NOTE_LIST_PAGE_SIZE)
+            target = state.index + delta
+            if not delta or not 0 <= target < count:
+                return
+            state.index = target
+            token = self._request_context.set(event.request_id)
+            try:
+                await self._show_note_list_page()
+            finally:
+                self._request_context.reset(token)
+        finally:
+            state.page_pending = False
 
     async def _cancel_note_discard(self, request_id: str | None) -> None:
         if (
@@ -1973,7 +2324,10 @@ class CapabilityRouter:
             selectable=True,
         )
 
-    async def _select_note(self, index: int, trace_id: str) -> None:
+    async def _select_note(self, index: int, trace_id: str, page_index: int | None = None) -> None:
+        state = self._note_list
+        if state is not None and (state.page_pending or (page_index if page_index is not None else 0) != state.index):
+            return
         if not 0 <= index < len(self._note_rows):
             return
         row = self._note_rows[index]
@@ -2017,13 +2371,17 @@ class CapabilityRouter:
             hint.append("up previous")
         if reader.index + 1 < len(reader.pages):
             hint.append("down more")
-        if reader.tap_hint:
+        review = reader.title == "MESSAGES · REVIEW"
+        review_complete = reader.index == len(reader.pages) - 1
+        if reader.tap_hint and (not review or review_complete):
             hint.append(reader.tap_hint)
         hint.append(BACK_HINT)
         await self._show_focus(
             reader.title,
             [f"{reader.index + 1}/{len(reader.pages)} · {reader.label}"[:64], *reader.pages[reader.index]],
             hint=" · ".join(hint),
+            selectable=review and review_complete,
+            reader_page=(reader.trace_id, reader.index, len(reader.pages)),
         )
 
     async def _page_note_reader(self, reader: _NoteReaderState, event: InputEvent) -> None:
@@ -2179,6 +2537,11 @@ class CapabilityRouter:
         hint: str = BACK_HINT,
         selectable: bool = False,
         planning_grid: tuple[PlanningGridCell, ...] | None = None,
+        planning_entries: tuple[PlanningGridEntry | None, ...] | None = None,
+        context_label: str | None = None,
+        quick_notes_page: tuple[int, int] | None = None,
+        reader_page: tuple[str, int, int] | None = None,
+        control_start_index: int | None = None,
     ) -> None:
         """Render non-dashboard capability states in the shared focus shell."""
         await self._send_list(HudList(
@@ -2187,6 +2550,16 @@ class CapabilityRouter:
             hint=hint,
             selectable=selectable,
             planning_grid=planning_grid,
+            planning_entries=planning_entries,
+            planning_navigation=(
+                (bool(self._planning_parents), self._planning_selected_index)
+                if self._active_capability in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}
+                else None
+            ),
+            context_label=context_label,
+            quick_notes_page=quick_notes_page,
+            reader_page=reader_page,
+            control_start_index=control_start_index,
         ))
 
     async def _send_list(self, message: HudList) -> None:
@@ -2198,7 +2571,9 @@ class CapabilityRouter:
 
     def _request_is_current(self) -> bool:
         request_id = self._request_context.get()
-        return request_id is None or request_id == self._active_request_id
+        planning_revision = self._planning_context.get()
+        return ((planning_revision is None or planning_revision == self._planning_revision)
+                and (request_id is None or request_id == self._active_request_id))
 
     @staticmethod
     def _canonical_capability(name: str) -> str:

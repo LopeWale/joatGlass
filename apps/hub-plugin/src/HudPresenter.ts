@@ -1282,14 +1282,25 @@ export class HudPresenter {
    * state: no Mac request, one visual paint, and the unchanged-tile skip
    * keeps a hover move to the tiles whose pixels actually differ. */
   async updatePlanningPane(pane: PlanningPaneState): Promise<boolean> {
-    if (this.surface.kind !== 'list' || !this.surface.options.planningGrid) {
-      return false;
-    }
-    this.surface = {
-      ...this.surface,
-      options: { ...this.surface.options, planningPane: { ...pane } },
+    const displayCurrent = this.captureDisplayGuard();
+    const current = this.surface;
+    const foregroundAvailable = () => !this.confirmation && !this.promptQuestion
+      && !this.assistantConversation.isActive();
+    if (!displayCurrent() || current.kind !== 'list' || !current.options.planningGrid
+      || !foregroundAvailable() || !this.visual) return false;
+    const surface: HudSurface = {
+      ...current,
+      options: { ...current.options, planningPane: { ...pane } },
     };
-    return this.paintVisual();
+    this.surface = surface;
+    const painted = await this.paintVisual();
+    if (!displayCurrent()) return false;
+    if (!painted && this.surface === surface && foregroundAvailable()) {
+      this.surface = current;
+      // One bounded rollback; never overwrite a newer foreground owner.
+      await this.visual.paint(this.visualFrame());
+    }
+    return painted && this.surface === surface && foregroundAvailable();
   }
 
   async setSelection(index: number): Promise<boolean> {
@@ -1311,19 +1322,22 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     const current = this.surface;
-    if (current.kind !== 'list' || this.confirmation || this.promptQuestion) return false;
+    if (current.kind !== 'list' || this.confirmation || this.promptQuestion
+      || this.assistantConversation.isActive()) return false;
     const selectedIndex = Math.max(0, Math.min(Math.max(0, current.items.length - 1), index));
     if (!this.visual) return selectedIndex === 0 ? this.setSelection(0) : false;
     const surface: HudSurface = { ...current, selectedIndex };
     const painted = await this.renderList(surface);
     if (!displayCurrent()) return false;
-    if (!painted && this.surface === surface && !this.confirmation && !this.promptQuestion) {
+    if (!painted && this.surface === surface && !this.confirmation && !this.promptQuestion
+      && !this.assistantConversation.isActive()) {
       this.surface = current;
       // One direct rollback paint follows the existing bounded recovery.
       // Never recurse into another healing attempt or overwrite a successor.
       await this.visual.paint(this.visualFrame());
     }
-    return painted && this.surface === surface && !this.confirmation && !this.promptQuestion;
+    return painted && this.surface === surface && !this.confirmation && !this.promptQuestion
+      && !this.assistantConversation.isActive();
   }
 
   moveSelection(delta: number): Promise<boolean> {

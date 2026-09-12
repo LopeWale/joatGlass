@@ -8,6 +8,8 @@ import {
   parseMessagesConversationRow,
   parsePlanningMonthTitle,
   usesQuickNotesReaderLayout,
+  usesMessagesPreparedReaderLayout,
+  quickNotesProsePages,
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
@@ -21,7 +23,6 @@ import {
   type PanelContentTab,
   type PlanningGridCell,
   type ProductivityHudModel,
-  type ResumePolicy,
 } from './types';
 
 /** What an expanded tab says before the Mac has pushed anything for it.
@@ -36,7 +37,13 @@ const PANEL_EMPTY_COPY: Readonly<Record<PanelContentTab, string>> = {
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
 interface DataSurfaceSnapshot {
+  planningNavigation?: { canGoBack: boolean; selectedIndex: number };
+  readerPage?: { id: string; index: number; count: number };
+  quickNotesPage?: { index: number; count: number };
   title: string;
+  contextLabel?: string;
+  controlStartIndex?: number;
+  planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>;
   items: string[];
   selectable: boolean;
   hint?: string;
@@ -45,6 +52,7 @@ interface DataSurfaceSnapshot {
   selectedIndex: number;
   messagesRetry: boolean;
   messagesScreen?: MessagesScreen;
+  messageProse?: { pages: string[][]; index: number };
   /** An expanded panel tab keeps its rail lit, on the page and on the
    * list Back restores; without this the rail vanished on return. */
   railTab?: PanelContentTab;
@@ -118,8 +126,8 @@ const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
  * instead of leaving a wearer on a spinner indefinitely.
  */
 const CAPABILITY_RESPONSE_TIMEOUT_MS = 12_000;
-/** Terminal native-write receipts must remain readable, then lead back to the
- * live, unified planner rather than stranding the wearer on a dead end. */
+/** Failure pages stay readable before return; success receipts remain over
+ * the promptly refreshed agenda. Monitoring follows the saved receipt. */
 const PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS = 5_000;
 
 function isTerminalProductivityOutcome(phase: ProductivityHudModel['phase']): boolean {
@@ -147,28 +155,15 @@ function isPlanningAnchor(value: unknown): value is number {
  * This class no longer draws a menu of its own — it opens what the wearer
  * picked and owns the pages beneath it.
  *
- * View machine, and what left double-tap means in each state:
+ * View machine, and what double-click means in each state:
  *   home ──firmware menu──▶ data view, settings, or direct action
- *   settings/data ──left double-tap──▶ home  (left double-tap is BACK, always)
+ *   settings/data ──double-click──▶ home  (double-click is BACK, always)
  */
 
-const POLICY_ROWS: ReadonlyArray<{ policy: ResumePolicy; label: string }> = [
-  { policy: 'auto', label: 'Resume mic: instantly' },
-  { policy: 'mac', label: 'Resume mic: Mac decides' },
-  { policy: 'confirm', label: 'Resume mic: ask me first' },
-];
-
-const SETTINGS_ACTION_ROWS = [
-  { action: 'repeat', label: 'Repeat last reply' },
-  { action: 'reconnect', label: 'Reconnect JOAT' },
-] as const;
-
 const SETTINGS_SURFACE = {
-  title: 'LISTENING RESUME',
-  // Only the left-temple double press owns contextual Back. Do not advertise
-  // a generic double-click: the right/ring double gesture has other runtime
-  // meanings.
-  hint: 'tap: apply · left x2: back',
+  title: 'PHONE CONTROLS',
+  // GesturePolicy owns the source-independent Back meaning.
+  hint: 'left x2: back',
 } as const;
 
 export function isActionLifecycleTitle(title?: string): boolean {
@@ -181,6 +176,18 @@ export class CapabilityMenu {
   private dataItemCount = 0;
   private dataRowsSelectable = false;
   private dataSelectionPending = false;
+  private rowSelection?: {
+    surface: DataSurfaceSnapshot;
+    requestId: string | undefined;
+    transition: number;
+    desired: number;
+    painted: number;
+    rows: number[];
+    tap: boolean;
+    boundary?: number;
+  };
+  private dashboardSelectionPaint?: Promise<boolean>;
+  private dashboardFailedPaint?: object;
   /** Some supported hosts emit a scroll while retaining the prior native-list
    * index. Preserve the locally mirrored row for that gesture's following
    * click; a later credible native index still takes precedence. */
@@ -192,10 +199,21 @@ export class CapabilityMenu {
   private dataHint?: string;
   private dataPagePending = false;
   private noteReaderTraceId?: string;
+  private noteProse?: { pages: string[][]; index: number };
+  private notePageDirection = 1;
+  private noteProsePainting = false;
+  private messageProsePainting = false;
+  private messagePageDirection = 1;
+  /** Reader identities belong to one capability visit, not the recipient/action.
+   * Keep tombstones through local Back/Home so delayed pages cannot revive it.
+   * At the cap, refuse new readers for this visit rather than forget a tombstone. */
+  private reviewVisit?: { requestId: string; activeId?: string; retired: Set<string> };
+
   /** Messages has two real read levels (conversation then full message), so
    * retain those exact Mac-authored frames for contextual Back. */
   private dataSurface?: DataSurfaceSnapshot;
   private dataReturn?: DataSurfaceSnapshot;
+  private notificationRefreshSelection?: { requestId: string; index: number };
   private dataGrandparent?: DataSurfaceSnapshot;
   private pendingTitle?: string;
   private pendingRequestId?: string;
@@ -212,9 +230,15 @@ export class CapabilityMenu {
   private productivityAnchorUnixMs?: number;
   private productivityReturnTimer?: ReturnType<typeof setTimeout>;
   private productivityReturnEpoch = 0;
+  private productivitySelection?: { contextLabel?: string; item: string; index: number };
+  private planningReceiptRefresh?: {
+    requestId: string; monitoring?: ProductivityHudModel;
+    selection?: { contextLabel?: string; item: string; index: number };
+  };
   /** A Planning row may open a day or item detail. Back returns to the live
    * schedule rather than throwing the wearer all the way to the overview. */
   private planningDrillDown = false;
+  private planningBackPending = false;
   /** The split Planning dashboard: hovered date, and whether the right pane
    * owns input. Plugin-local — a hover never costs a Mac round trip. */
   private dashboard?: {
@@ -234,7 +258,7 @@ export class CapabilityMenu {
 
   constructor(
     private readonly hud: HudPresenter,
-    private readonly settings: Settings,
+    _settings: Settings,
     private readonly link: MacLink,
   ) {}
 
@@ -307,7 +331,10 @@ export class CapabilityMenu {
       try { if (!action.isCurrent()) return false; } catch { return false; }
       action.message = Object.freeze(message);
     }
-    if (messageFinished(message.state)) selection.retiredActionIds.add(message.actionId);
+    if (messageFinished(message.state)) {
+      selection.retiredActionIds.add(message.actionId);
+      this.retireReviewReader();
+    }
     this.messagePaintRevision += 1;
     this.clearResponseTimeout();
     return true;
@@ -334,6 +361,7 @@ export class CapabilityMenu {
       || (actionId !== undefined && action.message.actionId !== actionId)
       || messageFinished(action.message.state)) return false;
     try { if (!action.isCurrent()) return false; } catch { return false; }
+    this.retireReviewReader();
     selection.retiredActionIds.add(action.message.actionId);
     selection.action = undefined;
     this.messagePaintRevision += 1;
@@ -345,6 +373,7 @@ export class CapabilityMenu {
 
   /** Disconnect retires locally; explicit departure also cancels its draft. */
   retireMessageUI(notifyMac = false): void {
+    this.retireReviewReader();
     const selection = this.messageSelection;
     this.messageSelection = undefined;
     this.messagePaintRevision += 1;
@@ -353,6 +382,13 @@ export class CapabilityMenu {
     if (notifyMac && selection?.action && !messageFinished(selection.action.message.state)) {
       this.sendMessageCancel(selection, selection.action.message.actionId);
     }
+  }
+
+  private retireReviewReader(): void {
+    const visit = this.reviewVisit;
+    if (!visit?.activeId) return;
+    visit.retired.add(visit.activeId);
+    visit.activeId = undefined;
   }
 
   private sendMessageCancel(selection: MessageSelectionBinding, actionId: string): void {
@@ -402,7 +438,7 @@ export class CapabilityMenu {
     if (!messageFinished(accepted.state)) return true;
     let parent = this.dataSurface;
     let grandparent = this.dataReturn;
-    if (this.messagesScreen === 'message_detail' || this.messagesScreen === 'compose'
+    if (this.messagesScreen === 'message_detail' || this.messagesScreen === 'review' || this.messagesScreen === 'compose'
       || this.messagesScreen === 'read_only') {
       parent = this.dataReturn;
       grandparent = this.dataGrandparent;
@@ -543,8 +579,8 @@ export class CapabilityMenu {
     this.dataGrandparent = undefined;
   }
 
-  /** Contextual-menu entry: settings remains reachable without consuming one
-   * of the five 576x288 sidebar rows. */
+  /** Compatibility for cached firmware Settings links. Configuration now
+   * belongs to the phone; this surface offers only directions and Back. */
   async openSettings(): Promise<void> {
     this.departSurface('settings');
     this.leaveMessages();
@@ -554,11 +590,8 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     this.selectedIndex = 0;
     const shown = await this.hud.showList(
-      [
-        ...POLICY_ROWS.map((row) => this.label(row)),
-        ...SETTINGS_ACTION_ROWS.map((row) => row.label),
-      ],
-      { ...SETTINGS_SURFACE, selectable: true },
+      ['Manage listening and Mac connections', 'in JOAT’s phone controls in Even Hub.'],
+      { ...SETTINGS_SURFACE, selectable: false },
     );
     if (!this.isCurrentTransition(transition)) return;
     if (shown) this.view = 'settings';
@@ -567,7 +600,7 @@ export class CapabilityMenu {
 
   /**
    * Contextual-menu escape. This intentionally uses the same Mac-owned
-   * Planning request as left-double Back: it cannot mutate Calendar or
+   * Planning request as double-click Back: it cannot mutate Calendar or
    * Reminders, and it retains the active safe-write day's anchor when there
    * is one. The OS menu itself stays one-shot; the rebuilt Planning page
    * carries the contextual menu forward.
@@ -586,7 +619,22 @@ export class CapabilityMenu {
     selectable = false,
     hint?: string,
     planningGrid?: PlanningGridCell[],
+    contextLabel?: string,
+    controlStartIndex?: number,
+    planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>,
+    quickNotesPage?: { index: number; count: number },
+    readerPage?: { id: string; index: number; count: number },
+    planningNavigation?: { canGoBack: boolean; selectedIndex: number },
   ): Promise<boolean> {
+    // Read-only Planning details answer a row tap. Once Back retires that
+    // tap, a delayed detail cannot replace its restored agenda.
+    if (title?.trim().toUpperCase() === 'PLANNING · EVENT'
+      && requestId === this.pendingRequestId && !this.dataSelectionPending) return true;
+    const isReview = title?.trim().toUpperCase() === 'MESSAGES · REVIEW';
+    const reviewVisit = this.reviewVisit;
+    if (isReview && reviewVisit && reviewVisit.requestId === requestId
+      && (!readerPage || reviewVisit.retired.has(readerPage.id)
+        || (reviewVisit.retired.size >= 256 && readerPage.id !== reviewVisit.activeId))) return true;
     // A reader response is always answering a row tap in this visit. Check
     // before voice-generation adoption so a late page cannot reopen it.
     if (usesQuickNotesReaderLayout(title ?? '', items)
@@ -620,7 +668,32 @@ export class CapabilityMenu {
       ? 'tap: retry · left x2: back'
       : hint;
 
-    const parent = this.detailReturnSurface(title);
+    if (isReview) {
+      if (!readerPage || typeof readerPage.id !== 'string' || !readerPage.id.length
+        || readerPage.id.length > 128 || !Number.isInteger(readerPage.index)
+        || !Number.isInteger(readerPage.count) || readerPage.index < 0
+        || readerPage.count <= readerPage.index) return true;
+      if (this.reviewVisit?.requestId !== requestId) {
+        this.reviewVisit = { requestId, retired: new Set() };
+      }
+      if (this.reviewVisit.activeId !== readerPage.id) this.retireReviewReader();
+      if (this.reviewVisit.retired.size >= 256) return true;
+      // Reserve before the first await: Back during painting also retires it.
+      this.reviewVisit.activeId = readerPage.id;
+    }
+
+    const planningOwner = title?.trim().toUpperCase().startsWith('PLANNING')
+      && planningNavigation && typeof planningNavigation.canGoBack === 'boolean'
+      && Number.isInteger(planningNavigation.selectedIndex)
+      && planningNavigation.selectedIndex >= 0 && planningNavigation.selectedIndex <= 41
+      ? { ...planningNavigation } : undefined;
+    // Current Planning publishes its own parent and row mapping. Cached peer
+    // scope rows must never become actionable against a newer Mac projection.
+    if (planningOwner) {
+      this.dataReturn = undefined;
+      this.dataGrandparent = undefined;
+    }
+    const parent = planningOwner ? undefined : this.detailReturnSurface(title);
     if (parent) {
       this.dataGrandparent = this.dataReturn;
       this.dataReturn = parent;
@@ -640,6 +713,7 @@ export class CapabilityMenu {
       if (dateIndex < 0) {
         dateIndex = Math.max(0, planningGrid.findIndex((cell) => cell.inMonth));
       }
+      if (planningOwner) dateIndex = planningOwner.selectedIndex;
       this.dashboard = {
         grid: [...planningGrid], dateIndex, paneFocused: false, paneIndex: 0,
       };
@@ -647,6 +721,8 @@ export class CapabilityMenu {
       this.dashboard = undefined;
     }
     const expectedRequestId = this.pendingRequestId;
+    const receiptRefresh = this.planningReceiptRefresh?.requestId === expectedRequestId
+      ? this.planningReceiptRefresh : undefined;
     const transition = this.beginTransition();
     if (conversationalTerminal && requestId) {
       // Bind after beginTransition retires the old view, and before awaiting
@@ -662,11 +738,55 @@ export class CapabilityMenu {
       && this.hud.usesCustomListSelection?.()
       ? items.flatMap((item, index) => parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : [])
       : [];
-    const initialSelection = messageRows[0] ?? 0;
-    const shown = await this.hud.showList(items, {
+    const refreshSelection = normalized === 'NOTIFICATIONS'
+      && this.notificationRefreshSelection?.requestId === requestId
+      ? this.notificationRefreshSelection.index : undefined;
+    const rowSelection = normalized.startsWith('PLANNING')
+      && receiptRefresh?.selection?.contextLabel === contextLabel
+      ? receiptRefresh?.selection : undefined;
+    const matchedPlanningIndex = rowSelection
+      ? items[rowSelection.index] === rowSelection.item ? rowSelection.index
+        : items.indexOf(rowSelection.item)
+      : -1;
+    const planningContentCount = controlStartIndex ?? items.length;
+    const restoredPlanningIndex = rowSelection
+      ? matchedPlanningIndex >= 0 ? matchedPlanningIndex
+        : Math.max(0, Math.min(rowSelection.index, planningContentCount - 1))
+      : undefined;
+    const preparedReader = readerPage && typeof readerPage.id === 'string'
+      && readerPage.id.length > 0 && readerPage.id.length <= 128
+      && Number.isInteger(readerPage.index) && Number.isInteger(readerPage.count)
+      && readerPage.index >= 0 && readerPage.count > readerPage.index
+      ? { ...readerPage } : undefined;
+    const archivePage = normalized === 'QUICKNOTES' && quickNotesPage
+      && Number.isInteger(quickNotesPage.index) && Number.isInteger(quickNotesPage.count)
+      && quickNotesPage.index >= 0 && quickNotesPage.count > quickNotesPage.index
+      ? { ...quickNotesPage } : undefined;
+    const previousArchivePage = this.dataSurface?.quickNotesPage;
+    const archiveSelection = archivePage && previousArchivePage && this.dataPagePending
+      && archivePage.index < previousArchivePage.index ? Math.max(0, items.length - 1) : undefined;
+    const authoritativePlanningIndex = planningOwner && !this.dashboard
+      ? Math.max(0, Math.min(planningOwner.selectedIndex, items.length - 1)) : undefined;
+    const initialSelection = archiveSelection ?? restoredPlanningIndex ?? authoritativePlanningIndex ?? (refreshSelection === undefined ? messageRows[0] ?? 0
+      : Math.max(0, Math.min(refreshSelection, items.length - 1)));
+    if (refreshSelection !== undefined) this.notificationRefreshSelection = undefined;
+    const noteProse = usesQuickNotesReaderLayout(title, items) && this.hud.usesCustomListSelection?.()
+      ? { pages: quickNotesProsePages(items), index: 0 } : undefined;
+    if (noteProse && this.notePageDirection < 0) noteProse.index = noteProse.pages.length - 1;
+    const messageProse = usesMessagesPreparedReaderLayout(title, items) && this.hud.usesCustomListSelection?.()
+      ? { pages: quickNotesProsePages(items), index: 0 } : undefined;
+    if (messageProse && this.messagePageDirection < 0 && this.dataPagePending
+      && this.dataSurface?.title === title) messageProse.index = messageProse.pages.length - 1;
+    const shown = await this.hud.showList(messageProse ? this.noteDisplayItems(items, messageProse)
+      : noteProse ? this.noteDisplayItems(items, noteProse) : items, {
       title,
-      hint: effectiveHint,
-      selectable: effectiveSelectable,
+      contextLabel,
+      controlStartIndex,
+      planningEntries,
+      retainProductivityReceipt: receiptRefresh !== undefined,
+      hint: messageProse ? this.messageDisplayHint(effectiveHint, messageProse)
+        : noteProse ? this.noteDisplayHint(effectiveHint, noteProse) : effectiveHint,
+      selectable: effectiveSelectable && (!messageProse || messageProse.index === messageProse.pages.length - 1),
       planningGrid,
       planningPane: this.dashboardPane(),
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
@@ -683,6 +803,9 @@ export class CapabilityMenu {
       return true;
     }
     this.view = 'data';
+    this.noteProse = noteProse;
+    this.notePageDirection = 1;
+    this.messagePageDirection = 1;
     this.dataItemCount = items.length;
     this.dataRowsSelectable = effectiveSelectable;
     this.dataSelectionPending = false;
@@ -692,7 +815,14 @@ export class CapabilityMenu {
     this.dataPagePending = false;
     this.selectedIndex = initialSelection;
     this.dataSurface = {
+      planningNavigation: planningOwner,
       title,
+      quickNotesPage: archivePage,
+      readerPage: preparedReader,
+      messageProse,
+      contextLabel,
+      controlStartIndex,
+      planningEntries,
       items: [...items],
       selectable: effectiveSelectable,
       hint: effectiveHint,
@@ -702,6 +832,9 @@ export class CapabilityMenu {
       messagesScreen: this.messagesScreen,
       ...(railTab ? { railTab } : {}),
     };
+    if (receiptRefresh?.monitoring) {
+      this.scheduleMonitoringReceipt(receiptRefresh.monitoring, expectedRequestId);
+    }
     if (conversationalTerminal && requestId) this.armResponseTimeout('AGENT TERMINAL', requestId);
     return true;
   }
@@ -742,6 +875,13 @@ export class CapabilityMenu {
     productivity: ProductivityHudModel,
     onVisible?: () => void,
   ): Promise<boolean> {
+    if (this.view !== 'productivity') {
+      this.productivitySelection = this.pendingTitle === 'PLANNING' && this.dataSurface
+        && this.selectedIndex < this.dataSurface.items.length
+        ? { contextLabel: this.dataSurface.contextLabel,
+          item: this.dataSurface.items[this.selectedIndex]!, index: this.selectedIndex }
+        : undefined;
+    }
     this.retireBrainstormSurface();
     this.leaveMessages();
     this.clearResponseTimeout();
@@ -790,7 +930,7 @@ export class CapabilityMenu {
       : undefined;
     this.pendingTitle = this.productivityReturn.toUpperCase();
     this.pendingRequestId = undefined;
-    this.selectedIndex = 0;
+    this.selectedIndex = this.productivitySelection?.index ?? 0;
     stateReady = true;
     // A deferred confirmation, failed paint, or newer transition can be
     // handled without a current visual page. Only a retained exact surface is
@@ -800,10 +940,17 @@ export class CapabilityMenu {
     return visible;
   }
 
-  /** Left double-tap is BACK, and only back. The wearer's menu is the
+  /** Double-click is BACK, and only back. The wearer's menu is the
    * firmware contextual menu (tap, then long-press); this gesture never
    * draws a second one. On the overview there is no level left to leave. */
   async toggle(): Promise<void> {
+    // Back retires any queued tap/page intent before awaiting another paint.
+    this.rowSelection = undefined;
+    if (this.dashboardSelectionPaint) {
+      const dashboard = this.dashboard;
+      await this.dashboardSelectionPaint;
+      if (this.dashboard !== dashboard || this.view !== 'data') return;
+    }
     this.terminalPreludeRevision += 1;
     if (this.view === 'closed') {
       if (this.terminalOpening) {
@@ -819,17 +966,47 @@ export class CapabilityMenu {
         this.productivityAnchorUnixMs,
       );
     } else if (this.view === 'data' && this.dashboard?.paneFocused) {
-      // First Back hands input from the day pane to the date grid.
-      this.dashboard.paneFocused = false;
-      this.dashboard.paneIndex = 0;
-      await this.hud.updatePlanningPane(this.dashboardPane()!);
+      // Keep Back ordered with any unfinished pane selection paint.
+      await this.queueDashboardInteraction(async () => {
+        this.dashboard!.paneFocused = false;
+        this.dashboard!.paneIndex = 0;
+        return this.hud.updatePlanningPane(this.dashboardPane()!);
+      });
+    } else if (this.view === 'data' && this.pendingTitle === 'PLANNING'
+      && this.dataSurface?.planningNavigation) {
+      if (this.planningBackPending) return;
+      if (!this.dataSurface.planningNavigation.canGoBack) {
+        await this.close();
+        return;
+      }
+      if (!this.pendingRequestId) return;
+      this.planningBackPending = true;
+      this.dataRowsSelectable = false;
+      this.dataSelectionPending = true;
+      this.link.send({ kind: 'input', event: {
+        containerName: 'capability-lifecycle', selectedName: 'planning-back',
+        requestId: this.pendingRequestId,
+      } });
+      this.armResponseTimeout('PLANNING', this.pendingRequestId);
     } else if (
       this.view === 'data'
       && this.pendingTitle === 'PLANNING'
       && this.planningDrillDown
     ) {
       this.planningDrillDown = false;
-      await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
+      const parent = this.dataReturn;
+      const selected = parent?.planningEntries?.[parent.selectedIndex];
+      // An event detail is read-only and leaves the Mac's published row map
+      // unchanged. Scope/day/paging controls and reminder mutations instead
+      // keep their authoritative refresh path.
+      if (this.dataSurface?.title.trim().toUpperCase() === 'PLANNING · EVENT'
+        && !this.dataSurface.selectable && parent?.selectable
+        && selected?.kind === 'event' && this.pendingRequestId) {
+        this.dataSelectionPending = false;
+        await this.returnToDataSurface();
+      } else {
+        await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
+      }
     } else if (
       this.view === 'data'
       && this.pendingTitle === 'QUICKNOTES'
@@ -870,6 +1047,9 @@ export class CapabilityMenu {
 
     if (this.view === 'data') {
       const eventType = list.eventType ?? 0;
+      if (this.dataSurface?.messageProse && eventType !== OsEventTypeList.CLICK_EVENT) {
+        return this.handleScroll(eventType);
+      }
       if (eventType !== OsEventTypeList.CLICK_EVENT && this.canRequestPanelPage(eventType)) {
         this.requestPanelPage(eventType);
         return true;
@@ -883,6 +1063,13 @@ export class CapabilityMenu {
         );
         return true;
       }
+      if (this.usesOrderedSelection()) {
+        // Some hosts wrap custom-surface gestures in a native List event.
+        // Its hidden index does not own the selection visible on this HUD.
+        if (eventType !== OsEventTypeList.CLICK_EVENT) return this.handleScroll(eventType);
+        this.dataSelectionUsesStaleNativeIndex = false;
+        return this.selectDataRow();
+      }
       const messageRows = this.customMessageRows();
       if (messageRows) {
         // Some hosts report a hidden native cursor for the custom text
@@ -893,6 +1080,7 @@ export class CapabilityMenu {
         this.dataSelectionUsesStaleNativeIndex = false;
         return this.selectDataRow();
       }
+      if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
       if (eventType !== OsEventTypeList.CLICK_EVENT) {
         if (this.isQuickNotesReader()) {
@@ -912,8 +1100,10 @@ export class CapabilityMenu {
             : 0;
         const expected = Math.max(0, Math.min(maximum, before + delta));
         const reported = list.currentSelectItemIndex;
+        // Hidden custom-list cursors can keep reporting zero even at the
+        // endpoint. Preserve the mirrored boundary too, or the next Down
+        // resets the controller to row zero without moving the visible HUD.
         const staleNativeIndex = delta !== 0
-          && expected !== before
           && (
             reported === before
             || (this.dataSelectionUsesStaleNativeIndex && reported === 0)
@@ -925,7 +1115,11 @@ export class CapabilityMenu {
         if (staleNativeIndex) void this.hud.setSelection(this.selectedIndex);
         const stayedAtBoundary = before === this.selectedIndex
           && (this.selectedIndex === 0 || this.selectedIndex === maximum);
-        const messagesReader = this.messagesScreen === 'message_detail';
+        if (stayedAtBoundary && this.canRequestQuickNotesListPage(eventType)) {
+          this.requestQuickNotesListPage(eventType);
+          return true;
+        }
+        const messagesReader = this.messagesScreen === 'message_detail' || this.messagesScreen === 'review';
         if (
           (messagesReader || stayedAtBoundary)
           && this.pendingTitle === 'MESSAGES'
@@ -980,6 +1174,19 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
+      if (this.usesOrderedSelection()) {
+        this.moveRowSelection(delta, eventType);
+        return true;
+      }
+      if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
+      if (this.canRequestQuickNotesListPage(eventType)) {
+        this.requestQuickNotesListPage(eventType);
+        return true;
+      }
+      if (this.messagesScreen === 'review' || this.dataSurface?.messageProse) {
+        if (this.canRequestMessagePage(eventType)) this.requestMessagePage(eventType);
+        return true;
+      }
       if (this.isQuickNotesReader()) {
         this.requestQuickNotesPage(eventType);
         return true;
@@ -1012,11 +1219,80 @@ export class CapabilityMenu {
       if (applied !== 0) void this.hud.moveSelection(applied);
       return true;
     }
-    // Settings is the one remaining locally-selectable page.
-    const maximum = POLICY_ROWS.length + SETTINGS_ACTION_ROWS.length - 1;
-    this.selectedIndex = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
-    void this.hud.setSelection(this.selectedIndex);
+    // Retired Settings links show phone guidance, with no local choices.
     return true;
+  }
+
+  private usesOrderedSelection(): boolean {
+    if (this.view !== 'data' || this.dashboard || !this.dataRowsSelectable
+      || !this.dataSurface?.selectable || !this.hud.usesCustomListSelection()
+      || this.dataSurface.messageProse) return false;
+    if (this.pendingTitle === 'PLANNING') return true;
+    if (this.pendingTitle === 'QUICKNOTES') return !!this.dataSurface.quickNotesPage;
+    return this.pendingTitle === 'MESSAGES' && this.messagesScreen !== 'review'
+      && this.messagesScreen !== 'message_detail';
+  }
+
+  private rowSelectionCurrent(driver: NonNullable<CapabilityMenu['rowSelection']>): boolean {
+    return this.rowSelection === driver && this.view === 'data'
+      && this.dataSurface === driver.surface && this.pendingRequestId === driver.requestId
+      && this.transitionId === driver.transition;
+  }
+
+  private moveRowSelection(delta: number, eventType: number): void {
+    const surface = this.dataSurface;
+    if (!surface || !this.usesOrderedSelection() || this.dataSelectionPending || this.dataPagePending) return;
+    let driver = this.rowSelection;
+    const start = !driver || !this.rowSelectionCurrent(driver);
+    if (start) {
+      const rows = this.messagesRetry ? [0] : this.customMessageRows()
+        ?? Array.from({ length: this.dataItemCount }, (_, index) => index);
+      if (!rows.length) return;
+      driver = {
+        surface, requestId: this.pendingRequestId, transition: this.transitionId,
+        desired: this.selectedIndex, painted: this.selectedIndex, rows, tap: false,
+      };
+      this.rowSelection = driver;
+    }
+    if (!driver || driver.tap || driver.boundary !== undefined) return;
+    const position = Math.max(0, driver.rows.indexOf(driver.desired));
+    const next = driver.rows[Math.max(0, Math.min(driver.rows.length - 1, position + delta))]!;
+    if (next === driver.desired && (this.canRequestQuickNotesListPage(eventType, next)
+      || this.canRequestMessagePage(eventType, next))) {
+      // Preserve the first endpoint gesture, but let its row finish painting
+      // before the existing Mac-owned pager advances the source snapshot.
+      driver.boundary = eventType;
+    }
+    driver.desired = next;
+    if (start) void this.paintRowSelection(driver);
+  }
+
+  private async paintRowSelection(driver: NonNullable<CapabilityMenu['rowSelection']>): Promise<void> {
+    let success = false;
+    try {
+      while (this.rowSelectionCurrent(driver) && driver.painted !== driver.desired) {
+        const target = driver.desired;
+        const painted = await this.hud.restoreSelection(target);
+        if (!this.rowSelectionCurrent(driver)) return;
+        if (!painted) return;
+        driver.painted = target;
+        this.selectedIndex = target;
+      }
+      success = this.rowSelectionCurrent(driver);
+    } catch {
+      // Failed or superseded paints cannot authorize a tap or page request.
+    } finally {
+      if (this.rowSelectionCurrent(driver)) {
+        this.selectedIndex = driver.painted;
+        this.rowSelection = undefined;
+        if (success && driver.boundary !== undefined) {
+          if (this.canRequestQuickNotesListPage(driver.boundary)) this.requestQuickNotesListPage(driver.boundary);
+          else if (this.canRequestMessagePage(driver.boundary)) this.requestMessagePage(driver.boundary);
+        } else if (success && driver.tap) this.selectDataRow();
+      } else if (this.rowSelection === driver) {
+        this.rowSelection = undefined;
+      }
+    }
   }
 
   /** Right temple/ring click selects the highlighted custom-rendered row. */
@@ -1046,73 +1322,99 @@ export class CapabilityMenu {
     return cell?.entries?.length ?? 0;
   }
 
-  /** Scroll on the dashboard: dates while the grid owns input, items once
-   * the pane does. Scrolling past either month edge asks the Mac for the
-   * neighbouring month through the existing row contract (rows 6 and 7 of
-   * the month list are its previous/next actions). */
-  private dashboardScroll(delta: number): void {
+  /** Input stays bound to one published month and follows visible paints.
+   * A failed selection paint retires already queued taps; the next gesture
+   * starts from the last committed selection. */
+  private queueDashboardInteraction(action: () => Promise<boolean>): Promise<boolean> {
     const dashboard = this.dashboard;
-    if (!dashboard || delta === 0) return;
-    if (dashboard.paneFocused) {
-      const maximum = Math.max(0, this.dashboardEntryCount() - 1);
-      dashboard.paneIndex = Math.max(0, Math.min(maximum, dashboard.paneIndex + delta));
-      void this.hud.updatePlanningPane(this.dashboardPane()!);
-      return;
-    }
-    const next = dashboard.dateIndex + delta;
-    if (next < 0 || next > 41) {
-      const monthRow = next < 0 ? 6 : 7;
-      if (this.pendingTitle && this.pendingRequestId) {
-        this.link.send({
-          kind: 'input',
-          event: {
-            containerName: 'capdata',
-            selectedIndex: monthRow,
-            selectedName: this.pendingTitle,
-            requestId: this.pendingRequestId,
-          },
-        });
-        this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+    const request = this.pendingRequestId;
+    const previous = this.dashboardSelectionPaint ?? Promise.resolve(true);
+    const paint = previous.then(async ok => {
+      if (!ok || !dashboard || this.dashboard !== dashboard || this.view !== 'data'
+        || this.pendingRequestId !== request || this.dataSelectionPending) return false;
+      if (this.dashboardFailedPaint === dashboard) {
+        if (!await this.hud.updatePlanningPane(this.dashboardPane()!)) return false;
+        if (this.dashboard !== dashboard || this.view !== 'data' || this.pendingRequestId !== request) return false;
+        this.dashboardFailedPaint = undefined;
       }
-      return;
-    }
-    dashboard.dateIndex = next;
-    dashboard.paneIndex = 0;
-    void this.hud.updatePlanningPane(this.dashboardPane()!);
+      const prior = { dateIndex: dashboard.dateIndex, paneFocused: dashboard.paneFocused, paneIndex: dashboard.paneIndex };
+      let painted = false;
+      try { painted = await action(); } catch { /* Retain the last visible binding. */ }
+      if (!painted && this.dashboard === dashboard) {
+        Object.assign(dashboard, prior);
+        this.dashboardFailedPaint = dashboard;
+      }
+      return painted;
+    }).catch(() => false);
+    this.dashboardSelectionPaint = paint;
+    void paint.then(() => {
+      if (this.dashboardSelectionPaint === paint) this.dashboardSelectionPaint = undefined;
+    });
+    return paint;
   }
 
-  /** Tap on the dashboard: the first hands input to the right pane, the
-   * second opens the hovered item. The wire carries only the date and the
-   * row position — the Mac re-resolves the entry from a fresh projection. */
-  private dashboardTap(): void {
-    const dashboard = this.dashboard;
-    if (!dashboard) return;
-    if (!dashboard.paneFocused) {
-      if (this.dashboardEntryCount() === 0) return;
-      dashboard.paneFocused = true;
+  /** Dates own grid scrolling; the pane includes its entries and Open day.
+   * Month edges use the existing previous/next Mac action rows. */
+  private dashboardScroll(delta: number): void {
+    if (!this.dashboard || delta === 0) return;
+    void this.queueDashboardInteraction(async () => {
+      const dashboard = this.dashboard!;
+      if (dashboard.paneFocused) {
+        dashboard.paneIndex = Math.max(0, Math.min(this.dashboardEntryCount(), dashboard.paneIndex + delta));
+        return this.hud.updatePlanningPane(this.dashboardPane()!);
+      }
+      const next = dashboard.dateIndex + delta;
+      if (next < 0 || next >= dashboard.grid.length) {
+        if (!this.pendingTitle || !this.pendingRequestId) return false;
+        this.dataSelectionPending = true;
+        this.link.send({ kind: 'input', event: {
+          containerName: 'capdata', selectedIndex: next < 0 ? 6 : 7,
+          selectedName: this.pendingTitle, requestId: this.pendingRequestId,
+        } });
+        this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+        return true;
+      }
+      dashboard.dateIndex = next;
       dashboard.paneIndex = 0;
-      void this.hud.updatePlanningPane(this.dashboardPane()!);
-      return;
-    }
-    const cell = dashboard.grid[dashboard.dateIndex];
-    if (!cell || !this.pendingTitle || !this.pendingRequestId) return;
-    const anchor = Date.parse(`${cell.day}T12:00:00Z`);
-    if (!Number.isFinite(anchor)) return;
-    this.planningDrillDown = true;
-    this.link.send({
-      kind: 'input',
-      event: {
-        containerName: 'capgrid',
-        selectedIndex: dashboard.paneIndex,
-        selectedName: this.pendingTitle,
-        requestId: this.pendingRequestId,
-        planningAnchorUnixMs: anchor,
-      },
+      return this.hud.updatePlanningPane(this.dashboardPane()!);
     });
-    this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+  }
+
+  /** Empty dates also have Open day. Item taps retain the Mac's published
+   * day/index identity binding; Open day exposes the complete paginated list. */
+  private dashboardTap(): void {
+    if (!this.dashboard) return;
+    void this.queueDashboardInteraction(async () => {
+      const dashboard = this.dashboard!;
+      if (!dashboard.paneFocused) {
+        dashboard.paneFocused = true;
+        dashboard.paneIndex = 0;
+        return this.hud.updatePlanningPane(this.dashboardPane()!);
+      }
+      const cell = dashboard.grid[dashboard.dateIndex];
+      if (!cell || !this.pendingTitle || !this.pendingRequestId) return false;
+      this.planningDrillDown = true;
+      this.dataSelectionPending = true;
+      this.link.send({ kind: 'input', event: {
+        containerName: 'capgrid', selectedIndex: dashboard.paneIndex,
+        selectedName: this.pendingTitle, requestId: this.pendingRequestId,
+        planningDay: cell.day,
+      } });
+      this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+      return true;
+    });
   }
 
   private selectDataRow(): true {
+    if (this.usesOrderedSelection() && this.dataPagePending) return true;
+    if (this.messageProsePainting) return true;
+    const messageProse = this.dataSurface?.messageProse;
+    if (this.messagesScreen === 'review' && messageProse
+      && messageProse.index !== messageProse.pages.length - 1) return true;
+    if (this.rowSelection && this.rowSelectionCurrent(this.rowSelection)) {
+      if (this.rowSelection.boundary === undefined) this.rowSelection.tap = true;
+      return true;
+    }
     if (this.dashboard) {
       this.dashboardTap();
       return true;
@@ -1123,8 +1425,23 @@ export class CapabilityMenu {
       return true;
     }
     if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
+    if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
     if (this.dataSelectionPending) return true;
     this.dataSelectionPending = true;
+    if (this.messagesScreen === 'review' && this.pendingRequestId) {
+      // This is the current draft's review action, not a new recipient row.
+      // Retain the original selection/action binding for its confirmation.
+      const reader = this.dataSurface?.readerPage;
+      if (!reader || reader.index !== reader.count - 1) {
+        this.dataSelectionPending = false;
+        return true;
+      }
+      this.link.send({ kind: 'input', event: {
+        containerName: 'capdata', selectedName: 'MESSAGES', selectedIndex: reader.index,
+        requestId: this.pendingRequestId, traceId: reader.id,
+      } });
+      return true;
+    }
     if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
     const random = globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1155,6 +1472,8 @@ export class CapabilityMenu {
       kind: 'input',
       event: {
         containerName: readingMessage ? 'capmessage' : 'capdata',
+        ...(this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.quickNotesPage
+          ? { quickNotesPageIndex: this.dataSurface.quickNotesPage.index } : {}),
         selectedIndex: this.selectedIndex,
         selectedName: this.pendingTitle,
         traceId,
@@ -1174,50 +1493,33 @@ export class CapabilityMenu {
     return true;
   }
 
-  private select(index: number): boolean {
-    const policy = POLICY_ROWS[index];
-    if (policy) {
-      this.settings.setResumePolicy(policy.policy);
-      this.link.send({ kind: 'policy', resume: policy.policy });
-      void this.close();
-      return true;
-    }
-    const action = SETTINGS_ACTION_ROWS[index - POLICY_ROWS.length];
-    if (action?.action === 'repeat') {
-      void this.repeatLastReply();
-    } else if (action?.action === 'reconnect') {
-      void this.reconnectToMac();
-    }
+  private select(_index: number): boolean {
+    // Cached firmware Settings pages are guidance only; no configuration or
+    // connection action can be triggered by an old row index.
     return true;
   }
 
-  private label(row: (typeof POLICY_ROWS)[number]): string {
-    const active = row.policy === this.settings.resumePolicy;
-    return `${active ? '*' : ' '} ${row.label}`;
-  }
-
-  private async repeatLastReply(): Promise<void> {
-    this.link.send({
-      kind: 'input',
-      event: { containerName: 'sysmenu', selectedIndex: 1 },
-    });
-    await this.close();
-  }
-
-  private async reconnectToMac(): Promise<void> {
-    this.link.connect();
-    await this.close();
-  }
-
   /** A row chosen in the firmware contextual menu — the platform's own menu
-   * mechanism, and the wearer's only one. Settings is a local page; every
-   * other row is the same Mac-backed open a menu tap performs. */
+   * mechanism, and the wearer's only one. A cached retired Settings slot
+   * offers phone guidance; visible rows keep their existing Mac-backed open. */
   async openFromContextualMenu(index: number): Promise<void> {
     const picked = CAPABILITIES[index];
     if (picked === undefined) return;
     this.terminalPreludeRevision += 1;
     if (picked === 'Settings') {
       await this.openSettings();
+      return;
+    }
+    if (picked === 'Planning' && this.view === 'data'
+      && this.pendingTitle === 'PLANNING' && this.dataSurface && this.dataRowsSelectable) {
+      // Reopening the current agenda refreshes its data without first
+      // replacing it with a four-tile Loading page. Keep the visible focus
+      // bound to the refreshed rows through the same outcome-return path.
+      const surface = this.dataSurface;
+      await this.openCapability(picked, index, undefined, {
+        selection: { contextLabel: surface.contextLabel,
+          item: surface.items[this.selectedIndex] ?? '', index: this.selectedIndex },
+      });
       return;
     }
     await this.openCapability(picked, index);
@@ -1233,8 +1535,8 @@ export class CapabilityMenu {
    * is already on the glass — the same gesture the wearer knows from the
    * platform's own readers.
    */
-  async openNotifications(): Promise<void> {
-    await this.openCapability('Notifications', CAPABILITIES.length);
+  async openNotifications(selectedIndex = 0): Promise<void> {
+    await this.openCapability('Notifications', CAPABILITIES.length, undefined, undefined, selectedIndex);
   }
 
   /** A click on the resting overview opens whichever tab the rail has
@@ -1440,6 +1742,28 @@ export class CapabilityMenu {
     this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
   }
 
+  private canRequestQuickNotesListPage(eventType: number, selectedIndex = this.selectedIndex): boolean {
+    const page = this.dataSurface?.quickNotesPage;
+    if (this.view !== 'data' || this.pendingTitle !== 'QUICKNOTES'
+      || this.dataSurface?.title !== 'QUICKNOTES' || !page
+      || this.dataPagePending || this.dataSelectionPending || !this.pendingRequestId) return false;
+    return eventType === OsEventTypeList.SCROLL_TOP_EVENT
+      ? selectedIndex === 0 && page.index > 0
+      : eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+        && selectedIndex === this.dataItemCount - 1 && page.index + 1 < page.count;
+  }
+
+  private requestQuickNotesListPage(eventType: number): void {
+    const page = this.dataSurface?.quickNotesPage;
+    if (!page || !this.pendingRequestId) return;
+    this.dataPagePending = true;
+    this.link.send({ kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'QUICKNOTES · LIST',
+      selectedIndex: page.index, eventType, requestId: this.pendingRequestId,
+    } });
+    this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
+  }
+
   private isQuickNotesReader(): boolean {
     return this.view === 'data' && this.pendingTitle === 'QUICKNOTES'
       && this.dataSurface !== undefined
@@ -1447,11 +1771,37 @@ export class CapabilityMenu {
   }
 
   private requestQuickNotesPage(eventType: number): void {
-    if (!this.isQuickNotesReader() || this.dataPagePending || !this.noteReaderTraceId
-      || !this.pendingRequestId || !this.hintOffersPage(eventType)) return;
+    if (!this.isQuickNotesReader() || this.dataPagePending || this.noteProsePainting || !this.noteReaderTraceId
+      || !this.pendingRequestId) return;
+    const direction = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1
+      : eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT ? 1 : 0;
+    if (!direction) return;
+    const prose = this.noteProse;
+    if (prose && prose.index + direction >= 0 && prose.index + direction < prose.pages.length) {
+      const surface = this.dataSurface!;
+      const request = this.pendingRequestId;
+      const next = { ...prose, index: prose.index + direction };
+      this.noteProsePainting = true;
+      void this.hud.showList(this.noteDisplayItems(surface.items, next), {
+        title: surface.title, contextLabel: surface.contextLabel,
+        hint: this.noteDisplayHint(surface.hint, next), selectable: false,
+      }, () => this.isQuickNotesReader() && this.dataSurface === surface
+        && this.pendingRequestId === request && this.noteProse === prose).then(ok => {
+        if (this.dataSurface !== surface || this.pendingRequestId !== request || this.noteProse !== prose) return;
+        if (ok) this.noteProse = next;
+        else void this.close();
+      }).catch(() => {
+        if (this.dataSurface === surface && this.pendingRequestId === request && this.noteProse === prose) {
+          void this.close();
+        }
+      }).finally(() => { this.noteProsePainting = false; });
+      return;
+    }
+    if (!this.hintOffersPage(eventType)) return;
     const counter = /^(\d+)\/(\d+) · /.exec(this.dataSurface?.items[0] ?? '');
     if (!counter) return;
     this.dataPagePending = true;
+    this.notePageDirection = direction;
     this.link.send({kind: 'input', event: {
       containerName: 'cappage', selectedName: 'QUICKNOTES',
       selectedIndex: Number(counter[1]) - 1,
@@ -1461,19 +1811,45 @@ export class CapabilityMenu {
   }
 
   private retireQuickNotesReader(destination: 'list' | 'home'): void {
-    if (this.pendingTitle === 'QUICKNOTES' && this.noteReaderTraceId && this.pendingRequestId) {
+    if (this.pendingTitle === 'QUICKNOTES' && this.pendingRequestId
+      && (this.noteReaderTraceId || destination === 'home')) {
       this.link.send({kind: 'input', event: {
         containerName: 'capability-lifecycle', selectedName: `quicknotes-${destination}`,
         requestId: this.pendingRequestId,
       }});
     }
     this.noteReaderTraceId = undefined;
+    this.noteProse = undefined;
+    this.notePageDirection = 1;
+  }
+
+  private noteDisplayItems(items: readonly string[], prose: { pages: string[][]; index: number }): string[] {
+    const suffix = prose.pages.length > 1 ? ` · part ${prose.index + 1}/${prose.pages.length}` : '';
+    return [`${items[0] ?? ''}${suffix}`, ...prose.pages[prose.index]!];
+  }
+
+  private noteDisplayHint(hint: string | undefined, prose: { pages: string[][]; index: number }): string {
+    const parts = (hint ?? '').split(' · ').filter(part => part !== 'up previous' && part !== 'down more');
+    if (prose.index > 0 || hint?.includes('up previous')) parts.unshift('up previous');
+    if (prose.index + 1 < prose.pages.length || hint?.includes('down more')) parts.unshift('down more');
+    return parts.join(' · ');
+  }
+
+  private messageDisplayHint(hint: string | undefined, prose: { pages: string[][]; index: number }): string {
+    const display = this.noteDisplayHint(hint, prose);
+    return prose.index === prose.pages.length - 1 ? display
+      : display.split(' · ').filter(part => part !== 'tap: confirm').join(' · ');
   }
 
   private async openCapability(
     picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'> | 'Notifications',
     index: number,
     planningAnchorUnixMs?: number,
+    receiptRefresh?: {
+      monitoring?: ProductivityHudModel;
+      selection?: { contextLabel?: string; item: string; index: number };
+    },
+    initialSelectedIndex = 0,
   ): Promise<void> {
     this.departSurface('feature');
     if (picked === 'Brainstorm') this.claimBrainstormVisit(this.captureBrainstormVisit());
@@ -1488,7 +1864,9 @@ export class CapabilityMenu {
     const transition = this.beginTransition();
     const title = picked.toUpperCase();
     const requestId = `hud-request-${this.randomId()}`;
-    const shown = await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
+    // A verified outcome already supplies feedback. Request its authoritative
+    // agenda immediately instead of spending another paint on a loading page.
+    const shown = receiptRefresh !== undefined || await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
       title,
       hint: 'left x2: back',
     });
@@ -1500,6 +1878,9 @@ export class CapabilityMenu {
     this.view = 'data';
     this.pendingTitle = title;
     this.pendingRequestId = requestId;
+    this.notificationRefreshSelection = picked === 'Notifications'
+      ? { requestId, index: initialSelectedIndex } : undefined;
+    if (receiptRefresh) this.planningReceiptRefresh = { requestId, ...receiptRefresh };
     if (picked === 'Agent Terminal') {
       // A busy lane opens directly without a picker row, so the request
       // itself identifies this explicit selection on both sides of the wire.
@@ -1643,14 +2024,20 @@ export class CapabilityMenu {
    * the cursor and private chat identity Mac-side also prevents G2 input from
    * choosing a different recipient.
    */
-  private canRequestMessagePage(eventType: number): boolean {
-    if (this.dataPagePending || !this.pendingRequestId) return false;
-    const isReader = this.messagesScreen === 'message_detail';
+  private canRequestMessagePage(eventType: number, selectedIndex = this.selectedIndex): boolean {
+    if (this.dataPagePending || this.messageProsePainting || !this.pendingRequestId) return false;
+    const isReader = this.messagesScreen === 'message_detail' || this.messagesScreen === 'review';
     if (this.messagesScreen !== 'conversation' && !isReader) return false;
-    if (isReader) return this.hintOffersPage(eventType);
+    if (isReader) {
+      const prose = this.dataSurface?.messageProse;
+      const direction = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1
+        : eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT ? 1 : 0;
+      if (prose && direction && prose.index + direction >= 0 && prose.index + direction < prose.pages.length) return true;
+      return this.hintOffersPage(eventType);
+    }
     const messageRows = this.customMessageRows();
-    const atTop = this.selectedIndex === (messageRows?.[0] ?? 0);
-    const atBottom = this.selectedIndex === (messageRows?.[messageRows.length - 1]
+    const atTop = selectedIndex === (messageRows?.[0] ?? 0);
+    const atBottom = selectedIndex === (messageRows?.[messageRows.length - 1]
       ?? Math.max(0, this.dataItemCount - 1));
     if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
       return atTop && this.dataHint?.includes('up newer') === true;
@@ -1672,14 +2059,41 @@ export class CapabilityMenu {
 
   private requestMessagePage(eventType: number): void {
     if (!this.pendingRequestId) return;
+    const surface = this.dataSurface;
+    const prose = surface?.messageProse;
+    const direction = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 1;
+    if (surface && prose && prose.index + direction >= 0 && prose.index + direction < prose.pages.length) {
+      const requestId = this.pendingRequestId;
+      const next = { ...prose, index: prose.index + direction };
+      const current = () => this.view === 'data' && this.dataSurface === surface
+        && this.pendingRequestId === requestId && surface.messageProse === prose;
+      this.messageProsePainting = true;
+      void this.hud.showList(this.noteDisplayItems(surface.items, next), {
+        title: surface.title, contextLabel: surface.contextLabel,
+        hint: this.messageDisplayHint(surface.hint, next),
+        selectable: surface.selectable && next.index === next.pages.length - 1,
+      }, current).then(ok => {
+        if (!current()) return;
+        if (ok) surface.messageProse = next;
+        else void this.close();
+      }).catch(() => { if (current()) void this.close(); })
+        .finally(() => { this.messageProsePainting = false; });
+      return;
+    }
+    const reader = surface?.readerPage;
+    // Review uses the shared exact-reader contract. Conversation/history
+    // keeps its established request shape and selected-message owner.
+    if (this.messagesScreen === 'review' && !reader) return;
+    this.messagePageDirection = direction;
     this.dataPagePending = true;
-    const traceId = `hud-${this.randomId()}`;
+    const traceId = reader?.id ?? `hud-${this.randomId()}`;
     console.info(`[joat trace] trace=${traceId} stage=message-page-requested event=${eventType}`);
     this.link.send({
       kind: 'input',
       event: {
         containerName: 'cappage',
         selectedName: 'MESSAGES',
+        ...(reader ? { selectedIndex: reader.index } : {}),
         eventType,
         traceId,
         requestId: this.pendingRequestId,
@@ -1692,6 +2106,7 @@ export class CapabilityMenu {
   }
 
   private beginTransition(): number {
+    this.planningBackPending = false;
     this.retireTerminalOpening();
     this.clearProductivityReturn();
     this.view = 'transition';
@@ -1727,6 +2142,23 @@ export class CapabilityMenu {
   private async returnToDataSurface(): Promise<void> {
     const parent = this.dataReturn;
     if (!parent) return;
+    if (this.messagesScreen === 'review') {
+      this.retireReviewReader();
+      const selection = this.messageSelection;
+      const action = selection?.action;
+      if (selection && action && !messageFinished(action.message.state)) {
+        this.sendMessageCancel(selection, action.message.actionId);
+        selection.retiredActionIds.add(action.message.actionId);
+        selection.action = undefined;
+        this.messagePaintRevision += 1;
+      }
+    }
+    if (this.pendingTitle === 'NOTIFICATIONS' && parent.title.trim().toUpperCase() === 'NOTIFICATIONS') {
+      // Reading acknowledges a JOAT card. A cached parent would still offer
+      // its old active rows against the Mac's updated action mapping.
+      await this.openNotifications(parent.selectedIndex);
+      return;
+    }
     const messagesBinding = this.messageLifecycleBinding;
     if (this.pendingTitle === 'MESSAGES' && parent.title.trim().toUpperCase() === 'MESSAGES') {
       this.retireMessageUI(true);
@@ -1756,10 +2188,16 @@ export class CapabilityMenu {
         paneIndex: 0,
       };
     }
-    const shown = await this.hud.showList(parent.items, {
+    const shown = await this.hud.showList(parent.messageProse
+      ? this.noteDisplayItems(parent.items, parent.messageProse) : parent.items, {
       title: parent.title,
-      hint: parent.hint,
-      selectable: parent.selectable,
+      initialSelectedIndex: this.dashboard ? 0 : parent.selectedIndex,
+      contextLabel: parent.contextLabel,
+      controlStartIndex: parent.controlStartIndex,
+      planningEntries: parent.planningEntries,
+      hint: parent.messageProse ? this.messageDisplayHint(parent.hint, parent.messageProse) : parent.hint,
+      selectable: parent.selectable && (!parent.messageProse
+        || parent.messageProse.index === parent.messageProse.pages.length - 1),
       planningGrid: parent.planningGrid,
       planningPane: this.dashboardPane(),
       ...(parent.railTab ? { railTab: parent.railTab } : {}),
@@ -1771,7 +2209,7 @@ export class CapabilityMenu {
     }
     // Rebuilding a list resets its visible cursor. Restore that cursor before
     // accepting a tap, so the highlighted row and the target stay identical.
-    if (parent.selectedIndex > 0 && !this.dashboard) {
+    if (parent.selectedIndex > 0 && !this.dashboard && !this.hud.usesCustomListSelection()) {
       const selected = await this.hud.setSelection(parent.selectedIndex);
       if (!this.isCurrentTransition(transition)) return;
       if (!selected) {
@@ -1801,6 +2239,13 @@ export class CapabilityMenu {
 
   private scheduleProductivityReturn(phase: ProductivityHudModel['phase']): void {
     if (!isTerminalProductivityOutcome(phase) || !this.productivityReturn) return;
+    if (phase === 'saved' || phase === 'completed' || phase === 'monitoring') {
+      void this.openCapability(
+        'Planning', CAPABILITIES.indexOf('Planning'), this.productivityAnchorUnixMs,
+        { selection: this.productivitySelection },
+      );
+      return;
+    }
     const epoch = ++this.productivityReturnEpoch;
     this.productivityReturnTimer = setTimeout(() => {
       this.productivityReturnTimer = undefined;
@@ -1813,37 +2258,47 @@ export class CapabilityMenu {
         'Planning',
         CAPABILITIES.indexOf('Planning'),
         this.productivityAnchorUnixMs,
+        { selection: this.productivitySelection },
       );
     }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);
   }
 
-  /** The native bridge has already verified the Reminder and the Mac has
-   * persisted its monitor occurrence. Show that fact as its own HUD state
-   * before returning to live Planning. The epoch guard means an immediate
-   * wearer return or a newer due frame cancels this local transition. */
+  /** The bridge verified the Reminder and the Mac persisted its monitor.
+   * Reload Planning now, then show that monitoring fact over the same agenda. */
   private scheduleReminderMonitoring(saved: ProductivityHudModel): void {
     if (!this.productivityReturn) return;
+    void this.openCapability(
+      'Planning', CAPABILITIES.indexOf('Planning'), saved.planningAnchorUnixMs,
+      { monitoring: saved, selection: this.productivitySelection },
+    );
+  }
+
+  /** Refresh data first; the subsequent receipt never reopens or reloads a page. */
+  private scheduleMonitoringReceipt(saved: ProductivityHudModel, requestId: string): void {
     const epoch = ++this.productivityReturnEpoch;
     this.productivityReturnTimer = setTimeout(() => {
       this.productivityReturnTimer = undefined;
       if (
         this.productivityReturnEpoch !== epoch
-        || this.view !== 'productivity'
-        || this.productivityReturn !== 'Planning'
+        || this.view !== 'data'
+        || this.pendingTitle !== 'PLANNING'
+        || this.pendingRequestId !== requestId
+        || this.contextualMenuOpen
       ) return;
-      void this.presentProductivity({
+      void this.hud.showProductivity({
         domain: 'reminders',
         phase: 'monitoring',
         title: saved.title,
         primary: 'Monitoring armed',
         secondary: 'Native alarm is scheduled. JOAT will check at due time.',
-        hint: 'Planning in 5s · left x2 now',
+        hint: 'left x2: back',
         planningAnchorUnixMs: saved.planningAnchorUnixMs,
       });
     }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);
   }
 
   private clearProductivityReturn(): void {
+    this.planningReceiptRefresh = undefined;
     this.productivityReturnEpoch += 1;
     if (this.productivityReturnTimer !== undefined) {
       clearTimeout(this.productivityReturnTimer);
