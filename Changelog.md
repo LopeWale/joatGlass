@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-12 — Readable prepared Messages results
+
+- Replace 24-character receipt slicing with the existing full-width JOAT regular-prose reader and paging. Preserve terminal action identity and double-click return to the conversation.
+- Official simulator with production prompt admission, prepared reply controller and disposable sender verified the complete long-review acceptance path, readable submission result and Back. No real message was sent. Partial transitions and short-confirmation transition stress remain unresolved.
+
 ## 2026-09-12 — Keep a successful legacy reply in its conversation
 
 - Restore the original recipient context after successful legacy submission only while its selection generation and original expiry remain valid. Each next reply requires a new confirmation; failed submissions and changed contexts do not re-arm a recipient.
