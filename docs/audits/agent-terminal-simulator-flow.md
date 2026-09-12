@@ -68,3 +68,15 @@ For each agent the lifecycle provider admits exactly five sends across four task
 The stop text is supplied at the recognized-speech boundary, just as final transcripts are supplied for acknowledged input. The acceptance does not call roster or adapter cancellation directly. This isolates recognition while preserving production command dispatch, ownership, cancellation transport, and rendering.
 
 The provider rejects wrong task/context identities, duplicate sends, wrong next prompts, lost question context, and cross-agent history. Successful acceptance requires ten sends, four cancel calls, two initialization probes, observed continuing polls, and unchanged before/after production-source fingerprints.
+
+The lifecycle walkthrough caught an inaccurate failure surface: a rejected stop was shown as an offline connection. The corrected surface says **CHECK TASK**, retains the uncertain stop outcome, and offers **check task status**. Both agents must pass explicit assertions excluding the former offline labels, and tapping recovery must poll the owned task without sending it again.
+
+## Final lifecycle and continuity replay
+
+Acceptance is bound to source commit `bf2e052`, tree `2048e983a2d3c9a2ddaaad91dba7f66b7910b308`. The lifecycle run passed with **48 screenshots, ten sends, four cancellation calls, and 134 task reads** (including the two initialization probes). Both agents passed status replacement, same-task input continuation, pending/confirmed/rejected stop outcomes, and task-status recovery without resending.
+
+The conversation regression replay passed with **47 screenshots, seven sends, and two initialization probes**. It verified 14 stable message identities and three exact transcript-region pixel matches: each agent's Back/reopen reading position and the held OpenClaw response arriving while older text remained visible.
+
+A shared-checkout replay correctly failed its final source guard when another task changed three Messages-related plugin files. Those changes were preserved. The successful lifecycle receipt's 205 input hashes were then checked against an immutable export of the accepted tree and matched exactly; continuity was replayed from that export with its own Mac Python import path. Both successful receipts now have identical source fingerprints. The temporary export was removed afterward.
+
+Final cleanup confirmed ports 18980, 18981, 5298, and 9998 closed, both temporary TLS keys removed, and all owned simulator/service processes released. This acceptance used the official simulator, production UI and routing, local TLS protocol fixtures, and the documented recognized-speech boundary. It did not connect to physical glasses or the installed engine.
