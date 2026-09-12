@@ -506,6 +506,9 @@ async function boot(): Promise<void> {
     onContextualMenu: (open) => {
       menu.setContextualMenuOpen(open);
       brainstorm.setSuspended(open);
+      // Closing firmware UI may clear its underlay. Restore the current
+      // surface, including a capability chosen from this menu.
+      if (!open && !exiting) void hud.repaintRestoredSurface();
     },
     onForegroundEnter: () => {
       if (exiting) return;
@@ -541,7 +544,12 @@ async function boot(): Promise<void> {
     menu,
     lifecycle,
     g2Diagnostics,
-    navigation,
+    {
+      isActive: () => navigation.isActive() && hud.isNavigationVisible(),
+      handleClick: () => navigation.handleClick(),
+      handleScroll: direction => navigation.handleScroll(direction),
+      handleCancel: () => navigation.handleCancel(),
+    },
     brainstorm,
     hud,
     (direction) => hud.scrollTranscript(direction),
@@ -755,6 +763,11 @@ async function boot(): Promise<void> {
         }
         break;
       case 'hud.text':
+        if (msg.containerId === ContainerId.Main && msg.contentKind === 'notification'
+          && msg.text === '' && msg.traceId) {
+          await awaitCurrent(hud.retireNotification(msg.traceId));
+          break;
+        }
         // Status-bar writes become the STATE WORD, not the whole line: the
         // bar has one owner (Chrome), so the clock and battery survive what
         // the Mac has to say.
@@ -767,7 +780,8 @@ async function boot(): Promise<void> {
         if (msg.append) await awaitCurrent(hud.appendText(msg.text, msg.containerId));
         else {
           await awaitCurrent(
-            hud.showText(msg.text, msg.containerId, msg.textColor, msg.contentKind),
+            hud.showText(msg.text, msg.containerId, msg.textColor, msg.contentKind,
+              msg.contentKind === 'notification' ? msg.traceId : undefined),
           );
         }
         break;
@@ -809,6 +823,12 @@ async function boot(): Promise<void> {
           msg.selectable ?? false,
           msg.hint,
           msg.planningGrid,
+          msg.contextLabel,
+          msg.controlStartIndex,
+          msg.planningEntries,
+          msg.quickNotesPage,
+          msg.readerPage,
+          msg.planningNavigation,
         ))) {
           break;
         }
