@@ -278,3 +278,10 @@ Candidate replay used frozen e76ce29 plus only CapabilityMenu/HudCanvasRenderer 
 ## 2026-09-12 — Settled short prepared confirmation
 
 Using frozen Hub 016036b and the production prepared prompt/controller fixture, visually selected Alex and acknowledged the body question. Supplied Fixture reply. END OF DRAFT through the current prompt dispatcher, then captured the full settled confirmation after three seconds before tapping. It accepted once, yielded the readable Submitted receipt with delivery-unverified wording, and double-click restored the same conversation. Controller state sent and disposable sender count one. This supersedes the short-draft no-acceptance gap for a settled prompt; it does not claim stress acceptance or eliminate intermediate tile rendering. No new input-policy code was justified by this run. All owned processes closed. A fresh Computer Use attempt still reported the Mac locked, so the portal baseline/upload remains unavailable pending the existing unlock request.
+
+
+## 2026-09-12 — Shared reply follow-up ownership
+
+Completion audit found the successful-conversation restoration was limited to the legacy lane. Extended the same original-object, trace, generation and expiry guards to prepared selected-conversation replies. Publish terminal sent status before checking that no prepared action remains active; a synchronous status observer changing selection still invalidates the generation. Compose, failure, expiry and navigation remain outside restoration.
+
+Official simulator with frozen Hub 016036b and current controller patch: selected Alex, displayed/acknowledged body prompt, admitted synthetic short transcript, captured settled confirmation, accepted once, inspected full-width receipt, double-clicked to conversation, began a second prepared reply without reselecting, observed fresh body question, double-clicked to cancel it and returned to conversation. Controller UI owner absent after cancel; disposable sender calls one total. All owned processes closed. This is not microphone/STT or real delivery acceptance.
