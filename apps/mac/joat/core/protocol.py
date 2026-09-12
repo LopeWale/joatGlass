@@ -193,6 +193,8 @@ class InputEvent:
     conversation_revision: int | None = None
     planning_anchor_unix_ms: int | None = None
     quick_notes_page_index: int | None = None
+    # Civil date selected in a published Planning grid, not an absolute instant.
+    planning_day: str | None = None
 
     @property
     def is_right_temple_click(self) -> bool:
@@ -750,6 +752,7 @@ class HudList:
     reader_page: tuple[str, int, int] | None = None
     control_start_index: int | None = None
     planning_entries: tuple[PlanningGridEntry | None, ...] | None = None
+    planning_navigation: tuple[bool, int] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -759,6 +762,13 @@ class HudList:
             "items": [utf16_slice(s, 64) for s in self.items[:20]],
             "selectable": self.selectable,
         }
+        if self.planning_navigation is not None:
+            can_go_back, selected_index = self.planning_navigation
+            limit = 41 if self.planning_grid is not None else max(0, len(message["items"]) - 1)
+            message["planningNavigation"] = {
+                "canGoBack": can_go_back,
+                "selectedIndex": max(0, min(selected_index, limit)),
+            }
         if self.planning_entries is not None:
             message["planningEntries"] = [
                 {"time": entry.time, "kind": entry.kind, "title": utf16_slice(entry.title, 200)}
@@ -2240,6 +2250,14 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     planning_anchor = None
                 else:
                     raise
+            planning_day = raw.get("planningDay")
+            if planning_day is not None:
+                if not isinstance(planning_day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", planning_day):
+                    raise ProtocolError("input planningDay must be an ISO civil date")
+                try:
+                    date.fromisoformat(planning_day)
+                except ValueError as exc:
+                    raise ProtocolError("input planningDay must be a valid civil date") from exc
             return Input(
                 event=InputEvent(
                     container_id=raw.get("containerId"),
@@ -2254,6 +2272,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                     conversation_revision=conversation_revision,
                     planning_anchor_unix_ms=planning_anchor,
                     quick_notes_page_index=quick_notes_page_index,
+                    planning_day=planning_day,
                 )
             )
         case "pairing":

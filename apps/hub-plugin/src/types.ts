@@ -501,6 +501,7 @@ export type DownlinkMessage =
     requestId?: string;
     selectable?: boolean;
     planningGrid?: PlanningGridCell[];
+    planningNavigation?: { canGoBack: boolean; selectedIndex: number };
   }
   | { kind: 'brainstorm.view'; brainstorm: BrainstormViewPayload }
   | { kind: 'agent_terminal.view'; terminal: AgentTerminalHudModel }
@@ -589,6 +590,8 @@ export type DownlinkMessage =
 
 export interface InputEventPayload {
   quickNotesPageIndex?: number;
+  /** Exact civil date from the Mac's current Planning grid. */
+  planningDay?: string;
   containerId?: number;
   containerName?: string;
   eventType?: number;
