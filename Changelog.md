@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-11 — Agent Terminal chooser and isolated simulator acceptance
+
+- Show only configured OpenClaw/Hermes agents in Agent Terminal; retain legacy Work/Calendar/session owners internally. Entry always opens the same chooser, including during a request. Use explicit connection states and consistent double-click Back/cancel instructions.
+- Back retires the conversation binding and returns to the chooser; cancelling a question restores its selected conversation. Reject delayed retired-opening frames and handle cycling from an internal legacy session.
+- Independent UI and ownership reviews informed the fixes. The final clean committed-source replay through `859870b` passed both complete official-simulator journeys, cancellation and busy re-entry; all 14 stable frames were visually inspected. Local TLS agent responses and acknowledged synthetic final speech transcripts are explicit fixture boundaries.
+- TypeScript compilation, 255 scoped UI tests and 248 roster/opening tests passed separately. The runner closed its isolated processes/ports and removed its temporary TLS key. No installed engine, phone/glasses connection, pairing or remote credentials were accessed. See docs/audits/agent-terminal-simulator-flow.md.
+
 ## 2026-09-11 — Authenticated Agent Terminal A2A connections
 
 - Added separate editable OpenClaw/Hermes profiles and endpoint-bound Keychain credentials in the signed Mac app. The engine verifies saved credentials at startup and adds both peers to the existing terminal roster; the earlier Gateway session remains distinct.
