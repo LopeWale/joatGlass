@@ -69,6 +69,7 @@ export interface AssistantOverlayInputOwner {
   continueAssistantConversation(): Promise<boolean>;
   requestAssistantConversationExit(): Promise<'inactive' | 'prompted' | 'exited' | 'failed'>;
   hasVisibleNotification(): boolean;
+  visibleNotificationId?(): string | undefined;
   dismissVisibleNotification(): Promise<boolean>;
 }
 
@@ -692,7 +693,17 @@ export class EventRouter {
   private dismissVisibleNotificationFor(eventType: number | undefined): boolean {
     if (!this.assistantOverlay?.hasVisibleNotification()) return false;
     if ((eventType ?? OsEventTypeList.CLICK_EVENT) !== OsEventTypeList.CLICK_EVENT) return false;
+    const cardId = this.assistantOverlay.visibleNotificationId?.();
+    // A replacement card can own the model before its pixels are ready.
+    // Consume that tap without dismissing unseen content. Older owners
+    // without identity support retain their local-only dismissal behavior.
+    if (this.assistantOverlay.visibleNotificationId && !cardId) return true;
+    // Dismiss synchronously retires the identity before any subsequent tap.
+    // Never queue this receipt for a replacement Mac session.
     void this.assistantOverlay.dismissVisibleNotification();
+    if (cardId && this.link.linkState === 'connected') {
+      this.link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId: cardId } });
+    }
     return true;
   }
 }
