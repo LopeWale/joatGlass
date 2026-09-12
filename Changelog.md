@@ -1900,3 +1900,10 @@ Official simulator replay used 601 in-memory reminders, an exact lookup for sele
 ## 2026-09-12 — Current-build rendering evidence correction
 
 Replayed connected QuickNote, Messaging reader and empty-day Planning returns against 0.1.88 Hub source. Withdrew the claim that these captures proved missing retained pixels: comparison with actual encoded images found zero missing bright pixels in the checked settled frames. Separately quantified a QuickNote list-to-reader transition: 12 of 50 samples mixed old/new pixels; first complete new frame at372ms. Partial-transition acceptance still fails. Details and limits are in the existing feature-repair audit. All owned simulator/support processes closed; no extra package or production workaround created.
+
+
+## 2026-09-12 — Canonical rebuild after Messaging follow-up repairs
+
+Rebuilt the existing apps/hub-plugin/joat.ehpk from committed source 22706d3 using the existing private WSS candidates and unchanged 0.1.88 manifest metadata. Type checking and production compilation passed (62 modules). Canonical artifact: 150653 bytes; SHA-256 40128047a55acdedd03d7a089066bc588ac30e97c16e427a1852d330c7442385. The deliberate dirty override covered only the pre-existing untracked tsconfig.tsbuildinfo under the plugin; tracked source was clean. Temporary release staging was removed; repository build/ was not created.
+
+Safari showed JOAT 0.1.88 as the latest existing private build before the attempt. Opened that project's Upload a build dialog. The canonical file appeared in the native picker, but selection did not take effect and Upload remained disabled; a coordinate attempt returned noWindowsAvailable. Cancelled the picker successfully. No submission occurred, no version was changed, and no new simulator/device acceptance is claimed. Partial transitions remain an unmet requirement.
