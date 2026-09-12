@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-12 — Hermes streaming and durable Agent Terminal recovery
+
+- Observe Hermes JSON-RPC SSE task/status/artifact events, including fragmented UTF-8, append/replacement updates, bounded frames and owned-task resubscription. Keep one assistant message identity across partial and final output. OpenClaw retains rate-conscious task polling; uncertain sends are never replayed.
+- Save explicit provider identity in native connection settings. Describe each provider's remote tool policy and distinguish invalid credentials from task authorization. OpenClaw peer credentials cannot approve operator actions, and the reviewed Hermes A2A interface has no approval-decision RPC; JOAT exposes no fabricated approve/deny action.
+- Persist whole bounded transcripts, context, task identity and dispatch receipts atomically in the existing leased SQLite store. Restore active work as Check task status. Drain local work and pending preparation on shutdown without sending remote cancellation; new captures and queued input never survive an engine restart. Recovered completion replaces stale working/authorization guidance.
+- Final isolated official simulator acceptance passed with 40 screens and 208 matching production source hashes: both agents complete requests, preserve Back/reading position, restore accepted tasks after reconstruction, and resolve external authorization by querying without resending. All owned ports and the temporary TLS key were released. Receipts and exact boundaries are recorded in docs/plans/agent-terminal-task-lifecycle.md.
+- Independent review closed SSE boundary/identity issues, receipt reconciliation and shutdown races. Validation includes 544 focused Mac tests (with subprocess crash/restart boundaries), six-file Python type checking and four native A2A settings tests. Physical glasses, phone pairing and the installed engine were not used.
+
 ## 2026-09-12 — Consistent prepared reply follow-up
 
 - Apply the same guarded successful-recipient restoration to prepared and legacy selected-conversation replies. Preserve original expiry, context generation and fresh confirmation requirements.

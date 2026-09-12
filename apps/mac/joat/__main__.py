@@ -107,6 +107,7 @@ from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.pomodoro import PomodoroStore
 from .persistence.store import DurableStore
+from .persistence.terminal import TerminalCheckpointStore
 from .persistence.tasks import TaskOccurrenceStore
 from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
@@ -1452,6 +1453,9 @@ async def main() -> None:
             endpoint=profile.endpoint, label=profile.label,
             token_loader=native_token_loader(profile, personal_data),
             state_changed=a2a_state_callback(profile.id),
+            streaming=profile.provider == "hermes", provider=profile.provider,
+            # OpenClaw defaults to 30 requests/minute per A2A peer.
+            poll_interval_s=3 if profile.provider == "openclaw" else 1,
         )
         a2a_agents[name] = agent
         status.set_a2a_connection(profile.id, state="unprepared")
@@ -1467,11 +1471,6 @@ async def main() -> None:
             used.add(address.key if isinstance(address, LaneAddress) else address)
             renamed.append((address, existing_agent))
         terminal_lanes = list(a2a_agents.items()) + renamed
-
-    # Check enabled credentials without submitting work or requiring glasses.
-    # Each adapter owns its bounded, authenticated probe and truthful status.
-    # A failed peer must not prevent the other peers or the engine starting.
-    await asyncio.gather(*(agent.initialize() for agent in a2a_agents.values()), return_exceptions=True)
 
     async def terminal_announce(line: str) -> None:
         # The SessionManager owns the HUD while a session runs; terminal
@@ -1527,6 +1526,20 @@ async def main() -> None:
         agent_terminal, paint=terminal_paint,
         connection_generation=lambda: transport.audio_connection_generation,
     )
+
+    terminal_checkpoints = TerminalCheckpointStore(durable_store)
+    restorable_agents: list[A2ATerminalAgent] = []
+    for profile in a2a_profiles:
+        if agent_terminal.bind_persistence(
+            profile.label.casefold(), terminal_checkpoints, profile.id, profile.endpoint,
+            provider=profile.provider,
+        ):
+            restorable_agents.append(a2a_agents[profile.label.casefold()])
+        else:
+            status.set_a2a_connection(profile.id, state="failed", reason="storage_unavailable")
+    # Restore task ownership before probing credentials. Authentication checks
+    # must never erase a recovered task or automatically submit its instruction.
+    await asyncio.gather(*(agent.initialize() for agent in restorable_agents), return_exceptions=True)
 
     terminal_commands = AgentTerminalCommands(
         agent_terminal,
@@ -1985,7 +1998,12 @@ async def main() -> None:
         await message_replies.aclose()
         await message_ui.aclose()
         await prompted_speech.aclose()
-        await asyncio.gather(*(agent_terminal.cancel(name) for name in a2a_agents), return_exceptions=True)
+        try:
+            await agent_terminal.detach_for_shutdown()
+        except Exception:
+            # A disk failure must not leave the phone relay or native bridge
+            # alive after shutdown. The last committed send intent remains.
+            log.error("Terminal checkpoint shutdown failed; continuing engine cleanup")
         await asyncio.gather(*(agent.close() for agent in a2a_agents.values()), return_exceptions=True)
         await transport.stop()
         if notif_task is not None:

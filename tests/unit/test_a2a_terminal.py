@@ -6,6 +6,7 @@ compatibility or rendered HUD behavior; those have separate acceptance runs.
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 import subprocess
 from collections.abc import AsyncIterator
@@ -17,6 +18,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from joat.agents.a2a_terminal import A2AHttpTransport, A2ATerminalAgent, parse_result
+from joat.agents.a2a_stream import parse_sse_payload
 from joat.core.a2a import A2AError, A2AErrorCode as Code, A2ARequestResult
 from joat.services.agent_terminal import AgentTerminalRoster
 
@@ -58,6 +60,7 @@ class Peer:
         self.redirect = False
         self.trap_calls = 0
         self.cancel_reply: Any = lambda body: task("TASK_STATE_CANCELED")
+        self.stream_payloads: list[dict[str, Any]] | None = None
 
     def agent(self, **kwargs: Any) -> A2ATerminalAgent:
         async def token() -> str:
@@ -83,6 +86,33 @@ async def peer(tls_contexts: tuple[ssl.SSLContext, ssl.SSLContext]) -> AsyncIter
         if fixture.reject or request.headers.get("Authorization") != "Bearer test-peer-secret":
             return web.Response(status=401)
         method = body["method"]
+        if method == "tasks/subscribe":
+            return web.json_response({"jsonrpc": "2.0", "id": body["id"],
+                                      "error": {"code": -32601, "message": "Subscription unavailable in this fixture"}})
+        if method == "message/stream":
+            events = fixture.stream_payloads
+            if events is None:
+                return web.Response(status=501)
+            if asyncio.iscoroutine(events):
+                events = await events
+            if not isinstance(events, list):
+                events = [events]
+
+            def wrap(event: Any) -> Any:
+                if not isinstance(event, dict):
+                    return event
+                if set(event.keys()) >= {"jsonrpc", "id", "result"}:
+                    return event
+                return {"jsonrpc": "2.0", "id": body["id"], "result": event}
+
+            lines = [
+                f"data: {json.dumps(wrap(event), separators=(',', ':'))}\n"
+                for event in events
+            ]
+            if len(lines) != len(events):
+                return web.Response(status=500)
+            payload = "\n".join(lines) + "\n"
+            return web.Response(body=payload.encode("utf-8"), headers={"Content-Type": "text/event-stream; charset=utf-8"})
         if method == "tasks/get" and body["params"]["id"] != "task-1":
             return web.json_response({"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32001, "message": "Task not found"}})
         if method == "message/send":
@@ -412,3 +442,158 @@ async def test_recover_shows_input_required_question_from_status_text(peer: Peer
     result = await agent.recover()
     assert result == "Which city are you in?"
     assert ("agent", "Which city are you in?") in await agent.history()
+
+
+async def test_streaming_message_stream_uses_no_polling(peer: Peer) -> None:
+    peer.stream_payloads = [
+        task("TASK_STATE_SUBMITTED", text="queued"),
+        task("TASK_STATE_WORKING", text="working"),
+        task("TASK_STATE_COMPLETED", text="stream-answer"),
+    ]
+    updates: list[str] = []
+
+    async def on_update(result: A2ARequestResult) -> None:
+        updates.append(result.state)
+
+    agent = peer.agent(streaming=True, provider="hermes")
+    await agent.initialize()
+    generation = agent.capture_context_generation
+    assert generation is not None
+
+    output: str = ""
+    async for chunk in agent.stream_task_captured("hello", context_generation=generation, on_update=on_update):
+        output += chunk
+
+    assert output == "stream-answer"
+    assert updates == ["submitted", "working", "completed"]
+    # Initialize probes tasks/get with a random id; polling in the stream
+    # phase should only target the known task id.
+    assert sum(1 for call in peer.calls if call["method"] == "tasks/get" and call["params"]["id"] == "task-1") == 0
+    assert any(call["method"] == "message/stream" for call in peer.calls)
+
+
+async def test_streaming_deduplicates_repeated_progress_states(peer: Peer) -> None:
+    peer.stream_payloads = [
+        task("TASK_STATE_SUBMITTED", text="queued"),
+        task("TASK_STATE_WORKING", text="working"),
+        task("TASK_STATE_WORKING", text="working"),
+        task("TASK_STATE_COMPLETED", text="done"),
+    ]
+    updates: list[str] = []
+
+    async def on_update(result: A2ARequestResult) -> None:
+        updates.append(result.state)
+
+    agent = peer.agent(streaming=True)
+    await agent.initialize()
+    generation = agent.capture_context_generation
+    assert generation is not None
+
+    outputs: list[str] = []
+    async for chunk in agent.stream_task_captured("hello", context_generation=generation, on_update=on_update):
+        outputs.append(chunk)
+
+    assert "".join(outputs) == "done"
+    assert updates == ["submitted", "working", "completed"]
+
+
+async def test_streaming_input_required_prefers_status_text(peer: Peer) -> None:
+    peer.stream_payloads = [
+        task("TASK_STATE_INPUT_REQUIRED", artifact_text="legacy artifact", status_text="What city are you in?"),
+    ]
+    agent = peer.agent(streaming=True)
+    await agent.initialize()
+    generation = agent.capture_context_generation
+    assert generation is not None
+
+    with pytest.raises(A2AError) as caught:
+        async for _ in agent.stream_task_captured("ask", context_generation=generation):
+            pass
+    assert caught.value.code == Code.INPUT_REQUIRED
+    assert caught.value.text == "What city are you in?"
+
+
+async def test_streaming_unknown_when_stream_ends_active(peer: Peer) -> None:
+    peer.stream_payloads = [
+        task("TASK_STATE_SUBMITTED", text="queued"),
+        task("TASK_STATE_WORKING", text="still-working"),
+    ]
+    agent = peer.agent(streaming=True)
+    with pytest.raises(A2AError) as caught:
+        await collect(agent)
+    assert caught.value.code == Code.OUTCOME_UNKNOWN
+    assert agent.needs_recovery
+
+
+async def test_checkpoint_failure_throws_fail_closed(peer: Peer) -> None:
+    events: list[str] = []
+
+    async def checkpoint(snapshot: dict[str, object]) -> None:
+        events.append(snapshot.get("dispatch_phase", ""))
+        raise RuntimeError("persist failed")
+
+    agent = peer.agent()
+    agent.set_checkpoint(checkpoint)
+    await agent.initialize()
+    with pytest.raises(A2AError) as caught:
+        await collect(agent)
+    assert caught.value.code == Code.SUBMISSION_UNCERTAIN
+    assert events == ["pre_send"]
+    assert all(call["method"] != "message/send" for call in peer.calls)
+
+
+async def test_export_and_restore_state_roundtrip(peer: Peer) -> None:
+    source = peer.agent(timeout_s=2)
+    assert await collect(source) == "answer"
+    snapshot = source.export_state()
+    assert snapshot["history"] == [list(item) for item in await source.history()]
+    assert snapshot["detached_for_shutdown"] is False
+    assert snapshot["dispatch_phase"] == "settled"
+
+    restored = peer.agent()
+    restored.restore_state(snapshot)
+    assert restored.capture_context_generation is None
+    assert restored._dispatch_id == snapshot["dispatch_id"]
+    assert restored._dispatch_phase == "settled"
+    assert await restored.history() == await source.history()
+    assert restored.last_outcome is not None
+
+
+async def test_state_restores_history_without_duplicate_tuples(peer: Peer) -> None:
+    agent = peer.agent()
+    assert await collect(agent, "first") == "answer"
+    snapshot = agent.export_state()
+    assert snapshot["history"] == [list(item) for item in await agent.history()]
+    restored = peer.agent()
+    restored.restore_state(snapshot)
+    assert (await restored.history()) == await agent.history()
+
+
+async def test_detach_for_shutdown_skips_remote_cancel(peer: Peer) -> None:
+    async def slow_send(_: object) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return task("TASK_STATE_WORKING")
+
+    peer.reply = slow_send
+    started = asyncio.Event()
+    states: list[str] = []
+
+    def on_state(state: str, _reason: str) -> None:
+        if state == "running":
+            states.append(state)
+            started.set()
+
+    agent = peer.agent(state_changed=on_state)
+    in_flight = asyncio.create_task(collect(agent))
+    await asyncio.wait_for(started.wait(), 1)
+    await agent.detach_for_shutdown()
+    in_flight.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await in_flight
+    assert states == ["running"]
+    assert not any(call["method"] == "tasks/cancel" for call in peer.calls)
+
+
+def test_parse_sse_payload_rejects_malformed_json() -> None:
+    with pytest.raises(A2AError):
+        parse_sse_payload("{")

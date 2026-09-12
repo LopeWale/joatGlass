@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
+
+MAX_BYTES = 262144
 
 
 class A2AErrorCode(StrEnum):
@@ -61,6 +64,9 @@ class A2ARPCError(A2AError):
 class A2AExternalTransport(ABC):
     @abstractmethod
     async def post_jsonrpc(self, endpoint: str, payload: dict[str, object], token: str) -> dict[str, object]: ...
+
+    def post_jsonrpc_events(self, endpoint: str, payload: dict[str, object], token: str) -> AsyncIterator[dict[str, object]]:  # pragma: no cover - default disabled in test doubles
+        raise A2AError(A2AErrorCode.UNSUPPORTED)
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,6 +30,8 @@ from typing import Literal, Protocol, runtime_checkable
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
 from ..core.a2a import A2AError, A2AErrorCode, A2ARequestResult
 from ..core.terminal_conversation import TerminalConversation, TerminalMessage
+from ..persistence.terminal import TerminalCheckpointStore
+from ..agents.a2a_permissions import permission_notice
 from ..agents.openclaw_gateway import (
     OpenClawPairingRequired, OpenClawScopeMismatch, classify_gateway_dial_failure,
 )
@@ -372,6 +374,8 @@ class TerminalLane:
     """Pending (id, kind, summary) — tool calls waiting on the wearer."""
     preparation: _LanePreparation | None = None
     conversation: TerminalConversation = field(default_factory=TerminalConversation)
+    persistence_error: str = ""
+    detaching: bool = False
     task_outcome: A2ARequestResult | None = None
 
     @property
@@ -409,6 +413,8 @@ class TerminalLane:
 
     @property
     def preparation_status(self) -> tuple[str, str]:
+        if self.persistence_error:
+            return "failed", self.persistence_error
         # Legacy stream-only embeddings have no typed readiness contract.
         # Retain their behavior; actual captured lanes must prove a context.
         try:
@@ -498,9 +504,136 @@ class AgentTerminalRoster:
         # Last chip text painted per lane, so a background lane
         # repaints on a STATE change and not on every line.
         self._marks: dict[str, str] = {}
+        self._persistence: dict[str, tuple[TerminalCheckpointStore, str, str, str]] = {}
+        self._receipts: dict[str, tuple[str | None, str | None]] = {}
         """Rows from the last discover(); what 'resume <label>' can name."""
 
     # ── roster ───────────────────────────────────────────────────────────
+
+    def bind_persistence(self, name: str, repository: TerminalCheckpointStore,
+                         profile_id: str, endpoint: str, provider: str = "generic") -> bool:
+        try:
+            self._bind_persistence(name, repository, profile_id, endpoint, provider)
+            return True
+        except Exception:
+            self.block_persistence(name)
+            return False
+
+    def block_persistence(self, name: str) -> None:
+        lane = self._lanes[name]
+        lane.persistence_error = "Conversation storage unavailable. Repair it on the Mac before sending."
+        lane.last_error = lane.persistence_error
+        lane.capture_revision += 1
+        async def refuse(_state: dict[str, object]) -> None:
+            raise RuntimeError("Terminal persistence unavailable")
+        getattr(lane.agent, "set_checkpoint")(refuse)
+        self._persistence.pop(name, None)
+        log.warning("terminal storage unavailable; lane disabled")
+
+    def _bind_persistence(self, name: str, repository: TerminalCheckpointStore,
+                          profile_id: str, endpoint: str, provider: str) -> None:
+        """Restore one exact enabled profile before adapter initialization.
+
+        Failure propagates: callers must not silently replace corrupt durable
+        ownership with a fresh conversation that could repeat remote work.
+        """
+        lane = self._lanes[name]
+        agent = lane.agent
+        if getattr(agent, "endpoint", None) != endpoint:
+            raise ValueError("Terminal persistence endpoint does not match its adapter")
+        restore = getattr(agent, "restore_state")
+        install = getattr(agent, "set_checkpoint")
+        snapshot = repository.load(profile_id, endpoint)
+        if snapshot is not None:
+            if snapshot["provider"] != provider:
+                raise ValueError("Terminal checkpoint provider changed")
+            conversation = TerminalConversation.restore(snapshot["conversation"])
+            saved = snapshot["adapter"]
+            history = saved.get("history", [])
+            outcome = saved.get("last_outcome")
+            if (saved.get("dispatch_phase") == "settled" and isinstance(outcome, dict)
+                    and outcome.get("state") in {"completed", "input-required"}
+                    and history and history[-1][0] == "user"):
+                content = ((outcome.get("status_text") or outcome.get("text")) if outcome["state"] == "input-required"
+                           else (outcome.get("text") or outcome.get("status_text")))
+                if isinstance(content, str) and content:
+                    history.append(["agent", content])
+                    saved["history"] = history[-64:]
+            restore(saved)
+            saved = getattr(agent, "export_state")()
+            # A crash can occur after the adapter committed its final receipt
+            # but before the async iterator yielded it into the UI model.
+            history = saved.get("history", [])
+            meaningful = [m for m in conversation.messages if m.role != "status"]
+            if (history and isinstance(history[-1], list) and len(history[-1]) == 2
+                    and history[-1][0] == "agent" and isinstance(history[-1][1], str)
+                    and snapshot["receipt_dispatch_id"] == snapshot["adapter"].get("dispatch_id")
+                    and saved.get("dispatch_phase") == "settled"):
+                users = [i for i, m in enumerate(meaningful) if m.id == snapshot["receipt_user_id"] and m.role == "user"]
+                if users:
+                    after = meaningful[users[-1] + 1:]
+                    if not after:
+                        conversation.append("assistant", history[-1][1])
+                    elif len(after) == 1 and after[0].role == "assistant":
+                        conversation.replace(after[0].id, history[-1][1])
+            lane.conversation = conversation
+            lane.tail.extend(m.text for m in conversation.messages)
+            self._receipts[name] = (snapshot["receipt_user_id"], snapshot["receipt_dispatch_id"])
+        self._persistence[name] = (repository, profile_id, endpoint, provider)
+
+        async def checkpoint(state: dict[str, object]) -> None:
+            if state.get("checkpoint_phase") == "pre_send":
+                users = [m for m in lane.conversation.messages if m.role == "user"]
+                dispatch = state.get("dispatch_id")
+                self._receipts[name] = (users[-1].id if users else None, dispatch if isinstance(dispatch, str) else None)
+            user_id, dispatch_id = self._receipts.get(name, (None, None))
+            try:
+                repository.save(profile_id, endpoint, lane.conversation, state, provider=provider,
+                                receipt_user_id=user_id, receipt_dispatch_id=dispatch_id)
+            except Exception:
+                self.block_persistence(name)
+                raise
+
+        install(checkpoint)
+        self._persist_lane(lane)
+
+    def _persist_lane(self, lane: TerminalLane) -> None:
+        binding = self._persistence.get(lane.key)
+        if binding is None:
+            return
+        repository, profile_id, endpoint, provider = binding
+        export = getattr(lane.agent, "export_state")
+        user_id, dispatch_id = self._receipts.get(lane.key, (None, None))
+        repository.save(profile_id, endpoint, lane.conversation, export(), provider=provider,
+                        receipt_user_id=user_id, receipt_dispatch_id=dispatch_id)
+
+    async def detach_for_shutdown(self) -> None:
+        """Leave remote tasks intact; discard process-owned input and paints."""
+        for lane in self._lanes.values():
+            detach = getattr(lane.agent, "detach_for_shutdown", None)
+            if detach is None:
+                continue
+            lane.detaching = True
+            lane.queued, lane.queued_context = "", None
+            lane.capture_revision += 1
+            preparation = lane.preparation
+            if preparation is not None:
+                preparation.abandoned = True
+                if preparation.task is not None and not preparation.task.done():
+                    preparation.task.cancel()
+                    await asyncio.gather(preparation.task, return_exceptions=True)
+            try:
+                await detach()
+            except Exception:
+                log.warning("terminal local observation detach failed")
+            finally:
+                if lane.task is not None and not lane.task.done():
+                    lane.task.cancel()
+                    await asyncio.gather(lane.task, return_exceptions=True)
+            try:
+                self._persist_lane(lane)
+            except Exception:
+                log.warning("terminal shutdown checkpoint failed; persisted receipt retained")
 
     @property
     def focused(self) -> str | None:
@@ -754,6 +887,11 @@ class AgentTerminalRoster:
         lane.conversation.append("status", line)
 
     async def repaint(self) -> None:
+        for name in list(self._persistence):
+            try:
+                self._persist_lane(self._lanes[name])
+            except Exception:
+                self.block_persistence(name)
         if self._paint is not None:
             try:
                 await self._paint(self.frame())
@@ -782,6 +920,12 @@ class AgentTerminalRoster:
         self.focus(name)
         lane = self._lanes[name]
         agent = lane.agent
+        if lane.detaching:
+            return False
+        if lane.persistence_error:
+            if paint is not None:
+                await paint(self.frame())
+            return False
         focus_generation = self._focus_revision
         attempt = lane.preparation
         if attempt is not None and attempt.agent is not agent:
@@ -877,8 +1021,7 @@ class AgentTerminalRoster:
             if getattr(attempt.agent, "needs_recovery", False) and recovery is not None:
                 recovered = str(await recovery())
                 if lane.agent is attempt.agent and lane.preparation is attempt and not attempt.abandoned:
-                    lane.tail.extend(recovered.splitlines())
-                    lane.conversation.append("assistant", recovered)
+                    self._retain_recovery(lane, recovered)
                     if _capture_context(attempt.agent) is not None:
                         lane.last_error = ""
             await attempt.agent.initialize()
@@ -899,7 +1042,11 @@ class AgentTerminalRoster:
                 origin.tb_lineno if origin is not None else 0,
             )
             if isinstance(exc, A2AError):
-                if exc.code in {A2AErrorCode.CREDENTIALS_MISSING, A2AErrorCode.AUTHENTICATION_FAILED, A2AErrorCode.AUTH_REQUIRED}:
+                if exc.code == A2AErrorCode.AUTH_REQUIRED:
+                    attempt.requires_authorization = True
+                    notice = permission_notice(getattr(lane.agent, "provider", "generic"), "auth-required")
+                    attempt.reason = notice.text if notice is not None else str(exc)
+                elif exc.code in {A2AErrorCode.CREDENTIALS_MISSING, A2AErrorCode.AUTHENTICATION_FAILED}:
                     attempt.requires_authorization = True
                     attempt.reason = "Update this agent's token in JOAT on the Mac, then retry."
                 elif exc.code in {A2AErrorCode.OUTCOME_UNKNOWN, A2AErrorCode.SUBMISSION_UNCERTAIN}:
@@ -1091,6 +1238,8 @@ class AgentTerminalRoster:
     async def _send_to_lane(
         self, lane: TerminalLane, text: str, context: _CapturedContext | None = None,
     ) -> str:
+        if lane.persistence_error:
+            return lane.persistence_error
         if context is not None and not self._context_is_current(lane, context):
             return f"{lane.name} ▸ input expired; select the session and speak again."
         lane.capture_revision += 1
@@ -1178,18 +1327,32 @@ class AgentTerminalRoster:
                 progress_id = lane.conversation.append("status", value)
 
         async def task_update(result: A2ARequestResult) -> None:
-            nonlocal progress_id, progress_text
+            nonlocal progress_id, progress_text, answer_id
             if not retain_conversation or (context is not None and not self._context_is_current(lane, context)):
                 return
             lane.task_outcome = result
+            partial_changed = False
+            if (getattr(lane.agent, "streaming_enabled", False) and result.text
+                    and result.state in {"working", "completed"}):
+                previous = next((m for m in lane.conversation.messages if m.id == answer_id), None)
+                if previous is None:
+                    answer_id = lane.conversation.append("assistant", result.text)
+                    partial_changed = True
+                elif previous.text != result.text:
+                    lane.conversation.replace(previous.id, result.text)
+                    partial_changed = True
             labels = {"submitted": "Queued", "working": "Working", "completed": "Completed",
                       "input-required": "Reply needed", "auth-required": "Authorization needed",
                       "failed": "Task failed", "rejected": "Task declined", "canceled": "Stopped"}
             if result.state not in {"submitted", "working"} and progress_id is None:
+                if partial_changed:
+                    await self.repaint()
                 return
             label = labels[result.state]
             value = f"{label}: {result.status_text}" if result.state in {"submitted", "working"} and result.status_text else label
             if value == progress_text:
+                if partial_changed:
+                    await self.repaint()
                 return
             retain_progress(value)
             progress_text = value
@@ -1240,6 +1403,9 @@ class AgentTerminalRoster:
                 await self._narrate(lane, pending)
             await self._narrate(lane, f"{lane.name} ▸ done.")
         except asyncio.CancelledError:
+            if lane.detaching:
+                lane.conversation.append("status", "Observation paused; check task status when reopening.")
+                raise
             if progress_id is not None:
                 retain_progress("Stopped" if getattr(lane.agent, "cancellation_status", "") == "confirmed"
                                 else "Remote stop unconfirmed")
@@ -1261,7 +1427,8 @@ class AgentTerminalRoster:
                         await self._narrate(lane, line)
                 await self._narrate(lane, f"{lane.name} ▸ waiting for your input.")
             else:
-                lane.last_error = str(exc)
+                notice = permission_notice(getattr(lane.agent, "provider", "generic"), "auth-required") if exc.code == A2AErrorCode.AUTH_REQUIRED else None
+                lane.last_error = lane.persistence_error or (notice.text if notice is not None else str(exc))
                 lane.tail.append(f"[!] {lane.last_error}")
                 lane.conversation.append("status", lane.last_error)
                 log.warning("terminal A2A failed lane=%s code=%s", lane.name, exc.code.value)
@@ -1613,6 +1780,29 @@ class AgentTerminalRoster:
         lane.last_error = lane.last_error or "cancelled — needs recovery"
         return f"{lane.name} ▸ cancelled; the session will re-verify on next send."
 
+    def _retain_recovery(self, lane: TerminalLane, result: str) -> None:
+        """Reconcile one owned answer instead of duplicating it on every query."""
+        outcome = getattr(lane.agent, "last_outcome", None)
+        state = outcome.state if isinstance(outcome, A2ARequestResult) else ""
+        role: Literal["assistant", "status"] = "assistant" if state in {"completed", "input-required", ""} else "status"
+        messages = list(lane.conversation.messages)
+        last_user = next((index for index in range(len(messages) - 1, -1, -1)
+                          if messages[index].role == "user"), -1)
+        statuses = [message for message in messages[last_user + 1:] if message.role == "status"]
+        # Recovery settles the current turn's progress; old "still working"
+        # or authorization guidance must not survive a confirmed completion.
+        for status in statuses[:-1]:
+            lane.conversation.remove(status.id)
+        if role == "assistant" and statuses:
+            lane.conversation.replace(statuses[-1].id, "Completed" if state == "completed" else "Reply needed")
+        candidates = [message for message in messages[last_user + 1:] if message.role == role]
+        if candidates:
+            lane.conversation.replace(candidates[-1].id, result)
+        else:
+            lane.conversation.append(role, result)
+        lane.tail.extend(result.splitlines())
+        self._persist_lane(lane)
+
     async def recover_task(self) -> str:
         lane = self._lanes.get(self._focus or "")
         recovery = getattr(lane.agent, "recover", None) if lane else None
@@ -1628,9 +1818,7 @@ class AgentTerminalRoster:
         except TimeoutError:
             return "The status check timed out. No instruction was sent."
         lane.last_error = ""
-        for line in result.splitlines():
-            lane.tail.append(line)
-        lane.conversation.append("assistant", result)
+        self._retain_recovery(lane, result)
         return result
 
     async def new_conversation(self) -> str:
@@ -1655,6 +1843,11 @@ class AgentTerminalRoster:
             result += " Any previous unconfirmed task may still be running."
         lane.tail.append(result)
         lane.conversation.append("status", result)
+        try:
+            self._persist_lane(lane)
+        except Exception:
+            self.block_persistence(lane.key)
+            return lane.persistence_error
         return result
 
 

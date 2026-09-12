@@ -269,6 +269,7 @@ def test_timer_migration_upgrades_v10_without_changing_existing_data_or_ledger(
             ledger = db.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
             action = db.execute("SELECT * FROM actions WHERE action_id='retained-action'").fetchone()
             tables = db.execute("SELECT name,sql FROM sqlite_schema WHERE type='table' ORDER BY name").fetchall()
+    monkeypatch.setattr(store_module, "_MIGRATIONS", current[:11])
     with DurableStore(path) as db:
         assert db.schema_version == 11, "Timer checkpoints require an append-only version-11 migration"
         assert db.execute("SELECT * FROM schema_migrations WHERE version<=10 ORDER BY version").fetchall() == ledger
