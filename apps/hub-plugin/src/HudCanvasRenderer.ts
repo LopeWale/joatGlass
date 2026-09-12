@@ -1,3 +1,4 @@
+import { GesturePolicy } from './GesturePolicy';
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
 import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
 import calendarSvg from '@phosphor-icons/core/regular/calendar-dots.svg?raw';
@@ -25,7 +26,6 @@ import {
 } from './PanelRail';
 import {
   CANVAS,
-  SPINE_LABEL_BOX,
   PANEL_TABS,
   type BrainstormHudModel,
   type HudContentKind,
@@ -45,6 +45,7 @@ import {
 } from './HudVisualSurface';
 import {
   formatNavigationDistance,
+  isNavigationSetupStatus,
   type NavigationHudModel,
   type NavigationMapModel,
   type NavigationMapPanelModel,
@@ -56,6 +57,7 @@ import {
   LEAD,
   mono,
   prose,
+  assistantProse,
   HINT_BASELINE_Y,
   RAIL_HEIGHT,
   upper,
@@ -90,7 +92,7 @@ export const HUD_TEXT_MEAN_ADVANCE_PX = 5.18;
 const HUD_CONTENT_RIGHT = 576 - HUD_EDGE;       // 562
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP TO DISMISS';
 export const ASSISTANT_OVERLAY_PAGE_HINT = 'UP / DOWN TO READ · TAP TO DISMISS';
-export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
+export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss';
 
 /** Error recovery copy belongs in its warning card; repeating it in the
  * decision header makes the action harder to scan at a glance. */
@@ -263,8 +265,8 @@ export const PANEL_RAIL = {
  * names it too: that tab is excluded from the refresh carve-out
  * (CapabilityMenu.isPanelRefreshable), so a hold there opens the mic. */
 export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · hold: mic';
-export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · left x2: back';
-export const POMODORO_EXPANDED_HINT = 'tap: choose · hold: mic · left x2: back';
+export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · double-click: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · hold: mic · double-click: back';
 
 /** Only the two long-text pages read through the shared reader: an opened
  * headline and an opened search result. Their families stay 'NEWS' and
@@ -289,6 +291,55 @@ export function usesQuickNotesReaderLayout(title: string, items: readonly string
   const normalized = title.trim().toUpperCase();
   return (normalized === 'QUICKNOTES · DETAIL' || normalized === 'QUICKNOTES · NOTE')
     && usesPreparedReaderLayout(title, items);
+}
+
+export function usesMessagesPreparedReaderLayout(title: string, items: readonly string[]): boolean {
+  const normalized = title.trim().toUpperCase();
+  return (normalized === 'MESSAGES · MESSAGE' || normalized === 'MESSAGES · REVIEW')
+    && /^\d+\/\d+ · /.test(items[0] ?? '');
+}
+
+/** Transport rows are exact source slices, not paragraph boundaries. Wrap
+ * their lossless concatenation against JOAT's regular prose face. */
+export function quickNotesProsePages(items: readonly string[]): string[][] {
+  const context = document.createElement('canvas').getContext('2d');
+  if (!context) throw new Error('QuickNotes text measurement unavailable');
+  context.font = TYPE.body;
+  const width = HUD_CONTENT_RIGHT - HUD_EDGE;
+  const rows: string[] = [];
+  const source = items.slice(1).join('');
+  for (const paragraph of source.match(/[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$/g) ?? ['']) {
+    const ending = paragraph.match(/\r\n$|[\r\n]$/)?.[0] ?? '';
+    const body = paragraph.slice(0, paragraph.length - ending.length);
+    const Segmenter = (Intl as typeof Intl & {
+      Segmenter?: new (locale: undefined, options: { granularity: 'grapheme' }) => {
+        segment(value: string): Iterable<{ segment: string }>;
+      };
+    }).Segmenter;
+    const glyphs = Segmenter
+      ? Array.from(new Segmenter(undefined, { granularity: 'grapheme' }).segment(body), part => part.segment)
+      : Array.from(body);
+    let start = 0;
+    if (!glyphs.length) rows.push(ending);
+    while (start < glyphs.length) {
+      let end = start;
+      let boundary = start;
+      while (end < glyphs.length) {
+        const next = glyphs.slice(start, end + 1).join('').replace(/\t/g, '        ');
+        if (end > start && context.measureText(next).width > width) break;
+        end += 1;
+        if (/\s/u.test(glyphs[end - 1]!)) boundary = end;
+      }
+      if (end < glyphs.length && boundary > start) end = boundary;
+      rows.push(glyphs.slice(start, end).join('') + (end === glyphs.length ? ending : ''));
+      start = end;
+    }
+  }
+  const pages: string[][] = [];
+  for (let index = 0; index < rows.length; index += MESSAGES_READER_BODY_LINE_CAPACITY) {
+    pages.push(rows.slice(index, index + MESSAGES_READER_BODY_LINE_CAPACITY));
+  }
+  return pages.length ? pages : [['']];
 }
 
 export interface HudNotificationRow {
@@ -357,7 +408,7 @@ export const HUD_VISUAL_GEOMETRY = {
  * Omitting the changing seconds counter prevents needless image transfers
  * while the wearer reads an otherwise unchanged review. */
 export function confirmationActionHint(): string {
-  return 'tap: confirm · swipe: cancel · left x2: back · auto-cancel';
+  return 'tap: confirm · swipe: cancel · double-click: back · auto-cancel';
 }
 
 /** Calendar/Reminder review follows the same compact reading axis as
@@ -501,19 +552,19 @@ export function brainstormActionHint(
     if (model.state === 'running') {
       // "tap: Hermes" described a different feature, and a downward swipe
       // used to CANCEL — the wearer asked to scroll, so swipes scroll and
-      // cancel is the deliberate left double-press only.
+      // cancel is the deliberate double-press.
       // Names the verb layer, because an open-ended capability nobody
       // knows about is not a capability. A menu screen would have been the
       // obvious place and the wrong one: it replaces the transcript the
       // wearer is reading to make the choice. The footer had 378 of its
       // 548 pixels unused — measured — so this costs no row.
-      return 'swipe: scroll · tap: terminal · say “send that to hermes” · left x2: cancel';
+      return 'swipe: scroll · tap: terminal · say “send that to hermes” · double-click: cancel';
     }
     if (model.state === 'acceptance_ready') {
-      return 'tap: start test · left x2: menu';
+      return 'tap: start test · double-click: menu';
     }
     if (model.state === 'topic_capture') {
-      return 'speak your question · left x2: cancel';
+      return 'speak your question · double-click: cancel';
     }
     // Brainstorm facts only. This also required terminalState === 'ready'
     // and noToolsChecked — fields a Brainstorm frame no longer carries
@@ -523,11 +574,9 @@ export function brainstormActionHint(
     // armed diagnostic went invisible the same way. Caught by the
     // acceptance flow, which noticed three captures were pixel-identical.
     if (model.state === 'ready') {
-      return model.acceptanceArmed === true
-        ? 'tap: speak · right/ring x2: test · left x2: menu'
-        : 'tap: speak · left x2: menu';
+      return 'tap: speak · double-click: menu';
     }
-    return 'swipe: scroll · left x2: menu · long-press: mic';
+    return 'swipe: scroll · double-click: menu · long-press: mic';
   }
   // Match the terminal controller: approval wins, busy taps stay here,
   // and double-click returns to the agent choices through navigation.
@@ -579,7 +628,7 @@ export interface AgentTerminalTranscriptLayout {
  * The engine sends "<lane> · <state>[ · N waiting]" as the topic. This
  * header said HERMES whatever was focused, so a wearer running a calendar
  * lane or a gateway session read someone else's name above their own
- * output. Falls back to HERMES only when no lane is named. */
+ * output. Falls back to the feature name when no agent is named. */
 export function agentTerminalFocusLabel(topic: string | undefined): string {
   const named = ((topic ?? '').split(' · ')[0] ?? '').trim();
   const cut = named.length > 24 ? `${named.slice(0, 23)}…` : named;
@@ -831,9 +880,9 @@ export function productivityPhaseProgress(phase: ProductivityHudModel['phase']):
  * cancels an in-flight native write nor claims an unavailable post-save undo.
  */
 export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase' | 'monitoringArmed'>): string {
-  if (model.phase === 'due') return 'say: complete reminder · Back: left x2 to Planning';
+  if (model.phase === 'due') return 'say: complete reminder · Back: double-click to Planning';
   if (model.phase === 'saved' && model.monitoringArmed) {
-    return 'Back: left x2 to Planning · monitoring next';
+    return 'Back: double-click to Planning · monitoring next';
   }
   if (
     model.phase === 'saved'
@@ -844,9 +893,9 @@ export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase'
     || model.phase === 'cancelled'
     || model.phase === 'not_saved'
   ) {
-    return 'Back: left x2 to Planning · auto in 5s';
+    return 'Back: double-click to Planning · auto in 5s';
   }
-  return 'Back: left x2 to Planning';
+  return 'Back: double-click to Planning';
 }
 
 interface StatusParts {
@@ -1008,7 +1057,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Offline',
       primary: 'JOAT on your Mac is unavailable.',
       recovery: 'Open JOAT on your Mac to reconnect.',
-      hint: 'left x2: menu · long-press: mic',
+      hint: 'double-click: menu · long-press: mic',
     };
   }
   if (/\breconnecting\b/i.test(input.status)) {
@@ -1017,7 +1066,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Reconnecting',
       primary: 'Restoring JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'left x2: menu · long-press: mic',
+      hint: 'double-click: menu · long-press: mic',
     };
   }
   if (/\bconnecting\b/i.test(input.status)) {
@@ -1026,7 +1075,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Connecting',
       primary: 'Waiting for JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'left x2: menu · long-press: mic',
+      hint: 'double-click: menu · long-press: mic',
     };
   }
   if (!main && !context && !tray) {
@@ -1034,8 +1083,8 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       kind: 'empty',
       title: 'Ready',
       primary: 'Ask JOAT anything.',
-      recovery: 'Say “JOAT …” or double-click left for the menu.',
-      hint: 'left x2: menu · long-press: mic',
+      recovery: 'Say “JOAT …” · tap then hold for menu.',
+      hint: 'double-click: menu · long-press: mic',
     };
   }
 
@@ -1262,6 +1311,7 @@ export function listReservesMarkerColumn(items: readonly string[]): boolean {
 export function planningFocusRows(
   title: string,
   itemCount: number,
+  hasContext = false,
 ): readonly PlanningFocusRow[] {
   void title;
   // ONE dense row language for every focus list. The two-line agenda variant
@@ -1272,7 +1322,7 @@ export function planningFocusRows(
   // The page name lives in the status spine now (the wearer's ruling), so
   // rows start directly beneath it instead of under a second title bar.
   // That reclaimed band is a whole extra row of real content: ten per page.
-  const firstBaselineY = 60;
+  const firstBaselineY = hasContext ? 80 : 60;
   const pitch = PITCH.row;
   const lastBaselineY = 246;
   const capacity = Math.floor((lastBaselineY - firstBaselineY) / pitch) + 1;
@@ -1543,25 +1593,10 @@ export function visibleHudListItems(
   }));
 }
 
-/**
- * What the status spine says on this frame, in place of "JOAT · READY".
- *
- * The wearer's ruling: a feature page must not repeat its own name in a
- * second title bar under the spine. The spine already has the wearer's eye,
- * so the page name lives there and the whole body belongs to the feature.
- * Home (overview) keeps "JOAT" — that IS the page.
- */
-/** The compact banner names the current page. Active voice and link states
- * remain visible; the separate mic icon already communicates muted state. */
-export function hudSpineLabel(frame: HudVisualFrame): string {
-  // A displayed question accepts the answer directly. The resting banner's
-  // wake-word instruction would contradict the question and its footer.
-  if (frame.kind === 'prompt_question') return 'JOAT';
-  const status = parseStatus(frame.status);
-  const pageTitle = hudSpinePageTitle(frame);
-  const resting = /(?:READY|MIC OFF)$/.test(status.state);
-  if (pageTitle && resting) return upper(pageTitle);
-  return status.state.endsWith('MIC OFF') ? 'JOAT' : status.state;
+/** Retained for callers that query the old banner slot. That slot is now
+ * deliberately empty; activity is shown within the conversation itself. */
+export function hudSpineLabel(_frame: HudVisualFrame): string {
+  return '';
 }
 
 export function hudSpinePageTitle(frame: HudVisualFrame): string {
@@ -1761,6 +1796,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   }
 
   async render(frame: HudVisualFrame): Promise<readonly HudImageTile[]> {
+    // Normalize only gesture guidance, never the wearer's content.
+    if ('hint' in frame) frame = { ...frame, hint: GesturePolicy.formatHint(frame.hint) };
+    if (frame.kind === 'navigation') {
+      frame = { ...frame, navigation: { ...frame.navigation,
+        hint: GesturePolicy.formatHint(frame.navigation.hint) } };
+    }
     const icons = await this.icons;
     const canvas = document.createElement('canvas');
     canvas.width = CANVAS.width;
@@ -1803,13 +1844,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       frame.status,
       frame.micOn,
       icons,
-      usesFlatHudShell(
+      (frame.kind === 'navigation' && isNavigationSetupStatus(frame.navigation)) || usesFlatHudShell(
         frame.kind,
         frame.kind === 'list' ? frame.title : '',
         frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
       frame.kind !== 'overview',
-      hudSpineLabel(frame),
     );
     if (frame.kind !== 'prompt_question' && frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
@@ -1845,7 +1885,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
      * and carries the DATE in that slot instead, where a banner normally
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
-    label = parseStatus(statusText).state,
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1864,11 +1903,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       30,
       HUD_VISUAL_GEOMETRY.statusBaselineY,
     );
-    // Use the same compact face as the surrounding clock and privacy
-    // indicator. Keep the changing label inside the top-left tile so an
-    // isolated status update dirties one tile, not both halves of the HUD.
-    context.font = TYPE.statusMeta;
-    this.fitText(context, label, SPINE_LABEL_BOX.x, HUD_VISUAL_GEOMETRY.statusBaselineY, SPINE_LABEL_BOX.width);
+    // The top line carries only time, microphone privacy, and battery.
+    // Conversation activity belongs to its retained in-card indicator.
     this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
     context.font = TYPE.statusMeta;
     context.textAlign = 'left';
@@ -2080,7 +2116,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.textAlign = 'center';
       this.fitText(
         context,
-        'Continue?  tap stay · left x2 exit',
+        'Continue?  tap stay · double-click exit',
         markerCenter,
         geometry.bottom - 11,
         310,
@@ -2588,6 +2624,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     hint: string,
     preparedLines?: readonly string[],
     left = HUD_EDGE,
+    contextLabel?: string,
+    regularProse = false,
   ): void {
     if (preparedLines && preparedLines.length > MESSAGES_READER_BODY_LINE_CAPACITY) {
       throw new Error('Prepared reader page exceeds 10 display rows');
@@ -2596,9 +2634,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textBaseline = 'middle';
     context.fillStyle = gray(CHROME);
     context.font = TYPE.meta;
-    this.fitText(context, metadata, left, 58, HUD_CONTENT_RIGHT - left);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.readerBody;
+    this.drawReadingContext(context, contextLabel, metadata, left);
+    context.fillStyle = gray(regularProse ? CHROME : BRIGHT);
+    context.font = regularProse ? TYPE.body : TYPE.readerBody;
     const lines = preparedLines ?? visibleHudLeadingLines(
       messagesReaderBodyLines(body), MESSAGES_READER_BODY_LINE_CAPACITY,
     );
@@ -2617,6 +2655,26 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = TYPE.hint;
     context.textAlign = 'center';
     context.fillText(hint, 288, 267);
+    context.textAlign = 'left';
+  }
+
+  private drawReadingContext(
+    context: CanvasRenderingContext2D,
+    identity: string | undefined,
+    metadata: string,
+    left = HUD_EDGE,
+  ): void {
+    if (!identity) {
+      this.fitText(context, metadata, left, 58, HUD_CONTENT_RIGHT - left);
+      return;
+    }
+    context.fillStyle = gray(SUPPORT);
+    context.font = TYPE.body;
+    this.fitText(context, identity, left, 58, 248);
+    context.fillStyle = gray(CHROME);
+    context.font = TYPE.meta;
+    context.textAlign = 'right';
+    this.fitText(context, metadata, HUD_CONTENT_RIGHT, 58, 236);
     context.textAlign = 'left';
   }
 
@@ -2675,6 +2733,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
+    if (usesMessagesPreparedReaderLayout(frame.title, frame.items)) {
+      this.drawTextReader(context, frame.items[0] ?? 'Message', '', frame.hint,
+        frame.items.slice(1), HUD_EDGE, frame.contextLabel, true);
+      return;
+    }
+
     if (usesMessagesCompactLayout(frame.title)) {
       this.drawMessagesConversation(context, frame);
       return;
@@ -2682,12 +2746,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     if (usesQuickNotesReaderLayout(frame.title, frame.items)) {
       this.drawTextReader(context, frame.items[0] ?? 'QuickNote', '', frame.hint,
-        frame.items.slice(1));
+        frame.items.slice(1), HUD_EDGE, frame.contextLabel, true);
       return;
     }
 
     if (usesNavigationSetupLayout(frame.title, frame.selectable)) {
       this.drawNavigationSetup(context, frame);
+      return;
+    }
+
+    if (!frame.selectable && frame.title.trim().toUpperCase() === 'PLANNING · EVENT') {
+      this.drawPlanningEventDetail(context, frame);
       return;
     }
 
@@ -2697,25 +2766,69 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     this.drawPlanningFocusList(context, frame);
   }
 
+  private drawPlanningEventDetail(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+  ): void {
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(BRIGHT);
+    context.font = TYPE.assistant;
+    const titleLines = this.drawWrappedText(
+      context, frame.items[0] ?? '', 36, 64, 504, LEAD.body, 6, 'leading');
+
+    context.fillStyle = gray(SUPPORT);
+    context.font = TYPE.secondary;
+    this.fitText(context, frame.items[1] ?? '', 36, 64 + titleLines * LEAD.body + 8, 504);
+
+    context.fillStyle = gray(QUIET);
+    context.font = TYPE.hint;
+    context.textAlign = 'center';
+    this.fitText(context, frame.hint, 288, HINT_BASELINE_Y, 500);
+  }
+
   private drawPlanningFocusList(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
   ): void {
-    const rows = planningFocusRows(frame.title, frame.items.length);
+    if (frame.title.toUpperCase().startsWith('PLANNING')
+      && frame.contextLabel && frame.controlStartIndex !== undefined
+      && frame.items.length - frame.controlStartIndex === 5
+      && frame.items[frame.items.length - 1]?.startsWith('●')) {
+      this.drawAgenda(context, frame, frame.controlStartIndex);
+      return;
+    }
+    const hasControls = frame.controlStartIndex !== undefined;
+    const rows = planningFocusRows(frame.title, frame.items.length, Boolean(frame.contextLabel))
+      .filter((row) => !hasControls || row.primaryBaselineY <= 232)
+      .filter((row) => !frame.actionOverlay || row.primaryBaselineY < 190);
     const notePreview = frame.title.trim().toUpperCase() === 'QUICKNOTES';
     const reserveMarker = !notePreview && frame.selectable && listReservesMarkerColumn(frame.items);
 
     context.textAlign = 'left';
     context.textBaseline = 'middle';
 
+    if (frame.contextLabel) {
+      context.fillStyle = gray(SUPPORT);
+      context.font = TYPE.label;
+      this.fitText(context, frame.contextLabel, 36, 58, 504);
+    }
     const visible = visibleHudListItems(frame.items, frame.selectedIndex, rows.length);
+    const controlsInWindow = visible.findIndex((entry) => entry.index === frame.controlStartIndex);
     visible.forEach((entry, index) => {
       const row = rows[index];
       if (!row) return;
+      const isControl = hasControls && entry.index >= frame.controlStartIndex!;
+      const groupOffset = controlsInWindow > 0 && index >= controlsInWindow ? 10 : 0;
+      const baseline = row.primaryBaselineY + groupOffset;
       const selected = frame.selectable && entry.index === frame.selectedIndex;
+      if (index === controlsInWindow && index > 0) {
+        context.fillStyle = gray(HAIRLINE);
+        context.fillRect(52, baseline - 15, 488, 1);
+      }
       if (selected) {
         context.fillStyle = gray(BRIGHT);
-        context.fillRect(36, row.railTopY, 3, row.railHeight);
+        context.fillRect(36, row.railTopY + groupOffset, 3, row.railHeight);
       }
       if (row.secondaryBaselineY !== undefined) {
         const { primary, secondary } = parseHudListItem(entry.item);
@@ -2727,7 +2840,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.fitText(context, secondary, 52, row.secondaryBaselineY, 488);
         return;
       }
-      this.drawFocusListLine(context, entry.item, row.primaryBaselineY, selected, reserveMarker, notePreview);
+      this.drawFocusListLine(context, entry.item, baseline, selected, reserveMarker, notePreview, isControl, hasControls);
     });
 
     // Content longer than one window gets a hairline scrollbar at the right
@@ -2735,7 +2848,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // stranded on the last row reads as an amputated page, not "scroll on".
     if (frame.items.length > rows.length && visible.length > 0) {
       const trackTop = 74;
-      const trackHeight = 178;
+      const trackHeight = frame.actionOverlay ? 112 : 178;
       const start = visible[0]?.index ?? 0;
       const thumbHeight = Math.max(
         12,
@@ -2757,6 +2870,102 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
   }
 
+  /** The Mac owns row identities and actions. This reading surface uses the
+   * same prose roles as the retained JOAT conversation, with task metadata
+   * below the title and navigation on its own selected-control page. */
+  private drawAgenda(
+    context: CanvasRenderingContext2D,
+    frame: Extract<HudVisualFrame, { kind: 'list' }>,
+    contentCount: number,
+  ): void {
+    context.textAlign = 'left';
+    context.textBaseline = 'top';
+    if (frame.selectedIndex >= contentCount) {
+      context.font = TYPE.secondary;
+      context.fillStyle = gray(CHROME);
+      this.fitText(context, frame.contextLabel ?? 'Planning', 36, 52, 500);
+      for (let offset = 0; offset < 5; offset += 1) {
+        const index = contentCount + offset;
+        const focused = frame.selectable && frame.selectedIndex === index;
+        const label = offset < 2
+          ? `${offset === 0 ? 'Previous' : 'Next'} day · ${(frame.items[index] ?? '').replace(/[‹›]/g, '').trim()}`
+          : ['Month', 'Week', 'Day'][offset - 2]!;
+        const pitch = frame.actionOverlay ? 23 : 32;
+        const top = (frame.actionOverlay ? 68 : 78) + offset * pitch;
+        context.font = focused ? TYPE.assistant : TYPE.body;
+        context.fillStyle = gray(focused ? BRIGHT : CHROME);
+        this.fitText(context, label, 48, top + (frame.actionOverlay ? 3 : 6), 480);
+        if (focused) {
+          context.strokeStyle = gray(BRIGHT);
+          context.lineWidth = 1;
+          context.strokeRect(36.5, top + .5, 503, pitch - 3);
+        }
+      }
+      return;
+    }
+    context.font = TYPE.assistant; // Measure the wider selected role for every row.
+    const rows = frame.items.slice(0, contentCount).map((fallback, index) => {
+      const metadata = frame.planningEntries?.[index];
+      const parsed = parseHudListItem(fallback);
+      const marker = focusListMarker(parsed.primary);
+      const title = metadata?.title ?? (marker ? parsed.primary.slice(2) : parsed.primary);
+      const wrapped = wrapHudText(title || fallback, 472, value => context.measureText(value).width);
+      const lines = wrapped.slice(0, 3);
+      if (wrapped.length > 3) lines[2] = `${lines[2]}…`;
+      const due = metadata?.time ?? parsed.age;
+      return { index, lines, due, reminder: metadata?.kind === 'reminder' || Boolean(marker),
+        height: 16 + lines.length * LEAD.body + (due ? 18 : 0) };
+    });
+    if (!rows.length) return;
+    let start = Math.min(frame.selectedIndex, rows.length - 1);
+    let end = start + 1;
+    let height = rows[start]!.height;
+    const available = (frame.actionOverlay ? 184 : 252) - 48;
+    const fits = (index: number): boolean => height + 6 + rows[index]!.height <= available;
+    if (start > 0 && fits(start - 1)) {
+      start -= 1;
+      height += 6 + rows[start]!.height;
+    }
+    while (end < rows.length && fits(end)) {
+      height += 6 + rows[end]!.height;
+      end += 1;
+    }
+    let top = 48;
+    for (const row of rows.slice(start, end)) {
+      const selected = frame.selectable && row.index === frame.selectedIndex;
+      if (selected) {
+        context.strokeStyle = gray(BRIGHT);
+        context.lineWidth = 1;
+        context.beginPath();
+        context.roundRect(28.5, top + .5, 519, row.height - 1, 4);
+        context.stroke();
+      }
+      if (row.reminder) {
+        context.strokeStyle = gray(selected ? BRIGHT : CHROME);
+        context.lineWidth = 1;
+        context.beginPath();
+        context.arc(39, top + 15, 3, 0, Math.PI * 2);
+        context.stroke();
+      }
+      context.font = selected ? TYPE.assistant : TYPE.body;
+      context.fillStyle = gray(selected ? BRIGHT : CHROME);
+      row.lines.forEach((line, lineIndex) => this.fitText(context, line, 50, top + 8 + lineIndex * LEAD.body, 472));
+      if (row.due) {
+        context.font = TYPE.secondary;
+        context.fillStyle = gray(CHROME);
+        this.fitText(context, row.due, 50, top + 9 + row.lines.length * LEAD.body, 472);
+      }
+      top += row.height + 6;
+    }
+    if (rows.length > end - start) {
+      const thumb = Math.max(12, available * (end - start) / rows.length);
+      context.fillStyle = gray(QUIET);
+      context.fillRect(557, 48, 1, available);
+      context.fillStyle = gray(CHROME);
+      context.fillRect(557, 48 + (available - thumb) * start / Math.max(1, rows.length - (end - start)), 1, thumb);
+    }
+  }
+
   /** One primary text edge; optional age is a separate trailing column.
    * All supporting text shares the banner/footer face and size. */
   private drawFocusListLine(
@@ -2766,6 +2975,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     selected: boolean,
     reserveMarker = false,
     preservePreview = false,
+    control = false,
+    emphasizeSelection = false,
   ): void {
     const trimmed = item.trim();
     if (!preservePreview && /^[A-Z][A-Z ]{1,18}$/.test(trimmed)) {
@@ -2792,14 +3003,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillStyle = gray(
         marker.emphasis === 'content' ? (selected ? BRIGHT : SUPPORT) : CHROME,
       );
-      context.font = TYPE.row;
+      context.font = control ? TYPE.secondary : TYPE.row;
       context.fillText(marker.glyph, x, baselineY);
       x += 18;
     } else if (reserveMarker) {
       x += 18; // keep one shared title edge in lists that mix marked rows
     }
-    context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-    context.font = TYPE.row;
+    context.fillStyle = gray(selected ? BRIGHT : control || preservePreview ? CHROME : SUPPORT);
+    context.font = control
+      ? (selected ? assistantProse(11) : TYPE.secondary)
+      : (selected && (emphasizeSelection || preservePreview) ? TYPE.assistant : TYPE.row);
     if (!secondary) {
       this.fitText(context, text, x, baselineY, right - x);
       return;
@@ -2857,7 +3070,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         : undefined;
       context.fillStyle = gray(CHROME);
       context.font = TYPE.label;
-      this.fitText(context, transcript.heading, 36, 58, 504);
+      this.drawReadingContext(context, frame.contextLabel, transcript.heading, 36);
 
       transcript.rows.forEach((parsed, row) => {
         const y = 84 + row * PITCH.labelled;
@@ -2889,7 +3102,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // the message body is the one bright thing on the page.
     const detail = messagesFullTextContent(frame.items);
     this.drawTextReader(context, detail.metadata, detail.body, frame.hint,
-      usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined);
+      usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined,
+      HUD_EDGE, frame.contextLabel);
   }
 
   /**
@@ -3072,42 +3286,57 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     );
 
     const entries = hovered?.entries ?? [];
-    if (entries.length === 0) {
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.secondary;
-      context.fillText('Free', geometry.paneLeft, geometry.paneFirstRowY);
-    }
-    entries.slice(0, geometry.paneRowCapacity).forEach((entry, row) => {
-      const y = geometry.paneFirstRowY + row * geometry.paneRowPitch;
-      const selected = pane.focused && row === pane.itemIndex;
+    // The final choice is always reachable, even on empty dates or dates
+    // whose payload only previews the first six entries.
+    const choices = [...entries, undefined];
+    const capacity = frame.actionOverlay ? 2 : 3;
+    const start = Math.max(0, Math.min(pane.itemIndex - 1, choices.length - capacity));
+    choices.slice(start, start + capacity).forEach((entry, offset) => {
+      const index = start + offset;
+      const y = geometry.paneFirstRowY + offset * 52;
+      const selected = pane.focused && index === pane.itemIndex;
       if (selected) {
-        context.fillStyle = gray(BRIGHT);
-        context.fillRect(geometry.paneLeft - 8, y - 10, 3, 19);
+        context.strokeStyle = gray(BRIGHT);
+        context.lineWidth = 1;
+        roundedRect(context, geometry.paneLeft - 7, y - 11, paneWidth + 7, 49, 4);
+        context.stroke();
       }
-      let x = geometry.paneLeft;
-      context.fillStyle = gray(selected ? SUPPORT : CHROME);
-      context.font = TYPE.microMono;
-      context.fillText(`[${entry.time}]`, x, y);
-      x += 52;
-      if (entry.kind === 'reminder') {
+      if (!entry) {
+        context.font = selected ? TYPE.assistant : TYPE.body;
+        context.fillStyle = gray(selected ? BRIGHT : CHROME);
+        context.fillText('Open day', geometry.paneLeft + 12, y);
+        context.font = TYPE.meta;
         context.fillStyle = gray(CHROME);
-        context.font = TYPE.secondary;
-        context.fillText('\u25a1', x, y);
+        context.fillText(entries.length ? 'Full schedule & views' : 'Free · schedule & views', geometry.paneLeft + 12, y + 18);
+        return;
       }
-      x += 16;
-      context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-      context.font = TYPE.row;
-      this.fitText(context, entry.title, x, y, geometry.paneRight - x);
+      const x = geometry.paneLeft + 12;
+      if (entry.kind === 'reminder') {
+        context.strokeStyle = gray(selected ? BRIGHT : CHROME);
+        context.lineWidth = 1;
+        context.beginPath();
+        context.arc(geometry.paneLeft + 3, y, 3, 0, Math.PI * 2);
+        context.stroke();
+      }
+      context.font = selected ? TYPE.assistant : TYPE.body;
+      context.fillStyle = gray(selected ? BRIGHT : CHROME);
+      const lines = wrapHudText(entry.title, geometry.paneRight - x - 4, value => context.measureText(value).width);
+      lines.slice(0, 2).forEach((line, i) => {
+        this.fitText(context, i === 1 && lines.length > 2 ? `${line}…` : line, x, y + i * LEAD.body, geometry.paneRight - x - 4);
+      });
+      context.font = TYPE.meta;
+      context.fillStyle = gray(CHROME);
+      context.fillText(entry.time, x, y + (Math.min(2, lines.length) - 1) * LEAD.body + 16);
     });
     const total = (hovered?.eventCount ?? 0) + (hovered?.reminderCount ?? 0);
-    if (total > entries.length && entries.length > 0) {
-      context.fillStyle = gray(QUIET);
+    if (choices.length > capacity) {
+      context.fillStyle = gray(CHROME);
       context.font = TYPE.micro;
-      context.fillText(
-        `+${total - entries.length} more`,
-        geometry.paneLeft,
-        geometry.paneFirstRowY + entries.length * geometry.paneRowPitch,
-      );
+      context.fillText(`${start + 1}–${Math.min(choices.length, start + capacity)} of ${choices.length}`, geometry.paneLeft, 247);
+    } else if (total > entries.length) {
+      context.fillStyle = gray(CHROME);
+      context.font = TYPE.micro;
+      context.fillText(`+${total - entries.length} more`, geometry.paneLeft, 247);
     }
 
     context.fillStyle = gray(QUIET);
@@ -3351,8 +3580,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillText(state, HUD_CONTENT_RIGHT, 58);
       context.textAlign = 'left';
       if (!layout.showRecoveryDetails) {
-        // Each chip carries its lane's state ("work·run", "calendar·ask1")
-        // so one glance covers every concurrent session.
+        // The selected agent is already named above; internal work sessions
+        // belong outside this conversation surface.
         context.fillStyle = gray(SUPPORT);
         context.font = TYPE.micro;
         this.fitText(
@@ -3473,6 +3702,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
+    if (isNavigationSetupStatus(navigation)) {
+      this.drawNavigationSetupStatus(context, navigation);
+      return;
+    }
     if (navigation.view === 'guidance') {
       this.drawActiveNavigation(context, navigation);
       return;
@@ -3495,6 +3728,30 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
     this.drawNavigationDecision(context, navigation);
+  }
+
+  private drawNavigationSetupStatus(
+    context: CanvasRenderingContext2D,
+    navigation: NavigationHudModel,
+  ): void {
+    // A pre-route wait is not a warning about an installed route. Keep its
+    // outcome in the same top-left image container: serial tile delivery can
+    // replace the complete explanation without leaving an old instruction
+    // in the lower half of the display.
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillStyle = gray(CHROME);
+    context.font = TYPE.label;
+    context.fillText('NAVIGATION', 36, 54);
+    context.fillStyle = gray(BRIGHT);
+    context.font = TYPE.primary;
+    this.drawWrappedText(context, navigation.primary, 36, 76, 240, 18, 2);
+    context.fillStyle = gray(SUPPORT);
+    context.font = TYPE.secondary;
+    this.drawWrappedText(context, navigation.secondary, 36, 106, 240, 12, 2);
+    context.fillStyle = gray(QUIET);
+    context.font = TYPE.hint;
+    this.fitText(context, navigation.hint, 36, 134, 240);
   }
 
   private drawNavigationDecision(
