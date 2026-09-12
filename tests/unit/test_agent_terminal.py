@@ -45,6 +45,52 @@ def roster(paint=None, **lanes: FakeAgent) -> AgentTerminalRoster:
     return AgentTerminalRoster(list(lanes.items()), paint=paint)
 
 
+class TestContinuousConversation:
+    async def test_complete_turns_keep_identity_across_focus_and_status_changes(self) -> None:
+        prose = "BEGIN " + "long paragraph " * 500 + "\n\nMIDDLE\n\n" + "another paragraph " * 300 + " END"
+        r = AgentTerminalRoster(
+            [("OpenClaw", FakeAgent([prose])), ("Hermes", FakeAgent(["separate reply"]))],
+            visible_lanes=("OpenClaw", "Hermes"),
+        )
+        assert r.focus("OpenClaw")
+        identity = r.frame().conversation_id
+        for prompt in ("Remember the codeword amber", "What codeword?", "Explain the result"):
+            await r.send(prompt)
+            assert r.frame().conversation_id == identity
+            task = r._lanes["OpenClaw"].task
+            assert task is not None
+            await task
+            await asyncio.sleep(0)
+        frame = r.frame()
+        assert [entry.text for entry in frame.messages if entry.role == "user"] == [
+            "Remember the codeword amber", "What codeword?", "Explain the result",
+        ]
+        assert [entry.text for entry in frame.messages if entry.role == "assistant"] == [prose] * 3
+        assert len({entry.id for entry in frame.messages}) == 6
+        r.focus("Hermes")
+        assert r.frame().conversation_id != identity
+        assert not r.frame().messages
+        r.focus("OpenClaw")
+        assert r.frame().conversation_id == identity
+        assert r.frame().messages == frame.messages
+
+    async def test_explicit_new_conversation_changes_identity_and_clears_old_messages(self) -> None:
+        class Resettable(FakeAgent):
+            async def reset_conversation(self) -> None:
+                pass
+
+        r = AgentTerminalRoster([("OpenClaw", Resettable())], visible_lanes=("OpenClaw",))
+        old = r.frame().conversation_id
+        await r.send("previous instruction")
+        task = r._lanes["OpenClaw"].task
+        assert task is not None
+        await task
+        await r.new_conversation()
+        assert r.frame().conversation_id != old
+        assert all(entry.role == "status" for entry in r.frame().messages)
+        assert all("previous instruction" not in entry.text for entry in r.frame().messages)
+
+
 class TestRoster:
     async def test_lists_lanes_and_marks_focus(self) -> None:
         r = roster(hermes=FakeAgent(), calendar=FakeAgent())

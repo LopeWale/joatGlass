@@ -135,10 +135,25 @@ export interface BrainstormViewPayload {
   acceptanceArmed?: boolean;
 }
 
+export interface TerminalConversationMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'status';
+  text: string;
+}
+
+export interface TerminalConversationFields {
+  conversationId?: string;
+  messages?: TerminalConversationMessage[];
+  historyTruncated?: boolean;
+  inputRequired?: boolean;
+}
+
 /** RENDER model, not a wire frame: the union one renderer draws. Built in
  * main.ts from whichever of the two wire payloads arrived, plus the
  * `screen` discriminator that exists only on this side. */
-export interface BrainstormHudModel {
+export interface BrainstormHudModel extends TerminalConversationFields {
+  /** Local exact prompt publication, never part of the terminal wire frame. */
+  terminalPrompt?: { id: string; question: string };
   /** WHICH of the two surfaces this frame is. Brainstorm (Codex proposes,
    * Claude critiques) and the Agent Terminal (Hermes and OpenClaw work) are
    * two features that share a frame shape, not one screen with two moods.
@@ -171,7 +186,7 @@ export interface BrainstormHudModel {
 /** The Agent Terminal: Hermes and OpenClaw work sessions. Its own frame,
  * with the connection and tool-policy facts that belong to it and to no
  * other surface. */
-export interface AgentTerminalHudModel {
+export interface AgentTerminalHudModel extends TerminalConversationFields {
   /** Opaque visit and row-selection identity; both are present together. */
   openingRequestId?: string;
   openingSelectionId?: string;

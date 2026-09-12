@@ -682,6 +682,10 @@ async function boot(): Promise<void> {
           terminalReason: msg.terminal.terminalReason,
           noToolsChecked: msg.terminal.noToolsChecked,
           approvals: msg.terminal.approvals,
+          conversationId: msg.terminal.conversationId,
+          messages: msg.terminal.messages?.map(message => ({...message})),
+          historyTruncated: msg.terminal.historyTruncated,
+          inputRequired: msg.terminal.inputRequired,
         };
         const openingRequestId = msg.terminal.openingRequestId;
         const openingSelectionId = msg.terminal.openingSelectionId;

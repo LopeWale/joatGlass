@@ -19,6 +19,8 @@ import re
 from typing import Any, Literal
 from uuid import UUID
 
+from .terminal_conversation import TERMINAL_HISTORY_BYTES, TERMINAL_MESSAGE_LIMIT, TerminalMessage
+
 # ── Constants mirrored from the SDK ──────────────────────────────────────────
 
 CANVAS_WIDTH = 576
@@ -962,6 +964,10 @@ class AgentTerminalHudView:
     approvals: int = 0
     opening_request_id: str | None = None
     opening_selection_id: str | None = None
+    conversation_id: str | None = None
+    messages: tuple[TerminalMessage, ...] = ()
+    history_truncated: bool = False
+    input_required: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         if self.state not in _BRAINSTORM_HUD_STATES:
@@ -978,6 +984,37 @@ class AgentTerminalHudView:
                 "openingRequestId": _brainstorm_text(self.opening_request_id, "opening request", 128),
                 "openingSelectionId": _brainstorm_text(self.opening_selection_id, "opening selection", 128),
             }
+        conversation: dict[str, Any] = {}
+        if self.conversation_id is not None:
+            if len(self.messages) > TERMINAL_MESSAGE_LIMIT:
+                raise ProtocolError("Agent Terminal has too many retained messages")
+            entries = []
+            size = 0
+            identities: set[str] = set()
+            for message in self.messages:
+                if message.role not in {"user", "assistant", "status"} or message.id in identities:
+                    raise ProtocolError("Agent Terminal message identity or role is invalid")
+                identities.add(message.id)
+                text = _brainstorm_text(message.text, "message", TERMINAL_HISTORY_BYTES, allow_empty=True)
+                try:
+                    size += len(text.encode("utf-8"))
+                except UnicodeError:
+                    raise ProtocolError("Agent Terminal message encoding is invalid") from None
+                entries.append({
+                    "id": _brainstorm_text(message.id, "message identity", 128),
+                    "role": message.role, "text": text,
+                })
+            if size > TERMINAL_HISTORY_BYTES:
+                raise ProtocolError("Agent Terminal retained history is too large")
+            if type(self.history_truncated) is not bool or type(self.input_required) is not bool:
+                raise ProtocolError("Agent Terminal conversation flags are invalid")
+            conversation = {
+                "conversationId": _brainstorm_text(self.conversation_id, "conversation identity", 128),
+                "messages": entries, "historyTruncated": self.history_truncated,
+                "inputRequired": self.input_required,
+            }
+        elif self.messages or self.history_truncated or self.input_required:
+            raise ProtocolError("Agent Terminal messages require conversation identity")
         return {
             "kind": "agent_terminal.view",
             "terminal": {
@@ -999,6 +1036,7 @@ class AgentTerminalHudView:
                 "noToolsChecked": self.no_tools_checked,
                 "approvals": self.approvals,
                 **opening,
+                **conversation,
             },
         }
 

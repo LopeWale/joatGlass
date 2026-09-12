@@ -29,6 +29,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from ..core.protocol import BRAINSTORM_ROW_COLUMNS, BRAINSTORM_SCROLLBACK_ROWS
 from ..core.a2a import A2AError, A2AErrorCode
+from ..core.terminal_conversation import TerminalConversation, TerminalMessage
 from ..agents.openclaw_gateway import (
     OpenClawPairingRequired, OpenClawScopeMismatch, classify_gateway_dial_failure,
 )
@@ -108,6 +109,10 @@ class TerminalFrame:
     approvals: int = 0
     #: Safe lane-specific setup guidance; never an adapter exception.
     reason: str = ""
+    conversation_id: str | None = None
+    messages: tuple[TerminalMessage, ...] = ()
+    history_truncated: bool = False
+    input_required: bool = False
 
 
 def _dial_failure_sentence(label: str, exc: BaseException) -> str:
@@ -357,6 +362,7 @@ class TerminalLane:
     approvals: list[tuple[str, str, str]] = field(default_factory=list)
     """Pending (id, kind, summary) — tool calls waiting on the wearer."""
     preparation: _LanePreparation | None = None
+    conversation: TerminalConversation = field(default_factory=TerminalConversation)
 
     @property
     def address(self) -> LaneAddress:
@@ -678,6 +684,7 @@ class AgentTerminalRoster:
             else "blocked" if lane.last_error
             else "ready"
         )
+        conversation = lane.conversation if self._visible_lanes is not None and lane.key in self._visible_lanes else None
         return TerminalFrame(
             approvals=len(lane.approvals),
             topic=header, state=state, reason=reason,
@@ -689,6 +696,10 @@ class AgentTerminalRoster:
                    for name, other in [(key, value) for key, value in self._lanes.items()
                                       if self._visible_lanes is None or key in self._visible_lanes][:3]],
             lines=body,
+            conversation_id=conversation.id if conversation else None,
+            messages=conversation.messages if conversation else (),
+            history_truncated=conversation.truncated if conversation else False,
+            input_required=conversation is not None and not lane.busy and lane.state == "needs input",
         )
 
     @staticmethod
@@ -722,6 +733,7 @@ class AgentTerminalRoster:
 
     def _record(self, lane: TerminalLane, line: str) -> None:
         lane.tail.append(line)
+        lane.conversation.append("status", line)
 
     async def repaint(self) -> None:
         if self._paint is not None:
@@ -848,6 +860,7 @@ class AgentTerminalRoster:
                 recovered = str(await recovery())
                 if lane.agent is attempt.agent and lane.preparation is attempt and not attempt.abandoned:
                     lane.tail.extend(recovered.splitlines())
+                    lane.conversation.append("assistant", recovered)
                     if _capture_context(attempt.agent) is not None:
                         lane.last_error = ""
             await attempt.agent.initialize()
@@ -1075,6 +1088,7 @@ class AgentTerminalRoster:
             lane.queued = text
             lane.queued_context = context
             lane.tail.append(f"> {text} (queued)")
+            lane.conversation.append("status", f"Queued: {text}")
             await self.repaint()
             return (
                 f"{lane.name} ▸ queued — replaces the earlier queued line."
@@ -1089,6 +1103,7 @@ class AgentTerminalRoster:
         """Schedule an admitted idle turn with the existing settlement hook."""
         lane.last_error = ""
         lane.tail.append(f"> {text}")
+        lane.conversation.append("user", text)
         task = asyncio.get_running_loop().create_task(
             self._run_send(lane, text, context), name=f"terminal-{lane.name}"
         )
@@ -1128,6 +1143,9 @@ class AgentTerminalRoster:
         self, lane: TerminalLane, text: str, context: _CapturedContext | None = None,
     ) -> None:
         pending = ""
+        answer = ""
+        answer_id: str | None = None
+        retain_conversation = self._visible_lanes is not None and lane.key in self._visible_lanes
         try:
             if context is not None:
                 if not self._context_is_current(lane, context):
@@ -1137,12 +1155,22 @@ class AgentTerminalRoster:
                 stream = lane.agent.stream(text)
             try:
                 async for chunk in stream:
+                    # Keep complete content independently of compatibility
+                    # tail rows. A paragraph is not one display row.
+                    if retain_conversation:
+                        answer += chunk
+                        if answer_id is None:
+                            answer_id = lane.conversation.append("assistant", answer)
+                        else:
+                            lane.conversation.replace(answer_id, answer)
                     pending += chunk
                     *lines, pending = pending.split("\n")
                     for line in lines:
                         if line.strip():
                             lane.tail.append(line)
                             await self._narrate(lane, line)
+                    if not lines and retain_conversation:
+                        await self.repaint()
             finally:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
@@ -1152,13 +1180,16 @@ class AgentTerminalRoster:
                 await self._narrate(lane, pending)
             await self._narrate(lane, f"{lane.name} ▸ done.")
         except asyncio.CancelledError:
-            lane.tail.append("[local wait stopped]" if hasattr(lane.agent, "cancellation_status") else "[cancelled]")
+            stopped = "[local wait stopped]" if hasattr(lane.agent, "cancellation_status") else "[cancelled]"
+            lane.tail.append(stopped)
+            lane.conversation.append("status", stopped)
             raise
         except A2AError as exc:
             if exc.code == A2AErrorCode.INPUT_REQUIRED:
                 lane.last_error = ""
                 question = getattr(exc, "text", "")
                 if isinstance(question, str) and question.strip():
+                    lane.conversation.append("assistant", question)
                     for line in question.splitlines():
                         lane.tail.append(line)
                         await self._narrate(lane, line)
@@ -1166,6 +1197,7 @@ class AgentTerminalRoster:
             else:
                 lane.last_error = str(exc)
                 lane.tail.append(f"[!] {lane.last_error}")
+                lane.conversation.append("status", lane.last_error)
                 log.warning("terminal A2A failed lane=%s code=%s", lane.name, exc.code.value)
                 await self._narrate(lane, f"{lane.name} ▸ {lane.last_error}")
         except Exception as exc:  # runtime already classified it; keep the line
@@ -1174,6 +1206,7 @@ class AgentTerminalRoster:
             # the reason and the retry path, never a silent dead lane.
             lane.last_error = str(exc) or exc.__class__.__name__
             lane.tail.append(f"[!] {lane.last_error}")
+            lane.conversation.append("status", lane.last_error)
             log.warning("terminal %s failed: %s", lane.name, lane.last_error)
             await self._narrate(lane, f"{lane.name} ▸ failed — {lane.last_error}")
 
@@ -1303,8 +1336,10 @@ class AgentTerminalRoster:
         lane.last_error = ""
         lane.approvals.clear()
         lane.tail.clear()
+        lane.conversation = TerminalConversation()
         label = match.get("label") or match["key"]
         lane.tail.append(f"[resumed] {label}")
+        lane.conversation.append("status", f"Resumed {label}")
         # The session's OWN recent history, from the runtime's direct API
         # (AGENT_TERMINAL_ROADMAP.md:113) — not JOAT's in-process echo,
         # which for a freshly resumed session is empty. Best-effort: a
@@ -1313,6 +1348,7 @@ class AgentTerminalRoster:
         if reader is not None:
             try:
                 for role, text in await reader(10):
+                    lane.conversation.append("user" if role == "user" else "assistant", text)
                     prefix = "> " if role == "user" else ""
                     first_line = text.split("\n", 1)[0][:200]
                     lane.tail.append(f"{prefix}{first_line}")
@@ -1466,10 +1502,12 @@ class AgentTerminalRoster:
         remote_status = getattr(lane.agent, "cancellation_status", None)
         if remote_status == "confirmed":
             lane.last_error = ""
+            lane.conversation.append("status", "Cancellation confirmed by the agent.")
             return f"{lane.name} ▸ cancellation confirmed by the agent."
         if remote_status in {"uncertain", "unsupported", "none"}:
             lane.last_error = "Remote stop unconfirmed; check the agent before sending again."
             lane.tail.append(lane.last_error)
+            lane.conversation.append("status", lane.last_error)
             return f"{lane.name} ▸ stopped waiting locally; remote cancellation is unconfirmed."
         lane.last_error = lane.last_error or "cancelled — needs recovery"
         return f"{lane.name} ▸ cancelled; the session will re-verify on next send."
@@ -1491,6 +1529,7 @@ class AgentTerminalRoster:
         lane.last_error = ""
         for line in result.splitlines():
             lane.tail.append(line)
+        lane.conversation.append("assistant", result)
         return result
 
     async def new_conversation(self) -> str:
@@ -1509,10 +1548,12 @@ class AgentTerminalRoster:
         lane.queued, lane.queued_context = "", None
         lane.last_error = ""
         lane.tail.clear()
+        lane.conversation = TerminalConversation()
         result = f"{lane.name} ▸ new conversation."
         if unknown:
             result += " Any previous unconfirmed task may still be running."
         lane.tail.append(result)
+        lane.conversation.append("status", result)
         return result
 
 
@@ -1612,7 +1653,8 @@ class AgentTerminalCommands:
             return None
         capture = TerminalCapture(
             capture_id=secrets.token_urlsafe(18), lane_name=target.lane.name,
-            question=f"What should {target.lane.name} do?",
+            question=(f"Reply to {target.lane.name}." if target.lane.state == "needs input"
+                      else f"Speak to {target.lane.name}."),
             expires_at=self._monotonic() + ttl_s,
         )
         self._capture, self._capture_target = capture, target

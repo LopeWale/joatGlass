@@ -1487,11 +1487,13 @@ class TestTheTwoLanguagesDescribeTheSameWire:
 
         source = (Path(__file__).resolve().parents[2]
                   / "apps/hub-plugin/src/types.ts").read_text()
-        marker = f"export interface {interface} {{"
-        assert marker in source, f"{interface} has been renamed or removed"
-        body = source.split(marker)[1].split("\n}")[0]
-        # Two-space indent only: nested object literals sit deeper.
-        return set(re.findall(r"^\s{2}(\w+)\??:", body, re.M))
+        def fields(name: str) -> set[str]:
+            match = re.search(rf"export interface {re.escape(name)}(?: extends (\w+))? \{{(.*?)\n\}}", source, re.S)
+            assert match is not None, f"{name} has been renamed or removed"
+            # Two-space indent only: nested object literals sit deeper.
+            own = set(re.findall(r"^\s{2}(\w+)\??:", match[2], re.M))
+            return own | (fields(match[1]) if match[1] else set())
+        return fields(interface)
 
     def test_the_brainstorm_frame_matches_its_typescript_payload(self) -> None:
         view = BrainstormHudView(
@@ -1519,6 +1521,7 @@ class TestTheTwoLanguagesDescribeTheSameWire:
             state="ready", focus="hermes", lanes=["l"], activity="x",
             endpoint_host="h", reason="r", no_tools_checked=True, approvals=1,
             opening_request_id="visit", opening_selection_id="selection",
+            conversation_id="conversation", history_truncated=False, input_required=True,
         )
         wire = view.to_wire()
         payload_key = next(k for k in wire if k != "kind")

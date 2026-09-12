@@ -206,6 +206,8 @@ interface AssistantOverlayState extends AssistantOverlayVisual {
 }
 
 interface PromptQuestionState {
+  terminalConversationId?: string;
+  inlineTerminal?: boolean;
   id: string;
   question: string;
   isCurrent: () => boolean;
@@ -513,21 +515,27 @@ export class HudPresenter {
 
   /** Present one complete question without replacing the feature beneath it.
    * Only this prompt's current, completed frame may acknowledge publication. */
-  showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean): Promise<boolean> {
+  showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean, ownerKind?: 'messages' | 'brainstorm' | 'terminal'): Promise<boolean> {
     if (!this.visual?.paintExact || this.confirmation || !promptId
       || !question.trim() || question.length > 1000) return Promise.resolve(false);
     if (this.assistantConversation.isActive()) {
       return this.prepareAssistantConversationHandoff().then((ready) => (
-        ready ? this.showPromptQuestion(promptId, question, isCurrent) : false
+        ready ? this.showPromptQuestion(promptId, question, isCurrent, ownerKind) : false
       ));
     }
+    if (ownerKind === 'terminal' && (this.surface.kind !== 'brainstorm'
+      || this.surface.brainstorm.screen !== 'agent_terminal')) return Promise.resolve(false);
     const existing = this.promptQuestion;
     if (existing?.id === promptId) {
       return existing.question === question && this.isPromptCurrent(existing)
         ? existing.paint ?? Promise.resolve(false)
         : Promise.resolve(false);
     }
-    const prompt: PromptQuestionState = { id: promptId, question, isCurrent };
+    const prompt: PromptQuestionState = { id: promptId, question, isCurrent,
+      inlineTerminal: ownerKind === 'terminal',
+      terminalConversationId: ownerKind === 'terminal' && this.surface.kind === 'brainstorm'
+        ? this.surface.brainstorm.conversationId : undefined,
+    };
     this.promptQuestion = prompt;
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
@@ -552,7 +560,10 @@ export class HudPresenter {
 
   private isPromptCurrent(prompt: PromptQuestionState): boolean {
     try {
-      return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent();
+      return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent()
+        && (!prompt.inlineTerminal || (this.surface.kind === 'brainstorm'
+          && this.surface.brainstorm.screen === 'agent_terminal'
+          && this.surface.brainstorm.conversationId === prompt.terminalConversationId));
     } catch {
       return false;
     }
@@ -2186,6 +2197,12 @@ export class HudPresenter {
       };
     }
     if (this.promptQuestion) {
+      if (this.promptQuestion.inlineTerminal && this.surface.kind === 'brainstorm'
+        && this.surface.brainstorm.screen === 'agent_terminal') {
+        return {kind: 'brainstorm', status, micOn: this.micOn,
+          brainstorm: {...this.cloneBrainstorm(this.surface.brainstorm),
+            terminalPrompt: {id: this.promptQuestion.id, question: this.promptQuestion.question}}};
+      }
       return {
         kind: 'prompt_question', status, micOn: this.micOn,
         promptId: this.promptQuestion.id, question: this.promptQuestion.question,
@@ -2506,7 +2523,8 @@ export class HudPresenter {
   }
 
   private cloneBrainstorm(brainstorm: BrainstormHudModel): BrainstormHudModel {
-    return { ...brainstorm, collaborators: [...brainstorm.collaborators] };
+    return { ...brainstorm, collaborators: [...brainstorm.collaborators],
+      messages: brainstorm.messages?.map(message => ({...message})) };
   }
 
   private cloneProductivity(productivity: ProductivityHudModel): ProductivityHudModel {

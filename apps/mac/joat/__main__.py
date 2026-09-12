@@ -1511,6 +1511,10 @@ async def main() -> None:
             approvals=frame.approvals,
             opening_request_id=opening_request_id,
             opening_selection_id=opening_selection_id,
+            conversation_id=frame.conversation_id,
+            messages=frame.messages,
+            history_truncated=frame.history_truncated,
+            input_required=frame.input_required,
         ))
 
     agent_terminal = AgentTerminalRoster(

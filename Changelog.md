@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-11 — Continuous Agent Terminal conversations
+
+- Preserve full user and agent messages in a stable per-agent conversation, replacing the one-row-per-paragraph display loss. Retain up to 64 messages / 262144 UTF-8 bytes in memory; evict whole oldest messages with an explicit history notice.
+- Keep follow-up input inside the selected conversation, preserve indentation and blank lines, and retain the reading position across Working/Ready, Back/reopen, agent switching, and new replies arriving while reading older text. Input-required tasks advertise Reply needed. Prompt acknowledgement still waits for the complete current question to be painted.
+- UI and simulator specialists implemented the client viewport and strengthened acceptance runner; independent review identified and closed a long-token wrapping performance issue. Cached measurements and bounded Unicode-safe fitting prevent repeatedly measuring unchanged history or huge remaining tokens.
+- Focused diagnostics passed: 415 Mac domain/protocol/roster/opening tests, 112 UI conversation/input/controller tests, seven prompt-ownership tests, five focused renderer tests, TypeScript checking and three-file Python type checking. Simulator acceptance details and explicit fixture boundaries are recorded in docs/audits/agent-terminal-simulator-flow.md.
+- Final official-simulator replay passed 47 captured screens and nine authenticated local-fixture requests: three context-dependent turns per agent, complete long replies, Back/reopen, input cancellation, and new output preserving older-text reading position. The terminal now says Working consistently with the chooser. All 205 source fingerprints matched before/after execution; isolated listeners closed and temporary TLS key removed.
+- Full renderer/presenter suites retain 25 baseline failures: an isolated HEAD comparison reproduced the same failing names and first failure messages, with no new failures from this slice. They are not reported as passing.
+- This slice does not add provider streaming, restart-persistent history, a session-management menu, or tool-permission negotiation. It does not deploy or change the installed Mac/phone/glasses connection.
+
 ## 2026-09-11 — Display recovery integration follow-up
 
 - Independent source review found that an explicit display resume could reopen image submission during a pending native page replacement. Submission and in-flight guards now also require that no replacement owns the display, independently of the resume flag.

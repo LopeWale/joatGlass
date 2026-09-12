@@ -155,7 +155,7 @@ export class PromptedInputController {
     try {
       const show = this.options.presenter.showPromptQuestion;
       const painted = show
-        ? await show.call(this.options.presenter, message.promptId, message.question, () => this.isCurrent(publication))
+        ? await show.call(this.options.presenter, message.promptId, message.question, () => this.isCurrent(publication), message.ownerKind)
         : false;
       if (!this.isCurrent(publication)) return;
       if (!painted) {
