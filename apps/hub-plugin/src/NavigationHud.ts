@@ -65,6 +65,16 @@ export interface NavigationHudModel {
   map?: NavigationMapModel;
 }
 
+/** Pre-route progress and recovery share one independently delivered region. */
+export function isNavigationSetupStatus(navigation: NavigationHudModel): boolean {
+  return navigation.view === 'error' || (
+    navigation.view === 'uncertain'
+    && navigation.interaction === 'none'
+    && navigation.remainingDistanceM === undefined
+    && !navigation.map
+  );
+}
+
 export interface NavigationMapPoint {
   latitude: number;
   longitude: number;
