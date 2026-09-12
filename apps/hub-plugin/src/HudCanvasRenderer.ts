@@ -1910,7 +1910,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.hint;
     context.textAlign = 'center';
-    context.fillText('speak your answer · left x2: cancel', 288, 267);
+    context.fillText('speak your answer · double-click: cancel', 288, 267);
   }
 
   private drawAssistantOverlay(

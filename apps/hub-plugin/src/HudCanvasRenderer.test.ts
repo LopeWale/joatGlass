@@ -78,7 +78,7 @@ describe('prompt question rendering', () => {
       await renderer.render({...questionFrame('What should work do?'),
         status: "9:41 JOAT ONLINE — SAY 'JOAT …'"});
       expect(text.some(({ value }) => /say.*joat/i.test(value))).toBe(false);
-      expect(text.some(({ value }) => value === 'speak your answer · left x2: cancel')).toBe(true);
+      expect(text.some(({ value }) => value === 'speak your answer · double-click: cancel')).toBe(true);
       expect(text.some(({ value, y }) => value === 'JOAT' && y === 20)).toBe(true);
     } finally { vi.unstubAllGlobals(); }
   });
