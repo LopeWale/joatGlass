@@ -1,4 +1,5 @@
 import { OsEventTypeList, EventSourceType, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
+import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
@@ -32,7 +33,7 @@ export interface NavigationInputOwner {
   isActive(): boolean;
   handleClick(): boolean;
   handleScroll(direction: 'up' | 'down'): Promise<boolean>;
-  /** Left-temple double press exits the current navigation session. */
+  /** Double press exits the current navigation session. */
   handleCancel(): boolean;
 }
 
@@ -40,7 +41,7 @@ export interface NavigationInputOwner {
 export interface BrainstormInputOwner {
   isActive(): boolean;
   handleClick(): boolean;
-  /** Left-temple double press cancels an active Brainstorm round. */
+  /** Double press cancels an active Brainstorm round. */
   handleCancel(): boolean;
   /** A swipe during topic capture backs out of the armed capture; every
    * other state lets the swipe fall through to transcript scrolling. */
@@ -108,6 +109,8 @@ export class EventRouter {
    * release so the subsequent foreground-overlay event can disambiguate a
    * menu gesture without stealing plain long-press mute.
    */
+  private readonly gestures = new GesturePolicy();
+  private backPending = false;
   private pendingMicLongPress = false;
   private contextualMenuOverlayOpen = false;
 
@@ -204,6 +207,13 @@ export class EventRouter {
         event.audioEvent.audioPcm, event.audioEvent.speakerRole, event.audioEvent.source,
       );
     }
+    const gesture = this.gestures.resolve(event);
+    if (gesture?.intent === 'back' && !this.contextualMenuOverlayOpen) {
+      this.recordGesture('double_press', gesture.delivery);
+      this.handleBack();
+      return;
+    }
+
 
     // The decision surface owns every non-lifecycle input. A G2 swipe is the
     // explicit refusal gesture; all other non-system input is consumed so no
@@ -289,7 +299,7 @@ export class EventRouter {
       // for it in as many words, and a swipe that CANCELLED the session
       // while they tried to re-read a reply was the harshest possible
       // answer to "can I scroll?". Swipes page the transcript; cancel is
-      // the deliberate left double-press only.
+      // the deliberate double-press.
       if (this.brainstorm?.isActive()) {
         const swipe = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (
@@ -361,12 +371,26 @@ export class EventRouter {
     }
   }
 
+  /** One semantic Back action for every SDK delivery envelope and temple.
+   * The active owner determines what is left, never whether Back exits JOAT. */
+  private handleBack(): void {
+    this.pendingMicLongPress = false;
+    if (this.imu.isPending()) { this.imu.declineByTap(); return; }
+    if (this.backPending) return;
+    if (this.handlePromptInput(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
+    if (this.handleAssistantConversation(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
+    if (this.dismissAssistantOverlayFor(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
+    if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
+    if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) return;
+    this.backPending = true;
+    void this.menu.toggle().finally(() => { this.backPending = false; });
+  }
+
   /** Questions retain the feature underneath; only Back releases this owner. */
-  private handlePromptInput(eventType: number | undefined, backAllowed = true): boolean {
+  private handlePromptInput(eventType: number | undefined): boolean {
     if (!this.promptedInput?.isActive()) return false;
     const type = eventType ?? OsEventTypeList.CLICK_EVENT;
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      if (!backAllowed) return false; // Keep the firmware exit gesture.
       this.promptedInput.cancel('back');
       return true;
     }
@@ -474,7 +498,7 @@ export class EventRouter {
 
     // Confirmation is exclusive: no menu navigation, OS exit dialog, or
     // generic Mac input may occur behind it. Either built-in G2 temple is the
-    // same source-agnostic TAP action. Left-temple double press is the
+    // same source-agnostic TAP action. Double press is the
     // consistent Back gesture and refuses the pending write. Optional R1
     // input remains compatible, but the decision never depends on owning that
     // accessory.
@@ -488,57 +512,15 @@ export class EventRouter {
         )
       ) {
         this.imu.confirmByTap();
-      } else if (
-        type === OsEventTypeList.DOUBLE_CLICK_EVENT &&
-        source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
-      ) {
-        this.imu.declineByTap();
       }
       return;
     }
 
-    if (this.handlePromptInput(type, this.isBackSource(source))) return;
-    if (this.handleAssistantConversation(type, this.isBackSource(source))) return;
+    if (this.handlePromptInput(type)) return;
+    if (this.handleAssistantConversation(type)) return;
     if (this.dismissAssistantOverlayFor(type)) return;
     if (this.dismissVisibleNotificationFor(type)) return;
 
-    if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      // Left temple double: BACK. Consumed locally, never relayed to the
-      // Mac or confused with the OS exit gesture.
-      if (this.isBackSource(source)) {
-        // Navigation owns the wearer surface as a single interaction; the
-        // same deliberate gesture becomes its stop/recovery action.
-        if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
-        // A live Brainstorm owns the same stop gesture. This check is after
-        // navigation so one active surface always has deterministic priority.
-        if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) {
-          this.recordAcceptedBrainstormAction(source, 'double_press');
-          return;
-        }
-        void this.menu.toggle();
-        return;
-      }
-      const acceptanceSource = source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
-        ? 'right'
-        : source === EventSourceType.TOUCH_EVENT_FROM_RING
-          ? 'ring'
-          : undefined;
-      if (
-        acceptanceSource !== undefined
-        && this.brainstorm?.isActive()
-        && this.brainstorm.isAcceptanceArmed()
-        && this.brainstorm.handleAcceptance(acceptanceSource)
-      ) {
-        this.recordAcceptedBrainstormAction(source, 'double_press');
-        return;
-      }
-      // Anything else: the SDK's own exit dialog. The platform expects every
-      // app to offer an exit gesture, and double-tap is the canonical one.
-      // Mode 1 shows a confirmation — do NOT tear down here, the wearer can
-      // still cancel. Cleanup happens in onExit when SYSTEM_EXIT arrives.
-      void this.client.require().shutDownPageContainer(1);
-      return;
-    }
 
     if (
       type === OsEventTypeList.CLICK_EVENT
@@ -551,7 +533,7 @@ export class EventRouter {
 
     // "tap" on the Brainstorm and Terminal footers means a single press on
     // EITHER temple or the ring: Even's input reference gives both temples
-    // the same gesture set, and only the LEFT DOUBLE press is JOAT's Back.
+    // the same gesture set, and double press is JOAT's Back.
     // The gate used to admit right/ring only, so a left tap silently did
     // nothing while the footer promised it would (the audit's O3).
     if (
@@ -566,7 +548,7 @@ export class EventRouter {
 
     // Checking Messages mid-Brainstorm no longer needs a plugin gesture: the
     // firmware contextual menu (tap, then long-press) is registered on every
-    // page, including this one, and cancel stays on left-double.
+    // page, including this one, and cancel stays on double-click.
 
     // On the resting overview a click drills into the tab the rail has
     // selected: notifications become a focused, scrollable page (the Mac
@@ -615,8 +597,8 @@ export class EventRouter {
       case 2: // Mute/unmute is LOCAL: a privacy control must not need the Mac
         this.toggleMic();
         return;
-      case 3: // Global Refresh: re-open the real bridge/gateway link.
-        this.link.connect();
+      case 3: // Cached reconnect configuration now belongs to the phone.
+        void this.menu.openSettings();
         return;
       case 4: // Retired row id from a cached host menu; settings still opens.
         void this.menu.openSettings();
@@ -651,7 +633,6 @@ export class EventRouter {
 
   private handleAssistantConversation(
     eventType: number | undefined,
-    backAllowed = true,
   ): boolean {
     const owner = this.assistantOverlay;
     if (!owner?.hasAssistantConversation()) return false;
@@ -683,7 +664,7 @@ export class EventRouter {
       }
       return true;
     }
-    if (type !== OsEventTypeList.DOUBLE_CLICK_EVENT || !backAllowed) return false;
+    if (type !== OsEventTypeList.DOUBLE_CLICK_EVENT) return false;
     void owner.requestAssistantConversationExit().then((result) => {
       if (result !== 'exited') return;
       this.link.sendConversationAction({
@@ -699,17 +680,9 @@ export class EventRouter {
     return true;
   }
 
-  /** Firmware/simulator builds that omit the physical source still expose a
-   * real local gesture. Treat only the dummy source as the compatibility
-   * fallback; explicit right/ring double presses retain their OS/Brainstorm
-   * meaning. */
-  private isBackSource(source: number): boolean {
-    return source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
-      || source === EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL;
-  }
-
   private isLocalTapSource(source: number): boolean {
-    return this.isBackSource(source)
+    return source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+      || source === EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL
       || source === EventSourceType.TOUCH_EVENT_FROM_RING
       || source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R;
   }
