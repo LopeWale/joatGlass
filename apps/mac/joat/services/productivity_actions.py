@@ -359,10 +359,22 @@ class ProductivityActionController:
             origin=origin,
         )
 
-    async def _complete_reminder(self, raw_title: str) -> str:
+    async def complete_reminder_by_identity(self, native_identifier: str) -> str | None:
+        """Complete the selected native item through the ordinary confirmed flow.
+
+        A returned string is a preflight explanation. None means the existing
+        productivity workflow owns the visible confirmation and outcome.
+        """
+        if not isinstance(native_identifier, str) or not native_identifier.strip():
+            return "The selected reminder has no valid identity. Refresh Planning."
+        return await self._complete_reminder("", native_identifier=native_identifier)
+
+    async def _complete_reminder(
+        self, raw_title: str, *, native_identifier: str | None = None,
+    ) -> str | None:
         if self._bridge is None:
             return "Open JOAT on the Mac and connect Reminders first."
-        title = self._valid_title(raw_title)
+        title = self._valid_title(raw_title) if native_identifier is None else ""
         if title is None:
             return "Reminder title must be 1 to 200 visible characters."
         try:
@@ -374,17 +386,24 @@ class ProductivityActionController:
                 if isinstance(item, dict)
                 and isinstance(item.get("calendar_identifier"), str)
             ]
-            queried = await self._bridge.call(
-                "reminders.query",
-                {
-                    "calendar_identifiers": identifiers,
-                    "include_completed": False,
-                    "limit": 500,
-                },
-            )
+            if native_identifier is not None:
+                queried = await self._bridge.call(
+                    "reminders.get", {"calendar_item_identifier": native_identifier},
+                )
+            else:
+                queried = await self._bridge.call(
+                    "reminders.query",
+                    {
+                        "calendar_identifiers": identifiers,
+                        "include_completed": False,
+                        "limit": 500,
+                    },
+                )
         except NativeBridgeError as exc:
             if exc.code == "full_access_required":
                 return "Open JOAT on the Mac and connect Reminders first."
+            if native_identifier is not None and exc.code == "unknown_method":
+                return "Update JOAT on your Mac to complete this reminder."
             return f"Reminders is unavailable: {exc}."
         except (NativeBridgeUnavailable, NativeBridgeProtocolError):
             return "Reminders is unavailable. Check JOAT on the Mac."
@@ -393,18 +412,38 @@ class ProductivityActionController:
             or listed.store_generation != queried.store_generation
         ):
             return "Reminders changed while I prepared the completion. Please try again."
-        reminders = queried.result if isinstance(queried.result, list) else []
+        reminders = (
+            [queried.result] if native_identifier is not None and isinstance(queried.result, dict)
+            else queried.result if native_identifier is None and isinstance(queried.result, list)
+            else []
+        )
         matches = [
             item for item in reminders
             if isinstance(item, dict)
-            and str(item.get("title") or "").casefold() == title.casefold()
+            and (
+                item.get("calendar_item_identifier") == native_identifier
+                if native_identifier is not None
+                else str(item.get("title") or "").casefold() == title.casefold()
+            )
             and item.get("is_completed") is False
         ]
         if not matches:
-            return f"No incomplete reminder is exactly named {title}."
+            return (
+                "This reminder is no longer incomplete. Refresh Planning."
+                if native_identifier is not None else f"No incomplete reminder is exactly named {title}."
+            )
         if len(matches) > 1:
-            return f"More than one incomplete reminder is named {title}. Complete it on the Mac."
+            return (
+                "The selected reminder identity is ambiguous. Refresh Planning."
+                if native_identifier is not None
+                else f"More than one incomplete reminder is named {title}. Complete it on the Mac."
+            )
         reminder = matches[0]
+        if native_identifier is not None:
+            resolved_title = self._valid_title(str(reminder.get("title") or ""))
+            if resolved_title is None:
+                return "The selected reminder has an invalid title. Nothing was completed."
+            title = resolved_title
         if reminder.get("has_recurrence_rules") is True:
             return "Recurring reminder completion is not enabled until occurrence behavior is device-verified."
         item_id = reminder.get("calendar_item_identifier")
@@ -431,7 +470,7 @@ class ProductivityActionController:
             "calendar_identifier": container.identifier,
             "calendar_item_identifier": item_id,
         }
-        return await self._confirm_and_write(
+        outcome = await self._confirm_and_write(
             kind="reminders.complete",
             method="reminders.complete",
             body=body,
@@ -449,6 +488,7 @@ class ProductivityActionController:
             planning_anchor_unix_ms=self._known_reminder_due_anchor(item_id, reminder),
             success_phase="completed",
         )
+        return None if native_identifier is not None else outcome
 
     async def _prepare(
         self,

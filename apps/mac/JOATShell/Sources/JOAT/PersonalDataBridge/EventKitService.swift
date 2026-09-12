@@ -297,6 +297,19 @@ actor EventKitService {
         return result
     }
 
+    /// Resolve a selected item directly; a bounded agenda/global query cannot
+    /// establish that an identity outside its first page is missing.
+    func getReminder(_ request: ReminderGetRequest) throws -> ReminderDTO? {
+        _ = try requireFullAccess("reminders")
+        guard !request.calendarItemIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NativeBridgeError("invalid_identifier", "reminder identity is required")
+        }
+        guard let reminder = store.calendarItem(withIdentifier: request.calendarItemIdentifier) as? EKReminder else {
+            return nil
+        }
+        return normalize(reminder: reminder)
+    }
+
     func queryReminders(_ request: ReminderQueryRequest) async throws -> [ReminderDTO] {
         _ = try requireFullAccess("reminders")
         guard (1...500).contains(request.limit) else {

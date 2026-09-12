@@ -70,6 +70,10 @@ actor BridgeRouter {
             case "reminders.listContainers":
                 result = try await BridgeContract.encode(eventKit.listContainers(entity: "reminders"))
                 commitPhase = "read_only"
+            case "reminders.get":
+                let body = try BridgeContract.decode(ReminderGetRequest.self, from: request.body)
+                result = try await BridgeContract.encode(eventKit.getReminder(body))
+                commitPhase = "read_only"
             case "reminders.query":
                 let body = try BridgeContract.decode(ReminderQueryRequest.self, from: request.body)
                 result = try await BridgeContract.encode(eventKit.queryReminders(body))
