@@ -297,7 +297,8 @@ export function usesQuickNotesReaderLayout(title: string, items: readonly string
 
 export function usesMessagesPreparedReaderLayout(title: string, items: readonly string[]): boolean {
   const normalized = title.trim().toUpperCase();
-  return (normalized === 'MESSAGES · MESSAGE' || normalized === 'MESSAGES · REVIEW')
+  return (normalized === 'MESSAGES · MESSAGE' || normalized === 'MESSAGES · REVIEW'
+    || /^MESSAGES · (SENT|FAILED|CANCELLED|UNCERTAIN)$/.test(normalized))
     && /^\d+\/\d+ · /.test(items[0] ?? '');
 }
 

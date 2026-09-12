@@ -100,25 +100,6 @@ function parseMessageUI(value: unknown): MessageUIMessage | undefined {
   };
 }
 
-/** Short literal rows stay within even the compact list's secondary-column
- * budget. All status characters remain reachable through its existing scroll;
- * no text is passed through a lossy ellipsis or native 20-row fallback. */
-function messageStatusRows(text: string): string[] {
-  const rows: string[] = [];
-  for (const line of text.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g) ?? []) {
-    let row = '';
-    let width = 0;
-    for (const character of line) {
-      const cost = character === '\t' ? 8 : /[\r\n]/.test(character) ? 0 : character.length;
-      if (row && width + cost > 24) { rows.push(row); row = ''; width = 0; }
-      row += character;
-      width += cost;
-    }
-    if (row) rows.push(row);
-  }
-  return rows.length ? rows : [''];
-}
-
 const PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000;
 /**
  * The native bridge itself has a bounded call deadline. Give it a small
@@ -477,12 +458,15 @@ export class CapabilityMenu {
       grandparent = this.dataGrandparent;
     }
     if (parent === this.dataSurface && parent) parent = { ...parent, selectedIndex: this.selectedIndex };
-    const rows = messageStatusRows(accepted.text);
+    const rows = [`1/1 · ${accepted.state === 'sent' ? 'Submitted' : accepted.state}`, accepted.text];
+    const messageProse = { pages: quickNotesProsePages(rows), index: 0 };
     const title = `MESSAGES · ${accepted.state.toUpperCase()}`;
-    const hint = 'swipe: read · left x2: back';
+    const hint = 'left x2: back';
     const transition = this.beginTransition();
     const stillCurrent = () => current() && this.transitionId === transition;
-    const shown = await this.hud.showList(rows, { title, hint, selectable: false }, stillCurrent);
+    const shown = await this.hud.showList(this.noteDisplayItems(rows, messageProse), {
+      title, hint: this.messageDisplayHint(hint, messageProse), selectable: false,
+    }, stillCurrent);
     if (!stillCurrent()) return false;
     this.view = 'data';
     if (!shown) return false;
@@ -496,7 +480,7 @@ export class CapabilityMenu {
     this.messagesRetry = false;
     this.messagesScreen = 'read_only';
     this.dataHint = hint;
-    this.dataSurface = { title, items: rows, hint, selectable: false, selectedIndex: 0, messagesRetry: false, messagesScreen: 'read_only' };
+    this.dataSurface = { title, items: rows, hint, messageProse, selectable: false, selectedIndex: 0, messagesRetry: false, messagesScreen: 'read_only' };
     return true;
   }
 
@@ -2059,7 +2043,8 @@ export class CapabilityMenu {
    */
   private canRequestMessagePage(eventType: number, selectedIndex = this.selectedIndex): boolean {
     if (this.dataPagePending || this.messageProsePainting || !this.pendingRequestId) return false;
-    const isReader = this.messagesScreen === 'message_detail' || this.messagesScreen === 'review';
+    const isReader = this.messagesScreen === 'message_detail' || this.messagesScreen === 'review'
+      || (this.messagesScreen === 'read_only' && this.dataSurface?.messageProse !== undefined);
     if (this.messagesScreen !== 'conversation' && !isReader) return false;
     if (isReader) {
       const prose = this.dataSurface?.messageProse;
