@@ -1,5 +1,6 @@
 import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
+import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import {
   ASSISTANT_CONVERSATION_GEOMETRY,
@@ -233,7 +234,7 @@ export function conversationViewport(
     dimText,
     brightText,
     scrollbarText: scrollbar(all.length, lineCapacity, scrollFromTail),
-    footerText: centered(footer, ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
+    footerText: centered(GesturePolicy.formatHint(footer), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
     visibleLines,
     lineCapacity,
     totalLines: all.length,
