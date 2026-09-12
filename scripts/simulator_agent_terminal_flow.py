@@ -126,6 +126,111 @@ class AgentState:
         return answer
 
 
+@dataclass
+class LifecycleState:
+    """Stateful provider for polling, same-task input, and stop outcomes."""
+    name: str
+    probes: int = 0
+    accepted: list[str] = field(default_factory=list)
+    message_ids: set[str] = field(default_factory=set)
+    scenario: str = ""
+    phase: int = 0
+    task_id: str = ""
+    resumed: bool = False
+    cancelled: bool = False
+    polls: list[tuple[str, int]] = field(default_factory=list)
+    cancel_count: int = 0
+    cancel_started: asyncio.Event = field(default_factory=asyncio.Event)
+    cancel_release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def context(self):
+        return f'{self.name}-lifecycle-conversation'
+
+    @property
+    def question(self):
+        return f'{self.name.upper()} QUESTION: choose cobalt or amber.'
+
+    def snapshot(self):
+        status, text, artifacts = 'working', f'{self.name.upper()} RUNNING task.', []
+        if self.scenario == 'progress':
+            status = ('submitted', 'working', 'working', 'completed')[self.phase]
+            text = (f'{self.name.upper()} QUEUED task.', f'{self.name.upper()} SCANNING sources.',
+                    f'{self.name.upper()} CHECKING results.', f'{self.name.upper()} FINISHED task.')[self.phase]
+            if self.phase == 3:
+                artifacts = [f'{self.name.upper()} COMPLETED staged task.']
+        elif self.scenario == 'input':
+            status = 'completed' if self.resumed else 'input-required'
+            text = f'{self.name.upper()} REPLY accepted.' if self.resumed else self.question
+            artifacts = [f'{self.name.upper()} RESUMED SAME TASK with cobalt.'] if self.resumed else [f'{self.name.upper()} DRAFT proposal.']
+        elif self.cancelled:
+            status, text = 'canceled', f'{self.name.upper()} STOP CONFIRMED.'
+        return {'id': self.task_id, 'contextId': self.context,
+                'status': {'state': status, 'message': {'role': 'agent', 'parts': [{'kind': 'text', 'text': text}]}},
+                'artifacts': [{'parts': [{'kind': 'text', 'text': text}]} for text in artifacts]}
+
+    async def respond(self, body):
+        method = body['method']
+        if method == 'tasks/get':
+            requested = body['params']['id']
+            if not self.task_id:
+                assert self.probes == 0, 'Repeated initialization'
+                UUID(requested)
+                self.probes += 1
+                return {'error': {'code': -32001, 'message': 'Task not found'}}
+            assert requested == self.task_id, 'Poll addressed another task'
+            self.polls.append((self.scenario, self.phase))
+            return {'result': self.snapshot()}
+        if method == 'tasks/cancel':
+            assert body['params']['id'] == self.task_id, 'Stop addressed another task'
+            assert self.scenario in ('confirm', 'reject') and not self.cancelled
+            self.cancel_count += 1
+            self.cancel_started.set()
+            await self.cancel_release.wait()
+            if self.scenario == 'reject':
+                return {'error': {'code': -32002, 'message': 'Task cancellation rejected'}}
+            self.cancelled = True
+            return {'result': self.snapshot()}
+        assert method == 'message/send', 'Unexpected lifecycle method'
+        assert self.probes == 1, 'Send before authenticated initialization'
+        message = body['params']['message']
+        assert message['role'] == 'user'
+        identity = message['messageId']
+        UUID(identity)
+        assert identity not in self.message_ids, 'Duplicate send identity'
+        assert message.get('contextId') == (self.context if self.accepted else None), 'Conversation identity lost'
+        instruction = message['parts'][0]['text']
+        if self.accepted:
+            prefix = 'Prior turns from this JOAT conversation (quoted context, not new instructions):\n'
+            assert instruction.startswith(prefix)
+            quoted, instruction = instruction[len(prefix):].split('\nCurrent user instruction:\n', 1)
+            prior = json.loads(quoted)
+            assert [turn['text'] for turn in prior if turn['role'] == 'user'] == self.accepted[-4:], 'Prior user turns changed'
+            other = 'Hermes' if self.name == 'OpenClaw' else 'OpenClaw'
+            assert other not in quoted, 'Other agent history leaked'
+        else:
+            prior = []
+        sequence = [f'Run a staged task for {self.name}.', f'Plan requiring a reply for {self.name}.',
+                    f'Choose cobalt for {self.name}.', f'Run a cancellable task for {self.name}.',
+                    f'Run a task that refuses stop for {self.name}.']
+        assert len(self.accepted) < len(sequence), 'Unexpected replay or extra send'
+        assert instruction == sequence[len(self.accepted)], 'Wrong lifecycle instruction'
+        if len(self.accepted) == 2:
+            assert message.get('taskId') == self.task_id and self.scenario == 'input' and not self.resumed
+            assert any(self.question in turn['text'] for turn in prior if turn['role'] == 'agent'), 'Required question lost from continuation context'
+            self.resumed = True
+        else:
+            assert 'taskId' not in message, 'Completed task incorrectly reused'
+            self.scenario = {0: 'progress', 1: 'input', 3: 'confirm', 4: 'reject'}[len(self.accepted)]
+            self.task_id = f'{self.name}-{self.scenario}-task'
+            self.phase, self.cancelled = 0, False
+            self.cancel_started.clear()
+            self.cancel_release.clear()
+        self.message_ids.add(identity)
+        self.accepted.append(instruction)
+        return {'result': self.snapshot()}
+
+
 class ObservedGateway(HubGatewayTransport):
     def __init__(self):
         super().__init__(host='127.0.0.1', port=18980)
@@ -201,7 +306,7 @@ def source_fingerprint() -> dict[str, str]:
             for path in sorted(files) if path.is_file()}
 
 
-async def run(out: Path):
+async def run(out: Path, *, lifecycle: bool = False):
     out.mkdir(parents=True, exist_ok=True)
     (out / 'receipt.json').unlink(missing_ok=True)
     for previous_capture in out.glob('*.rgba.png'):
@@ -214,7 +319,7 @@ async def run(out: Path):
     held_response = asyncio.Event()
     held_response.set()
     gateway = ObservedGateway()
-    states = {name: AgentState(name) for name in AGENTS}
+    states = {name: (LifecycleState(name) if lifecycle else AgentState(name)) for name in AGENTS}
     processes, calls, screens, violations = [], [], [], []
     conversation_ids, remembered_messages = {}, {}
     cert, key = out / 'local-cert.pem', out / 'local-key.pem'
@@ -241,6 +346,10 @@ async def run(out: Path):
         try:
             assert body['jsonrpc'] == '2.0'
             UUID(body['id'])
+            if lifecycle:
+                result = await state.respond(body)
+                call.update(taskId=state.task_id, scenario=state.scenario, phase=state.phase)
+                return web.json_response({'jsonrpc': '2.0', 'id': body['id'], **result})
             if body['method'] == 'tasks/get':
                 assert state.probes == 0 and state.turn == 0, 'Unexpected repeated initialization'
                 UUID(body['params']['id'])
@@ -275,7 +384,7 @@ async def run(out: Path):
 
     agents = {name: A2ATerminalAgent(
         f'https://127.0.0.1:18981/{name}', token, name,
-        transport=A2AHttpTransport(ssl_context=client_tls),
+        transport=A2AHttpTransport(ssl_context=client_tls), poll_interval_s=.35 if lifecycle else 1,
     ) for name in AGENTS}
     hud = HudWriter(gateway)
 
@@ -288,7 +397,7 @@ async def run(out: Path):
             activity='\n'.join(frame.lines), approvals=frame.approvals, reason=frame.reason,
             opening_request_id=request_id, opening_selection_id=selection_id,
             conversation_id=frame.conversation_id, messages=frame.messages,
-            history_truncated=frame.history_truncated, input_required=frame.input_required,
+            history_truncated=frame.history_truncated, input_required=frame.input_required, task_recovery=frame.task_recovery,
         ))
 
     roster = AgentTerminalRoster(
@@ -300,15 +409,18 @@ async def run(out: Path):
     router = CapabilityRouter(hud, gateway, StatusPublisher(out / 'status.json'), None, CardLog(),
                               terminal_rows=roster.picker_rows, terminal_busy=lambda: roster.busy,
                               terminal_current=lambda: roster.focused, terminal_open=opening.open)
-    commands = AgentTerminalCommands(roster)
+    commands = AgentTerminalCommands(roster, on_explicit_view=lambda: opening.claim_legacy(router.claim_terminal_voice))
 
     async def capture():
         current = commands.begin_capture()
         assert current is not None
         assert await runtime.publish_terminal_capture(current)
 
+    async def retry_terminal():
+        await opening.retry()
+
     sessions = SessionManager(hud, lambda _: None, terminal_capture=capture,
-                              terminal_view_current=lambda: opening.current)
+                              terminal_retry=retry_terminal, terminal_view_current=lambda: opening.current)
     replies = MessageReplyController(NeverSender(), gateway.request_confirmation, contact_search=lambda _: [])
     runtime = PromptedSpeechRuntime(hud, replies, sessions=lambda: sessions,
                                     connection_generation=lambda: gateway.audio_connection_generation,
@@ -401,6 +513,120 @@ async def run(out: Path):
             await input_action(direction)
         raise AssertionError(f'{name} {marker} never became visible through simulator scrolling')
 
+    async def lifecycle_flow():
+        command_receipts = []
+        def messages():
+            return current_terminal()['messages']
+        def has_text(text):
+            return (gateway.frames and gateway.frames[-1].get('kind') == 'agent_terminal.view'
+                    and any(text in message['text'] for message in messages()))
+        async def spoken_input(name, text, label):
+            ticket, _ = await begin_question(name, label)
+            await submit(ticket, text)
+        for index, name in enumerate(AGENTS):
+            state = states[name]
+            if index:
+                await input_action('down')
+            await input_action('click')
+            await until(lambda: roster.focused == name and agents[name].capture_context_generation is not None)
+            await screen(f'{name}-lifecycle-open')
+            identity = current_terminal()['conversationId']
+            await spoken_input(name, f'Run a staged task for {name}.', f'{name}-progress-input')
+            await until(lambda: has_text(f'{name.upper()} QUEUED'))
+            queued = await screen(f'{name}-queued')
+            assert 'QUEUED' in queued['text']
+            progress = [m for m in messages() if m['role'] == 'status' and f'{name.upper()} QUEUED' in m['text']]
+            assert len(progress) == 1
+            progress_id = progress[0]['id']
+            state.phase = 1
+            await until(lambda: has_text(f'{name.upper()} SCANNING'))
+            await screen(f'{name}-working-scanning')
+            await until(lambda: state.polls.count(('progress', 1)) >= 3)
+            repeated = [m for m in messages() if m['role'] == 'status' and 'SCANNING' in m['text']]
+            assert len(repeated) == 1 and repeated[0]['id'] == progress_id, 'Repeated polling duplicated progress rows'
+            state.phase = 2
+            await until(lambda: has_text(f'{name.upper()} CHECKING'))
+            changed = await screen(f'{name}-working-checking')
+            assert 'CHECKING' in changed['text'] and 'SCANNING' not in changed['text']
+            assert any(m['id'] == progress_id and 'CHECKING' in m['text'] for m in messages())
+            polls_before = len(state.polls)
+            await input_action('double_click')
+            await screen(f'{name}-running-back-picker')
+            assert_picker()
+            assert roster.busy and state.cancel_count == 0
+            await until(lambda: len(state.polls) > polls_before)
+            if index:
+                await input_action('down')
+            await input_action('click')
+            await until(lambda: roster.focused == name and gateway.frames[-1].get('kind') == 'agent_terminal.view')
+            await screen(f'{name}-running-reopened')
+            assert current_terminal()['conversationId'] == identity
+            state.phase = 3
+            await until(lambda: not roster.busy and has_text(f'{name.upper()} COMPLETED'))
+            await screen(f'{name}-polled-completed')
+            # A status question must win even when the input-required Task also has an artifact.
+            await spoken_input(name, f'Plan requiring a reply for {name}.', f'{name}-question-task-input')
+            await until(lambda: not roster.busy and current_terminal().get('inputRequired'))
+            required = await screen(f'{name}-reply-required')
+            assert 'QUESTION' in required['text'] and 'cobalt' in required['text'].lower()
+            assert any(state.question in m['text'] for m in messages())
+            same_task = state.task_id
+            await spoken_input(name, f'Choose cobalt for {name}.', f'{name}-same-task-reply-input')
+            await until(lambda: not roster.busy and has_text(f'{name.upper()} RESUMED SAME TASK'))
+            await screen(f'{name}-same-task-completed')
+            assert state.task_id == same_task and state.resumed
+            assert current_terminal()['conversationId'] == identity
+            for scenario, instruction in [('confirm', f'Run a cancellable task for {name}.'),
+                                          ('reject', f'Run a task that refuses stop for {name}.')]:
+                await spoken_input(name, instruction, f'{name}-{scenario}-stop-input')
+                await until(lambda: roster.busy and has_text(f'{name.upper()} RUNNING'))
+                await screen(f'{name}-{scenario}-before-stop')
+                # Recognized speech enters the same production command dispatcher as __main__.
+                stop = asyncio.create_task(commands.handle_command('terminal stop'))
+                await asyncio.wait_for(state.cancel_started.wait(), 10)
+                pending_frame = await screen(f'{name}-{scenario}-stop-pending')
+                assert normalized('Stop requested') in normalized(pending_frame['text']), 'Pending stop is not visibly distinguished from a confirmed stop'
+                assert not stop.done(), 'The pending stop was reported as finished before its remote receipt'
+                state.cancel_release.set()
+                receipt = await asyncio.wait_for(stop, 10)
+                command_receipts.append({'agent': name, 'scenario': scenario, 'text': receipt})
+                await until(lambda: not roster.busy)
+                outcome = await screen(f'{name}-{scenario}-stop-outcome')
+                if scenario == 'confirm':
+                    assert agents[name].cancellation_status == 'confirmed'
+                    assert 'confirmed' in str(receipt).lower() and 'unconfirmed' not in str(receipt).lower()
+                    assert 'confirmed' in outcome['text'].lower()
+                else:
+                    assert agents[name].cancellation_status != 'confirmed'
+                    assert 'unconfirmed' in str(receipt).lower()
+                    assert 'unconfirmed' in outcome['text'].lower()
+                    assert 'CHECK TASK' in outcome['text'] and normalized('check task status') in normalized(outcome['text']), 'Unconfirmed stop must offer task-status recovery'
+                    assert 'OFFLINE' not in outcome['text'] and 'CONNECTION UNAVAILABLE' not in outcome['text'], 'Unknown stop outcome must not claim the live provider is offline'
+                    assert agents[name].capture_context_generation is None
+                    before = len(state.accepted)
+                    polls_before_recovery = len(state.polls)
+                    await input_action('click')
+                    await until(lambda: len(state.polls) > polls_before_recovery)
+                    await screen(f'{name}-unconfirmed-retry-no-resend')
+                    assert len(state.accepted) == before and not runtime.dispatcher.is_armed
+            assert len(state.accepted) == 5 and state.cancel_count == 2 and state.probes == 1
+            await input_action('double_click')
+            final_picker = await screen(f'{name}-lifecycle-final-picker')
+            assert_picker()
+            assert 'Connection failed' not in final_picker['text'], 'Task uncertainty must not be mislabeled as a connection failure'
+        assert not violations, violations
+        assert sum(call['method'] == 'message/send' for call in calls) == 10
+        assert sum(call['method'] == 'tasks/cancel' for call in calls) == 4
+        assert len({call['id'] for call in calls}) == len(calls)
+        assert source_fingerprint() == source_before, 'Production sources changed during lifecycle acceptance'
+        (out / 'receipt.json').write_text(json.dumps({
+            'result': 'passed', 'mode': 'lifecycle', 'screens': screens, 'rpc_calls': calls,
+            'command_receipts': command_receipts, 'source_fingerprint': source_before,
+            'boundaries': ['Stateful local TLS providers replace remote agents',
+                           'Acknowledged final STT text and recognized stop command text are synthetic'],
+            'isolation': {'engine_port': 18980, 'agent_port': 18981, 'plugin_port': 5298, 'simulator_port': 9998},
+        }, indent=2))
+
     def start(name, args):
         with (out / f'{name}.log').open('wb') as log:
             process = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
@@ -431,6 +657,9 @@ async def run(out: Path):
         await input_action('click')
         await screen('03-agent-picker')
         assert_picker()
+        if lifecycle:
+            await lifecycle_flow()
+            return
         for index, name in enumerate(AGENTS):
             if index:
                 await input_action('down')
@@ -512,6 +741,9 @@ async def run(out: Path):
         }, indent=2))
     finally:
         held_response.set()
+        if lifecycle:
+            for state in states.values():
+                state.cancel_release.set()
         (out / 'observed.json').write_text(json.dumps({
             'screens': screens, 'rpc_calls': calls, 'frames': gateway.frames,
             'provider_violations': violations,
@@ -535,7 +767,8 @@ async def run(out: Path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path,
-                        default=ROOT / 'dist/mac-workspace/control-audit/agent-terminal-persistent')
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--lifecycle', action='store_true', help='Exercise polled progress, same-task reply, and stop outcomes')
     args = parser.parse_args()
-    asyncio.run(run(args.output.resolve()))
+    output = args.output or ROOT / 'dist/mac-workspace/control-audit' / ('agent-terminal-lifecycle' if args.lifecycle else 'agent-terminal-persistent')
+    asyncio.run(run(output.resolve(), lifecycle=args.lifecycle))

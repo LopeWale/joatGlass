@@ -968,6 +968,7 @@ class AgentTerminalHudView:
     messages: tuple[TerminalMessage, ...] = ()
     history_truncated: bool = False
     input_required: bool = False
+    task_recovery: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         if self.state not in _BRAINSTORM_HUD_STATES:
@@ -1006,14 +1007,14 @@ class AgentTerminalHudView:
                 })
             if size > TERMINAL_HISTORY_BYTES:
                 raise ProtocolError("Agent Terminal retained history is too large")
-            if type(self.history_truncated) is not bool or type(self.input_required) is not bool:
+            if type(self.history_truncated) is not bool or type(self.input_required) is not bool or type(self.task_recovery) is not bool:
                 raise ProtocolError("Agent Terminal conversation flags are invalid")
             conversation = {
                 "conversationId": _brainstorm_text(self.conversation_id, "conversation identity", 128),
                 "messages": entries, "historyTruncated": self.history_truncated,
-                "inputRequired": self.input_required,
+                "inputRequired": self.input_required, "taskRecovery": self.task_recovery,
             }
-        elif self.messages or self.history_truncated or self.input_required:
+        elif self.messages or self.history_truncated or self.input_required or self.task_recovery:
             raise ProtocolError("Agent Terminal messages require conversation identity")
         return {
             "kind": "agent_terminal.view",

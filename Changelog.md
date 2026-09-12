@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-12 — Agent Terminal task progress and Stop/Reply lifecycle
+
+- Project accepted task status separately from answer artifacts. Poll snapshots update one retained status record, repeated snapshots do not duplicate transcript output, and final answers enter once. Input-required questions take priority over draft artifacts and remain in the same-task continuation context.
+- Show pending Stop confirmation, confirmed remote cancellation, and unconfirmed outcomes distinctly. Bind Stop to its original local task and agent; preserve a known completion and never cancel a later replacement task. Progress-record eviction cannot interrupt remote polling.
+- Show Check task and a matching status-check action for uncertain owned tasks instead of falsely reporting Offline or Connection failed. The new optional taskRecovery wire field keeps old frames compatible.
+- Adapter and simulator specialists implemented typed updates and an isolated task-state fixture. Independent review found and closed stop ownership/final-paint races, clarification-history loss, progress eviction, and a recovery predicate/action mismatch. Focused diagnostics: 444 Mac tests, 112 UI conversation/input tests, the targeted recovery-label renderer check, TypeScript and Python type checking. Broader renderer/presenter suites retain the same 25 baseline failures with no new failing test names.
+- The uploaded 0.1.88 package is unchanged. Provider SSE, provider-specific tool permissions, and durable restart persistence are separate remaining work; no installed engine, pairing or physical glasses connection is used by this task.
+
 ## 2026-09-12 — JOAT 0.1.88 package built
 
 - Built the canonical apps/hub-plugin/joat.ehpk from a temporary export of committed source 482fd0a (completed Agent Terminal implementation 29184ba plus version metadata). Release checks and TypeScript compilation passed; temporary export removed. No developer environment or simulator fixtures were packaged.

@@ -545,7 +545,7 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals' | 'inputRequired'>
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals' | 'inputRequired' | 'taskRecovery'>
     // The lane chips, used only to decide whether the switch gesture has
     // anywhere to go. Optional so every existing caller stays valid.
     & { collaborators?: readonly string[] },
@@ -596,6 +596,7 @@ export function brainstormActionHint(
       ? 'tap: reply · swipe: scroll · double-click: back'
       : 'tap: speak · swipe: scroll · double-click: back';
   }
+  if (model.taskRecovery) return 'tap: check task status · double-click: back';
   if (model.state === 'blocked' || model.state === 'unavailable') {
     return 'tap: retry connection · double-click: back';
   }
@@ -640,9 +641,9 @@ export function agentTerminalFocusLabel(topic: string | undefined): string {
 }
 
 export function agentTerminalTranscriptLayout(
-  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked' | 'topic' | 'inputRequired'>,
+  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked' | 'topic' | 'inputRequired' | 'taskRecovery'>,
 ): AgentTerminalTranscriptLayout {
-  const state = model.inputRequired ? 'REPLY NEEDED'
+  const state = model.taskRecovery ? 'CHECK TASK' : model.inputRequired ? 'REPLY NEEDED'
     : model.state === 'running' ? 'WORKING' : brainstormStateLabel(model.state);
   const focus = agentTerminalFocusLabel(model.topic);
   // Recovery chrome exists to be ACTED ON — a blocked terminal names the
@@ -652,9 +653,9 @@ export function agentTerminalTranscriptLayout(
   // shit" was needed there. It is not: when nothing is wrong, one summary
   // row carries the connection state, and the rest of the
   // glass belongs to the transcript.
-  const needsRecovery = model.state === 'blocked'
+  const needsRecovery = !model.taskRecovery && (model.state === 'blocked'
     || model.state === 'approval_required'
-    || model.state === 'unavailable';
+    || model.state === 'unavailable');
   if (!needsRecovery) {
     return {
       summary: `${focus} > ${state}`,

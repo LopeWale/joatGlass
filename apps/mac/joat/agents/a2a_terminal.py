@@ -23,6 +23,9 @@ MAX_BYTES = 262144
 ACTIVE = {"submitted", "working"}
 FINAL = {"completed", "failed", "rejected", "canceled"}
 INTERRUPTED = {"input-required", "auth-required"}
+SUPPORTED_STATES = ACTIVE | FINAL | INTERRUPTED
+
+ProgressUpdate = Callable[[A2ARequestResult], Awaitable[None]]
 
 
 def _endpoint(value: str) -> str:
@@ -113,6 +116,23 @@ def _identifier(value: object, *, required: bool = False) -> str | None:
     return value
 
 
+def _normalize_state(value: object) -> str:
+    if not isinstance(value, str):
+        raise A2AError(Code.PROTOCOL_ERROR)
+    state = value.removeprefix("TASK_STATE_").lower().replace("_", "-")
+    if state == "cancelled":
+        state = "canceled"
+    if state not in SUPPORTED_STATES:
+        raise A2AError(Code.PROTOCOL_ERROR)
+    return state
+
+
+def _status_text(message: object) -> str:
+    if isinstance(message, dict):
+        return _text(message.get("parts", []))
+    return ""
+
+
 def parse_result(result: dict[str, object], *, expected_task: str | None = None) -> A2ARequestResult:
     # Some v1 bindings wrap the Task/Message union; the deployed services
     # return the task directly. Neither permits an absent state => completed.
@@ -124,18 +144,14 @@ def parse_result(result: dict[str, object], *, expected_task: str | None = None)
         if expected_task is not None or result.get("role") not in {"agent", "ROLE_AGENT"} or "parts" not in result:
             raise A2AError(Code.PROTOCOL_ERROR)
         _identifier(result.get("messageId"), required=True)
-        return A2ARequestResult(None, context, "completed", _text(result["parts"]))
+        return A2ARequestResult(None, context, "completed", _text(result["parts"]), "")
     task_id = _identifier(result.get("id"), required=True)
     if expected_task is not None and task_id != expected_task:
         raise A2AError(Code.PROTOCOL_ERROR)
     status = result["status"]
     if not isinstance(status, dict) or not isinstance(status.get("state"), str):
         raise A2AError(Code.PROTOCOL_ERROR)
-    state = status["state"].removeprefix("TASK_STATE_").lower().replace("_", "-")
-    if state == "cancelled":
-        state = "canceled"
-    if state not in ACTIVE | FINAL | INTERRUPTED:
-        raise A2AError(Code.PROTOCOL_ERROR)
+    state = _normalize_state(status.get("state"))
     artifacts = result.get("artifacts", [])
     if not isinstance(artifacts, list):
         raise A2AError(Code.PROTOCOL_ERROR)
@@ -144,10 +160,7 @@ def parse_result(result: dict[str, object], *, expected_task: str | None = None)
         if not isinstance(artifact, dict):
             raise A2AError(Code.PROTOCOL_ERROR)
         output.append(_text(artifact.get("parts", [])))
-    message = status.get("message")
-    if not output and isinstance(message, dict):
-        output.append(_text(message.get("parts", [])))
-    return A2ARequestResult(task_id, context, state, "\n".join(output).strip())
+    return A2ARequestResult(task_id, context, state, "\n".join(output).strip(), _status_text(status.get("message")))
 
 
 class A2ATerminalAgent:
@@ -178,6 +191,7 @@ class A2ATerminalAgent:
         self._history: deque[tuple[str, str]] = deque(maxlen=64)
         self.last_outcome: A2ARequestResult | None = None
         self.cancellation_status = "none"
+        self._last_update: tuple[str | None, str | None, str, str, str] | None = None
 
     @property
     def capture_context_generation(self) -> int | None:
@@ -237,7 +251,13 @@ class A2ATerminalAgent:
         async for text in self.stream_captured(prompt, context_generation=generation):
             yield text
 
-    async def stream_captured(self, prompt: str, *, context_generation: int) -> AsyncIterator[str]:
+    async def stream_task_captured(self, prompt: str, *, context_generation: int,
+                                  on_update: ProgressUpdate | None = None) -> AsyncIterator[str]:
+        async for text in self.stream_captured(prompt, context_generation=context_generation, on_update=on_update):
+            yield text
+
+    async def stream_captured(self, prompt: str, *, context_generation: int,
+                             on_update: ProgressUpdate | None = None) -> AsyncIterator[str]:
         async with self._lock:
             if context_generation != self.capture_context_generation:
                 raise A2AError(Code.CONTEXT_CHANGED)
@@ -245,6 +265,7 @@ class A2ATerminalAgent:
                 raise A2AError(Code.PROTOCOL_ERROR)
             if self._active_state in ACTIVE or self._uncertain:
                 raise A2AError(Code.OUTCOME_UNKNOWN)
+            self._last_update = None
             # Some deployed peers preserve contextId but run each task with
             # no conversation memory. Carry only this lane's bounded prior
             # turns, as quoted context, so follow-ups survive that behavior.
@@ -268,6 +289,7 @@ class A2ATerminalAgent:
             if self._active_state in INTERRUPTED and self._task:
                 message["taskId"] = self._task
             self.cancellation_status = "none"
+            self.last_outcome = None
             self._status("running")
             self._history.append(("user", prompt))
             sending = True
@@ -275,11 +297,15 @@ class A2ATerminalAgent:
                 raw = await self._rpc("message/send", {"message": message, "configuration": {"blocking": False}})
                 result = self._accept(raw)
                 sending = False
+                if on_update is not None:
+                    await self._emit_update(result, on_update)
                 async with asyncio.timeout(self._poll_seconds):
                     while result.state in ACTIVE:
                         await asyncio.sleep(self._poll_interval)
                         raw = await self._rpc("tasks/get", {"id": result.task_id})
                         result = self._accept(raw, expected_task=result.task_id)
+                        if on_update is not None:
+                            await self._emit_update(result, on_update)
             except asyncio.CancelledError:
                 if self._task and self._active_state in ACTIVE | INTERRUPTED:
                     try:
@@ -307,19 +333,30 @@ class A2ATerminalAgent:
                 self._unknown(Code.SUBMISSION_UNCERTAIN if sending else Code.OUTCOME_UNKNOWN)
                 raise A2AError(Code.SUBMISSION_UNCERTAIN if sending else Code.OUTCOME_UNKNOWN) from None
             self._finish(result)
-            if result.text:
-                self._history.append(("agent", result.text))
+            final_output = result.display_text.strip()
             if result.state == "input-required":
-                raise A2AError(Code.INPUT_REQUIRED, text=result.text)
+                if final_output:
+                    self._history.append(("agent", final_output))
+                if result.text or result.status_text:
+                    raise A2AError(Code.INPUT_REQUIRED, text=final_output)
+                raise A2AError(Code.INPUT_REQUIRED)
             if result.state == "auth-required":
                 raise A2AError(Code.AUTH_REQUIRED)
             if result.state in {"failed", "rejected", "canceled"}:
                 code = {"failed": Code.TASK_FAILED, "rejected": Code.TASK_REJECTED, "canceled": Code.CANCELLED}[result.state]
                 raise A2AError(code)
-            if result.text:
-                yield result.text
+            if final_output:
+                self._history.append(("agent", final_output))
+                yield final_output
             else:
                 yield "Task completed without a text response."
+
+    async def _emit_update(self, result: A2ARequestResult, on_update: ProgressUpdate) -> None:
+        key = (result.task_id, result.context_id, result.state, result.text, result.status_text)
+        if self._last_update == key:
+            return
+        self._last_update = key
+        await on_update(result)
 
     def _accept(self, raw: dict[str, object], *, expected_task: str | None = None) -> A2ARequestResult:
         result = parse_result(raw, expected_task=expected_task)
@@ -374,12 +411,13 @@ class A2ATerminalAgent:
             if result.state in ACTIVE:
                 self._status("running")
                 return "The agent is still working. Check again or cancel this task."
+            final_output = result.display_text.strip()
             self._uncertain = False
             self._ready = True
             self._finish(result)
-            if result.text:
-                self._history.append(("agent", result.text))
-            return result.text or f"Agent task: {result.state}."
+            if final_output:
+                self._history.append(("agent", final_output))
+            return final_output or f"Agent task: {result.state}."
 
     async def reset_conversation(self) -> None:
         async with self._lock:

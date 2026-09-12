@@ -1518,3 +1518,12 @@ describe('inline terminal composer rendering', () => {
     expect(painted.filter(row => row.text === 'Reply to Hermes.').every(row => row.y < 257)).toBe(true);
   });
 });
+
+it('keeps uncertain owned tasks distinct from connection failure', () => {
+  const model = {screen: 'agent_terminal' as const, state:'blocked' as const,
+    topic:'Hermes · check task', taskRecovery:true};
+  const layout = agentTerminalTranscriptLayout(model);
+  expect(layout.summary).toBe('HERMES > CHECK TASK');
+  expect(layout.showRecoveryDetails).toBe(false);
+  expect(brainstormActionHint(model)).toBe('tap: check task status · double-click: back');
+});
