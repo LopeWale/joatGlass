@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-12 — Keep a successful legacy reply in its conversation
+
+- Restore the original recipient context after successful legacy submission only while its selection generation and original expiry remain valid. Each next reply requires a new confirmation; failed submissions and changed contexts do not re-arm a recipient.
+- Visually verified official simulator acceptance, receipt dismissal, retired-review rejection, a fresh follow-up review and confirmation timeout with one disposable sender invocation total. All owned runs closed. Navigation/expiry adverse guards still need runtime coverage; package and installed engine unchanged.
+
 ## 2026-09-12 — Restore conversation after legacy reply cancellation
 
 - Consume the completed voice draft review into the retained conversation when its confirmation claims the screen. Stage the return snapshot synchronously without an intermediate paint; preserve the prepared MessageUI path.

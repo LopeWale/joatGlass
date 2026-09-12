@@ -173,6 +173,7 @@ class MessageReplyController:
         self._begin_reply = begin_reply
         self._on_status = on_status
         self._selection: _MessageSelection | None = None
+        self._selection_generation = 0
         self._compose: _ComposeSelection | None = None
         self._draft_lock = asyncio.Lock()
         self._prepared: dict[str, _PreparedMessage] = {}
@@ -586,6 +587,7 @@ class MessageReplyController:
             log.warning("message cleanup journal error=%s", type(exc).__name__)
 
     def select(self, thread: MessageThread, trace_id: str) -> None:
+        self._selection_generation += 1
         if self._active_action is not None:
             self.cancel_message_action(self._active_action)
         safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
@@ -603,6 +605,7 @@ class MessageReplyController:
         )
 
     def begin_compose(self, trace_id: str) -> None:
+        self._selection_generation += 1
         if self._active_action is not None:
             self.cancel_message_action(self._active_action)
         safe_trace = re.sub(r"[^a-zA-Z0-9._:-]", "-", trace_id)[:64] or "hud"
@@ -615,6 +618,7 @@ class MessageReplyController:
         log.info("message reply trace=%s stage=compose-selected", safe_trace)
 
     def clear_selection(self, reason: str = "explicit") -> None:
+        self._selection_generation += 1
         if reason != "confirmation-accepted" and self._active_action is not None:
             self.cancel_message_action(self._active_action)
         selection = self._selection
@@ -880,6 +884,11 @@ class MessageReplyController:
         prepared: _PreparedMessage | None = None,
     ) -> str:
         target = thread.reply_target
+        conversation_selection = self._selection if (
+            prepared is None and origin_kind == "messages.selection"
+            and self._selection is not None and self._selection.thread is thread
+            and self._selection.trace_id == trace_id
+        ) else None
         if target is None:
             message = "This conversation has no Messages send target. Open it again on your Mac."
             if prepared is not None:
@@ -1020,7 +1029,9 @@ class MessageReplyController:
             if prepared is not None:
                 self._set_status(prepared, "cancelled", "Reply cancelled.")
             return "Reply cancelled."
+        restore_conversation = conversation_selection is not None and self._selection is conversation_selection
         self.clear_selection("confirmation-accepted")
+        consumed_generation = self._selection_generation
         attempt = None
         if self._journal is not None:
             attempt = self._journal.begin_attempt(
@@ -1083,6 +1094,15 @@ class MessageReplyController:
             )
             self._journal.purge_payload(action_id)
         log.info("message reply trace=%s stage=submitted delivery=unverified", action_id)
+        # Consent is consumed above. A successful submission may retain the
+        # still-visible conversation for a NEW draft and NEW confirmation.
+        # Never re-arm after navigation, another selection, expiry or failure.
+        if (restore_conversation and conversation_selection is not None
+                and self._selection_generation == consumed_generation
+                and self._selection is None and self._compose is None
+                and self._active_action is None
+                and self._monotonic() < conversation_selection.expires_at):
+            self._selection = conversation_selection
         message = f"Submitted to Messages for {thread.sender}; delivery unverified."
         if prepared is not None:
             self._set_status(prepared, "sent", message)
