@@ -135,8 +135,8 @@ class NotificationObservationStore:
 
         self.set_health(source_id, "stale", now_us=now_us)
 
-    def prune(self, *, before_us: int) -> int:
-        """Drop settled observations older than ``before_us``.
+    def prune(self, *, before_us: int, limit: int = 500) -> int:
+        """Drop one bounded batch of settled observations older than ``before_us``.
 
         Nothing ever removed rows from this table, and the cross-source
         duplicate-suppression queries filter it on every poll. Left to grow it
@@ -149,14 +149,16 @@ class NotificationObservationStore:
         retained window must stay wider than the suppression lookup's own
         window or a duplicate could slip through behind the deletion.
         """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("prune limit must be between 1 and 500")
         cursor = self._store.execute(
             "DELETE FROM notification_observations WHERE observation_id IN ("
             "  SELECT o.observation_id FROM notification_observations o "
             "  JOIN notification_outbox x ON x.observation_id=o.observation_id "
             "  WHERE x.state != 'pending' "
-            "  AND COALESCE(o.occurred_at_us,o.observed_at_us) < ?"
+            "  AND COALESCE(o.occurred_at_us,o.observed_at_us) < ? LIMIT ?"
             ")",
-            (before_us,),
+            (before_us, limit),
         )
         return cursor.rowcount if cursor.rowcount > 0 else 0
 
