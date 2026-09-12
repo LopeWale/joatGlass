@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-12 — Consistent prepared reply follow-up
+
+- Apply the same guarded successful-recipient restoration to prepared and legacy selected-conversation replies. Preserve original expiry, context generation and fresh confirmation requirements.
+- Official simulator verified accepted prepared reply, readable result, Back, a fresh follow-up body prompt without recipient reselection, prompt cancellation and return. One disposable sender invocation; no real message sent. All owned runs closed.
+
 ## 2026-09-12 — Readable prepared Messages results
 
 - Replace 24-character receipt slicing with the existing full-width JOAT regular-prose reader and paging. Preserve terminal action identity and double-click return to the conversation.

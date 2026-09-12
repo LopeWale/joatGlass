@@ -885,7 +885,7 @@ class MessageReplyController:
     ) -> str:
         target = thread.reply_target
         conversation_selection = self._selection if (
-            prepared is None and origin_kind == "messages.selection"
+            origin_kind == "messages.selection"
             and self._selection is not None and self._selection.thread is thread
             and self._selection.trace_id == trace_id
         ) else None
@@ -1094,6 +1094,9 @@ class MessageReplyController:
             )
             self._journal.purge_payload(action_id)
         log.info("message reply trace=%s stage=submitted delivery=unverified", action_id)
+        message = f"Submitted to Messages for {thread.sender}; delivery unverified."
+        if prepared is not None:
+            self._set_status(prepared, "sent", message)
         # Consent is consumed above. A successful submission may retain the
         # still-visible conversation for a NEW draft and NEW confirmation.
         # Never re-arm after navigation, another selection, expiry or failure.
@@ -1103,7 +1106,4 @@ class MessageReplyController:
                 and self._active_action is None
                 and self._monotonic() < conversation_selection.expires_at):
             self._selection = conversation_selection
-        message = f"Submitted to Messages for {thread.sender}; delivery unverified."
-        if prepared is not None:
-            self._set_status(prepared, "sent", message)
         return message
