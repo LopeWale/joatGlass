@@ -23,7 +23,8 @@ export class BrainstormController {
   constructor(private readonly link: BrainstormLink) {}
 
   present(model: BrainstormHudModel): void {
-    this.model = { ...model, collaborators: [...model.collaborators] };
+    this.model = { ...model, collaborators: [...model.collaborators],
+      messages: model.messages?.map(message => ({...message})) };
     // acceptance_ready is an explicit Mac acknowledgement. Keep the trigger
     // consumed while that phase is visible, and accept exactly one start tap.
     this.acceptancePending = model.state === 'acceptance_ready';

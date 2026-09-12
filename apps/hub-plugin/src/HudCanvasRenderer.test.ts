@@ -677,9 +677,8 @@ describe('Brainstorm wearable actions', () => {
       state: 'running', noToolsChecked: true, topic: 'hermes · running',
     }))
       .toEqual({
-        // LIVE, not RUNNING: the wearer asked what our state words meant,
-        // so the glass speaks theirs.
-        summary: 'HERMES > LIVE',
+        // A2A work is not a streaming connection; match the chooser state.
+        summary: 'HERMES > WORKING',
         // Dense: header + LANES in two tight rows, 12 transcript rows.
         dividerY: 78.5,
         transcriptBaselineY: 92,
@@ -706,7 +705,7 @@ describe('Brainstorm wearable actions', () => {
     // gateway session read someone else's name above their own output.
     expect(agentTerminalTranscriptLayout({
       state: 'running', noToolsChecked: false, topic: 'calendar · running · 2 waiting',
-    }).summary).toBe('CALENDAR > LIVE');
+    }).summary).toBe('CALENDAR > WORKING');
     expect(agentTerminalFocusLabel('agent:hermes:nightly · running'))
       .toBe('AGENT:HERMES:NIGHTLY');
     // A gateway key we do not choose must not run off the spine.
@@ -1493,5 +1492,29 @@ describe('terminal conversation footer transitions', () => {
     renderer.drawBrainstorm(context, {...model, state: 'ready'}, {});
     expect(painted[painted.length - 1]).toContain('double-click: back');
     expect(painted[painted.length - 1]).not.toContain('menu');
+  });
+});
+
+describe('inline terminal composer rendering', () => {
+  it('retains the conversation and complete question while showing the listening action', () => {
+    const painted: Array<{text: string; y: number}> = [];
+    const context = new Proxy({
+      fillText: (text: string, _x: number, y: number) => painted.push({text, y}),
+      measureText: (text: string) => ({width: text.length * 6}),
+    }, {get: (target, key) => Reflect.get(target, key) ?? (() => undefined)});
+    const renderer = Object.create(HudCanvasRenderer.prototype) as any;
+    renderer.drawIcon = () => undefined;
+    renderer.fitText = (ctx: any, text: string, x: number, y: number) => ctx.fillText(text, x, y);
+    renderer.transcriptScrollFor = () => ({offset:0});
+    renderer.drawBrainstorm(context, {screen:'agent_terminal', state:'ready', topic:'Hermes · ready',
+      collaborators: [], activity:'', conversationId:'hermes-conversation',
+      messages:[{id:'old-reply',role:'assistant',text:'Previous answer remains visible.'}],
+      terminalPrompt:{id:'prompt',question:'Reply to Hermes.'}, inputRequired:true}, {});
+    expect(painted.some(row => row.text === 'AGENT > Previous answer remains visible.')).toBe(true);
+    expect(painted.some(row => row.text === 'Reply to Hermes.')).toBe(true);
+    expect(painted.some(row => row.text.includes('REPLY NEEDED'))).toBe(true);
+    expect(painted.some(row => row.text === 'READY')).toBe(false);
+    expect(painted[painted.length-1]?.text).toContain('Listening');
+    expect(painted.filter(row => row.text === 'Reply to Hermes.').every(row => row.y < 257)).toBe(true);
   });
 });

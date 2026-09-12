@@ -1,3 +1,5 @@
+import { wrapTerminalParagraph } from './TerminalText';
+import { TerminalConversationViewport } from './TerminalConversation';
 import { GesturePolicy } from './GesturePolicy';
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
 import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
@@ -543,7 +545,7 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
  * accepts. This is presentation only: input ownership stays in EventRouter.
  */
 export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals'>
+  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals' | 'inputRequired'>
     // The lane chips, used only to decide whether the switch gesture has
     // anywhere to go. Optional so every existing caller stays valid.
     & { collaborators?: readonly string[] },
@@ -590,7 +592,9 @@ export function brainstormActionHint(
     return 'swipe: scroll · say "terminal cancel" · double-click: back';
   }
   if (model.state === 'ready') {
-    return 'tap: speak · swipe: scroll · double-click: back';
+    return model.inputRequired
+      ? 'tap: reply · swipe: scroll · double-click: back'
+      : 'tap: speak · swipe: scroll · double-click: back';
   }
   if (model.state === 'blocked' || model.state === 'unavailable') {
     return 'tap: retry connection · double-click: back';
@@ -636,9 +640,10 @@ export function agentTerminalFocusLabel(topic: string | undefined): string {
 }
 
 export function agentTerminalTranscriptLayout(
-  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked' | 'topic'>,
+  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked' | 'topic' | 'inputRequired'>,
 ): AgentTerminalTranscriptLayout {
-  const state = brainstormStateLabel(model.state);
+  const state = model.inputRequired ? 'REPLY NEEDED'
+    : model.state === 'running' ? 'WORKING' : brainstormStateLabel(model.state);
   const focus = agentTerminalFocusLabel(model.topic);
   // Recovery chrome exists to be ACTED ON — a blocked terminal names the
   // host and policy the wearer must go fix. A READY terminal was printing
@@ -1375,19 +1380,39 @@ export function wrapHudText(
   let line = '';
 
   const pushLongWord = (word: string): string => {
-    let remainder = word;
-    while (remainder && measure(remainder) > maxWidth) {
-      let end = remainder.length;
-      while (end > 1 && measure(remainder.slice(0, end)) > maxWidth) end -= 1;
-      lines.push(remainder.slice(0, end));
-      remainder = remainder.slice(end);
+    const points = Array.from(word);
+    let offset = 0;
+    while (offset < points.length) {
+      const remaining = points.length - offset;
+      const fits = (count: number) => measure(points.slice(offset, offset + count).join('')) <= maxWidth;
+      let low = 0;
+      let high = 1;
+      // Probe outward from one glyph, never repeatedly measure an entire
+      // remaining URL or code token. Each row costs logarithmic probes.
+      while (high < remaining && fits(high)) {
+        low = high;
+        high = Math.min(remaining, high * 2);
+      }
+      if (fits(high)) low = high;
+      else {
+        while (high - low > 1) {
+          const middle = Math.floor((low + high) / 2);
+          if (fits(middle)) low = middle;
+          else high = middle;
+        }
+      }
+      const count = Math.max(1, low);
+      const chunk = points.slice(offset, offset + count).join('');
+      offset += count;
+      if (offset === points.length) return chunk;
+      lines.push(chunk);
     }
-    return remainder;
+    return '';
   };
 
   for (const word of words) {
     const candidate = line ? `${line} ${word}` : word;
-    if (measure(candidate) <= maxWidth) {
+    if (word.length <= 128 && measure(candidate) <= maxWidth) {
       line = candidate;
       continue;
     }
@@ -3568,6 +3593,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.textBaseline = 'middle';
     const scroll = this.transcriptScrollFor(model);
+    this.terminalViewportActive = model.screen === 'agent_terminal' && model.messages !== undefined;
+    let terminalNewer = 0;
     if (model.screen === 'agent_terminal') {
       const layout = agentTerminalTranscriptLayout(model);
       this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
@@ -3577,7 +3604,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.textAlign = 'right';
       context.fillStyle = gray(SUPPORT);
       context.font = TYPE.micro;
-      context.fillText(state, HUD_CONTENT_RIGHT, 58);
       context.textAlign = 'left';
       if (!layout.showRecoveryDetails) {
         // The selected agent is already named above; internal work sessions
@@ -3609,14 +3635,38 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.stroke();
       context.fillStyle = gray(BRIGHT);
       context.font = TYPE.transcript;
-      this.drawBrainstormTranscript(
-        context,
-        model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
-        HUD_EDGE,
-        layout.transcriptBaselineY,
-        layout.transcriptLineCapacity,
-        scroll,
-      );
+      const question = model.terminalPrompt?.question;
+      const questionLines = question === undefined ? [] : question.split(/\r?\n/)
+        .flatMap(line => wrapTerminalParagraph(line, HUD_CONTENT_WIDTH, text => context.measureText(text).width));
+      // Publication may only acknowledge a complete visible question.
+      if (questionLines.length > 6) throw new Error('Terminal prompt exceeds composer capacity');
+      const composerRows = question === undefined ? 0 : questionLines.length + 1;
+      const visible = Math.max(1, layout.transcriptLineCapacity - composerRows);
+      if (model.messages !== undefined) {
+        this.terminalViewport ??= new TerminalConversationViewport();
+        const page = this.terminalViewport.view(
+          model.conversationId || `legacy:${agentTerminalFocusLabel(model.topic)}`,
+          model.messages, visible,
+          text => wrapTerminalParagraph(text, HUD_CONTENT_WIDTH, value => context.measureText(value).width),
+          model.historyTruncated, `${HUD_CONTENT_WIDTH}|${TYPE.transcript}`,
+        );
+        terminalNewer = page.newer;
+        const lines = page.lines.length ? page.lines : ['Tap to speak to this agent.'];
+        lines.forEach((line, index) => context.fillText(line, HUD_EDGE,
+          layout.transcriptBaselineY + index * LEAD.transcript));
+      } else {
+        this.drawBrainstormTranscript(context,
+          model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
+          HUD_EDGE, layout.transcriptBaselineY, visible, scroll);
+      }
+      if (question !== undefined) {
+        const composerY = layout.transcriptBaselineY + visible * LEAD.transcript;
+        context.fillStyle = gray(SUPPORT);
+        context.fillRect(HUD_EDGE, composerY - 5, HUD_CONTENT_WIDTH, 1);
+        context.fillStyle = gray(BRIGHT);
+        questionLines.forEach((line, index) => context.fillText(line, HUD_EDGE,
+          composerY + (index + 1) * LEAD.transcript));
+      }
     } else {
       this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
       context.fillStyle = gray(BRIGHT);
@@ -3653,7 +3703,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         scroll,
       );
     }
-    const actionHint = scroll.offset > 0
+    const actionHint = model.terminalPrompt
+      ? 'Listening · speak your answer · double-click: cancel'
+      : this.terminalViewportActive && terminalNewer > 0
+        ? `▼ ${terminalNewer} newer rows · swipe down · double-click: back`
+      : !this.terminalViewportActive && scroll.offset > 0
       // Scrolling changes the transcript position, not the destination of Back.
       ? `▼ ${scroll.offset} newer — swipe down · double-click: ${
         model.screen === 'agent_terminal' ? 'back'
@@ -3673,12 +3727,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
    * at the live tail; while the wearer is scrolled up, freshly arriving
    * rows must not drag the view — the offset grows with the content so
    * the words under the wearer's eyes stay put. */
+  private terminalViewport?: TerminalConversationViewport;
+  private terminalViewportActive = false;
+
   private transcriptScroll = { key: '', offset: 0, rows: 0, visible: 13 };
 
   private transcriptScrollFor(
     model: BrainstormHudModel,
   ): { offset: number; rows: number; visible: number } {
-    const key = `${model.screen}|${model.topic}`;
+    const key = model.screen === 'agent_terminal'
+      ? `agent_terminal|${model.conversationId || agentTerminalFocusLabel(model.topic)}`
+      : `${model.screen}|${model.topic}`;
     if (key !== this.transcriptScroll.key) {
       this.transcriptScroll = { key, offset: 0, rows: 0, visible: this.transcriptScroll.visible };
     }
@@ -3686,6 +3745,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   }
 
   scrollTranscript(direction: 'up' | 'down'): boolean {
+    if (this.terminalViewportActive) return this.terminalViewport?.scroll(direction) ?? false;
     const step = 6; // half a screen per swipe — enough to move, easy to track
     const state = this.transcriptScroll;
     const maximum = Math.max(0, state.rows - state.visible);

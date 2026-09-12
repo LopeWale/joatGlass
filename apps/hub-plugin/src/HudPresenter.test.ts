@@ -239,6 +239,41 @@ describe('prompt question ownership', () => {
     return new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
   }
 
+  it('publishes a terminal question inline only after its exact paint and restores the conversation on cancel', async () => {
+    const frames: HudVisualFrame[] = [];
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered = false;
+    const hud = rig(async frame => {
+      frames.push(frame);
+      if (frame.kind === 'brainstorm' && frame.brainstorm.terminalPrompt) {
+        entered = true; await held;
+      }
+      return true;
+    });
+    const model = {screen: 'agent_terminal' as const, state: 'ready' as const,
+      topic: 'OpenClaw · ready', collaborators: [], activity: '', conversationId: 'conversation-a',
+      messages: [{id:'answer-one', role:'assistant' as const, text:'Previous answer remains visible.'}]};
+    await hud.showBrainstorm(model);
+    let settled = false;
+    const publication = hud.showPromptQuestion('terminal-prompt', 'Speak to OpenClaw.', () => true, 'terminal')
+      .then(ok => { settled = true; return ok; });
+    await vi.waitFor(() => expect(entered).toBe(true));
+    expect(settled).toBe(false);
+    expect(frames[frames.length-1]).toMatchObject({kind:'brainstorm', brainstorm: {
+      messages: model.messages, terminalPrompt:{id:'terminal-prompt', question:'Speak to OpenClaw.'}}});
+    release(); expect(await publication).toBe(true);
+    expect(await hud.dismissPromptQuestion('terminal-prompt')).toBe(true);
+    expect(frames[frames.length-1]).toMatchObject({kind:'brainstorm', brainstorm:model});
+    const restored = frames[frames.length-1];
+    if (restored?.kind === 'brainstorm') expect(restored.brainstorm.terminalPrompt).toBeUndefined();
+  });
+
+  it('rejects terminal publication when its conversation is absent', async () => {
+    const hud = rig(async () => true);
+    expect(await hud.showPromptQuestion('terminal-prompt', 'Speak to Hermes.', () => true, 'terminal')).toBe(false);
+  });
+
   it('awaits its question paint and remains dominant over an incidental reply and text update', async () => {
     const frames: HudVisualFrame[] = [];
     let release!: () => void;

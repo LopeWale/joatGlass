@@ -219,7 +219,7 @@ describe('PromptedInputController staged presentation', () => {
     const message = present({ question: '  Say “send”, literally.\nNo rewriting.  ', source });
     await r.publish(message);
     expect(r.presenter.showPromptQuestion).toHaveBeenCalledWith(
-      message.promptId, message.question, expect.any(Function),
+      message.promptId, message.question, expect.any(Function), message.ownerKind,
     );
     expect(r.sent).toEqual([{
       generation: 7,
@@ -347,7 +347,7 @@ describe('PromptedInputController staged presentation', () => {
     expect(r.presenter.showPromptQuestion).not.toHaveBeenCalled();
     await r.controller.handle(original, ctx);
     expect(r.presenter.showPromptQuestion).toHaveBeenCalledWith(
-      original.promptId, original.question, expect.any(Function),
+      original.promptId, original.question, expect.any(Function), original.ownerKind,
     );
   });
 });
