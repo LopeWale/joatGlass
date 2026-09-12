@@ -1611,6 +1611,16 @@ export class HudPresenter {
     return restored;
   }
 
+  /** Replace only the return snapshot of the exact, already claimed consent gate. */
+  stageConfirmationReturnList(id: string, items: string[], options: ListSurfaceOptions): boolean {
+    if (this.confirmation?.id !== id) return false;
+    this.confirmation.surface = {
+      kind: 'list', items: [...items], options: this.resolveListOptions(options),
+      selectedIndex: this.initialListSelection(items, options),
+    };
+    return true;
+  }
+
   /**
    * The one exclusive app-owned decision surface.
    *

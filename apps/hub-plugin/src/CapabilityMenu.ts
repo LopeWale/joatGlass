@@ -384,6 +384,39 @@ export class CapabilityMenu {
     }
   }
 
+  /** Consume a completed voice review without painting underneath its consent gate. */
+  stageLegacyReviewReturn(confirmationId: string): void {
+    const reader = this.dataSurface?.readerPage;
+    const parent = this.dataReturn;
+    if (this.view !== 'data' || this.messagesScreen !== 'review'
+      || this.pendingTitle !== 'MESSAGES' || !this.dataSelectionPending
+      || !reader || reader.index !== reader.count - 1 || !parent
+      || this.reviewVisit?.requestId !== this.pendingRequestId
+      || this.reviewVisit?.activeId !== reader.id) return;
+    const staged = this.hud.stageConfirmationReturnList(confirmationId,
+      parent.messageProse ? this.noteDisplayItems(parent.items, parent.messageProse) : parent.items, {
+        title: parent.title, initialSelectedIndex: parent.selectedIndex,
+        contextLabel: parent.contextLabel, controlStartIndex: parent.controlStartIndex,
+        hint: parent.messageProse ? this.messageDisplayHint(parent.hint, parent.messageProse) : parent.hint,
+        selectable: parent.selectable && (!parent.messageProse
+          || parent.messageProse.index === parent.messageProse.pages.length - 1),
+      });
+    if (!staged) return;
+    this.retireReviewReader();
+    this.dataReturn = this.dataGrandparent;
+    this.dataGrandparent = undefined;
+    this.clearResponseTimeout();
+    this.dataItemCount = parent.items.length;
+    this.dataRowsSelectable = parent.selectable;
+    this.dataSelectionPending = false;
+    this.messagesRetry = parent.messagesRetry;
+    this.messagesScreen = parent.messagesScreen;
+    this.dataHint = parent.hint;
+    this.dataPagePending = false;
+    this.selectedIndex = parent.selectedIndex;
+    this.dataSurface = parent;
+  }
+
   private retireReviewReader(): void {
     const visit = this.reviewVisit;
     if (!visit?.activeId) return;

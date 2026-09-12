@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-12 — Restore conversation after legacy reply cancellation
+
+- Consume the completed voice draft review into the retained conversation when its confirmation claims the screen. Stage the return snapshot synchronously without an intermediate paint; preserve the prepared MessageUI path.
+- Official simulator replay against frozen 0.1.88 source plus this repair verified long review, cancellation, receipt dismissal, opening a restored message and double-click return. Disposable sender calls: zero. All owned simulator/support processes closed. Independent review confirmed the existing draft lock serializes this handoff.
+- Acceptance and timeout branches still need candidate visual coverage. Partial-frame transitions remain unresolved; no new package or upload in this slice.
+
 ## 2026-09-12 — Agent Terminal task progress and Stop/Reply lifecycle
 
 - Project accepted task status separately from answer artifacts. Poll snapshots update one retained status record, repeated snapshots do not duplicate transcript output, and final answers enter once. Input-required questions take priority over draft artifacts and remain in the same-task continuation context.
