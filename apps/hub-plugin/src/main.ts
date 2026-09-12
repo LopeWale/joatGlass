@@ -883,6 +883,9 @@ async function boot(): Promise<void> {
         if (!ownerCurrent()) break;
         const rendered = hud.showConfirmation(msg.prompt, msg.actionId, msg.diagnosticKind,
           msg.messageUIActionId === undefined ? undefined : ownerCurrent);
+        if (msg.diagnosticKind === 'messages' && msg.messageUIActionId === undefined) {
+          menu.stageLegacyReviewReturn(msg.actionId);
+        }
         imu.prepare(msg.actionId, (accepted) => {
           void deliverAfterConfirmationDismissal({
             accepted,
