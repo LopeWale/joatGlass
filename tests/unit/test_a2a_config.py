@@ -38,6 +38,8 @@ def test_loads_enabled_and_disabled_profiles_without_credentials(tmp_path: Path)
     {"id": "../../bad"},
     {"enabled": "false"},
     {"label": "bad\nlabel"},
+    {"provider": "invented"},
+    {"provider": {"hermes": True}},
 ])
 def test_invalid_profile_is_rejected(tmp_path: Path, changes: dict[str, object]) -> None:
     path = tmp_path / "a2a.json"
@@ -73,3 +75,15 @@ async def test_native_loader_binds_token_to_exact_profile_and_destination() -> N
     loader = native_token_loader(profile, Bridge())
     assert await loader() == "test-only-token"
     assert requests == [("a2a.token.load", {"profile_id": "openclaw", "endpoint": profile.endpoint})]
+
+
+def test_provider_migration_is_independent_of_label_and_endpoint(tmp_path: Path) -> None:
+    path = tmp_path / "a2a.json"
+    write_profiles(path, [entry(id="hermes-2", label="My renamed agent")])
+    assert load_a2a_profiles(path)[0].provider == "hermes"
+    write_profiles(path, [entry(id="custom", label="Hermes", endpoint="https://host.example:9900/")])
+    assert load_a2a_profiles(path)[0].provider == "generic"
+    write_profiles(path, [entry(id="custom", provider="hermes")])
+    assert load_a2a_profiles(path)[0].provider == "hermes"
+    write_profiles(path, [entry(id="hermes", provider="generic")])
+    assert load_a2a_profiles(path)[0].provider == "generic"

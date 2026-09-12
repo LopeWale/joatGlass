@@ -4,13 +4,46 @@ import Foundation
 import Security
 import SwiftUI
 
+enum A2AProvider: String, Codable, CaseIterable, Sendable {
+    case openclaw, hermes, generic
+
+    var label: String {
+        switch self {
+        case .openclaw: "OpenClaw"
+        case .hermes: "Hermes"
+        case .generic: "Other A2A agent"
+        }
+    }
+
+    static func legacy(_ identity: String) -> Self {
+        for provider in [Self.openclaw, .hermes] {
+            if identity == provider.rawValue || (2...16).contains(where: { identity == "\(provider.rawValue)-\($0)" }) {
+                return provider
+            }
+        }
+        return .generic
+    }
+
+    var permissionsNotice: String {
+        switch self {
+        case .openclaw:
+            "Tool access follows the remote OpenClaw agent. Approve tool requests in its Control UI; this peer token cannot grant operator approval."
+        case .hermes:
+            "Tool access follows the remote Hermes configuration and peer trust. Manage permissions on Hermes; A2A does not expose tool approval controls."
+        case .generic:
+            "Tool permissions are managed by the remote agent. This connection has no negotiated tool approval interface."
+        }
+    }
+}
+
 struct A2AConnectionProfile: Codable, Equatable, Sendable {
     let id: String
     let label: String
     let endpoint: String
     let enabled: Bool
+    let provider: A2AProvider
 
-    init(id: String, label: String, endpoint: String, enabled: Bool) throws {
+    init(id: String, label: String, endpoint: String, enabled: Bool, provider: A2AProvider? = nil) throws {
         self.id = try A2AConnectionConfiguration.validateProfileID(id)
         self.label = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !self.label.isEmpty, self.label.count <= 32,
@@ -19,10 +52,11 @@ struct A2AConnectionProfile: Codable, Equatable, Sendable {
         }
         self.endpoint = try A2AConnectionConfiguration.canonicalEndpoint(endpoint)
         self.enabled = enabled
+        self.provider = provider ?? A2AProvider.legacy(self.id)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, endpoint, enabled
+        case id, label, endpoint, enabled, provider
     }
 
     init(from decoder: any Decoder) throws {
@@ -31,7 +65,8 @@ struct A2AConnectionProfile: Codable, Equatable, Sendable {
         let rawLabel = try container.decode(String.self, forKey: .label)
         let rawEndpoint = try container.decode(String.self, forKey: .endpoint)
         let rawEnabled = try container.decode(Bool.self, forKey: .enabled)
-        try self.init(id: rawID, label: rawLabel, endpoint: rawEndpoint, enabled: rawEnabled)
+        let provider = try container.decodeIfPresent(A2AProvider.self, forKey: .provider)
+        try self.init(id: rawID, label: rawLabel, endpoint: rawEndpoint, enabled: rawEnabled, provider: provider)
     }
 }
 
@@ -229,7 +264,9 @@ struct A2AConnectionConfiguration {
             throw ConfigurationError.invalidPayload
         }
         let profiles = try rawProfiles.map { item -> A2AConnectionProfile in
-            guard Set(item.keys) == ["id", "label", "endpoint", "enabled"],
+            let required: Set<String> = ["id", "label", "endpoint", "enabled"]
+            guard required.isSubset(of: Set(item.keys)),
+                  Set(item.keys).subtracting(required).isSubset(of: ["provider"]),
                   let id = item["id"] as? String,
                   let label = item["label"] as? String,
                   let endpoint = item["endpoint"] as? String,
@@ -238,7 +275,14 @@ struct A2AConnectionConfiguration {
                 throw ConfigurationError.invalidPayload
             }
             let enabled = flag.boolValue
-            return try A2AConnectionProfile(id: id, label: label, endpoint: endpoint, enabled: enabled)
+            var provider: A2AProvider?
+            if let rawProvider = item["provider"] {
+                guard let value = rawProvider as? String, let parsed = A2AProvider(rawValue: value) else {
+                    throw ConfigurationError.invalidPayload
+                }
+                provider = parsed
+            }
+            return try A2AConnectionProfile(id: id, label: label, endpoint: endpoint, enabled: enabled, provider: provider)
         }
         try validate(profiles)
         return profiles
@@ -373,10 +417,12 @@ final class A2AConnectionsModel {
         var label: String
         var endpoint: String
         var enabled: Bool
+        var provider: A2AProvider
         var token = ""
-        init(profileID: String, label: String, endpoint: String, enabled: Bool = true) {
+        init(profileID: String, label: String, endpoint: String, enabled: Bool = true, provider: A2AProvider? = nil) {
             id = UUID(); self.profileID = profileID; self.label = label
             self.endpoint = endpoint; self.enabled = enabled
+            self.provider = provider ?? A2AProvider.legacy(profileID)
         }
     }
 
@@ -398,7 +444,7 @@ final class A2AConnectionsModel {
 
     var parsed: [A2AConnectionProfile]? {
         guard let profiles = try? drafts.map({ try A2AConnectionProfile(
-            id: $0.profileID, label: $0.label, endpoint: $0.endpoint, enabled: $0.enabled
+            id: $0.profileID, label: $0.label, endpoint: $0.endpoint, enabled: $0.enabled, provider: $0.provider
         ) }), (try? A2AConnectionConfiguration.validate(profiles)) != nil else { return nil }
         return profiles
     }
@@ -424,7 +470,7 @@ final class A2AConnectionsModel {
     func reload() {
         do {
             savedProfiles = try A2AConnectionConfiguration.load(from: url)
-            drafts = savedProfiles.map { Draft(profileID: $0.id, label: $0.label, endpoint: $0.endpoint, enabled: $0.enabled) }
+            drafts = savedProfiles.map { Draft(profileID: $0.id, label: $0.label, endpoint: $0.endpoint, enabled: $0.enabled, provider: $0.provider) }
             loadFailed = false; failed = false; notice = nil
         } catch {
             loadFailed = true; failed = true
@@ -480,6 +526,12 @@ struct A2AConnectionSettings: View {
                         Button("Remove connection", systemImage: "minus.circle") { model.remove(draft.id) }
                             .labelStyle(.iconOnly).buttonStyle(.borderless)
                     }
+                    Picker("Provider", selection: $draft.provider) {
+                        ForEach(A2AProvider.allCases, id: \.self) { provider in
+                            Text(provider.label).tag(provider)
+                        }
+                    }
+                    Text(draft.provider.permissionsNotice).font(.caption).foregroundStyle(.secondary)
                     TextField("HTTPS endpoint", text: $draft.endpoint).textFieldStyle(.roundedBorder)
                         .accessibilityLabel("A2A endpoint")
                     SecureField("Token — leave blank to keep saved credential", text: $draft.token)
@@ -519,7 +571,11 @@ struct A2AConnectionSettings: View {
         case "checking": return "Checking authentication…"
         case "running": return "Working — waiting for the agent’s reply."
         case "input_required": return "The agent needs more input. Continue in Agent Terminal."
-        case "auth_required": return "Credential required or rejected. Update its token and retry."
+        case "auth_required":
+            if connection.reason == "auth_required" {
+                return "The agent needs additional authorization. " + draft.provider.permissionsNotice
+            }
+            return "Credential required or rejected. Update its token and retry."
         case "unknown": return "The request’s outcome is unknown. Check the agent before sending again."
         case "cancelled": return "Cancellation confirmed by the agent."
         case "failed": return "Connection or task failed. Open Agent Terminal for recovery details."

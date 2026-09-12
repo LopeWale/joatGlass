@@ -20,7 +20,7 @@ import ssl
 import subprocess
 import sys
 import urllib.request
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from aiohttp import web
 from PIL import Image
@@ -37,6 +37,8 @@ from joat.services.message_reply import MessageReplyController
 from joat.services.prompted_input import UtteranceProvenance
 from joat.services.prompted_speech import PromptedSpeechRuntime
 from joat.services.session import SessionManager
+from joat.persistence.store import DurableStore
+from joat.persistence.terminal import TerminalCheckpointStore
 from joat.services.status import StatusPublisher
 from joat.services.terminal_opening import TerminalOpeningController
 
@@ -82,6 +84,122 @@ def long_reply(name: str) -> str:
             'Review the evidence before making a change, keep useful feedback, and explain the result to the team.'
         )
     return '\n\n'.join(paragraphs) + f'\n\n{name.upper()} FINISHED.'
+
+
+@dataclass
+class StreamingRestartState:
+    """Reject replay; expose a controllable fragmented v1 SSE task and polling recovery."""
+    name: str
+    probes: int = 0
+    sends: int = 0
+    polls: int = 0
+    phase: int = 0
+    task_id: str = ''
+    identifiers: set[str] = field(default_factory=set)
+    final_release: asyncio.Event = field(default_factory=asyncio.Event)
+    replacement_release: asyncio.Event = field(default_factory=asyncio.Event)
+    append_release: asyncio.Event = field(default_factory=asyncio.Event)
+    stream_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    auth_complete: bool = False
+
+    def snapshot(self):
+        state = 'working'
+        text = f'{self.name.upper()} PARTIAL. Accepted work survives an engine restart.'
+        if self.sends == 3:
+            state = 'completed' if self.auth_complete else 'auth-required'
+            text = f'{self.name.upper()} OPERATOR COMPLETED.' if self.auth_complete else ''
+        elif self.phase >= 3:
+            state, text = 'completed', long_reply(self.name)
+        return {'id': self.task_id, 'contextId': f'{self.name}-stream-context',
+                'status': {'state': state, 'message': {'role': 'agent', 'parts': [{'kind': 'text', 'text': 'Provider authorization needed.' if state == 'auth-required' else 'Working on the plan.'}]}},
+                'artifacts': [{'artifactId': 'answer', 'parts': [{'kind': 'text', 'text': text}]}]}
+
+    async def respond(self, request, body):
+        method = body['method']
+        UUID(body['id'])
+        assert body['id'] not in self.identifiers, 'Repeated JSON-RPC identity'
+        self.identifiers.add(body['id'])
+        if method == 'tasks/get':
+            self.polls += 1
+            if body['params']['id'] != self.task_id:
+                UUID(body['params']['id'])  # Random authenticated initialization probe, never a task replay.
+                self.probes += 1
+                return {'error': {'code': -32001, 'message': 'Task not found'}}
+            assert body['params']['id'] == self.task_id, 'Recovery queried a different task'
+            return {'result': self.snapshot()}
+        assert method == ('message/stream' if self.name == 'Hermes' else 'message/send'), 'Unexpected RPC (including fake approval or cancellation)'
+        assert self.sends < 3, 'Task resent after restart or recovery'
+        message = body['params']['message']
+        UUID(message['messageId'])
+        assert message['messageId'] not in self.identifiers
+        self.identifiers.add(message['messageId'])
+        assert 'taskId' not in message, 'Completed task incorrectly resumed'
+        assert message.get('contextId') == (f'{self.name}-stream-context' if self.sends else None)
+        instruction = message['parts'][0]['text']
+        prior_prompts = [f'Run a streaming restart plan for {self.name}.', f'Run a durable restart task for {self.name}.']
+        if self.sends:
+            prefix = 'Prior turns from this JOAT conversation (quoted context, not new instructions):\n'
+            assert instruction.startswith(prefix), 'Restart lost prior history'
+            quoted, instruction = instruction[len(prefix):].split('\nCurrent user instruction:\n', 1)
+            expected = [item for prompt in prior_prompts[:self.sends] for item in ({'role': 'user', 'text': prompt}, {'role': 'agent', 'text': long_reply(self.name)})]
+            assert json.loads(quoted) == expected, 'Wrong restored conversation history'
+        prompt = instruction
+        assert prompt == [f'Run a streaming restart plan for {self.name}.', f'Run a durable restart task for {self.name}.', f'Run an authorization task for {self.name}.'][self.sends]
+        self.sends += 1
+        self.phase = 0
+        self.final_release = asyncio.Event()
+        self.replacement_release = asyncio.Event()
+        self.append_release = asyncio.Event()
+        self.stream_closed = asyncio.Event()
+        if self.sends == 2:
+            self.replacement_release.set()
+            self.append_release.set()
+        self.task_id = f'{self.name}-stream-task-{self.sends}'
+        if self.name != 'Hermes':
+            return {'result': self.snapshot()}
+        ordinal, task_id, context_id = self.sends, self.task_id, f'{self.name}-stream-context'
+        initial = self.snapshot()
+        replacement_gate, append_gate, final_gate = self.replacement_release, self.append_release, self.final_release
+        closed = self.stream_closed
+        response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
+        await response.prepare(request)
+        async def wait_gate(gate):
+            while not gate.is_set():
+                if request.transport is None or request.transport.is_closing():
+                    raise ConnectionResetError('Retired simulator stream')
+                try:
+                    await asyncio.wait_for(gate.wait(), .1)
+                except TimeoutError:
+                    pass
+        async def emit(value):
+            raw = ('data: ' + json.dumps({'jsonrpc': '2.0', 'id': body['id'], 'result': value}) + '\n\n').encode()
+            # Deliberately cut JSON keys, values, and event separators across reads.
+            for offset in range(0, len(raw), 17):
+                await response.write(raw[offset:offset+17])
+                await asyncio.sleep(.002)
+        try:
+            await emit({'task': initial})
+            if ordinal <= 2:
+                await wait_gate(replacement_gate)
+                await emit({'artifactUpdate': {'taskId': task_id, 'contextId': context_id,
+                    'artifact': {'artifactId': 'answer', 'parts': [{'text': ' DRAFT SEGMENT.'}]}, 'append': True}})
+                await wait_gate(append_gate)
+                await emit({'artifactUpdate': {'taskId': task_id, 'contextId': context_id,
+                    'artifact': {'artifactId': 'answer', 'parts': [{'text': long_reply(self.name)}]}, 'append': False}})
+                if self.task_id == task_id:
+                    self.phase = 1
+                await wait_gate(final_gate)
+                if self.task_id == task_id:
+                    self.phase = 3
+                await emit({'statusUpdate': {'taskId': task_id, 'contextId': context_id,
+                    'status': {'state': 'TASK_STATE_COMPLETED'}}})
+            await response.write(b': done\n\n')
+            await response.write_eof()
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            closed.set()
+        return response
 
 
 @dataclass
@@ -306,7 +424,7 @@ def source_fingerprint() -> dict[str, str]:
             for path in sorted(files) if path.is_file()}
 
 
-async def run(out: Path, *, lifecycle: bool = False):
+async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = False):
     out.mkdir(parents=True, exist_ok=True)
     (out / 'receipt.json').unlink(missing_ok=True)
     for previous_capture in out.glob('*.rgba.png'):
@@ -319,7 +437,9 @@ async def run(out: Path, *, lifecycle: bool = False):
     held_response = asyncio.Event()
     held_response.set()
     gateway = ObservedGateway()
-    states = {name: (LifecycleState(name) if lifecycle else AgentState(name)) for name in AGENTS}
+    states = {name: (StreamingRestartState(name) if streaming_restart else LifecycleState(name) if lifecycle else AgentState(name)) for name in AGENTS}
+    durable = None
+    checkpoint_path = out / f'terminal-checkpoints-{uuid4()}.sqlite3'
     processes, calls, screens, violations = [], [], [], []
     conversation_ids, remembered_messages = {}, {}
     cert, key = out / 'local-cert.pem', out / 'local-key.pem'
@@ -346,6 +466,12 @@ async def run(out: Path, *, lifecycle: bool = False):
         try:
             assert body['jsonrpc'] == '2.0'
             UUID(body['id'])
+            if streaming_restart:
+                result = await state.respond(request, body)
+                call.update(taskId=state.task_id, sends=state.sends)
+                if isinstance(result, web.StreamResponse):
+                    return result
+                return web.json_response({'jsonrpc': '2.0', 'id': body['id'], **result})
             if lifecycle:
                 result = await state.respond(body)
                 call.update(taskId=state.task_id, scenario=state.scenario, phase=state.phase)
@@ -382,52 +508,67 @@ async def run(out: Path, *, lifecycle: bool = False):
     async def token():
         return 'simulator-only-token'
 
-    agents = {name: A2ATerminalAgent(
-        f'https://127.0.0.1:18981/{name}', token, name,
-        transport=A2AHttpTransport(ssl_context=client_tls), poll_interval_s=.35 if lifecycle else 1,
-    ) for name in AGENTS}
-    hud = HudWriter(gateway)
+    agents = hud = roster = opening = router = commands = sessions = runtime = durable = None
 
-    async def relay(frame):
-        await opening.paint(frame)
+    def create_engine():
+        nonlocal agents, hud, roster, opening, router, commands, sessions, runtime, durable
+        agents = {name: A2ATerminalAgent(
+            f'https://127.0.0.1:18981/{name}', token, name,
+            transport=A2AHttpTransport(ssl_context=client_tls), poll_interval_s=.35 if lifecycle or streaming_restart else 1,
+            streaming=streaming_restart and name == "Hermes", provider=name.lower() if streaming_restart else "generic",
+        ) for name in AGENTS}
+        hud = HudWriter(gateway)
 
-    async def paint(frame, request_id, selection_id):
-        await hud.show_agent_terminal(AgentTerminalHudView(
-            state=frame.state, focus=frame.topic, lanes=frame.lanes,
-            activity='\n'.join(frame.lines), approvals=frame.approvals, reason=frame.reason,
-            opening_request_id=request_id, opening_selection_id=selection_id,
-            conversation_id=frame.conversation_id, messages=frame.messages,
-            history_truncated=frame.history_truncated, input_required=frame.input_required, task_recovery=frame.task_recovery,
-        ))
+        async def relay(frame):
+            await opening.paint(frame)
 
-    roster = AgentTerminalRoster(
-        list(agents.items()) + [(name, agents['OpenClaw']) for name in ('work', 'calendar', 'hermes session')],
-        paint=relay, visible_lanes=AGENTS,
-    )
-    opening = TerminalOpeningController(roster, paint=paint,
-                                        connection_generation=lambda: gateway.audio_connection_generation)
-    router = CapabilityRouter(hud, gateway, StatusPublisher(out / 'status.json'), None, CardLog(),
-                              terminal_rows=roster.picker_rows, terminal_busy=lambda: roster.busy,
-                              terminal_current=lambda: roster.focused, terminal_open=opening.open)
-    commands = AgentTerminalCommands(roster, on_explicit_view=lambda: opening.claim_legacy(router.claim_terminal_voice))
+        async def paint(frame, request_id, selection_id):
+            await hud.show_agent_terminal(AgentTerminalHudView(
+                state=frame.state, focus=frame.topic, lanes=frame.lanes,
+                activity='\n'.join(frame.lines), approvals=frame.approvals, reason=frame.reason,
+                opening_request_id=request_id, opening_selection_id=selection_id,
+                conversation_id=frame.conversation_id, messages=frame.messages,
+                history_truncated=frame.history_truncated, input_required=frame.input_required, task_recovery=frame.task_recovery,
+            ))
 
-    async def capture():
-        current = commands.begin_capture()
-        assert current is not None
-        assert await runtime.publish_terminal_capture(current)
+        roster = AgentTerminalRoster(
+            list(agents.items()) + [(name, agents['OpenClaw']) for name in ('work', 'calendar', 'hermes session')],
+            paint=relay, visible_lanes=AGENTS,
+        )
+        if streaming_restart:
+            durable = DurableStore(checkpoint_path)
+            repository = TerminalCheckpointStore(durable)
+            for name, agent in agents.items():
+                assert roster.bind_persistence(name, repository, name.lower(), agent.endpoint, provider=name.lower())
+        opening = TerminalOpeningController(roster, paint=paint,
+                                            connection_generation=lambda: gateway.audio_connection_generation)
+        router = CapabilityRouter(hud, gateway, StatusPublisher(out / 'status.json'), None, CardLog(),
+                                  terminal_rows=roster.picker_rows, terminal_busy=lambda: roster.busy,
+                                  terminal_current=lambda: roster.focused, terminal_open=opening.open)
+        commands = AgentTerminalCommands(roster, on_explicit_view=lambda: opening.claim_legacy(router.claim_terminal_voice))
 
-    async def retry_terminal():
-        await opening.retry()
+        async def capture():
+            current = commands.begin_capture()
+            assert current is not None
+            assert await runtime.publish_terminal_capture(current)
 
-    sessions = SessionManager(hud, lambda _: None, terminal_capture=capture,
-                              terminal_retry=retry_terminal, terminal_view_current=lambda: opening.current)
-    replies = MessageReplyController(NeverSender(), gateway.request_confirmation, contact_search=lambda _: [])
-    runtime = PromptedSpeechRuntime(hud, replies, sessions=lambda: sessions,
-                                    connection_generation=lambda: gateway.audio_connection_generation,
-                                    fence_audio=lambda: 10, capturing=lambda: False, terminal=lambda: commands)
-    gateway.on_input(router.on_input)
-    gateway.on_device(runtime.handle_device)
-    gateway.on_brainstorm_action(sessions.handle_brainstorm_action)
+        async def retry_terminal():
+            await opening.retry()
+
+        sessions = SessionManager(hud, lambda _: None, terminal_capture=capture,
+                                  terminal_retry=retry_terminal, terminal_view_current=lambda: opening.current)
+        replies = MessageReplyController(NeverSender(), gateway.request_confirmation, contact_search=lambda _: [])
+        runtime = PromptedSpeechRuntime(hud, replies, sessions=lambda: sessions,
+                                        connection_generation=lambda: gateway.audio_connection_generation,
+                                        fence_audio=lambda: 10, capturing=lambda: False, terminal=lambda: commands)
+
+    create_engine()
+    # The fixture keeps its isolated socket alive across engine reconstruction.
+    # Register once and route to the current runtime; retired callbacks would
+    # otherwise keep writing to the closed store and handle each gesture twice.
+    gateway.on_input(lambda event: router.on_input(event))
+    gateway.on_device(lambda event: runtime.handle_device(event))
+    gateway.on_brainstorm_action(lambda event: sessions.handle_brainstorm_action(event))
     connected = asyncio.Event()
     gateway.on_hello(lambda _: connected.set())
 
@@ -512,6 +653,144 @@ async def run(out: Path, *, lifecycle: bool = False):
                 return frame
             await input_action(direction)
         raise AssertionError(f'{name} {marker} never became visible through simulator scrolling')
+
+    async def streaming_restart_flow():
+        def visible(text):
+            return (gateway.frames[-1].get('kind') == 'agent_terminal.view'
+                    and any(text in m['text'] for m in current_terminal()['messages']))
+        async def reopen(name):
+            # Context menu entry drives the production chooser, even after engine replacement.
+            await input_action('context_menu')
+            await screen(f'{name}-restart-feature-menu')
+            for _ in range(5):
+                await input_action('down')
+            await input_action('click')
+            await until(lambda: gateway.frames[-1].get('kind') == 'hud.list'
+                        and gateway.frames[-1].get('title') == 'AGENT TERMINAL')
+            await screen(f'{name}-restart-picker')
+            if name == 'Hermes':
+                await input_action('down')
+            await input_action('click')
+            await until(lambda: roster.focused == name and gateway.frames[-1].get('kind') == 'agent_terminal.view')
+        for index, name in enumerate(AGENTS):
+            state = states[name]
+            if index:
+                await input_action('down')
+            await input_action('click')
+            await until(lambda: agents[name].capture_context_generation is not None)
+            await until(lambda: gateway.frames[-1].get('kind') == 'agent_terminal.view'
+                        and current_terminal().get('state') == 'ready')
+            await screen(f'{name}-stream-opened')
+            identity = current_terminal()['conversationId']
+            ticket, _ = await begin_question(name, f'{name}-stream-input')
+            await submit(ticket, f'Run a streaming restart plan for {name}.')
+            if name == 'Hermes':
+                await until(lambda: visible(f'{name.upper()} PARTIAL'))
+                partial = await screen(f'{name}-partial-before-final')
+                assert 'PARTIAL' in partial['text'] and roster.busy, 'No visible partial result while stream remains active'
+            else:
+                await until(lambda: visible('Working on the plan.'))
+                partial = await screen(f'{name}-polling-working-before-final')
+                assert 'WORKING' in partial['text'].upper() and roster.busy, 'Polling task has no visible working status'
+            anchor = partial
+            if name == 'Hermes':
+                state.replacement_release.set()
+                await until(lambda: visible('DRAFT SEGMENT'))
+                appended = await screen(f'{name}-stream-appended')
+                assert 'DRAFT SEGMENT' in appended['text'] and 'PARTIAL' in appended['text']
+                state.append_release.set()
+                await until(lambda: state.phase == 1)
+                anchor = await seek(name, 'MIDDLE', 'up', f'{name}-stream-middle')
+                assert 'DRAFT SEGMENT' not in json.dumps(current_terminal()['messages']), 'Replacement retained obsolete artifact content'
+            before = current_terminal()
+            await input_action('double_click')
+            await until(lambda: gateway.frames[-1].get('kind') == 'hud.list')
+            await screen(f'{name}-picker-{state.sends}')
+            assert_picker()
+            if index:
+                await input_action('down')
+            await input_action('click')
+            await until(lambda: roster.focused == name)
+            reopened = await screen(f'{name}-stream-back-reopen')
+            assert current_terminal()['conversationId'] == identity
+            assert current_terminal()['messages'] == before['messages'], 'Back lost streamed history'
+            def transcript_pixels(capture):
+                return Image.open(out / (capture['name'] + '.rgba.png')).crop((0, 82, 576, 251)).tobytes()
+            assert transcript_pixels(anchor) == transcript_pixels(reopened), 'Back moved the streamed reading anchor'
+            # Finish the first task through its original SSE stream (or polling).
+            state.phase = 3
+            state.final_release.set()
+            await until(lambda: not roster.busy and visible(f'{name.upper()} FINISHED'))
+            await seek(name, 'FINISHED', 'down', f'{name}-stream-final')
+            ticket, _ = await begin_question(name, f'{name}-durable-input')
+            await submit(ticket, f'Run a durable restart task for {name}.')
+            await until(lambda: roster.busy and state.sends == 2
+                        and agents[name].export_state().get('task') == state.task_id
+                        and agents[name].export_state().get('dispatch_phase') == 'accepted')
+            saved = TerminalCheckpointStore(durable).load(name.lower(), agents[name].endpoint)
+            assert saved is not None and saved['adapter']['task'] == state.task_id
+            assert saved['adapter']['dispatch_phase'] == 'accepted', 'Client has not durably accepted the task'
+            await screen(f'{name}-durable-before-restart')
+            # Discard engine ownership and recreate every runtime object from the same durable store.
+            accepted = len([c for c in calls if c['method'].startswith('message/')])
+            task_id = state.task_id
+            await roster.detach_for_shutdown()
+            await runtime.aclose()
+            await sessions.close()
+            for agent in agents.values():
+                await agent.close()
+            if name == 'Hermes':
+                await asyncio.wait_for(state.stream_closed.wait(), 5)
+            durable.close()
+            create_engine()
+            await reopen(name)
+            restored = await screen(f'{name}-restart-restored')
+            assert current_terminal()['conversationId'] == identity
+            assert any(m['role'] == 'user' for m in current_terminal()['messages'])
+            assert not runtime.dispatcher.is_armed
+            assert len([c for c in calls if c['method'].startswith('message/')]) == accepted
+            assert not any(c['method'] == 'tasks/cancel' for c in calls)
+            previous_polls = state.polls
+            state.phase = 3
+            await input_action('click')
+            await until(lambda: state.polls > previous_polls and visible(f'{name.upper()} FINISHED'))
+            await seek(name, 'FINISHED', 'down', f'{name}-restart-recovered-final')
+            latest_user = max(i for i, m in enumerate(current_terminal()['messages']) if m['role'] == 'user')
+            assert all(m['text'] == 'Completed' for m in current_terminal()['messages'][latest_user + 1:] if m['role'] == 'status'), 'Recovery retained stale progress or authorization guidance'
+            assert state.task_id == task_id and state.sends == 2
+            # auth-required is an external provider gate, never a JOAT approval RPC.
+            ticket, _ = await begin_question(name, f'{name}-authorization-input')
+            await submit(ticket, f'Run an authorization task for {name}.')
+            await until(lambda: not roster.busy and agents[name].needs_recovery)
+            guidance = await screen(f'{name}-authorization-guidance')
+            assert 'authoriz' in guidance['text'].lower() or 'dashboard' in guidance['text'].lower(), 'Missing provider authorization guidance'
+            assert not runtime.dispatcher.is_armed
+            prior = state.polls
+            state.auth_complete = True  # Simulates an operator acting outside JOAT; no approval endpoint exists.
+            await input_action('click')
+            await until(lambda: state.polls > prior and visible(f'{name.upper()} OPERATOR COMPLETED'))
+            await screen(f'{name}-operator-completed-query')
+            assert state.sends == 3
+            await input_action('double_click')
+            await until(lambda: gateway.frames[-1].get('kind') == 'hud.list')
+            await screen(f'{name}-picker-{state.sends}')
+            assert_picker()
+        assert not violations, violations
+        assert sum(c['method'] == 'message/send' for c in calls) == 3
+        assert sum(c['method'] == 'message/stream' for c in calls) == 3
+        assert not any(c['method'] not in ('tasks/get', 'message/send', 'message/stream') for c in calls)
+        assert source_fingerprint() == source_before, 'Production sources changed during streaming acceptance'
+        (out / 'receipt.json').write_text(json.dumps({
+            'result': 'passed', 'mode': 'streaming-restart', 'screens': screens, 'rpc_calls': calls,
+            'durable_database': str(checkpoint_path),
+            'source_fingerprint': source_before,
+            'boundaries': ['Local TLS v1 SSE/polling services; recognized final speech text',
+                'Fragmented append/replacement frames stress protocol handling; current Hermes normally emits its final artifact rather than token deltas',
+                'Fixture remote task survives disconnect intentionally; real Hermes may report a failed task on later query',
+                'Fresh full engine objects restored in the same process; separate subprocess persistence tests cover actual process death',
+                'External authorization completion is a fixture state change, never a JOAT approval RPC'],
+            'isolation': {'engine_port': 18980, 'agent_port': 18981, 'plugin_port': 5298, 'simulator_port': 9998},
+        }, indent=2))
 
     async def lifecycle_flow():
         command_receipts = []
@@ -657,6 +936,9 @@ async def run(out: Path, *, lifecycle: bool = False):
         await input_action('click')
         await screen('03-agent-picker')
         assert_picker()
+        if streaming_restart:
+            await streaming_restart_flow()
+            return
         if lifecycle:
             await lifecycle_flow()
             return
@@ -756,12 +1038,20 @@ async def run(out: Path, *, lifecycle: bool = False):
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, 9)
                     process.wait()
+        if streaming_restart:
+            for state in states.values():
+                state.final_release.set()
+                state.replacement_release.set()
+                state.append_release.set()
+            await roster.detach_for_shutdown()
         await runtime.aclose()
         await sessions.close()
         await gateway.stop()
         for agent in agents.values():
             await agent.close()
         await runner.cleanup()
+        if durable is not None:
+            durable.close()
         key.unlink(missing_ok=True)
 
 
@@ -769,6 +1059,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--lifecycle', action='store_true', help='Exercise polled progress, same-task reply, and stop outcomes')
+    parser.add_argument('--streaming-restart', action='store_true', help='Exercise fragmented Hermes SSE and durable task recovery')
     args = parser.parse_args()
-    output = args.output or ROOT / 'dist/mac-workspace/control-audit' / ('agent-terminal-lifecycle' if args.lifecycle else 'agent-terminal-persistent')
-    asyncio.run(run(output.resolve(), lifecycle=args.lifecycle))
+    if args.lifecycle and args.streaming_restart:
+        parser.error('Choose one acceptance mode')
+    output = args.output or ROOT / 'dist/mac-workspace/control-audit' / ('agent-terminal-streaming-restart' if args.streaming_restart else 'agent-terminal-lifecycle' if args.lifecycle else 'agent-terminal-persistent')
+    asyncio.run(run(output.resolve(), lifecycle=args.lifecycle, streaming_restart=args.streaming_restart))

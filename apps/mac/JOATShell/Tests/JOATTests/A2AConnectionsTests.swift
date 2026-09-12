@@ -2,6 +2,19 @@ import XCTest
 @testable import JOAT
 
 final class A2AConnectionsTests: XCTestCase {
+    func testProviderMigrationAndRoundTripDoNotUseDisplayName() throws {
+        let legacy = Data(#"{"id":"hermes-2","label":"Renamed agent","endpoint":"https://host.example:9900/","enabled":true}"#.utf8)
+        let migrated = try JSONDecoder().decode(A2AConnectionProfile.self, from: legacy)
+        XCTAssertEqual(migrated.provider, .hermes)
+        let custom = try A2AConnectionProfile(id: "custom", label: "Hermes", endpoint: "https://host.example:9900/", enabled: true)
+        XCTAssertEqual(custom.provider, .generic)
+        let explicit = try A2AConnectionProfile(id: "custom", label: "Custom", endpoint: custom.endpoint, enabled: true, provider: .hermes)
+        let encoded = try JSONEncoder().encode(explicit)
+        XCTAssertEqual(try JSONDecoder().decode(A2AConnectionProfile.self, from: encoded), explicit)
+        let invalid = Data(#"{"id":"custom","label":"Custom","endpoint":"https://host.example/","enabled":true,"provider":"invented"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(A2AConnectionProfile.self, from: invalid))
+    }
+
     func testEndpointPreservesRoutingPathAndRejectsCredentials() throws {
         XCTAssertEqual(try A2AConnectionConfiguration.canonicalEndpoint("https://HOST.example:9900/"), "https://host.example:9900/")
         XCTAssertEqual(try A2AConnectionConfiguration.canonicalEndpoint("https://host.example/a%2Fb/"), "https://host.example/a%2Fb/")

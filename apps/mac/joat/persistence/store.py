@@ -569,6 +569,20 @@ _MIGRATION_11 = (
     """,
 )
 
+_MIGRATION_12 = (
+    """
+    CREATE TABLE terminal_checkpoints (
+        profile_id TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        snapshot BLOB NOT NULL CHECK(typeof(snapshot) = 'blob' AND length(snapshot) <= 2097152),
+        revision INTEGER NOT NULL CHECK(revision > 0),
+        updated_at_us INTEGER NOT NULL,
+        PRIMARY KEY(profile_id, endpoint)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -581,6 +595,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (9, "index_notification_observations_class_time", _MIGRATION_9),
     (10, "drop_calendar_starting_soon_alerts", _MIGRATION_10),
     (11, "durable_pomodoro_checkpoint", _MIGRATION_11),
+    (12, "durable_terminal_conversations", _MIGRATION_12),
 )
 
 
