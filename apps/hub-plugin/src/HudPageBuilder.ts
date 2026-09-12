@@ -1,3 +1,4 @@
+import { GesturePolicy } from './GesturePolicy';
 import {
   CreateStartUpPageContainer,
   RebuildPageContainer,
@@ -168,7 +169,7 @@ export class HudPageBuilder {
    * erased the reply. Regions also let the PLUGIN paint chrome (status,
    * hints) with no Mac attached, instead of a frozen screen.
    *
-   *   0   status  39   plugin: clock, link, mic, battery   (1 line)
+   *   0   status  39   plugin: clock, mic, battery   (1 line)
    *   39  main   117   Mac: reply / card / debate  <-- capture (4 lines)
    *   156 context 62   Mac: what the wearer last said        (2 lines)
    *   218 tray    35   Mac: what is waiting                  (1 line)
@@ -209,13 +210,18 @@ export class HudPageBuilder {
    * while the real menu lived in our tiles is why the menu gesture opened a
    * menu the wearer did not recognise.
    *
-   * Mute keeps its long-press gesture and Reconnect lives in Settings, so
-   * neither needs a row; the retired ids stay handled in EventRouter because
+   * Mute keeps its long-press gesture; connection and listening settings live
+   * on the phone. The retired Settings slot has no visible menu entry.
+   * The retired ids stay handled in EventRouter because
    * a host may still be showing a cached menu.
    */
   private systemMenu(): MenuContainerProperty {
     return new MenuContainerProperty({
-      menuItems: CAPABILITIES.map((name, index) => new MenuItemProperty({
+      // Filter after attaching the original index so surviving action IDs
+      // never move when a phone-owned entry disappears from the menu.
+      menuItems: CAPABILITIES.map((name, index) => ({ name, index }))
+        .filter(({ name }) => name !== 'Settings')
+        .map(({ name, index }) => new MenuItemProperty({
         itemID: CAPABILITY_MENU_ID_BASE + index,
         itemName: name,
       })),
@@ -431,7 +437,7 @@ export class HudPageBuilder {
           isEventCapture: 0,
           zOrderIndex: 5,
           textColor: 4,
-          content: content(view.footerText),
+          content: content(GesturePolicy.formatHint(view.footerText)),
         }),
       ],
     });
@@ -453,7 +459,7 @@ export class HudPageBuilder {
     // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
     // below is the real bound; a tighter char pre-cut here silently dropped
     // half the presenter's copy (2026-09-05 audit).
-    const hint = pxTruncate((chrome.hint?.trim() || 'left x2 overview').slice(0, 96), REGION_TEXT_WIDTH);
+    const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || 'double-click: overview').slice(0, 96), REGION_TEXT_WIDTH);
     return new RebuildPageContainer({
       containerTotalNum: 4,
       ...this.menuConfig(),

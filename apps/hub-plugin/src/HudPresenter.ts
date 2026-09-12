@@ -1,4 +1,5 @@
-import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import { TextContainerUpgrade, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
+import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
 import type {
@@ -137,7 +138,12 @@ export interface PlanningPaneState {
 }
 
 export interface ListSurfaceOptions {
+  /** A matching terminal Planning refresh keeps its independently expiring receipt. */
+  retainProductivityReceipt?: boolean;
   title?: string;
+  contextLabel?: string;
+  controlStartIndex?: number;
+  planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>;
   hint?: string;
   selectable?: boolean;
   /** Plugin-local initial cursor, applied in the first custom frame only. */
@@ -150,6 +156,9 @@ export interface ListSurfaceOptions {
 
 interface ResolvedListSurfaceOptions {
   title: string;
+  contextLabel?: string;
+  controlStartIndex?: number;
+  planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>;
   hint: string;
   selectable: boolean;
   planningGrid?: readonly PlanningGridCell[];
@@ -158,6 +167,7 @@ interface ResolvedListSurfaceOptions {
 }
 
 interface HudContentState {
+  notificationId?: string;
   streams: Map<number, string>;
   brightness: Map<number, number>;
   kinds: Map<number, HudContentKind>;
@@ -231,6 +241,7 @@ function sameProductivity(a: ProductivityHudModel, b: ProductivityHudModel): boo
  * card it covered. Keep only the local visual tuple; acknowledging or
  * mutating a native notification remains a separate Mac-owned operation. */
 interface NotificationReturnState {
+  notificationId?: string;
   text?: string;
   brightness?: number;
   kind?: HudContentKind;
@@ -253,6 +264,9 @@ export class HudPresenter {
   private pendingPaint = new Map<number, ReturnType<typeof setTimeout>>();
   private brightness = new Map<number, number>();
   private kinds = new Map<number, HudContentKind>();
+  private notificationId?: string;
+  private paintedNotificationId?: string;
+  private readonly retiredNotificationIds = new Set<string>();
   private surface: HudSurface = { kind: 'default' };
   /** Margin facts (weather, unread) resolved by the Mac for the dashboard. */
   private ambient?: { temperature: string; condition: string; unread: number };
@@ -386,9 +400,10 @@ export class HudPresenter {
     containerId: ContainerId = ContainerId.Main,
     textColor?: number,
     contentKind?: HudContentKind,
+    notificationId?: string,
   ): Promise<boolean> {
     if (this.confirmation && containerId !== ContainerId.StatusBar) {
-      this.deferText(text, containerId, textColor, contentKind);
+      this.deferText(text, containerId, textColor, contentKind, notificationId);
       return true;
     }
     // A focus page owns the entire non-status canvas. Background replies,
@@ -396,10 +411,10 @@ export class HudPresenter {
     // until Back instead of overwriting its header or targeting containers
     // that intentionally do not exist in this layout.
     if (this.surface.kind !== 'default' && containerId !== ContainerId.StatusBar) {
-      this.deferFocusText(text, containerId, textColor, contentKind);
+      this.deferFocusText(text, containerId, textColor, contentKind, notificationId);
       return true;
     }
-    return this.replaceText(text, containerId, textColor, contentKind);
+    return this.replaceText(text, containerId, textColor, contentKind, notificationId);
   }
 
   private async replaceText(
@@ -407,6 +422,7 @@ export class HudPresenter {
     containerId: ContainerId,
     textColor?: number,
     contentKind?: HudContentKind,
+    notificationId?: string,
   ): Promise<boolean> {
     if (containerId === ContainerId.Main) {
       if (contentKind === 'notification') {
@@ -415,6 +431,7 @@ export class HudPresenter {
             text: this.streams.get(ContainerId.Main),
             brightness: this.brightness.get(ContainerId.Main),
             kind: this.kinds.get(ContainerId.Main),
+            notificationId: this.notificationId,
           };
         }
       } else {
@@ -432,6 +449,9 @@ export class HudPresenter {
     }
     if (containerId === ContainerId.Main) {
       this.kinds.set(containerId, contentKind ?? 'assistant');
+      this.notificationId = contentKind === 'notification' && /^[a-f0-9]{32}$/i.test(notificationId ?? '')
+        ? notificationId : undefined;
+      this.paintedNotificationId = undefined;
     }
     return this.paint(containerId);
   }
@@ -439,17 +459,29 @@ export class HudPresenter {
   /** Stream a chunk: accumulate, repaint (throttled) with the full text. */
   async appendText(chunk: string, containerId: ContainerId = ContainerId.Main): Promise<boolean> {
     if (this.confirmation && containerId !== ContainerId.StatusBar) {
+      if (containerId === ContainerId.Main) {
+        this.prepareAssistantAppend(this.confirmation);
+      }
       const streams = this.confirmation.streams;
       streams.set(containerId, (streams.get(containerId) ?? '') + chunk);
       return true;
     }
     if (this.surface.kind !== 'default' && containerId !== ContainerId.StatusBar) {
       const deferred = this.ensureFocusReturn();
+      if (containerId === ContainerId.Main) this.prepareAssistantAppend(deferred);
       deferred.streams.set(
         containerId,
         (deferred.streams.get(containerId) ?? '') + chunk,
       );
       return true;
+    }
+    if (containerId === ContainerId.Main) {
+      const content = { streams: this.streams, brightness: this.brightness, kinds: this.kinds,
+        notificationId: this.notificationId };
+      this.prepareAssistantAppend(content);
+      this.notificationId = undefined;
+      this.paintedNotificationId = undefined;
+      this.notificationReturn = undefined;
     }
     this.streams.set(containerId, (this.streams.get(containerId) ?? '') + chunk);
     const now = Date.now();
@@ -466,6 +498,17 @@ export class HudPresenter {
       }, PAINT_INTERVAL_MS - elapsed));
     }
     return true;
+  }
+
+  private prepareAssistantAppend(content: HudContentState): void {
+    // An assistant stream starts its own Main content; it must neither
+    // append prose to a notification nor inherit that card's dismiss id.
+    if (content.kinds.get(ContainerId.Main) === 'notification') {
+      content.streams.delete(ContainerId.Main);
+      content.brightness.delete(ContainerId.Main);
+    }
+    content.kinds.set(ContainerId.Main, 'assistant');
+    content.notificationId = undefined;
   }
 
   /** Present one complete question without replacing the feature beneath it.
@@ -736,7 +779,7 @@ export class HudPresenter {
         // A list's Main is only its short title. Give a reply the ordinary
         // reading area while retaining the list and its selection underneath.
         const status = this.captureLiveStatus();
-        const rebuilt = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+        const rebuilt = await this.rebuildPage(this.layouts.defaultLayout());
         if (!rebuilt) return false;
         this.nativeReplyPage = true;
         this.lastLength.clear();
@@ -794,8 +837,63 @@ export class HudPresenter {
     return this.surface.kind === 'default'
       && !this.confirmation
       && !this.assistantOverlay
+      && !this.assistantConversation.isActive()
+      && !this.promptQuestion
       && this.kinds.get(ContainerId.Main) === 'notification'
       && (this.streams.get(ContainerId.Main)?.trim().length ?? 0) > 0;
+  }
+
+  visibleNotificationId(): string | undefined {
+    return this.hasVisibleNotification() && this.notificationId === this.paintedNotificationId
+      ? this.notificationId : undefined;
+  }
+
+  /** An explicit Mac acknowledgement clears only that JOAT card. A delayed
+   * clear can never remove the newer card that arrived in the meantime. */
+  async retireNotification(cardId: string): Promise<boolean> {
+    if (!/^[a-f0-9]{32}$/i.test(cardId)) return false;
+    this.retiredNotificationIds.add(cardId);
+    // Retain tombstones for in-flight rollback snapshots, with a bounded
+    // session-local window far larger than the number of retained surfaces.
+    if (this.retiredNotificationIds.size > 512) {
+      this.retiredNotificationIds.delete(this.retiredNotificationIds.values().next().value!);
+    }
+    const wasVisible = this.hasVisibleNotification() && this.notificationId === cardId;
+    this.removeRetiredNotifications();
+    return wasVisible ? this.paint(ContainerId.Main) : true;
+  }
+
+  private removeRetiredNotifications(): void {
+    const clear = (content: HudContentState | undefined): void => {
+      if (!content?.notificationId || !this.retiredNotificationIds.has(content.notificationId)
+        || content.kinds.get(ContainerId.Main) !== 'notification') return;
+      content.streams.delete(ContainerId.Main);
+      content.brightness.delete(ContainerId.Main);
+      content.kinds.delete(ContainerId.Main);
+      content.notificationId = undefined;
+    };
+    if (this.notificationId && this.retiredNotificationIds.has(this.notificationId)
+      && this.kinds.get(ContainerId.Main) === 'notification') {
+      this.cancelPending(ContainerId.Main);
+      this.streams.delete(ContainerId.Main);
+      this.brightness.delete(ContainerId.Main);
+      this.kinds.delete(ContainerId.Main);
+      this.notificationId = undefined;
+      this.paintedNotificationId = undefined;
+      const prior = this.notificationReturn;
+      this.notificationReturn = undefined;
+      if (prior && prior.kind !== 'notification') {
+        if (prior.text !== undefined) this.streams.set(ContainerId.Main, prior.text);
+        if (prior.brightness !== undefined) this.brightness.set(ContainerId.Main, prior.brightness);
+        if (prior.kind !== undefined) this.kinds.set(ContainerId.Main, prior.kind);
+      }
+    }
+    clear(this.focusReturn);
+    clear(this.confirmation);
+    if (this.notificationReturn?.notificationId
+      && this.retiredNotificationIds.has(this.notificationReturn.notificationId)) {
+      this.notificationReturn = undefined;
+    }
   }
 
   /** Hide the visible card locally and restore the exact displaced Main
@@ -804,6 +902,8 @@ export class HudPresenter {
     if (!this.hasVisibleNotification()) return false;
     const prior = this.notificationReturn;
     this.notificationReturn = undefined;
+    this.notificationId = prior?.notificationId;
+    this.paintedNotificationId = undefined;
     this.cancelPending(ContainerId.Main);
     this.streams.delete(ContainerId.Main);
     this.brightness.delete(ContainerId.Main);
@@ -856,7 +956,7 @@ export class HudPresenter {
         this.focusReturn = {
           streams: new Map(this.confirmation.streams),
           brightness: new Map(this.confirmation.brightness),
-          kinds: new Map(this.confirmation.kinds),
+          kinds: new Map(this.confirmation.kinds), notificationId: this.confirmation.notificationId,
         };
       }
       this.confirmation.surface = surface;
@@ -866,10 +966,10 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
       };
     }
-    this.clearActionOverlay();
+    if (!options.retainProductivityReceipt) this.clearActionOverlay();
     return this.renderList(surface);
   }
 
@@ -898,6 +998,9 @@ export class HudPresenter {
     const frame: HudVisualFrame = {
       kind: 'list', status: this.streams.get(ContainerId.StatusBar) ?? '', micOn: this.micOn,
       title: surface.options.title, items: [...surface.items], selectedIndex: surface.selectedIndex,
+      contextLabel: surface.options.contextLabel,
+      controlStartIndex: surface.options.controlStartIndex,
+      planningEntries: surface.options.planningEntries,
       selectable: surface.options.selectable, hint: surface.options.hint,
       planningGrid: surface.options.planningGrid, planningPane: surface.options.planningPane,
       ...(surface.options.railTab ? { rail: this.rail.visualFor(surface.options.railTab) } : {}),
@@ -908,7 +1011,7 @@ export class HudPresenter {
     const liveStatus = this.captureLiveStatus();
     if (priorSurface.kind === 'default' && !this.focusReturn) {
       this.focusReturn = {
-        streams: new Map(this.streams), brightness: new Map(this.brightness), kinds: new Map(this.kinds),
+        streams: new Map(this.streams), brightness: new Map(this.brightness), kinds: new Map(this.kinds), notificationId: this.notificationId,
       };
     }
     this.clearActionOverlay();
@@ -928,6 +1031,11 @@ export class HudPresenter {
 
   /** Paint a complete navigation snapshot. The Mac/session owns the state;
    * this presenter only gives it exclusive focus and exact restoration. */
+  /** A retained route does not own input over a different visible feature. */
+  isNavigationVisible(): boolean {
+    return this.surface.kind === 'navigation';
+  }
+
   async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
@@ -946,7 +1054,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
       };
     }
     // Route progress updates the SAME page; only entering navigation
@@ -1028,7 +1136,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
       };
     }
     const liveStatus = statusOverride === undefined
@@ -1051,7 +1159,7 @@ export class HudPresenter {
     if (!stillCurrent()) return false;
     if (!painted) {
       this.restorePresenterSnapshot(prior);
-      await this.visual.paint(this.visualFrame());
+      await this.paintRollbackSurface();
     }
     return painted;
   }
@@ -1088,7 +1196,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
       };
     }
     const liveStatus = statusOverride === undefined
@@ -1106,7 +1214,7 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (!painted) {
       this.restorePresenterSnapshot(prior);
-      await this.visual.paint(this.visualFrame());
+      await this.paintRollbackSurface();
     }
     return painted;
   }
@@ -1256,7 +1364,7 @@ export class HudPresenter {
       // paintVisual already spent its one bounded self-heal on the failed new
       // frame. Make one direct rollback paint so pixels and input ownership
       // converge on the same prior surface, but keep the caller result false.
-      await this.visual?.paint(this.visualFrame());
+      await this.paintRollbackSurface();
     }
     this.recordPageTransition(from, 'navigation', 'show_navigation', painted ? 'success' : 'failed');
     return painted;
@@ -1267,13 +1375,12 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
-    // Every feature retains the custom typography, banner and selection
-    // renderer. Native lists are only the no-renderer compatibility path.
+    // The painter preserves JOAT typography across feature screens. The
+    // no-painter compatibility path continues using a firmware list.
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = this.visual
       ? true
-      : await this.client.require()
-        .rebuildPageContainer(nativeReplyPage
+      : await this.rebuildPage(nativeReplyPage
           ? this.layouts.defaultLayout()
           : this.layouts.listLayout(surface.items, surface.options));
     if (!ok || !displayCurrent()) {
@@ -1409,6 +1516,7 @@ export class HudPresenter {
         this.confirmation.streams = new Map(this.focusReturn.streams);
         this.confirmation.brightness = new Map(this.focusReturn.brightness);
         this.confirmation.kinds = new Map(this.focusReturn.kinds);
+        this.confirmation.notificationId = this.focusReturn.notificationId;
         this.focusReturn = undefined;
       }
       return true;
@@ -1421,7 +1529,7 @@ export class HudPresenter {
       const content = deferred ?? {
         streams: new Map(this.streams),
         brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
       };
       this.resetAll();
       this.surface = { kind: 'default' };
@@ -1429,6 +1537,7 @@ export class HudPresenter {
       this.streams = new Map(content.streams);
       this.brightness = new Map(content.brightness);
       this.kinds = new Map(content.kinds);
+      this.notificationId = content.notificationId;
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -1439,7 +1548,7 @@ export class HudPresenter {
       this.recordPageTransition(from, 'overview', 'show_overview', painted ? 'success' : 'failed');
       return painted;
     }
-    const ok = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+    const ok = await this.rebuildPage(this.layouts.defaultLayout());
     if (!ok) {
       this.recordPageTransition(from, 'overview', 'show_overview', 'failed');
       return false;
@@ -1463,6 +1572,7 @@ export class HudPresenter {
     for (const [id, kind] of deferred.kinds) {
       if (id !== ContainerId.StatusBar) this.kinds.set(id, kind);
     }
+    this.notificationId = deferred.notificationId;
     for (const id of [
       ContainerId.Main,
       ContainerId.Context,
@@ -1512,7 +1622,7 @@ export class HudPresenter {
     if (!this.confirmation) {
       const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn
-        : { streams: this.streams, brightness: this.brightness, kinds: this.kinds };
+        : { streams: this.streams, brightness: this.brightness, kinds: this.kinds, notificationId: this.notificationId };
       this.confirmation = {
         id,
         prompt: safePrompt,
@@ -1521,7 +1631,7 @@ export class HudPresenter {
         surface: this.cloneSurface(this.surface),
         streams: new Map(content.streams),
         brightness: new Map(content.brightness),
-        kinds: new Map(content.kinds),
+        kinds: new Map(content.kinds), notificationId: content.notificationId,
       };
     } else {
       // Claim ownership synchronously, before an awaited bridge call. A stale
@@ -1594,6 +1704,8 @@ export class HudPresenter {
         this.streams = new Map(current.streams);
         this.brightness = new Map(current.brightness);
         this.kinds = new Map(current.kinds);
+        this.notificationId = current.notificationId;
+        this.paintedNotificationId = undefined;
         // One failed tile can leave a torn confirmation visible even though
         // the logical gate has rolled back. Actively repaint the complete
         // prior frame before returning failure to the input gate.
@@ -1608,8 +1720,7 @@ export class HudPresenter {
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', painted ? 'success' : 'failed');
       return painted;
     }
-    const ok = await this.client.require()
-      .rebuildPageContainer(this.layouts.confirmationLayout(current.prompt));
+    const ok = await this.rebuildPage(this.layouts.confirmationLayout(current.prompt));
     if (!displayCurrent()) return false;
     if (this.confirmation?.id !== id) return true;
     if (!ok) {
@@ -1662,7 +1773,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
-        kinds: new Map(prior.kinds),
+        kinds: new Map(prior.kinds), notificationId: prior.notificationId,
       };
       const restored = await this.renderList(prior.surface);
       const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
@@ -1674,7 +1785,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
-        kinds: new Map(prior.kinds),
+        kinds: new Map(prior.kinds), notificationId: prior.notificationId,
       };
       const restored = await this.renderNavigation(prior.surface);
       const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
@@ -1686,7 +1797,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
-        kinds: new Map(prior.kinds),
+        kinds: new Map(prior.kinds), notificationId: prior.notificationId,
       };
       const restored = await this.showBrainstorm(prior.surface.brainstorm);
       const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
@@ -1698,7 +1809,7 @@ export class HudPresenter {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
-        kinds: new Map(prior.kinds),
+        kinds: new Map(prior.kinds), notificationId: prior.notificationId,
       };
       const restored = await this.showProductivity(prior.surface.productivity);
       if (!displayCurrent()) return false;
@@ -1717,6 +1828,7 @@ export class HudPresenter {
       this.streams = new Map(prior.streams);
       this.brightness = new Map(prior.brightness);
       this.kinds = new Map(prior.kinds);
+      this.notificationId = prior.notificationId;
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -1727,7 +1839,7 @@ export class HudPresenter {
       this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
     }
-    const rebuilt = await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+    const rebuilt = await this.rebuildPage(this.layouts.defaultLayout());
     if (!rebuilt) {
       this.recordPageTransition('confirmation', 'overview', 'dismiss_confirmation', 'failed');
       return false;
@@ -1741,6 +1853,7 @@ export class HudPresenter {
     this.streams = new Map(prior.streams);
     this.brightness = new Map(prior.brightness);
     this.kinds = new Map(prior.kinds);
+    this.notificationId = prior.notificationId;
     if (liveStatus) {
       this.streams.set(ContainerId.StatusBar, liveStatus.text);
       if (liveStatus.brightness !== undefined) {
@@ -1781,6 +1894,20 @@ export class HudPresenter {
    * Every paint result is now checked, so any cause of a missing page
    * self-heals on the next write.
    */
+  /** Every presenter page-definition write shares the image lane's native
+   * barrier. A stalled upload aborts recovery instead of racing a rebuild. */
+  private async rebuildPage(layout: RebuildPageContainer): Promise<boolean> {
+    const current = this.captureDisplayGuard();
+    if (!current()) return false;
+    const replace = () => this.client.require().rebuildPageContainer(layout);
+    if (!this.visual) return replace();
+    if (!this.visual.withPageTransition) return false;
+    try {
+      const rebuilt = await this.visual.withPageTransition(replace, current);
+      return rebuilt && current();
+    } catch { return false; }
+  }
+
   private healing = false;
 
   private async healAndRetry(containerId: number): Promise<boolean> {
@@ -1801,7 +1928,7 @@ export class HudPresenter {
           ? this.layouts.listLayout(this.surface.items, this.surface.options)
           : this.layouts.defaultLayout();
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'heal-rebuild-start');
-      const rebuilt = await this.client.require().rebuildPageContainer(layout);
+      const rebuilt = await this.rebuildPage(layout);
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'heal-rebuild-result', rebuilt);
       if (!rebuilt || !displayCurrent()) {
         this.recordSelfHeal('abandoned', containerId);
@@ -1823,6 +1950,7 @@ export class HudPresenter {
   }
 
   private async paint(containerId: number): Promise<boolean> {
+    this.removeRetiredNotifications();
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
@@ -1834,13 +1962,21 @@ export class HudPresenter {
     const overlay = !this.visual && !this.confirmation && containerId === ContainerId.Main
       ? this.assistantOverlay?.text
       : undefined;
-    const full = overlay ?? this.streams.get(containerId) ?? '';
+    const stored = overlay ?? this.streams.get(containerId) ?? '';
+    // Native compatibility shares the same quiet top line as the raster
+    // shell. Keep transient activity in the conversation, and use the
+    // structured microphone state rather than inferring it from wording.
+    const full = containerId === ContainerId.StatusBar
+      ? [stored.match(/^\d{1,2}:\d{2}/)?.[0], `MIC ${this.micOn ? 'ON' : 'OFF'}`,
+        stored.match(/bat\s*\d+%\+?/i)?.[0]].filter(Boolean).join(' · ')
+      : containerId === ContainerId.Hint ? GesturePolicy.formatHint(stored) : stored;
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
     // being read; the opening lines are already consumed.
     const content = full.length > MAX_UPGRADE_CHARS ? full.slice(-MAX_UPGRADE_CHARS) : full;
     const previous = this.lastLength.get(containerId) ?? 0;
     this.lastPaint.set(containerId, Date.now());
     const level = this.brightness.get(containerId);
+    const notificationId = containerId === ContainerId.Main && this.hasVisibleNotification() ? this.notificationId : undefined;
     const ok = await this.client.require().textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: containerId,
@@ -1853,6 +1989,9 @@ export class HudPresenter {
       }),
     );
     if (!displayCurrent()) return false;
+    if (ok && containerId === ContainerId.Main && notificationId === this.notificationId) {
+      this.paintedNotificationId = notificationId;
+    }
     this.lastLength.set(containerId, content.length);
     if (!ok && !this.healing) {
       // The container is gone. Rebuild the page and paint again, rather
@@ -1907,6 +2046,7 @@ export class HudPresenter {
     containerId: ContainerId,
     textColor?: number,
     contentKind?: HudContentKind,
+    notificationId?: string,
   ): void {
     const deferred = this.confirmation;
     if (!deferred) return;
@@ -1915,6 +2055,8 @@ export class HudPresenter {
     else deferred.brightness.delete(containerId);
     if (containerId === ContainerId.Main) {
       deferred.kinds.set(containerId, contentKind ?? 'assistant');
+      deferred.notificationId = contentKind === 'notification' && /^[a-f0-9]{32}$/i.test(notificationId ?? '')
+        ? notificationId : undefined;
     }
   }
 
@@ -1923,6 +2065,7 @@ export class HudPresenter {
     containerId: ContainerId,
     textColor?: number,
     contentKind?: HudContentKind,
+    notificationId?: string,
   ): void {
     const deferred = this.ensureFocusReturn();
     deferred.streams.set(containerId, text);
@@ -1930,6 +2073,8 @@ export class HudPresenter {
     else deferred.brightness.delete(containerId);
     if (containerId === ContainerId.Main) {
       deferred.kinds.set(containerId, contentKind ?? 'assistant');
+      deferred.notificationId = contentKind === 'notification' && /^[a-f0-9]{32}$/i.test(notificationId ?? '')
+        ? notificationId : undefined;
     }
   }
 
@@ -1986,12 +2131,24 @@ export class HudPresenter {
 
   private resolveListOptions(options: ListSurfaceOptions): ResolvedListSurfaceOptions {
     const planningGrid = normalizePlanningGrid(options.planningGrid);
+    const planningEntries = Array.isArray(options.planningEntries)
+      ? options.planningEntries.slice(0, 20).map(entry => entry && typeof entry.title === 'string'
+        && typeof entry.time === 'string' && (entry.kind === 'event' || entry.kind === 'reminder')
+        ? { title: entry.title.slice(0, 200), time: entry.time.slice(0, 32), kind: entry.kind } : null)
+      : undefined;
     return {
       title: (options.title?.trim() || DEFAULT_LIST_TITLE).slice(0, MAX_FOCUS_COPY_CHARS),
+      ...(options.contextLabel?.trim()
+        ? { contextLabel: Array.from(options.contextLabel.trim()).slice(0, 96).join('') }
+        : {}),
+      ...(Number.isInteger(options.controlStartIndex) && options.controlStartIndex! >= 0
+        ? { controlStartIndex: Math.min(20, options.controlStartIndex!) }
+        : {}),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
+      ...(planningEntries ? { planningEntries } : {}),
       // The pane rides only with a valid grid: hover state without dates
       // would put the renderer on the dashboard path with nothing to draw.
       ...(planningGrid && options.planningPane
@@ -2027,6 +2184,9 @@ export class HudPresenter {
         status,
         micOn: this.micOn,
         title: this.surface.options.title,
+        contextLabel: this.surface.options.contextLabel,
+        controlStartIndex: this.surface.options.controlStartIndex,
+        planningEntries: this.surface.options.planningEntries,
         items: [...this.surface.items],
         selectedIndex: this.surface.selectedIndex,
         selectable: this.surface.options.selectable,
@@ -2099,10 +2259,18 @@ export class HudPresenter {
     return out;
   }
 
-  /** Paint the surface adopted from a background snapshot. Exactly one paint:
-   * the reloaded page already drew its startup frame, and the BLE lane is
-   * serialized, so a second repaint would queue behind this one for nothing. */
+  /** Restore the current owner after host UI may have erased its pixels.
+   * A remembered upload is no longer evidence that its tile is on the glass.
+   * Invalidate before either renderer so unchanged content is delivered again. */
   async repaintRestoredSurface(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    // A native menu may close halfway through a capability paint. Cancelling
+    // that paint makes its caller mistake our invalidation for a missing page
+    // and rebuild an otherwise healthy layout. Let the lane settle first.
+    if (this.visual?.whenIdle && !await this.visual.whenIdle()) return false;
+    if (!displayCurrent()) return false;
+    this.visual?.forgetPage?.();
     if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
     return this.paintVisual();
   }
@@ -2124,10 +2292,10 @@ export class HudPresenter {
 
       const surface = this.surface;
       const rebuilt = surface.kind === 'list'
-        ? await this.client.require().rebuildPageContainer(
+        ? await this.rebuildPage(
           this.layouts.listLayout(surface.items, surface.options),
         )
-        : await this.client.require().rebuildPageContainer(this.layouts.defaultLayout());
+        : await this.rebuildPage(this.layouts.defaultLayout());
       if (!rebuilt) return false;
       this.lastLength.clear();
       let painted = true;
@@ -2143,7 +2311,25 @@ export class HudPresenter {
     }
   }
 
+  /** Restore pixels once without starting another recovery cycle. A restored
+   * notification becomes actionable only after this replacement paint. */
+  private async paintRollbackSurface(): Promise<boolean> {
+    if (!this.visual) return false;
+    const displayCurrent = this.captureDisplayGuard();
+    const surface = this.surface;
+    const notificationId = this.hasVisibleNotification() ? this.notificationId : undefined;
+    const current = () => displayCurrent() && this.surface === surface
+      && notificationId === (this.hasVisibleNotification() ? this.notificationId : undefined);
+    if (!current()) return false;
+    const frame = this.visualFrame();
+    const painted = await (this.visual.paintExact?.(frame, current) ?? this.visual.paint(frame));
+    if (!painted || !current()) return false;
+    this.paintedNotificationId = notificationId;
+    return true;
+  }
+
   private async paintVisual(localTick = false): Promise<boolean> {
+    this.removeRetiredNotifications();
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
@@ -2162,7 +2348,11 @@ export class HudPresenter {
     if (prompt) {
       return this.visual.paintExact?.(this.visualFrame(), () => this.isPromptCurrent(prompt)) ?? false;
     }
+    const notificationId = this.hasVisibleNotification() ? this.notificationId : undefined;
     const ok = await this.visual.paint(this.visualFrame(), localTick);
+    if (ok && displayCurrent() && notificationId === this.notificationId) {
+      this.paintedNotificationId = notificationId;
+    }
     if (!displayCurrent()) return false;
     // Keep the local elapsed counter moving between Mac frames.
     this.armThinkingTicker();
@@ -2199,7 +2389,7 @@ export class HudPresenter {
     return {
       streams: new Map(content.streams),
       brightness: new Map(content.brightness),
-      kinds: new Map(content.kinds),
+      kinds: new Map(content.kinds), notificationId: content.notificationId,
     };
   }
 
@@ -2212,11 +2402,29 @@ export class HudPresenter {
    * container keys become plain records here.
    */
   exportBackgroundState(): Record<string, unknown> {
+    const content = {
+      streams: new Map(this.streams),
+      brightness: new Map(this.brightness),
+      kinds: new Map(this.kinds),
+    };
+    // A restored WebView has no authority to acknowledge the old Mac's
+    // notification. Persist the displaced assistant content instead, if any.
+    if (content.kinds.get(ContainerId.Main) === 'notification') {
+      content.streams.delete(ContainerId.Main);
+      content.brightness.delete(ContainerId.Main);
+      content.kinds.delete(ContainerId.Main);
+      const prior = this.notificationReturn;
+      if (prior && prior.kind !== 'notification') {
+        if (prior.text !== undefined) content.streams.set(ContainerId.Main, prior.text);
+        if (prior.brightness !== undefined) content.brightness.set(ContainerId.Main, prior.brightness);
+        if (prior.kind !== undefined) content.kinds.set(ContainerId.Main, prior.kind);
+      }
+    }
     return {
       surface: this.cloneSurface(this.surface),
-      streams: Object.fromEntries(this.streams),
-      brightness: Object.fromEntries(this.brightness),
-      kinds: Object.fromEntries(this.kinds),
+      streams: Object.fromEntries(content.streams),
+      brightness: Object.fromEntries(content.brightness),
+      kinds: Object.fromEntries(content.kinds),
       micOn: this.micOn,
       rail: this.rail.export(),
     };
@@ -2230,6 +2438,8 @@ export class HudPresenter {
    * rather than trusted — a corrupt snapshot must not brick the surface.
    */
   importBackgroundState(saved: Record<string, unknown>): boolean {
+    this.notificationId = undefined;
+    this.paintedNotificationId = undefined;
     const surface = saved.surface;
     if (typeof surface !== 'object' || surface === null) return false;
     const kind = (surface as { kind?: unknown }).kind;
@@ -2241,6 +2451,13 @@ export class HudPresenter {
       saved.kinds,
       (v): v is HudContentKind => typeof v === 'string',
     );
+    // Also reject notification Main content from snapshots written by older
+    // builds. The authenticated Mac publishes current notification state.
+    if (this.kinds.get(ContainerId.Main) === 'notification') {
+      this.streams.delete(ContainerId.Main);
+      this.brightness.delete(ContainerId.Main);
+      this.kinds.delete(ContainerId.Main);
+    }
     if (typeof saved.micOn === 'boolean') this.micOn = saved.micOn;
     if (typeof saved.rail === 'object' && saved.rail !== null) {
       this.rail.import(saved.rail as Record<string, unknown>);
@@ -2253,7 +2470,7 @@ export class HudPresenter {
       surface: this.cloneSurface(this.surface),
       streams: new Map(this.streams),
       brightness: new Map(this.brightness),
-      kinds: new Map(this.kinds),
+      kinds: new Map(this.kinds), notificationId: this.notificationId,
       ...(this.focusReturn ? { focusReturn: this.cloneContentState(this.focusReturn) } : {}),
     };
   }
@@ -2263,6 +2480,8 @@ export class HudPresenter {
     this.streams = new Map(snapshot.streams);
     this.brightness = new Map(snapshot.brightness);
     this.kinds = new Map(snapshot.kinds);
+    this.notificationId = snapshot.notificationId;
+    this.paintedNotificationId = undefined;
     this.focusReturn = snapshot.focusReturn
       ? this.cloneContentState(snapshot.focusReturn)
       : undefined;
@@ -2298,5 +2517,7 @@ export class HudPresenter {
     this.lastPaint.clear();
     this.brightness.clear();
     this.kinds.clear();
+    this.notificationId = undefined;
+    this.paintedNotificationId = undefined;
   }
 }
