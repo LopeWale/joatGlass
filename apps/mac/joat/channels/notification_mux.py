@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 OBSERVATION_RETENTION_S = 2 * 24 * 60 * 60.0
 # Housekeeping, not a hot path — hourly is plenty and stays off the poll tick.
 OBSERVATION_PRUNE_INTERVAL_S = 3600.0
+OBSERVATION_PRUNE_BATCH_SIZE = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,13 +96,25 @@ class NotificationMux:
         """
         while self._running:
             await asyncio.sleep(OBSERVATION_PRUNE_INTERVAL_S)
+            if not self._running:
+                break
             horizon = time.time_ns() // 1_000 - int(
                 OBSERVATION_RETENTION_S * 1_000_000
             )
+            removed = 0
             try:
-                removed = await asyncio.to_thread(
-                    self._observations.prune, before_us=horizon
-                )
+                while self._running:
+                    # DurableStore belongs to this event-loop thread. Moving
+                    # its shared SQLite connection into a worker raises
+                    # ProgrammingError. Bound each deletion and yield before
+                    # continuing a backlog so ingestion can still run.
+                    batch = self._observations.prune(
+                        before_us=horizon, limit=OBSERVATION_PRUNE_BATCH_SIZE
+                    )
+                    removed += batch
+                    if batch < OBSERVATION_PRUNE_BATCH_SIZE:
+                        break
+                    await asyncio.sleep(0)
             except Exception as exc:
                 log.warning("notification prune failed error=%s", type(exc).__name__)
                 continue
