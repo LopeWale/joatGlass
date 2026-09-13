@@ -83,7 +83,7 @@ export interface MacLinkOptions {
   token?: string | null;
   /** Pairing tokens keyed by canonical origin for approved candidate brains. */
   tokens?: PairingTokensByOrigin;
-  /** Exact approved candidate that most recently authenticated successfully. */
+  /** Remembered approved Mac. Retries stay here until an explicit selection. */
   preferredUrl?: string | null;
   maxQueue?: number;
   reconnectBaseMs?: number;
@@ -108,6 +108,7 @@ export class MacLink {
   private pendingLocation?: PhoneLocationUplink;
   private attempt = 0;
   private urlIndex = 0;
+  private selectionPinned = false;
   private closed = false;
   private replaced = false;
   private handler?: DownlinkHandler;
@@ -146,7 +147,10 @@ export class MacLink {
     const preferredIndex = opts.preferredUrl === undefined || opts.preferredUrl === null
       ? -1
       : opts.urls.indexOf(opts.preferredUrl);
-    if (preferredIndex >= 0) this.urlIndex = preferredIndex;
+    if (preferredIndex >= 0) {
+      this.urlIndex = preferredIndex;
+      this.selectionPinned = true;
+    }
     this.maxQueue = opts.maxQueue ?? 200;
     this.baseMs = opts.reconnectBaseMs ?? 500;
     this.capMs = opts.reconnectMaxMs ?? 15_000;
@@ -166,6 +170,7 @@ export class MacLink {
     if (index < 0) return false;
     this.halt();
     this.urlIndex = index;
+    this.selectionPinned = true;
     this.attempt = 0;
     this.connect();
     return true;
@@ -616,11 +621,11 @@ export class MacLink {
     // At most ONE dial in flight. Without this, every stray close adds
     // another pending connect and they compound.
     if (this.reconnectTimer !== undefined) return;
-    // Rotate to the next candidate brain before retrying, so a dead primary
-    // never blocks a live secondary. Backoff grows per full rotation, not per
-    // attempt — trying 3 dead hosts shouldn't take 3x as long to give up on.
-    this.urlIndex = (this.urlIndex + 1) % this.opts.urls.length;
-    const round = Math.floor(this.attempt++ / this.opts.urls.length);
+    // Discovery may rotate only before a Mac has been chosen. A failed
+    // explicit connection is not permission to switch the user's computer.
+    if (!this.selectionPinned) this.urlIndex = (this.urlIndex + 1) % this.opts.urls.length;
+    const candidates = this.selectionPinned ? 1 : this.opts.urls.length;
+    const round = Math.floor(this.attempt++ / candidates);
     const delay = Math.min(this.baseMs * 2 ** round, this.capMs);
     const jitter = delay * 0.2 * Math.random();
     this.reconnectTimer = setTimeout(() => {

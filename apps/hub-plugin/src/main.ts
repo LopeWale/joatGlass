@@ -239,7 +239,7 @@ async function boot(): Promise<void> {
     // win over a stale local mirror. No URL is accepted from storage.
     tokens = mergePairingTokens(decodePairingTokens(hostedTokensRaw), tokens);
     tokens = migrateLegacyToken(tokens, hostedLegacy, MAC_WS_URLS[0]);
-    preferredUrl = rememberedBrain(hostedPreferredRaw) ?? preferredUrl;
+    preferredUrl = preferredUrl ?? rememberedBrain(hostedPreferredRaw);
   } catch {
     // Older host: WebView storage remains the fallback.
   }
@@ -468,7 +468,14 @@ async function boot(): Promise<void> {
       const cleared = await hud.showDefault();
       if (!cleared || exiting) return false;
       chromeRef?.start();
-      return link.selectUrl(url);
+      const selected = link.selectUrl(url);
+      if (selected) {
+        // Remember user intent before authentication, including an offline Mac.
+        // A stale host mirror must not replace this choice on the next launch.
+        try { localStorage.setItem(PREFERRED_BRAIN_KEY, url); } catch { /* session selection still holds */ }
+        void client.require().setLocalStorage(PREFERRED_BRAIN_KEY, url).catch(() => {});
+      }
+      return selected;
     },
     checkLocation: () => location.requestNavigationOrigin(),
     changePolicy: (policy) => {

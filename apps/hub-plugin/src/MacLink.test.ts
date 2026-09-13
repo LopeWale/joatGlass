@@ -967,3 +967,44 @@ describe('MacLink stale pairing token', () => {
     expect(forgotten).toBe(0); // intermittency is not staleness
   });
 });
+
+
+describe('explicit Mac choice survives connection failures', () => {
+  it.each(['dial', 'authentication', 'disconnect'] as const)('does not visit a healthy other Mac after %s failure', (failure) => {
+    vi.useFakeTimers();
+    const mini = 'ws://mac-mini:19080/glasses';
+    const book = 'ws://macbook:19081/glasses';
+    const link = new MacLink({ urls: [mini, book], dialTimeoutMs: 40,
+      reconnectBaseMs: 10, reconnectMaxMs: 10 });
+    expect(link.selectUrl(book)).toBe(true);
+    for (let i = 0; i < 4; i++) {
+      const socket = sockets[sockets.length - 1]!;
+      if (failure === 'dial') vi.advanceTimersByTime(40);
+      else {
+        socket.open();
+        if (failure === 'disconnect') socket.receive({ kind: 'auth.accepted' });
+        socket.close(failure === 'authentication' ? 4401 : 1006);
+      }
+      vi.advanceTimersByTime(12);
+    }
+    expect(new Set(dialed)).toEqual(new Set([book]));
+    link.close();
+  });
+
+  it('restores a selected Mac that has not authenticated yet and allows an explicit change', () => {
+    vi.useFakeTimers();
+    const mini = 'ws://mac-mini:19080/glasses';
+    const book = 'ws://macbook:19081/glasses';
+    const link = new MacLink({ urls: [mini, book], preferredUrl: book,
+      dialTimeoutMs: 40, reconnectBaseMs: 10, reconnectMaxMs: 10 });
+    link.connect();
+    vi.advanceTimersByTime(52);
+    expect(dialed).toEqual([book, book]);
+    expect(link.selectUrl('ws://unapproved:19081/glasses')).toBe(false);
+    expect(link.activeUrl).toBe(book);
+    expect(link.selectUrl(mini)).toBe(true);
+    vi.advanceTimersByTime(52);
+    expect(dialed.slice(-2)).toEqual([mini, mini]);
+    link.close();
+  });
+});
