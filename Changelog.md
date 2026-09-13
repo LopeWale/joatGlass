@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-13 — Keep an explicit Mac connection selected
+
+- Pin a manually selected or remembered approved Mac through dial, authentication and disconnect failures. Discovery can still rotate before a choice; an explicit choice no longer silently fails over to another computer. Backoff applies per retry for pinned targets.
+- Save the explicit target before authentication completes and prefer that local intent over a stale host mirror on relaunch. Credentials remain isolated by origin. Explain when the dropdown is only a pending choice and Connect must be pressed.
+- Four new regression cases reproduced rotation before the fix; all 73 focused transport/pairing tests and TypeScript checking pass afterward. Browser inspection with production MacLink/PhoneControlPanel and two disposable local WebSocket servers verified unavailable MacBook retries never reached the available Mini, relaunch retained the MacBook, bringing it online connected successfully, and an explicit switch back worked. This fixture exercises the phone panel, not physical glasses or a full Even Hub startup.
+- A separate read-only HTTPS request reached the actual MacBook and returned its closed-pairing-window response. Its log contains the same refusal at 20:31 on September 12. No pairing state or physical connection was changed. This source fix requires a new plugin package before the phone uses it.
+
 ## 2026-09-12 — Hermes streaming and durable Agent Terminal recovery
 
 - Observe Hermes JSON-RPC SSE task/status/artifact events, including fragmented UTF-8, append/replacement updates, bounded frames and owned-task resubscription. Keep one assistant message identity across partial and final output. OpenClaw retains rate-conscious task polling; uncertain sends are never replayed.

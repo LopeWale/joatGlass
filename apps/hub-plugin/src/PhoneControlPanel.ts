@@ -63,11 +63,13 @@ export class PhoneControlPanel {
       ? 'Reconnect here to make this phone display active again.'
       : state === 'connected'
         ? 'The Mac connection is authenticated. AI and feature availability still depend on the services configured in that Mac’s JOAT app.'
-        : 'Open JOAT on the selected Mac and keep it awake. For a Tailscale connection, connect both devices to Tailscale. Check pairing approval in the Mac app, then reconnect.');
+        : 'Open JOAT on the Mac shown here and keep it awake. For a Tailscale connection, connect both devices to Tailscale. Check pairing approval in the Mac app, then reconnect.');
     if (this.connect) this.connect.disabled = this.switching || !this.options.canReconnect();
     if (this.connect) this.connect.textContent = this.switching ? 'Connecting…'
       : this.brain?.value === link.activeUrl && state === 'connected' ? 'Reconnect' : 'Connect';
-    if (state === 'connected' && !this.switching) this.write('p-action', '');
+    if (!this.switching && this.brain && this.brain.value !== link.activeUrl) {
+      this.write('p-action', `Tap Connect to switch to ${brainLabel(this.brain.value)}. Current connection: ${brainLabel(link.activeUrl)}.`);
+    } else if (state === 'connected' && !this.switching) this.write('p-action', '');
   }
 
   private async selectBrain(url: string): Promise<void> {
