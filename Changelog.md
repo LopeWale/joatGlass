@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-13 — Build JOAT 0.1.89 for existing Even Hub project
+
+- Built current committed reconnect fix from source `cdde1d1` in an isolated export. Eight release candidate/manifest checks, TypeScript and production Vite build passed. Preserved package ID com.example.joat and secure MacBook-first, Mini-second release candidates; explicit selections remain pinned.
+- Canonical apps/hub-plugin/joat.ehpk: 150738 bytes, SHA-256 `76a1c04d0417fa8a8525aeab6470c6c62486b46c7ee6c55662b357cc9d29701f`. Minimum Even App 2.2.9 and SDK 0.0.14.
+- Portal submission has not been attempted: Computer Use reports the Mac is locked. User authorized adding a build inside the existing JOAT project; no new portal project, public release, installation, pairing or physical connection change.
+
 ## 2026-09-13 — Keep an explicit Mac connection selected
 
 - Pin a manually selected or remembered approved Mac through dial, authentication and disconnect failures. Discovery can still rotate before a choice; an explicit choice no longer silently fails over to another computer. Backoff applies per retry for pinned targets.
