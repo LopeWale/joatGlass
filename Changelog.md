@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-13 — Build JOAT 0.1.90 native conversation update
+
+- Built the existing JOAT package from committed source `a62f19c` in an isolated export. Eight release-candidate and release-manifest checks, TypeScript checking, and the production Vite build passed. The package keeps ID `com.akinwale.joat`, minimum Even App 2.2.9, SDK 0.0.14, and the reviewed secure MacBook-first, Mac Mini-second Tailscale candidates.
+- Canonical `apps/hub-plugin/joat.ehpk`: 154719 bytes, SHA-256 `8dc5dfe8157845b16a795734cfea2dcf886f30dacb3c83c2836ac91864f7b9d1`.
+- Official simulator acceptance was completed separately against the committed implementation: 70-screen OpenClaw/Hermes conversation flow, 48-screen lifecycle, 42-screen Hermes streaming/restart recovery, and 18-frame assistant conversation. The package has not been submitted to Even Hub, installed in Even App, or verified on physical glasses.
+
 ## 2026-09-13 — Native conversations, working terminal gestures and nearby-place repair
 
 - Replaced the four-image assistant and Agent Terminal documents with fixed Even-native text pages. Assistant thinking, streaming, continuation and transcript movement use in-place text upgrades; each selected terminal provider uses one complete native body update. The Agent Terminal chooser now contains only OpenClaw and Hermes, and recovery, prompt, working and Back labels describe the action the current gesture owner accepts.
