@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
+import math
 import re
 import time
 from typing import Literal, cast
@@ -62,6 +64,23 @@ _VOICE_CANCEL = frozenset({
     "stop directions",
 })
 
+_NEARBY_PREFIX = re.compile(
+    r"^(?:the\s+)?(?:nearest|closest)\s+",
+    flags=re.IGNORECASE,
+)
+_NEARBY_SUFFIX = re.compile(
+    r"\s*,?\s*(?:near(?:\s+to)?\s+(?:me|here|us)|around\s+(?:me|here|us)|"
+    r"close\s+by|nearby|to\s+(?:me|here|us))$",
+    flags=re.IGNORECASE,
+)
+_CORRECTION_PREFIX = re.compile(
+    r"^(?:no\s*[,;:-]?\s*)?i\s+(?:mean|meant)\s+(.+)$",
+    flags=re.IGNORECASE,
+)
+_EARTH_RADIUS_METERS = 6_371_008.8
+
+ProximityRefresh = Callable[[], Awaitable[NavigationPoint | None]]
+
 
 def _normalise_navigation_voice(text: str) -> str:
     """Canonicalise only presentation noise; do not reinterpret speech."""
@@ -75,11 +94,25 @@ def navigation_query(text: str) -> str | None:
     # Keep the command explicit after stripping it: ordinary conversation must
     # never become a route request merely because it mentioned a place.
     request = re.sub(r"^joat(?:\s*[,:-])?\s+", "", request, count=1, flags=re.IGNORECASE)
+    request = re.sub(
+        r"^(?:(?:can|could|would)\s+you\s+|please\s+)",
+        "",
+        request,
+        count=1,
+        flags=re.IGNORECASE,
+    )
     match = re.match(
-        r"^(?:navigate|directions|take me)(?:\s+to)\s+(.+)$",
+        r"^(?:navigate(?:\s+me)?|directions|take me|guide me|get me|"
+        r"help me get|show me (?:the )?way)(?:\s+to)\s+(.+)$",
         request,
         flags=re.IGNORECASE,
     )
+    if match is None:
+        match = re.match(
+            r"^(?:how do i get|what(?:'s| is) the (?:best )?way)(?:\s+to)\s+(.+)$",
+            request,
+            flags=re.IGNORECASE,
+        )
     if match is None:
         return None
     destination = match.group(1).strip()
@@ -92,9 +125,18 @@ class _Query:
 
 
 @dataclass(frozen=True, slots=True)
+class _DestinationSearch:
+    text: str
+    nearby: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _SearchReady:
     generation: int
     candidates: list[NavigationCandidate] | None
+    proximity: NavigationPoint | None
+    nearby: bool
+    failure: Literal["location"] | None = None
 
 
 #: How far the wearer must move before the street panel is refetched.
@@ -156,6 +198,7 @@ class NavigationSession(Session):
         *,
         session_id: str,
         proximity: NavigationPoint | None = None,
+        refresh_proximity: ProximityRefresh | None = None,
         map_token: str = "",
     ) -> None:
         self._initial_query = query
@@ -163,6 +206,10 @@ class NavigationSession(Session):
         self._transport = transport
         self._session_id = session_id
         self._proximity = proximity
+        self._refresh_proximity = refresh_proximity
+        self._search_proximity: NavigationPoint | None = None
+        self._nearby_search = False
+        self._last_query = query
         # Street surroundings for the guidance pane. Empty means the wearer
         # still gets the route's shape; the map is an enhancement, never a
         # precondition for navigating.
@@ -193,7 +240,9 @@ class NavigationSession(Session):
         self._cancelled = False
         self._finished = False
         self._awaiting_destination_speech = False
-        self._error_recovery: Literal["destination", "origin", "route", "install"] | None = None
+        self._error_recovery: Literal[
+            "destination", "search_location", "origin", "route", "install"
+        ] | None = None
 
     @property
     def status(self) -> str:
@@ -269,12 +318,19 @@ class NavigationSession(Session):
             self.cancel()
             return True
 
+        view = self._current_view
+        if view is not None and view.navigation.view in ("destination", "repair", "error"):
+            correction = _navigation_correction(query)
+            if correction is not None:
+                self._awaiting_destination_speech = False
+                self._events.put_nowait(_Query(correction))
+                return True
+
         if self._awaiting_destination_speech:
             self._awaiting_destination_speech = False
             self._events.put_nowait(_Query(query))
             return True
 
-        view = self._current_view
         if view is None:
             return False
         decision = self._voice_action(view, spoken)
@@ -374,6 +430,8 @@ class NavigationSession(Session):
         self._events.put_nowait(request)
 
     def _start_search(self, query: str) -> None:
+        search_request = _destination_search(query)
+        self._last_query = query
         self._awaiting_destination_speech = False
         self._cancel_task(self._search_task)
         self._cancel_task(self._route_task)
@@ -396,8 +454,31 @@ class NavigationSession(Session):
 
         async def search() -> None:
             candidates: list[NavigationCandidate] | None
+            proximity = self._proximity
+            if search_request.nearby and self._refresh_proximity is not None:
+                try:
+                    refreshed = await self._refresh_proximity()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning(
+                        "navigation proximity refresh failed type=%s",
+                        type(exc).__name__,
+                    )
+                    refreshed = None
+                if refreshed is not None:
+                    proximity = refreshed
+            if search_request.nearby and proximity is None:
+                await self._events.put(_SearchReady(
+                    generation,
+                    None,
+                    None,
+                    True,
+                    "location",
+                ))
+                return
             try:
-                candidates = await self._provider.search(query, self._proximity)
+                candidates = await self._provider.search(search_request.text, proximity)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -406,12 +487,34 @@ class NavigationSession(Session):
                     type(exc).__name__,
                 )
                 candidates = None
-            await self._events.put(_SearchReady(generation, candidates))
+            await self._events.put(_SearchReady(
+                generation,
+                candidates,
+                proximity,
+                search_request.nearby,
+            ))
 
         self._search_task = asyncio.create_task(search())
 
     async def _handle_search_ready(self, ready: _SearchReady) -> None:
         if ready.generation != self._search_generation:
+            return
+        if ready.proximity is not None:
+            # Keep the accepted request-bound fix for a conversational
+            # correction in this same session. A follow-up such as "I meant
+            # OnCue, the gas station" should not fall back to an older fix.
+            self._proximity = ready.proximity
+        self._search_proximity = ready.proximity
+        self._nearby_search = ready.nearby
+        if ready.failure == "location":
+            self._error_recovery = "search_location"
+            await self._send_view(NavigationHudView(
+                view="error",
+                primary="Phone location unavailable",
+                secondary="I need your phone location to find the nearest match",
+                hint="tap/say retry · swipe cancel",
+                interaction="stationary",
+            ), "search-location-error")
             return
         candidates = ready.candidates
         if not candidates:
@@ -434,7 +537,13 @@ class NavigationSession(Session):
             (candidate.repair_hint for candidate in bounded if candidate.repair_hint),
             None,
         )
-        options = [_candidate_option(candidate) for candidate in bounded] + [
+        options = [
+            _candidate_option(
+                candidate,
+                proximity=ready.proximity if ready.nearby else None,
+            )
+            for candidate in bounded
+        ] + [
             "None of these · retry",
         ]
         choice_ids = [candidate.choice_id for candidate in bounded] + ["retry"]
@@ -442,7 +551,11 @@ class NavigationSession(Session):
             view="repair",
             primary="Which destination?",
             secondary=(
-                f"Check {repair_hint}" if repair_hint else "Choose the canonical place"
+                "Closest matches near you"
+                if ready.nearby
+                else (
+                    f"Check {repair_hint}" if repair_hint else "Choose the canonical place"
+                )
             ),
             hint="tap choose · swipe select · say first/second",
             interaction="stationary",
@@ -452,10 +565,14 @@ class NavigationSession(Session):
         ), "repair")
 
     async def _show_destination(self, candidate: NavigationCandidate) -> None:
+        secondary = candidate.address
+        if self._nearby_search and self._search_proximity is not None:
+            distance = _candidate_distance(candidate, self._search_proximity)
+            secondary = f"About {_format_distance(distance)} away · {candidate.address}"
         await self._send_view(NavigationHudView(
             view="destination",
             primary=candidate.label,
-            secondary=candidate.address,
+            secondary=secondary[:128],
             hint="tap/say confirm · swipe retry",
             interaction="stationary",
         ), "destination")
@@ -519,7 +636,9 @@ class NavigationSession(Session):
             self._finished = True
             self._events.put_nowait(_Cancelled())
         elif phase == "error" and action.action == "retry":
-            if self._error_recovery == "origin":
+            if self._error_recovery == "search_location":
+                self._start_search(self._last_query)
+            elif self._error_recovery == "origin":
                 await self._request_origin()
             elif self._error_recovery == "route" and self._origin is not None:
                 self._start_route(
@@ -975,9 +1094,69 @@ class NavigationSession(Session):
             task.cancel()
 
 
-def _candidate_option(candidate: NavigationCandidate) -> str:
-    value = f"{candidate.label} · {candidate.address}"
+def _candidate_option(
+    candidate: NavigationCandidate,
+    *,
+    proximity: NavigationPoint | None = None,
+) -> str:
+    distance = (
+        f" · about {_format_distance(_candidate_distance(candidate, proximity))}"
+        if proximity is not None
+        else ""
+    )
+    value = f"{candidate.label}{distance} · {candidate.address}"
     return value if len(value) <= 64 else f"{value[:61].rstrip()}..."
+
+
+def _destination_search(query: str) -> _DestinationSearch:
+    """Separate place words from an explicit current-location modifier."""
+    text = " ".join(query.strip().rstrip(".!?").split())
+    nearby = False
+    if _NEARBY_PREFIX.match(text) is not None:
+        text = _NEARBY_PREFIX.sub("", text, count=1)
+        nearby = True
+    if _NEARBY_SUFFIX.search(text) is not None:
+        text = _NEARBY_SUFFIX.sub("", text, count=1)
+        nearby = True
+    text = text.strip(" ,")
+    return _DestinationSearch(text=text or query.strip(), nearby=nearby)
+
+
+def _navigation_correction(text: str) -> str | None:
+    request = " ".join(text.strip().rstrip(".!?").split())
+    match = _CORRECTION_PREFIX.fullmatch(request)
+    if match is None:
+        return None
+    destination = re.sub(r",\s*(?:the\s+)?", " ", match.group(1))
+    destination = " ".join(destination.split()).strip(" ,")
+    return destination or None
+
+
+def _candidate_distance(
+    candidate: NavigationCandidate,
+    proximity: NavigationPoint,
+) -> float:
+    if (
+        candidate.distance_m is not None
+        and math.isfinite(candidate.distance_m)
+        and candidate.distance_m >= 0
+    ):
+        return candidate.distance_m
+    origin_lat = math.radians(proximity.latitude)
+    target_lat = math.radians(candidate.point.latitude)
+    delta_lat = target_lat - origin_lat
+    delta_lon = math.radians(candidate.point.longitude - proximity.longitude)
+    haversine = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(origin_lat) * math.cos(target_lat) * math.sin(delta_lon / 2) ** 2
+    )
+    return 2 * _EARTH_RADIUS_METERS * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def _format_distance(distance_m: float) -> str:
+    if distance_m < 1_000:
+        return f"{round(distance_m / 10) * 10:.0f} m"
+    return f"{distance_m / 1_000:.1f} km"
 
 
 class NavigationUnavailableSession(Session):

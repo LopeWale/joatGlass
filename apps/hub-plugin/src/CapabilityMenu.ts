@@ -808,6 +808,7 @@ export class CapabilityMenu {
       planningPane: this.dashboardPane(),
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
+      ...(normalized === 'AGENT TERMINAL' ? { nativeFirmwareList: true } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -1886,6 +1887,7 @@ export class CapabilityMenu {
     const shown = receiptRefresh !== undefined || await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
       title,
       hint: 'left x2: back',
+      ...(picked === 'Agent Terminal' ? { nativeFirmwareList: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {

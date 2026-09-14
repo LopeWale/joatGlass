@@ -3945,14 +3945,21 @@ export class HudCanvasRenderer implements HudFrameRenderer {
 
     if (projection) this.drawNavigationMap(context, projection, panel);
 
-    // The bottom band: progress, then the facts it measures. Both span the
-    // whole canvas beneath the panes, exactly like the reference frame's
-    // "Interior · Exterior · Climate · Sentry" line.
-    this.drawNavigationProgress(context, navigation.progress ?? 0);
+    // Keep live facts with the maneuver when a map owns the right pane. A
+    // full-width changing footer dirties the bottom-right image tile on every
+    // distance update, forcing one unrelated serial BLE upload before the
+    // next usable frame can finish.
+    const liveBandWidth = projection ? actWidth : 504;
+    this.drawNavigationProgress(context, navigation.progress ?? 0, liveBandWidth);
     const mode = navigation.mode === 'cycling' ? 'Cycling' : 'Walking';
     const arrival = this.arrivalClock(navigation.etaMinutes);
-    const facts = `${mode} · ${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
-    this.drawNavigationFooter(context, arrival ? `${facts} · ${arrival}` : facts);
+    const compactFacts = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
+    const facts = projection ? compactFacts : `${mode} · ${compactFacts}`;
+    this.drawNavigationFooter(
+      context,
+      arrival ? `${facts} · ${arrival}` : facts,
+      liveBandWidth,
+    );
   }
 
   /** The route as a picture: a dim full polyline, a bright travelled-to
@@ -4141,23 +4148,31 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return `arrive ${hours}:${String(arrival.getMinutes()).padStart(2, '0')}`;
   }
 
-  private drawNavigationFooter(context: CanvasRenderingContext2D, copy: string): void {
+  private drawNavigationFooter(
+    context: CanvasRenderingContext2D,
+    copy: string,
+    width = 504,
+  ): void {
     // Left-aligned on the bottom band, not centred: it is a row of facts,
     // and facts line up with the content above them.
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.meta;
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    this.fitText(context, copy, 36, HINT_BASELINE_Y, 504);
+    this.fitText(context, copy, 36, HINT_BASELINE_Y, width);
   }
 
-  private drawNavigationProgress(context: CanvasRenderingContext2D, progress: number): void {
+  private drawNavigationProgress(
+    context: CanvasRenderingContext2D,
+    progress: number,
+    width = 504,
+  ): void {
     const normalized = Math.max(0, Math.min(1, progress));
     // Directly above the fact line it measures.
     context.fillStyle = gray(HAIRLINE);
-    context.fillRect(36, 253, 504, 3);
+    context.fillRect(36, 253, width, 3);
     context.fillStyle = gray(SUPPORT);
-    context.fillRect(36, 253, Math.round(504 * normalized), 3);
+    context.fillRect(36, 253, Math.round(width * normalized), 3);
   }
 
   private drawWarningMark(

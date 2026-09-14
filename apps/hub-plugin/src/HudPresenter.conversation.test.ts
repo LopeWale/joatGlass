@@ -35,7 +35,8 @@ function rig() {
   const visual = {
     paint: vi.fn(async (frame: HudVisualFrame) => { frames.push(frame); return true; }),
     forgetPage: vi.fn(),
-    preparePageTransition: vi.fn(async () => {}),
+    whenIdle: vi.fn(async () => true),
+    withPageTransition: vi.fn(async (replace: () => Promise<boolean>) => replace()),
   };
   return {
     hud: new HudPresenter(client, new HudPageBuilder(), visual),
@@ -44,7 +45,7 @@ function rig() {
 }
 
 describe('HudPresenter retained assistant conversation integration', () => {
-  it('composites the real prompt and answer into raster frames and blocks unrelated repaints', async () => {
+  it('renders prompt and answer through native text while blocking unrelated raster repaints', async () => {
     const { hud, rebuilds, upgrades, frames } = rig();
     await hud.showText('NEXT\nDesign review', ContainerId.Main);
     const visualFramesBeforeConversation = frames.length;
@@ -60,15 +61,15 @@ describe('HudPresenter retained assistant conversation integration', () => {
     await hud.setStatus('JOAT · listening');
 
     const conversationFrames = frames.slice(visualFramesBeforeConversation);
-    expect(conversationFrames[0]?.assistantConversation?.visibleLines)
-      .toContainEqual({ role: 'user', text: 'What is the capital of France?' });
-    expect(conversationFrames[conversationFrames.length - 1]?.assistantConversation?.visibleLines)
-      .toContainEqual({ role: 'assistant', text: 'Paris.' });
-    expect(rebuilds).toHaveLength(0);
-    expect(upgrades).toHaveLength(0);
+    expect(rebuilds).toHaveLength(1);
+    expect(rebuilds[0]?.imageObject ?? []).toHaveLength(0);
+    expect(rebuilds[0]?.textObject?.find((item) => item.containerName === 'wearer-turns')?.content)
+      .toContain('What is the capital of France?');
+    expect(upgrades.find((item) => item.containerName === 'joat-turns')?.content)
+      .toContain('Paris.');
     // The status mutation is retained underneath, but does not overwrite the
     // conversation with an unrelated frame while the conversation owns it.
-    expect(conversationFrames).toHaveLength(2);
+    expect(conversationFrames).toHaveLength(0);
     expect(hud.hasAssistantConversation()).toBe(true);
   });
 
@@ -86,8 +87,9 @@ describe('HudPresenter retained assistant conversation integration', () => {
     await expect(hud.requestAssistantConversationExit()).resolves.toBe('prompted');
     await expect(hud.requestAssistantConversationExit()).resolves.toBe('exited');
 
-    expect(rebuilds).toHaveLength(0);
-    expect(visual.forgetPage).not.toHaveBeenCalled();
+    expect(rebuilds[0]?.imageObject ?? []).toHaveLength(0);
+    expect(rebuilds[rebuilds.length - 1]?.imageObject).toHaveLength(4);
+    expect(visual.forgetPage).toHaveBeenCalled();
     expect(frames[frames.length - 1]).toMatchObject({
       kind: 'overview', main: 'Retained dashboard card',
     });

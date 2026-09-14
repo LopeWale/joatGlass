@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 import hashlib
 import json
 import math
+import re
 from typing import Literal, cast
 import urllib.error
 import urllib.parse
@@ -45,6 +47,18 @@ NavigationManeuver = Literal[
     "depart", "continue", "turn_left", "turn_right", "slight_left",
     "slight_right", "u_turn", "arrive",
 ]
+
+_EARTH_RADIUS_METERS = 6_371_008.8
+_SEARCH_STOP_WORDS = frozenset({"a", "an", "the"})
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchCandidate:
+    candidate: NavigationCandidate
+    feature_type: str
+    names: tuple[str, ...]
+    categories: tuple[str, ...]
+    source_index: int
 
 
 # Why a route request failed, in terms the wearer can act on. "Route
@@ -88,16 +102,25 @@ class MapboxNavigationProvider(NavigationProvider):
             "q": bounded,
             "access_token": self._access_token,
             "language": "en",
-            "limit": "3",
+            # Proximity is a bias, not an ordering guarantee. Ask for enough
+            # candidates to rank exact brands/categories by measured distance
+            # on this Mac before the HUD sees them.
+            "limit": "10",
             "types": "address,poi,place,street",
         }
         if proximity is not None:
             params["proximity"] = f"{proximity.longitude},{proximity.latitude}"
         payload = await self._http_get(SEARCH_URL, params)
         features = _objects(payload.get("features"))
-        parsed = [candidate for feature in features if (candidate := _candidate(feature))]
-        if len(parsed) < 2:
-            return parsed
+        parsed = [
+            candidate
+            for index, feature in enumerate(features)
+            if (candidate := _candidate(feature, proximity, index)) is not None
+        ]
+        ranked = _ranked_search_candidates(bounded, parsed, proximity)
+        candidates = [item.candidate for item in ranked]
+        if len(candidates) < 2:
+            return candidates
         return [
             NavigationCandidate(
                 choice_id=item.choice_id,
@@ -105,8 +128,9 @@ class MapboxNavigationProvider(NavigationProvider):
                 address=item.address,
                 point=item.point,
                 repair_hint="street, city, or postcode",
+                distance_m=item.distance_m,
             )
-            for item in parsed
+            for item in candidates
         ]
 
     async def route(
@@ -193,7 +217,11 @@ def _blocking_json_get(url: str, params: Mapping[str, str]) -> JsonObject:
     return cast(JsonObject, value)
 
 
-def _candidate(feature: JsonObject) -> NavigationCandidate | None:
+def _candidate(
+    feature: JsonObject,
+    proximity: NavigationPoint | None,
+    source_index: int,
+) -> _SearchCandidate | None:
     properties = _object(feature.get("properties"))
     geometry = _object(feature.get("geometry"))
     if properties is None or geometry is None:
@@ -208,13 +236,119 @@ def _candidate(feature: JsonObject) -> NavigationCandidate | None:
     point = _routable_point(properties) or _coordinate_pair(geometry.get("coordinates"))
     if label is None or provider_id is None or address is None or point is None:
         return None
+    provider_distance = _number(properties.get("distance"))
+    if provider_distance is None or provider_distance < 0:
+        provider_distance = (
+            _surface_distance_meters(proximity, point)
+            if proximity is not None
+            else None
+        )
     choice_digest = hashlib.sha256(provider_id.encode("utf-8")).hexdigest()[:20]
-    return NavigationCandidate(
-        choice_id=f"mbx-{choice_digest}",
-        label=label[:96],
-        address=address[:128],
-        point=point,
+    brands = _texts(properties.get("brand"))
+    categories = (
+        *_texts(properties.get("poi_category")),
+        *_texts(properties.get("poi_category_ids")),
     )
+    return _SearchCandidate(
+        candidate=NavigationCandidate(
+            choice_id=f"mbx-{choice_digest}",
+            label=label[:96],
+            address=address[:128],
+            point=point,
+            distance_m=provider_distance,
+        ),
+        feature_type=(_text(properties.get("feature_type")) or "").casefold(),
+        names=(label, *brands),
+        categories=categories,
+        source_index=source_index,
+    )
+
+
+def _ranked_search_candidates(
+    query: str,
+    candidates: list[_SearchCandidate],
+    proximity: NavigationPoint | None,
+) -> list[_SearchCandidate]:
+    """Prefer semantic POI matches, then measured proximity.
+
+    Mapbox documents ``proximity`` as a result bias. It does not promise that
+    the first feature is the closest, so provider order alone cannot answer a
+    spoken "nearest" request. The relevance tier protects address and city
+    searches while keeping an exact brand/category ahead of a closer street
+    that merely contains the same words.
+    """
+    if not candidates:
+        return []
+    ranked = [(candidate, _search_match_rank(query, candidate)) for candidate in candidates]
+    best_rank = min(rank for _, rank in ranked)
+    if best_rank <= 1:
+        # Once Mapbox returned a matching POI or brand/category, non-POI
+        # address/place results are disambiguation noise rather than choices.
+        ranked = [(candidate, rank) for candidate, rank in ranked if rank <= 1]
+    elif best_rank <= 3:
+        ranked = [(candidate, rank) for candidate, rank in ranked if rank <= 3]
+    else:
+        # Preserve Mapbox's fuzzy relevance fallback when none of the returned
+        # metadata can substantiate a lexical match (misspellings, aliases).
+        return candidates
+
+    def key(value: tuple[_SearchCandidate, int]) -> tuple[float, ...]:
+        candidate, rank = value
+        if proximity is None or candidate.candidate.distance_m is None:
+            return (float(rank), float(candidate.source_index))
+        return (
+            float(rank),
+            candidate.candidate.distance_m,
+            float(candidate.source_index),
+        )
+
+    ranked.sort(key=key)
+    return [candidate for candidate, _ in ranked]
+
+
+def _search_match_rank(query: str, result: _SearchCandidate) -> int:
+    query_text = _search_text(query)
+    query_tokens = _search_tokens(query)
+    names = tuple(_search_text(value) for value in result.names)
+    categories = tuple(_search_text(value) for value in result.categories)
+    address = _search_text(result.candidate.address)
+    is_poi = result.feature_type == "poi" or len(result.names) > 1 or bool(categories)
+
+    if is_poi and query_text in (*names, *categories):
+        return 0
+    poi_text = " ".join((*names, *categories))
+    if is_poi and query_tokens and query_tokens.issubset(_search_tokens(poi_text)):
+        return 1
+    if query_text in (*names, address):
+        return 2
+    ordinary_text = " ".join((*names, address))
+    if query_tokens and query_tokens.issubset(_search_tokens(ordinary_text)):
+        return 3
+    return 4 if is_poi else 5
+
+
+def _search_text(value: str) -> str:
+    return re.sub(r"[\W_]+", " ", value.casefold(), flags=re.UNICODE).strip()
+
+
+def _search_tokens(value: str) -> frozenset[str]:
+    return frozenset(
+        token for token in _search_text(value).split()
+        if token not in _SEARCH_STOP_WORDS
+    )
+
+
+def _surface_distance_meters(origin: NavigationPoint, target: NavigationPoint) -> float:
+    """Deterministic great-circle fallback when Search Box omits distance."""
+    origin_lat = math.radians(origin.latitude)
+    target_lat = math.radians(target.latitude)
+    delta_lat = target_lat - origin_lat
+    delta_lon = math.radians(target.longitude - origin.longitude)
+    haversine = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(origin_lat) * math.cos(target_lat) * math.sin(delta_lon / 2) ** 2
+    )
+    return 2 * _EARTH_RADIUS_METERS * math.asin(min(1.0, math.sqrt(haversine)))
 
 
 def _routable_point(properties: JsonObject) -> NavigationPoint | None:
@@ -349,6 +483,12 @@ def _object(value: object) -> JsonObject | None:
 
 def _text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _texts(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(text for item in value if (text := _text(item)) is not None)
 
 
 def _number(value: object) -> float | None:

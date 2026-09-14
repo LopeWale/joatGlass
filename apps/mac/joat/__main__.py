@@ -413,6 +413,11 @@ async def main() -> None:
         loc = await transport.request_location_refresh()
         return (loc.latitude, loc.longitude) if loc is not None else None
 
+    async def refresh_navigation_proximity() -> NavigationPoint | None:
+        """Give an explicit nearby route search a request-bound phone fix."""
+        coords = await refresh_wearer_coords()
+        return NavigationPoint(*coords) if coords is not None else None
+
     # Nearby places must be in the reply engine's initial tool schemas.  The
     # provider is also later reused by the explicit navigation flow;
     # configuring it here does not start a route by itself.
@@ -1005,7 +1010,10 @@ async def main() -> None:
                 session_id=session_id,
                 reason="Mapbox is not configured on this Mac",
             )
-        location = transport.location
+        # Ordinary named destinations may use a recent connected-phone fix as
+        # a relevance hint. Explicit nearest/near-me requests refresh through
+        # ``refresh_navigation_proximity`` inside NavigationSession.
+        location = transport.fresh_location()
         proximity = (
             NavigationPoint(location.latitude, location.longitude)
             if location is not None
@@ -1017,6 +1025,7 @@ async def main() -> None:
             transport,
             session_id=session_id,
             proximity=proximity,
+            refresh_proximity=refresh_navigation_proximity,
             # Same credential as search/routing, and it stays on this Mac:
             # the session sends rendered pixels, never a tile URL.
             map_token=mapbox_token,

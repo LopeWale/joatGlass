@@ -1,4 +1,7 @@
-import { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import {
+  TextContainerUpgrade,
+  type RebuildPageContainer,
+} from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
 import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
@@ -50,11 +53,26 @@ interface AssistantConversationSurfaceOptions {
     isCurrent: () => boolean,
   ) => Promise<boolean>;
   measureTextWidth?: (text: string) => number;
+  /** Own the page-type transition when a visual HUD is mounted underneath.
+   * Native text must never rebuild while an image upload is still in flight. */
+  replacePage?: (page: RebuildPageContainer) => Promise<boolean>;
 }
 
 export type ConversationExitResult = 'inactive' | 'prompted' | 'exited' | 'failed';
 
-const NATIVE_LINE_STAGES = [1, 3, 5, 7] as const;
+export interface AssistantConversationSurfaceState {
+  snapshot: AssistantConversationSnapshot;
+  scrollFromTail: number;
+  continuePrompt: boolean;
+  indicatorFrame: number;
+}
+
+// Native text is the latency path. Keep one stable container geometry for the
+// whole visit so thinking, streamed answer chunks, scrolling, and the
+// continuation prompt use flicker-free textContainerUpgrade calls. Changing
+// the card height as lines arrive would turn every early chunk into a full
+// rebuildPageContainer and recreate the very redraw problem this path fixes.
+const NATIVE_LINE_STAGES = [7] as const;
 const VISUAL_LINE_STAGES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 // The visual renderer has eight observed morph phases. The text-only
 // compatibility page cannot reproduce their geometry, but it keeps the same
@@ -63,7 +81,10 @@ const INDICATOR_FRAMES = [
   '■ □', '□ ■', '■', '■ ■', '□ □', '■', '□', '■',
 ] as const;
 const ANSWERING_INDICATOR_MIN_MS = 2_000;
-const CONTINUE_COPY = 'Continue conversation? tap stays · x2 exits';
+// Use the same product word as every other surface. "x2 exits" described the
+// mechanism but made this page sound like it was closing JOAT; the gesture
+// actually returns to the retained feature underneath.
+const CONTINUE_COPY = 'Continue? tap: stay · double-click: back';
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
@@ -265,10 +286,10 @@ function copySnapshot(value: AssistantConversationSnapshot): AssistantConversati
 
 /**
  * Owns one retained conversation surface. New Mac revisions are coalesced to
- * one latest snapshot while a bridge update is in flight. The primary raster
- * path repaints only changed tiles; the native-container path remains a
- * compatibility fallback. Scroll position commits only after the complete
- * aligned dim/bright viewport has been accepted.
+ * one latest snapshot while a bridge update is in flight. Production uses the
+ * native-container path so revisions and gestures do not incur image uploads.
+ * Scroll position commits only after the complete aligned dim/bright viewport
+ * has been accepted.
  */
 export class AssistantConversationSurface {
   private snapshot?: AssistantConversationSnapshot;
@@ -292,6 +313,7 @@ export class AssistantConversationSurface {
   private readonly indicatorIntervalMs: number;
   private readonly continuationPromptEnabled: boolean;
   private readonly paintView?: AssistantConversationSurfaceOptions['paintView'];
+  private readonly replacePage?: AssistantConversationSurfaceOptions['replacePage'];
   private readonly viewportOptions: ConversationViewportOptions;
 
   constructor(
@@ -303,6 +325,7 @@ export class AssistantConversationSurface {
     this.indicatorIntervalMs = Math.max(0, options.indicatorIntervalMs ?? 450);
     this.continuationPromptEnabled = options.continuationPromptEnabled ?? true;
     this.paintView = options.paintView;
+    this.replacePage = options.replacePage;
     this.viewportOptions = options.paintView
       ? {
         lineStages: VISUAL_LINE_STAGES,
@@ -362,9 +385,51 @@ export class AssistantConversationSurface {
     return { conversationId: current.conversationId, revision: current.revision };
   }
 
+  /** JSON-safe visible state for Even Hub's foreground/headless WebView handoff. */
+  exportState(): AssistantConversationSurfaceState | undefined {
+    const current = this.snapshot;
+    if (!this.active || !current) return undefined;
+    return {
+      snapshot: copySnapshot(current),
+      scrollFromTail: this.committedScroll,
+      continuePrompt: this.continuePrompt,
+      indicatorFrame: this.indicatorFrame,
+    };
+  }
+
+  /** Adopt a saved native page without painting. The caller owns the one
+   * page rebuild after all background state has been imported. */
+  importState(value: unknown): boolean {
+    if (typeof value !== 'object' || value === null) return false;
+    const saved = value as Partial<AssistantConversationSurfaceState>;
+    const snapshot = saved.snapshot;
+    if (!snapshot || !validAssistantConversationSnapshot(snapshot)) return false;
+    if (!Number.isSafeInteger(saved.scrollFromTail) || (saved.scrollFromTail ?? -1) < 0) return false;
+    if (typeof saved.continuePrompt !== 'boolean'
+      || !Number.isSafeInteger(saved.indicatorFrame) || (saved.indicatorFrame ?? -1) < 0) return false;
+    const scrollFromTail = saved.scrollFromTail!;
+    const indicatorFrame = saved.indicatorFrame!;
+    this.clearTimers();
+    this.snapshot = copySnapshot(snapshot);
+    this.active = true;
+    this.paused = false;
+    this.exiting = false;
+    this.continuePrompt = saved.continuePrompt;
+    this.desiredScroll = scrollFromTail;
+    this.committedScroll = scrollFromTail;
+    this.indicatorFrame = indicatorFrame % INDICATOR_FRAMES.length;
+    this.renderedRevision = -1;
+    this.pageLineCapacity = 0;
+    this.lastView = undefined;
+    this.snapshotDirty = false;
+    this.footerDirty = false;
+    this.lastPaintSucceeded = false;
+    return true;
+  }
+
   scroll(direction: 'up' | 'down'): boolean {
     const current = this.snapshot;
-    if (!this.canInteract() || !current || this.continuePrompt) return this.canInteract();
+    if (!this.canInteract() || !current || this.continuePrompt) return false;
     const view = conversationViewport(
       current, this.desiredScroll, this.indicatorFrame, false, this.viewportOptions,
     );
@@ -373,11 +438,10 @@ export class AssistantConversationSurface {
       0,
       view.maximumScrollFromTail,
     );
-    if (candidate !== this.desiredScroll) {
-      this.desiredScroll = candidate;
-      this.snapshotDirty = true;
-      void this.ensureDrain();
-    }
+    if (candidate === this.desiredScroll) return false;
+    this.desiredScroll = candidate;
+    this.snapshotDirty = true;
+    void this.ensureDrain();
     return true;
   }
 
@@ -595,9 +659,10 @@ export class AssistantConversationSurface {
   }
 
   private rebuild(view: ConversationViewport): Promise<boolean> {
-    return this.client.require().rebuildPageContainer(
-      this.layouts.assistantConversationLayout(view),
-    );
+    const page = this.layouts.assistantConversationLayout(view);
+    return this.replacePage
+      ? this.replacePage(page)
+      : this.client.require().rebuildPageContainer(page);
   }
 
   private paintVisual(

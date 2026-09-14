@@ -80,12 +80,14 @@ class FakeProvider(NavigationProvider):
     def __init__(self, candidates: list[NavigationCandidate]) -> None:
         self.candidates = candidates
         self.searches: list[str] = []
+        self.search_proximities: list[NavigationPoint | None] = []
         self.routes: list[tuple[NavigationPoint, NavigationCandidate, str]] = []
 
     async def search(
         self, query: str, proximity: NavigationPoint | None,
     ) -> list[NavigationCandidate]:
         self.searches.append(query)
+        self.search_proximities.append(proximity)
         return self.candidates
 
     async def route(
@@ -203,7 +205,158 @@ class TestNavigationSession:
         assert navigation_query("joat directions to 2301 N Lincoln Ave") == (
             "2301 N Lincoln Ave"
         )
+        assert navigation_query("Could you take me to the nearest OnCue near me?") == (
+            "the nearest OnCue near me"
+        )
+        assert navigation_query("JOAT, please help me get to OnCue") == "OnCue"
+        assert navigation_query("How do I get to the airport?") == "the airport"
+        assert navigation_query("What's the best way to the library?") == "the library"
         assert navigation_query("Cajun Corner") is None
+        assert navigation_query("I talked about the way to the library") is None
+
+    async def test_nearest_request_refreshes_phone_location_and_cleans_provider_query(
+        self,
+    ) -> None:
+        candidate = NavigationCandidate(
+            choice_id="oncue-nearby",
+            label="OnCue",
+            address="1201 N Main St",
+            point=NavigationPoint(latitude=35.480, longitude=-97.520),
+        )
+        provider = FakeProvider([candidate])
+        refreshed = NavigationPoint(latitude=35.475, longitude=-97.520)
+        refresh_calls = 0
+
+        async def refresh_proximity() -> NavigationPoint | None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            return refreshed
+
+        transport = SinkTransport()
+        session = NavigationSession(
+            "the nearest OnCue near me",
+            provider,
+            transport,
+            session_id="nav-nearest-oncue",
+            proximity=NavigationPoint(latitude=0, longitude=0),
+            refresh_proximity=refresh_proximity,
+        )
+        task = asyncio.create_task(session.run())
+
+        destination = await wait_for(transport, NavigationView)
+        assert isinstance(destination, NavigationView)
+        assert refresh_calls == 1
+        assert provider.searches == ["OnCue"]
+        assert provider.search_proximities == [refreshed]
+        assert "About " in destination.navigation.secondary
+        assert "1201 N Main St" in destination.navigation.secondary
+
+        assert session.consume_transcript("I meant OnCue, the gas station") is True
+        for _ in range(100):
+            if len(provider.searches) == 2:
+                break
+            await asyncio.sleep(0)
+        assert refresh_calls == 1
+        assert provider.searches == ["OnCue", "OnCue gas station"]
+        assert provider.search_proximities == [refreshed, refreshed]
+
+        session.cancel()
+        await task
+
+    async def test_nearest_request_does_not_claim_a_result_without_phone_location(
+        self,
+    ) -> None:
+        provider = FakeProvider([])
+
+        async def refresh_proximity() -> NavigationPoint | None:
+            return None
+
+        transport = SinkTransport()
+        session = NavigationSession(
+            "closest OnCue",
+            provider,
+            transport,
+            session_id="nav-nearest-no-location",
+            refresh_proximity=refresh_proximity,
+        )
+        task = asyncio.create_task(session.run())
+
+        unavailable = await wait_for(transport, NavigationView)
+        assert isinstance(unavailable, NavigationView)
+        assert provider.searches == []
+        assert unavailable.navigation.view == "error"
+        assert unavailable.navigation.primary == "Phone location unavailable"
+        assert "nearest" in unavailable.navigation.secondary.casefold()
+
+        session.cancel()
+        await task
+
+    async def test_ordinary_destination_keeps_cached_proximity_without_refreshing(
+        self,
+    ) -> None:
+        candidate = NavigationCandidate(
+            choice_id="library",
+            label="Downtown Library",
+            address="300 Park Ave",
+            point=NavigationPoint(latitude=35.48, longitude=-97.52),
+        )
+        provider = FakeProvider([candidate])
+        cached = NavigationPoint(latitude=35.47, longitude=-97.51)
+
+        async def must_not_refresh() -> NavigationPoint | None:
+            raise AssertionError("ordinary destinations do not require a new phone fix")
+
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Downtown Library",
+            provider,
+            transport,
+            session_id="nav-named-place",
+            proximity=cached,
+            refresh_proximity=must_not_refresh,
+        )
+        task = asyncio.create_task(session.run())
+
+        destination = await wait_for(transport, NavigationView)
+        assert isinstance(destination, NavigationView)
+        assert provider.searches == ["Downtown Library"]
+        assert provider.search_proximities == [cached]
+        assert destination.navigation.secondary == "300 Park Ave"
+
+        session.cancel()
+        await task
+
+    async def test_destination_view_accepts_a_narrow_conversational_correction(
+        self,
+    ) -> None:
+        candidate = NavigationCandidate(
+            choice_id="oncue",
+            label="OnCue",
+            address="1201 N Main St",
+            point=NavigationPoint(latitude=35.48, longitude=-97.52),
+        )
+        provider = FakeProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Onsen",
+            provider,
+            transport,
+            session_id="nav-spoken-correction",
+        )
+        task = asyncio.create_task(session.run())
+        await wait_for(transport, NavigationView)
+
+        assert session.consume_transcript("No, I mean OnCue, the gas station") is True
+        for _ in range(100):
+            if len(provider.searches) == 2:
+                break
+            await asyncio.sleep(0)
+
+        assert provider.searches == ["Onsen", "OnCue gas station"]
+        assert session.consume_transcript("That gas station is new") is False
+
+        session.cancel()
+        await task
 
     async def test_voice_controls_destination_mode_and_retry_from_the_visible_state(
         self,
