@@ -433,9 +433,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     gateway.on_hello(lambda _hello: connected.set())
     gateway.on_navigation_action(lambda action: (actions.append(action), session.accept_action(action)))
     gateway.on_navigation_view_ack(lambda ack: (view_acks.append(ack), session.accept_view_ack(ack)))
-    gateway.on_navigation_origin_failure(
-        lambda failure: (origin_failures.append(failure), session.accept_origin_failure(failure))
-    )
+    # Retain the real simulator-originated failure until the preceding
+    # "Locating" frame has become visible. Delivering it inline can replace
+    # that frame before the screenshot settles, producing a receipt labelled
+    # "locating" whose pixels actually show the later error page.
+    gateway.on_navigation_origin_failure(origin_failures.append)
     gateway.on_navigation_route_ack(lambda ack: (route_acks.append(ack), session.accept_route_ack(ack)))
 
     managed: list[ManagedProcess] = []
@@ -540,6 +542,11 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(FlowReceipt("locating", "click", select_mode.action, "uncertain", True, digest, content_pixels))
         artifacts["locating"] = {"raw": raw, "alpha": alpha}
 
+        first_origin_failure = await _wait_for(
+            lambda: origin_failures[0] if origin_failures else None,
+            label="simulator phone-location failure",
+        )
+        session.accept_origin_failure(first_origin_failure)
         error = await _wait_for(
             lambda: _last_view(gateway, "error", after=view_count), label="location unavailable error"
         )
@@ -564,6 +571,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 
         action_count = len(actions)
         view_count = len(gateway.sent)
+        origin_failure_count = len(origin_failures)
         await _request_input(automation_base, "click", manual=args.manual_input)
         retry = await _wait_for(
             lambda: next((item for item in actions[action_count:] if item.action == "retry"), None),
@@ -583,6 +591,13 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         receipts.append(FlowReceipt("retrying-location", "click", retry.action, "uncertain", True, digest, content_pixels))
         artifacts["retrying-location"] = {"raw": raw, "alpha": alpha}
 
+        second_origin_failure = await _wait_for(
+            lambda: origin_failures[-1]
+            if len(origin_failures) > origin_failure_count
+            else None,
+            label="second simulator phone-location failure",
+        )
+        session.accept_origin_failure(second_origin_failure)
         error_again = await _wait_for(
             lambda: _last_view(gateway, "error", after=view_count), label="second location unavailable error"
         )
