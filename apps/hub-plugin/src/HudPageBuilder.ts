@@ -17,6 +17,11 @@ import {
   ContainerId,
   VisualContainerName,
 } from './types';
+import {
+  NATIVE_TERMINAL_GEOMETRY,
+  NativeTerminalContainer,
+  type NativeTerminalPage,
+} from './NativeTerminalSurface';
 
 /**
  * The firmware renders text at a fixed 27px line height and list rows at a
@@ -438,6 +443,48 @@ export class HudPageBuilder {
           zOrderIndex: 5,
           textColor: 4,
           content: content(GesturePolicy.formatHint(view.footerText)),
+        }),
+      ],
+    });
+  }
+
+  /** One fixed firmware-text document for a selected terminal provider.
+   * The complete dynamic body is replaced in a single SDK transaction, so a
+   * provider revision or page gesture cannot expose mixed quadrants or mixed
+   * old/new terminal regions. */
+  nativeTerminalLayout(page: NativeTerminalPage): RebuildPageContainer {
+    const geometry = NATIVE_TERMINAL_GEOMETRY;
+    return new RebuildPageContainer({
+      containerTotalNum: 2,
+      ...this.menuConfig(),
+      textObject: [
+        new TextContainerProperty({
+          containerID: NativeTerminalContainer.Head.id,
+          containerName: NativeTerminalContainer.Head.name,
+          xPosition: 0,
+          yPosition: geometry.headY,
+          width: geometry.width,
+          height: geometry.headHeight,
+          paddingLength: geometry.padding,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 1,
+          textColor: 2,
+          content: page.headText || ' ',
+        }),
+        new TextContainerProperty({
+          containerID: NativeTerminalContainer.Body.id,
+          containerName: NativeTerminalContainer.Body.name,
+          xPosition: 0,
+          yPosition: geometry.bodyY,
+          width: geometry.width,
+          height: geometry.bodyHeight,
+          paddingLength: geometry.padding,
+          borderWidth: 0,
+          isEventCapture: 1,
+          zOrderIndex: 2,
+          textColor: 4,
+          content: page.bodyText || ' ',
         }),
       ],
     });

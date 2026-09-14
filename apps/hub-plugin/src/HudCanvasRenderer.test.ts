@@ -1078,6 +1078,74 @@ describe('navigation map projection', () => {
     // route stops sitting on the roads the Mac drew.
     expect(east[0] - (bounds.x + bounds.width / 2)).toBeCloseTo(93.2, 0);
   });
+  it('keeps changing mapped-guidance facts inside the left tile column', () => {
+    const widths: Array<number | undefined> = [];
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    const stub = renderer as never as {
+      drawActiveNavigation(c: CanvasRenderingContext2D, navigation: unknown): void;
+      drawManeuver(): void;
+      fitText(): void;
+      drawWrappedText(): void;
+      drawNavigationMap(): void;
+      arrivalClock(): string;
+      drawNavigationProgress(c: CanvasRenderingContext2D, progress: number, width?: number): void;
+      drawNavigationFooter(c: CanvasRenderingContext2D, copy: string, width?: number): void;
+    };
+    stub.drawManeuver = () => {};
+    stub.fitText = () => {};
+    stub.drawWrappedText = () => {};
+    stub.drawNavigationMap = () => {};
+    stub.arrivalClock = () => '';
+    stub.drawNavigationProgress = (_context, _progress, width) => { widths.push(width); };
+    stub.drawNavigationFooter = (_context, _copy, width) => { widths.push(width); };
+    const context = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
+      fillText() {},
+    } as unknown as CanvasRenderingContext2D;
+
+    stub.drawActiveNavigation(context, {
+      view: 'guidance', primary: 'Turn right', secondary: 'onto Main Street',
+      hint: 'Then continue', interaction: 'none', options: [], selectedIndex: 0,
+      mode: 'walking', maneuver: 'turn_right', maneuverDistanceM: 40,
+      remainingDistanceM: 900, etaMinutes: 12, progress: 0.25,
+      map: {
+        geometry: [
+          { latitude: panel.latitude, longitude: panel.longitude },
+          { latitude: panel.latitude + 0.001, longitude: panel.longitude + 0.001 },
+        ],
+        position: { latitude: panel.latitude, longitude: panel.longitude },
+        panel,
+      },
+    });
+
+    // The left guidance pane ends at x=272, before the x=288 image-tile
+    // seam. A full-width progress/footer dirties the bottom-right map tile
+    // for every distance update and adds one unnecessary serial BLE write.
+    expect(widths).toEqual([236, 236]);
+  });
+
+  it('draws the mapped-guidance live band before the image-tile seam', () => {
+    const bounds: Array<{ x: number; width: number }> = [];
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    const stub = renderer as never as {
+      fitText(
+        c: CanvasRenderingContext2D, text: string, x: number, y: number, width: number,
+      ): void;
+      drawNavigationProgress(c: CanvasRenderingContext2D, progress: number, width?: number): void;
+      drawNavigationFooter(c: CanvasRenderingContext2D, copy: string, width?: number): void;
+    };
+    stub.fitText = (_context, _text, x, _y, width) => { bounds.push({ x, width }); };
+    const context = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
+      fillRect(x: number, _y: number, width: number) { bounds.push({ x, width }); },
+    } as unknown as CanvasRenderingContext2D;
+
+    stub.drawNavigationProgress(context, 0.4, 236);
+    stub.drawNavigationFooter(context, '900 m left · 12 min', 236);
+
+    expect(bounds).toHaveLength(3);
+    expect(bounds.every(({ x, width }) => x + width < 288)).toBe(true);
+  });
 });
 
 describe('assistant answer and receipt semantics', () => {

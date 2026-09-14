@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-13 — Native conversations, working terminal gestures and nearby-place repair
+
+- Replaced the four-image assistant and Agent Terminal documents with fixed Even-native text pages. Assistant thinking, streaming, continuation and transcript movement use in-place text upgrades; each selected terminal provider uses one complete native body update. The Agent Terminal chooser now contains only OpenClaw and Hermes, and recovery, prompt, working and Back labels describe the action the current gesture owner accepts.
+- Preserved independent reading anchors for OpenClaw and Hermes through provider switching and WebView restoration. Up and Down report success only when the visible transcript actually moves. The provider picker is a firmware-owned list, and transitions between picker and terminal no longer expose serialized image quadrants.
+- Interpreted explicit nearest/near-me navigation as a fresh phone-location search, strips proximity filler before Mapbox, ranks matching POIs and brands by distance, accepts a narrow in-session correction such as “I meant OnCue, the gas station,” and reports when current location is unavailable. Mapped guidance keeps its changing progress/footer inside the left image column to avoid an unrelated fourth tile write.
+- Official isolated simulator journeys passed against current source: 70-screen conversational OpenClaw/Hermes flow, 48-screen task lifecycle, 42-screen streaming/restart recovery and 18-frame assistant conversation. Both providers completed request/reply/Back flows; real swipes changed settled framebuffers and reversed to byte-identical tail pixels. Active assistant/terminal visits issued zero image writes. Live Mac logs independently showed the removed path spending roughly 0.2–1.4 seconds per serialized tile. No live engine, phone, package, installed build or physical glasses were used for simulator acceptance.
+
 ## 2026-09-13 — Build JOAT 0.1.89 for existing Even Hub project
 
 - Built current committed reconnect fix from source `cdde1d1` in an isolated export. Eight release candidate/manifest checks, TypeScript and production Vite build passed. Preserved package ID com.example.joat and secure MacBook-first, Mini-second release candidates; explicit selections remain pinned.

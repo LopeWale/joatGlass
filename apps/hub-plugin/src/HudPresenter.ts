@@ -3,7 +3,6 @@ import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
 import type {
-  AssistantConversationVisual,
   AssistantOverlayPresentation,
   AssistantOverlayVisual,
   HudFramePainter,
@@ -15,6 +14,7 @@ import {
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
+import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { usesActionPillLayout } from './HudCanvasRenderer';
 import type { NavigationHudModel } from './NavigationHud';
 import {
@@ -152,6 +152,8 @@ export interface ListSurfaceOptions {
   planningPane?: PlanningPaneState;
   /** This list is an expanded panel tab: keep its rail lit on the left. */
   railTab?: PanelContentTab;
+  /** Opt into the firmware-owned list and its native gesture cursor. */
+  nativeFirmwareList?: boolean;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -164,6 +166,8 @@ interface ResolvedListSurfaceOptions {
   planningGrid?: readonly PlanningGridCell[];
   planningPane?: PlanningPaneState;
   railTab?: PanelContentTab;
+  /** This page is intentionally rendered by the G2 firmware list. */
+  nativeFirmwareList?: boolean;
 }
 
 interface HudContentState {
@@ -189,6 +193,12 @@ type HudSurface =
   | { kind: 'navigation'; navigation: NavigationHudModel }
   | { kind: 'brainstorm'; brainstorm: BrainstormHudModel }
   | { kind: 'productivity'; productivity: ProductivityHudModel };
+
+type DisplayPageOwner =
+  | 'visual'
+  | 'assistant-native'
+  | 'terminal-list-native'
+  | 'terminal-conversation-native';
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -295,7 +305,12 @@ export class HudPresenter {
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
+  private readonly nativeTerminal: NativeTerminalSurface;
   private restoringAssistantConversation = false;
+  /** Which set of SDK containers currently exists on the lenses. Content
+   * state alone is insufficient: native text and firmware lists use different
+   * container IDs from the four-image HUD. */
+  private pageOwner: DisplayPageOwner = 'visual';
 
   constructor(
     private readonly client: BridgeClient,
@@ -308,39 +323,94 @@ export class HudPresenter {
       layouts,
       () => this.restoreAfterAssistantConversation(),
       {
-        ...(visual ? {
-          paintView: (view: AssistantConversationVisual, isCurrent: () => boolean) => (
-            this.paintAssistantConversationView(view, isCurrent)
-          ),
-        } : {}),
-        ...(visual?.measureAssistantConversationText ? {
-          measureTextWidth: (text: string) => visual.measureAssistantConversationText!(text),
-        } : {}),
+        replacePage: (page) => this.replaceNativePage(page, 'assistant-native'),
       },
+    );
+    this.nativeTerminal = new NativeTerminalSurface(
+      client,
+      (page) => layouts.nativeTerminalLayout(page),
+      (page) => this.replaceNativePage(page, 'terminal-conversation-native'),
     );
   }
 
-  private async paintAssistantConversationView(
-    conversation: AssistantConversationVisual,
-    isConversationCurrent: () => boolean,
+  /** Switch from the image HUD to an SDK-native text page under the same
+   * serialized display barrier. This is the path Even's own text-heavy and
+   * AI surfaces use for responsive content and scroll updates. */
+  private async replaceNativePage(
+    page: RebuildPageContainer,
+    owner: Exclude<DisplayPageOwner, 'visual'>,
   ): Promise<boolean> {
-    const visual = this.visual;
-    if (!visual) return false;
     const displayCurrent = this.captureDisplayGuard();
-    const isCurrent = () => displayCurrent() && isConversationCurrent();
-    if (!isCurrent()) return false;
-    const frame: HudVisualFrame = {
-      ...this.visualFrame(),
-      assistantConversation: conversation,
-    };
+    if (!displayCurrent()) return false;
+    const visual = this.visual;
+    const replace = () => this.client.require().rebuildPageContainer(page);
+    if (!visual) {
+      const replaced = await replace();
+      if (replaced && displayCurrent()) this.pageOwner = owner;
+      return replaced && displayCurrent();
+    }
+    if (!visual.withPageTransition) return false;
     try {
-      const painted = visual.paintExact
-        ? await visual.paintExact(frame, isCurrent)
-        : await visual.paint(frame);
-      return painted && isCurrent();
+      const replaced = await visual.withPageTransition(replace, displayCurrent);
+      if (replaced && displayCurrent()) {
+        visual.forgetPage?.();
+        this.pageOwner = owner;
+      }
+      return replaced && displayCurrent();
     } catch {
       return false;
     }
+  }
+
+  /** Recreate the four image containers at a native-to-visual boundary. */
+  private async rebuildVisualPage(): Promise<boolean> {
+    const visual = this.visual;
+    const displayCurrent = this.captureDisplayGuard();
+    if (!visual || !displayCurrent()) return false;
+    if (this.pageOwner === 'visual') return true;
+    if (!visual.withPageTransition) return false;
+    try {
+      const rebuilt = await visual.withPageTransition(
+        () => this.client.require().rebuildPageContainer(this.layouts.visualLayout()),
+        displayCurrent,
+      );
+      if (!rebuilt || !displayCurrent()) return false;
+      visual.forgetPage?.();
+      this.pageOwner = 'visual';
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Restore the retained visual underlay only after its containers exist. */
+  private async restoreVisualPage(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!await this.rebuildVisualPage() || !displayCurrent() || !this.visual) return false;
+    const painted = this.visual.paintExact
+      ? await this.visual.paintExact(this.visualFrame(), displayCurrent)
+      : await this.visual.paint(this.visualFrame());
+    return painted && displayCurrent();
+  }
+
+  /** Restore the retained feature beneath a native assistant conversation.
+   * A terminal/list underlay must return to its native page type; painting its
+   * canvas projection would reintroduce the four-tile path after Back. */
+  private async restoreRetainedPage(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    if (this.surface.kind === 'brainstorm'
+      && this.surface.brainstorm.screen === 'agent_terminal') {
+      return this.nativeTerminal.present(this.surface.brainstorm,
+        this.streams.get(ContainerId.StatusBar), displayCurrent);
+    }
+    if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
+      return this.replaceNativePage(
+        this.layouts.listLayout(this.surface.items, this.surface.options),
+        'terminal-list-native',
+      );
+    }
+    return this.restoreVisualPage();
   }
 
   /** Stop this document's painters, including delayed native fallback work. */
@@ -360,6 +430,8 @@ export class HudPresenter {
     if (this.assistantOverlay?.dismissTimer !== undefined) clearTimeout(this.assistantOverlay.dismissTimer);
     this.assistantOverlay = undefined;
     this.assistantConversation.retireForHandoff();
+    this.nativeTerminal.retireForHandoff();
+    this.pageOwner = 'visual';
     this.clearActionOverlay();
     this.promptQuestion = undefined;
     this.promptQuestionPaint = undefined;
@@ -388,7 +460,8 @@ export class HudPresenter {
 
   /** The custom list owns its cursor; the compatibility list is firmware-owned. */
   usesCustomListSelection(): boolean {
-    return this.visual !== undefined;
+    return this.visual !== undefined
+      && !(this.surface.kind === 'list' && this.surface.options.nativeFirmwareList);
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -516,26 +589,55 @@ export class HudPresenter {
   /** Present one complete question without replacing the feature beneath it.
    * Only this prompt's current, completed frame may acknowledge publication. */
   showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean, ownerKind?: 'messages' | 'brainstorm' | 'terminal'): Promise<boolean> {
-    if (!this.visual?.paintExact || this.confirmation || !promptId
-      || !question.trim() || question.length > 1000) return Promise.resolve(false);
+    if (this.confirmation || !promptId || !question.trim() || question.length > 1000) {
+      return Promise.resolve(false);
+    }
+    if (ownerKind === 'terminal') {
+      if (!this.nativeTerminal.isActive() || this.surface.kind !== 'brainstorm'
+        || this.surface.brainstorm.screen !== 'agent_terminal') return Promise.resolve(false);
+      const existing = this.promptQuestion;
+      if (existing?.id === promptId) {
+        return existing.question === question && this.isPromptCurrent(existing)
+          ? existing.paint ?? Promise.resolve(false)
+          : Promise.resolve(false);
+      }
+      const prompt: PromptQuestionState = {
+        id: promptId,
+        question,
+        isCurrent,
+        inlineTerminal: true,
+        terminalConversationId: this.surface.brainstorm.conversationId,
+      };
+      this.promptQuestion = prompt;
+      const paint = this.nativeTerminal.showPrompt(
+        promptId,
+        question,
+        () => this.isPromptCurrent(prompt),
+      ).then((painted) => {
+        const accepted = painted && this.isPromptCurrent(prompt);
+        if (!accepted && this.promptQuestion === prompt) this.promptQuestion = undefined;
+        return accepted;
+      }).catch(() => {
+        if (this.promptQuestion === prompt) this.promptQuestion = undefined;
+        return false;
+      });
+      prompt.paint = paint;
+      this.promptQuestionPaint = paint;
+      return paint;
+    }
+    if (!this.visual?.paintExact) return Promise.resolve(false);
     if (this.assistantConversation.isActive()) {
       return this.prepareAssistantConversationHandoff().then((ready) => (
         ready ? this.showPromptQuestion(promptId, question, isCurrent, ownerKind) : false
       ));
     }
-    if (ownerKind === 'terminal' && (this.surface.kind !== 'brainstorm'
-      || this.surface.brainstorm.screen !== 'agent_terminal')) return Promise.resolve(false);
     const existing = this.promptQuestion;
     if (existing?.id === promptId) {
       return existing.question === question && this.isPromptCurrent(existing)
         ? existing.paint ?? Promise.resolve(false)
         : Promise.resolve(false);
     }
-    const prompt: PromptQuestionState = { id: promptId, question, isCurrent,
-      inlineTerminal: ownerKind === 'terminal',
-      terminalConversationId: ownerKind === 'terminal' && this.surface.kind === 'brainstorm'
-        ? this.surface.brainstorm.conversationId : undefined,
-    };
+    const prompt: PromptQuestionState = { id: promptId, question, isCurrent };
     this.promptQuestion = prompt;
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
@@ -550,6 +652,10 @@ export class HudPresenter {
     const prompt = this.promptQuestion;
     if (!prompt || prompt.id !== promptId) return false;
     this.promptQuestion = undefined;
+    if (prompt.inlineTerminal) {
+      this.promptQuestionPaint = undefined;
+      return this.nativeTerminal.dismissPrompt(promptId);
+    }
     // The old frame may already have one bridge write in flight. Its guard
     // prevents further writes; restore only after that owned work settles.
     await prompt.paint?.catch(() => false);
@@ -561,7 +667,8 @@ export class HudPresenter {
   private isPromptCurrent(prompt: PromptQuestionState): boolean {
     try {
       return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent()
-        && (!prompt.inlineTerminal || (this.surface.kind === 'brainstorm'
+        && (!prompt.inlineTerminal || (this.nativeTerminal.isActive()
+          && this.surface.kind === 'brainstorm'
           && this.surface.brainstorm.screen === 'agent_terminal'
           && this.surface.brainstorm.conversationId === prompt.terminalConversationId));
     } catch {
@@ -619,6 +726,7 @@ export class HudPresenter {
     // may resume later under the same Mac identity.
     if (this.assistantConversation.isActive()
       && !await this.prepareAssistantConversationHandoff()) return false;
+    if (!await this.prepareNativeTerminalHandoff()) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
     const revision = append && current
@@ -643,6 +751,7 @@ export class HudPresenter {
   async showAssistantConversation(snapshot: AssistantConversationSnapshot): Promise<boolean> {
     if (!this.displayActive || this.confirmation || this.promptQuestion
       || !validAssistantConversationSnapshot(snapshot)) return false;
+    if (!await this.prepareNativeTerminalHandoff()) return false;
     const entering = !this.assistantConversation.isActive();
     if (entering) {
       const displayCurrent = this.captureDisplayGuard();
@@ -698,6 +807,10 @@ export class HudPresenter {
     return this.assistantConversation.whenIdle();
   }
 
+  whenNativeTerminalIdle(): Promise<void> {
+    return this.nativeTerminal.whenIdle();
+  }
+
   private async prepareAssistantConversationHandoff(): Promise<boolean> {
     if (!this.assistantConversation.isActive()) return true;
     if (!await this.assistantConversation.pauseForHandoff()) return false;
@@ -706,11 +819,7 @@ export class HudPresenter {
         // Paint the retained feature before relinquishing conversation
         // ownership. This is the rollback point: if the exact underlay does
         // not reach the bridge, the same conversation resumes in place.
-        const displayCurrent = this.captureDisplayGuard();
-        const painted = this.visual.paintExact
-          ? await this.visual.paintExact(this.visualFrame(), displayCurrent)
-          : await this.visual.paint(this.visualFrame());
-        if (!painted || !displayCurrent()) {
+        if (!await this.restoreRetainedPage()) {
           await this.assistantConversation.resumeAfterFailedHandoff();
           return false;
         }
@@ -718,6 +827,42 @@ export class HudPresenter {
       return this.assistantConversation.completeHandoff();
     } catch {
       await this.assistantConversation.resumeAfterFailedHandoff();
+      return false;
+    }
+  }
+
+  /** Quiesce a terminal body before a graphical page replaces its containers. */
+  private async prepareNativeTerminalHandoff(): Promise<boolean> {
+    if (!this.nativeTerminal.isActive()) {
+      return this.pageOwner === 'terminal-list-native'
+        ? this.rebuildVisualPage()
+        : true;
+    }
+    if (!await this.nativeTerminal.pauseForHandoff()) return false;
+    try {
+      if (this.visual && !await this.rebuildVisualPage()) {
+        await this.nativeTerminal.resumeAfterFailedHandoff();
+        return false;
+      }
+      return this.nativeTerminal.completeHandoff();
+    } catch {
+      await this.nativeTerminal.resumeAfterFailedHandoff();
+      return false;
+    }
+  }
+
+  /** Back from a selected provider goes directly to the firmware picker. */
+  private async replaceWithNativeTerminalList(page: RebuildPageContainer): Promise<boolean> {
+    const active = this.nativeTerminal.isActive();
+    if (active && !await this.nativeTerminal.pauseForHandoff()) return false;
+    try {
+      const replaced = await this.replaceNativePage(page, 'terminal-list-native');
+      if (!active) return replaced;
+      if (replaced) return this.nativeTerminal.completeHandoff();
+      await this.nativeTerminal.resumeAfterFailedHandoff();
+      return false;
+    } catch {
+      if (active) await this.nativeTerminal.resumeAfterFailedHandoff();
       return false;
     }
   }
@@ -956,6 +1101,7 @@ export class HudPresenter {
     items: string[], options: ListSurfaceOptions = {}, isCurrent?: () => boolean,
   ): Promise<boolean> {
     if (!await this.prepareAssistantConversationHandoff()) return false;
+    if (!options.nativeFirmwareList && !await this.prepareNativeTerminalHandoff()) return false;
     if (isCurrent) return this.renderBoundList(items, options, isCurrent);
     const resolved = this.resolveListOptions(options);
     const surface: HudSurface = {
@@ -1050,6 +1196,7 @@ export class HudPresenter {
   async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
+    if (!await this.prepareNativeTerminalHandoff()) return false;
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
       kind: 'navigation',
@@ -1124,7 +1271,11 @@ export class HudPresenter {
 
   /** Swipe on the brainstorm/terminal surface pages through history. */
   scrollTranscript(direction: 'up' | 'down'): boolean {
-    if (this.surface.kind !== 'brainstorm' || !this.visual) return false;
+    if (this.surface.kind !== 'brainstorm') return false;
+    if (this.surface.brainstorm.screen === 'agent_terminal') {
+      return this.nativeTerminal.scroll(direction);
+    }
+    if (!this.visual) return false;
     if (!(this.visual.scrollTranscript?.(direction) ?? false)) return true;
     void this.paintVisual();
     return true;
@@ -1135,8 +1286,12 @@ export class HudPresenter {
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
-    if (!this.visual || this.confirmation || (isCurrent && !isCurrent())) return false;
+    if (this.confirmation || (isCurrent && !isCurrent())) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
+    if (brainstorm.screen === 'agent_terminal') {
+      return this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
+    }
+    if (!this.visual || !await this.prepareNativeTerminalHandoff()) return false;
     this.clearActionOverlay();
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
@@ -1175,6 +1330,64 @@ export class HudPresenter {
     return painted;
   }
 
+  private async showNativeTerminal(
+    terminal: BrainstormHudModel,
+    statusOverride?: string,
+    isCurrent?: () => boolean,
+  ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent() || terminal.screen !== 'agent_terminal') return false;
+    const prior = this.capturePresenterSnapshot();
+    const wasActive = this.nativeTerminal.isActive();
+    const surface: HudSurface = {
+      kind: 'brainstorm',
+      brainstorm: this.cloneBrainstorm(terminal),
+    };
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams),
+        brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
+      };
+    }
+    const liveStatus = statusOverride === undefined
+      ? this.captureLiveStatus()
+      : { text: statusOverride, brightness: 2 };
+    this.clearActionOverlay();
+    this.resetAll();
+    this.surface = surface;
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) {
+        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+      }
+    }
+    const stillCurrent = () => displayCurrent() && this.surface === surface && (isCurrent?.() ?? true);
+    const painted = await this.nativeTerminal.present(
+      surface.brainstorm,
+      liveStatus?.text,
+      stillCurrent,
+    );
+    if (!stillCurrent()) return false;
+    if (painted) return true;
+
+    this.restorePresenterSnapshot(prior);
+    if (!wasActive) {
+      this.nativeTerminal.retire();
+      if (this.pageOwner === 'terminal-conversation-native') {
+        if (prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList) {
+          await this.replaceNativePage(
+            this.layouts.listLayout(prior.surface.items, prior.surface.options),
+            'terminal-list-native',
+          );
+        } else {
+          await this.restoreVisualPage();
+        }
+      }
+    }
+    return false;
+  }
+
   /** Native Calendar/Reminders lifecycle page. The preceding confirmation is
    * the only write authority; this surface only renders bridge evidence. */
   async showProductivity(
@@ -1186,6 +1399,7 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (!this.visual) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
+    if (!await this.prepareNativeTerminalHandoff()) return false;
     if (usesActionPillLayout(productivity.phase)) {
       return this.showActionPill(productivity, onDeferredProductivityVisible);
     }
@@ -1400,10 +1614,16 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
-    // The painter preserves JOAT typography across feature screens. The
-    // no-painter compatibility path continues using a firmware list.
+    // Agent selection is a firmware-owned list: its highlight and paging stay
+    // smooth without four sequential image uploads. Other lists retain JOAT's
+    // authored visual treatment in this migration slice.
+    const firmwareList = surface.options.nativeFirmwareList === true;
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
-    const ok = this.visual
+    const ok = firmwareList
+      ? await this.replaceWithNativeTerminalList(
+        this.layouts.listLayout(surface.items, surface.options),
+      )
+      : this.visual
       ? true
       : await this.rebuildPage(nativeReplyPage
           ? this.layouts.defaultLayout()
@@ -1421,7 +1641,11 @@ export class HudPresenter {
     this.brightness.set(ContainerId.Main, 4);
     this.streams.set(ContainerId.Hint, surface.options.hint);
     this.brightness.set(ContainerId.Hint, 1);
-    if (this.visual) {
+    if (this.visual && !firmwareList) {
+      if (!await this.rebuildVisualPage()) {
+        this.recordPageTransition(from, 'list', 'show_list', 'failed');
+        return false;
+      }
       if (liveStatus) {
         this.streams.set(ContainerId.StatusBar, liveStatus.text);
         if (liveStatus.brightness !== undefined) {
@@ -1429,6 +1653,11 @@ export class HudPresenter {
         }
       }
       const painted = await this.paintVisual();
+      this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
+      return painted;
+    }
+    if (firmwareList) {
+      const painted = displayCurrent();
       this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
       return painted;
     }
@@ -1535,6 +1764,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
+    if (!await this.prepareNativeTerminalHandoff()) return false;
     if (this.confirmation) {
       this.confirmation.surface = { kind: 'default' };
       if (this.focusReturn) {
@@ -1649,6 +1879,11 @@ export class HudPresenter {
     }
     if (this.assistantConversation.isActive()) {
       return this.prepareAssistantConversationHandoff().then((ready) => (
+        ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent) : false
+      ));
+    }
+    if (this.nativeTerminal.isActive() || this.pageOwner === 'terminal-list-native') {
+      return this.prepareNativeTerminalHandoff().then((ready) => (
         ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent) : false
       ));
     }
@@ -1989,6 +2224,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
+    if (this.pageOwner !== 'visual') return true;
     if (this.visual) return this.paintVisual();
     // No custom renderer: retain native text compatibility updates.
     // The text compatibility surface owns the same transient reply as the
@@ -2160,7 +2396,7 @@ export class HudPresenter {
 
   private initialListSelection(items: readonly string[], options: ListSurfaceOptions): number {
     const requested = options.initialSelectedIndex;
-    if (!this.visual || requested === undefined || !Number.isInteger(requested)) return 0;
+    if (!this.visual || options.nativeFirmwareList || requested === undefined || !Number.isInteger(requested)) return 0;
     return Math.max(0, Math.min(Math.max(0, items.length - 1), requested));
   }
 
@@ -2181,6 +2417,7 @@ export class HudPresenter {
         : {}),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
+      ...(options.nativeFirmwareList ? { nativeFirmwareList: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
       ...(planningEntries ? { planningEntries } : {}),
@@ -2313,6 +2550,18 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     this.visual?.forgetPage?.();
     if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
+    if (this.surface.kind === 'brainstorm'
+      && this.surface.brainstorm.screen === 'agent_terminal') {
+      if (this.nativeTerminal.isActive()) return this.nativeTerminal.repaint();
+      return this.nativeTerminal.present(this.surface.brainstorm,
+        this.streams.get(ContainerId.StatusBar), displayCurrent);
+    }
+    if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
+      return this.replaceNativePage(
+        this.layouts.listLayout(this.surface.items, this.surface.options),
+        'terminal-list-native',
+      );
+    }
     return this.paintVisual();
   }
 
@@ -2320,10 +2569,7 @@ export class HudPresenter {
     this.restoringAssistantConversation = true;
     try {
       if (this.visual) {
-        // Conversation is another composite of the existing visual page.
-        // Restoring it is one ordinary frame paint, so the tile cache keeps
-        // unchanged quadrants and the OS-owned contextual menu stays mounted.
-        const painted = await this.visual.paint(this.visualFrame());
+        const painted = await this.restoreRetainedPage();
         if (painted) {
           this.armThinkingTicker();
           this.armPanelTicker();
@@ -2374,6 +2620,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
+    if (this.pageOwner !== 'visual') return true;
     if (!this.visual) return false;
     const confirmation = this.confirmation;
     if (confirmation?.isCurrent) {
@@ -2461,6 +2708,11 @@ export class HudPresenter {
         if (prior.kind !== undefined) content.kinds.set(ContainerId.Main, prior.kind);
       }
     }
+    const assistantConversation = this.assistantConversation.exportState();
+    const nativeTerminal = this.surface.kind === 'brainstorm'
+      && this.surface.brainstorm.screen === 'agent_terminal'
+      ? this.nativeTerminal.exportState()
+      : undefined;
     return {
       surface: this.cloneSurface(this.surface),
       streams: Object.fromEntries(content.streams),
@@ -2468,6 +2720,8 @@ export class HudPresenter {
       kinds: Object.fromEntries(content.kinds),
       micOn: this.micOn,
       rail: this.rail.export(),
+      ...(assistantConversation ? { assistantConversation } : {}),
+      ...(nativeTerminal ? { nativeTerminal } : {}),
     };
   }
 
@@ -2486,6 +2740,9 @@ export class HudPresenter {
     const kind = (surface as { kind?: unknown }).kind;
     if (typeof kind !== 'string') return false;
     this.surface = this.cloneSurface(surface as HudSurface);
+    // A replacement WebView starts from the declared visual startup page.
+    // repaintRestoredSurface performs the one native rebuild, if needed.
+    this.pageOwner = 'visual';
     this.streams = numericMap(saved.streams, (v): v is string => typeof v === 'string');
     this.brightness = numericMap(saved.brightness, (v): v is number => typeof v === 'number');
     this.kinds = numericMap(
@@ -2503,6 +2760,10 @@ export class HudPresenter {
     if (typeof saved.rail === 'object' && saved.rail !== null) {
       this.rail.import(saved.rail as Record<string, unknown>);
     }
+    if (saved.assistantConversation !== undefined
+      && !this.assistantConversation.importState(saved.assistantConversation)) return false;
+    if (saved.nativeTerminal !== undefined
+      && !this.nativeTerminal.importState(saved.nativeTerminal)) return false;
     return true;
   }
 

@@ -28,6 +28,11 @@ class NavigationCandidate:
     address: str
     point: NavigationPoint
     repair_hint: str | None = None
+    # Provider-reported distance from the search proximity, in metres. Search
+    # adapters may compute the same straight-line value when the provider does
+    # not return it. It is temporary presentation/ranking data, not route
+    # distance and never substitutes for Directions.
+    distance_m: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

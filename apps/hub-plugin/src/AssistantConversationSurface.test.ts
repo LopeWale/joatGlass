@@ -314,7 +314,9 @@ describe('AssistantConversationSurface delivery', () => {
     const footerUpdates = textContainerUpgrade.mock.calls
       .map(([update]) => update)
       .filter((update) => update.containerName === 'generation');
-    const prompt = footerUpdates.find((update) => update.content?.includes('Continue conversation'));
+    const prompt = footerUpdates.find(
+      (update) => update.content?.trim() === 'Continue? tap: stay · double-click: back',
+    );
     const ready = footerUpdates[footerUpdates.length - 1];
     expect(prompt).toBeDefined();
     expect(ready?.content?.trim()).toBe('■');

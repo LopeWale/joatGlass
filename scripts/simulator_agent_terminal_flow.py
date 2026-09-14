@@ -19,6 +19,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from uuid import UUID, uuid4
 
@@ -41,11 +42,18 @@ from joat.persistence.store import DurableStore
 from joat.persistence.terminal import TerminalCheckpointStore
 from joat.services.status import StatusPublisher
 from joat.services.terminal_opening import TerminalOpeningController
+from scripts.simulator_brainstorm_action_flow_acceptance import (
+    BrainstormActionFlowError,
+    _prepare_simulator_plugin_root,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTOMATION = 'http://127.0.0.1:9998'
+BRIDGE_MARKER = '[agent-terminal-native-bridge]'
 AGENTS = ('OpenClaw', 'Hermes')
 FACTS = {'OpenClaw': 'cobalt beacon', 'Hermes': 'amber compass'}
+_CONSOLE_LAST_ID: int | None = None
+_BRIDGE_LEDGER: list[dict] = []
 OCR_SOURCE = '''import Foundation
 import Vision
 import AppKit
@@ -379,8 +387,122 @@ def http(url, payload=None):
         return response.read()
 
 
+def inject_bridge_probe(root: Path) -> None:
+    """Record SDK operations in the disposable simulator source snapshot."""
+    main = root / 'src/main.ts'
+    source = main.read_text(encoding='utf-8')
+    needle = '  await client.init();'
+    if source.count(needle) != 1:
+        raise BrainstormActionFlowError('could not place disposable terminal SDK probe')
+    probe = f"""
+  const fixtureRequire = client.require.bind(client);
+  const fixtureBridge = fixtureRequire() as any;
+  const fixtureRecord = (value: unknown) =>
+    console.info('{BRIDGE_MARKER}' + JSON.stringify(value));
+  const fixturePage = (page: any) => ({{
+    containerTotalNum: page.containerTotalNum,
+    imageCount: (page.imageObject ?? []).length,
+    text: (page.textObject ?? []).map((item: any) => ({{
+      containerID: item.containerID,
+      containerName: item.containerName,
+      isEventCapture: item.isEventCapture,
+      content: item.content,
+    }})),
+    list: (page.listObject ?? []).map((item: any) => ({{
+      containerID: item.containerID,
+      containerName: item.containerName,
+      isEventCapture: item.isEventCapture,
+      itemNames: item.itemContainer?.itemName ?? [],
+    }})),
+    menuCount: (page.menuObject?.menuItems ?? []).length,
+  }});
+  const fixtureStartup = async (page: any) => {{
+    fixtureRecord({{ operation: 'startup-start', atUnixMs: Date.now(), ...fixturePage(page) }});
+    const result = await fixtureBridge.createStartUpPageContainer(page);
+    fixtureRecord({{ operation: 'startup', acceptedAtUnixMs: Date.now(), result: String(result), ...fixturePage(page) }});
+    return result;
+  }};
+  const fixtureRebuild = async (page: any) => {{
+    fixtureRecord({{ operation: 'rebuild-start', atUnixMs: Date.now(), ...fixturePage(page) }});
+    const result = await fixtureBridge.rebuildPageContainer(page);
+    fixtureRecord({{ operation: 'rebuild', acceptedAtUnixMs: Date.now(), result: String(result), ...fixturePage(page) }});
+    return result;
+  }};
+  const fixtureImage = async (update: any) => {{
+    fixtureRecord({{ operation: 'image-start', atUnixMs: Date.now(), containerID: update.containerID }});
+    const result = await fixtureBridge.updateImageRawData(update);
+    fixtureRecord({{ operation: 'image', acceptedAtUnixMs: Date.now(), result: String(result), containerID: update.containerID }});
+    return result;
+  }};
+  const fixtureText = async (update: any) => {{
+    fixtureRecord({{
+      operation: 'text-start', atUnixMs: Date.now(),
+      containerID: update.containerID, containerName: update.containerName,
+      content: update.content, contentLength: update.contentLength,
+    }});
+    const result = await fixtureBridge.textContainerUpgrade(update);
+    fixtureRecord({{
+      operation: 'text', acceptedAtUnixMs: Date.now(), result: String(result),
+      containerID: update.containerID, containerName: update.containerName,
+      content: update.content, contentLength: update.contentLength,
+    }});
+    return result;
+  }};
+  const fixtureObservedBridge = new Proxy(fixtureBridge, {{
+    get(target, property) {{
+      if (property === 'createStartUpPageContainer') return fixtureStartup;
+      if (property === 'rebuildPageContainer') return fixtureRebuild;
+      if (property === 'updateImageRawData') return fixtureImage;
+      if (property === 'textContainerUpgrade') return fixtureText;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }},
+  }});
+  (client as any).require = () => fixtureObservedBridge;
+"""
+    main.write_text(source.replace(needle, f'{needle}{probe}'), encoding='utf-8')
+
+
+async def console_payloads() -> list[dict]:
+    global _CONSOLE_LAST_ID
+    url = AUTOMATION + '/api/console'
+    if _CONSOLE_LAST_ID is not None:
+        url += f'?since_id={_CONSOLE_LAST_ID}'
+    raw = await asyncio.to_thread(http, url)
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AssertionError('Simulator returned invalid console JSON') from exc
+    entries = decoded.get('entries') if isinstance(decoded, dict) else None
+    assert isinstance(entries, list), 'Simulator console has no entries'
+    ids = [entry.get('id') for entry in entries if isinstance(entry, dict)
+           and isinstance(entry.get('id'), int)]
+    if ids:
+        _CONSOLE_LAST_ID = max(ids)
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get('message'), str):
+            continue
+        message = entry['message']
+        offset = message.find(BRIDGE_MARKER)
+        if offset < 0:
+            continue
+        payload = json.loads(message[offset + len(BRIDGE_MARKER):].strip())
+        if isinstance(payload, dict):
+            _BRIDGE_LEDGER.append(payload)
+    return list(_BRIDGE_LEDGER)
+
+
+async def bridge_event(after: int, operations: set[str], predicate, timeout=12) -> dict:
+    async with asyncio.timeout(timeout):
+        while True:
+            for event in (await console_payloads())[after:]:
+                if event.get('operation') in operations and predicate(event):
+                    return event
+            await asyncio.sleep(.04)
+
+
 def verify_stable_evidence(out: Path, frames: list[dict]) -> dict:
-    """Independent checks on all wire identities and the rendered transcript pixels."""
+    """Check stable wire identities and the rendered native terminal body."""
     seen = {}
     for frame in frames:
         if frame.get('kind') != 'agent_terminal.view':
@@ -406,13 +528,13 @@ def verify_stable_evidence(out: Path, frames: list[dict]) -> dict:
     ]
     matches = []
     for before, after in pairs:
-        # Exclude changing clock, header state, and newer-row footer; compare
-        # every pixel in the actual transcript region rather than only OCR labels.
+        # Exclude the changing header and interaction footer; compare every
+        # transcript pixel inside the native body container.
         left = Image.open(out / (before + '.rgba.png')).crop((0, 82, 576, 251)).tobytes()
         right = Image.open(out / (after + '.rgba.png')).crop((0, 82, 576, 251)).tobytes()
         assert left == right, f'Reading position changed between {before} and {after}'
         matches.append({'before': before, 'after': after, 'sha256': hashlib.sha256(left).hexdigest()})
-    return {'stable_message_identities': len(seen), 'exact_transcript_pixel_matches': matches}
+    return {'stable_message_identities': len(seen), 'exact_native_body_pixel_matches': matches}
 
 
 def source_fingerprint() -> dict[str, str]:
@@ -425,6 +547,9 @@ def source_fingerprint() -> dict[str, str]:
 
 
 async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = False):
+    global _CONSOLE_LAST_ID
+    _CONSOLE_LAST_ID = None
+    _BRIDGE_LEDGER.clear()
     out.mkdir(parents=True, exist_ok=True)
     (out / 'receipt.json').unlink(missing_ok=True)
     for previous_capture in out.glob('*.rgba.png'):
@@ -576,22 +701,14 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         await asyncio.to_thread(http, AUTOMATION + '/api/input', {'action': action})
         await asyncio.sleep(.7)
 
+    async def input_now(action):
+        await asyncio.to_thread(http, AUTOMATION + '/api/input', {'action': action})
+
     def current_terminal():
         assert gateway.frames[-1]['kind'] == 'agent_terminal.view', gateway.frames[-1]
         return gateway.frames[-1]['terminal']
 
-    async def screen(name, *, settle=2.5):
-        await asyncio.sleep(settle)
-        previous = None
-        for _ in range(20):
-            raw = await asyncio.to_thread(http, AUTOMATION + '/api/screenshot/glasses')
-            visible = Image.open(io.BytesIO(raw)).crop((0, 30, 576, 288)).tobytes()
-            if visible == previous:
-                break
-            previous = visible
-            await asyncio.sleep(.35)
-        else:
-            raise AssertionError('Simulator framebuffer did not settle')
+    def store_screen(name, raw):
         (out / f'{name}.rgba.png').write_bytes(raw)
         source = Image.open(io.BytesIO(raw)).convert('RGBA')
         optical = Image.new('RGBA', source.size, 'black')
@@ -607,9 +724,131 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         print('SCREEN', name, repr(text), flush=True)
         return receipt
 
+    async def immediate_screen(name):
+        """Capture once at the action boundary, before stable-frame polling."""
+        raw = await asyncio.to_thread(http, AUTOMATION + '/api/screenshot/glasses')
+        return store_screen(name, raw)
+
+    async def screen(name, *, settle=2.5):
+        await asyncio.sleep(settle)
+        previous = None
+        for _ in range(20):
+            raw = await asyncio.to_thread(http, AUTOMATION + '/api/screenshot/glasses')
+            visible = Image.open(io.BytesIO(raw)).crop((0, 30, 576, 288)).tobytes()
+            if visible == previous:
+                break
+            previous = visible
+            await asyncio.sleep(.35)
+        else:
+            raise AssertionError('Simulator framebuffer did not settle')
+        return store_screen(name, raw)
+
     def assert_picker():
         assert gateway.frames[-1]['kind'] == 'hud.list', gateway.frames[-1]
         assert [row.split(' · ')[0] for row in gateway.frames[-1]['items']] == list(AGENTS)
+
+    def is_picker_page(event):
+        text = event.get('text')
+        lists = event.get('list')
+        return (event.get('operation') == 'rebuild'
+                and event.get('containerTotalNum') == 4
+                and event.get('imageCount') == 0
+                and isinstance(text, list) and len(text) == 3
+                and isinstance(lists, list) and len(lists) == 1
+                and lists[0].get('containerName') == 'list'
+                and lists[0].get('isEventCapture') == 1
+                and [str(item).split(' · ')[0] for item in lists[0].get('itemNames', [])] == list(AGENTS)
+                and sum(item.get('isEventCapture') == 1 for item in text) == 0)
+
+    def is_terminal_page(event):
+        text = event.get('text')
+        return (event.get('operation') == 'rebuild'
+                and event.get('containerTotalNum') == 2
+                and event.get('imageCount') == 0
+                and event.get('list') == []
+                and isinstance(text, list)
+                and [(item.get('containerID'), item.get('containerName'), item.get('isEventCapture'))
+                     for item in text] == [(16, 'terminal-head', 0), (17, 'terminal-body', 1)])
+
+    def is_visual_page(event):
+        return (event.get('operation') in {'startup', 'rebuild'}
+                and event.get('containerTotalNum') == 5
+                and event.get('imageCount') == 4
+                and event.get('list') == [])
+
+    async def assert_picker_bridge(after, label, *, exactly_one=False):
+        page = await bridge_event(after, {'rebuild'}, is_picker_page)
+        events = (await console_payloads())[after:]
+        completed = [event for event in events if event.get('operation') in {'rebuild', 'text', 'image'}]
+        picker_pages = [event for event in completed if is_picker_page(event)]
+        if exactly_one:
+            assert len(picker_pages) == 1, f'{label}: expected one picker rebuild, got {len(picker_pages)}'
+        assert not [event for event in completed if event.get('operation') == 'image'], f'{label}: picker wrote raster images'
+        return page
+
+    async def assert_terminal_entry(after, label):
+        page = await bridge_event(after, {'rebuild'}, is_terminal_page)
+        events = (await console_payloads())[after:]
+        pages = [event for event in events if is_terminal_page(event)]
+        assert len(pages) == 1, f'{label}: expected one terminal entry rebuild, got {len(pages)}'
+        assert not [event for event in events if event.get('operation') == 'image'], f'{label}: entry wrote raster images'
+        assert page['text'][0]['content'] == 'JOAT · AGENT TERMINAL'
+        return page
+
+    async def assert_terminal_visit(after, label):
+        events = (await console_payloads())[after:]
+        completed = [event for event in events if event.get('operation') in {'rebuild', 'text', 'image'}]
+        rebuilds = [event for event in completed if event.get('operation') == 'rebuild']
+        images = [event for event in completed if event.get('operation') == 'image']
+        upgrades = [event for event in completed if event.get('operation') == 'text']
+        assert len(rebuilds) == 1 and is_terminal_page(rebuilds[0]), \
+            f'{label}: terminal visit performed {len(rebuilds)} rebuilds instead of one entry rebuild'
+        assert not images, f'{label}: active terminal performed raster image writes'
+        assert upgrades, f'{label}: active terminal performed no native text upgrades'
+        assert all((event.get('containerID'), event.get('containerName')) == (17, 'terminal-body')
+                   for event in upgrades), f'{label}: active terminal updated outside terminal-body'
+        assert all(event.get('result') in {'true', 'undefined'} for event in upgrades), f'{label}: SDK rejected a body upgrade'
+        return upgrades
+
+    async def body_event(after, *, changed_from=None):
+        return await bridge_event(
+            after,
+            {'text'},
+            lambda event: (event.get('containerID'), event.get('containerName')) == (17, 'terminal-body')
+            and (changed_from is None or event.get('content') != changed_from),
+        )
+
+    async def assert_native_swipe_round_trip(name, label):
+        events = await console_payloads()
+        prior = next((event for event in reversed(events)
+                      if event.get('operation') in {'text', 'rebuild'}
+                      and ((event.get('containerID'), event.get('containerName')) == (17, 'terminal-body')
+                           or is_terminal_page(event))), None)
+        assert prior is not None, f'{label}: terminal has no body receipt'
+        before_text = (prior.get('content') if prior.get('operation') == 'text'
+                       else prior['text'][1]['content'])
+        before_footer = before_text.splitlines()[-1].lower()
+        assert 'up: older' in before_footer, f'{label}: scrollable tail did not advertise older content'
+        assert 'down: newer' not in before_footer, f'{label}: tail advertised a false newer direction'
+        before = await screen(f'{label}-tail-before-swipe', settle=.2)
+        boundary = len(events)
+        await input_action('up')
+        moved = await body_event(boundary, changed_from=before_text)
+        middle = await screen(f'{label}-after-up', settle=.2)
+        assert moved['content'] != before_text, f'{label}: up swipe did not move native content'
+        assert 'down: newer' in moved['content'].splitlines()[-1].lower(), f'{label}: moved view omitted the valid newer direction'
+        before_pixels = Image.open(out / f"{before['name']}.rgba.png").crop((0, 35, 576, 288)).tobytes()
+        middle_pixels = Image.open(out / f"{middle['name']}.rgba.png").crop((0, 35, 576, 288)).tobytes()
+        assert before_pixels != middle_pixels, f'{label}: up swipe changed the model but not the framebuffer'
+        boundary = len(await console_payloads())
+        await input_action('down')
+        restored = await body_event(boundary, changed_from=moved['content'])
+        after = await screen(f'{label}-after-down', settle=.2)
+        assert restored['content'] == before_text, f'{label}: down swipe did not restore the terminal tail'
+        after_pixels = Image.open(out / f"{after['name']}.rgba.png").crop((0, 35, 576, 288)).tobytes()
+        assert after_pixels == before_pixels, f'{label}: swipe round trip did not restore terminal pixels'
+        return {'agent': name, 'upBodyChanged': True, 'roundTripBodyRestored': True,
+                'tailHint': before_footer, 'middleHint': moved['content'].splitlines()[-1].lower()}
 
     def assert_conversation(name, turn):
         terminal = current_terminal()
@@ -912,11 +1151,16 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
                                        start_new_session=True)
         processes.append(process)
 
+    scratch = tempfile.TemporaryDirectory(prefix='joat-terminal-source-')
     try:
         await gateway.start()
         env = dict(os.environ, VITE_MAC_WS_URL='ws://127.0.0.1:18980/glasses')
+        fixture_root = _prepare_simulator_plugin_root(
+            ROOT, Path(scratch.name), 'ws://127.0.0.1:18980/glasses',
+        )
+        inject_bridge_probe(fixture_root)
         with (out / 'build.log').open('w') as log:
-            subprocess.run([str(ROOT / 'apps/hub-plugin/node_modules/.bin/vite'), 'build',
+            subprocess.run([str(ROOT / 'apps/hub-plugin/node_modules/.bin/vite'), 'build', str(fixture_root),
                             '--outDir', str(out / 'plugin'), '--emptyOutDir'],
                            cwd=ROOT / 'apps/hub-plugin', env=env, check=True,
                            stdout=log, stderr=subprocess.STDOUT)
@@ -928,25 +1172,34 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         await asyncio.wait_for(connected.wait(), 45)
         await asyncio.sleep(3)
         await screen('00-home')
+        boot_events = await console_payloads()
+        assert any(is_visual_page(event) for event in boot_events), 'Overview has no four-image SDK page declaration'
         await input_action('context_menu')
         await screen('01-feature-menu')
         for _ in range(5):
             await input_action('down')
         await screen('02-agent-terminal-selected')
+        picker_bridge_start = len(await console_payloads())
         await input_action('click')
         await screen('03-agent-picker')
         assert_picker()
+        await assert_picker_bridge(picker_bridge_start, 'initial Agent Terminal picker')
         if streaming_restart:
             await streaming_restart_flow()
             return
         if lifecycle:
             await lifecycle_flow()
             return
+        native_receipts = []
+        swipe_receipts = []
         for index, name in enumerate(AGENTS):
             if index:
                 await input_action('down')
-            await input_action('click')
+            visit_start = len(await console_payloads())
+            await input_now('click')
+            await immediate_screen(f'{name}-entry-transition-immediate')
             await until(lambda: roster.focused == name and agents[name].capture_context_generation is not None)
+            entry = await assert_terminal_entry(visit_start, f'{name} first entry')
             await screen(f'{name}-conversation')
             for turn in range(3):
                 ticket, question = await begin_question(name, f'{name}-turn-{turn+1}-input')
@@ -957,15 +1210,31 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
                 await until(lambda: not roster.busy and gateway.frames[-1].get('kind') == 'agent_terminal.view')
                 assert_conversation(name, turn + 1)
                 await screen(f'{name}-turn-{turn+1}-reply')
+            swipe_receipts.append(await assert_native_swipe_round_trip(
+                name, f'{name}-native-swipe',
+            ))
             await seek(name, 'BEGIN', 'up', f'{name}-long-begin')
             anchor = await seek(name, 'MIDDLE', 'down', f'{name}-long-middle')
-            await input_action('double_click')
+            visit_upgrades = await assert_terminal_visit(visit_start, f'{name} first visit')
+            native_receipts.append({
+                'agent': name, 'visit': 'first',
+                'entryTextContainers': [item['containerName'] for item in entry['text']],
+                'bodyUpgrades': len(visit_upgrades), 'imageOperations': 0,
+                'pageRebuilds': 1,
+            })
+            back_start = len(await console_payloads())
+            await input_now('double_click')
+            await immediate_screen(f'{name}-back-transition-immediate')
+            await asyncio.sleep(.7)
             await screen(f'{name}-back-picker')
             assert_picker()
+            await assert_picker_bridge(back_start, f'{name} Back picker', exactly_one=True)
             if index:
                 await input_action('down')
+            revisit_start = len(await console_payloads())
             await input_action('click')
             await until(lambda: roster.focused == name and gateway.frames[-1].get('kind') == 'agent_terminal.view')
+            await assert_terminal_entry(revisit_start, f'{name} reopen')
             reopened = await screen(f'{name}-reopened-middle')
             assert_conversation(name, 3)
             assert normalized(f'{name} MIDDLE') in normalized(reopened['text']), 'Reopening lost the reading position'
@@ -975,26 +1244,40 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
             await screen(f'{name}-cancelled')
             assert not runtime.dispatcher.is_armed
             assert_conversation(name, 3)
+            revisit_upgrades = await assert_terminal_visit(revisit_start, f'{name} reopened visit')
+            native_receipts.append({
+                'agent': name, 'visit': 'reopened', 'bodyUpgrades': len(revisit_upgrades),
+                'imageOperations': 0, 'pageRebuilds': 1,
+            })
+            picker_start = len(await console_payloads())
             await input_action('double_click')
             await screen(f'{name}-final-picker')
             assert_picker()
+            await assert_picker_bridge(picker_start, f'{name} final picker', exactly_one=True)
         assert conversation_ids['OpenClaw'] != conversation_ids['Hermes']
         # Hold a fourth OpenClaw response: busy entry and updates while reading older text.
+        held_visit_start = len(await console_payloads())
         await input_action('click')
         await until(lambda: roster.focused == 'OpenClaw' and gateway.frames[-1].get('kind') == 'agent_terminal.view')
+        await assert_terminal_entry(held_visit_start, 'OpenClaw held-turn entry')
         await screen('OpenClaw-before-held-turn')
         ticket, _ = await begin_question('OpenClaw', 'OpenClaw-held-input')
         held_response.clear()
         pending = asyncio.create_task(submit(ticket, prompts('OpenClaw')[3]))
         await until(lambda: roster.busy)
+        await assert_terminal_visit(held_visit_start, 'OpenClaw held turn before chooser')
         await input_action('context_menu')
         for _ in range(5):
             await input_action('down')
+        busy_picker_start = len(await console_payloads())
         await input_action('click')
         await screen('busy-agent-picker')
         assert_picker()
+        await assert_picker_bridge(busy_picker_start, 'busy Agent Terminal picker')
+        busy_reopen_start = len(await console_payloads())
         await input_action('click')
         await until(lambda: roster.focused == 'OpenClaw' and gateway.frames[-1].get('kind') == 'agent_terminal.view')
+        await assert_terminal_entry(busy_reopen_start, 'busy OpenClaw reopen')
         held_frame = await seek('OpenClaw', 'BEGIN', 'up', 'OpenClaw-held-reading-begin')
         assert 'WORKING' in held_frame['text'], 'Running conversation must say WORKING'
         assert 'LIVE' not in held_frame['text'].splitlines(), 'Legacy LIVE state label remains'
@@ -1005,6 +1288,34 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         assert_conversation('OpenClaw', 4)
         assert normalized('OpenClaw BEGIN') in normalized(update['text']), 'New output displaced the reading position'
         await seek('OpenClaw', 'UPDATE', 'down', 'OpenClaw-read-new-output')
+        held_upgrades = await assert_terminal_visit(busy_reopen_start, 'OpenClaw held-output visit')
+        native_receipts.append({
+            'agent': 'OpenClaw', 'visit': 'held-output', 'bodyUpgrades': len(held_upgrades),
+            'imageOperations': 0, 'pageRebuilds': 1,
+        })
+
+        # Complete the required navigation contract: selected terminal → native
+        # picker → visual Overview. Capture both transition boundaries and the
+        # settled destinations instead of inferring them from Mac-side frames.
+        final_picker_start = len(await console_payloads())
+        await input_now('double_click')
+        await immediate_screen('OpenClaw-final-back-transition-immediate')
+        await asyncio.sleep(.7)
+        final_picker = await screen('OpenClaw-final-back-picker-stable')
+        assert_picker()
+        await assert_picker_bridge(final_picker_start, 'final Back picker', exactly_one=True)
+        overview_start = len(await console_payloads())
+        await input_now('double_click')
+        await immediate_screen('overview-transition-immediate')
+        await asyncio.sleep(.7)
+        overview = await screen('overview-after-terminal-stable')
+        overview_rebuild = await bridge_event(overview_start, {'rebuild'}, is_visual_page)
+        overview_events = (await console_payloads())[overview_start:]
+        overview_images = [event for event in overview_events if event.get('operation') == 'image']
+        assert [event.get('containerID') for event in overview_images] == [4, 8, 9, 10], \
+            'Overview did not restore the four visual tiles once in serial order'
+        assert overview_rebuild['imageCount'] == 4
+        assert normalized('AGENT TERMINAL') not in normalized(overview['text']), 'Overview still renders terminal chrome'
         assert not violations, violations
         assert [states[name].turn for name in AGENTS] == [4, 3]
         assert [states[name].probes for name in AGENTS] == [1, 1]
@@ -1016,6 +1327,18 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
             'conversation_ids': conversation_ids,
             'source_fingerprint': source_before,
             'stable_evidence': verify_stable_evidence(out, gateway.frames),
+            'native_surface_evidence': {
+                'pickerRows': list(AGENTS),
+                'terminalContainers': ['terminal-head', 'terminal-body'],
+                'visits': native_receipts,
+                'swipes': swipe_receipts,
+                'backToPicker': final_picker['name'],
+                'backToOverview': overview['name'],
+                'overviewImageOperations': [event.get('containerID') for event in overview_images],
+                'immediateTransitionFrames': [
+                    screen['name'] for screen in screens if 'immediate' in screen['name']
+                ],
+            },
             'boundaries': ['Stateful local TLS providers replace remote agents',
                            'Final STT text supplied after simulator prompt acknowledgment'],
             'isolation': {'engine_port': 18980, 'agent_port': 18981,
@@ -1053,6 +1376,7 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         if durable is not None:
             durable.close()
         key.unlink(missing_ok=True)
+        scratch.cleanup()
 
 
 if __name__ == '__main__':

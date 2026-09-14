@@ -31,7 +31,6 @@ from joat.audio.vad import RmsVad
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.core.interfaces import ReplyEngine, SttEngine, Transcript
 from joat.core.protocol import (
-    AssistantConversationDismiss,
     AssistantConversationView,
     DownlinkMessage,
     InputEvent,
@@ -75,15 +74,17 @@ EXPECTED_STATES = [
     "thinking", "answering", "answering", "ready",
 ]
 EXPECTED_REVISIONS = list(range(1, 12))
-FRAME_MARKER = "[assistant-raster-frame]"
-BRIDGE_MARKER = "[assistant-raster-bridge]"
+VIEW_MARKER = "[assistant-native-view]"
+BRIDGE_MARKER = "[assistant-native-bridge]"
 CONVERSATION_PIXEL_REGION = (35, 50, 541, 263)
 # The dashboard clock is intentionally live during this minute-long journey.
 # Everything outside its authored region must return byte-for-byte after the
 # conversation is dismissed; the clock itself must remain visibly populated.
 DASHBOARD_LIVE_CLOCK_REGION = (60, 60, 225, 235)
-INTER_TILE_STABLE_S = 0.24
+NATIVE_STABLE_S = 0.12
 ACTIVITY_FIXTURE_DELAY_S = 3.2
+_CONSOLE_LAST_IDS: dict[str, int] = {}
+_CONSOLE_LEDGERS: dict[tuple[str, str], list[dict[str, Any]]] = {}
 VOICE_BATCH_SAMPLES = 3_200
 LOUD_PCM = struct.pack(
     f"<{VOICE_BATCH_SAMPLES}h",
@@ -168,20 +169,24 @@ class RecordingGateway(HubGatewayTransport):
 def _inject_fixture_probe(root: Path) -> None:
     """Instrument only the disposable source copy used by this fixture."""
 
-    presenter = root / "src/HudPresenter.ts"
-    presenter_source = presenter.read_text(encoding="utf-8")
-    presenter_needle = """    const frame: HudVisualFrame = {
-      ...this.visualFrame(),
-      assistantConversation: conversation,
-    };"""
-    if presenter_source.count(presenter_needle) != 1:
-        raise BrainstormActionFlowError("could not place disposable raster-frame probe")
-    presenter_probe = f"""    console.info('{FRAME_MARKER}' + JSON.stringify({{
-      ...conversation, paintRequestedAtUnixMs: Date.now(),
+    surface = root / "src/AssistantConversationSurface.ts"
+    surface_source = surface.read_text(encoding="utf-8")
+    surface_needle = """    const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined;"""
+    if surface_source.count(surface_needle) != 1:
+        raise BrainstormActionFlowError("could not place disposable native-view probe")
+    surface_probe = f"""    console.info('{VIEW_MARKER}' + JSON.stringify({{
+      conversationId: current.conversationId,
+      revision: current.revision,
+      state: current.state,
+      turns: current.turns,
+      continuePrompt: this.continuePrompt,
+      indicatorFrame: this.indicatorFrame,
+      paintRequestedAtUnixMs: Date.now(),
+      ...view,
     }}));
-{presenter_needle}"""
-    presenter.write_text(
-        presenter_source.replace(presenter_needle, presenter_probe),
+{surface_needle}"""
+    surface.write_text(
+        surface_source.replace(surface_needle, surface_probe),
         encoding="utf-8",
     )
 
@@ -195,31 +200,65 @@ def _inject_fixture_probe(root: Path) -> None:
   const fixtureBridge = fixtureRequire() as any;
   const fixtureRecord = (value: unknown) =>
     console.info('{BRIDGE_MARKER}' + JSON.stringify(value));
+  const fixturePage = (page: any) => ({{
+    containerTotalNum: page.containerTotalNum,
+    imageCount: (page.imageObject ?? []).length,
+    text: (page.textObject ?? []).map((item: any) => ({{
+      containerID: item.containerID,
+      containerName: item.containerName,
+      isEventCapture: item.isEventCapture,
+      content: item.content,
+    }})),
+    list: (page.listObject ?? []).map((item: any) => ({{
+      containerID: item.containerID,
+      containerName: item.containerName,
+      isEventCapture: item.isEventCapture,
+      itemNames: item.itemContainer?.itemName ?? [],
+    }})),
+    menuCount: (page.menuObject?.menuItems ?? []).length,
+  }});
   const fixtureStartup = async (page: any) => {{
+    fixtureRecord({{ operation: 'startup-start', atUnixMs: Date.now(), ...fixturePage(page) }});
     const result = await fixtureBridge.createStartUpPageContainer(page);
     fixtureRecord({{
       operation: 'startup', result: String(result), acceptedAtUnixMs: Date.now(),
-      imageCount: (page.imageObject ?? []).length,
-      textCount: (page.textObject ?? []).length,
-      menuCount: (page.menuObject?.menuItems ?? []).length,
+      ...fixturePage(page),
     }});
     return result;
   }};
   const fixtureRebuild = async (page: any) => {{
+    fixtureRecord({{ operation: 'rebuild-start', atUnixMs: Date.now(), ...fixturePage(page) }});
     const ok = await fixtureBridge.rebuildPageContainer(page);
     fixtureRecord({{
       operation: 'rebuild', ok, acceptedAtUnixMs: Date.now(),
-      imageCount: (page.imageObject ?? []).length,
-      textCount: (page.textObject ?? []).length,
-      menuCount: (page.menuObject?.menuItems ?? []).length,
+      ...fixturePage(page),
     }});
     return ok;
   }};
   const fixtureImage = async (update: any) => {{
+    fixtureRecord({{
+      operation: 'image-start', atUnixMs: Date.now(),
+      containerID: update.containerID,
+    }});
     const result = await fixtureBridge.updateImageRawData(update);
     fixtureRecord({{
       operation: 'image', acceptedAtUnixMs: Date.now(),
       containerID: update.containerID, result: String(result),
+    }});
+    return result;
+  }};
+  const fixtureText = async (update: any) => {{
+    fixtureRecord({{
+      operation: 'text-start', atUnixMs: Date.now(),
+      containerID: update.containerID, containerName: update.containerName,
+      content: update.content, contentLength: update.contentLength,
+    }});
+    const result = await fixtureBridge.textContainerUpgrade(update);
+    fixtureRecord({{
+      operation: 'text', acceptedAtUnixMs: Date.now(),
+      containerID: update.containerID, containerName: update.containerName,
+      content: update.content, contentLength: update.contentLength,
+      result: String(result),
     }});
     return result;
   }};
@@ -228,6 +267,7 @@ def _inject_fixture_probe(root: Path) -> None:
       if (property === 'createStartUpPageContainer') return fixtureStartup;
       if (property === 'rebuildPageContainer') return fixtureRebuild;
       if (property === 'updateImageRawData') return fixtureImage;
+      if (property === 'textContainerUpgrade') return fixtureText;
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
     }},
@@ -238,7 +278,10 @@ def _inject_fixture_probe(root: Path) -> None:
 
 
 async def _console_payloads(automation_base: str, marker: str) -> list[dict[str, Any]]:
-    raw = await asyncio.to_thread(_http_bytes, f"{automation_base}/api/console")
+    url = f"{automation_base}/api/console"
+    if automation_base in _CONSOLE_LAST_IDS:
+        url += f"?since_id={_CONSOLE_LAST_IDS[automation_base]}"
+    raw = await asyncio.to_thread(_http_bytes, url)
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -246,24 +289,34 @@ async def _console_payloads(automation_base: str, marker: str) -> list[dict[str,
     entries = decoded.get("entries") if isinstance(decoded, dict) else None
     if not isinstance(entries, list):
         raise BrainstormActionFlowError("official simulator console has no entries")
-    payloads: list[dict[str, Any]] = []
+    ids = [
+        entry.get("id") for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), int)
+    ]
+    if ids:
+        _CONSOLE_LAST_IDS[automation_base] = max(cast(list[int], ids))
+    for known_marker in (VIEW_MARKER, BRIDGE_MARKER):
+        _CONSOLE_LEDGERS.setdefault((automation_base, known_marker), [])
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("message"), str):
             continue
         message = cast(str, entry["message"])
-        offset = message.find(marker)
-        if offset < 0:
-            continue
-        try:
-            payload = json.loads(message[offset + len(marker):].strip())
-        except json.JSONDecodeError as exc:
-            raise BrainstormActionFlowError(f"invalid fixture probe payload for {marker}") from exc
-        if isinstance(payload, dict):
-            payloads.append(payload)
-    return payloads
+        for known_marker in (VIEW_MARKER, BRIDGE_MARKER):
+            offset = message.find(known_marker)
+            if offset < 0:
+                continue
+            try:
+                payload = json.loads(message[offset + len(known_marker):].strip())
+            except json.JSONDecodeError as exc:
+                raise BrainstormActionFlowError(
+                    f"invalid fixture probe payload for {known_marker}"
+                ) from exc
+            if isinstance(payload, dict):
+                _CONSOLE_LEDGERS[(automation_base, known_marker)].append(payload)
+    return list(_CONSOLE_LEDGERS[(automation_base, marker)])
 
 
-async def _poll_raster_frame(
+async def _poll_native_view(
     automation_base: str,
     predicate: Callable[[dict[str, Any]], bool],
     *,
@@ -274,7 +327,7 @@ async def _poll_raster_frame(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         try:
-            frames = await _console_payloads(automation_base, FRAME_MARKER)
+            frames = await _console_payloads(automation_base, VIEW_MARKER)
         except (OSError, urllib.error.URLError):
             await asyncio.sleep(0.05)
             continue
@@ -310,29 +363,6 @@ def _region_digest(raw: bytes, *, left: int, top: int, right: int, bottom: int) 
     return digest.hexdigest()
 
 
-def _changed_tile_regions(before: bytes, after: bytes) -> list[int]:
-    """Return the production image-container ids whose framebuffer pixels differ."""
-
-    before_width, before_height, before_rgba = decode_rgba8_png(before)
-    after_width, after_height, after_rgba = decode_rgba8_png(after)
-    if (before_width, before_height) != (after_width, after_height):
-        raise BrainstormActionFlowError("activity frame dimensions changed")
-    changed: list[int] = []
-    for container_id, left, top in (
-        (4, 0, 0), (8, 288, 0), (9, 0, 144), (10, 288, 144),
-    ):
-        different = False
-        for y in range(top, min(top + 144, after_height)):
-            start = (y * after_width + left) * 4
-            end = (y * after_width + min(left + 288, after_width)) * 4
-            if before_rgba[start:end] != after_rgba[start:end]:
-                different = True
-                break
-        if different:
-            changed.append(container_id)
-    return changed
-
-
 def _assert_dashboard_underlay_restored(before: bytes, after: bytes) -> None:
     """Prove dismissal restored the dashboard, allowing only its live clock."""
 
@@ -362,6 +392,36 @@ def _assert_dashboard_underlay_restored(before: bytes, after: bytes) -> None:
     )
     if lit_clock_pixels < 1_000:
         raise BrainstormActionFlowError("restored dashboard clock is blank or incomplete")
+
+
+async def _wait_dashboard_underlay_restored(
+    automation_base: str,
+    baseline: bytes,
+    *,
+    timeout_s: float = 8.0,
+) -> bytes:
+    """Wait past serialized tile writes for a settled restored Overview."""
+
+    deadline = time.monotonic() + timeout_s
+    matching_since: float | None = None
+    latest_error: BrainstormActionFlowError | None = None
+    while time.monotonic() < deadline:
+        raw = await _screenshot(automation_base)
+        try:
+            _assert_dashboard_underlay_restored(baseline, raw)
+        except BrainstormActionFlowError as exc:
+            latest_error = exc
+            matching_since = None
+        else:
+            now = time.monotonic()
+            if matching_since is None:
+                matching_since = now
+            elif now - matching_since >= NATIVE_STABLE_S:
+                return raw
+        await asyncio.sleep(0.04)
+    if latest_error is not None:
+        raise latest_error
+    raise BrainstormActionFlowError("restored Overview never reached a stable framebuffer")
 
 
 def _assert_context_menu_visible(raw: bytes) -> int:
@@ -449,16 +509,9 @@ async def _changed_conversation_frame(
     *,
     label: str,
     timeout_s: float = 12.0,
-    stable_s: float = INTER_TILE_STABLE_S,
-    model: dict[str, Any] | None = None,
+    stable_s: float = NATIVE_STABLE_S,
 ) -> bytes:
-    """Wait for complete conversation pixels, ignoring status-only changes.
-
-    The default stable window outlasts the production 110ms inter-tile
-    pacing. Initial-card and one-tile activity captures may request the short
-    two-sample window because their full edge geometry or quadrant invariant
-    independently rejects a partial frame.
-    """
+    """Wait for a settled native conversation framebuffer change."""
 
     return await _changed_frame(
         automation_base,
@@ -467,10 +520,6 @@ async def _changed_conversation_frame(
         timeout_s=timeout_s,
         stable_s=max(0.04, stable_s),
         region=CONVERSATION_PIXEL_REGION,
-        accept=(
-            (lambda raw: _conversation_card_matches(raw, model))
-            if model is not None else None
-        ),
     )
 
 
@@ -496,67 +545,6 @@ def _save_frame(raw: bytes, output: Path, name: str) -> dict[str, Any]:
             "bottom": max(y for _, y in visible),
         } if visible else None,
     }
-
-
-def _conversation_card_matches(raw: bytes, model: dict[str, Any]) -> bool:
-    capacity = model.get("lineCapacity")
-    if not isinstance(capacity, int):
-        return False
-    width, height, rgba = decode_rgba8_png(raw)
-    top = 260 - (13 + capacity * 18 + 28)
-    points = (
-        (100, top), (288, top), (500, top),
-        (36, top + 6), (539, top + 6),
-        (100, 260), (500, 260),
-    )
-    return all(
-        0 <= x < width and 0 <= y < height
-        and rgba[(y * width + x) * 4 + 3] >= 100
-        for x, y in points
-    )
-
-
-def _assert_conversation_card(
-    raw: bytes,
-    model: dict[str, Any],
-    *,
-    label: str,
-) -> None:
-    """Bind a model probe to the card geometry present in its screenshot."""
-
-    if not _conversation_card_matches(raw, model):
-        raise BrainstormActionFlowError(
-            f"{label}: framebuffer does not contain the probed card geometry"
-        )
-
-
-def _role_pixel_stats(raw: bytes, line_capacity: int) -> dict[str, Any]:
-    """Measure the two deterministic opening rows in actual framebuffer pixels."""
-
-    width, _, rgba = decode_rgba8_png(raw)
-    top = 260 - (13 + line_capacity * 18 + 28)
-    baselines = {"user": top + 20, "assistant": top + 38}
-    result: dict[str, Any] = {}
-    for role, baseline in baselines.items():
-        values: list[int] = []
-        ink_rows: set[int] = set()
-        for y in range(baseline - 8, baseline + 9):
-            for x in range(54, 520):
-                alpha = rgba[(y * width + x) * 4 + 3]
-                if alpha:
-                    values.append(alpha)
-                    ink_rows.add(y)
-        if not values:
-            raise BrainstormActionFlowError(f"opening {role} row has no framebuffer ink")
-        values.sort()
-        result[role] = {
-            "medianAlpha": values[len(values) // 2],
-            "maximumAlpha": values[-1],
-            "glyphHeightPx": max(ink_rows) - min(ink_rows) + 1,
-        }
-    if result["assistant"]["medianAlpha"] <= result["user"]["medianAlpha"]:
-        raise BrainstormActionFlowError("assistant row is not brighter than wearer row")
-    return result
 
 
 def _normalized_role_text(rows: list[dict[str, str]], role: str) -> str:
@@ -641,7 +629,7 @@ class FramebufferLatencyProbe:
                 if digest != self._candidate:
                     self._candidate = digest
                     self._candidate_since = now
-                elif now - self._candidate_since >= INTER_TILE_STABLE_S:
+                elif now - self._candidate_since >= NATIVE_STABLE_S:
                     self.stable_at = now
                     self._done.set()
                     return
@@ -663,46 +651,52 @@ async def _drive_voice_turn(
     return next_seq, worker, closed_monotonic, closed_unix_ms
 
 
-async def _bridge_image_latency(
+async def _bridge_native_latency(
     automation_base: str,
     *,
     after: int,
     closed_unix_ms: float,
     paint_requested_unix_ms: int,
 ) -> int:
-    event = await _poll_bridge_image(
+    event = await _poll_bridge_event(
         automation_base,
         after=after,
         accepted_after_unix_ms=paint_requested_unix_ms,
+        operations={"rebuild", "text"},
     )
     accepted = event.get("acceptedAtUnixMs")
     if not isinstance(accepted, int):
-        raise BrainstormActionFlowError("bridge image receipt has no timestamp")
+        raise BrainstormActionFlowError("native bridge receipt has no timestamp")
     elapsed = round(accepted - closed_unix_ms)
     if elapsed < 0:
-        raise BrainstormActionFlowError("raster image preceded utterance closure")
+        raise BrainstormActionFlowError("native write preceded utterance closure")
     return elapsed
 
 
-async def _poll_bridge_image(
+async def _poll_bridge_event(
     automation_base: str,
     *,
     after: int,
+    operations: set[str],
     timeout_s: float = 6.0,
     accepted_after_unix_ms: int = 0,
+    predicate: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         events = await _console_payloads(automation_base, BRIDGE_MARKER)
         for event in events[after:]:
             if (
-                event.get("operation") == "image"
+                event.get("operation") in operations
                 and isinstance(event.get("acceptedAtUnixMs"), int)
                 and cast(int, event["acceptedAtUnixMs"]) >= accepted_after_unix_ms
+                and (predicate is None or predicate(event))
             ):
                 return event
         await asyncio.sleep(0.04)
-    raise BrainstormActionFlowError("timed out waiting for accepted raster image")
+    raise BrainstormActionFlowError(
+        f"timed out waiting for accepted bridge operation {sorted(operations)!r}"
+    )
 
 
 async def _scroll_to_boundary(
@@ -720,15 +714,15 @@ async def _scroll_to_boundary(
         maximum = cast(int, current["maximumScrollFromTail"])
         position = cast(int, current["scrollFromTail"])
         at_boundary = position == (maximum if direction == "up" else 0)
-        before_frames = len(await _console_payloads(automation_base, FRAME_MARKER))
+        before_frames = len(await _console_payloads(automation_base, VIEW_MARKER))
         await _input(automation_base, direction)
         if at_boundary:
             await asyncio.sleep(0.3)
-            after_frames = len(await _console_payloads(automation_base, FRAME_MARKER))
+            after_frames = len(await _console_payloads(automation_base, VIEW_MARKER))
             if after_frames != before_frames:
                 raise BrainstormActionFlowError(f"{direction} repainted beyond its boundary")
             return steps, current, current_raw, reconstructed
-        next_frame = await _poll_raster_frame(
+        next_frame = await _poll_native_view(
             automation_base,
             lambda item: (
                 item.get("conversationId") == current.get("conversationId")
@@ -742,7 +736,6 @@ async def _scroll_to_boundary(
             automation_base,
             current_raw,
             label=f"{direction} framebuffer step",
-            model=next_frame,
         )
         previous_rows = cast(list[dict[str, str]], current["visibleLines"])
         next_rows = cast(list[dict[str, str]], next_frame["visibleLines"])
@@ -769,21 +762,20 @@ async def _continue_after_inactivity(
     """Wait for the inactivity question, then accept it with a real tap."""
 
     before_inputs = len(gateway.inputs)
-    before_frames = len(await _console_payloads(automation_base, FRAME_MARKER))
-    prompt_model = await _poll_raster_frame(
+    before_bridge = len(await _console_payloads(automation_base, BRIDGE_MARKER))
+    prompt_footer = await _poll_bridge_event(
         automation_base,
-        lambda item: item.get("continuePrompt") is True,
-        label=f"{name} continue prompt",
-        after=before_frames,
+        after=before_bridge,
+        operations={"text"},
         timeout_s=20.0,
+        predicate=lambda item: item.get("containerName") == "generation"
+        and "Continue? tap: stay · double-click: back" in str(item.get("content", "")),
     )
     prompt_raw = await _changed_conversation_frame(
         automation_base,
         prior_raw,
         label=f"{name} continue prompt pixels",
-        model=prompt_model,
     )
-    _assert_conversation_card(prompt_raw, prompt_model, label=f"{name} continue prompt")
     prompt_frame = _save_frame(prompt_raw, output, f"{name}-continue-prompt")
     if len(gateway.inputs) != before_inputs:
         raise BrainstormActionFlowError("inactivity prompt emitted an action without a tap")
@@ -799,26 +791,24 @@ async def _continue_after_inactivity(
         automation_base,
         prompt_raw,
         label=f"{name} continued pixels",
-        model=prompt_model,
     )
-    _assert_conversation_card(resumed_raw, prompt_model, label=f"{name} continued")
-    line_capacity = cast(int, prompt_model["lineCapacity"])
-    card_top = 260 - (13 + line_capacity * 18 + 28)
     if _region_digest(
-        resumed_raw, left=36, top=card_top, right=541, bottom=263,
+        resumed_raw, left=36, top=50, right=541, bottom=235,
     ) != _region_digest(
-        prior_raw, left=36, top=card_top, right=541, bottom=263,
+        prior_raw, left=36, top=50, right=541, bottom=235,
     ):
         raise BrainstormActionFlowError(
             f"{name} continuation did not restore the same conversation card"
         )
     return prompt_frame, {
-        "model": prompt_model,
+        "footer": prompt_footer,
         "frame": _save_frame(resumed_raw, output, f"{name}-continued"),
     }
 
 
 async def run(args: argparse.Namespace) -> dict[str, object]:
+    _CONSOLE_LAST_IDS.clear()
+    _CONSOLE_LEDGERS.clear()
     for port in (args.ws_port, args.vite_port, args.automation_port):
         if _port_busy(port):
             raise BrainstormActionFlowError(f"isolated acceptance port {port} is occupied")
@@ -855,7 +845,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
     source_paths = (
         "apps/hub-plugin/src/AssistantConversationSurface.ts",
         "apps/hub-plugin/src/EventRouter.ts",
-        "apps/hub-plugin/src/HudCanvasRenderer.ts",
+        "apps/hub-plugin/src/HudPageBuilder.ts",
         "apps/hub-plugin/src/HudPresenter.ts",
         "apps/hub-plugin/src/HudTypography.ts",
         "apps/hub-plugin/src/HudVisualSurface.ts",
@@ -870,6 +860,45 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
         path: hashlib.sha256((args.repo / path).read_bytes()).hexdigest()
         for path in source_paths
     }
+
+    def is_assistant_layout(event: dict[str, Any]) -> bool:
+        text = event.get("text")
+        if not isinstance(text, list):
+            return False
+        return (
+            event.get("operation") == "rebuild"
+            and event.get("containerTotalNum") == 5
+            and event.get("imageCount") == 0
+            and event.get("list") == []
+            and [item.get("containerName") for item in text] == [
+                "conversation", "wearer-turns", "joat-turns",
+                "scroll-position", "generation",
+            ]
+            and sum(item.get("isEventCapture") == 1 for item in text) == 1
+            and text[0].get("containerID") == 11
+            and text[0].get("isEventCapture") == 1
+        )
+
+    def is_visual_layout(event: dict[str, Any]) -> bool:
+        return (
+            event.get("operation") in {"startup", "rebuild"}
+            and event.get("containerTotalNum") == 5
+            and event.get("imageCount") == 4
+            and event.get("list") == []
+        )
+
+    async def stable_after(
+        prior_raw: bytes,
+        *,
+        label: str,
+        name: str,
+        stable_s: float = NATIVE_STABLE_S,
+    ) -> bytes:
+        raw = await _changed_conversation_frame(
+            base, prior_raw, label=label, stable_s=stable_s,
+        )
+        frames[name] = _save_frame(raw, args.out, name)
+        return raw
 
     await gateway.start()
     try:
@@ -917,23 +946,12 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             baseline_hash, baseline_raw_name, baseline_optical_name = await _capture(
                 base, args.out, "00-baseline", None,
             )
-            # Vite may perform one dev-only full reload while it notices the
-            # disposable root's tsconfig. Establish the bridge-ledger boundary
-            # after that startup settles; the captured 576x288 raster and the
-            # later OS menu frame are the actual page/menu evidence.
+            baseline_raw = (args.out / baseline_raw_name).read_bytes()
             await asyncio.sleep(0.5)
             boot_bridge_events = await _console_payloads(base, BRIDGE_MARKER)
-            boot_page_declarations = [
-                item for item in boot_bridge_events
-                if item.get("operation") in {"startup", "rebuild"}
-            ]
-            if not boot_page_declarations:
-                raise BrainstormActionFlowError("mounted visual page has no SDK declaration")
-            declared_menu_rows = boot_page_declarations[-1].get("menuCount")
-            if declared_menu_rows != 8:
-                raise BrainstormActionFlowError(
-                    f"mounted visual page declared {declared_menu_rows!r} menu rows instead of eight"
-                )
+            boot_pages = [item for item in boot_bridge_events if is_visual_layout(item)]
+            if not boot_pages:
+                raise BrainstormActionFlowError("mounted Overview has no four-image SDK declaration")
             journey_bridge_start = len(boot_bridge_events)
 
             next_seq = 0
@@ -946,163 +964,150 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             }
             timings: dict[str, Any] = {}
 
-            # Opening prompt and answer.
+            # Opening turn: capture one immediate transition frame before waiting
+            # for a settled native page, then verify the one entry rebuild.
             before = len(gateway.conversations)
             bridge_before = len(await _console_payloads(base, BRIDGE_MARKER))
-            probe = await FramebufferLatencyProbe.start(base)
+            latency = await FramebufferLatencyProbe.start(base)
             next_seq, task, closed, closed_unix = await _drive_voice_turn(orchestrator, next_seq)
-            probe.mark_closed(closed)
-            await _wait_for(
+            latency.mark_closed(closed)
+            opening_thinking = await _wait_for(
                 lambda: _latest_conversation(gateway, after=before, state="thinking"),
                 label="opening thinking downlink",
             )
-            thinking_model = await _poll_raster_frame(
+            thinking_model = await _poll_native_view(
                 base,
-                lambda item: item.get("state") == "thinking"
+                lambda item: item.get("revision") == opening_thinking["revision"]
+                and item.get("state") == "thinking"
                 and any(
                     line.get("role") == "user" and OPENING_PROMPT in line.get("text", "")
                     for line in item.get("visibleLines", [])
                 ),
-                label="opening prompt raster frame",
+                label="opening native thinking view",
             )
-            baseline_raw = (args.out / baseline_raw_name).read_bytes()
-            thinking_raw = await _changed_conversation_frame(
+            immediate_raw = await _screenshot(base)
+            frames["openingTransitionImmediate"] = _save_frame(
+                immediate_raw, args.out, "01-opening-transition-immediate",
+            )
+            entry_rebuild = await _poll_bridge_event(
                 base,
+                after=bridge_before,
+                operations={"rebuild"},
+                predicate=is_assistant_layout,
+            )
+            thinking_raw = await stable_after(
                 baseline_raw,
-                label="opening thinking pixels",
-                stable_s=0.04,
-                model=thinking_model,
+                label="opening native thinking pixels",
+                name="02-opening-thinking-stable",
             )
-            _assert_conversation_card(
-                thinking_raw, thinking_model, label="opening thinking",
-            )
-            frames["openingThinking"] = _save_frame(
-                thinking_raw, args.out, "01-opening-thinking",
-            )
-            next_indicator_raw = await _changed_conversation_frame(
-                base,
-                thinking_raw,
-                label="advancing activity marker pixels",
-                stable_s=0.04,
-                model=thinking_model,
-            )
-            _assert_conversation_card(
-                next_indicator_raw, thinking_model,
-                label="opening activity tick",
-            )
-            activity_models = [
-                item for item in await _console_payloads(base, FRAME_MARKER)
-                if item.get("conversationId") == thinking_model.get("conversationId")
-                and item.get("revision") == thinking_model.get("revision")
-                and item.get("state") == "thinking"
-                and item.get("indicatorFrame") != thinking_model.get("indicatorFrame")
-            ]
-            if not activity_models:
-                raise BrainstormActionFlowError("activity pixels advanced without a model tick")
-            if any(
-                item.get("visibleLines") != thinking_model.get("visibleLines")
-                for item in activity_models
-            ):
-                raise BrainstormActionFlowError("activity tick changed the transcript")
-            frames["openingThinkingNext"] = _save_frame(
-                next_indicator_raw, args.out, "01-opening-thinking-next",
-            )
-            activity_changed_tile_regions = _changed_tile_regions(
-                thinking_raw, next_indicator_raw,
-            )
-            if activity_changed_tile_regions != [9]:
-                raise BrainstormActionFlowError(
-                    "activity-only pixels crossed more than the lower-left tile: "
-                    f"{activity_changed_tile_regions!r}"
-                )
-            opening_latency = await probe.result()
-            opening_latency["firstConversationImageAcceptedMs"] = await _bridge_image_latency(
+            opening_latency = await latency.result()
+            opening_latency["firstNativeWriteAcceptedMs"] = await _bridge_native_latency(
                 base,
                 after=bridge_before,
                 closed_unix_ms=closed_unix,
                 paint_requested_unix_ms=cast(int, thinking_model["paintRequestedAtUnixMs"]),
             )
             timings["openingPrompt"] = opening_latency
-            # Geometry binds these screenshots to the one-line thinking card.
-            # Do not infer display order from task.done() here: the fixture may
-            # finish while the harness is hashing and saving an already-seen
-            # frame.
+
+            bridge_before_tick = len(await _console_payloads(base, BRIDGE_MARKER))
+            entry_generation = next(
+                item.get("content") for item in entry_rebuild["text"]
+                if item.get("containerName") == "generation"
+            )
+            activity_event = await _poll_bridge_event(
+                base,
+                after=bridge_before_tick,
+                operations={"text"},
+                predicate=lambda event: event.get("containerName") == "generation"
+                and event.get("content") != entry_generation,
+            )
+            tick_events = (await _console_payloads(base, BRIDGE_MARKER))[bridge_before_tick:]
+            if any(
+                item.get("operation") in {"rebuild", "image"}
+                or (
+                    item.get("operation") == "text"
+                    and item.get("containerName") != "generation"
+                )
+                for item in tick_events
+            ):
+                raise BrainstormActionFlowError(
+                    "activity tick changed more than the native generation footer"
+                )
+            activity_raw = await stable_after(
+                thinking_raw,
+                label="native activity tick pixels",
+                name="03-opening-activity-stable",
+            )
+
             await task
             opening_ready = _latest_conversation(
                 gateway, after=before, state="ready", answer=OPENING_ANSWER,
             )
             if opening_ready is None:
                 raise BrainstormActionFlowError("opening answer never reached ready")
-            ready_model = await _poll_raster_frame(
+            ready_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == opening_ready["revision"]
                 and item.get("state") == "ready",
-                label="opening ready raster frame",
+                label="opening native ready view",
             )
-            opening_raw = await _changed_conversation_frame(
-                base,
-                next_indicator_raw,
-                label="opening ready pixels",
-                stable_s=0.45,
-                model=ready_model,
+            opening_raw = await stable_after(
+                activity_raw,
+                label="opening native ready pixels",
+                name="04-opening-ready-stable",
             )
-            _assert_conversation_card(
-                opening_raw, ready_model, label="opening ready",
-            )
-            frames["openingReady"] = _save_frame(
-                opening_raw, args.out, "02-opening-ready",
-            )
-            role_pixels = _role_pixel_stats(opening_raw, cast(int, ready_model["lineCapacity"]))
-            if cast(int, thinking_model["lineCapacity"]) >= cast(int, ready_model["lineCapacity"]):
-                raise BrainstormActionFlowError("opening card did not grow upward for the answer")
+
+            # The inactivity question must be a footer upgrade and an actual tap
+            # must restore the same transcript pixels.
+            continue_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
             opening_prompt_frame, opening_continued = await _continue_after_inactivity(
                 base,
                 gateway,
                 prior_raw=opening_raw,
                 output=args.out,
-                name="03-opening",
+                name="05-opening",
             )
             frames["openingContinuePrompt"] = opening_prompt_frame
             frames["openingContinued"] = opening_continued["frame"]
             opening_continued_raw = (
                 args.out / cast(str, frames["openingContinued"]["raw"])
             ).read_bytes()
+            continue_events = (
+                await _console_payloads(base, BRIDGE_MARKER)
+            )[continue_bridge_start:]
+            completed_continue = [item for item in continue_events if item.get("operation") == "text"]
+            if not completed_continue or any(
+                item.get("containerName") != "generation" for item in completed_continue
+            ):
+                raise BrainstormActionFlowError("continue prompt changed more than the native footer")
 
-            # Follow-up joke: retain the first pair and expose a partial answer.
+            # Follow-up stream: retain the opening exchange and expose the partial
+            # answer before the completed reply, all through text upgrades.
             before = len(gateway.conversations)
             bridge_before = len(await _console_payloads(base, BRIDGE_MARKER))
-            probe = await FramebufferLatencyProbe.start(base)
+            latency = await FramebufferLatencyProbe.start(base)
             next_seq, task, closed, closed_unix = await _drive_voice_turn(orchestrator, next_seq)
-            probe.mark_closed(closed)
+            latency.mark_closed(closed)
             joke_thinking = await _wait_for(
                 lambda: _latest_conversation(gateway, after=before, state="thinking"),
                 label="joke thinking downlink",
             )
-            joke_thinking_model = await _poll_raster_frame(
+            joke_thinking_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == joke_thinking["revision"],
-                label="retained joke prompt raster",
+                label="retained joke native view",
             )
-            joke_thinking_raw = await _changed_conversation_frame(
-                base,
+            joke_thinking_raw = await stable_after(
                 opening_continued_raw,
-                label="joke thinking pixels",
-                model=joke_thinking_model,
+                label="joke thinking native pixels",
+                name="06-joke-thinking-stable",
             )
-            _assert_conversation_card(
-                joke_thinking_raw, joke_thinking_model, label="joke thinking",
-            )
-            frames["jokeThinking"] = _save_frame(
-                joke_thinking_raw, args.out, "03-joke-thinking",
-            )
-            joke_latency = await probe.result()
-            joke_latency["firstConversationImageAcceptedMs"] = await _bridge_image_latency(
+            joke_latency = await latency.result()
+            joke_latency["firstNativeWriteAcceptedMs"] = await _bridge_native_latency(
                 base,
                 after=bridge_before,
                 closed_unix_ms=closed_unix,
-                paint_requested_unix_ms=cast(
-                    int, joke_thinking_model["paintRequestedAtUnixMs"],
-                ),
+                paint_requested_unix_ms=cast(int, joke_thinking_model["paintRequestedAtUnixMs"]),
             )
             timings["jokePrompt"] = joke_latency
             setup = await _wait_for(
@@ -1111,109 +1116,60 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 ),
                 label="partial joke downlink",
             )
-            setup_model = await _poll_raster_frame(
+            setup_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == setup["revision"],
-                label="partial joke raster frame",
+                label="partial joke native view",
             )
-            setup_raw = await _changed_conversation_frame(
-                base,
+            setup_raw = await stable_after(
                 joke_thinking_raw,
-                label="partial joke pixels",
-                model=setup_model,
+                label="partial joke native pixels",
+                name="07-joke-partial-stable",
             )
-            _assert_conversation_card(
-                setup_raw, setup_model, label="partial joke",
-            )
-            frames["jokeSetup"] = _save_frame(setup_raw, args.out, "04-joke-setup")
-            joke_setup_pixels_ms = round((time.monotonic() - closed) * 1_000)
-            # The five-line card geometry above distinguishes this partial
-            # setup from the six-line completed joke. Task completion can race
-            # with screenshot encoding after those pixels were already seen.
             await task
             joke_ready = _latest_conversation(
                 gateway, after=before, state="ready", answer=JOKE_ANSWER,
             )
             if joke_ready is None:
                 raise BrainstormActionFlowError("complete joke never reached ready")
-            joke_ready_model = await _poll_raster_frame(
+            joke_ready_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == joke_ready["revision"],
-                label="complete joke raster frame",
+                label="complete joke native view",
             )
-            joke_raw = await _changed_conversation_frame(
-                base,
+            joke_raw = await stable_after(
                 setup_raw,
-                label="complete joke pixels",
-                stable_s=0.45,
-                model=joke_ready_model,
+                label="complete joke native pixels",
+                name="08-joke-ready-stable",
             )
-            _assert_conversation_card(
-                joke_raw, joke_ready_model, label="complete joke",
-            )
-            frames["jokeReady"] = _save_frame(joke_raw, args.out, "05-joke-ready")
-            joke_ready_pixels_ms = round((time.monotonic() - closed) * 1_000)
-            timings["jokeAnswer"] = {
-                "fixtureFirstChunkDownlinkMs": round(
-                    (cast(float, setup["at"]) - closed) * 1_000
-                ),
-                "fixtureSetupStablePixelsMs": joke_setup_pixels_ms,
-                "fixtureCompleteStablePixelsMs": joke_ready_pixels_ms,
-            }
-            if not (
-                cast(int, joke_thinking_model["lineCapacity"])
-                < cast(int, setup_model["lineCapacity"])
-                <= cast(int, joke_ready_model["lineCapacity"])
-            ):
-                raise BrainstormActionFlowError("joke card did not grow with streamed answer lines")
-            joke_prompt_frame, joke_continued = await _continue_after_inactivity(
-                base,
-                gateway,
-                prior_raw=joke_raw,
-                output=args.out,
-                name="06-joke",
-            )
-            frames["jokeContinuePrompt"] = joke_prompt_frame
-            frames["jokeContinued"] = joke_continued["frame"]
-            joke_continued_raw = (
-                args.out / cast(str, frames["jokeContinued"]["raw"])
-            ).read_bytes()
 
-            # Long answer: preserve the transcript and prove bounded scrolling.
+            # Long answer: verify a real native swipe moves exactly one viewport
+            # row, reaches both bounds, and restores the tail pixels.
             before = len(gateway.conversations)
             bridge_before = len(await _console_payloads(base, BRIDGE_MARKER))
-            probe = await FramebufferLatencyProbe.start(base)
+            latency = await FramebufferLatencyProbe.start(base)
             next_seq, task, closed, closed_unix = await _drive_voice_turn(orchestrator, next_seq)
-            probe.mark_closed(closed)
+            latency.mark_closed(closed)
             long_thinking = await _wait_for(
                 lambda: _latest_conversation(gateway, after=before, state="thinking"),
                 label="long thinking downlink",
             )
-            long_thinking_model = await _poll_raster_frame(
+            long_thinking_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == long_thinking["revision"],
-                label="long prompt raster frame",
+                label="long thinking native view",
             )
-            long_thinking_raw = await _changed_conversation_frame(
-                base,
-                joke_continued_raw,
-                label="long thinking pixels",
-                model=long_thinking_model,
+            long_thinking_raw = await stable_after(
+                joke_raw,
+                label="long thinking native pixels",
+                name="09-long-thinking-stable",
             )
-            _assert_conversation_card(
-                long_thinking_raw, long_thinking_model, label="long thinking",
-            )
-            frames["longThinking"] = _save_frame(
-                long_thinking_raw, args.out, "06-long-thinking",
-            )
-            long_latency = await probe.result()
-            long_latency["firstConversationImageAcceptedMs"] = await _bridge_image_latency(
+            long_latency = await latency.result()
+            long_latency["firstNativeWriteAcceptedMs"] = await _bridge_native_latency(
                 base,
                 after=bridge_before,
                 closed_unix_ms=closed_unix,
-                paint_requested_unix_ms=cast(
-                    int, long_thinking_model["paintRequestedAtUnixMs"],
-                ),
+                paint_requested_unix_ms=cast(int, long_thinking_model["paintRequestedAtUnixMs"]),
             )
             timings["longPrompt"] = long_latency
             await task
@@ -1222,97 +1178,131 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             )
             if long_ready is None:
                 raise BrainstormActionFlowError("long answer never reached ready")
-            long_model = await _poll_raster_frame(
+            long_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == long_ready["revision"]
                 and item.get("state") == "ready",
-                label="long answer raster frame",
+                label="long answer native view",
             )
-            long_raw = await _changed_conversation_frame(
-                base,
+            long_raw = await stable_after(
                 long_thinking_raw,
-                label="long answer pixels",
-                stable_s=0.45,
-                model=long_model,
+                label="long answer native pixels",
+                name="10-long-tail-stable",
             )
-            _assert_conversation_card(
-                long_raw, long_model, label="long ready",
-            )
-            frames["longTail"] = _save_frame(long_raw, args.out, "07-long-tail")
-            if cast(int, long_model["lineCapacity"]) != 9:
-                raise BrainstormActionFlowError("long conversation did not reach the nine-line visual cap")
+            if cast(int, long_model["lineCapacity"]) != 7:
+                raise BrainstormActionFlowError("native conversation geometry changed from seven lines")
             if cast(int, long_model["maximumScrollFromTail"]) <= 0:
-                raise BrainstormActionFlowError("long conversation has no scrollable overflow")
+                raise BrainstormActionFlowError("long native conversation has no scrollable overflow")
 
+            scroll_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
             up_steps, top_model, top_raw, reconstructed = await _scroll_to_boundary(
                 base, direction="up", start_frame=long_model, start_raw=long_raw,
             )
-            frames["longTop"] = _save_frame(top_raw, args.out, "08-long-top")
+            frames["longTop"] = _save_frame(top_raw, args.out, "11-long-top-stable")
             expected_user = " ".join((OPENING_PROMPT, JOKE_PROMPT, LONG_PROMPT))
             expected_assistant = " ".join((OPENING_ANSWER, JOKE_ANSWER, LONG_ANSWER))
             if _normalized_role_text(reconstructed, "user") != expected_user:
-                raise BrainstormActionFlowError("scrollback changed or omitted wearer text")
+                raise BrainstormActionFlowError("native scrollback changed or omitted wearer text")
             if _normalized_role_text(reconstructed, "assistant") != expected_assistant:
-                raise BrainstormActionFlowError("scrollback changed or omitted assistant text")
+                raise BrainstormActionFlowError("native scrollback changed or omitted assistant text")
             down_steps, tail_model, restored_raw, _ = await _scroll_to_boundary(
                 base, direction="down", start_frame=top_model, start_raw=top_raw,
             )
             if up_steps != down_steps or cast(int, tail_model["scrollFromTail"]) != 0:
-                raise BrainstormActionFlowError("scroll did not return through the same bounded rows")
+                raise BrainstormActionFlowError("native scroll did not return through the same rows")
             if _conversation_pixel_digest(restored_raw) != _conversation_pixel_digest(long_raw):
-                raise BrainstormActionFlowError(
-                    "scroll cycle did not restore exact conversation-tail pixels"
-                )
+                raise BrainstormActionFlowError("native scroll cycle did not restore tail pixels")
             frames["longTailRestored"] = _save_frame(
-                restored_raw, args.out, "09-long-tail-restored",
+                restored_raw, args.out, "12-long-tail-restored-stable",
             )
+            scroll_events = (
+                await _console_payloads(base, BRIDGE_MARKER)
+            )[scroll_bridge_start:]
+            scroll_text = [item for item in scroll_events if item.get("operation") == "text"]
+            if not scroll_text or any(
+                item.get("containerName") not in {"wearer-turns", "joat-turns", "scroll-position"}
+                for item in scroll_text
+            ):
+                raise BrainstormActionFlowError("native swipe updated an unrelated container")
 
-            # The simulator API does not identify a left-temple source for a
-            # double-click, so it cannot prove JOAT's source-specific Back.
-            # It can prove the inactivity question and its ordinary tap path.
-            prompt_frame, continued = await _continue_after_inactivity(
-                base,
-                gateway,
-                prior_raw=restored_raw,
-                output=args.out,
-                name="10-long",
+            # First Back asks for confirmation through one footer update. Second
+            # Back exits and recreates the visual Overview with its four images.
+            back_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
+            before_inputs = len(gateway.inputs)
+            await _input(base, "double_click")
+            back_immediate_raw = await _screenshot(base)
+            frames["backPromptImmediate"] = _save_frame(
+                back_immediate_raw, args.out, "13-back-prompt-immediate",
             )
-            frames["continuePrompt"] = prompt_frame
-            frames["continued"] = continued["frame"]
+            back_footer = await _poll_bridge_event(
+                base,
+                after=back_bridge_start,
+                operations={"text"},
+                predicate=lambda item: item.get("containerName") == "generation"
+                and "Continue? tap: stay · double-click: back" in str(item.get("content", "")),
+            )
+            back_prompt_raw = await stable_after(
+                restored_raw,
+                label="Back confirmation native pixels",
+                name="14-back-prompt-stable",
+            )
+            if len(gateway.inputs) != before_inputs:
+                raise BrainstormActionFlowError("first Back exited without confirmation")
+            first_back_events = (
+                await _console_payloads(base, BRIDGE_MARKER)
+            )[back_bridge_start:]
+            completed_first_back = [
+                item for item in first_back_events if item.get("operation") == "text"
+            ]
+            if not completed_first_back or any(
+                item.get("containerName") != "generation" for item in completed_first_back
+            ):
+                raise BrainstormActionFlowError("first Back changed more than the native footer")
 
-            # Exercise the production Mac-to-Hub dismissal contract to prove
-            # the latest feature state is restored without rebuilding the page.
-            await gateway.send(AssistantConversationDismiss(
-                conversation_id=cast(str, long_ready["conversationId"]),
-                revision=cast(int, long_ready["revision"]),
-            ))
-            restored_underlay_raw = await _changed_conversation_frame(
+            exit_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
+            await _input(base, "double_click")
+            exit_immediate_raw = await _screenshot(base)
+            frames["overviewTransitionImmediate"] = _save_frame(
+                exit_immediate_raw, args.out, "15-overview-transition-immediate",
+            )
+            await _wait_for(
+                lambda: gateway.inputs[-1]
+                if len(gateway.inputs) > before_inputs
+                and gateway.inputs[-1].selected_name == "exit"
+                else None,
+                label="Back exit action at Mac",
+            )
+            await _poll_bridge_event(
                 base,
-                (
-                    args.out / cast(str, frames["continued"]["raw"])
-                ).read_bytes(),
-                label="underlay restored after dismissal",
-                stable_s=0.45,
+                after=exit_bridge_start,
+                operations={"rebuild"},
+                predicate=is_visual_layout,
             )
-            _assert_dashboard_underlay_restored(baseline_raw, restored_underlay_raw)
-            frames["underlayRestored"] = _save_frame(
-                restored_underlay_raw, args.out, "12-underlay-restored",
-            )
-
-            # The official simulator draws the SDK menu itself. Capturing it
-            # after the conversation journey proves our page still carries the
-            # global menu declaration and that the gesture path remains live.
-            await _input(base, "context_menu")
-            menu_raw = await _changed_frame(
+            # Wait for all four serialized Overview image writes without a
+            # fixed renderer-delay assumption.
+            deadline = time.monotonic() + 8.0
+            while True:
+                exit_events = (
+                    await _console_payloads(base, BRIDGE_MARKER)
+                )[exit_bridge_start:]
+                exit_images = [item for item in exit_events if item.get("operation") == "image"]
+                if len(exit_images) >= 4:
+                    break
+                if time.monotonic() >= deadline:
+                    raise BrainstormActionFlowError("Overview did not restore all four visual tiles")
+                await asyncio.sleep(0.04)
+            overview_raw = await _changed_frame(
                 base,
-                cast(str, frames["underlayRestored"]["sha256"]),
-                label="official contextual menu",
-                stable_s=0.25,
+                _digest(back_prompt_raw),
+                label="stable visual Overview after Back",
+                stable_s=NATIVE_STABLE_S,
             )
-            frames["contextMenu"] = _save_frame(
-                menu_raw, args.out, "13-context-menu",
+            overview_raw = await _wait_dashboard_underlay_restored(
+                base, baseline_raw,
             )
-            visible_menu_row_bands = _assert_context_menu_visible(menu_raw)
+            frames["overviewStable"] = _save_frame(
+                overview_raw, args.out, "16-overview-stable",
+            )
 
             expected_turns = [
                 {"role": "user", "text": OPENING_PROMPT},
@@ -1334,27 +1324,44 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             if identities != {cast(str, opening_ready["conversationId"])}:
                 raise BrainstormActionFlowError("follow-ups created detached conversation identities")
 
-            bridge_events = await _console_payloads(base, BRIDGE_MARKER)
-            journey_bridge_events = bridge_events[journey_bridge_start:]
-            post_boot_rebuilds = [
-                item for item in journey_bridge_events
-                if item.get("operation") == "rebuild"
+            all_bridge_events = await _console_payloads(base, BRIDGE_MARKER)
+            active_events = all_bridge_events[journey_bridge_start:exit_bridge_start]
+            active_completed = [
+                item for item in active_events
+                if item.get("operation") in {"rebuild", "text", "image"}
             ]
-            if post_boot_rebuilds:
-                raise BrainstormActionFlowError("conversation or exit replaced the mounted visual page")
-            image_events = [
-                item for item in journey_bridge_events if item.get("operation") == "image"
-            ]
-            if not image_events:
-                raise BrainstormActionFlowError("no raster frame crossed the official SDK bridge")
+            active_rebuilds = [item for item in active_completed if item.get("operation") == "rebuild"]
+            active_images = [item for item in active_completed if item.get("operation") == "image"]
+            active_text = [item for item in active_completed if item.get("operation") == "text"]
+            if len(active_rebuilds) != 1 or active_rebuilds[0] != entry_rebuild:
+                raise BrainstormActionFlowError(
+                    f"active native conversation rebuilt {len(active_rebuilds)} times instead of once"
+                )
+            if active_images:
+                raise BrainstormActionFlowError("active native conversation wrote raster images")
+            allowed_text = {"wearer-turns", "joat-turns", "scroll-position", "generation"}
+            if not active_text or any(item.get("containerName") not in allowed_text for item in active_text):
+                raise BrainstormActionFlowError("active native conversation wrote an unknown text container")
+            if any(item.get("containerID") == 11 for item in active_text):
+                raise BrainstormActionFlowError("native conversation rewrote its event-capture frame")
+            if any(item.get("result") not in {"true", "undefined"} for item in active_text):
+                raise BrainstormActionFlowError("native text upgrade was rejected by the SDK bridge")
+
+            exit_events = all_bridge_events[exit_bridge_start:]
+            exit_rebuilds = [item for item in exit_events if item.get("operation") == "rebuild"]
+            exit_images = [item for item in exit_events if item.get("operation") == "image"]
+            if len(exit_rebuilds) != 1 or not is_visual_layout(exit_rebuilds[0]):
+                raise BrainstormActionFlowError("Back did not perform one visual Overview rebuild")
+            if [item.get("containerID") for item in exit_images] != [4, 8, 9, 10]:
+                raise BrainstormActionFlowError("Overview tiles were not restored once in serial order")
 
             return {
-                "schemaVersion": 4,
-                "result": "official-simulator-retained-conversation-pass",
+                "schemaVersion": 5,
+                "result": "official-simulator-native-conversation-pass",
                 "evidence": {
-                    "renderer": "current source snapshot through JOAT four-tile raster renderer",
+                    "renderer": "current source snapshot through SDK-native text containers",
                     "transport": "production Mac protocol, WebSocket, Hub plug-in, Even SDK bridge",
-                    "simulator": "official Even Realities simulator 0.9.3 framebuffer and input API",
+                    "simulator": "official Even Realities simulator framebuffer, console, and input API",
                     "fixtureProbe": "disposable deterministic-source copy; absent from product source",
                     "sttAndModel": "deterministic local fixtures; no external AI service",
                     "physicalG2": "not run",
@@ -1366,51 +1373,43 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                     "streamStates": states,
                     "streamRevisions": revisions,
                     "singleConversationIdentity": True,
-                    "cardGrowthLineCapacity": {
-                        "openingThinking": thinking_model["lineCapacity"],
-                        "openingReady": ready_model["lineCapacity"],
-                        "jokeThinking": joke_thinking_model["lineCapacity"],
-                        "jokeSetup": setup_model["lineCapacity"],
-                        "jokeReady": joke_ready_model["lineCapacity"],
-                        "longReady": long_model["lineCapacity"],
+                    "nativeEntryLayout": {
+                        "containerTotalNum": entry_rebuild["containerTotalNum"],
+                        "textContainerNames": [
+                            item["containerName"] for item in cast(list[dict[str, Any]], entry_rebuild["text"])
+                        ],
+                        "imageCount": entry_rebuild["imageCount"],
                     },
-                    "rolePixels": role_pixels,
+                    "nativePageRebuildsWhileActive": len(active_rebuilds),
+                    "nativeTextUpgradesWhileActive": len(active_text),
+                    "acceptedRasterImageOperationsWhileActive": len(active_images),
+                    "partialJokeVisibleBeforeCompletion": setup_model["revision"] < joke_ready_model["revision"],
+                    "activityIndicatorAdvanced": activity_event.get("content") != entry_generation,
                     "scrollbar": {
                         "totalLines": long_model["totalLines"],
                         "visibleLines": long_model["lineCapacity"],
                         "upSteps": up_steps,
                         "downSteps": down_steps,
-                        "topReached": top_model["scrollFromTail"]
-                        == top_model["maximumScrollFromTail"],
+                        "topReached": top_model["scrollFromTail"] == top_model["maximumScrollFromTail"],
                         "tailConversationPixelsRestoredExactly": (
                             _conversation_pixel_digest(restored_raw)
                             == _conversation_pixel_digest(long_raw)
                         ),
                     },
-                    "partialJokeVisibleBeforeCompletion": True,
-                    "activityIndicatorAdvanced": (
-                        _conversation_pixel_digest(next_indicator_raw)
-                        != _conversation_pixel_digest(thinking_raw)
-                    ),
-                    "activityIndicatorChangedTileRegions": (
-                        activity_changed_tile_regions
-                    ),
-                    "inactivityContinuePrompt": True,
-                    "continueReachedMac": True,
-                    "dismissCommandRestoredUnderlay": True,
+                    "firstBackWasFooterOnly": True,
+                    "secondBackReachedMac": True,
+                    "overviewVisualRebuilds": len(exit_rebuilds),
+                    "overviewImageOperations": len(exit_images),
                     "underlayRestoredOutsideLiveClockExactly": True,
-                    "restoredLiveClockPopulated": True,
-                    "contextMenuDeclaredRows": declared_menu_rows,
-                    "contextMenuVisibleRowBands": visible_menu_row_bands,
-                    "contextMenuVisiblyOpened": True,
-                    "nativePageRebuildsDuringJourney": len(post_boot_rebuilds),
-                    "acceptedRasterImageOperations": len(image_events),
+                    "immediateTransitionFramesCaptured": [
+                        "01-opening-transition-immediate",
+                        "13-back-prompt-immediate",
+                        "15-overview-transition-immediate",
+                    ],
                 },
                 "timingsMs": {
                     "scope": "local deterministic STT/model through official simulator, from VAD closure",
-                    "activityFixtureFirstChunkDelay": round(
-                        ACTIVITY_FIXTURE_DELAY_S * 1_000
-                    ),
+                    "activityFixtureFirstChunkDelay": round(ACTIVITY_FIXTURE_DELAY_S * 1_000),
                     **timings,
                 },
                 "frames": frames,
@@ -1420,7 +1419,6 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
         for process in reversed(processes):
             process.stop()
         await gateway.stop()
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
