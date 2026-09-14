@@ -40,7 +40,6 @@ from scripts.hud_visual_evidence import decode_rgba8_png
 from scripts.simulator_brainstorm_action_flow_acceptance import (
     BrainstormActionFlowError,
     ManagedProcess,
-    _capture,
     _http_bytes,
     _input,
     _optical_preview,
@@ -422,6 +421,49 @@ async def _wait_dashboard_underlay_restored(
     if latest_error is not None:
         raise latest_error
     raise BrainstormActionFlowError("restored Overview never reached a stable framebuffer")
+
+
+async def _wait_visual_idle_after(
+    automation_base: str,
+    *,
+    after: int,
+    timeout_s: float = 12.0,
+    stable_s: float = 1.0,
+) -> bytes:
+    """Wait for a post-marker visual write and its settled framebuffer.
+
+    A quiet screenshot alone is not a boot receipt. The simulator can hold its
+    local "Connecting" Overview long enough to look stable while the Mac's
+    already-sent Ready frame is still queued behind it. Tie the baseline to a
+    completed image write after ``VoiceOrchestrator.on_connect`` and then wait
+    until both the bridge ledger and framebuffer stop changing.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    last_signature: tuple[int, int, str] | None = None
+    stable_since = 0.0
+    latest: bytes | None = None
+    while time.monotonic() < deadline:
+        events = (await _console_payloads(automation_base, BRIDGE_MARKER))[after:]
+        starts = sum(item.get("operation") == "image-start" for item in events)
+        completed = sum(item.get("operation") == "image" for item in events)
+        try:
+            raw = await _screenshot(automation_base)
+        except (OSError, urllib.error.URLError):
+            await asyncio.sleep(0.04)
+            continue
+        signature = (starts, completed, _digest(raw))
+        now = time.monotonic()
+        if signature != last_signature:
+            last_signature = signature
+            stable_since = now
+            latest = raw
+        elif completed > 0 and starts == completed and now - stable_since >= stable_s:
+            return latest or raw
+        await asyncio.sleep(0.04)
+    raise BrainstormActionFlowError(
+        "Mac-connected Overview did not finish a post-connect visual frame"
+    )
 
 
 def _assert_context_menu_visible(raw: bytes) -> int:
@@ -942,12 +984,16 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 lambda: True if gateway.connected else None,
                 label="simulator plug-in WebSocket connection",
             )
+            connect_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
             await orchestrator.on_connect()
-            baseline_hash, baseline_raw_name, baseline_optical_name = await _capture(
-                base, args.out, "00-baseline", None,
+            baseline_raw = await _wait_visual_idle_after(
+                base,
+                after=connect_bridge_start,
             )
-            baseline_raw = (args.out / baseline_raw_name).read_bytes()
-            await asyncio.sleep(0.5)
+            baseline_frame = _save_frame(baseline_raw, args.out, "00-baseline")
+            baseline_hash = cast(str, baseline_frame["sha256"])
+            baseline_raw_name = cast(str, baseline_frame["raw"])
+            baseline_optical_name = cast(str, baseline_frame["optical"])
             boot_bridge_events = await _console_payloads(base, BRIDGE_MARKER)
             boot_pages = [item for item in boot_bridge_events if is_visual_layout(item)]
             if not boot_pages:
