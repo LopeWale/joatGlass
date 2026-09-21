@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from websockets.asyncio.client import ClientConnection, connect as open_websocket
+from websockets.exceptions import InvalidHandshake, InvalidStatus
 
 from ..core.log_redaction import install_websocket_secret_redaction
 
@@ -847,6 +848,21 @@ class OpenClawGatewayClient:
                 )
         except TimeoutError as exc:
             raise OpenClawGatewayError("OpenClaw connection timed out") from exc
+        except InvalidStatus as exc:
+            # The host answered, but refused the upgrade.  A reverse proxy in
+            # front of the Gateway (Tailscale Serve) reports the service behind
+            # it being down as a plain 502 here.  That is a peer that is not
+            # available right now, not a fault in this engine, so it has to
+            # surface as OpenClawGatewayError like every other reachability
+            # failure -- an unmapped exception escapes initialize() and kills
+            # the whole brain process.
+            raise OpenClawGatewayError(
+                "OpenClaw gateway refused the WebSocket upgrade "
+                f"(HTTP {exc.response.status_code:d})"
+            ) from exc
+        except (InvalidHandshake, OSError) as exc:
+            # Malformed handshake, TLS failure, refused connection, no route.
+            raise OpenClawGatewayError(f"OpenClaw gateway is unreachable: {exc}") from exc
         try:
             async with asyncio.timeout(self._timeout_s):
                 challenge = _decode_frame(await websocket.recv())
