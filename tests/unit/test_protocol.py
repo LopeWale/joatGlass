@@ -384,6 +384,61 @@ class TestParseUplink:
                 },
             })
 
+    def test_g2_diagnostic_frame_timing_splits_one_frame_by_stage(self) -> None:
+        # The whole-frame split the DEV-only console line cannot give us:
+        # `[hud-timing]` never runs in a QR sideload or a packed .ehpk, and
+        # those are the only places the BLE hop exists. Stage durations are
+        # optional so an older plugin still parses.
+        message = parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "frame_timing", "frame": 7, "kind": "overview",
+                "changedTiles": 4, "queueMs": 0, "renderMs": 31,
+                "encodeMs": 12, "pacingMs": 330, "bridgeMs": 1840, "totalMs": 2213,
+            },
+        })
+        assert message == G2Diagnostic(event={
+            "type": "frame_timing", "frame": 7, "kind": "overview",
+            "changedTiles": 4, "queueMs": 0, "renderMs": 31,
+            "encodeMs": 12, "pacingMs": 330, "bridgeMs": 1840, "totalMs": 2213,
+        })
+        # An older plugin sends the shape without the stage breakdown.
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "frame_timing", "frame": 1, "kind": "list", "changedTiles": 0,
+            },
+        }) == G2Diagnostic(event={
+            "type": "frame_timing", "frame": 1, "kind": "list", "changedTiles": 0,
+        })
+        # A screen name outside the closed set is a schema change, not data.
+        with pytest.raises(ProtocolError, match="kind is invalid"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "frame_timing", "frame": 1, "kind": "sidebar",
+                    "changedTiles": 1,
+                },
+            })
+        # Five tiles cannot exist: the page declares four image containers.
+        with pytest.raises(ProtocolError, match="changedTiles is invalid"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "frame_timing", "frame": 1, "kind": "overview",
+                    "changedTiles": 5,
+                },
+            })
+        # This record is durations and counts. Nothing renderable rides it.
+        with pytest.raises(ProtocolError, match="unsupported fields"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "frame_timing", "frame": 1, "kind": "overview",
+                    "changedTiles": 1, "main": "Submit project report draft",
+                },
+            })
+
     def test_g2_diagnostic_accepts_content_free_navigation_page_transition(self) -> None:
         assert parse_uplink({
             "kind": "g2.diagnostic",
