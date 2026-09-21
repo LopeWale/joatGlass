@@ -86,6 +86,9 @@ function rig(
     }),
     isProductivityVisible: vi.fn(() => productivityVisible),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
+    // See CapabilityMenu.panel.test.ts: two call sites invoke this without
+    // `?.`, so omitting it throws rather than degrading.
+    usesCustomListSelection: () => true,
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => {
     const event = m.event as { containerName?: string; selectedName?: string } | undefined;
@@ -1911,6 +1914,7 @@ describe('Planning split dashboard', () => {
       showProductivity: vi.fn(async () => true),
       isProductivityVisible: vi.fn(() => true),
       showDefault: vi.fn(async () => true),
+      usesCustomListSelection: () => true,
     } as unknown as HudPresenter;
     const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
     const menu = new CapabilityMenu(hud, new Settings(), link);
