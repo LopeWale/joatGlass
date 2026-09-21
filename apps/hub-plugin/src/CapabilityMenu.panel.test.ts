@@ -50,6 +50,13 @@ function rig(activeTab: PanelTab = 'notifications', restorationResult: boolean |
     moveSelection: vi.fn(async () => true),
     setStatus: vi.fn(async () => true),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
+    // The real presenter answers true whenever a visual surface exists and
+    // the list is not a native firmware one. These panels drive the custom
+    // cursor (setSelection/moveSelection/restoreSelection), so that is the
+    // configuration under test. Two CapabilityMenu call sites invoke this
+    // WITHOUT `?.`, so a double that omits it does not fall back — it
+    // throws, and every test in the file dies on the first selection.
+    usesCustomListSelection: () => true,
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
