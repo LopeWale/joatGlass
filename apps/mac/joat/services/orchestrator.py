@@ -53,6 +53,10 @@ _LATENCY_BUCKETS = (
     (10.0, "5_10s"),
 )
 _SPEAKER_ROLES = frozenset({"self", "other", "unknown"})
+# Roles that prove the host's speaker classifier is actually running on this
+# connection. `unknown` is the degraded value the SDK documents for the phone
+# mic and for hosts older than 0.0.14, so it proves nothing either way.
+_DECISIVE_SPEAKER_ROLES = frozenset({"self", "other"})
 
 
 def _latency_bucket(elapsed_s: float) -> str:
@@ -335,6 +339,19 @@ class VoiceOrchestrator:
         self._last_seq: int | None = None
         self._connection_generation: str | None = None
         self._ingress_ordinal = 0
+        # Which audio sources have ever returned a decisive speaker label.
+        # `speakerRole` is absent on the phone mic and on hosts older than
+        # SDK 0.0.14, where every frame degrades to `unknown`; rejecting
+        # unlabelled speech there would mute the wearer outright. Once a
+        # single `self`/`other` has arrived FOR A SOURCE we know that
+        # source's classifier is live, and an utterance it declined to call
+        # `self` is not the wearer.
+        #
+        # Per-source, not global: the glasses mic classifies and the phone
+        # fallback does not, so one flag would let the glasses teach the
+        # gate a confidence that silences the phone the moment JOAT falls
+        # back to it.
+        self._speaker_labelled_sources: set[str] = set()
         self._prompt_revision = 0
         # Mirror VAD's actual pre-roll, rather than retaining every idle
         # microphone/source label since the preceding utterance. These
@@ -487,6 +504,9 @@ class VoiceOrchestrator:
             self._reset_partial_utterance()
         self._last_seq = seq
 
+        if speaker in _DECISIVE_SPEAKER_ROLES and source is not None:
+            self._speaker_labelled_sources.add(source)
+
         receipt = UtteranceProvenance(
             source=source, connection_generation=connection_generation,
             audio_epoch=audio_epoch,
@@ -524,15 +544,40 @@ class VoiceOrchestrator:
             "glasses" if provenance.source == "glasses"
             else "phone" if provenance.source == "phone" else None
         )
-        only_other_speaker = provenance.speaker_roles == {"other"}
+        roles = provenance.speaker_roles
         self._utterance_frames.clear()
-        if only_other_speaker:
-            # Do not transcribe a completed utterance the host classified as
-            # someone else.  This is a capacity hint, never identity proof:
-            # unknown/mixed/legacy speech remains available to the normal
-            # wake-word gate rather than making the wearer appear muted.
-            log.info("ignored other-speaker utterance bytes=%d", len(utterance))
+        # `unknown` stays eligible on purpose — the SDK degrades to it on the
+        # phone mic and on hosts predating 0.0.14, so treating it as "not the
+        # wearer" would mute them outright. What the old `== {"other"}` rule
+        # missed is the MIXED case: an utterance the host attributed to
+        # someone else, carrying one stray `unknown` frame, no longer equals
+        # {"other"} and so reached STT. Whisper does not return silence for
+        # another person's speech — it transcribes it, and the wearer is then
+        # asked about a sentence they never said.
+        #
+        # Reject when the host named another speaker and never named the
+        # wearer, whatever else is in the set.
+        if "other" in roles and "self" not in roles:
+            log.info(
+                "ignored non-wearer utterance bytes=%d source=%s roles=%s",
+                len(utterance), provenance.source, ",".join(sorted(roles)),
+            )
             return
+        # Pure-`unknown` on a source we KNOW classifies is the remaining
+        # suspect for phantom questions: the classifier was running and still
+        # declined to call this the wearer. Rejecting it would invert a
+        # deliberate, tested contract, so measure first — count them here and
+        # decide with numbers rather than by argument.
+        if (
+            not roles - {"unknown"}
+            and provenance.source is not None
+            and provenance.source in self._speaker_labelled_sources
+        ):
+            log.info(
+                "admitted unlabelled utterance on a classifying source "
+                "bytes=%d source=%s (strict gate would drop this)",
+                len(utterance), provenance.source,
+            )
         queued = _QueuedUtterance(utterance, utterance_source, provenance, time.monotonic())
         if self._utterance_worker is not None and not self._utterance_worker.done():
             dropped = len(self._pending_utterances) == self._pending_utterances.maxlen

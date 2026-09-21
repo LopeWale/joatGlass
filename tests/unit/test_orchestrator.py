@@ -241,6 +241,32 @@ class TestVoiceLoop:
 
         assert conversation_role_text(transport, "user") == ["hello from an unknown speaker"]
 
+    async def test_other_speaker_utterance_is_rejected_despite_a_stray_unknown_frame(
+        self,
+    ) -> None:
+        """One `unknown` frame must not rescue another person's speech.
+
+        The gate used to compare the role set to {"other"} exactly, so a
+        single unattributed frame anywhere in the utterance made the set
+        {"other", "unknown"} and the whole thing reached STT. Whisper
+        transcribes the other person, and the wearer is asked about a
+        sentence they never said.
+        """
+        transport, engine = FrameTransport(), FakeEngine("someone else talking")
+        orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
+        orch.attach()
+        assert transport.frame_cb is not None
+
+        # Same shape as the other-speaker case, with frame 2 unattributed.
+        roles = ["other", "other", "unknown", "other", "other"]
+        for sequence, (pcm, role) in enumerate(
+            zip([LOUD, LOUD, QUIET, QUIET, QUIET], roles),
+        ):
+            transport.emit_frame(pcm, sequence, "glasses", role)
+        await drain()
+
+        assert conversation_role_text(transport, "user") == []
+
     async def test_seq_gap_resets_vad_and_engine(self) -> None:
         transport, engine = FakeTransport(), FakeEngine()
         orch = VoiceOrchestrator(transport, engine, vad=TEST_VAD())
