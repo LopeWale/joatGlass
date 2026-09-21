@@ -447,14 +447,27 @@ describe('HudVisualSurface', () => {
 
     // Each receipt carries the bridge round trip and the encoded size —
     // the two numbers that locate a slow HUD on the phone or on the BLE
-    // hop — and never the pixels themselves.
+    // hop — and never the pixels themselves. The frame closes with one
+    // whole-frame split naming the screen, so a slow surface is findable
+    // without replaying it; it too carries only counts and durations.
     expect(events).toEqual([
       { type: 'tile_upload', frame: 1, order: 0, containerId: 4, outcome: 'success', durationMs: expect.any(Number), bytes: 3 },
       { type: 'tile_upload', frame: 1, order: 1, containerId: 8, outcome: 'success', durationMs: expect.any(Number), bytes: 1 },
       { type: 'tile_upload', frame: 1, order: 2, containerId: 9, outcome: 'success', durationMs: expect.any(Number), bytes: 1 },
       { type: 'tile_upload', frame: 1, order: 3, containerId: 10, outcome: 'success', durationMs: expect.any(Number), bytes: 1 },
+      {
+        type: 'frame_timing', frame: 1, kind: 'overview', changedTiles: 4,
+        queueMs: expect.any(Number), renderMs: expect.any(Number),
+        encodeMs: expect.any(Number), pacingMs: expect.any(Number),
+        bridgeMs: expect.any(Number), totalMs: expect.any(Number),
+      },
     ]);
-    for (const event of events as Array<{ durationMs: number }>) {
+    const uploads = events.filter(
+      (event): event is { type: 'tile_upload'; durationMs: number } =>
+        (event as { type?: string }).type === 'tile_upload',
+    );
+    expect(uploads).toHaveLength(4);
+    for (const event of uploads) {
       expect(event.durationMs).toBeGreaterThanOrEqual(0);
     }
   });

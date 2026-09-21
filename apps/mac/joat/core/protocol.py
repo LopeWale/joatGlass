@@ -2043,6 +2043,38 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
                 event["bytes"], "bytes", minimum=0, maximum=16_777_216,
             )
         return tile_upload
+    if event_type == "frame_timing":
+        # Plugin 0.1.91+: where one visual frame's time went, split across the
+        # stages the plugin controls.  Durations and counts only -- there is no
+        # text, pixel, wearer or device field in this record, and `kind` is a
+        # closed set of screen names.  It exists because `[hud-timing]` only
+        # prints under Vite DEV, and the BLE hop -- the part that decides
+        # whether a screen belongs on the image-tile path at all -- is absent
+        # from both the dev server and the simulator.
+        _trace_shape(
+            event,
+            {"type", "frame", "kind", "changedTiles"},
+            optional=frozenset({
+                "queueMs", "renderMs", "encodeMs", "pacingMs", "bridgeMs", "totalMs",
+            }),
+        )
+        frame_timing: dict[str, str | int] = {
+            "type": "frame_timing",
+            "frame": _trace_int(event["frame"], "frame", minimum=1, maximum=2_147_483_647),
+            "kind": _trace_enum(event["kind"], "kind", (
+                "brainstorm", "confirmation", "list", "messages",
+                "navigation", "overview", "productivity", "prompt_question",
+            )),
+            "changedTiles": _trace_int(
+                event["changedTiles"], "changedTiles", minimum=0, maximum=4,
+            ),
+        }
+        for stage in ("queueMs", "renderMs", "encodeMs", "pacingMs", "bridgeMs", "totalMs"):
+            if stage in event:
+                frame_timing[stage] = _trace_int(
+                    event[stage], stage, minimum=0, maximum=3_600_000,
+                )
+        return frame_timing
     if event_type == "hud_surface":
         _trace_shape(event, {"type", "stage", "surface", "outcome"})
         return {

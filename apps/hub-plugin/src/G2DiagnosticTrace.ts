@@ -58,6 +58,39 @@ export type G2TraceEvent =
     bytes: number;
   }
   /**
+   * Where one visual frame's time went. Durations and counts only: no text,
+   * no pixels, no wearer or device identifier. `kind` names the screen so a
+   * slow surface can be found without guessing which one it was.
+   *
+   * The production twin of the DEV-only `[hud-timing]` console line. BLE
+   * transit exists only on real hardware, so the numbers that decide whether
+   * a screen is worth moving off the image-tile path cannot be collected
+   * from the dev server or the simulator — the two places that line prints.
+   * Emitted only for frames that actually re-sent tiles: a clock tick
+   * repaints without telling the wearer anything, and recording those floods
+   * the bounded trace (see `completedVisualFrameReceipt` below).
+   */
+  | {
+    type: 'frame_timing';
+    frame: number;
+    kind: 'brainstorm' | 'confirmation' | 'list' | 'messages'
+      | 'navigation' | 'overview' | 'productivity' | 'prompt_question';
+    /** Tiles actually re-sent. 0 means every region was already correct. */
+    changedTiles: number;
+    /** Waiting to start, behind an in-flight frame. */
+    queueMs: number;
+    /** Canvas draw. */
+    renderMs: number;
+    /** Greyscale/LZ4 preparation, parallel across tiles. */
+    encodeMs: number;
+    /** Slept in TILE_CALL_GAP_MS pacing — self-imposed, not the bridge. */
+    pacingMs: number;
+    /** Sum of the SDK upload calls. Never a pixel-visible receipt. */
+    bridgeMs: number;
+    /** Queue to last tile settled. */
+    totalMs: number;
+  }
+  /**
    * A content-free first-light receipt. It identifies only whether the real
    * host accepted the modern page and its first image frame; it never carries
    * HUD text, image pixels, or wearer/device data.

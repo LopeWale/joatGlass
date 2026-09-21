@@ -755,6 +755,25 @@ export class HudVisualSurface implements HudFramePainter {
       // Development performance evidence contains no text, identifiers or
       // raster payloads and does not change the Mac diagnostic wire schema.
       if (import.meta.env.DEV) console.info('[hud-timing]', JSON.stringify({ ...timing, workMs: elapsedSince(startedAt) }));
+      // The same split, on the wire, so it survives QR sideload and a packed
+      // .ehpk — the only places the BLE hop is real. A clock tick repaints
+      // without carrying anything new, and an unchanged frame sent nothing:
+      // recording either floods a trace bounded at MAX_RETAINED_EVENTS and
+      // buries the frames that did work.
+      if (!localTick && timing.changedTiles > 0) {
+        this.diagnostics?.record({
+          type: 'frame_timing',
+          frame: timing.frame,
+          kind: timing.kind,
+          changedTiles: timing.changedTiles,
+          queueMs: timing.queueMs,
+          renderMs: timing.renderMs,
+          encodeMs: timing.encodeMs,
+          pacingMs: timing.pacingMs,
+          bridgeMs: timing.bridgeMs,
+          totalMs: timing.totalMs,
+        });
+      }
     }
   }
 }
