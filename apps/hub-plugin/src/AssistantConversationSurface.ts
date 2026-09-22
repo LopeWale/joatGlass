@@ -11,6 +11,7 @@ import {
   type AssistantConversationPage,
   type HudPageBuilder,
 } from './HudPageBuilder';
+import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
 import type {
   AssistantConversationSnapshot,
   AssistantConversationTurn,
@@ -723,7 +724,7 @@ export class AssistantConversationSurface {
     content: string,
     previous = '',
   ): Promise<boolean> {
-    const replacement = content || ' ';
+    const replacement = fitUtf8(content, TEXT_CONTAINER_MAX_BYTES) || ' ';
     return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
       containerID,
       containerName,

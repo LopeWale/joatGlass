@@ -12,6 +12,14 @@ import type { HudVisualFrame } from './HudVisualSurface';
 import { selectedMessagesConversationRow } from './HudCanvasRenderer';
 import type { MacLink } from './MacLink';
 import { CAPABILITIES, type ProductivityHudModel } from './types';
+import { setNativePanelTabsForTest } from './CapabilityMenu';
+
+// These tests pin the plugin-side cursor-restoration path, which ships as the
+// fallback when VITE_NATIVE_PANEL_TABS narrows the firmware-list set. On a
+// firmware list there is nothing to restore: the glasses own the highlight
+// and report it back (see restorePanelSelection).
+setNativePanelTabsForTest([]);
+
 
 /**
  * The wearer's report from hardware: double-tap opened "a menu modal, but

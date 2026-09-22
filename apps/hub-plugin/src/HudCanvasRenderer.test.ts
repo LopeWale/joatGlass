@@ -1404,7 +1404,7 @@ describe('the resting overview wears one footer on every tab', () => {
   });
 
   it('keeps the chrome hint where there is no rail to swipe', () => {
-    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · hold: mic · “JOAT …”');
+    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · long-press: mic · “JOAT …”');
   });
 });
 

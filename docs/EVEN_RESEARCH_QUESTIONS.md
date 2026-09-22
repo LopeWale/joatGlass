@@ -71,6 +71,34 @@ duplicates it.
 
 ## Answered
 
+### Payload limits a page must respect — ANSWERED (2026-09-22)
+Source: Even's `@evenrealities/evenhub-simulator` README, changelog entries
+written "to behave more like firmware":
+- v0.7.1 — "add text container bytes limit to 999" → a text container's
+  `content` is at most **999 UTF-8 bytes**.
+- v0.7.3 — "constraint list item text size to be maximum 63 bytes and 20
+  items" → a list has at most **20 rows of 63 UTF-8 bytes**.
+- SDK d.ts: menu item names ≤ 32 UTF-8 bytes (`isMenuNameWithinLimit`).
+A page over any limit is rejected WHOLE: `rebuildPageContainer` resolves
+`false` and the glass keeps its previous page. Observed live in the
+simulator log: "RebuildPageContainer validation failed: text content length
+1203 exceeds limit of 999 bytes" (the News tab card) and "list item text
+length 67 exceeds limit of 63 bytes" (the expanded News list). Both had
+been failing silently — every status push re-sent the rejected page, which
+is what "EXPAND stomped by the overview" actually was.
+Implemented: `apps/hub-plugin/src/FirmwareLimits.ts` clamps every text
+container, upgrade and list row; `BridgeClient` logs `[page-rejected]`
+naming the offending container whenever the host refuses a page.
+
+### Firmware scrolling swallows swipes inside an overflowing capture container — CONFIRMED (2026-09-22)
+Observed on the simulator: with the overview's pane as the capture
+container and a News card longer than its six lines, every swipe scrolled
+the card and none reached the plugin; the tab rail never moved. The rail
+(which never overflows) is now the capture container and the pane is a
+six-row, one-line-per-row preview. Firmware paging inside the opened
+article works the same way in our favour: swipes scroll the page for free
+and only the boundary swipe reaches the Mac to turn the page.
+
 ### Why Even's Dashboard is cheap and our overview is not — ANSWERED
 
 Our overview is a faithful copy of Even's Dashboard, and that is deliberate.

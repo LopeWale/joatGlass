@@ -4,7 +4,7 @@ import {
   type RebuildPageContainer,
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
-import { HudPresenter } from './HudPresenter';
+import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import {
@@ -14,6 +14,12 @@ import {
 } from './HudVisualSurface';
 import { CANVAS, ContainerId } from './types';
 import { navigationVisualFixture } from './NavigationHud';
+
+// These tests pin the CANVAS overview, which ships as the VITE_NATIVE_OVERVIEW=0
+// fallback. The default text overview has its own tests in
+// HudPresenter.textOverview.test.ts.
+setNativeOverviewForTest(false);
+
 
 /**
  * Streamed paints must be SELF-CONTAINED full frames, throttled to BLE
@@ -694,13 +700,17 @@ describe('HudPresenter streaming', () => {
   });
 
   it('overflow keeps the tail — the newest words are the ones being read', async () => {
+    // A text container holds at most 999 UTF-8 bytes (Even simulator README
+    // v0.7.1, "to behave more like firmware"); an upgrade beyond that is
+    // rejected whole. The cut is marked with an ellipsis inside the budget.
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
     await hud.appendText('x'.repeat(1990));
     vi.advanceTimersByTime(400);
     await hud.appendText('THE-END-' + 'y'.repeat(100));
     vi.advanceTimersByTime(400);
     const last = lastOf(mainPaints());
-    expect(last.content!.length).toBe(2000);
+    expect(new TextEncoder().encode(last.content!).length).toBeLessThanOrEqual(999);
+    expect(last.content!.startsWith('…')).toBe(true);
     expect(last.content!.endsWith('y'.repeat(100))).toBe(true);
   });
 

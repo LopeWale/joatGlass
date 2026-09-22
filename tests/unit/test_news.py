@@ -157,7 +157,7 @@ class TestService:
 
     async def test_an_empty_tab_says_why(self, tmp_path: Path) -> None:
         svc = service(tmp_path, {})
-        assert svc.snapshot().empty == "No headlines yet — hold to refresh."
+        assert svc.snapshot().empty == "No headlines yet — long-press to refresh."
         await svc.refresh_once()
         assert svc.snapshot().empty == "Feeds unavailable — hold to retry."
 
@@ -216,3 +216,22 @@ class TestService:
         assert svc.spoken_headlines() == "I don't have any headlines yet."
         await svc.refresh_once()
         assert svc.spoken_headlines() == "Here are the headlines. 1. One from BBC. 2. Two from BBC."
+
+
+def test_summary_text_decodes_entities_and_breaks_related_coverage_rows() -> None:
+    """A Google News summary is an <ol> of related coverage joined by
+    &nbsp;&nbsp; — it must reach the glass as decoded rows, never as a
+    run-on line with literal entities (observed on the simulator)."""
+    from joat.services.news import _summary_text
+
+    html = (
+        '<ol><li><a href="x">Trump tells U.N. he could &#8216;annihilate&#8217; Iran</a>'
+        "&nbsp;&nbsp;<font color=\"#6f6f6f\">NBC News</font></li>"
+        '<li><a href="y">Live updates: Trump speaks at UNGA</a>&nbsp;&nbsp;<font>CNN</font></li></ol>'
+    )
+    assert _summary_text(html) == (
+        "Trump tells U.N. he could ‘annihilate’ Iran NBC News\n"
+        "Live updates: Trump speaks at UNGA CNN"
+    )
+    assert "&nbsp;" not in _summary_text(html)
+    assert _summary_text("<p>One &amp; two</p>") == "One & two"

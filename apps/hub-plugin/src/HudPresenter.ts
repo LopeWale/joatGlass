@@ -9,7 +9,7 @@ import { PANEL_TABS } from './types';
  * checked against a pixel diff. Canvas overview vs this one:
  *
  *   swipe between tabs   208ms -> 165ms
- *   expand a tab         416ms -> 165ms   (with VITE_NATIVE_PANEL_TABS)
+ *   expand a tab         416ms -> 165ms   (with the firmware-list tabs)
  *   leave a tab          416ms -> 330ms
  *   the walk above      2037ms -> 825ms
  *
@@ -18,10 +18,15 @@ import { PANEL_TABS } from './types';
  * "Text updates are much faster than image updates: use text for anything
  * that needs to feel instant" (everything-evenhub skills/glasses-ui).
  *
- * OFF by default only because 25 tests still assert the canvas overview's
- * behaviour; they encode the old architecture and have to be rewritten
- * rather than deleted. Turn it on with VITE_NATIVE_OVERVIEW=1. */
-const NATIVE_OVERVIEW = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '0') !== '0';
+ * ON by default; VITE_NATIVE_OVERVIEW=0 falls back to the canvas overview,
+ * which stays in the product and stays tested as the fallback. */
+let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') !== '0';
+
+/** Tests that pin the CANVAS overview call this to select the fallback the
+ * flag still ships; the text path has its own tests. Never product code. */
+export function setNativeOverviewForTest(on: boolean): void {
+  nativeOverviewEnabled = on;
+}
 
 function parseOverviewStatus(status: string): { time: string; date: string } {
   return {
@@ -46,10 +51,16 @@ import {
   type ConversationExitResult,
 } from './AssistantConversationSurface';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
-import { usesActionPillLayout } from './HudCanvasRenderer';
+import { resolveHudOverview, usesActionPillLayout } from './HudCanvasRenderer';
+import { TEXT_CONTAINER_MAX_BYTES, fitUtf8, fitUtf8Tail } from './FirmwareLimits';
 import type { NavigationHudModel } from './NavigationHud';
 import {
   PanelRail,
+  formatCountdown,
+  formatMinutesLeft,
+  pomodoroBlockLabel,
+  pomodoroCycleDots,
+  pomodoroRemainingMs,
   pomodoroTickDelayMs,
   type HudPanelMessage,
   type PanelContent,
@@ -67,7 +78,10 @@ import {
   type ProductivityHudModel,
 } from './types';
 
-const MAX_UPGRADE_CHARS = 2000;
+// A text container holds at most 999 UTF-8 bytes (FirmwareLimits); an
+// upgrade beyond that is rejected whole, and the 2000-char cap here used to
+// let one through.
+const MAX_UPGRADE_BYTES = TEXT_CONTAINER_MAX_BYTES;
 
 /**
  * Repaint throttle for streamed text. Tokens arrive far faster than BLE can
@@ -185,6 +199,10 @@ export interface ListSurfaceOptions {
   railTab?: PanelContentTab;
   /** Opt into the firmware-owned list and its native gesture cursor. */
   nativeFirmwareList?: boolean;
+  /** With nativeFirmwareList: this "list" is prose (an opened article or
+   * note) and renders as a firmware TEXT page — head line, scrolling body,
+   * hint — instead of rows. Even's own text-heavy pattern; no image tiles. */
+  nativeReaderPage?: boolean;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -199,6 +217,7 @@ interface ResolvedListSurfaceOptions {
   railTab?: PanelContentTab;
   /** This page is intentionally rendered by the G2 firmware list. */
   nativeFirmwareList?: boolean;
+  nativeReaderPage?: boolean;
 }
 
 interface HudContentState {
@@ -373,6 +392,9 @@ export class HudPresenter {
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    // Any other native page replaces the text overview on the glass, so its
+    // unchanged-signature shortcut must not survive the transition.
+    this.overviewTextLive = false;
     const visual = this.visual;
     const replace = () => this.client.require().rebuildPageContainer(page);
     if (!visual) {
@@ -395,6 +417,7 @@ export class HudPresenter {
 
   /** Recreate the four image containers at a native-to-visual boundary. */
   private async rebuildVisualPage(): Promise<boolean> {
+    this.overviewTextLive = false;
     const visual = this.visual;
     const displayCurrent = this.captureDisplayGuard();
     if (!visual || !displayCurrent()) return false;
@@ -417,6 +440,16 @@ export class HudPresenter {
   /** Restore the retained visual underlay only after its containers exist. */
   private async restoreVisualPage(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
+    // Back from a native page lands HERE, not in paintVisual — the first cut
+    // intercepted only paintVisual, so Back rebuilt the empty canvas page and
+    // the wearer got a blank screen. The overview must come back as the same
+    // text page it left as.
+    if (nativeOverviewEnabled && !this.confirmation && !this.promptQuestion) {
+      const frame = this.visualFrame();
+      if (frame.kind === 'overview' && !frame.actionOverlay && !frame.assistantOverlay) {
+        return this.paintOverviewAsText(frame);
+      }
+    }
     if (!await this.rebuildVisualPage() || !displayCurrent() || !this.visual) return false;
     const painted = this.visual.paintExact
       ? await this.visual.paintExact(this.visualFrame(), displayCurrent)
@@ -437,7 +470,7 @@ export class HudPresenter {
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
       return this.replaceNativePage(
-        this.layouts.listLayout(this.surface.items, this.surface.options),
+        this.nativeListLayout(this.surface),
         'terminal-list-native',
       );
     }
@@ -480,6 +513,14 @@ export class HudPresenter {
     this.client.resumeDisplay?.();
     this.visual?.resumeDisplay?.();
     this.displayActive = true;
+  }
+
+  /** A firmware list page is still on the glass under a Home surface: the
+   * next visual paint must replace it (text overview) or rebuild the image
+   * page before painting tiles. */
+  private visualPagePending(): boolean {
+    return this.pageOwner === 'terminal-list-native'
+      && this.surface.kind === 'default' && this.visual !== undefined;
   }
 
   private captureDisplayGuard(): () => boolean {
@@ -865,9 +906,15 @@ export class HudPresenter {
   /** Quiesce a terminal body before a graphical page replaces its containers. */
   private async prepareNativeTerminalHandoff(): Promise<boolean> {
     if (!this.nativeTerminal.isActive()) {
-      return this.pageOwner === 'terminal-list-native'
-        ? this.rebuildVisualPage()
-        : true;
+      if (this.pageOwner !== 'terminal-list-native') return true;
+      // Leaving a firmware list for Home: the text overview is itself a
+      // full page rebuild, so it replaces the list page directly. Rebuilding
+      // the four-tile image page first cost a second 165ms rebuild and a
+      // blank flash on every Back-to-Home (measured [1,7] → [7], 2026-09-22).
+      // The image page is rebuilt lazily by paintVisual only when the next
+      // frame is NOT an overview (visualPagePending).
+      if (nativeOverviewEnabled && this.visual) return true;
+      return this.rebuildVisualPage();
     }
     if (!await this.nativeTerminal.pauseForHandoff()) return false;
     try {
@@ -1043,12 +1090,14 @@ export class HudPresenter {
   ): Promise<boolean> {
     const client = this.client.require();
     const wrote = await client.textContainerUpgrade(new TextContainerUpgrade({
-      containerID: ContainerId.Main, containerName: 'main', content: body || ' ',
+      containerID: ContainerId.Main, containerName: 'main',
+      content: fitUtf8(body, TEXT_CONTAINER_MAX_BYTES) || ' ',
     }));
     if (!wrote || !displayCurrent()) return false;
     this.streams.set(ContainerId.Main, body);
     const paged = await client.textContainerUpgrade(new TextContainerUpgrade({
-      containerID: ContainerId.Hint, containerName: 'answer-pager', content: footer || ' ',
+      containerID: ContainerId.Hint, containerName: 'answer-pager',
+      content: fitUtf8(footer, TEXT_CONTAINER_MAX_BYTES) || ' ',
     }));
     if (paged) this.streams.set(ContainerId.Hint, footer);
     return paged && displayCurrent();
@@ -1518,7 +1567,7 @@ export class HudPresenter {
       if (this.pageOwner === 'terminal-conversation-native') {
         if (prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList) {
           await this.replaceNativePage(
-            this.layouts.listLayout(prior.surface.items, prior.surface.options),
+            this.nativeListLayout(prior.surface),
             'terminal-list-native',
           );
         } else {
@@ -1774,13 +1823,13 @@ export class HudPresenter {
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = firmwareList
       ? await this.replaceWithNativeTerminalList(
-        this.layouts.listLayout(surface.items, surface.options),
+        this.nativeListLayout(surface),
       )
       : this.visual
       ? true
       : await this.rebuildPage(nativeReplyPage
           ? this.layouts.defaultLayout()
-          : this.layouts.listLayout(surface.items, surface.options));
+          : this.nativeListLayout(surface));
     if (!ok || !displayCurrent()) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
       return false;
@@ -1812,6 +1861,7 @@ export class HudPresenter {
     if (firmwareList) {
       const painted = displayCurrent();
       this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
+      if (painted) this.armPanelTicker();
       return painted;
     }
     const restored = await this.restoreLiveStatus(liveStatus);
@@ -1890,8 +1940,65 @@ export class HudPresenter {
     this.panelTicker = setTimeout(() => {
       this.panelTicker = undefined;
       if (this.panelTickDelay() === undefined) return;
-      void this.paintVisual(true);
+      void this.tickPanel();
     }, delay);
+  }
+
+  /** The list page for a list surface. The expanded Pomodoro carries its
+   * countdown in the title line — a firmware list cannot be updated in
+   * place, but its title container can (one textContainerUpgrade per
+   * second while running; the canvas page re-uploaded tiles for the same). */
+  private nativeListLayout(surface: Extract<HudSurface, { kind: 'list' }>): RebuildPageContainer {
+    return this.layouts.listLayout(surface.items, {
+      ...surface.options, title: this.panelListTitle(surface.options),
+    });
+  }
+
+  private panelListTitle(options: ResolvedListSurfaceOptions): string {
+    if (options.railTab !== 'pomodoro') return options.title;
+    const pomodoro = this.rail.content('pomodoro')?.pomodoro;
+    if (!pomodoro || pomodoro.phase === 'idle') return options.title;
+    const remaining = pomodoroRemainingMs(pomodoro, Date.now());
+    return `${options.title} · ${formatCountdown(remaining)} · ${pomodoroBlockLabel(pomodoro)}`;
+  }
+
+  /** What the resting Pomodoro card says, from the same helpers the
+   * expanded page uses, so the two never disagree about where you are. */
+  private pomodoroCardRows(content: PanelContent | undefined): string[] {
+    if (content?.empty) return [content.headline ?? 'Timer unavailable', content.empty];
+    const pomodoro = content?.pomodoro;
+    if (!pomodoro) return ['Say “JOAT, start a pomodoro”'];
+    if (pomodoro.phase === 'idle') {
+      return ['Ready', `${Math.round(pomodoro.lengthMs / 60_000)} min focus · tap to start`];
+    }
+    const remaining = pomodoroRemainingMs(pomodoro, Date.now());
+    return [
+      formatMinutesLeft(remaining),
+      pomodoroBlockLabel(pomodoro),
+      pomodoroCycleDots(pomodoro.completed),
+      ...(content?.rows ?? []),
+    ];
+  }
+
+  /** A local tick: the countdown's digit moved, nothing new from the Mac.
+   * On the expanded firmware list only the title container is rewritten. */
+  private async tickPanel(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList
+      && this.surface.options.railTab === 'pomodoro' && this.pageOwner === 'terminal-list-native') {
+      const title = this.panelListTitle(this.surface.options);
+      const previous = this.streams.get(ContainerId.Main) ?? '';
+      if (title === previous) { this.armPanelTicker(); return true; }
+      const ok = await this.client.require().textContainerUpgrade(new TextContainerUpgrade({
+        containerID: ContainerId.Main, contentOffset: 0,
+        contentLength: Math.max(previous.length, title.length),
+        content: fitUtf8(title, TEXT_CONTAINER_MAX_BYTES),
+      }));
+      if (ok && displayCurrent()) this.streams.set(ContainerId.Main, title);
+      this.armPanelTicker();
+      return ok;
+    }
+    return this.paintVisual(true);
   }
 
   private panelTickDelay(): number | undefined {
@@ -2348,7 +2455,7 @@ export class HudPresenter {
         : this.confirmation
         ? this.layouts.confirmationLayout(this.confirmation.prompt)
         : this.surface.kind === 'list' && !this.nativeReplyPage
-          ? this.layouts.listLayout(this.surface.items, this.surface.options)
+          ? this.nativeListLayout(this.surface)
           : this.layouts.defaultLayout();
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'heal-rebuild-start');
       const rebuilt = await this.rebuildPage(layout);
@@ -2377,7 +2484,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
-    if (this.pageOwner !== 'visual') return true;
+    if (this.pageOwner !== 'visual' && !this.visualPagePending()) return true;
     if (this.visual) return this.paintVisual();
     // No custom renderer: retain native text compatibility updates.
     // The text compatibility surface owns the same transient reply as the
@@ -2396,7 +2503,7 @@ export class HudPresenter {
       : containerId === ContainerId.Hint ? GesturePolicy.formatHint(stored) : stored;
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
     // being read; the opening lines are already consumed.
-    const content = full.length > MAX_UPGRADE_CHARS ? full.slice(-MAX_UPGRADE_CHARS) : full;
+    const content = fitUtf8Tail(full, MAX_UPGRADE_BYTES);
     const previous = this.lastLength.get(containerId) ?? 0;
     this.lastPaint.set(containerId, Date.now());
     const level = this.brightness.get(containerId);
@@ -2571,6 +2678,7 @@ export class HudPresenter {
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
       ...(options.nativeFirmwareList ? { nativeFirmwareList: true } : {}),
+      ...(options.nativeFirmwareList && options.nativeReaderPage ? { nativeReaderPage: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
       ...(planningEntries ? { planningEntries } : {}),
@@ -2711,7 +2819,7 @@ export class HudPresenter {
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
       return this.replaceNativePage(
-        this.layouts.listLayout(this.surface.items, this.surface.options),
+        this.nativeListLayout(this.surface),
         'terminal-list-native',
       );
     }
@@ -2733,7 +2841,7 @@ export class HudPresenter {
       const surface = this.surface;
       const rebuilt = surface.kind === 'list'
         ? await this.rebuildPage(
-          this.layouts.listLayout(surface.items, surface.options),
+          this.nativeListLayout(surface),
         )
         : await this.rebuildPage(this.layouts.defaultLayout());
       if (!rebuilt) return false;
@@ -2773,35 +2881,157 @@ export class HudPresenter {
    * each became a rebuildPageContainer — measured at three per swipe,
    * 495ms, worse than the four tiles it replaced. */
   private lastOverviewText?: string;
+  /** The band contents of the overview page on the glass, by container id,
+   * so a change to ONE band can be an in-place upgrade instead of a rebuild. */
+  private lastOverviewBands?: Map<number, { content: string; textColor?: number }>;
+  /** Whether the text overview is what the glass is PHYSICALLY showing.
+   * The signature alone is not enough: after a native list took the page,
+   * an unchanged signature made Back skip the rebuild and the wearer got a
+   * blank screen — the signature matched a page that was no longer there. */
+  private overviewTextLive = false;
 
   private async paintOverviewAsText(
     frame: Extract<HudVisualFrame, { kind: 'overview' }>,
   ): Promise<boolean> {
+    // Taken BEFORE any await. A status push that started painting the
+    // overview a moment before the wearer expanded a tab used to finish
+    // after the firmware list was on the glass and write the overview over
+    // it — the list appeared and vanished, and the menu closed as failed.
+    // The display guard alone was not enough, because rebuildPage only
+    // consults it for the return value; the write still went out. So the
+    // write itself is conditional at the instant it would fire.
+    const current = this.captureDisplayGuard();
     const rail = frame.rail;
     const content = rail?.content;
+    // The same content-priority rules the canvas overview uses: boot and
+    // link states first, then a notification/reply in the main region, then
+    // the resting dashboard. Sharing the resolver is what keeps a Mac reply
+    // or a Home notification from being silently swallowed by the tab pane —
+    // the first cut of this path did exactly that.
+    const overview = resolveHudOverview(frame);
     const parsed = parseOverviewStatus(frame.status);
-    const rows = content?.rows?.length
-      ? content.rows.join('\n')
-      : (content?.empty ?? frame.main ?? '');
-    const view = {
-      status: frame.status,
-      clock: parsed.time,
-      date: parsed.date,
-      ambient: frame.ambient
-        ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim()
-        : frame.context,
-      tabs: PANEL_TABS.map((tab: (typeof PANEL_TABS)[number]) => ({
-        label: PANEL_TAB_TITLES[tab],
-        active: rail?.activeTab === tab,
-      })),
-      paneTitle: rail ? PANEL_TAB_TITLES[rail.activeTab] : '',
-      paneBody: content?.headline ? `${content.headline}\n${rows}` : rows,
-      hint: frame.hint,
+    // Mic state is structured (frame.micOn), never inferred from status
+    // copy — same contract as the native compatibility status line.
+    const status = [
+      parsed.date, parsed.time,
+      `MIC ${frame.micOn ? 'ON' : 'OFF'}`,
+      /bat\s*\d+%\+?/i.exec(frame.status)?.[0],
+    ].filter(Boolean).join(' · ');
+    const tabRows = rail?.activeTab === 'pomodoro'
+      ? this.pomodoroCardRows(content).join('\n')
+      : content?.rows?.length
+        ? content.rows.join('\n')
+        : (content?.empty ?? '');
+    const tabs = PANEL_TABS.map((tab: (typeof PANEL_TABS)[number]) => ({
+      label: PANEL_TAB_TITLES[tab], active: rail?.activeTab === tab,
+    }));
+    const ambientLine = frame.ambient
+      ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim()
+      : '';
+    const tabCard = {
+      title: rail ? PANEL_TAB_TITLES[rail.activeTab] : '',
+      body: content?.headline && rail?.activeTab !== 'pomodoro' ? `${content.headline}\n${tabRows}` : tabRows,
     };
+    // Who owns the pane, in the canvas overview's own priority order:
+    //   - a link/boot state (Offline, Reconnecting, Connecting): nothing
+    //     else on the screen is valid, so its copy takes the pane;
+    //   - a notification, message or reply: the wearer must SEE it;
+    //   - otherwise the active tab's card — the Dashboard's whole purpose.
+    // The "Ready" resting copy is NOT a pane owner. The first cut let it be
+    // one, and the wearer swiped to NEWS and kept reading "Ask JOAT anything".
+    const boot = overview.kind === 'empty' && overview.title !== 'Ready';
+    const view = boot
+      ? {
+        status, clock: parsed.time, date: parsed.date, ambient: ambientLine, tabs,
+        paneTitle: overview.title.toUpperCase(),
+        paneBody: `${overview.primary}\n${overview.recovery}`,
+        paneBrightness: frame.mainBrightness,
+        hint: overview.hint,
+      }
+      : overview.kind === 'content' && overview.main
+        ? {
+          status, clock: parsed.time, date: parsed.date, ambient: ambientLine, tabs,
+          paneTitle: overview.main.label,
+          paneBody: [overview.main.value, overview.tray].filter(Boolean).join('\n'),
+          paneBrightness: frame.mainBrightness,
+          hint: frame.hint,
+        }
+        : {
+          status, clock: parsed.time, date: parsed.date,
+          // Resting: the ambient row carries the ready copy when the Mac has
+          // sent no weather, so the clock column is never a bare number.
+          ambient: ambientLine
+            || (overview.kind === 'empty' ? overview.primary
+              : overview.context ? `${overview.context.label}: ${overview.context.value}` : ''),
+          tabs,
+          paneTitle: tabCard.title,
+          paneBody: tabCard.body,
+          paneBrightness: frame.mainBrightness,
+          hint: overview.kind === 'empty' ? overview.hint : frame.hint,
+        };
     const signature = JSON.stringify(view);
-    if (this.lastOverviewText === signature && this.pageOwner === 'visual') return true;
-    const ok = await this.rebuildPage(this.layouts.overviewTextLayout(view));
-    if (ok) this.lastOverviewText = signature;
+    if (this.lastOverviewText === signature && this.overviewTextLive
+      && this.pageOwner === 'visual') return true;
+    const layout = this.layouts.overviewTextLayout(view);
+    const bands = new Map((layout.textObject ?? []).map((t) => [
+      t.containerID ?? 0, { content: t.content ?? '', textColor: t.textColor },
+    ]));
+    // Ours while Home owns the glass — either the visual page or a firmware
+    // list page that Home is replacing (visualPagePending). A list that is
+    // live under a list SURFACE is never ours: that is the stomp this guard
+    // exists for.
+    const stillOurs = (): boolean => current()
+      && (this.pageOwner === 'visual' || this.visualPagePending());
+    if (!stillOurs()) return false;
+    // ONE band changed on a live overview — a Pomodoro tick, a fresh
+    // headline, a reply — is one textContainerUpgrade (~83ms), not a page
+    // rebuild (~165ms). Two or more changed bands (a minute tick moves the
+    // status bar and the clock) cost more as upgrades than as one rebuild
+    // (even-g2-notes performance: break-even at two containers).
+    const live = this.overviewTextLive && this.pageOwner === 'visual' && this.lastOverviewBands;
+    const changed = live
+      ? [...bands].filter(([id, band]) => {
+        const was = this.lastOverviewBands!.get(id);
+        return was?.content !== band.content || was?.textColor !== band.textColor;
+      })
+      : [];
+    if (live && changed.length === 1 && (this.lastOverviewBands!.size === bands.size)) {
+      const [[containerID, band]] = changed as [[number, { content: string; textColor?: number }]];
+      const previous = this.lastOverviewBands!.get(containerID)?.content ?? '';
+      const upgraded = await this.client.require().textContainerUpgrade(new TextContainerUpgrade({
+        containerID, contentOffset: 0,
+        contentLength: Math.max(previous.length, band.content.length),
+        content: band.content,
+        ...(band.textColor !== undefined ? { textColor: band.textColor } : {}),
+      }));
+      if (upgraded && stillOurs()) {
+        this.lastOverviewText = signature;
+        this.lastOverviewBands = bands;
+        this.armPanelTicker();
+        return true;
+      }
+      if (!stillOurs()) return false;
+      // The container is gone or refused: fall through to a full rebuild.
+    }
+    const replace = (): Promise<boolean> => (stillOurs()
+      ? this.client.require().rebuildPageContainer(layout)
+      : Promise.resolve(false));
+    let ok = false;
+    if (!this.visual) ok = await replace();
+    else if (this.visual.withPageTransition) {
+      try { ok = await this.visual.withPageTransition(replace, stillOurs); } catch { ok = false; }
+    }
+    if (ok) {
+      this.lastOverviewText = signature;
+      this.lastOverviewBands = bands;
+      this.overviewTextLive = true;
+      // This page IS the visual owner's page. rebuildVisualPage() is what
+      // normally records that, and this path replaces it — leaving the
+      // owner stale made every later paint misjudge who held the glass.
+      this.pageOwner = 'visual';
+      this.visual?.forgetPage?.();
+      this.armPanelTicker();
+    }
     return ok;
   }
 
@@ -2810,15 +3040,19 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
-    if (this.pageOwner !== 'visual') return true;
+    if (this.pageOwner !== 'visual' && !this.visualPagePending()) return true;
     if (!this.visual) return false;
-    if (NATIVE_OVERVIEW && !this.confirmation && !this.promptQuestion) {
+    if (nativeOverviewEnabled && !this.confirmation && !this.promptQuestion) {
       const overview = this.visualFrame();
       if (overview.kind === 'overview' && !overview.actionOverlay && !overview.assistantOverlay) {
         return this.paintOverviewAsText(overview);
       }
       this.lastOverviewText = undefined;
     }
+    // Not an overview frame, and a firmware list page is still on the glass:
+    // the tiles need their image containers back first.
+    if (this.visualPagePending() && !await this.rebuildVisualPage()) return false;
+    if (!displayCurrent()) return false;
     const confirmation = this.confirmation;
     if (confirmation?.isCurrent) {
       if (!this.isConfirmationCurrent(confirmation)) return false;

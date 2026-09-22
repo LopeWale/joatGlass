@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
-import { HudPresenter } from './HudPresenter';
+import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
 import { ContainerId } from './types';
+
+// These tests pin the CANVAS overview, which ships as the VITE_NATIVE_OVERVIEW=0
+// fallback. The default text overview has its own tests in
+// HudPresenter.textOverview.test.ts.
+setNativeOverviewForTest(false);
+
 
 /**
  * The presenter carries the tab rail into every overview frame, repaints

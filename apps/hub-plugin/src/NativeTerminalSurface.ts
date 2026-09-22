@@ -5,6 +5,7 @@ import {
 import { getTextWidth, pxTruncate } from '@evenrealities/pretext';
 import type { BridgeClient } from './BridgeClient';
 import { TerminalConversationViewport } from './TerminalConversation';
+import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
 import { wrapTerminalParagraph } from './TerminalText';
 import type { BrainstormHudModel, TerminalConversationMessage } from './types';
 
@@ -558,7 +559,7 @@ export class NativeTerminalSurface {
           containerName: NativeTerminalContainer.Body.name,
           contentOffset: 0,
           contentLength: Math.max(previous.length, snapshot.page.bodyText.length),
-          content: snapshot.page.bodyText || ' ',
+          content: fitUtf8(snapshot.page.bodyText, TEXT_CONTAINER_MAX_BYTES) || ' ',
         }),
       );
       if (accepted && this.active && this.desired?.visit === snapshot.desired.visit) {

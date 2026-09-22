@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+import html
 import json
 import logging
 import os
@@ -270,7 +271,7 @@ def fetch_feed(url: str, category: str, *, now: float | None = None) -> list[Hea
         # N2): when the publisher page cannot be extracted, the wearer
         # gets the feed's summary rather than the headline repeated.
         summary_html = str(entry.get("summary", "") or entry.get("description", "") or "")
-        summary = " ".join(re.sub(r"<[^>]+>", " ", summary_html).split())
+        summary = _summary_text(summary_html)
         headlines.append(Headline(
             title=title,
             link=link,
@@ -282,6 +283,21 @@ def fetch_feed(url: str, category: str, *, now: float | None = None) -> list[Hea
         ))
     headlines.sort(key=lambda h: h.published_at, reverse=True)
     return headlines
+
+
+def _summary_text(summary_html: str) -> str:
+    """Feed HTML → readable text for the glass.
+
+    The old tag-strip left entities in place, so a Google News summary
+    (an <ol> of related coverage separated by ``&nbsp;&nbsp;``) reached the
+    wearer as one run-on line with literal "&nbsp;" in it (observed on the
+    simulator, 2026-09-22). Block ends become line breaks so each related
+    headline is its own row, and entities are decoded.
+    """
+    broken = re.sub(r"(?i)</(li|p|div|h[1-6]|tr)\s*>|<br\s*/?>", "\n", summary_html)
+    stripped = re.sub(r"<[^>]+>", " ", broken)
+    lines = (" ".join(html.unescape(line).split()) for line in stripped.split("\n"))
+    return "\n".join(line for line in lines if line)
 
 
 def _struct_to_unix(struct: Any, fallback: float) -> float:
@@ -297,9 +313,9 @@ def _struct_to_unix(struct: Any, fallback: float) -> float:
 
 def fetch_article_text(url: str) -> tuple[str, str]:
     """Synchronous: one article page → (title, readable text). On a thread."""
-    html = _get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.5")
+    page = _get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.5")
     text = trafilatura.extract(
-        html.decode("utf-8", errors="replace"),
+        page.decode("utf-8", errors="replace"),
         url=url,
         include_comments=False,
         include_tables=False,
@@ -307,7 +323,7 @@ def fetch_article_text(url: str) -> tuple[str, str]:
         output_format="txt",
     )
     title = ""
-    metadata = trafilatura.extract_metadata(html.decode("utf-8", errors="replace"), default_url=url)
+    metadata = trafilatura.extract_metadata(page.decode("utf-8", errors="replace"), default_url=url)
     if metadata is not None and metadata.title:
         title = str(metadata.title)
     return title, (text or "").strip()
@@ -462,7 +478,7 @@ class NewsService:
             empty = (
                 "Feeds unavailable — hold to retry."
                 if self._last_error
-                else "No headlines yet — hold to refresh."
+                else "No headlines yet — long-press to refresh."
             )
             return PanelSnapshot(rows=(), empty=empty)
         rows = tuple(h.row(now) for h in self._headlines)
