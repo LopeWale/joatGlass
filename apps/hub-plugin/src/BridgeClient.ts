@@ -18,6 +18,14 @@ export type StartupPageResolution = 'created' | 'recovered';
  * audioControl(Glasses) and imuControl fail if step 2 has not succeeded, so
  * every consumer goes through `assertStarted()` before touching those APIs.
  */
+/** DEV-only: name every host display call. Each one costs real BLE time on a
+ * G2 (~83ms textContainerUpgrade, ~165ms rebuildPageContainer, ~104ms+ per
+ * image tile), so "how many calls, of what kind" is the rendering cost — the
+ * simulator itself is too fast to show it. */
+function hostCall(method: string, detail?: number): void {
+  if (import.meta.env.DEV) console.info('[host-call]', method, detail ?? '');
+}
+
 export class BridgeClient {
   private bridge?: EvenAppBridge;
   private displayBridge?: EvenAppBridge;
@@ -102,12 +110,20 @@ export class BridgeClient {
         'createStartUpPageContainer' | 'rebuildPageContainer' | 'textContainerUpgrade' | 'updateImageRawData'
       > = {
         createStartUpPageContainer: (page) => this.writeDisplay(
-          () => native.createStartUpPageContainer(page), StartUpPageCreateResult.invalid,
+          () => { hostCall('createStartUpPageContainer'); return native.createStartUpPageContainer(page); },
+          StartUpPageCreateResult.invalid,
         ),
-        rebuildPageContainer: (page) => this.writeDisplay(() => native.rebuildPageContainer(page), false),
-        textContainerUpgrade: (text) => this.writeDisplay(() => native.textContainerUpgrade(text), false),
+        rebuildPageContainer: (page) => this.writeDisplay(
+          () => { hostCall('rebuildPageContainer', page.textObject?.length); return native.rebuildPageContainer(page); },
+          false,
+        ),
+        textContainerUpgrade: (text) => this.writeDisplay(
+          () => { hostCall('textContainerUpgrade', text.containerID); return native.textContainerUpgrade(text); },
+          false,
+        ),
         updateImageRawData: (image) => this.writeDisplay(
-          () => native.updateImageRawData(image), ImageRawDataUpdateResult.sendFailed,
+          () => { hostCall('updateImageRawData', image.containerID); return native.updateImageRawData(image); },
+          ImageRawDataUpdateResult.sendFailed,
         ),
       };
       this.displayBridge = new Proxy(native, {
