@@ -100,7 +100,7 @@ describe('HudPageBuilder invariants', () => {
     }
   });
 
-  it('builds the conversation as one bordered, bottom-anchored native surface', () => {
+  it('builds the conversation as one borderless, bottom-anchored native surface', () => {
     const page = builder.assistantConversationLayout({
       cardTop: 128,
       cardHeight: 132,
@@ -115,10 +115,20 @@ describe('HudPageBuilder invariants', () => {
 
     expect(page.imageObject).toBeUndefined();
     expect(page.textObject).toHaveLength(5);
+    // borderWidth 0, not 1. The frame container exists to be the page's single
+    // isEventCapture owner; the stroke was decoration and the wearer saw it as
+    // a hairline box around every answer on real glass.
+    //
+    // Event capture does NOT require a border. Every one of Even's own
+    // templates pairs isEventCapture: 1 with borderWidth: 0 —
+    // evenhub-templates asr/src/main.ts, minimal/src/main.ts,
+    // text-heavy/src/main.ts, and image/src/main.ts, whose transparent
+    // full-screen 'eventLayer' is exactly this pattern. Do not restore the
+    // border to "keep events working"; that is not what makes them work.
     expect(byName('conversation')).toMatchObject({
       yPosition: 128,
       height: 132,
-      borderWidth: 1,
+      borderWidth: 0,
       isEventCapture: 1,
     });
     expect(byName('wearer-turns')).toMatchObject({ textColor: 2, content: expect.stringContaining('joke') });
