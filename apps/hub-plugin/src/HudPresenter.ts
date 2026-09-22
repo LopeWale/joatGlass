@@ -1,5 +1,34 @@
 import { TextContainerUpgrade, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import { GesturePolicy } from './GesturePolicy';
+import { PANEL_TAB_TITLES } from './PanelRail';
+import { PANEL_TABS } from './types';
+
+/** Render the overview as firmware text rather than four image tiles.
+ *
+ * Measured with the [host-call] probe against the real brain, every reading
+ * checked against a pixel diff. Canvas overview vs this one:
+ *
+ *   swipe between tabs   208ms -> 165ms
+ *   expand a tab         416ms -> 165ms   (with VITE_NATIVE_PANEL_TABS)
+ *   leave a tab          416ms -> 330ms
+ *   the walk above      2037ms -> 825ms
+ *
+ * updateImageRawData does not appear at all: the overview stops being four
+ * 288x144 quadrant tiles at ~104ms each. Even's guidance is the basis —
+ * "Text updates are much faster than image updates: use text for anything
+ * that needs to feel instant" (everything-evenhub skills/glasses-ui).
+ *
+ * OFF by default only because 25 tests still assert the canvas overview's
+ * behaviour; they encode the old architecture and have to be rewritten
+ * rather than deleted. Turn it on with VITE_NATIVE_OVERVIEW=1. */
+const NATIVE_OVERVIEW = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '0') !== '0';
+
+function parseOverviewStatus(status: string): { time: string; date: string } {
+  return {
+    time: /\b(\d{1,2}:\d{2})\b/.exec(status)?.[1] ?? '',
+    date: /\b([A-Z][a-z]{2}\s+\d{1,2}\/\d{1,2})\b/.exec(status)?.[1] ?? '',
+  };
+}
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
 import { ASSISTANT_ANSWER_GEOMETRY } from './HudPageBuilder';
@@ -2739,6 +2768,43 @@ export class HudPresenter {
     return true;
   }
 
+  /** The text overview's last rendered content, so an unchanged repaint
+   * costs nothing. Without this the swipe handler's several paint calls
+   * each became a rebuildPageContainer — measured at three per swipe,
+   * 495ms, worse than the four tiles it replaced. */
+  private lastOverviewText?: string;
+
+  private async paintOverviewAsText(
+    frame: Extract<HudVisualFrame, { kind: 'overview' }>,
+  ): Promise<boolean> {
+    const rail = frame.rail;
+    const content = rail?.content;
+    const parsed = parseOverviewStatus(frame.status);
+    const rows = content?.rows?.length
+      ? content.rows.join('\n')
+      : (content?.empty ?? frame.main ?? '');
+    const view = {
+      status: frame.status,
+      clock: parsed.time,
+      date: parsed.date,
+      ambient: frame.ambient
+        ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim()
+        : frame.context,
+      tabs: PANEL_TABS.map((tab: (typeof PANEL_TABS)[number]) => ({
+        label: PANEL_TAB_TITLES[tab],
+        active: rail?.activeTab === tab,
+      })),
+      paneTitle: rail ? PANEL_TAB_TITLES[rail.activeTab] : '',
+      paneBody: content?.headline ? `${content.headline}\n${rows}` : rows,
+      hint: frame.hint,
+    };
+    const signature = JSON.stringify(view);
+    if (this.lastOverviewText === signature && this.pageOwner === 'visual') return true;
+    const ok = await this.rebuildPage(this.layouts.overviewTextLayout(view));
+    if (ok) this.lastOverviewText = signature;
+    return ok;
+  }
+
   private async paintVisual(localTick = false): Promise<boolean> {
     this.removeRetiredNotifications();
     const displayCurrent = this.captureDisplayGuard();
@@ -2746,6 +2812,13 @@ export class HudPresenter {
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
     if (this.pageOwner !== 'visual') return true;
     if (!this.visual) return false;
+    if (NATIVE_OVERVIEW && !this.confirmation && !this.promptQuestion) {
+      const overview = this.visualFrame();
+      if (overview.kind === 'overview' && !overview.actionOverlay && !overview.assistantOverlay) {
+        return this.paintOverviewAsText(overview);
+      }
+      this.lastOverviewText = undefined;
+    }
     const confirmation = this.confirmation;
     if (confirmation?.isCurrent) {
       if (!this.isConfirmationCurrent(confirmation)) return false;
