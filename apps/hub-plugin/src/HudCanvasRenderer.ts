@@ -94,7 +94,12 @@ export const HUD_TEXT_MEAN_ADVANCE_PX = 5.18;
 const HUD_CONTENT_RIGHT = 576 - HUD_EDGE;       // 562
 export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP TO DISMISS';
 export const ASSISTANT_OVERLAY_PAGE_HINT = 'UP / DOWN TO READ · TAP TO DISMISS';
-export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss';
+/** A notification must say both things it can do. Dropping the menu half
+ * left the wearer looking at a card with no stated way off it except the
+ * exit gesture, which is reserved and must never be advertised as
+ * navigation. Authored in `left x2` form; GesturePolicy.formatHint renders
+ * it as the current Back wording. */
+export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
 
 /** Error recovery copy belongs in its warning card; repeating it in the
  * decision header makes the action harder to scan at a glance. */

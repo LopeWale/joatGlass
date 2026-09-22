@@ -63,3 +63,6 @@ build/
 
 # Simulator screenshots dropped in the CWD by evenhub-simulator
 glasses_*.png
+
+# TypeScript incremental build artifact
+*.tsbuildinfo
