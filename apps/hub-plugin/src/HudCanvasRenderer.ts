@@ -445,31 +445,6 @@ export function confirmationReviewLayout(): {
   };
 }
 
-/** The navigation views a wearer reads while stopped. They are content
- * pages, not the moving live session, so they render flat like every list. */
-const FLAT_NAVIGATION_VIEWS: ReadonlySet<string> = new Set([
-  'destination', 'repair', 'mode', 'preview', 'arrived', 'error',
-]);
-
-/** Content pages use the status spine alone. The second rounded container
- * ("the card") spent border and margin pixels on decoration; every list,
- * confirmation, productivity, and stationary navigation page now renders
- * flat. Only the moving states (guidance, warnings, rerouting) keep the
- * live-session shell, like Brainstorm. */
-export function usesFlatHudShell(
-  kind: HudVisualFrame['kind'],
-  title = '',
-  navigationView?: NavigationHudModel['view'],
-): boolean {
-  void title;
-  if (kind === 'navigation') return FLAT_NAVIGATION_VIEWS.has(navigationView ?? '');
-  // Brainstorm and Agent Terminal are transcripts: every pixel the
-  // rounded frame occupies is a pixel of discussion the wearer cannot
-  // read, and it is the surface they said was wasting space.
-  return kind === 'confirmation' || kind === 'productivity' || kind === 'list'
-    || kind === 'brainstorm' || kind === 'prompt_question';
-}
-
 export type HudIconName =
   | 'messages'
   | 'notifications'
@@ -1866,16 +1841,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Chrome is the final compositing layer. Besides making ownership
     // explicit, this prevents state-specific paths from ever obscuring the
     // clock/privacy/battery spine on host canvas implementations.
-    this.drawShell(
+    this.drawStatusSpine(
       context,
       frame.status,
       frame.micOn,
       icons,
-      (frame.kind === 'navigation' && isNavigationSetupStatus(frame.navigation)) || usesFlatHudShell(
-        frame.kind,
-        frame.kind === 'list' ? frame.title : '',
-        frame.kind === 'navigation' ? frame.navigation.view : undefined,
-      ),
       frame.kind !== 'overview',
     );
     if (frame.kind !== 'prompt_question' && frame.actionOverlay) {
@@ -1901,25 +1871,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return splitGrayscaleTiles(pixels);
   }
 
-  private drawShell(
+  private drawStatusSpine(
     context: CanvasRenderingContext2D,
     statusText: string,
     micOn: boolean,
     icons: Record<HudIconName, HTMLImageElement>,
-    flat: boolean,
     /** The dashboard prints the time at full size; a designer never sets
      * the same fact twice on one screen, so the spine yields its clock —
      * and carries the DATE in that slot instead, where a banner normally
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
   ): void {
-    if (!flat) {
-      context.strokeStyle = gray(HAIRLINE);
-      context.lineWidth = 1;
-      roundedRect(context, 1.5, 1.5, 573, 285, 20);
-      context.stroke();
-    }
-
     const status = parseStatus(statusText);
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
