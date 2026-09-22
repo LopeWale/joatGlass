@@ -26,21 +26,6 @@ insufficient, not that the source is absent. Record where you looked.
 
 ## Open
 
-### 1. Gesture vocabulary, and the R1 ring
-The wearer uses an R1 ring, so any hint naming a temple ("left x2") names a
-gesture they cannot perform. `GesturePolicy.formatHint` rewrites "left x2"
-to "double-click", but that is OUR invention, not Even's wording.
-
-- What vocabulary does Even use in their own on-lens hints?
-- Is there a canonical term covering temple and ring together?
-- Does the SDK report which input device sent an event, so hints could name
-  the right one? (`EventSourceType` exists in the SDK exports — check it.)
-- Are ring gestures a distinct event source, or indistinguishable from
-  temple taps?
-
-Until answered, every wearer-facing hint goes through `formatHint`, and no
-hint names a physical location. See dd63111 for a leak that shipped.
-
 ### 2. The Even AI agent interface
 How does Even's own assistant distinguish the wearer's words from the
 agent's reply on screen? Looked in all four templates and both official
@@ -85,6 +70,44 @@ against Even's own docs, then delete any hand-rolled scrollbar that
 duplicates it.
 
 ## Answered
+
+### Gesture vocabulary and the R1 ring — ANSWERED
+
+Even's canonical ring grammar, from their own post *The Grammar of a Ring*
+(evenrealities.com/blogs/even-insider/the-grammar-of-a-ring) — four
+gestures, quoted:
+
+- **Tap** — "Confirm."
+- **Double-tap** — "Back, or dismiss."
+- **Swipe** — "Navigate."
+- **Long-press** — "Open the menu."
+
+Corroborated by the official support page *How to Control*
+(support.evenrealities.com/hc/en-us/articles/13772400722063): Single Tap
+confirms in a list; Double Tap is Back while the display is on; Scroll
+Up / Scroll Down navigate.
+
+**The SDK reports which device sent the event.** `EventSourceType` in
+`even_hub_sdk` `dist/index.d.ts`:
+
+    TOUCH_EVENT_FORM_DUMMY_NULL = 0
+    TOUCH_EVENT_FROM_GLASSES_R  = 1
+    TOUCH_EVENT_FROM_RING       = 2
+    TOUCH_EVENT_FROM_GLASSES_L  = 3
+
+So a hint can name the device actually in the wearer's hand rather than
+assuming a temple. Nothing in this plugin reads it yet — that is the
+mechanism if device-aware hints are ever wanted.
+
+**Wording:** Even says "double-tap"; this plugin says "double-click". The
+wearer has accepted "2x tap/click" as fine, so this is NOT worth churning
+23 test assertions over. What is not acceptable is naming a physical
+location: "left x2" names a temple an R1 wearer does not press. Every
+wearer-facing hint goes through `GesturePolicy.formatHint`, and no hint
+names a side. See dd63111 for a leak that reached the glass.
+
+`hold` vs Even's `long-press` is the same class of cosmetic mismatch —
+note it, do not churn it.
 
 ### Event capture does not require a border — CONFIRMED
 All four official templates pair `isEventCapture: 1` with `borderWidth: 0`:
