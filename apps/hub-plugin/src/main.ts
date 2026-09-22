@@ -96,7 +96,15 @@ const MAC_WS_URLS = ((): readonly string[] => {
     .filter((u) => u.length > 0);
   // Fall back AFTER filtering: an empty or whitespace-only env var survives
   // `??` and would otherwise leave zero candidates and abort boot.
-  return parsed.length > 0 ? parsed : ['wss://mac.local:8787/glasses'];
+  //
+  // The fallback must itself be whitelisted in app.json. This was
+  // `wss://mac.local:8787/glasses`, a host that appears in no manifest —
+  // and because the choice is made at runtime the literal ships in every
+  // bundle whether or not it is ever dialled, so a packaged release carried
+  // an origin its own manifest did not allow.
+  return parsed.length > 0
+    ? parsed
+    : ['wss://emmanuels-macbook-pro.tail3a3363.ts.net/glasses'];
 })();
 
 /** Accept a remembered candidate only when it remains in this package's
