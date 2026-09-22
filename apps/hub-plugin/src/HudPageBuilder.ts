@@ -250,6 +250,81 @@ export class HudPageBuilder {
     });
   }
 
+  /**
+   * The overview as firmware text. No image tiles.
+   *
+   * GEOMETRY IS DERIVED, NOT INVENTED. The firmware line box is 27px
+   * (LINE_HEIGHT), the canvas is 576x288, and Even's multi-row pattern is
+   * stacked text containers with explicit heights (everything-evenhub
+   * skills/glasses-ui, "Multi-row layout"). Every band below is a whole
+   * number of 27px lines plus its 4px padding, and the bands are laid out
+   * head to tail so none can overlap:
+   *
+   * A band's height is lines*27 PLUS its 4px padding top and bottom, so one
+   * line needs 35px, not 27. Sizing single-line bands at 30 overflowed every
+   * one of them by 5px and the firmware drew a scrollbar down the right edge
+   * of each — visible in the first capture as green ticks beside the status,
+   * the pane title and the hint.
+   *
+   *   y=0   h=35   status          1 line, full width
+   *   y=37  h=89   clock + date    3 lines, left column
+   *   y=128 h=116  tab rail        4 lines, left column   -> ends 244
+   *   y=37  h=35   pane title      1 line, right column
+   *   y=74  h=170  pane body       6 lines, right column  -> ends 244
+   *   y=246 h=35   hint            1 line, full width     -> ends 281
+   *
+   * A first cut of this put the rail at y=160 h=120, running to 280 while
+   * the hint started at 252: the rail printed through the hint and both
+   * containers overflowed into firmware scrollbars. That was arithmetic,
+   * not a limitation of text containers.
+   *
+   * Column split at x=168 keeps the left column clear of the right pane;
+   * the pane is the event-capture container, so the firmware scrolls its
+   * own overflow and a scroll costs no host call at all.
+   */
+  overviewTextLayout(view: {
+    status: string; clock: string; date: string; ambient: string;
+    tabs: readonly { label: string; active: boolean }[];
+    paneTitle: string; paneBody: string; hint: string;
+  }): RebuildPageContainer {
+    /** n firmware lines plus the band's own 4px padding, top and bottom. */
+    const LINE_BAND = (lines: number): number => lines * 27 + 8;
+    const LEFT_W = 160;
+    const RIGHT_X = 168;
+    const RIGHT_W = CANVAS.width - RIGHT_X - 4;
+    const text = (value: string): string => value.trim() || ' ';
+    // '>' as the cursor, which is Even's documented convention for marking
+    // a selected row ("Prefix text items with > as a cursor indicator").
+    const rail = view.tabs
+      .map(({ label, active }) => `${active ? '>' : ' '} ${label}`)
+      .join('\n');
+    const band = (
+      containerID: number, containerName: string,
+      x: number, y: number, width: number, height: number,
+      textColor: number, content: string, capture = 0, z = 1,
+    ): TextContainerProperty => new TextContainerProperty({
+      containerID, containerName,
+      xPosition: x, yPosition: y, width, height,
+      paddingLength: 4, borderWidth: 0,
+      isEventCapture: capture, zOrderIndex: z,
+      textColor, content: text(content),
+    });
+    return new RebuildPageContainer({
+      containerTotalNum: 6,
+      ...this.menuConfig(),
+      textObject: [
+        band(ContainerId.StatusBar, 'status', 0, 0, CANVAS.width, LINE_BAND(1), 2, view.status, 0, 1),
+        band(ContainerId.Context, 'clock', 0, 37, LEFT_W, LINE_BAND(3), 4,
+          [view.clock, view.date, view.ambient].filter((l) => l.trim()).join('\n'), 0, 2),
+        band(ContainerId.Tray, 'tabs', 0, 128, LEFT_W, LINE_BAND(4), 2, rail, 0, 3),
+        band(ContainerId.List, 'pane-title', RIGHT_X, 37, RIGHT_W, LINE_BAND(1), 2, view.paneTitle, 0, 4),
+        band(ContainerId.Main, 'pane', RIGHT_X, 74, RIGHT_W, LINE_BAND(6), 4, view.paneBody, 1, 5),
+        band(ContainerId.Hint, 'hint', 0, 246, CANVAS.width, LINE_BAND(1), 2,
+          GesturePolicy.formatHint(view.hint), 0, 6),
+      ],
+    });
+  }
+
   private menuConfig(): { menuObject?: MenuContainerProperty } {
     return this.contextualMenu ? { menuObject: this.systemMenu() } : {};
   }
