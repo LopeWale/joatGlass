@@ -71,6 +71,42 @@ duplicates it.
 
 ## Answered
 
+### Why Even's Dashboard is cheap and our overview is not — ANSWERED
+
+Our overview is a faithful copy of Even's Dashboard, and that is deliberate.
+Their support page (support.evenrealities.com "Dashboard") describes exactly
+our layout: a status section on the LEFT carrying "Time, Date and day of the
+week, Glasses battery level, Weather and temperature, Number of unread
+messages", and a widgets area to the RIGHT showing "cards for News, Stocks,
+Calendar, QuickList, and Health", navigated by "Swipe on the TouchPad to
+switch between widget cards. Single-tap the TouchPad to expand the current
+widget card".
+
+They render it cheaply because the Dashboard is a FIRMWARE screen, not a Hub
+plugin. hub.evenrealities.com/docs/build/display on what a plugin gets:
+"No font selection, no size control, not monospaced", one LVGL font baked
+into firmware. The large clock is therefore not reachable from a text
+container at all. Drawing it as pixels is not a mistake in our renderer, it
+is the only path a plugin has — and it is why the overview costs 581ms.
+
+**The middle path, and it keeps the design.** The overview spends 4 tiles
+because its content spans all four 288x144 quadrants. Split the page by what
+actually CHANGES rather than by geometry:
+
+- the clock half is pixels, and changes once a minute
+- the widget half is rows of text, and changes on every swipe
+
+Give the clock its own image containers (two, stacked, since they cap at
+288x144) and build the right half from TEXT containers. A tab switch then
+rewrites text only — one or two textContainerUpgrade calls, ~83-166ms —
+instead of four tiles at 416ms, and HudVisualSurface's existing pixelsEqual
+cache already suppresses the unchanged clock tiles.
+
+Budget allows it: 12 containers per page, up to 4 image and 8 text/list.
+
+Not yet built. This is the next rendering change, and it is measurable with
+the [host-call] probe the same way the panel-tab work was.
+
 ### Gesture vocabulary and the R1 ring — ANSWERED
 
 Even's canonical ring grammar, from their own post *The Grammar of a Ring*
