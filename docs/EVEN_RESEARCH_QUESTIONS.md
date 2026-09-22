@@ -99,6 +99,24 @@ So a hint can name the device actually in the wearer's hand rather than
 assuming a temple. Nothing in this plugin reads it yet — that is the
 mechanism if device-aware hints are ever wanted.
 
+**Requirement, from the wearer:** "I should be able to use anything I want,
+ring or glasses." Both, interchangeably — not one or the other.
+
+Input already honours that. `EventRouter.isLocalTapSource` and the IMU
+tap-confirm both admit `TOUCH_EVENT_FROM_RING`, `_FROM_GLASSES_L` and
+`_FROM_GLASSES_R`. A comment at EventRouter.ts:538 records an earlier gate
+that admitted right/ring only, "so a left tap silently did nothing" — the
+same bug pointing the other way.
+
+What the wearer SEES has to honour it too, and that is the fragile half:
+roughly forty hint strings are still AUTHORED as "left x2" and depend on
+every render path remembering to call `formatHint`. One forgot, and it
+reached the glass. `GestureHints.test.ts` now asserts no rendered hint
+matches /left|right|temple|ring/, so the next forgotten call fails a test
+instead of a wearer. Renaming the authored constants would be better still;
+it is ~40 literals plus their assertions, so it is worth doing as its own
+change rather than smuggled into a fix.
+
 **Wording:** Even says "double-tap"; this plugin says "double-click". The
 wearer has accepted "2x tap/click" as fine, so this is NOT worth churning
 23 test assertions over. What is not acceptable is naming a physical
