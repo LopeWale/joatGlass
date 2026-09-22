@@ -231,7 +231,7 @@ describe('HudPageBuilder invariants', () => {
   it('list layout gives full-focus content a title and quiet bottom action rail', () => {
     const page = builder.listLayout(['Messages', 'Settings'], {
       title: 'CAPABILITIES',
-      hint: 'SWIPE move · TAP open · LEFT x2 back',
+      hint: 'SWIPE move · TAP open · LEFT x2 back',   // authored form
     }) as Page;
     const title = page.textObject?.find((c) => c.containerID === ContainerId.Main);
     const list = page.listObject?.[0];
@@ -242,7 +242,12 @@ describe('HudPageBuilder invariants', () => {
     expect(title).toMatchObject({ yPosition: 39, height: 38, textColor: 4, content: 'CAPABILITIES' });
     expect(list).toMatchObject({ yPosition: 77, height: 176 });
     expect(hint).toMatchObject({ yPosition: 253, height: 35, textColor: 1 });
-    expect(hint?.content).toBe('SWIPE move · TAP open · LEFT x2 back');
+    // The wearer sees the FORMATTED hint. Hints are authored in the legacy
+    // "left x2" form and GesturePolicy.formatHint rewrites them at render, so
+    // a wearer on the R1 ring is never told to press a left temple they do
+    // not have. Asserting the authored form here meant this test would have
+    // passed while the glasses said "LEFT x2".
+    expect(hint?.content).toBe('SWIPE move · TAP open · double-click back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
   });
 

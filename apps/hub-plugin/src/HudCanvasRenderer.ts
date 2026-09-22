@@ -2410,10 +2410,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // seam, so a footer that differed between the notifications tab and
     // the other three made a swipe repaint the bottom-left tile as well —
     // three image writes where the rail and the pane need two.
+    // formatHint here, not just in render(). render() normalises frame.hint
+    // and frame.navigation.hint, but this footer can substitute a constant
+    // AFTER that gate — so the notifications tab drew its authored
+    // "left x2: menu" verbatim. A wearer using the R1 ring has no left
+    // temple to press, so that hint named a gesture they cannot perform.
     context.fillText(
-      frame.mainKind === 'notification'
-        ? NOTIFICATION_DISMISS_HINT
-        : frame.rail ? PANEL_OVERVIEW_HINT : frame.hint,
+      GesturePolicy.formatHint(
+        frame.mainKind === 'notification'
+          ? NOTIFICATION_DISMISS_HINT
+          : frame.rail ? PANEL_OVERVIEW_HINT : frame.hint,
+      ),
       288,
       267,
     );
