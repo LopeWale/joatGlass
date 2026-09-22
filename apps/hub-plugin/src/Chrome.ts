@@ -18,7 +18,7 @@ import type { LinkState } from './MacLink';
 // The resting overview's gestures, truthfully: tap expands the tab the
 // rail has lit, swipe moves along the rail, hold is the microphone. The
 // menu is the firmware's (tap, then hold) and needs no line of its own.
-const HINT = 'tap: open \u00b7 swipe: tabs \u00b7 hold: mic \u00b7 \u201cJOAT \u2026\u201d';
+const HINT = 'tap: open \u00b7 swipe: tabs \u00b7 long-press: mic \u00b7 \u201cJOAT \u2026\u201d';
 // The visual renderer centers this text between a fixed clock and microphone
 // region.  Thirty source characters become at most a 32-character rendered
 // state after its JOAT separator, which leaves the microphone/battery chrome

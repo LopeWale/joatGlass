@@ -39,6 +39,26 @@ describe('wearer-facing hints never name a device or a side', () => {
     expect(GesturePolicy.formatHint('left×2 overview')).toBe('double-click overview');
   });
 
+  it('formatHint speaks one vocabulary: tap, double-click, swipe, long-press', () => {
+    // The reader (Mac reader_hint), the list beside it, and Home used to
+    // disagree: "down more" vs "hold: refresh" vs "long-press: mic".
+    expect(GesturePolicy.formatHint('down more · left x2: back'))
+      .toBe('swipe: more · double-click: back');
+    expect(GesturePolicy.formatHint('up previous · down more · left x2: back'))
+      .toBe('swipe: page · double-click: back');
+    expect(GesturePolicy.formatHint('up previous · left x2: back'))
+      .toBe('swipe: previous · double-click: back');
+    expect(GesturePolicy.formatHint('tap: open · hold: refresh · double-click: back'))
+      .toBe('tap: open · long-press: refresh · double-click: back');
+    expect(GesturePolicy.formatHint('Continue conversation? tap stays · x2 exits'))
+      .toBe('Continue conversation? tap stays · double-click exits');
+    expect(GesturePolicy.formatHint('down older · tap read · say reply · left x2: back'))
+      .toBe('swipe: older · tap read · say reply · double-click: back');
+    for (const hint of ['hold: mic', 'down more', 'up previous · down more']) {
+      expect(GesturePolicy.formatHint(hint)).not.toMatch(/\b(hold|up previous|down more)\b/);
+    }
+  });
+
   it('formatHint output is free of hardware names', () => {
     for (const hint of [
       NOTIFICATION_DISMISS_HINT,

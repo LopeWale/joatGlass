@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-22 — Every tab flow on firmware text, within the firmware's limits
+
+- Found why the expanded News list and the News card failed and the overview repainted over them: the host rejects a page whole when a text container exceeds 999 UTF-8 bytes or a list row exceeds 63 bytes / 20 rows (Even simulator README v0.7.1, v0.7.3, "to behave more like firmware"; simulator log "validation failed … exceeds limit"). Added `FirmwareLimits` clamps on every text container, upgrade and list row, and a `[page-rejected]` diagnostic naming the offending container.
+- Opened articles, results and notification details are now a firmware text page (status, head line, scrolling body, hint) instead of the last four-tile canvas page: open costs one rebuild, a swipe inside the page costs nothing, the boundary swipe turns the Mac page.
+- Leaving a firmware list for Home is one rebuild (was an image-page rebuild followed by the overview rebuild, with a blank flash).
+- The overview's tab rail is the capture container; the pane is a six-row single-line preview, so a long card no longer swallows swipes. A change to one band (a Pomodoro tick, a fresh headline, a streamed reply) is one in-place text upgrade rather than a page rebuild; the resting Pomodoro card shows minutes left, block and cycle, and the expanded page carries the countdown in its title, one upgrade per second.
+- One gesture vocabulary on every page — tap, swipe, long-press, double-click — normalised at render (`GesturePolicy.formatHint`): "hold", "down more", "up previous", "x2" no longer appear.
+- News feed summaries decode HTML entities and keep one related headline per row; the Google News fallback no longer shows literal `&nbsp;`.
+- Measured on the official simulator with the live sandbox brain: home → News → expand → open → page → back → home is 7 rebuilds/upgrades and zero image uploads.
+
 ## 2026-09-13 — Build JOAT 0.1.90 native conversation update
 
 - Built the existing JOAT package from committed source `a62f19c` in an isolated export. Eight release-candidate and release-manifest checks, TypeScript checking, and the production Vite build passed. The package keeps ID `com.example.joat`, minimum Even App 2.2.9, SDK 0.0.14, and the reviewed secure MacBook-first, Mac Mini-second Tailscale candidates.

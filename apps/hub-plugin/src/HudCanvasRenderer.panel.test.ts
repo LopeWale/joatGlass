@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { pxTruncate } from '@evenrealities/pretext';
 import {
   OVERVIEW_DASHBOARD,
   PANEL_EXPANDED_HINT,
@@ -87,17 +88,22 @@ describe('timer recovery failure presentation', () => {
 });
 
 describe('panel page copy', () => {
-  it('names only wired gestures and fits the 46-character footer', () => {
+  it('names only wired gestures, in the one vocabulary, and fits a firmware hint row', () => {
+    // The hint row is a 576px firmware text container with 4px padding;
+    // pxTruncate is the measured bound (the old 46-char cap was the canvas
+    // footer's). One vocabulary everywhere: tap, swipe, long-press,
+    // double-click — "hold" was the odd one out (GesturePolicy.formatHint).
     for (const hint of [PANEL_OVERVIEW_HINT, PANEL_EXPANDED_HINT, POMODORO_EXPANDED_HINT]) {
-      expect(hint.length).toBeLessThanOrEqual(46);
+      expect(pxTruncate(hint, 576 - 8)).toBe(hint);
+      expect(hint).not.toMatch(/\bhold\b/);
     }
     expect(PANEL_OVERVIEW_HINT).toContain('swipe');
-    expect(PANEL_EXPANDED_HINT).toContain('hold: refresh');
+    expect(PANEL_EXPANDED_HINT).toContain('long-press: refresh');
     // Long press is the mic on every resting tab and on the pomodoro page
     // (excluded from the refresh carve-out), so both must say so. The
     // pomodoro hint must NOT promise a refresh it will never send.
-    expect(PANEL_OVERVIEW_HINT).toContain('hold: mic');
-    expect(POMODORO_EXPANDED_HINT).toContain('hold: mic');
+    expect(PANEL_OVERVIEW_HINT).toContain('long-press: mic');
+    expect(POMODORO_EXPANDED_HINT).toContain('long-press: mic');
     expect(POMODORO_EXPANDED_HINT).not.toContain('refresh');
   });
 

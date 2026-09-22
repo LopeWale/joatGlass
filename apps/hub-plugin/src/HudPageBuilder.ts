@@ -10,6 +10,7 @@ import {
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
 import { pxTruncate } from '@evenrealities/pretext';
+import { LIST_ITEM_MAX_BYTES, TEXT_CONTAINER_MAX_BYTES, fitListItems, fitUtf8 } from './FirmwareLimits';
 import {
   CANVAS,
   CAPABILITIES,
@@ -154,7 +155,7 @@ export class HudPageBuilder {
       isEventCapture,
       zOrderIndex: 2,
       textColor,
-      content,
+      content: fitUtf8(content, TEXT_CONTAINER_MAX_BYTES),
     });
   }
 
@@ -180,7 +181,7 @@ export class HudPageBuilder {
       isEventCapture: geometry.isEventCapture ?? 0,
       zOrderIndex: z,
       textColor,
-      content,
+      content: fitUtf8(content, TEXT_CONTAINER_MAX_BYTES),
     });
   }
 
@@ -278,14 +279,23 @@ export class HudPageBuilder {
    * containers overflowed into firmware scrollbars. That was arithmetic,
    * not a limitation of text containers.
    *
-   * Column split at x=168 keeps the left column clear of the right pane;
-   * the pane is the event-capture container, so the firmware scrolls its
-   * own overflow and a scroll costs no host call at all.
+   * Column split at x=168 keeps the left column clear of the right pane.
+   *
+   * THE TAB RAIL IS THE CAPTURE CONTAINER, NOT THE PANE. A capturing text
+   * container scrolls its own overflow and reports a swipe only at its
+   * ends (even-g2-notes), so with the pane capturing, a News card longer
+   * than six lines swallowed every swipe: the rail never moved and the
+   * next tap expanded the wrong tab (observed 2026-09-22). The rail never
+   * overflows, so every swipe reaches the plugin and steps the rail. The
+   * pane is a PREVIEW — six rows, each cut to one line — and the expanded
+   * tab is where the whole list lives.
    */
   overviewTextLayout(view: {
     status: string; clock: string; date: string; ambient: string;
     tabs: readonly { label: string; active: boolean }[];
     paneTitle: string; paneBody: string; hint: string;
+    /** Mac urgency carries into the pane, same as the canvas overview. */
+    paneBrightness?: number;
   }): RebuildPageContainer {
     /** n firmware lines plus the band's own 4px padding, top and bottom. */
     const LINE_BAND = (lines: number): number => lines * 27 + 8;
@@ -293,6 +303,12 @@ export class HudPageBuilder {
     const RIGHT_X = 168;
     const RIGHT_W = CANVAS.width - RIGHT_X - 4;
     const text = (value: string): string => value.trim() || ' ';
+    const PANE_LINES = 6;
+    const preview = view.paneBody.split('\n')
+      .map((row) => row.trim()).filter(Boolean)
+      .slice(0, PANE_LINES)
+      .map((row) => pxTruncate(row, RIGHT_W - 2 * 4))
+      .join('\n');
     // '>' as the cursor, which is Even's documented convention for marking
     // a selected row ("Prefix text items with > as a cursor indicator").
     const rail = view.tabs
@@ -307,18 +323,25 @@ export class HudPageBuilder {
       xPosition: x, yPosition: y, width, height,
       paddingLength: 4, borderWidth: 0,
       isEventCapture: capture, zOrderIndex: z,
-      textColor, content: text(content),
+      textColor, content: fitUtf8(text(content), TEXT_CONTAINER_MAX_BYTES),
     });
     return new RebuildPageContainer({
-      containerTotalNum: 6,
+      containerTotalNum: 7,
       ...this.menuConfig(),
       textObject: [
         band(ContainerId.StatusBar, 'status', 0, 0, CANVAS.width, LINE_BAND(1), 2, view.status, 0, 1),
         band(ContainerId.Context, 'clock', 0, 37, LEFT_W, LINE_BAND(3), 4,
           [view.clock, view.date, view.ambient].filter((l) => l.trim()).join('\n'), 0, 2),
-        band(ContainerId.Tray, 'tabs', 0, 128, LEFT_W, LINE_BAND(4), 2, rail, 0, 3),
+        band(ContainerId.Tray, 'tabs', 0, 128, LEFT_W, LINE_BAND(4), 2, rail, 1, 3),
         band(ContainerId.List, 'pane-title', RIGHT_X, 37, RIGHT_W, LINE_BAND(1), 2, view.paneTitle, 0, 4),
-        band(ContainerId.Main, 'pane', RIGHT_X, 74, RIGHT_W, LINE_BAND(6), 4, view.paneBody, 1, 5),
+        band(ContainerId.Main, 'pane', RIGHT_X, 74, RIGHT_W, LINE_BAND(PANE_LINES),
+          view.paneBrightness ?? 4, preview, 0, 5),
+        // The dotted column between status and widgets, from Even's own
+        // Dashboard: one '·' per 27px line renders as the sparse dotted
+        // divider their reference shows. Static content, so it is never
+        // upgraded and never costs a call after the rebuild.
+        band(ContainerId.Image, 'divider', LEFT_W, 37, 8, LINE_BAND(7), 1,
+          Array(7).fill('\u00b7').join('\n'), 0, 7),
         band(ContainerId.Hint, 'hint', 0, 246, CANVAS.width, LINE_BAND(1), 2,
           GesturePolicy.formatHint(view.hint), 0, 6),
       ],
@@ -493,7 +516,7 @@ export class HudPageBuilder {
           isEventCapture: 0,
           zOrderIndex: 2,
           textColor: 2,
-          content: content(view.dimText),
+          content: fitUtf8(content(view.dimText), TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
           containerID: AssistantConversationContainerId.JoatTurns,
@@ -507,7 +530,7 @@ export class HudPageBuilder {
           isEventCapture: 0,
           zOrderIndex: 3,
           textColor: 4,
-          content: content(view.brightText),
+          content: fitUtf8(content(view.brightText), TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
           containerID: AssistantConversationContainerId.ScrollPosition,
@@ -521,7 +544,7 @@ export class HudPageBuilder {
           isEventCapture: 0,
           zOrderIndex: 4,
           textColor: 2,
-          content: content(view.scrollbarText),
+          content: fitUtf8(content(view.scrollbarText), TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
           containerID: AssistantConversationContainerId.Generation,
@@ -535,7 +558,7 @@ export class HudPageBuilder {
           isEventCapture: 0,
           zOrderIndex: 5,
           textColor: 4,
-          content: content(GesturePolicy.formatHint(view.footerText)),
+          content: fitUtf8(content(GesturePolicy.formatHint(view.footerText)), TEXT_CONTAINER_MAX_BYTES),
         }),
       ],
     });
@@ -563,7 +586,7 @@ export class HudPageBuilder {
           isEventCapture: 0,
           zOrderIndex: 1,
           textColor: 2,
-          content: page.headText || ' ',
+          content: fitUtf8(page.headText || ' ', TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
           containerID: NativeTerminalContainer.Body.id,
@@ -577,7 +600,7 @@ export class HudPageBuilder {
           isEventCapture: 1,
           zOrderIndex: 2,
           textColor: 4,
-          content: page.bodyText || ' ',
+          content: fitUtf8(page.bodyText || ' ', TEXT_CONTAINER_MAX_BYTES),
         }),
       ],
     });
@@ -591,10 +614,14 @@ export class HudPageBuilder {
    */
   listLayout(
     items: string[],
-    chrome: { title?: string; hint?: string } = {},
+    chrome: { title?: string; hint?: string; nativeReaderPage?: boolean } = {},
   ): RebuildPageContainer {
-    const capped = items.slice(0, 20)
-      .map((s) => pxTruncate(s.slice(0, 64), LIST_ROW_TEXT_WIDTH));
+    if (chrome.nativeReaderPage) return this.readerLayout(items, chrome);
+    // Firmware caps: 20 rows, 63 UTF-8 BYTES per row (FirmwareLimits). The
+    // old 64-CHAR pre-cut let a 67-byte headline through and the whole page
+    // was rejected — News expanded to nothing (2026-09-22).
+    const capped = fitListItems(items)
+      .map((s) => fitUtf8(pxTruncate(s, LIST_ROW_TEXT_WIDTH), LIST_ITEM_MAX_BYTES));
     const title = pxTruncate((chrome.title?.trim() || 'JOAT').slice(0, 46), REGION_TEXT_WIDTH);
     // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
     // below is the real bound; a tighter char pre-cut here silently dropped
@@ -629,6 +656,48 @@ export class HudPageBuilder {
             itemName: capped,
           }),
         }),
+      ],
+    });
+  }
+
+  /**
+   * An opened article or note, on the firmware's own text containers —
+   * the same shape as the reply page (Even's text-heavy pattern): status,
+   * one head line (page position · source), a body that captures input so
+   * the firmware scrolls its overflow and reports SCROLL_TOP/BOTTOM at the
+   * ends (those relay to the Mac, which turns the page), and one hint line.
+   *
+   * The Mac sends each page as rows whose concatenation is the exact
+   * source slice (reader.py: "concatenation is lossless"), so the rows are
+   * rejoined here and the firmware wraps them for its own face — re-sending
+   * the Mac's 62-column mono rows would wrap twice and read ragged.
+   *
+   * This replaces the four-tile canvas reader, the last image page in the
+   * News/Search/Notifications flow (open cost 1 rebuild + 6 tile uploads,
+   * measured 2026-09-22).
+   */
+  readerLayout(
+    items: string[],
+    chrome: { title?: string; hint?: string } = {},
+  ): RebuildPageContainer {
+    const [label = '', ...rows] = items;
+    const tab = (chrome.title?.trim() || 'JOAT').split(' · ')[0] ?? 'JOAT';
+    const head = pxTruncate(`${tab} · ${label}`.trim(), REGION_TEXT_WIDTH);
+    const body = rows.join('').trim() || ' ';
+    const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || 'double-click: back').slice(0, 96), REGION_TEXT_WIDTH);
+    const HEAD_Y = FIRMWARE_LINE + 12;               // 39: below the status bar
+    const HEAD_H = FIRMWARE_LINE + 2 * REGION_PAD;   // 35: one line
+    const HINT_H = FIRMWARE_LINE + 2 * REGION_PAD;   // 35: one line
+    const BODY_Y = HEAD_Y + HEAD_H;                  // 74
+    const BODY_H = 6 * FIRMWARE_LINE + 2 * REGION_PAD; // 170: six whole lines
+    return new RebuildPageContainer({
+      containerTotalNum: 4,
+      ...this.menuConfig(),
+      textObject: [
+        this.statusBar(),
+        this.region(ContainerId.List, 'reader-head', HEAD_Y, HEAD_H, 3, 2, head),
+        this.main(BODY_H, 1, 4, body, { y: BODY_Y }),
+        this.region(ContainerId.Hint, 'hint', CANVAS.height - HINT_H, HINT_H, 4, 1, hint),
       ],
     });
   }

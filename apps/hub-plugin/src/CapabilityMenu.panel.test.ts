@@ -6,6 +6,14 @@ import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
 import type { PanelTab } from './types';
+import { setNativePanelTabsForTest } from './CapabilityMenu';
+
+// These tests pin the plugin-side cursor-restoration path, which ships as the
+// fallback when VITE_NATIVE_PANEL_TABS narrows the firmware-list set. On a
+// firmware list there is nothing to restore: the glasses own the highlight
+// and report it back (see restorePanelSelection).
+setNativePanelTabsForTest([]);
+
 
 /**
  * The overview's tab rail, through the menu: a resting swipe moves the

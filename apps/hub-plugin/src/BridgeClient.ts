@@ -2,8 +2,11 @@ import {
   waitForEvenAppBridge,
   StartUpPageCreateResult,
   ImageRawDataUpdateResult,
+  utf8ByteLength,
   type EvenAppBridge,
+  type RebuildPageContainer,
 } from '@evenrealities/even_hub_sdk';
+import { LIST_ITEM_MAX_BYTES, LIST_MAX_ITEMS, TEXT_CONTAINER_MAX_BYTES } from './FirmwareLimits';
 import type { Unsubscribe } from './types';
 
 /** How the host accepted the one-shot startup request. */
@@ -24,6 +27,27 @@ export type StartupPageResolution = 'created' | 'recovered';
  * simulator itself is too fast to show it. */
 function hostCall(method: string, detail?: number): void {
   if (import.meta.env.DEV) console.info('[host-call]', method, detail ?? '');
+}
+
+/** A rejected rebuild leaves the glass on its previous page with no visible
+ * error. Name the limit that was crossed (FirmwareLimits) so the failure is
+ * never silent again — the News tab card and list both failed this way for
+ * weeks, and every status push re-sent the same rejected page. */
+function reportRejectedPage(page: RebuildPageContainer): void {
+  const over: string[] = [];
+  for (const t of page.textObject ?? []) {
+    const n = utf8ByteLength(t.content ?? '');
+    if (n > TEXT_CONTAINER_MAX_BYTES) over.push(`text '${t.containerName}' ${n}B > ${TEXT_CONTAINER_MAX_BYTES}B`);
+  }
+  for (const l of page.listObject ?? []) {
+    const names = l.itemContainer?.itemName ?? [];
+    if (names.length > LIST_MAX_ITEMS) over.push(`list '${l.containerName}' ${names.length} rows > ${LIST_MAX_ITEMS}`);
+    names.forEach((name, i) => {
+      const n = utf8ByteLength(name);
+      if (n > LIST_ITEM_MAX_BYTES) over.push(`list '${l.containerName}' row ${i} ${n}B > ${LIST_ITEM_MAX_BYTES}B`);
+    });
+  }
+  console.warn('[page-rejected] rebuildPageContainer', over.length ? over.join('; ') : 'no byte-limit violation (see simulator/host log)');
 }
 
 export class BridgeClient {
@@ -114,7 +138,12 @@ export class BridgeClient {
           StartUpPageCreateResult.invalid,
         ),
         rebuildPageContainer: (page) => this.writeDisplay(
-          () => { hostCall('rebuildPageContainer', page.textObject?.length); return native.rebuildPageContainer(page); },
+          async () => {
+            hostCall('rebuildPageContainer', page.textObject?.length);
+            const accepted = await native.rebuildPageContainer(page);
+            if (!accepted) reportRejectedPage(page);
+            return accepted;
+          },
           false,
         ),
         textContainerUpgrade: (text) => this.writeDisplay(

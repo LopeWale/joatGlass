@@ -13,6 +13,7 @@ import {
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
+import { PANEL_TABS } from './types';
 import {
   CAPABILITIES,
   VOICE_REQUEST_PREFIX,
@@ -41,16 +42,25 @@ import {
  * one. That demand was the bug, not the list: the firmware OWNS the
  * highlight and reports it back. See restorePanelSelection.
  *
- * Still opt-in while the visual result is being judged on hardware:
- * VITE_NATIVE_PANEL_TABS=search,news
+ * ON by default now that the overview itself is a text rebuild: measured
+ * together, the four-tab walk fell from 2037ms to 825ms of BLE time.
+ * Standalone it was net-neutral, because leaving a tab still repainted the
+ * four-tile canvas overview — that is no longer where Back lands.
+ * VITE_NATIVE_PANEL_TABS narrows the list, or a single space disables it.
  */
-const NATIVE_PANEL_TABS: ReadonlySet<string> = new Set(
-  String(import.meta.env.VITE_NATIVE_PANEL_TABS ?? '')
+let NATIVE_PANEL_TABS: ReadonlySet<string> = new Set(
+  String(import.meta.env.VITE_NATIVE_PANEL_TABS ?? 'notifications,news,pomodoro,search')
     .split(',').map((t) => t.trim()).filter((t) => t.length > 0),
 );
 
+/** Tests that pin the custom-list fallback (a narrowed VITE_NATIVE_PANEL_TABS
+ * still ships it) call this with an empty set. Never product code. */
+export function setNativePanelTabsForTest(tabs: readonly string[]): void {
+  NATIVE_PANEL_TABS = new Set(tabs);
+}
+
 const PANEL_EMPTY_COPY: Readonly<Record<PanelContentTab, string>> = {
-  news: 'No headlines yet — hold to refresh.',
+  news: 'No headlines yet — long-press to refresh.',
   pomodoro: 'Say “JOAT, start a pomodoro” to begin.',
   search: 'Say “JOAT, look up …” to search.',
 };
@@ -772,6 +782,12 @@ export class CapabilityMenu {
     // An opened headline or result is still inside its tab: the rail
     // stays on the reader so the wearer sees where they are.
     const railTab = panelTabForTitle(this.pendingTitle);
+    // A two-part title ("NEWS · ARTICLE") under a panel family is that
+    // tab's reader. panelTabForTitle deliberately excludes Notifications
+    // (it has no rail entry to light), so the family is matched here.
+    const readerFamily = title.includes('\u00b7') ? title.split('\u00b7')[0]?.trim().toUpperCase() : undefined;
+    const readerTab = readerFamily
+      ? PANEL_TABS.find((tab) => PANEL_TAB_TITLES[tab] === readerFamily) : undefined;
     const messageRows = messagesState?.screen === 'conversation' && effectiveSelectable
       && this.hud.usesCustomListSelection?.()
       ? items.flatMap((item, index) => parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : [])
@@ -830,6 +846,12 @@ export class CapabilityMenu {
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
       ...(normalized === 'AGENT TERMINAL' ? { nativeFirmwareList: true } : {}),
+      // An opened row of a firmware-owned tab — "NEWS · ARTICLE", "SEARCH ·
+      // RESULT", "NOTIFICATIONS · DETAIL" — is prose, and a firmware TEXT
+      // page: the whole tab flow stays off image tiles.
+      ...(readerTab && NATIVE_PANEL_TABS.has(readerTab) && !effectiveSelectable
+        && !messageProse && !noteProse
+        ? { nativeFirmwareList: true, nativeReaderPage: true } : {}),
     });
     if (
       !this.isCurrentTransition(transition)

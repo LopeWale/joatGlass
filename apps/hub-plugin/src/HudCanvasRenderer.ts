@@ -279,9 +279,9 @@ export const PANEL_RAIL = {
  * affordance from the footer while it kept working. The pomodoro page
  * names it too: that tab is excluded from the refresh carve-out
  * (CapabilityMenu.isPanelRefreshable), so a hold there opens the mic. */
-export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · hold: mic';
-export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · double-click: back';
-export const POMODORO_EXPANDED_HINT = 'tap: choose · hold: mic · double-click: back';
+export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · long-press: mic';
+export const PANEL_EXPANDED_HINT = 'tap: open · long-press: refresh · double-click: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · long-press: mic · double-click: back';
 
 /** Only the two long-text pages read through the shared reader: an opened
  * headline and an opened search result. Their families stay 'NEWS' and
@@ -1105,7 +1105,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       kind: 'empty',
       title: 'Ready',
       primary: 'Ask JOAT anything.',
-      recovery: 'Say “JOAT …” · tap then hold for menu.',
+      recovery: 'Say “JOAT …” · tap then long-press for menu.',
       hint: 'double-click: menu · long-press: mic',
     };
   }
@@ -2566,7 +2566,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
     if (content.rows.length === 0) {
-      quiet([content.empty ?? 'No headlines yet.', 'Tap to open, then hold to refresh.'], layout.mainTopBaselineY);
+      quiet([content.empty ?? 'No headlines yet.', 'Tap to open, then long-press to refresh.'], layout.mainTopBaselineY);
       return;
     }
     let y = layout.labelBaselineY + 22;

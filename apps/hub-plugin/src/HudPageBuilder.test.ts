@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
+import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
+import { pxTruncate } from '@evenrealities/pretext';
 import { HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
@@ -226,6 +227,79 @@ describe('HudPageBuilder invariants', () => {
     expect(list.itemContainer.itemName).toHaveLength(20);
     expect(list.itemContainer.itemName.every((s) => s.length <= 64)).toBe(true);
     expect(list.yPosition + list.height).toBeLessThanOrEqual(CANVAS.height);
+  });
+
+  it('list layout: every row is within the firmware 63-BYTE limit, not 64 chars', () => {
+    // A 66-char headline with two curly quotes is 70 bytes; the old 64-char
+    // pre-cut let it through and the firmware rejected the whole page —
+    // News expanded to nothing (2026-09-22).
+    const headline = "[20m] Trump tells U.N. he could ‘annihilate’ Iran but expects a deal · NBC";
+    const page = builder.listLayout([headline]) as unknown as {
+      listObject: Array<{ itemContainer: { itemName: string[] } }>;
+    };
+    for (const row of page.listObject[0]!.itemContainer.itemName) {
+      expect(utf8ByteLength(row)).toBeLessThanOrEqual(63);
+    }
+  });
+
+  it('text overview: a full News card stays within the firmware 999-byte pane limit', () => {
+    const rows = Array.from({ length: 20 }, (_, i) => `[${i + 1}m] A headline long enough to matter, number ${i} · Source`);
+    const page = builder.overviewTextLayout({
+      status: '11:33 · MIC ON · bat 100%', clock: '11:33', date: 'Tue 22 Sep', ambient: '',
+      tabs: [{ label: 'NOTIFICATIONS', active: false }, { label: 'NEWS', active: true }],
+      paneTitle: 'NEWS', paneBody: rows.join('\n'), hint: 'double-click: menu · long-press: mic',
+    }) as unknown as { textObject: Array<{ containerName: string; content: string }> };
+    expect(utf8ByteLength(rows.join('\n'))).toBeGreaterThan(999); // the case that failed live
+    for (const t of page.textObject) expect(utf8ByteLength(t.content)).toBeLessThanOrEqual(999);
+    expect(validateEvenHubPageContainer(page as never).valid).toBe(true);
+  });
+
+  it('text overview: the tab rail captures swipes; the pane is a six-row, one-line-per-row preview', () => {
+    // With the pane capturing, an overflowing News card swallowed every
+    // swipe (the firmware scrolled the card instead of reporting the
+    // swipe) and the rail never moved — observed 2026-09-22.
+    const rows = Array.from({ length: 12 }, (_, i) => `[${i + 1}m] A headline that is far too long to fit on one pane line of the right column · Source`);
+    const page = builder.overviewTextLayout({
+      status: 's', clock: '11:33', date: 'Tue', ambient: '',
+      tabs: [{ label: 'NEWS', active: true }],
+      paneTitle: 'NEWS', paneBody: rows.join('\n'), hint: 'double-click: menu',
+    }) as unknown as { textObject: Array<{ containerName: string; content: string; isEventCapture: number; width: number }> };
+    const byName = Object.fromEntries(page.textObject.map((t) => [t.containerName, t]));
+    expect(byName['tabs']!.isEventCapture).toBe(1);
+    expect(byName['pane']!.isEventCapture).toBe(0);
+    expect(page.textObject.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
+    const preview = byName['pane']!.content.split('\n');
+    expect(preview).toHaveLength(6);
+    for (const line of preview) expect(pxTruncate(line, byName['pane']!.width - 8)).toBe(line);
+  });
+
+  it('reader layout: an opened article is four firmware text containers, body captures, rows rejoined', () => {
+    const page = builder.listLayout(
+      ['1/5 · BBC · 16m · Woman and three children die', 'A woman and three children have died in a house fire on ', 'Merseyside.\n', 'Six fire engines were at the scene.'],
+      { title: 'NEWS · ARTICLE', hint: 'down more · left x2: back', nativeReaderPage: true },
+    ) as unknown as {
+      containerTotalNum: number;
+      textObject: Array<{ containerID: number; containerName: string; content: string; isEventCapture: number; zOrderIndex: number; yPosition: number; height: number }>;
+      listObject?: unknown[];
+      imageObject?: unknown[];
+    };
+    expect(page.containerTotalNum).toBe(4);
+    expect(page.textObject).toHaveLength(4);
+    expect(page.listObject ?? []).toHaveLength(0);
+    expect(page.imageObject ?? []).toHaveLength(0);
+    expect(validateEvenHubPageContainer(page as never).valid).toBe(true);
+    const byName = Object.fromEntries(page.textObject.map((t) => [t.containerName, t]));
+    expect(byName['reader-head']!.content).toBe('NEWS · 1/5 · BBC · 16m · Woman and three children die');
+    // The Mac's 62-column rows concatenate losslessly; the firmware wraps.
+    expect(byName['main']!.content).toBe('A woman and three children have died in a house fire on Merseyside.\nSix fire engines were at the scene.');
+    expect(byName['main']!.isEventCapture).toBe(1);
+    expect(page.textObject.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
+    expect(byName['hint']!.content).toBe('swipe: more · double-click: back');
+    // Every band is whole 27px lines inside its 4px padding and on-canvas.
+    for (const t of page.textObject) {
+      expect(t.yPosition + t.height).toBeLessThanOrEqual(CANVAS.height);
+      expect((t.height - 2 * (t.containerName === 'status' ? 6 : 4)) % 27).toBe(0);
+    }
   });
 
   it('list layout gives full-focus content a title and quiet bottom action rail', () => {
