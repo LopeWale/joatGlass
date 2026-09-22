@@ -202,15 +202,15 @@ describe('QuickNotes exact reader', () => {
 
 describe('productivity escape copy', () => {
   it.each([
-    [{ phase: 'verifying', monitoringArmed: false }, 'Back: left x2 to Planning'],
-    [{ phase: 'saved', monitoringArmed: true }, 'Back: left x2 to Planning · monitoring next'],
-    [{ phase: 'monitoring', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'completed', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'failed', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'check', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'cancelled', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'not_saved', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: left x2 to Planning'],
+    [{ phase: 'verifying', monitoringArmed: false }, 'Back: double-click to Planning'],
+    [{ phase: 'saved', monitoringArmed: true }, 'Back: double-click to Planning · monitoring next'],
+    [{ phase: 'monitoring', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'completed', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'failed', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'check', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'cancelled', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'not_saved', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: double-click to Planning'],
   ] as const)('keeps %o visibly escapable', (model, hint) => {
     expect(productivityActionHint(model)).toBe(hint);
   });
@@ -219,7 +219,7 @@ describe('productivity escape copy', () => {
 describe('flat productivity chrome', () => {
   it('collapses confirmation controls into one static low-bandwidth footer', () => {
     expect(HudCanvas.confirmationActionHint()).toBe(
-      'tap: confirm · swipe: cancel · left x2: back · auto-cancel',
+      'tap: confirm · swipe: cancel · double-click: back · auto-cancel',
     );
   });
 
@@ -239,38 +239,28 @@ describe('flat productivity chrome', () => {
     });
   });
 
-  it('removes the outer rounded card from every list and flow page', () => {
-    expect(HudCanvas.usesFlatHudShell('confirmation')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('productivity')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('list', 'PLANNING · PLAN · TUE SEP 1')).toBe(true);
-    // The wearer's ruling: the card was the waste, not its border. Every
-    // list page is flat now — Messages, QuickNotes, and all the rest.
-    expect(HudCanvas.usesFlatHudShell('list', 'MESSAGES')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('list', 'QUICKNOTES')).toBe(true);
-    // Brainstorm went flat too, and last: it is the surface whose whole
-    // job is showing prose, so the frame cost it most. The wearer had to
-    // say it twice — "stop wasting so much place on things that does not
-    // affect functionality", then "why are we still not fully using the
-    // display?" — before the transcript surfaces followed the lists.
-    expect(HudCanvas.usesFlatHudShell('brainstorm')).toBe(true);
-  });
+  it('never draws a full-frame perimeter from the shared status spine', () => {
+    let strokes = 0;
+    let arcSegments = 0;
+    const context = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
+      fillText() {},
+      stroke() { strokes += 1; },
+      beginPath() {}, moveTo() {}, lineTo() {}, closePath() {},
+      arcTo() { arcSegments += 1; },
+    } as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
+    const stub = renderer as never as {
+      drawIcon(): void;
+      drawStatusSpine(
+        c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown, showTime: boolean,
+      ): void;
+    };
+    stub.drawIcon = () => {};
+    stub.drawStatusSpine(context, '9:41  JOAT ready  bat 87%', true, {} as unknown, true);
 
-  it('renders stationary navigation pages flat; only moving states keep the shell', () => {
-    // Text pages a wearer reads while stopped carried the rounded card too
-    // (the wearer's ruling: remove it). The moving live-session states stay
-    // in the shell family with Brainstorm.
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'destination')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'repair')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'mode')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'preview')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'arrived')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'error')).toBe(true);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'guidance')).toBe(false);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'uncertain')).toBe(false);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'wrong_way')).toBe(false);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'off_route')).toBe(false);
-    expect(HudCanvas.usesFlatHudShell('navigation', '', 'rerouting')).toBe(false);
-    expect(HudCanvas.usesFlatHudShell('navigation')).toBe(false);
+    expect(strokes).toBe(0);
+    expect(arcSegments).toBe(0);
   });
 });
 
@@ -432,7 +422,6 @@ describe('compact focus list rows', () => {
     expect(
       HudCanvas.planningFocusRows('MESSAGES', 4)[0]?.secondaryBaselineY,
     ).toBeUndefined();
-    expect(HudCanvas.usesFlatHudShell('list', 'QUICKNOTES · NOTE')).toBe(true);
   });
 });
 
@@ -736,7 +725,7 @@ describe('Brainstorm wearable actions', () => {
       screen: 'brainstorm',
       state: 'ready',
       noToolsChecked: true,
-    })).toBe('tap: speak · left x2: menu');
+    })).toBe('tap: speak · double-click: menu');
   });
 
   it('shows the diagnostic test gesture only when the Mac explicitly arms it', () => {
@@ -1078,6 +1067,7 @@ describe('navigation map projection', () => {
     // route stops sitting on the roads the Mac drew.
     expect(east[0] - (bounds.x + bounds.width / 2)).toBeCloseTo(93.2, 0);
   });
+
   it('keeps changing mapped-guidance facts inside the left tile column', () => {
     const widths: Array<number | undefined> = [];
     const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
@@ -1264,7 +1254,7 @@ describe('the footer never names a gesture the router will not perform', () => {
 });
 
 describe('the spine\'s left slot', () => {
-  /** drawShell with the icon and fitText helpers stubbed, so the assertion
+  /** drawStatusSpine with the icon and fitText helpers stubbed, so the assertion
    * is about the slot's TEXT and not about canvas image compositing. */
   function shell(showTime: boolean): string[] {
     const texts: string[] = [];
@@ -1279,15 +1269,15 @@ describe('the spine\'s left slot', () => {
     const stub = renderer as never as {
       drawIcon(): void;
       fitText(c: CanvasRenderingContext2D, t: string): void;
-      drawShell(
+      drawStatusSpine(
         c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
-        f: boolean, showTime: boolean,
+        showTime: boolean,
       ): void;
     };
     stub.drawIcon = () => {};
     stub.fitText = (c, t) => { c.fillText(t, 0, 0); };
-    stub.drawShell(
-      context, '9:41  JOAT ready  bat 87%', false, {} as unknown, true, showTime,
+    stub.drawStatusSpine(
+      context, '9:41  JOAT ready  bat 87%', false, {} as unknown, showTime,
     );
     return texts;
   }
@@ -1319,13 +1309,13 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
     const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
     const stub = renderer as never as {
       drawIcon(c: unknown, i: unknown, x: number): void;
-      drawShell(
+      drawStatusSpine(
         c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
-        f: boolean, showTime: boolean,
+        showTime: boolean,
       ): void;
     };
     stub.drawIcon = (_c, _i, x) => { icons.push(x); };
-    stub.drawShell(context, status, true, {} as unknown, true, true);
+    stub.drawStatusSpine(context, status, true, {} as unknown, true);
     return { texts, icons };
   }
 
