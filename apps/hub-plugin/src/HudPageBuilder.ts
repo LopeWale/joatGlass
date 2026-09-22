@@ -378,9 +378,12 @@ export class HudPageBuilder {
    * One Even-style native conversation card. Wearer and JOAT text occupy
    * aligned transparent layers so the fixed firmware font can express role
    * hierarchy with brightness even though it exposes no bold font weight.
-   * The border is the single event owner; the plugin moves both text layers
-   * together on scroll instead of asking one firmware container to scroll
-   * independently of the other.
+   * The frame container is the single event owner; the plugin moves both text
+   * layers together on scroll instead of asking one firmware container to
+   * scroll independently of the other. It draws NO border: the wearer sees a
+   * hairline box around the whole answer on real glass, and every other
+   * event-capture container in this file already owns its events with
+   * borderWidth 0, so the stroke was decoration, not a capture requirement.
    */
   assistantConversationLayout(view: AssistantConversationPage): RebuildPageContainer {
     const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
@@ -397,9 +400,7 @@ export class HudPageBuilder {
           width: geometry.cardWidth,
           height: view.cardHeight,
           paddingLength: 0,
-          borderWidth: 1,
-          borderColor: 12,
-          borderRadius: 4,
+          borderWidth: 0,
           isEventCapture: 1,
           zOrderIndex: 1,
           textColor: 0,

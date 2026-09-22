@@ -9,7 +9,6 @@ import {
   encodeGray8TilePng,
   HudVisualSurface,
   PAINT_COALESCE_MS,
-  TILE_CALL_GAP_MS,
 } from './HudVisualSurface';
 import {
   activateVisualHudPage,
