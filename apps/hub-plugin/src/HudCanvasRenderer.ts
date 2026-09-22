@@ -13,6 +13,10 @@ import activitySvg from '@phosphor-icons/core/regular/pulse.svg?raw';
 import navigationSvg from '@phosphor-icons/core/regular/navigation-arrow.svg?raw';
 import microphoneSvg from '@phosphor-icons/core/regular/microphone.svg?raw';
 import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
+import batteryFullSvg from '@phosphor-icons/core/regular/battery-full.svg?raw';
+import batteryMediumSvg from '@phosphor-icons/core/regular/battery-medium.svg?raw';
+import batteryLowSvg from '@phosphor-icons/core/regular/battery-low.svg?raw';
+import batteryWarningSvg from '@phosphor-icons/core/regular/battery-warning.svg?raw';
 import weatherSvg from '@phosphor-icons/core/regular/cloud-sun.svg?raw';
 import newspaperSvg from '@phosphor-icons/core/regular/newspaper.svg?raw';
 import timerSvg from '@phosphor-icons/core/regular/timer.svg?raw';
@@ -83,6 +87,10 @@ const HAIRLINE = 51;
  * image is least reliable, and a glyph clipped by the lens edge is worse
  * than one that never reached it. Everything between is content. */
 const HUD_EDGE = 14;
+/** Navigation's fact row (distance remaining), one meta line above the
+ * gesture hint. It used to share HINT_BASELINE_Y and win, which is why the
+ * hint moved on exactly the screens a wearer is least able to hunt for it. */
+const NAVIGATION_FOOTER_BASELINE_Y = 243;
 const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
 /** Measured mean advance of the prose face (TYPE.transcript, 11px) — a
  * 63-character row rendered by the REAL simulator spans 326px → 5.18 px per character.
@@ -463,6 +471,10 @@ export type HudIconName =
   | 'settings'
   | 'microphone'
   | 'battery'
+  | 'batteryFull'
+  | 'batteryMedium'
+  | 'batteryLow'
+  | 'batteryWarning'
   | 'weather'
   | 'news'
   | 'pomodoro'
@@ -481,11 +493,34 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   settings: gearSvg,
   microphone: microphoneSvg,
   battery: batteryHighSvg,
+  batteryFull: batteryFullSvg,
+  batteryMedium: batteryMediumSvg,
+  batteryLow: batteryLowSvg,
+  batteryWarning: batteryWarningSvg,
   weather: weatherSvg,
   news: newspaperSvg,
   pomodoro: timerSvg,
   search: magnifyingGlassSvg,
 };
+
+/**
+ * Pick the battery glyph that matches the reading.
+ *
+ * Thresholds follow the phosphor set's own five steps so the cell count the
+ * wearer sees tracks the number printed beside it. Below 10% the warning
+ * face replaces the cells outright: at that point "how much is left" has
+ * stopped being the question.
+ */
+function batteryIcon(
+  icons: Record<HudIconName, HTMLImageElement>, level: number,
+): HTMLImageElement {
+  if (!Number.isFinite(level)) return icons.battery;
+  if (level <= 10) return icons.batteryWarning;
+  if (level <= 35) return icons.batteryLow;
+  if (level <= 60) return icons.batteryMedium;
+  if (level <= 85) return icons.battery;      // 'high'
+  return icons.batteryFull;
+}
 
 /** A month is intentionally a real six-row grid on the lens, rather than a
  * web-calendar imitation. The Mac still owns the selected week/action row;
@@ -1907,7 +1942,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.font = TYPE.statusMeta;
       context.textAlign = 'right';
       context.fillText(`${status.battery}%`, 531, HUD_VISUAL_GEOMETRY.statusBaselineY);
-      this.drawIcon(context, icons.battery, 538, 12, 20, SUPPORT);
+      // The glyph has to agree with the number beside it. It used to be
+      // `icons.battery` unconditionally — one full-looking cell drawn at 5%
+      // exactly as at 87% — so the only honest part of the indicator was
+      // the digits, and the picture contradicted them at a glance, which is
+      // the one moment a status icon is supposed to do its whole job.
+      const level = Number(status.battery);
+      this.drawIcon(context, batteryIcon(icons, level), 538, 12, 20,
+        Number.isFinite(level) && level <= 10 ? BRIGHT : SUPPORT);
     }
 
     // No rule under the spine. It separated nothing that the gap below it
@@ -4070,7 +4112,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillText(navigation.secondary, 288, 184);
     context.fillStyle = gray(CHROME);
     context.font = TYPE.meta;
-    context.fillText(navigation.hint, 288, 211);
+    // The gesture line lives at HINT_BASELINE_Y on every other screen. It
+    // sat at 211 here only because drawNavigationFooter had taken 267 for
+    // the distance remaining, so the one line a wearer scans for "what can
+    // I do" moved whenever the page changed. The footer yields: a fact row
+    // can sit above the hint, the hint cannot move.
+    context.textAlign = 'center';
+    context.fillText(navigation.hint, 288, HINT_BASELINE_Y);
     this.drawNavigationFooter(
       context,
       navigation.remainingDistanceM === undefined
@@ -4120,13 +4168,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     copy: string,
     width = 504,
   ): void {
-    // Left-aligned on the bottom band, not centred: it is a row of facts,
-    // and facts line up with the content above them.
+    // Left-aligned, and one line ABOVE the hint. It is a row of facts, so it
+    // lines up with the content above it — but it no longer occupies
+    // HINT_BASELINE_Y, which belongs to the gesture line on every screen.
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.meta;
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    this.fitText(context, copy, 36, HINT_BASELINE_Y, width);
+    this.fitText(context, copy, 36, NAVIGATION_FOOTER_BASELINE_Y, width);
   }
 
   private drawNavigationProgress(
