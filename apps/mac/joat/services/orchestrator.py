@@ -249,7 +249,7 @@ class VoiceOrchestrator:
         status: object | None = None,
         commands: Callable[[str], Awaitable[str | None]] | None = None,
         fuzzy_wake: tuple[str, ...] = ("joat", "jode", "jodh"),
-        anchored_wake: tuple[str, ...] = ("jokes", "jot", "jolt"),
+        anchored_wake: tuple[str, ...] = ("jokes", "joke", "choke", "jot", "jolt"),
         anchor_window: int = 2,
         fuzzy_threshold: float = 0.86,
         conversation_window_s: float = CONVERSATION_WINDOW_S,
@@ -299,6 +299,16 @@ class VoiceOrchestrator:
         # outright. Requiring them to OPEN the utterance keeps the
         # mis-rendering they exist for ("jokes, what is the weather") while
         # dropping the conversational use.
+        #
+        # "joke" and "choke" were added from captures taken on 2026-09-22:
+        # driving a real voice turn through the running brain, "JOAT, in
+        # three sentences ..." came back from STT as "Joke, in three
+        # sentences ..." and, on a second run, "Choke, in three sentences
+        # ...". Only the PLURAL "jokes" was listed, so the singular missed,
+        # and "choke" was not listed at all — the wearer says the name and
+        # the assistant acts deaf to it. Both are ordinary English, so they
+        # are anchored rather than matched anywhere: "I liked your joke" is
+        # four words in and cannot trigger.
         #
         # Two words rather than one, because the mis-rendering can follow a
         # filler ("so jokes, tell me the time"). Measured over thirteen

@@ -1549,7 +1549,7 @@ class TestOrdinaryEnglishWakeWordsMustOpenTheUtterance:
         o = VoiceOrchestrator(
             Transport(),  # type: ignore[arg-type]
             stt=None, stt_available=False,
-            wake_words=("hey joat", "joat", "jote", "jolt", "jokes", "jot"),
+            wake_words=("hey joat", "joat", "jote", "jolt", "jokes", "joke", "choke", "jot"),
         )
         return o._strip_wake_word(text)
 
@@ -1570,6 +1570,30 @@ class TestOrdinaryEnglishWakeWordsMustOpenTheUtterance:
                       "jot remind me at six",
                       "so jokes tell me the time"):
             assert await self._addressed(heard) is not None, heard
+
+    async def test_singular_joke_and_choke_wake_the_assistant(self) -> None:
+        """Captured on 2026-09-22 from a real voice turn: "JOAT, in three
+        sentences ..." came back from STT as "Joke, in three sentences ..."
+        and then "Choke, in three sentences ...". Only the PLURAL was
+        listed, and "choke" was absent, so the wearer said the name and the
+        assistant behaved as though nothing had been said to it."""
+        for heard in ("joke in three sentences why are displays grayscale",
+                      "choke in three sentences why are displays grayscale",
+                      "joke what is the weather",
+                      "so choke tell me the time"):
+            assert await self._addressed(heard) is not None, heard
+
+    async def test_joke_and_choke_stay_harmless_in_ordinary_speech(self) -> None:
+        """They are ordinary English, so they are anchored: they count only
+        when they OPEN the utterance. Otherwise adding them would make the
+        assistant answer someone telling a joke."""
+        for ambient in (
+            "I really liked your joke last night",
+            "he told one joke and left",
+            "I nearly had to choke it down",
+            "the engine needs more choke than that",
+        ):
+            assert await self._addressed(ambient) is None, ambient
 
     async def test_the_assistants_own_name_is_never_anchored(self) -> None:
         """No way of addressing JOAT by name may be lost — it is not an
@@ -1807,7 +1831,7 @@ class TestTheConversationWindow:
         clock = Clock()
         o = VoiceOrchestrator.__new__(VoiceOrchestrator)
         o._wake_words = ("hey joat", "joat")
-        o._anchored_wake = ("jokes", "jot", "jolt")
+        o._anchored_wake = ("jokes", "joke", "choke", "jot", "jolt")
         o._anchor_window = 2
         o._fuzzy_wake = ("joat", "jode", "jodh")
         o._fuzzy_threshold = 0.86
