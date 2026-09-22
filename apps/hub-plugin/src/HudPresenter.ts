@@ -1738,10 +1738,9 @@ export class HudPresenter {
     //
     // Opt out with `nativeFirmwareList: false` where a surface genuinely
     // needs the canvas (a prose reader that is not a row list).
-    // NOT a flag flip: `usesCustomListSelection()` keys off this, so turning
-    // every list firmware-owned also hands the firmware the selection model
-    // CapabilityMenu drives — 37 tests fail on that alone. The render path
-    // and the cursor have to move together, as one piece of work.
+    // Firmware lists cannot have their selection set programmatically and
+    // cannot be updated in place, so surfaces that restore a cursor across
+    // Back, or page through message rows, cannot live on one.
     const firmwareList = surface.options.nativeFirmwareList === true;
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = firmwareList

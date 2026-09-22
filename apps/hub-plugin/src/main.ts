@@ -404,7 +404,7 @@ async function boot(): Promise<void> {
           coalesceMs: PAINT_COALESCE_MS,
           // Tile calls are paced past the host's 100 ms hold window, so a
           // frame's last tile is never left waiting for the next frame.
-          tileGapMs: TILE_CALL_GAP_MS,
+          tileGapMs: 0,
         },
       ),
       g2Diagnostics,
