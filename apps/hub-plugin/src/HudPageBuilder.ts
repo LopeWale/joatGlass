@@ -33,6 +33,23 @@ import {
 const FIRMWARE_LINE = 27;
 const LIST_ROW = 40;
 const REGION_PAD = 4;
+
+/**
+ * The reply page, in whole firmware lines.
+ *
+ * Spine 39, body 39..249, footer 249..288. The body's inner box is
+ * 576 − 2×REGION_PAD = 568 wide and 210 − 2×REGION_PAD = 202 tall, which
+ * is exactly seven 27px lines with 13px spare — the pager measures against
+ * these numbers, so the page it fills is the page the firmware draws.
+ */
+export const ASSISTANT_ANSWER_GEOMETRY = {
+  bodyY: FIRMWARE_LINE + 12,                      // 39, directly under the spine
+  bodyHeight: 210,
+  footerY: 249,
+  footerHeight: FIRMWARE_LINE + 12,               // 39: one line inside 6px padding
+  /** Inner box handed to `paginate` — padding already subtracted. */
+  inner: { width: CANVAS.width - 2 * REGION_PAD, height: 210 - 2 * REGION_PAD },
+} as const;
 /** Inner text width of a full-width region (576 − 2×REGION_PAD). */
 const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
 /** A list row's text width: container pad (8) + firmware row pad (12/side). */
@@ -536,6 +553,35 @@ export class HudPageBuilder {
             itemName: capped,
           }),
         }),
+      ],
+    });
+  }
+
+  /**
+   * A reply, on the firmware's own text containers.
+   *
+   * Three containers, sized so every inner box is a whole number of 27px
+   * firmware lines: the spine, a seven-line reading area, and one footer
+   * line that carries the page position. Turning a page rewrites the body
+   * and the footer with `textContainerUpgrade` — two in-place writes, no
+   * rebuild, no image pacing floor. The body captures input so a tap
+   * dismisses and a swipe pages without the wearer leaving the answer.
+   */
+  assistantAnswerLayout(body: string, footer: string): RebuildPageContainer {
+    return new RebuildPageContainer({
+      containerTotalNum: 3,
+      ...this.menuConfig(),
+      textObject: [
+        this.statusBar(),
+        this.main(
+          ASSISTANT_ANSWER_GEOMETRY.bodyHeight, 1, 4, body,
+          { y: ASSISTANT_ANSWER_GEOMETRY.bodyY },
+        ),
+        this.region(
+          ContainerId.Hint, 'answer-pager',
+          ASSISTANT_ANSWER_GEOMETRY.footerY, ASSISTANT_ANSWER_GEOMETRY.footerHeight,
+          3, 2, footer,
+        ),
       ],
     });
   }

@@ -114,7 +114,7 @@ describe('HudPresenter retained assistant conversation integration', () => {
   });
 
   it('makes a transactional receipt visible by completing a page handoff first', async () => {
-    const { hud, frames } = rig();
+    const { hud, rebuilds } = rig();
     await hud.showAssistantConversation(conversation(1, 'ready', [
       { role: 'user', text: 'Save this note.' },
       { role: 'assistant', text: 'I can do that.' },
@@ -124,9 +124,13 @@ describe('HudPresenter retained assistant conversation integration', () => {
 
     expect(hud.hasAssistantConversation()).toBe(false);
     expect(hud.hasAssistantOverlay()).toBe(true);
-    expect(frames[frames.length - 1]).toMatchObject({
-      assistantOverlay: { text: 'Saved QuickNote.', presentation: 'receipt' },
-    });
+    // The receipt is text, so it lands on a firmware text container rather
+    // than in a raster frame. Asserting the container proves the handoff
+    // completed AND that the words reached the glass — the visual frame
+    // only ever proved the canvas had been asked to draw them.
+    const page = rebuilds[rebuilds.length - 1];
+    const body = page?.textObject?.find((c) => c.containerName === 'main');
+    expect(body?.content).toContain('Saved QuickNote.');
   });
 
   it('rolls a failed feature handoff back to the conversation and can resume the same id', async () => {

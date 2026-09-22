@@ -2,6 +2,8 @@ import { TextContainerUpgrade, type RebuildPageContainer } from '@evenrealities/
 import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
+import { ASSISTANT_ANSWER_GEOMETRY } from './HudPageBuilder';
+import { paginate, pagerLabel } from './AssistantAnswerPager';
 import type {
   AssistantOverlayPresentation,
   AssistantOverlayVisual,
@@ -913,7 +915,7 @@ export class HudPresenter {
       return Promise.resolve(true);
     }
     this.assistantOverlayPaintStartedAt = Date.now();
-    const paint = this.visual ? this.paintVisual() : this.paintNativeAssistantOverlay();
+    const paint = this.assistantOverlayPaintTarget();
     this.assistantOverlayPaint = paint;
     const completed = (): void => {
       if (this.assistantOverlayPaint !== paint) return;
@@ -924,6 +926,103 @@ export class HudPresenter {
     };
     void paint.then(completed, completed);
     return paint;
+  }
+
+  /**
+   * A reply is text, so it goes on text containers — except over the map.
+   *
+   * Streaming used to run through paintVisual() whenever a visual surface
+   * existed: four image uploads, each behind TILE_CALL_GAP_MS. Measured,
+   * one such frame is ~400ms with ~330ms of that pacing alone, before the
+   * BLE hop, and PAINT_INTERVAL_MS then throttles streaming so it cannot
+   * outrun it. AssistantOverlayVisual carries `text` and nothing else.
+   *
+   * Navigation keeps the canvas. There the answer is composited OVER a
+   * live map, and a text page would replace it — the wearer loses their
+   * turn-by-turn mid-junction to save a few hundred milliseconds. That is
+   * the trade that broke when this was attempted as a blanket switch.
+   */
+  private assistantOverlayNeedsCanvas(): boolean {
+    if (this.surface.kind === 'navigation' || this.actionOverlay !== undefined) return true;
+    // A painter that cannot hand the page over cannot take it back either:
+    // replaceNativePage refuses without withPageTransition, and a refusal
+    // here would report a failed paint rather than simply drawing the
+    // answer the old way. Absent that capability the canvas keeps the job.
+    return this.visual !== undefined && this.visual.withPageTransition === undefined;
+  }
+
+  private assistantOverlayPaintTarget(): Promise<boolean> {
+    if (!this.visual) return this.paintNativeAssistantOverlay();
+    if (this.assistantOverlay && !this.assistantOverlayNeedsCanvas()) {
+      return this.paintAssistantAnswerPage();
+    }
+    if (this.assistantOverlay || this.pageOwner !== 'assistant-native') {
+      return this.paintVisual();
+    }
+    // The borrowed text page goes back. paintVisual() returns true without
+    // drawing while another owner holds the page, so the way home has to be
+    // the explicit restore or the wearer is stranded on a stale answer.
+    this.answerPages = undefined;
+    this.nativeReplyPage = false;
+    return this.restoreVisualPage();
+  }
+
+  /** Pages of the current answer, measured for the firmware's own box. */
+  private answerPages?: { revision: number; pages: string[]; index: number };
+
+  private answerPageState(): { pages: string[]; index: number } {
+    const overlay = this.assistantOverlay;
+    const text = overlay?.text ?? '';
+    const current = this.answerPages;
+    if (current && current.revision === overlay?.revision) {
+      // Streaming appends to the same answer: re-measure, but hold the
+      // wearer's place. A chunk arriving must not yank them back to page 1.
+      const pages = paginate(text, ASSISTANT_ANSWER_GEOMETRY.inner);
+      const index = Math.min(current.index, pages.length - 1);
+      this.answerPages = { revision: current.revision, pages, index };
+      return { pages, index };
+    }
+    const pages = paginate(text, ASSISTANT_ANSWER_GEOMETRY.inner);
+    this.answerPages = { revision: overlay?.revision ?? 0, pages, index: 0 };
+    return { pages, index: 0 };
+  }
+
+  private async paintAssistantAnswerPage(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    const { pages, index } = this.answerPageState();
+    const body = pages[index] ?? '';
+    const footer = pagerLabel(index, pages.length);
+    if (this.pageOwner !== 'assistant-native') {
+      const status = this.captureLiveStatus();
+      if (!await this.replaceNativePage(
+        this.layouts.assistantAnswerLayout(body, footer), 'assistant-native',
+      )) return false;
+      this.lastLength.clear();
+      this.nativeReplyPage = true;
+      this.streams.set(ContainerId.Main, body);
+      this.streams.set(ContainerId.Hint, footer);
+      await this.restoreLiveStatus(status);
+      return displayCurrent();
+    }
+    // Already ours: two in-place writes, which is the whole point.
+    return this.writeAnswerPage(body, footer, displayCurrent);
+  }
+
+  private async writeAnswerPage(
+    body: string, footer: string, displayCurrent: () => boolean,
+  ): Promise<boolean> {
+    const client = this.client.require();
+    const wrote = await client.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: ContainerId.Main, containerName: 'main', content: body || ' ',
+    }));
+    if (!wrote || !displayCurrent()) return false;
+    this.streams.set(ContainerId.Main, body);
+    const paged = await client.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: ContainerId.Hint, containerName: 'answer-pager', content: footer || ' ',
+    }));
+    if (paged) this.streams.set(ContainerId.Hint, footer);
+    return paged && displayCurrent();
   }
 
   private async paintNativeAssistantOverlay(): Promise<boolean> {
@@ -980,6 +1079,19 @@ export class HudPresenter {
    * they can never operate the obscured feature or dismiss unread copy. */
   scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
     if (!this.assistantOverlay) return false;
+    // On the native answer page the pager is ours, not the renderer's: the
+    // canvas is not drawing this answer, so asking it to scroll would move
+    // a frame nobody is looking at.
+    const paged = this.answerPages;
+    if (paged && this.pageOwner === 'assistant-native') {
+      const next = Math.max(0, Math.min(paged.pages.length - 1,
+        paged.index + (direction === 'down' ? 1 : -1)));
+      if (next !== paged.index) {
+        paged.index = next;
+        void this.paintAssistantOverlayNow();
+      }
+      return true;
+    }
     if (this.visual?.scrollAssistantOverlay?.(direction)) {
       void this.paintAssistantOverlayNow();
     }
@@ -1614,9 +1726,22 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
-    // Agent selection is a firmware-owned list: its highlight and paging stay
-    // smooth without four sequential image uploads. Other lists retain JOAT's
-    // authored visual treatment in this migration slice.
+    // Every list is a firmware-owned list now.
+    //
+    // Agent selection went first and the rest were left on "JOAT's authored
+    // visual treatment in this migration slice". Measured on the simulator,
+    // that slice costs 721ms to open a feature list — 607ms of it asleep in
+    // TILE_CALL_GAP_MS between four image uploads — and ~310ms for every
+    // step of the tab rail. News, Messages, QuickNotes and Planning are rows
+    // of text; the firmware scrolls its own highlight and reports the pick
+    // as `listEvent`, with no raster bill at all.
+    //
+    // Opt out with `nativeFirmwareList: false` where a surface genuinely
+    // needs the canvas (a prose reader that is not a row list).
+    // NOT a flag flip: `usesCustomListSelection()` keys off this, so turning
+    // every list firmware-owned also hands the firmware the selection model
+    // CapabilityMenu drives — 37 tests fail on that alone. The render path
+    // and the cursor have to move together, as one piece of work.
     const firmwareList = surface.options.nativeFirmwareList === true;
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = firmwareList
