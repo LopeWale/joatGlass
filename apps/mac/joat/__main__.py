@@ -128,6 +128,9 @@ from .agents.panel_tools import (
     news_article_tool, news_headlines_tool, pomodoro_status_tool, web_search_tool,
 )
 from .services.news import NewsService
+from .services.local_commands import (
+    Capability, ChildCommandPipe, CommandResult, service_retry_capability,
+)
 from .services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
 from .services.panels import PanelPublisher
 from .services.pomodoro import PomodoroService
@@ -282,6 +285,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 async def main() -> None:
+    command_pipe = ChildCommandPipe.from_environment()
     parser = build_argument_parser()
     args = parser.parse_args()
     try:
@@ -1122,21 +1126,28 @@ async def main() -> None:
             no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 
-    async def retry_openclaw_terminal() -> None:
+    async def perform_terminal_retry(*, show_on_glasses: bool) -> None:
         """Retry only the isolated Hermes terminal after an explicit G2 tap."""
         nonlocal openclaw_terminal
+        async def present_retry(activity: str) -> None:
+            if show_on_glasses:
+                await show_terminal_retry_view(activity)
+
         candidate = openclaw_retry_candidate
         if candidate is None:
-            await show_terminal_retry_view("Open JOAT on the Mac to configure or approve Hermes.")
+            await present_retry("Open JOAT on the Mac to configure or approve Hermes.")
             return
-        status.set_openclaw(
-            state="checking",
-            endpoint_host=endpoint_host,
-            scopes=(),
-            reason="checking_pairing",
-        )
-        status.set_agent_terminal(state="running", reason="")
-        await show_terminal_retry_view("Checking the dedicated Hermes session…")
+        # Local pending state belongs to the command receipt. An attestation
+        # does not make the established service active or disconnected.
+        if show_on_glasses:
+            status.set_openclaw(
+                state="checking",
+                endpoint_host=endpoint_host,
+                scopes=(),
+                reason="checking_pairing",
+            )
+            status.set_agent_terminal(state="running", reason="")
+        await present_retry("Checking the dedicated Hermes session…")
         was_initialized = candidate.initialized
         try:
             if was_initialized:
@@ -1151,25 +1162,25 @@ async def main() -> None:
                 reason="device_approval_required",
             )
             status.set_agent_terminal(state="approval_required", reason="write_scope_required")
-            await show_terminal_retry_view("Approve the JOAT device in OpenClaw, then tap retry.")
+            await present_retry("Approve the JOAT device in OpenClaw, then tap retry.")
         except OpenClawToolsEnabled:
             status.set_openclaw(
                 state="disconnected", endpoint_host=endpoint_host, scopes=(), reason="gateway_not_ready",
             )
             status.set_agent_terminal(state="blocked", reason="tools_enabled")
-            await show_terminal_retry_view("Hermes tools are enabled; this JOAT session remains blocked.")
+            await present_retry("Hermes tools are enabled; this JOAT session remains blocked.")
         except OpenClawToolInventoryUnsettled:
             status.set_openclaw(
                 state="disconnected", endpoint_host=endpoint_host, scopes=(), reason="gateway_not_ready",
             )
             status.set_agent_terminal(state="blocked", reason="dedicated_session_not_proven")
-            await show_terminal_retry_view("Hermes session isolation is not proven yet.")
+            await present_retry("Hermes session isolation is not proven yet.")
         except OpenClawGatewayError:
             status.set_openclaw(
                 state="failed", endpoint_host=endpoint_host, scopes=(), reason="protocol_rejected",
             )
             status.set_agent_terminal(state="unavailable", reason="gateway_not_ready")
-            await show_terminal_retry_view("Hermes rejected the dedicated session protocol.")
+            await present_retry("Hermes rejected the dedicated session protocol.")
         except (
             NativeBridgeError,
             NativeBridgeProtocolError,
@@ -1186,7 +1197,7 @@ async def main() -> None:
                 state="failed", endpoint_host=endpoint_host, scopes=(), reason=reason,
             )
             status.set_agent_terminal(state="unavailable", reason=reason)
-            await show_terminal_retry_view(wearer_terminal_reason({
+            await present_retry(wearer_terminal_reason({
                 "state": "unavailable", "reason": reason, "endpoint_host": endpoint_host,
             }))
         else:
@@ -1198,7 +1209,26 @@ async def main() -> None:
                 reason="",
             )
             status.set_agent_terminal(state="ready", reason="")
-            await show_terminal_retry_view(terminal_ready_activity(reverified=was_initialized))
+            await present_retry(terminal_ready_activity(reverified=was_initialized))
+
+    terminal_retry_lock = asyncio.Lock()
+
+    async def retry_openclaw_terminal(*, show_on_glasses: bool = True) -> None:
+        # Both Mac and G2 retries enter the same owner. Refuse overlap instead
+        # of queuing a retry behind an unrelated conversation.
+        if terminal_retry_lock.locked() or agent_terminal.busy:
+            return
+        async with terminal_retry_lock:
+            try:
+                await perform_terminal_retry(show_on_glasses=show_on_glasses)
+            except asyncio.CancelledError:
+                if show_on_glasses:
+                    status.set_openclaw(
+                        state="disconnected", endpoint_host=endpoint_host, scopes=(),
+                        reason="connection_closed",
+                    )
+                    status.set_agent_terminal(state="unavailable", reason="connection_closed")
+                raise
 
     initial_count = len(current_seated())
     initial_brainstorm_ready = brainstorm_available()
@@ -1579,9 +1609,16 @@ async def main() -> None:
     # whisper on short utterances: a one-word utterance gives the model no
     # context, so "JOAT" comes back as "Jokes"/"Jote"/"Jolt". Rejecting
     # those made the assistant look deaf to its own name.
+    #
+    # "joke" and "choke" join them from captures on 2026-09-22: a real voice
+    # turn through the running brain transcribed "JOAT, in three sentences"
+    # as "Joke, in three sentences" and then "Choke, in three sentences".
+    # The SINGULAR was missing while the plural was listed, and "choke" was
+    # absent entirely. Both are anchored in the orchestrator, so they only
+    # count when they open the utterance.
     wake_words = None if args.always_answer else (
         "hey joat",
-        "joat", "jote", "jolt", "jokes", "jot",
+        "joat", "jote", "jolt", "jokes", "joke", "choke", "jot",
     )
     voice_latency = VoiceLatencyStore() if args.voice_latency_diagnostics else None
     prompted_speech = PromptedSpeechRuntime(
@@ -1969,6 +2006,52 @@ async def main() -> None:
                      "(expose with: tailscale serve --bg --set-path /agent "
                      "http://127.0.0.1:%d)", agent_endpoint.port, agent_endpoint.port)
 
+    def local_capabilities() -> dict[str, Capability]:
+        terminal = status.agent_terminal_projection()
+        return {
+            "news.refresh": Capability(
+                configured=bool(news.config.feeds()), available=True,
+                active=news.fetched_at is not None and news.last_error is None,
+                disconnected=news.last_error is not None,
+            ),
+            "service.retry": service_retry_capability(
+                configured=openclaw_config is not None,
+                owner_available=openclaw_retry_candidate is not None,
+                state=str(terminal["state"]),
+                busy=terminal_retry_lock.locked() or agent_terminal.busy,
+            ),
+        }
+
+    async def local_news_refresh() -> CommandResult:
+        changed = await news.refresh_changed()
+        if changed:
+            # Publish through the existing engine owner, never an uplink frame.
+            await panels.publish("news")
+        if news.last_error is not None:
+            return CommandResult("failed", "unavailable")
+        return CommandResult("succeeded", "partial" if news.partial else "completed")
+
+    async def local_service_retry() -> CommandResult:
+        state = local_capabilities()["service.retry"]
+        if not state.configured:
+            return CommandResult("refused", "not_configured")
+        if not state.available:
+            return CommandResult("refused", "busy")
+        await retry_openclaw_terminal(show_on_glasses=False)
+        terminal = status.agent_terminal_projection()
+        if terminal["state"] == "ready":
+            return CommandResult("succeeded", "completed")
+        if terminal["state"] in {"approval_required", "blocked"}:
+            return CommandResult("refused", "denied")
+        return CommandResult("failed", "unavailable")
+
+    command_task = (
+        asyncio.create_task(command_pipe.run(
+            {"news.refresh": local_news_refresh, "service.retry": local_service_retry},
+            local_capabilities,
+        ), name="mac-local-commands") if command_pipe is not None else None
+    )
+
     # Diagnostic: a starved loop delays every reply, and looks exactly
     # like a slow model in the logs unless it is measured directly.
     lag_task = asyncio.get_running_loop().create_task(orchestrator.watch_loop_lag())
@@ -1977,6 +2060,9 @@ async def main() -> None:
     try:
         await shutdown.wait()
     finally:
+        if command_task is not None:
+            command_task.cancel()
+            await asyncio.gather(command_task, return_exceptions=True)
         remove_shutdown_handlers(shutdown_signals)
         # Stop new questions before draining their owners. This does not
         # cancel completed STT or an unrelated caller's tool execution.
