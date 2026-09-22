@@ -28,6 +28,27 @@ import {
 /** What an expanded tab says before the Mac has pushed anything for it.
  * Truthful about the way in: news and search only fill by voice or by
  * the Mac's own poll; the timer starts with a word. */
+/** Expanded panel tabs rendered as firmware lists instead of canvas tiles.
+ *
+ * Measured with the [host-call] probe against the real brain and real feeds,
+ * every reading checked against a pixel diff: an expanded canvas tab costs 4
+ * image tiles to open, 2-3 to scroll and 4 to leave, at ~104ms each on a G2
+ * (even-g2-notes/performance.md). A firmware list is one rebuildPageContainer
+ * (~165ms, flat) and the firmware then scrolls its own highlight for free.
+ *
+ * An earlier attempt at this wedged the whole menu, because openPanelTab
+ * demanded a restored cursor and bailed when a firmware list would not take
+ * one. That demand was the bug, not the list: the firmware OWNS the
+ * highlight and reports it back. See restorePanelSelection.
+ *
+ * Still opt-in while the visual result is being judged on hardware:
+ * VITE_NATIVE_PANEL_TABS=search,news
+ */
+const NATIVE_PANEL_TABS: ReadonlySet<string> = new Set(
+  String(import.meta.env.VITE_NATIVE_PANEL_TABS ?? '')
+    .split(',').map((t) => t.trim()).filter((t) => t.length > 0),
+);
+
 const PANEL_EMPTY_COPY: Readonly<Record<PanelContentTab, string>> = {
   news: 'No headlines yet — hold to refresh.',
   pomodoro: 'Say “JOAT, start a pomodoro” to begin.',
@@ -1652,8 +1673,10 @@ export class CapabilityMenu {
       : [content?.empty ?? PANEL_EMPTY_COPY[tab]];
     const selectable = rows.length > 0;
     const hint = tab === 'pomodoro' ? POMODORO_EXPANDED_HINT : PANEL_EXPANDED_HINT;
+    const firmwareOwned = NATIVE_PANEL_TABS.has(tab);
     const shown = await this.hud.showList(items, {
       title, hint, selectable, railTab: tab,
+      ...(firmwareOwned ? { nativeFirmwareList: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -1665,7 +1688,9 @@ export class CapabilityMenu {
       // already stale. Paint once more from the new cache.
       return this.openPanelTab(tab, keepSelection, false);
     }
-    const selectedIndex = await this.restorePanelSelection(keepSelection, items.length, transition);
+    const selectedIndex = await this.restorePanelSelection(
+      keepSelection, items.length, transition, firmwareOwned,
+    );
     if (selectedIndex === undefined || !this.isCurrentTransition(transition)) return;
     if (this.hud.rail.requestId(tab) !== requestId) return this.openPanelTab(tab, keepSelection, false);
     this.view = 'data';
@@ -1708,9 +1733,21 @@ export class CapabilityMenu {
   /** After a repaint from the cache, put the wearer's row back, clamped
    * to the rows that exist now. */
   private async restorePanelSelection(
-    keep: number, itemCount: number, transition: number,
+    keep: number, itemCount: number, transition: number, firmwareOwned = false,
   ): Promise<number | undefined> {
     const clamped = Math.max(0, Math.min(Math.max(0, itemCount - 1), keep));
+    // A firmware list keeps its own highlight and reports it on the click
+    // event as listEvent.currentSelectItemIndex; there is no field to set it
+    // with (ListItemContainerProperty carries only itemCount, itemWidth,
+    // isItemSelectBorderEn and itemName). The working G2 launcher states the
+    // rule outright: "Do not track the selected item yourself. The firmware
+    // owns the highlight and reports it."
+    //
+    // So there is nothing to restore here, and treating the failure to
+    // restore as fatal is what left the whole capability menu wedged: this
+    // returned undefined, openPanelTab returned before setting view = 'data',
+    // and every tab stopped expanding.
+    if (firmwareOwned) return clamped;
     if (clamped > 0) {
       const painted = await this.hud.restoreSelection(clamped);
       if (!this.isCurrentTransition(transition)) return undefined;
