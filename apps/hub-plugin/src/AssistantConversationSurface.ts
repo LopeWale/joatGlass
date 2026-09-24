@@ -68,12 +68,15 @@ export interface AssistantConversationSurfaceState {
   indicatorFrame: number;
 }
 
-// Native text is the latency path. Keep one stable container geometry for the
-// whole visit so thinking, streamed answer chunks, scrolling, and the
-// continuation prompt use flicker-free textContainerUpgrade calls. Changing
-// the card height as lines arrive would turn every early chunk into a full
-// rebuildPageContainer and recreate the very redraw problem this path fixes.
-const NATIVE_LINE_STAGES = [7] as const;
+// Native text is the latency path: within a stage, thinking, streamed answer
+// chunks, scrolling and the continuation prompt are flicker-free
+// textContainerUpgrade calls. The stages are BOUNDED so the card still does
+// what Even AI's own card does — hug its content and grow upward from the
+// fixed bottom as the exchange grows (product-page demo, frame-measured
+// 2026-09-24: five card heights across one exchange). A stage crossing is
+// one rebuild; per-chunk height changes would be one rebuild per chunk,
+// which is the redraw problem this path exists to avoid.
+const NATIVE_LINE_STAGES = [2, 3, 5, 7] as const;
 const VISUAL_LINE_STAGES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 // The visual renderer has eight observed morph phases. The text-only
 // compatibility page cannot reproduce their geometry, but it keeps the same
@@ -196,19 +199,6 @@ function centered(text: string, width: number): string {
   return `${' '.repeat(Math.floor(room / space / 2))}${text}`;
 }
 
-function scrollbar(total: number, capacity: number, scrollFromTail: number): string {
-  if (total <= capacity) return ' ';
-  const slots = capacity;
-  const thumbSize = Math.max(1, Math.round((capacity / total) * slots));
-  const maximum = total - capacity;
-  const startFromTop = maximum - scrollFromTail;
-  const travel = Math.max(0, slots - thumbSize);
-  const thumbStart = maximum === 0 ? 0 : Math.round((startFromTop / maximum) * travel);
-  return Array.from({ length: slots }, (_, index) => (
-    index >= thumbStart && index < thumbStart + thumbSize ? '█' : '│'
-  )).join('\n');
-}
-
 export function conversationViewport(
   snapshot: AssistantConversationSnapshot,
   requestedScrollFromTail = 0,
@@ -236,13 +226,20 @@ export function conversationViewport(
     .map((line) => line.role === 'assistant' ? line.text : ' ')
     .join('\n');
   const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
+  // The state glyph rides ON the card's bottom border, centred — Even AI's
+  // own placement (product-page demo) — so the resting card reserves no
+  // interior footer row. Only the continuation prompt is a sentence; the
+  // border must not strike through it, so that one state moves the footer
+  // inside the card and grows the card by one line to hold it.
   const cardHeight = (
     lineCapacity * geometry.lineHeight
     + geometry.cardTopPadding
     + geometry.footerGap
-    + geometry.lineHeight
-    + geometry.footerBottomInset
+    + (continuePrompt ? geometry.lineHeight + geometry.footerBottomInset : 0)
   );
+  const footerTop = continuePrompt
+    ? geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight
+    : geometry.cardBottom - Math.round(geometry.lineHeight / 2);
   const footer = continuePrompt
     ? CONTINUE_COPY
     : snapshot.state === 'ready'
@@ -253,9 +250,9 @@ export function conversationViewport(
     cardHeight,
     transcriptTop: geometry.cardBottom - cardHeight + geometry.cardTopPadding,
     transcriptHeight: lineCapacity * geometry.lineHeight,
+    footerTop,
     dimText,
     brightText,
-    scrollbarText: scrollbar(all.length, lineCapacity, scrollFromTail),
     footerText: centered(GesturePolicy.formatHint(footer), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
     visibleLines,
     lineCapacity,
@@ -614,7 +611,12 @@ export class AssistantConversationSurface {
       current, requestedScroll, this.indicatorFrame, this.continuePrompt,
       this.viewportOptions,
     );
-    const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined;
+    // A footer that moved (glyph on the border ↔ continuation sentence
+    // inside the card) needs its container re-placed; an upgrade would draw
+    // the new text at the old position.
+    const needsRebuild = this.pageLineCapacity !== view.lineCapacity
+      || this.lastView === undefined
+      || this.lastView.footerTop !== view.footerTop;
     let painted = this.paintView
       ? await this.paintVisual(current, view)
       : needsRebuild
@@ -705,9 +707,6 @@ export class AssistantConversationSurface {
     }
     if (prior?.brightText !== view.brightText) {
       updates.push([AssistantConversationContainerId.JoatTurns, 'joat-turns', view.brightText, prior?.brightText ?? '']);
-    }
-    if (prior?.scrollbarText !== view.scrollbarText) {
-      updates.push([AssistantConversationContainerId.ScrollPosition, 'scroll-position', view.scrollbarText, prior?.scrollbarText ?? '']);
     }
     if (prior?.footerText !== view.footerText) {
       updates.push([AssistantConversationContainerId.Generation, 'generation', view.footerText, prior?.footerText ?? '']);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-24 — The conversation card matches Even AI's own
+
+- Measured Even's product-page demo frame by frame and rebuilt the assistant conversation card to it: one hairline rounded box (borderWidth 1, borderColor 8, borderRadius 10 — the firmware default border color is 0, invisible, which is why the earlier border "removal" changed nothing on glass and why restoring the width alone would have drawn nothing), the wearer's question dim over the bright answer, and the state glyph centred on the card's bottom border. The continuation prompt is a sentence, so it alone moves inside the card.
+- Removed the hand-rolled scroll-position column (█/│ glyphs): Even AI has no scrollbar — older lines leave through the top. The page is now 4 containers; scrollback still pages the window.
+- The card hugs its content and grows upward from a fixed bottom, as in the demo: NATIVE_LINE_STAGES = [2, 3, 5, 7]. A stage crossing is one rebuild; streaming inside a stage stays in-place text upgrades.
+- Verified on the official simulator against the live sandbox brain: two voice turns painted the bordered card, the follow-up appended below a blank separator, and the card grew from 3 to 7 lines without moving its bottom edge. Vitest: no new failures against HEAD.
+
 ## 2026-09-22 — Every tab flow on firmware text, within the firmware's limits
 
 - Found why the expanded News list and the News card failed and the overview repainted over them: the host rejects a page whole when a text container exceeds 999 UTF-8 bytes or a list row exceeds 63 bytes / 20 rows (Even simulator README v0.7.1, v0.7.3, "to behave more like firmware"; simulator log "validation failed … exceeds limit"). Added `FirmwareLimits` clamps on every text container, upgrade and list row, and a `[page-rejected]` diagnostic naming the offending container.

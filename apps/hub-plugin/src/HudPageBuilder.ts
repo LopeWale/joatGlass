@@ -66,8 +66,6 @@ export const ASSISTANT_CONVERSATION_GEOMETRY = {
   transcriptWidth: 458,
   footerLeft: 52,
   footerWidth: 458,
-  scrollbarLeft: 516,
-  scrollbarWidth: 18,
   lineHeight: 27,
   cardTopPadding: 8,
   footerGap: 5,
@@ -80,7 +78,8 @@ export const AssistantConversationContainerId = {
   Frame: 11,
   WearerTurns: 12,
   JoatTurns: 13,
-  ScrollPosition: 14,
+  // 14 was ScrollPosition, retired 2026-09-24: Even AI draws no scrollbar —
+  // older lines simply leave through the top of the card (product demo).
   Generation: 15,
 } as const;
 
@@ -89,9 +88,14 @@ export interface AssistantConversationPage {
   cardHeight: number;
   transcriptTop: number;
   transcriptHeight: number;
+  /** Top of the one-line state/footer container. On the resting and
+   * streaming card this line straddles the card's bottom border, carrying
+   * the centred state glyph exactly where Even AI's demo puts it; the
+   * continuation prompt moves it inside the card so the border never
+   * strikes through a sentence. */
+  footerTop: number;
   dimText: string;
   brightText: string;
-  scrollbarText: string;
   footerText: string;
 }
 
@@ -478,16 +482,21 @@ export class HudPageBuilder {
    * hierarchy with brightness even though it exposes no bold font weight.
    * The frame container is the single event owner; the plugin moves both text
    * layers together on scroll instead of asking one firmware container to
-   * scroll independently of the other. It draws NO border: the wearer sees a
-   * hairline box around the whole answer on real glass, and every other
-   * event-capture container in this file already owns its events with
-   * borderWidth 0, so the stroke was decoration, not a capture requirement.
+   * scroll independently of the other.
+   *
+   * The frame DOES draw its hairline border. Even AI's own conversation
+   * card is a bordered rounded box (product-page demo, frame-measured
+   * 2026-09-24: one hairline box, dim question over bright answer,
+   * bottom-anchored growth, the state glyph centred on the bottom border,
+   * and no scrollbar). An earlier pass removed the border citing the
+   * generic templates — but the templates show that capture does not NEED
+   * a border, not that Even's AI surface lacks one. It has one.
    */
   assistantConversationLayout(view: AssistantConversationPage): RebuildPageContainer {
     const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
     const content = (value: string): string => value || ' ';
     return new RebuildPageContainer({
-      containerTotalNum: 5,
+      containerTotalNum: 4,
       ...this.menuConfig(),
       textObject: [
         new TextContainerProperty({
@@ -498,7 +507,14 @@ export class HudPageBuilder {
           width: geometry.cardWidth,
           height: view.cardHeight,
           paddingLength: 0,
-          borderWidth: 0,
+          // The hairline rounded box from Even AI's own card. The simulator
+          // (matching glasses firmware) defaults borderColor to 0 —
+          // INVISIBLE — so a width alone draws nothing; the colour is the
+          // 4-bit pixel value. Mid-grey keeps the frame quieter than the
+          // bright answer text, as in the demo.
+          borderWidth: 1,
+          borderColor: 8,
+          borderRadius: 10,
           isEventCapture: 1,
           zOrderIndex: 1,
           textColor: 0,
@@ -533,30 +549,16 @@ export class HudPageBuilder {
           content: fitUtf8(content(view.brightText), TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
-          containerID: AssistantConversationContainerId.ScrollPosition,
-          containerName: 'scroll-position',
-          xPosition: geometry.scrollbarLeft,
-          yPosition: view.transcriptTop,
-          width: geometry.scrollbarWidth,
-          height: view.transcriptHeight,
-          paddingLength: 0,
-          borderWidth: 0,
-          isEventCapture: 0,
-          zOrderIndex: 4,
-          textColor: 2,
-          content: fitUtf8(content(view.scrollbarText), TEXT_CONTAINER_MAX_BYTES),
-        }),
-        new TextContainerProperty({
           containerID: AssistantConversationContainerId.Generation,
           containerName: 'generation',
           xPosition: geometry.footerLeft,
-          yPosition: geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight,
+          yPosition: view.footerTop,
           width: geometry.footerWidth,
           height: geometry.lineHeight,
           paddingLength: 0,
           borderWidth: 0,
           isEventCapture: 0,
-          zOrderIndex: 5,
+          zOrderIndex: 4,
           textColor: 4,
           content: fitUtf8(content(GesturePolicy.formatHint(view.footerText)), TEXT_CONTAINER_MAX_BYTES),
         }),

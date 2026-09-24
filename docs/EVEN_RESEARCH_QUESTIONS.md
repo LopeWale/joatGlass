@@ -26,20 +26,6 @@ insufficient, not that the source is absent. Record where you looked.
 
 ## Open
 
-### 2. The Even AI agent interface
-How does Even's own assistant distinguish the wearer's words from the
-agent's reply on screen? Looked in all four templates and both official
-repos: the ASR template is transcription only and carries no role concept.
-Reviews describe a listening animation on activation and an adjustable
-"response speed" for the answer. Not yet checked: the Figma guidelines,
-Even's videos, and the shipped app itself.
-
-Blocked on this: the conversation surface currently stacks two containers
-at different brightness, which measured 197 vs 255 and is illegible as a
-role cue. Relevant constraint, from Even's own tracker
-(`everything-evenhub#23`): "Text containers render at a single uniform
-brightness — there is no API to set a highlight color behind a span."
-
 ### 3. List selection across a Back navigation
 Firmware lists cost far less than canvas but cannot have their selection set
 programmatically, so `restorePanelSelection` cannot restore a cursor and
@@ -70,6 +56,37 @@ against Even's own docs, then delete any hand-rolled scrollbar that
 duplicates it.
 
 ## Answered
+
+### 2. The Even AI agent interface — ANSWERED (2026-09-24)
+Source: Even's own product-page demo video (the wearer-supplied screen
+recording of evenrealities.com; frame-extracted at 2 fps and measured).
+The Even AI conversation surface is:
+- ONE hairline ROUNDED box, centred, generous side margins; nothing else
+  on the page — no status bar, no header, no hint line.
+- Bottom-anchored: the bottom edge never moves; the box grows UPWARD as
+  the exchange grows (five distinct card heights measured across one
+  exchange: top 681 → 628 → 562 → 456 → 401 px at fixed bottom 879).
+- The wearer's question in DIM text; the answer in BRIGHT text directly
+  beneath it; a follow-up question dim again below the answer, separated
+  from the previous pair by one blank line. Role is carried by brightness
+  alone — the same two-layer dim/bright approach JOAT uses.
+- ONE small state glyph centred ON the bottom border — listening bars,
+  thinking dots, a working spinner, done/expand corners. It is the only
+  chrome the card has.
+- NO scrollbar anywhere: older lines simply leave through the top.
+Implemented in JOAT 2026-09-24: frame borderWidth 1 / borderColor 8 /
+borderRadius 10 (the simulator, matching firmware, defaults borderColor
+to 0 = invisible, so a width alone draws nothing); the hand-rolled
+scroll-position column removed (page is 4 containers); the footer glyph
+straddles the card's bottom border (the continuation prompt, a sentence,
+stays inside the card so the border never strikes through it); and
+NATIVE_LINE_STAGES = [2, 3, 5, 7] so the card hugs its content and grows
+at stage boundaries — one rebuild per crossing, upgrades within a stage.
+Verified on the official simulator with the live sandbox brain
+(--always-answer): two voice turns painted the bordered card, the
+follow-up appended with the blank separator, and the card grew upward
+from the fixed bottom. Still unchecked: the Figma guidelines (exact
+margins/typography) and the shipped app.
 
 ### Payload limits a page must respect — ANSWERED (2026-09-22)
 Source: Even's `@evenrealities/evenhub-simulator` README, changelog entries
