@@ -60,9 +60,9 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
     cardHeight: 132,
     transcriptTop: 140,
     transcriptHeight: 81,
+    footerTop: 247,
     dimText: 'Tell me a joke.\n \n ',
     brightText: ' \nWhy did the byte cross the bus?\n ',
-    scrollbarText: '│\n█\n│',
     footerText: '■ □',
   }) as Page],
 ];
@@ -101,49 +101,47 @@ describe('HudPageBuilder invariants', () => {
     }
   });
 
-  it('builds the conversation as one borderless, bottom-anchored native surface', () => {
+  it('builds the conversation as Even AI builds it: one bordered, bottom-anchored card', () => {
+    // The reference is Even's own product-page demo (frame-measured
+    // 2026-09-24): a single hairline box, the wearer's question dim above
+    // the bright answer, the box growing upward from a fixed bottom, the
+    // state glyph centred ON the bottom border — and no scrollbar; older
+    // lines simply leave through the top of the card.
     const page = builder.assistantConversationLayout({
       cardTop: 128,
       cardHeight: 132,
       transcriptTop: 140,
       transcriptHeight: 81,
+      footerTop: 247, // cardBottom 260 - half a 27px line: straddles the border
       dimText: 'Tell me a joke.\n \n ',
       brightText: ' \nWhy did the byte cross the bus?\n ',
-      scrollbarText: '│\n█\n│',
       footerText: '■ □',
     }) as Page;
     const byName = (name: string) => page.textObject?.find((entry) => entry.containerName === name);
 
     expect(page.imageObject).toBeUndefined();
-    expect(page.textObject).toHaveLength(5);
-    // borderWidth 0, not 1. The frame container exists to be the page's single
-    // isEventCapture owner; the stroke was decoration and the wearer saw it as
-    // a hairline box around every answer on real glass.
-    //
-    // Event capture does NOT require a border. Every one of Even's own
-    // templates pairs isEventCapture: 1 with borderWidth: 0 —
-    // evenhub-templates asr/src/main.ts, minimal/src/main.ts,
-    // text-heavy/src/main.ts, and image/src/main.ts, whose transparent
-    // full-screen 'eventLayer' is exactly this pattern. Do not restore the
-    // border to "keep events working"; that is not what makes them work.
+    expect(page.textObject).toHaveLength(4);
+    expect(page.textObject?.find((entry) => entry.containerName === 'scroll-position')).toBeUndefined();
     expect(byName('conversation')).toMatchObject({
       yPosition: 128,
       height: 132,
-      borderWidth: 0,
+      borderWidth: 1,
       isEventCapture: 1,
     });
     expect(byName('wearer-turns')).toMatchObject({ textColor: 2, content: expect.stringContaining('joke') });
     expect(byName('joat-turns')).toMatchObject({ textColor: 4, content: expect.stringContaining('byte') });
-    expect(byName('generation')).toMatchObject({ content: '■ □' });
-    expect(byName('scroll-position')).toMatchObject({ content: '│\n█\n│' });
+    // The glyph line straddles the card's bottom edge, exactly as passed.
+    expect(byName('generation')).toMatchObject({ content: '■ □', yPosition: 247 });
 
     const frame = byName('conversation')!;
     const transcript = byName('wearer-turns')!;
     const footer = byName('generation')!;
     expect((transcript.yPosition ?? 0) + (transcript.height ?? 0))
       .toBeLessThanOrEqual(footer.yPosition ?? 0);
+    // Straddling: the footer line starts above the border and ends below it.
+    expect(footer.yPosition ?? 0).toBeLessThan((frame.yPosition ?? 0) + (frame.height ?? 0));
     expect((footer.yPosition ?? 0) + (footer.height ?? 0))
-      .toBeLessThan((frame.yPosition ?? 0) + (frame.height ?? 0));
+      .toBeGreaterThan((frame.yPosition ?? 0) + (frame.height ?? 0));
   });
 
   it('keeps every visual container name within the packaged-host limit', () => {

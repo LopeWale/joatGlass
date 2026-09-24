@@ -69,7 +69,9 @@ describe('native Even-style assistant conversation model', () => {
     expect(dim.some((line, index) => line.trim() && bright[index]?.trim())).toBe(false);
   });
 
-  it('grows only to the optical cap, then exposes a real scrollbar and bounded scrollback', () => {
+  it('grows only to the optical cap, then scrolls off the top with no scrollbar', () => {
+    // Even AI draws no scrollbar (product-page demo): overflow leaves
+    // through the top of the card, and scrollback pages the window.
     const long = snapshot(3, [
       { role: 'user', text: 'Explain why the daytime sky looks blue.' },
       { role: 'assistant', text: Array.from({ length: 90 }, (_, i) => `word${i}`).join(' ') },
@@ -77,8 +79,6 @@ describe('native Even-style assistant conversation model', () => {
     const tail = conversationViewport(long);
     expect(tail.lineCapacity).toBe(7);
     expect(tail.totalLines).toBeGreaterThan(tail.lineCapacity);
-    expect(tail.scrollbarText).toContain('█');
-    expect(tail.scrollbarText).toContain('│');
 
     const top = conversationViewport(long, Number.MAX_SAFE_INTEGER);
     expect(top.scrollFromTail).toBe(top.maximumScrollFromTail);
@@ -114,7 +114,6 @@ describe('native Even-style assistant conversation model', () => {
       { role: 'assistant', text: 'Dust, smoke, clouds, and pollution can intensify or' },
       { role: 'assistant', text: 'mute those sunset colors.' },
     ]);
-    expect(view.scrollbarText).toBe('│\n│\n│\n│\n█\n█\n█');
   });
 
   it('marks omitted history instead of silently pretending the viewport is complete', () => {
@@ -172,7 +171,10 @@ describe('AssistantConversationSurface delivery', () => {
     }
   });
 
-  it('builds one native card, streams newer revisions in place, and never sends image tiles', async () => {
+  it('grows the card at stage boundaries and streams within a stage, never image tiles', async () => {
+    // Even AI's card hugs its content and grows upward as the exchange
+    // grows (product-page demo). A stage crossing is exactly one rebuild;
+    // a newer revision INSIDE a stage is in-place text upgrades only.
     const { client, rebuildPageContainer, textContainerUpgrade } = fakeClient();
     const restore = vi.fn(async () => true);
     const surface = new AssistantConversationSurface(
@@ -185,13 +187,23 @@ describe('AssistantConversationSurface delivery', () => {
     await expect(surface.present(snapshot(1, [
       { role: 'user', text: "What is France's\ncapital?" },
     ], 'thinking'))).resolves.toBe(true);
-    expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(1); // 2 lines: stage 2
 
     await surface.present(snapshot(2, [
       { role: 'user', text: "What is France's\ncapital?" },
       { role: 'assistant', text: 'Paris.' },
     ], 'answering'));
     await surface.whenIdle();
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(2); // 3 lines: stage 3
+
+    const upgradesBefore = textContainerUpgrade.mock.calls.length;
+    await surface.present(snapshot(3, [
+      { role: 'user', text: "What is France's\ncapital?" },
+      { role: 'assistant', text: 'Paris, of course.' },
+    ], 'answering'));
+    await surface.whenIdle();
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(2); // same stage: no rebuild
+    expect(textContainerUpgrade.mock.calls.length).toBeGreaterThan(upgradesBefore);
 
     const everyContent = [
       ...rebuildPageContainer.mock.calls.flatMap(([page]) => page.textObject ?? []),
@@ -199,9 +211,7 @@ describe('AssistantConversationSurface delivery', () => {
     ].map((entry) => entry.content ?? '').join('\n');
     expect(everyContent).toContain("What is France's");
     expect(everyContent).toContain('capital?');
-    expect(everyContent).toContain('Paris.');
-    expect(textContainerUpgrade).toHaveBeenCalled();
-    expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
+    expect(everyContent).toContain('Paris, of course.');
   });
 
   it('coalesces a fast final answer behind a slow native update instead of queuing every preview', async () => {
@@ -381,7 +391,9 @@ describe('AssistantConversationSurface delivery', () => {
       { role: 'user', text: 'First prompt\nwith a second line' },
       { role: 'assistant', text: 'The completed answer' },
     ], 'ready'))).resolves.toBe(true);
-    expect(rebuildPageContainer).toHaveBeenCalledTimes(2);
+    // Three rebuilds: the first card (stage 2), the answer crossing into
+    // stage 3, and the restore after handoff.
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(3);
     expect(surface.currentIdentity()).toEqual({ conversationId: 'conversation-1', revision: 3 });
   });
 });

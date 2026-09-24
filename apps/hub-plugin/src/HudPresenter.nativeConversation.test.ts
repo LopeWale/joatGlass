@@ -69,7 +69,7 @@ describe('HudPresenter native assistant conversation', () => {
     expect(rebuilds).toHaveLength(1);
     expect(rebuilds[0]?.imageObject ?? []).toHaveLength(0);
     expect(rebuilds[0]?.textObject?.map((item) => item.containerName)).toEqual([
-      'conversation', 'wearer-turns', 'joat-turns', 'scroll-position', 'generation',
+      'conversation', 'wearer-turns', 'joat-turns', 'generation',
     ]);
     expect(frames).toHaveLength(0);
 
