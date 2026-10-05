@@ -10,29 +10,63 @@ same way any other notification arrives — there is no speaker to ring.
 Phases run on: a finished focus block starts its break, a finished break
 starts the next block. The wearer's hands are busy; the timer should not
 wait on them. Pause, skip and reset are one tap or one word away.
+
+The page opened by hand is a control surface: while idle it shows Start
+and the three lengths, and a tap on a length steps it to the next preset.
+The lengths persist with the checkpoint, so a restart keeps them.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 import logging
 import time
 
 from ..channels.cards import Card, Urgency
 from ..core.protocol import HudPanelPomodoro
-from ..persistence.pomodoro import PomodoroCheckpoint, PomodoroStore
+from ..persistence.pomodoro import (
+    DEFAULT_FOCUS_MS,
+    DEFAULT_LONG_BREAK_MS,
+    DEFAULT_SHORT_BREAK_MS,
+    PomodoroCheckpoint,
+    PomodoroStore,
+)
 from .panels import PanelSnapshot, Reader
 
 log = logging.getLogger(__name__)
 
-FOCUS_MS = 25 * 60_000
-SHORT_BREAK_MS = 5 * 60_000
-LONG_BREAK_MS = 15 * 60_000
+FOCUS_MS = DEFAULT_FOCUS_MS
+SHORT_BREAK_MS = DEFAULT_SHORT_BREAK_MS
+LONG_BREAK_MS = DEFAULT_LONG_BREAK_MS
 BLOCKS_PER_SET = 4
 
 Phase = str  # "idle" | "focus" | "break" | "long_break"
+LengthKind = str  # "focus" | "short_break" | "long_break"
+
+# A tap on an idle length row steps to the next preset and wraps.
+LENGTH_PRESETS_MIN: dict[LengthKind, tuple[int, ...]] = {
+    "focus": (15, 20, 25, 30, 45, 50, 60),
+    "short_break": (3, 5, 10, 15),
+    "long_break": (10, 15, 20, 30),
+}
+_LENGTH_ROW_LABELS: dict[LengthKind, str] = {
+    "focus": "Focus", "short_break": "Short break", "long_break": "Long break",
+}
+_LENGTH_RECEIPT_NOUNS: dict[LengthKind, str] = {
+    "focus": "Focus blocks", "short_break": "Short breaks", "long_break": "Long breaks",
+}
+
+
+def _minutes(ms: int) -> int:
+    return ms // 60_000
+
+
+def _minutes_phrase(ms: int) -> str:
+    minutes = _minutes(ms)
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +83,28 @@ class PomodoroLengths:
         if phase == "break":
             return self.short_break_ms
         return self.focus_ms
+
+    def of(self, kind: LengthKind) -> int:
+        if kind == "focus":
+            return self.focus_ms
+        if kind == "short_break":
+            return self.short_break_ms
+        if kind == "long_break":
+            return self.long_break_ms
+        raise ValueError(f"unknown pomodoro length {kind!r}")
+
+    def with_next_preset(self, kind: LengthKind) -> PomodoroLengths:
+        """The next preset above the current length, wrapping to the first."""
+        presets = LENGTH_PRESETS_MIN.get(kind)
+        if presets is None:
+            raise ValueError(f"unknown pomodoro length {kind!r}")
+        current = self.of(kind)
+        minutes = next((preset for preset in presets if preset * 60_000 > current), presets[0])
+        return replace(self, **{f"{kind}_ms": minutes * 60_000})
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint: PomodoroCheckpoint) -> PomodoroLengths:
+        return cls(checkpoint.focus_ms, checkpoint.short_break_ms, checkpoint.long_break_ms)
 
 
 OnChange = Callable[[], Awaitable[None]]
@@ -181,17 +237,35 @@ class PomodoroService:
             ends_at_unix_ms=self._ends_at_unix_ms if self._running else None,
         )
 
+    @property
+    def lengths(self) -> PomodoroLengths:
+        return self._lengths
+
+    def _controls(self) -> tuple[tuple[str, Callable[[], str]], ...]:
+        """The expanded tab's rows, each paired with what its tap does.
+
+        The page is a control surface: every row is something to tap, and
+        the idle page carries the cycle's lengths so they can be set by hand.
+        """
+        if self._load_failed:
+            return (("Reset", self.reset),)
+        if self._phase == "idle":
+            return (
+                ("▶ Start a focus block", self.start),
+                *(
+                    (f"{_LENGTH_ROW_LABELS[kind]}: {_minutes(self._lengths.of(kind))} min",
+                     partial(self.cycle_length, kind))
+                    for kind in ("focus", "short_break", "long_break")
+                ),
+            )
+        if not self._running:
+            return (("▶ Resume", self.resume), ("Reset", self.reset))
+        skip = "Skip to break" if self._phase == "focus" else "Skip break"
+        return (("Pause", self.pause), (skip, self.skip), ("Reset", self.reset))
+
     def rows(self) -> tuple[str, ...]:
         """The control rows the expanded tab shows; a tap acts, by index."""
-        if self._load_failed:
-            return ("Reset",)
-        if self._phase == "idle":
-            return ("▶ Start a focus block",)
-        if not self._running:
-            return ("▶ Resume", "Reset")
-        if self._phase == "focus":
-            return ("Pause", "Skip to break", "Reset")
-        return ("Pause", "Skip break", "Reset")
+        return tuple(label for label, _action in self._controls())
 
     def status_text(self) -> str:
         """What JOAT says for "how long is left"."""
@@ -199,8 +273,7 @@ class PomodoroService:
             return self._error
         prefix = f"{self._recovery_notice} " if self._recovery_notice else ""
         if self._phase == "idle":
-            minutes = self._lengths.focus_ms // 60_000
-            return f"No pomodoro running. Say start to begin a {minutes} minute focus block."
+            return f"No pomodoro running. A focus block is {_minutes_phrase(self._lengths.focus_ms)}."
         minutes = max(0, -(-self.remaining_ms() // 60_000))
         what = {
             "focus": f"focus block {min(BLOCKS_PER_SET, self._completed + 1)} of {BLOCKS_PER_SET}",
@@ -219,7 +292,7 @@ class PomodoroService:
         if self._phase == "idle":
             if not self._begin("focus"):
                 return self.status_text()
-            return f"Focus block {self._completed + 1} of {BLOCKS_PER_SET}. {self._lengths.focus_ms // 60_000} minutes."
+            return f"Focus block {self._completed + 1} of {BLOCKS_PER_SET}. {_minutes_phrase(self._lengths.focus_ms)}."
         if not self._running:
             return self.resume()
         return "The timer is already running. " + self.status_text()
@@ -259,21 +332,31 @@ class PomodoroService:
             return self.status_text()
         return "Pomodoro reset."
 
+    def cycle_length(self, kind: LengthKind) -> str:
+        """Step one length to its next preset, wrapping, and persist it.
+
+        Idle, the new focus length is also the page's countdown. During a
+        phase the block under way keeps the length it started with; the new
+        one applies from the next phase of its kind.
+        """
+        if not self._can_control():
+            return self.status_text()
+        lengths = self._lengths.with_next_preset(kind)
+        if self._phase == "idle":
+            checkpoint = self._phase_checkpoint("idle", completed=0, running=False, lengths=lengths)
+        else:
+            checkpoint = self._checkpoint(running=self._running, remaining_ms=self.remaining_ms(),
+                ends_at=self._ends_at_unix_ms if self._running else None, lengths=lengths)
+        if not self._commit(checkpoint):
+            return self.status_text()
+        return f"{_LENGTH_RECEIPT_NOUNS[kind]}: {_minutes_phrase(lengths.of(kind))}."
+
     def control(self, index: int) -> str:
-        """A tap on one of rows()."""
-        rows = self.rows()
-        if not 0 <= index < len(rows):
+        """A tap on one of rows(): the action paired with that row."""
+        controls = self._controls()
+        if not 0 <= index < len(controls):
             return ""
-        label = rows[index].lstrip("▶ ").lower()
-        if label.startswith("start") or label.startswith("resume"):
-            return self.start()
-        if label == "pause":
-            return self.pause()
-        if label.startswith("skip"):
-            return self.skip()
-        if label == "reset":
-            return self.reset()
-        return ""
+        return controls[index][1]()
 
     # ── PanelProvider ────────────────────────────────────────────────────
 
@@ -306,17 +389,26 @@ class PomodoroService:
             return False
         return True
 
-    def _checkpoint(self, *, running: bool, remaining_ms: int, ends_at: int | None) -> PomodoroCheckpoint:
+    def _checkpoint(self, *, running: bool, remaining_ms: int, ends_at: int | None,
+                    lengths: PomodoroLengths | None = None) -> PomodoroCheckpoint:
+        lengths = lengths or self._lengths
         return PomodoroCheckpoint(self._phase, running, remaining_ms, self._length_ms,
-            self._completed, ends_at, self._now_ms())
+            self._completed, ends_at, self._now_ms(),
+            lengths.focus_ms, lengths.short_break_ms, lengths.long_break_ms)
 
-    def _phase_checkpoint(self, phase: Phase, *, completed: int, running: bool) -> PomodoroCheckpoint:
-        length = self._lengths.for_phase(phase)
+    def _phase_checkpoint(self, phase: Phase, *, completed: int, running: bool,
+                          lengths: PomodoroLengths | None = None) -> PomodoroCheckpoint:
+        lengths = lengths or self._lengths
+        length = lengths.for_phase(phase)
         now = self._now_ms()
         return PomodoroCheckpoint(phase, running, length, length, completed,
-            now + length if running else None, now)
+            now + length if running else None, now,
+            lengths.focus_ms, lengths.short_break_ms, lengths.long_break_ms)
 
     def _adopt(self, checkpoint: PomodoroCheckpoint) -> None:
+        # The checkpoint is the one truth, lengths included: a restart keeps
+        # what the wearer set, not this build's defaults.
+        self._lengths = PomodoroLengths.from_checkpoint(checkpoint)
         self._phase = checkpoint.phase
         self._running = checkpoint.running
         self._remaining_ms = checkpoint.remaining_ms

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import { CapabilityMenu } from './CapabilityMenu';
+import { CapabilityMenu, pomodoroCountdownRow } from './CapabilityMenu';
 import { PanelRail } from './PanelRail';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
@@ -142,9 +142,32 @@ describe('CapabilityMenu — the overview tab rail', () => {
     const { menu, lists } = rig('search');
     await menu.openPanelTab('search');
     const page = lists[0]!;
-    expect(page.items).toEqual(['Say “JOAT, look up …” to search.']);
+    expect(page.items).toEqual(['Search not loaded — hold to retry.']);
     expect(page.options).toMatchObject({ title: 'SEARCH', selectable: false });
     expect(menu.handleClick()).toBe(true); // consumed, nothing to open
+  });
+
+  it('an empty pomodoro tab names the gesture that fills it, never a phrase to say', async () => {
+    const { menu, lists } = rig('pomodoro');
+    await menu.openPanelTab('pomodoro');
+    const page = lists[0]!;
+    // The countdown row falls back to a plain heading: nothing to count yet.
+    expect(page.items).toEqual(['Focus timer', 'Timer not loaded — hold to retry.']);
+    expect(page.options).toMatchObject({ title: 'POMODORO', selectable: false, nativeFirmwareList: true });
+    expect(page.items.join(' ')).not.toMatch(/Say “JOAT/u);
+    expect(menu.handleClick()).toBe(true);
+  });
+
+  it('the countdown row is a plain label without a snapshot and the configured focus length when idle', () => {
+    const now = 1_700_000_000_000;
+    expect(pomodoroCountdownRow(undefined, now)).toBe('Focus timer');
+    expect(pomodoroCountdownRow({
+      phase: 'idle', running: false, remainingMs: 1_800_000, lengthMs: 1_800_000, completed: 0,
+    }, now)).toBe('Ready · 30 min focus');
+    expect(pomodoroCountdownRow({
+      phase: 'focus', running: true, remainingMs: 877_000, lengthMs: 1_500_000, completed: 1,
+      endsAtUnixMs: now + 877_000,
+    }, now)).toBe('Focus · block 2 of 4 · 15 min left');
   });
 
   it('a row tap carries the cached revision, so a stale tap is refusable', async () => {
