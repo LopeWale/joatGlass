@@ -12,8 +12,10 @@ import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import {
   AssistantConversationSurface,
   validAssistantConversationSnapshot,
+  wrapConversationText,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
+import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { usesActionPillLayout } from './HudCanvasRenderer';
 import type { NavigationHudModel } from './NavigationHud';
@@ -199,7 +201,26 @@ type DisplayPageOwner =
   | 'assistant-native'
   | 'terminal-list-native'
   | 'terminal-conversation-native'
-  | 'confirmation-native';
+  | 'confirmation-native'
+  | 'overlay-native';
+
+/** Split an answer into firmware pages with the installed glyph metrics. */
+export function paginateAnswer(
+  text: string,
+  lineCapacity: number = ASSISTANT_ANSWER_PAGE.lineCapacity,
+  width: number = ASSISTANT_ANSWER_PAGE.textWidth,
+): string[] {
+  const rows = wrapConversationText(text, width);
+  const pages: string[] = [];
+  for (let start = 0; start < rows.length; start += lineCapacity) {
+    pages.push(rows.slice(start, start + lineCapacity).join('\n'));
+  }
+  return pages.length > 0 ? pages : [' '];
+}
+
+function answerPageHint(page: number, count: number): string {
+  return count > 1 ? `${page + 1}/${count} · swipe: page · tap: dismiss` : 'tap: dismiss';
+}
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -293,6 +314,8 @@ export class HudPresenter {
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private assistantOverlay?: AssistantOverlayState;
   private assistantOverlayRevision = 0;
+  /** The answer as the firmware page shows it: pages and the one on glass. */
+  private nativeOverlay?: { revision: number; pages: string[]; page: number; body: string; hint: string };
   private promptQuestion?: PromptQuestionState;
   private promptQuestionPaint?: Promise<boolean>;
   private actionOverlay?: ActionOverlayState;
@@ -427,6 +450,7 @@ export class HudPresenter {
     this.assistantOverlayPaint = undefined;
     if (this.assistantOverlay?.dismissTimer !== undefined) clearTimeout(this.assistantOverlay.dismissTimer);
     this.assistantOverlay = undefined;
+    this.nativeOverlay = undefined;
     this.assistantConversation.retireForHandoff();
     this.nativeTerminal.retireForHandoff();
     this.pageOwner = 'visual';
@@ -930,7 +954,11 @@ export class HudPresenter {
       return Promise.resolve(true);
     }
     this.assistantOverlayPaintStartedAt = Date.now();
-    const paint = this.visual ? this.paintVisual() : this.paintNativeAssistantOverlay();
+    const paint = this.visual
+      ? this.usesNativeAnswerPage() || this.pageOwner === 'overlay-native'
+        ? this.paintNativeAnswerPage()
+        : this.paintVisual()
+      : this.paintNativeAssistantOverlay();
     this.assistantOverlayPaint = paint;
     const completed = (): void => {
       if (this.assistantOverlayPaint !== paint) return;
@@ -941,6 +969,71 @@ export class HudPresenter {
     };
     void paint.then(completed, completed);
     return paint;
+  }
+
+  /** An answer over the visual HUD is Even's own text page whenever the
+   * surface can hand the page over under its transition barrier. Receipts
+   * stay on the image page: a short strip is two tiles, cheaper than a
+   * page swap and its four-tile return. */
+  private usesNativeAnswerPage(): boolean {
+    return this.visual?.withPageTransition !== undefined
+      && this.assistantOverlay?.presentation === 'answer';
+  }
+
+  private async paintNativeAnswerPage(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    const overlay = this.assistantOverlay;
+    if (!overlay || overlay.presentation !== 'answer') {
+      // Dismissed, or replaced by a receipt: leave the firmware page and
+      // repaint whatever JOAT feature is retained underneath.
+      this.nativeOverlay = undefined;
+      if (this.pageOwner !== 'overlay-native') return this.paintVisual();
+      return this.restoreRetainedPage();
+    }
+    const pages = paginateAnswer(overlay.text);
+    const revision = overlay.revision ?? 0;
+    const previous = this.nativeOverlay;
+    // The same answer keeps its page across streamed appends; a new answer
+    // starts on page one.
+    const page = previous && previous.revision === revision
+      ? Math.min(previous.page, pages.length - 1)
+      : 0;
+    const body = pages[page] ?? ' ';
+    const hint = answerPageHint(page, pages.length);
+    const next = { revision, pages, page, body, hint };
+    if (this.pageOwner !== 'overlay-native') {
+      const replaced = await this.replaceNativePage(
+        this.layouts.assistantAnswerLayout(body, { status: this.streams.get(ContainerId.StatusBar), hint }),
+        'overlay-native',
+      );
+      if (!replaced || !displayCurrent()) return false;
+      this.nativeOverlay = next;
+      return true;
+    }
+    this.nativeOverlay = next;
+    let ok = true;
+    if (!previous || previous.body !== body) {
+      ok = await this.upgradeNativeText(ContainerId.Main, 'main', body, previous?.body) && ok;
+      if (!displayCurrent()) return false;
+    }
+    if (!previous || previous.hint !== hint) {
+      ok = await this.upgradeNativeText(ContainerId.Hint, 'hint', hint, previous?.hint) && ok;
+    }
+    return ok && displayCurrent();
+  }
+
+  private upgradeNativeText(
+    containerID: number, containerName: string, content: string, previous = '',
+  ): Promise<boolean> {
+    const replacement = content || ' ';
+    return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
+      containerID,
+      containerName,
+      contentOffset: 0,
+      contentLength: Math.max(previous.length, replacement.length),
+      content: replacement,
+    }));
   }
 
   private async paintNativeAssistantOverlay(): Promise<boolean> {
@@ -997,6 +1090,15 @@ export class HudPresenter {
    * they can never operate the obscured feature or dismiss unread copy. */
   scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
     if (!this.assistantOverlay) return false;
+    const native = this.nativeOverlay;
+    if (native && this.pageOwner === 'overlay-native') {
+      const page = direction === 'down' ? native.page + 1 : native.page - 1;
+      if (page >= 0 && page < native.pages.length) {
+        native.page = page;
+        void this.paintAssistantOverlayNow();
+      }
+      return true;
+    }
     if (this.visual?.scrollAssistantOverlay?.(direction)) {
       void this.paintAssistantOverlayNow();
     }
