@@ -232,7 +232,8 @@ export class HudPageBuilder {
    */
   static readonly MENU_REPEAT = 1;
   static readonly MENU_MUTE = 2;
-  /** Universal recovery: tap, then long-press, then choose Refresh. */
+  /** Retired row id, still answered for a host showing a cached menu: it
+   * opens the Settings guidance (connection settings live on the phone). */
   static readonly MENU_REFRESH = 3;
   static readonly MENU_SETTINGS = 4;
   /** A non-destructive escape from any visual or text focus surface. */

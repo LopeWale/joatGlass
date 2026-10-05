@@ -88,11 +88,17 @@ Every app is expected to offer an exit via the glasses. The canonical pattern is
 
 The wearer's menu is the **firmware contextual menu** (tap, then
 long-press) carrying the CAPABILITIES rows — see "The three ways to draw a
-menu, measured". **Left**-temple double-press is BACK (a no-op on the
-overview), **right**-temple double-press is the exit dialog, and a left
-SINGLE press on the resting overview drills into the notifications tray.
-On a live Brainstorm the left double press CANCELS the session; the
-firmware menu remains reachable mid-session for everything else.
+menu, measured". A double-press on EITHER temple, or on the ring, is BACK
+(a no-op on the overview; `GesturePolicy` gives every source the same
+meaning because the simulator's generic double-click is right-sourced and
+kept opening the exit confirmation), and a left SINGLE press on the
+resting overview drills into the notifications tray. The exit dialog is
+reachable only through the Mac's `shutdown` downlink. On a live Brainstorm
+the double press CANCELS the session; the firmware menu remains reachable
+mid-session for everything else. The one named press: while the Mac has
+ARMED a Brainstorm acceptance run, a right-temple or ring double press
+starts it (the Mac's contract names the source), and the ready frame says
+"right/ring x2: test" only then.
 
 ### Lifecycle events (all `sysEvent`)
 

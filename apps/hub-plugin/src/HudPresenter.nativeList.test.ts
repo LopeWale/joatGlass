@@ -16,7 +16,10 @@ interface RebuiltPage {
   textObject?: Array<{ containerID?: number; content?: string }>;
 }
 
-function harness(withVisual = true) {
+/** `withBarrier` adds the surface's page-transition barrier, which every
+ * page rebuild (including the self-heal) requires; without it the
+ * confirmation and question stay raster, as most of these cases assume. */
+function harness(withVisual = true, withBarrier = false) {
   const rebuilds: RebuiltPage[] = [];
   const upgrades: TextContainerUpgrade[] = [];
   const frames: HudVisualFrame[] = [];
@@ -35,6 +38,7 @@ function harness(withVisual = true) {
       return state.paintAccepted && current();
     },
     forgetPage: () => undefined,
+    ...(withBarrier ? { withPageTransition: async (replace: () => Promise<boolean>) => replace() } : {}),
   } as unknown as HudVisualSurface;
   const hud = new HudPresenter(client, new HudPageBuilder(), withVisual ? visual : undefined);
   return { hud, rebuilds, upgrades, frames, state };
@@ -151,7 +155,8 @@ describe('consistent custom News and Search surface', () => {
   });
 
   it('heals a refused custom frame using the image layout, never a firmware News list', async () => {
-    const h = harness();
+    // The self-heal rebuild is a page replacement, so it needs the barrier.
+    const h = harness(true, true);
     await openNews(h);
     h.state.paintAccepted = false;
     expect(await h.hud.setSelection(1)).toBe(false);
