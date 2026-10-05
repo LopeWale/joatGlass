@@ -75,6 +75,7 @@ from ..core.protocol import (
     PairingAck,
     PairingSet,
     Policy,
+    ResumePolicy,
     ProtocolError,
     PromptAck,
     PromptCancel,
@@ -223,6 +224,10 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._last_seq: int | None = None
         self.device: Device | None = None
         self.hello: Hello | None = None
+        #: The wearer's choice for how the mic resumes after the glasses go
+        #: back on (the plugin's Settings). "mac" means this process decides:
+        #: __main__ answers a worn report with AudioControl(open=True).
+        self.resume_policy: ResumePolicy | None = None
         self.location: Location | None = None
         self._location_cbs: list[Callable[[Location], None]] = []
         self._location_received_at_s: float | None = None
@@ -1280,6 +1285,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     confirm_cb(message)
             case Policy():
                 log.info("wearer resume policy: %s", message.resume)
+                self.resume_policy = message.resume
             case Location():
                 first = self.location is None
                 self.location = message
