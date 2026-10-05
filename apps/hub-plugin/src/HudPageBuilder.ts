@@ -33,6 +33,38 @@ import {
 const FIRMWARE_LINE = 27;
 const LIST_ROW = 40;
 const REGION_PAD = 4;
+/** One firmware line inside the region padding: the header of every
+ * firmware page (status container) and where the page below it starts. */
+export const NATIVE_HEADER_HEIGHT = FIRMWARE_LINE + 2 * REGION_PAD; // 35
+/** Whole 40px rows between the header and the hint line. */
+export const NATIVE_LIST_ROWS = 5;
+
+/**
+ * Fit the header to its line by shortening the page's WORD, never its tail:
+ * a plain pixel cut would take the microphone and battery glyphs off the
+ * glass first, and those are the facts the line exists to show. The word is
+ * the second " · " segment ("9:41 · MESSAGES · CONVERSATION · ● · ▇" has
+ * the title's own separator inside it, so the cut walks the whole middle).
+ */
+export function fitHeader(line: string, width = REGION_TEXT_WIDTH): string {
+  const compact = line.replace(/\s+/g, ' ').trim();
+  if (pxTruncate(compact, width) === compact) return compact;
+  const parts = compact.split(' · ');
+  if (parts.length < 3) return pxTruncate(compact, width);
+  const head = parts[0]!;
+  // Everything between the clock and the trailing glyphs is the word.
+  const tailCount = parts.slice(1).filter((part) => /^[●○]$|^[▁▂▃▄▅▆▇█]\+?( \d{1,3}%)?$/.test(part)).length;
+  const tail = tailCount > 0 ? parts.slice(parts.length - tailCount) : [];
+  let word = parts.slice(1, parts.length - tail.length).join(' · ');
+  while (word.length > 1) {
+    word = `${word.slice(0, -2).trimEnd()}…`;
+    const candidate = [head, word, ...tail].join(' · ');
+    if (pxTruncate(candidate, width) === candidate) return candidate;
+    if (word.length <= 2) break;
+    word = word.slice(0, -1);
+  }
+  return pxTruncate([head, ...tail].join(' · '), width);
+}
 /** Inner text width of a full-width region (576 − 2×REGION_PAD). */
 const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
 /** A list row's text width: container pad (8) + firmware row pad (12/side). */
@@ -68,9 +100,9 @@ export function clampUtf8Bytes(text: string, maxBytes: number): string {
 /** The firmware answer page: one status line, one tall body, one hint
  * line. The body holds seven firmware lines; longer answers page. */
 export const ASSISTANT_ANSWER_PAGE = {
-  bodyY: 39,
-  bodyHeight: 214,
-  lineCapacity: Math.floor((214 - 2 * REGION_PAD) / FIRMWARE_LINE),
+  bodyY: NATIVE_HEADER_HEIGHT,
+  bodyHeight: 253 - NATIVE_HEADER_HEIGHT, // 218: down to the hint line
+  lineCapacity: Math.floor((253 - NATIVE_HEADER_HEIGHT - 2 * REGION_PAD) / FIRMWARE_LINE),
   textWidth: REGION_TEXT_WIDTH,
 } as const;
 
@@ -128,6 +160,10 @@ export class HudPageBuilder {
     return new HudPageBuilder(enabled);
   }
 
+  /** The one-line header of every firmware page: clock · page · mic ·
+   * battery (HudStatus.nativeStatusLine), composed by the presenter. It
+   * replaced a status line in words plus a separate title line, so each
+   * page below it starts 42 px higher than it did — a fifth list row. */
   private statusBar(content = ''): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.StatusBar,
@@ -135,13 +171,13 @@ export class HudPageBuilder {
       xPosition: 0,
       yPosition: 0,
       width: CANVAS.width,
-      height: FIRMWARE_LINE + 12, // 39: one firmware line inside 6px padding
-      paddingLength: 6,
+      height: NATIVE_HEADER_HEIGHT, // 35: one firmware line inside 4px padding
+      paddingLength: REGION_PAD,
       borderWidth: 0,
       isEventCapture: 0,
       zOrderIndex: 1,
       textColor: 2,
-      content,
+      content: fitHeader(content),
     });
   }
 
@@ -163,7 +199,7 @@ export class HudPageBuilder {
       containerID: ContainerId.Main,
       containerName: 'main',
       xPosition: geometry.x ?? 0,
-      yPosition: geometry.y ?? 39,
+      yPosition: geometry.y ?? NATIVE_HEADER_HEIGHT,
       width: geometry.width ?? CANVAS.width,
       height,
       paddingLength: REGION_PAD,
@@ -208,8 +244,8 @@ export class HudPageBuilder {
    * erased the reply. Regions also let the PLUGIN paint chrome (status,
    * hints) with no Mac attached, instead of a frozen screen.
    *
-   *   0   status  39   plugin: clock, mic, battery   (1 line)
-   *   39  main   117   Mac: reply / card / debate  <-- capture (4 lines)
+   *   0   status  35   plugin: clock, mic, battery   (1 line)
+   *   35  main   121   Mac: reply / card / debate  <-- capture (4 lines)
    *   156 context 62   Mac: what the wearer last said        (2 lines)
    *   218 tray    35   Mac: what is waiting                  (1 line)
    *   253 hint    35   plugin: gesture hints, blank at rest  (1 line)
@@ -217,7 +253,7 @@ export class HudPageBuilder {
   private dashboard(): TextContainerProperty[] {
     return [
       this.statusBar(),
-      this.main(117),
+      this.main(156 - NATIVE_HEADER_HEIGHT),
       this.region(ContainerId.Context, 'context', 156, 62, 3, 3),
       this.region(ContainerId.Tray, 'tray', 218, 35, 4, 2),
       this.region(ContainerId.Hint, 'hint', 253, 35, 5, 1),
@@ -526,10 +562,14 @@ export class HudPageBuilder {
   }
 
   /**
-   * The full-width firmware list page: status, one-line title, four visible
-   * 40px rows (the firmware scrolls the rest), one-line hint. Text is
-   * truncated by MEASURED pixels (@evenrealities/pretext), not characters —
-   * the audit showed a 64-char row spans 705-1024px against a 536px row.
+   * The full-width firmware list page: one header line (clock · page name ·
+   * mic · battery), FIVE visible 40px rows (the firmware scrolls the rest),
+   * one-line hint. Until 2026-10-05 the page spent two lines up top — a
+   * status line in words and a separate title line — and showed four rows;
+   * folding the name into the header is where the fifth row comes from.
+   * Text is truncated by MEASURED pixels (@evenrealities/pretext), not
+   * characters — the audit showed a 64-char row spans 705-1024px against a
+   * 536px row.
    */
   listLayout(
     items: string[],
@@ -537,21 +577,19 @@ export class HudPageBuilder {
   ): RebuildPageContainer {
     const capped = items.slice(0, 20)
       .map((s) => pxTruncate(clampUtf8Bytes(s, LIST_ROW_MAX_UTF8_BYTES), LIST_ROW_TEXT_WIDTH));
-    const title = pxTruncate((chrome.title?.trim() || 'JOAT').slice(0, 46), REGION_TEXT_WIDTH);
+    // The presenter composes the header with the page's name in it; a bare
+    // title here is the no-status fallback, so the page is never nameless.
+    const header = (chrome.status?.trim() || chrome.title?.trim() || 'JOAT').slice(0, 64);
     // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
     // below is the real bound; a tighter char pre-cut here silently dropped
     // half the presenter's copy (2026-09-05 audit).
     const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || 'double-click: overview').slice(0, 96), REGION_TEXT_WIDTH);
     return new RebuildPageContainer({
-      containerTotalNum: 4,
+      containerTotalNum: 3,
       ...this.menuConfig(),
-      // Capture moves OFF main and ONTO the list — see main()'s note.
+      // Capture is ON the list — see main()'s note.
       textObject: [
-        // The presenter cannot upgrade this container while the firmware
-        // list owns the page, so the live clock/battery line rides in the
-        // rebuild itself instead of leaving the top line blank.
-        this.statusBar(pxTruncate((chrome.status ?? '').slice(0, 46), REGION_TEXT_WIDTH)),
-        this.main(FIRMWARE_LINE + 2 * REGION_PAD + 3, 0, 4, title), // 38: one line
+        this.statusBar(header),
         this.region(ContainerId.Hint, 'hint', 253, 35, 4, 1, hint),
       ],
       listObject: [
@@ -559,9 +597,9 @@ export class HudPageBuilder {
           containerID: ContainerId.List,
           containerName: 'list',
           xPosition: 0,
-          yPosition: 77,
+          yPosition: NATIVE_HEADER_HEIGHT,
           width: CANVAS.width,
-          height: 4 * LIST_ROW + 16, // 176: four whole rows inside 8px padding
+          height: NATIVE_LIST_ROWS * LIST_ROW + 16, // 216: five whole rows inside 8px padding
           paddingLength: 8,
           // The capturing container for this layout: firmware scrolls the
           // highlight on swipe and reports the pick as `listEvent`.
@@ -589,7 +627,7 @@ export class HudPageBuilder {
       containerTotalNum: 3,
       ...this.menuConfig(),
       textObject: [
-        this.statusBar(pxTruncate((chrome.status ?? '').slice(0, 46), REGION_TEXT_WIDTH)),
+        this.statusBar(chrome.status ?? ''),
         this.main(ASSISTANT_ANSWER_PAGE.bodyHeight, 1, 4, (body || ' ').slice(0, 1000)),
         this.region(
           ContainerId.Hint, 'hint', 253, 35, 3, 1,
@@ -628,7 +666,7 @@ export class HudPageBuilder {
       textObject: [
         // Over the visual HUD this page is firmware-owned and the presenter
         // cannot upgrade its containers, so the live top line rides along.
-        this.statusBar(pxTruncate((status ?? '').slice(0, 46), REGION_TEXT_WIDTH)),
+        this.statusBar(status ?? ''),
         this.main(5 * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`), // 144
         this.region(
           ContainerId.Context, 'context', 183, 35, 3, 3,

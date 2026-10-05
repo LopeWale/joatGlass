@@ -129,7 +129,7 @@ describe('HudPresenter native answer page over the visual HUD', () => {
     expect(await r.hud.dismissAssistantOverlay()).toBe(true);
 
     const since = r.operations.slice(before);
-    expect(since.filter((op) => op.startsWith('rebuild:0:3:1'))).toHaveLength(1);
+    expect(since.filter((op) => op.startsWith('rebuild:0:2:1'))).toHaveLength(1);
     expect(since.filter((op) => op.startsWith('rebuild:4:') || op.startsWith('visual:'))).toHaveLength(0);
   });
 });

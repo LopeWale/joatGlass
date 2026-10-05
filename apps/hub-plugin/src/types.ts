@@ -41,7 +41,7 @@ export type ContainerId = (typeof ContainerId)[keyof typeof ContainerId];
  * production caller supplied the label, so the write could never succeed —
  * and a second writer for the same word is a collision, not a fallback.
  */
-export const SPINE_LABEL_BOX = { x: 95, y: 7, width: 192, height: 27 } as const;
+export const SPINE_LABEL_BOX = { x: 95, y: 1, width: 192, height: 22 } as const;
 
 /** Image updates must identify the same named visual container that the
  * layout declared. Keeping the mapping beside stable IDs prevents a bridge

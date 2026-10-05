@@ -126,7 +126,11 @@ describe('NativeTerminalSurface', () => {
     expect(rebuilds[0]?.textObject?.filter((item) => item.isEventCapture === 1)
       .map((item) => item.containerName)).toEqual(['terminal-body']);
     expect(pages[0]?.bodyText.split('\n')).toHaveLength(NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity);
-    expect(pages[0]?.bodyText).toContain('OPENCLAW > READY · MIC OFF');
+    // The status line given to present() is the head; the body's state
+    // row no longer repeats it.
+    expect(pages[0]?.headText).toBe('MIC OFF');
+    expect(pages[0]?.bodyText).toContain('OPENCLAW > READY');
+    expect(pages[0]?.bodyText).not.toContain('OPENCLAW > READY · MIC OFF');
     expect(footer(pages[0]!)).toBe('tap: speak · double-click: back');
     expect(surface.scroll('up')).toBe(false);
     expect(surface.scroll('down')).toBe(false);
@@ -350,9 +354,9 @@ describe('Brainstorm on the native page', () => {
     expect(r.rebuilds).toHaveLength(1);
     expect(r.imageWrites).not.toHaveBeenCalled();
     const page = r.pages[0]!;
-    expect(page.headText).toBe('JOAT · BRAINSTORM');
+    expect(page.headText).toBe('12:34 JOAT mic off bat 80%');
     const lines = page.bodyText.split('\n');
-    expect(lines[0]).toBe('READY · Ready for a question · 12:34 JOAT mic off bat 80%');
+    expect(lines[0]).toBe('READY · Ready for a question');
     expect(lines).toContain('Tap to choose a question, then speak.');
     expect(footer(page)).toBe('tap: speak · double-click: menu');
   });

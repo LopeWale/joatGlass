@@ -96,7 +96,7 @@ same ownership boundaries.
 ```
  123456789|123456789|123456789|123456789|123456   <- 46 char columns
 +----------------------------------------------+  y=0   id1 STATUS  z1  bright2  capture0
-|09:41   JOAT listening                 bat 87%|
+|09:41 · JOAT · ● · ▇                          |
 +----------------------------------------------+  y=32  id2 MAIN    z2  bright4  capture1 <-- EVENT
 |Dele . Messages                               |
 |On my way, 10 min out                         |
@@ -114,7 +114,7 @@ same ownership boundaries.
 
 | id | name | x,y,w,h | z | capture | textColor | owner | source |
 |---|---|---|---|---|---|---|---|
-| 1 | `status` | 0,0,576,32 | 1 | 0 | 2 | **plugin** | clock + `MacLink` state (`MacLink.ts:4`) + `audio.isOpen` (`main.ts:85`) + `DeviceMonitor` battery (`DeviceMonitor.ts:46-49`) |
+| 1 | `status` | 0,0,576,35 | 1 | 0 | 2 | **plugin** | `HudStatusModel` (`HudStatus.ts`): clock + `MacLink` state + `audio` mic + `DeviceMonitor` battery/charging, composed as `9:41 · PAGE · ● · ▇` by `nativeStatusLine` and fitted by `HudPageBuilder.fitHeader` |
 | 2 | `main` | 0,32,576,128 | 2 | **1** | 4 | Mac | `last_reply` / card summary / debate stream (`status.py:42-44`) |
 | 5 | `context` | 0,160,576,64 | 3 | 0 | 3 | Mac | `last_transcript` (`status.py:42`), verifier verdicts (`session.py:283-286`) |
 | 6 | `tray` | 0,224,576,32 | 4 | 0 | 2 | Mac | `_pending_cards` depth (`session.py:47`), `counts` (`status.py:45`) |
@@ -151,7 +151,7 @@ utterance, including empty or unaddressed speech.
 
 ```
 +----------------------------------------------+  y=0   id1 STATUS  bright2
-|09:41   JOAT answering                 bat 87%|
+|09:41 · JOAT · ANSWERING · ● · ▇              |
 +----------------------------------------------+  y=32  id2 MAIN    bright4   <- streamed by append
 |Standup is at 10:00. You have 19 minutes      |
 |and the room is Ada.                          |

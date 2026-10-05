@@ -1408,8 +1408,11 @@ describe('HudPresenter modal surfaces', () => {
       listObject?: Array<{ width?: number }>;
     };
     expect(messages.listObject?.[0]?.width).toBe(CANVAS.width);
-    expect(messages.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+    // The page's name is the header line (container 1); there is no title
+    // container any more.
+    expect(messages.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content)
       .toBe('MESSAGES');
+    expect(messages.textObject?.find((c) => c.containerID === ContainerId.Main)).toBeUndefined();
 
     // Content arriving behind the focus page must not be lost.
     await hud.showText('Updated overview behind messages', ContainerId.Main, 3);
@@ -1427,8 +1430,8 @@ describe('HudPresenter modal surfaces', () => {
     const page = rebuiltPages[0] as {
       textObject?: Array<{ containerID?: number; content?: string; textColor?: number }>;
     };
-    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toMatchObject({
-      content: 'CAPABILITIES', textColor: 4,
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.StatusBar)).toMatchObject({
+      content: 'CAPABILITIES', textColor: 2,
     });
     // The page builder rewrites gesture wording to the shared GesturePolicy
     // vocabulary ("left x2" → "double-click") so every footer names the
@@ -1672,7 +1675,7 @@ describe('HudPresenter modal surfaces', () => {
     const restored = rebuiltPages[2] as {
       textObject?: Array<{ containerID?: number; content?: string }>;
     };
-    expect(restored.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+    expect(restored.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content)
       .toBe('LISTENING RESUME');
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.Hint)?.content)
       .toBe('tap apply · double-click back');

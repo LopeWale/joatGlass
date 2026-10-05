@@ -124,7 +124,7 @@ describe('HudPresenter native confirmation over the visual HUD', () => {
 
     const since = r.operations.slice(before);
     expect(since.filter((op) => op.startsWith('rebuild:4:'))).toHaveLength(0);
-    expect(since.filter((op) => op.startsWith('rebuild:0:3:1'))).toHaveLength(1);
+    expect(since.filter((op) => op.startsWith('rebuild:0:2:1'))).toHaveLength(1);
     expect(since.filter((op) => op.startsWith('visual:'))).toHaveLength(0);
   });
 });
