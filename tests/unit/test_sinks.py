@@ -374,23 +374,28 @@ class TestSilentWaitClock:
         assert "Thinking…" not in activity
         assert "resident weights" in activity
 
-    def test_the_marker_matches_what_the_renderer_animates(self) -> None:
-        """The counter hangs on a STRING SHARED ACROSS TWO REPOSITORIES.
+    def test_the_marker_reaches_the_glass_as_written(self) -> None:
+        """The marker is the engine's word, shown verbatim.
 
-        HudCanvasRenderer decides to animate by testing the tail row with
-        `endsWith('Thinking…')`. Nothing links that to the engine's
-        spelling, so changing this word here — to "Working…", or dropping
-        the ellipsis — would stop the clock on the glasses with every test
-        in both repositories still green. Pin them together.
+        The raster transcript once matched the tail row against its own
+        spelling (`endsWith('Thinking…')`) to animate an elapsed counter,
+        a string shared across two repositories that this test pinned
+        together. That page is gone (2026-10-05): the Agent Terminal and
+        Brainstorm are the firmware's own text page
+        (`NativeTerminalSurface`), which shows the Mac's rows as they
+        arrive and keeps no spelling of its own — so there is nothing on
+        the plugin side to drift. Pin that it stays that way: a plugin that
+        starts matching the word again must bring this test back with it.
         """
         from pathlib import Path
 
         from joat.services.sinks import HudSink
 
-        renderer = (Path(__file__).resolve().parents[2]
-                    / "apps/hub-plugin/src/HudCanvasRenderer.ts").read_text()
-        assert "endsWith('Thinking…')" in renderer, (
-            "the renderer's tail match has moved; re-pin it"
+        surface = (Path(__file__).resolve().parents[2]
+                   / "apps/hub-plugin/src/NativeTerminalSurface.ts").read_text()
+        assert "Thinking" not in surface, (
+            "the native terminal now interprets the marker; pin the spelling "
+            "on both sides again"
         )
         assert HudSink.THINKING_MARKER == "Thinking…"
 
@@ -530,32 +535,30 @@ class TestTheTranscriptFillsTheGlass:
             BRAINSTORM_SCROLLBACK_ROWS,
         )
 
-        renderer = (Path(__file__).resolve().parents[2]
-                    / "apps/hub-plugin/src/HudCanvasRenderer.ts").read_text()
-        capacity = re.search(r"transcriptLineCapacity:\s*(\d+)", renderer)
-        assert capacity is not None, "the transcript layout has moved"
-        window = int(capacity.group(1))
+        # The transcript is the firmware's own text page (2026-10-05):
+        # `bodyLineCapacity` lines, less the status row and the footer.
+        surface = (Path(__file__).resolve().parents[2]
+                   / "apps/hub-plugin/src/NativeTerminalSurface.ts").read_text()
+        capacity = re.search(r"bodyLineCapacity:\s*(\d+)", surface)
+        fixed = re.search(r"const BODY_FIXED_ROWS\s*=\s*(\d+)", surface)
+        assert capacity is not None and fixed is not None, (
+            "the native terminal layout has moved"
+        )
+        window = int(capacity.group(1)) - int(fixed.group(1))
+        assert window >= 5, "a transcript window under five rows is not a transcript"
         assert BRAINSTORM_ACTIVITY_MAX == (
             BRAINSTORM_SCROLLBACK_ROWS * BRAINSTORM_ROW_COLUMNS
             + (BRAINSTORM_SCROLLBACK_ROWS - 1)
         )
-        # RE-DERIVED, not pinned. A literal here is how the bound went
-        # stale once (74 survived a font change), and a pinned 105 would
-        # only repeat that: the renderer could change its column or its
-        # measured advance and this test would keep agreeing with itself.
-        # Both inputs come from the renderer source — the same file the
-        # window came from — so a one-sided edit fails the build.
-        edge = re.search(r"HUD_EDGE\s*=\s*(\d+)", renderer)
-        advance = re.search(
-            r"HUD_TEXT_MEAN_ADVANCE_PX\s*=\s*([0-9.]+)", renderer
+        # The page wraps every row by measured glyph width
+        # (`wrapWithMetrics`), so the Mac's column budget is a size bound,
+        # not a layout: it must stay inside the plugin's per-row unit cap
+        # or a full-width Mac row would be split in two on the glass.
+        units = re.search(r"const MAX_LINE_UNITS\s*=\s*(\d+)", surface)
+        assert units is not None, "the native terminal's row cap has moved"
+        assert BRAINSTORM_ROW_COLUMNS <= int(units.group(1)), (
+            "protocol.py's column budget exceeds the plugin's row cap"
         )
-        assert edge is not None and advance is not None, (
-            "the renderer's column geometry has moved"
-        )
-        column_px = 576 - int(edge.group(1)) * 2
-        assert BRAINSTORM_ROW_COLUMNS == int(
-            column_px / float(advance.group(1))
-        ), "protocol.py's column budget drifted from the renderer's geometry"
         assert BRAINSTORM_SCROLLBACK_ROWS >= window * 3, (
             "scrollback should hold several windows of history"
         )
@@ -683,35 +686,25 @@ class TestTheSilentWaitIsCovered:
     tests is how it reached three seconds in the first place.
     """
 
-    def test_the_tick_reassures_well_inside_one_turn(self) -> None:
+    def test_the_silent_wait_shows_the_marker_once(self) -> None:
+        """The engine paints the marker ONCE; a silent turn costs one frame.
+
+        The elapsed counter that this test used to time lived on the raster
+        transcript, which the firmware's text page replaced before the
+        raster page was deleted (2026-10-05): the glass shows the marker
+        as written and no clock beside it. That is a gap, recorded in the
+        Changelog, not a rate to guard — an in-place upgrade of the
+        terminal's status row once a second would be the native version.
+        Until it exists, pin the engine's side: the marker goes out once
+        per turn, as its own row, and never again until words arrive.
+        """
         from pathlib import Path
 
-        presenter = (Path(__file__).resolve().parents[2]
-                     / "apps/hub-plugin/src/HudPresenter.ts").read_text()
-        ticker = presenter[presenter.index("private armThinkingTicker"):]
-        ticker = ticker[:ticker.index("\n  }")]
-        rates = sorted({int(m) / 1000 for m in re.findall(r"\b(\d{3,5})\b", ticker)})
-        assert rates, "the thinking ticker has moved; re-pin it"
+        from joat.services.sinks import HudSink
 
-        fast = rates[0]
-        assert fast <= 5.0, (
-            "turns run 10-18s and are silent for nearly all of it; a slower "
-            "tick leaves the wearer unable to tell working from hung, and "
-            "the only remedy they know is cancelling a healthy session"
-        )
-        assert fast >= 1.0, (
-            "the counter shows whole seconds — ticking faster than it can "
-            "change is repaint for no new information"
-        )
-        # …and it must NOT stay that fast forever. Measured: one bridge
-        # write per tick, against a whole frame every three seconds before,
-        # so 1Hz is 3x the writes. A hung collaborator would otherwise hold
-        # the link at that rate indefinitely.
-        assert len(rates) >= 2, (
-            "the counter needs a slower rate once the number stops being "
-            "worth reading — otherwise a hung turn ticks at 1Hz forever"
-        )
-        assert rates[-1] > fast
+        assert HudSink.THINKING_MARKER == "Thinking…"
+        assert "Thinking" not in (Path(__file__).resolve().parents[2]
+                                  / "apps/hub-plugin/src/HudPresenter.ts").read_text()
 
     async def test_a_turn_that_produced_nothing_says_so(self) -> None:
         """A silent turn must not be filed as "Thinking…" forever.

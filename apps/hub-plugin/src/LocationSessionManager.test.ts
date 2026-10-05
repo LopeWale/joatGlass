@@ -217,6 +217,36 @@ describe('LocationSessionManager', () => {
     });
   });
 
+  it('starts the stream for a navigation consumer when the boot start had failed', async () => {
+    // A route used to be acked as installed while the one host stream had
+    // never started (the boot start failed and nothing retried), so the
+    // glasses said "Starting navigation" forever. A consumer is a promise
+    // of fixes: the start is retried, and its truth is what the route gets.
+    const h = harness();
+    h.bridge.startAppLocationUpdates.mockImplementationOnce(async () => {
+      h.order.push('start');
+      return false;
+    });
+    expect(await h.manager.start()).toBe(false);
+    expect(h.order).toEqual(['start']);
+
+    const fixes: AppLocation[] = [];
+    expect(await h.manager.setNavigationConsumer((location) => { fixes.push(location); })).toBe(true);
+    expect(h.order).toEqual(['start', 'start', 'listen']);
+    expect(h.bridge.startAppLocationUpdates.mock.calls[1]).toEqual([{
+      accuracy: AppLocationAccuracy.High,
+      distanceFilter: 1,
+      intervalMs: 1000,
+    }]);
+    h.emit({ latitude: 41.9, longitude: -87.65, accuracy: 6 });
+    expect(fixes).toHaveLength(1);
+
+    // Never started at all: nothing to clear, and no stream to promise.
+    const idle = harness();
+    expect(await idle.manager.setNavigationConsumer(undefined)).toBe(true);
+    expect(await idle.manager.setNavigationConsumer(() => undefined)).toBe(false);
+  });
+
   it('re-arms the active high-accuracy navigation stream after foreground return', async () => {
     const h = harness();
     await h.manager.start();

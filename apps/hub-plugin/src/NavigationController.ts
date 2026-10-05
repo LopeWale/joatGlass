@@ -6,7 +6,7 @@ import {
   type NavigationFix,
   type NavigationProgressState,
 } from './NavigationProgress';
-import type { LocationSessionManager } from './LocationSessionManager';
+import { locationTimestampMs, type LocationSessionManager } from './LocationSessionManager';
 import type { G2DiagnosticTrace, NavigationCue } from './G2DiagnosticTrace';
 import type {
   DownlinkMessage,
@@ -31,6 +31,60 @@ async function decodePngDataUrl(source: string): Promise<CanvasImageSource> {
   });
   return image;
 }
+/**
+ * The guidance page follows the wearer, not only the instruction. Until
+ * 2026-10-05 it repainted only when the maneuver or the ROUNDED distance
+ * changed — over a kilometre the distance rounds to 0.1 km, so the position
+ * dot, the progress bar and the ETA froze for a hundred metres at a time.
+ * Now a fix that moved the wearer repaints the page, at most once a second:
+ * the queue below keeps only the newest guidance fix, and the four-tile
+ * frame itself paces the BLE link, so this is a ceiling, not a rate.
+ */
+const REPAINT_MIN_INTERVAL_MS = 1_000;
+/** About a pixel and a half at zoom 16: smaller moves are not visible. */
+const REPAINT_MIN_MOVE_M = 3;
+/** Two tiles centred within a metre of each other are the same tile. */
+const PANEL_DEDUPE_M = 1;
+const EARTH_RADIUS_M = 6_371_000;
+
+function distanceM(
+  a: { latitude: number; longitude: number },
+  b: { latitude: number; longitude: number },
+): number {
+  const lat = ((a.latitude + b.latitude) / 2) * Math.PI / 180;
+  const dx = (b.longitude - a.longitude) * Math.PI / 180 * EARTH_RADIUS_M * Math.cos(lat);
+  const dy = (b.latitude - a.latitude) * Math.PI / 180 * EARTH_RADIUS_M;
+  return Math.hypot(dx, dy);
+}
+
+/** The tile whose centre is nearest the wearer: with equal-size tiles that
+ * is the one with the most ground around them, and the choice flips in the
+ * middle of the overlap, where both tiles cover the position. */
+export function nearestMapPanel<T extends { latitude: number; longitude: number }>(
+  panels: readonly T[],
+  position: { latitude: number; longitude: number } | undefined,
+): T | undefined {
+  if (panels.length === 0) return undefined;
+  if (!position) return panels[0];
+  let best = panels[0]!;
+  let bestDistance = distanceM(best, position);
+  for (const panel of panels.slice(1)) {
+    const candidate = distanceM(panel, position);
+    if (candidate < bestDistance) {
+      best = panel;
+      bestDistance = candidate;
+    }
+  }
+  return best;
+}
+
+/** Keep one tile per centre; a refetched centre replaces its predecessor. */
+function adoptPanel(panels: NavigationMapPanelModel[], panel: NavigationMapPanelModel): void {
+  const index = panels.findIndex((existing) => distanceM(existing, panel) <= PANEL_DEDUPE_M);
+  if (index >= 0) panels[index] = panel;
+  else panels.push(panel);
+}
+
 type NavigationUplink = Extract<UplinkMessage, {
   kind: 'navigation.action' | 'navigation.route.ack' | 'navigation.state'
     | 'navigation.reroute.request' | 'navigation.origin'
@@ -65,8 +119,18 @@ interface ActiveRoute {
    */
   pendingProgress: Array<{ state: NavigationProgressState; fix: NavigationFix }>;
   progressRendering: boolean;
-  /** Mac-rendered street surroundings for this route, once decoded. */
-  mapPanel?: NavigationMapPanelModel;
+  /** Mac-rendered street surroundings along this route, once decoded: the
+   * Mac prefetches a tile every ~180 m of the route, and the guidance page
+   * draws the one nearest the wearer, so the map follows them without the
+   * Mac ever receiving a live position. */
+  mapPanels: NavigationMapPanelModel[];
+  /** When and where the guidance page was last painted, for the repaint pace. */
+  lastPaintAt?: number;
+  lastPaintedFix?: NavigationFix;
+  /** The last progress shown, replayed when a tile for it arrives late. */
+  lastProgress?: { state: NavigationProgressState; fix: NavigationFix };
+  repaintRequested: boolean;
+  reportedFixShape: boolean;
 }
 
 /**
@@ -78,7 +142,7 @@ export class NavigationController {
   private route?: ActiveRoute;
   /** Streets that arrived before their route did: the Mac fetches the map
    * as soon as it has an origin, which is before it has a route to send. */
-  private pendingMapPanel?: { sessionId: string; panel: NavigationMapPanelModel };
+  private pendingMapPanels?: { sessionId: string; panels: NavigationMapPanelModel[] };
   private progressQueue: Promise<void> = Promise.resolve();
   private lifecycleEpoch = 0;
   private presentationOperation = 0;
@@ -90,6 +154,7 @@ export class NavigationController {
     private readonly link: NavigationLink,
     private readonly location?: NavigationLocationSession,
     private readonly diagnostics?: G2DiagnosticTrace,
+    private readonly clock: () => number = () => Date.now(),
   ) {}
 
   isActive(): boolean {
@@ -171,7 +236,7 @@ export class NavigationController {
       this.sendRouteAck(message, 'rejected');
       return false;
     }
-    const pending = this.pendingMapPanel;
+    const pending = this.pendingMapPanels;
     const route: ActiveRoute = {
       message,
       tracker,
@@ -180,21 +245,42 @@ export class NavigationController {
       pausedForReroute: false,
       pendingProgress: [],
       progressRendering: false,
-      // Adopt streets that arrived while this route was still being fetched.
-      ...(pending?.sessionId === message.sessionId ? { mapPanel: pending.panel } : {}),
+      // Adopt streets that arrived while this route was still being fetched,
+      // and keep a reroute's predecessor tiles: the streets did not move.
+      mapPanels: [
+        ...(prior?.message.sessionId === message.sessionId ? prior.mapPanels : []),
+        ...(pending?.sessionId === message.sessionId ? pending.panels : []),
+      ],
+      repaintRequested: false,
+      reportedFixShape: false,
     };
     let started = false;
     try {
       started = await this.location.setNavigationConsumer((fix, receivedAt) => {
         if (this.route !== route || route.pausedForReroute) return;
+        const timestamp = locationTimestampMs(fix.timestamp, receivedAt);
         const safeFix: NavigationFix = {
           latitude: fix.latitude,
           longitude: fix.longitude,
           ...(Number.isFinite(fix.accuracy) ? { accuracy: fix.accuracy } : {}),
           ...(Number.isFinite(fix.heading) ? { heading: fix.heading } : {}),
           ...(Number.isFinite(fix.speed) ? { speed: fix.speed } : {}),
-          ...(Number.isFinite(fix.timestamp) ? { timestamp: fix.timestamp } : {}),
+          ...(timestamp !== undefined ? { timestamp } : {}),
         };
+        if (!route.reportedFixShape) {
+          // The shape of the host's fixes, once per route and without the
+          // position: which optional fields it fills decides whether the
+          // tracker trusts, ages or rejects every fix that follows.
+          route.reportedFixShape = true;
+          console.info('[joat] navigation fix shape', {
+            accuracy: Number.isFinite(fix.accuracy),
+            heading: Number.isFinite(fix.heading),
+            speed: Number.isFinite(fix.speed),
+            timestamp: fix.timestamp === undefined ? 'absent'
+              : timestamp === Math.round(fix.timestamp as number) ? 'milliseconds' : 'seconds',
+            ageMs: timestamp === undefined ? undefined : receivedAt - timestamp,
+          });
+        }
         const state = route.tracker.accept(safeFix, receivedAt);
         this.enqueueProgress(route, state, safeFix);
       });
@@ -477,14 +563,26 @@ export class NavigationController {
       : state.kind === 'uncertain'
         ? `${state.kind}:${state.reason}`
         : state.kind;
-    if (signature === route.lastSignature) return;
+    const semanticChange = signature !== route.lastSignature;
+    const now = this.clock();
+    // A position-only repaint: the wearer moved visibly since the last
+    // painted frame, and that frame is at least a second old. Only the
+    // guidance page has a dot to move; the warnings and arrival are text.
+    const moved = state.kind === 'guidance'
+      && (route.lastPaintedFix === undefined || distanceM(route.lastPaintedFix, fix) >= REPAINT_MIN_MOVE_M);
+    const paced = now - (route.lastPaintAt ?? Number.NEGATIVE_INFINITY) >= REPAINT_MIN_INTERVAL_MS;
+    if (!semanticChange && !route.repaintRequested && !(moved && paced)) return;
     if (route.pausedForReroute) return;
+    route.repaintRequested = false;
     const navigation = this.progressModel(route, state, fix);
     const painted = await this.hud.showNavigation(navigation);
     if (this.route !== route) return;
-    this.recordCue(navigation.view, painted);
+    if (semanticChange) this.recordCue(navigation.view, painted);
     if (!painted) return;
     route.lastSignature = signature;
+    route.lastPaintAt = this.clock();
+    route.lastPaintedFix = fix;
+    route.lastProgress = { state, fix };
     this.current = {
       kind: 'navigation.view',
       sessionId: route.message.sessionId,
@@ -492,6 +590,9 @@ export class NavigationController {
       generation: route.message.generation,
       navigation,
     };
+    // The Mac hears about STATES, not positions: a position-only repaint
+    // sends nothing, which is the privacy boundary ARCHITECTURE.md draws.
+    if (!semanticChange) return;
     route.sequence += 1;
     this.link.sendNavigation({
       kind: 'navigation.state',
@@ -553,10 +654,20 @@ export class NavigationController {
     };
     const route = this.route;
     if (route && route.message.sessionId === message.sessionId) {
-      route.mapPanel = panel;
+      adoptPanel(route.mapPanels, panel);
+      // A tile that arrives while its stretch of road is on the glass used
+      // to wait for the next instruction change to appear. Show it now.
+      const progress = route.lastProgress;
+      if (progress && progress.state.kind === 'guidance' && !route.pausedForReroute) {
+        route.repaintRequested = true;
+        this.enqueueProgress(route, progress.state, progress.fix);
+      }
       return;
     }
-    this.pendingMapPanel = { sessionId: message.sessionId, panel };
+    if (this.pendingMapPanels?.sessionId !== message.sessionId) {
+      this.pendingMapPanels = { sessionId: message.sessionId, panels: [] };
+    }
+    adoptPanel(this.pendingMapPanels.panels, panel);
   }
 
   private progressModel(
@@ -576,7 +687,7 @@ export class NavigationController {
       map: {
         geometry: route.message.plan.geometry,
         ...(fix ? { position: { latitude: fix.latitude, longitude: fix.longitude } } : {}),
-        ...(route.mapPanel ? { panel: route.mapPanel } : {}),
+        ...((panel) => (panel ? { panel } : {}))(nearestMapPanel(route.mapPanels, fix)),
       },
     };
     if (state.kind === 'guidance') {

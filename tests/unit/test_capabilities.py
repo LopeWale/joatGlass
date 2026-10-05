@@ -602,6 +602,7 @@ def make_router(
     message_ui=None,
     ask=None,
     navigate=None,
+    places=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -634,6 +635,7 @@ def make_router(
         message_ui=message_ui,
         ask=ask,
         navigate=navigate,
+        places=places,
     )
     return router, transport, status
 
@@ -873,6 +875,46 @@ class TestCapabilityViews:
         assert lists[0].selectable is True
         assert lists[0].request_id == "navigation-entry"
         assert not any("JOAT" in item for item in lists[0].items)
+
+    async def test_navigation_page_lists_saved_places_first_and_a_tap_starts_their_route(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        from joat.core.protocol import SavedPlace
+
+        started: list[str] = []
+
+        async def navigate(destination: str) -> str | None:
+            started.append(destination)
+            return None
+
+        saved = [
+            SavedPlace(place_id="p1", name="Home", address="12 Oak St"),
+            SavedPlace(place_id="p2", name="Work", latitude=35.2, longitude=-97.4),
+        ]
+        router, transport, _ = make_router(tmp_path, navigate=navigate, places=lambda: saved)
+
+        await router.open("Navigation", request_id="navigation-places")
+        page = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert page.items == [
+            "➤ Home",
+            "➤ Work",
+            "➤ Navigate to a place",
+            "Add places on the phone page.",
+        ]
+        assert page.selectable is True
+
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION", selected_index=1,
+            request_id="navigation-places",
+        ))
+        await wait_until(lambda: started == ["Work"])
+        # The open question still sits after the places.
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION", selected_index=3,
+            request_id="navigation-places",
+        ))
+        await asyncio.sleep(0.01)
+        assert started == ["Work"]
 
     async def test_navigation_entry_opens_from_the_real_capability_menu_input(
         self, tmp_path

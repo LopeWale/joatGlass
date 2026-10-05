@@ -141,7 +141,7 @@ between them is not a matter of taste:
 | Mechanism | Cost | Rows visible of 8 | Type | Verdict |
 |---|---|---|---|---|
 | `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
-| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch; **each row ≤ 63 UTF-8 bytes** (the host refuses the rebuild with a silent `false` from 64 bytes, measured in the 0.9.5 simulator; `listLayout` clamps) | **In use for AGENT TERMINAL, the MESSAGES picker, the MESSAGES conversation thread and ACTIVITY** (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`, opted in per page with `nativeFirmwareList`; the thread opts in when the Mac sends `pageControls`). NEWS and SEARCH were native in 2026-09-02 and went back to pixels for the rail and row memory. Rejected for the menu itself — no denser, and it costs a page. |
+| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch; **each row ≤ 63 UTF-8 bytes** (the host refuses the rebuild with a silent `false` from 64 bytes, measured in the 0.9.5 simulator; `listLayout` clamps) | **In use for every list but the Planning month** (`usesFirmwareList` in `CapabilityMenu`: a list is Even's own unless it carries the month grid, which has no firmware template; a reader is a text page; the thread and the archive page by tappable rows when the Mac sends `pageControls`). Rejected for the menu itself — no denser, and it costs a page. |
 | Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
 
 Both native mechanisms render in the firmware's own proportional font at a
@@ -182,7 +182,7 @@ other three, so a swipe shipped three tiles.
 | Interaction | Tiles before | Tiles after |
 |---|---|---|
 | Mac state word ("hearing you…") | 2 | **1** — drawn inside `SPINE_LABEL_BOX`, which ends on the seam, so only the top-left tile changes (the native-text twin was never wired; see "levers" below) |
-| Mic on/off, battery | 2 / 1 | **1** (top-right) |
+| Mic on/off, battery | 2 / 1 | **1** (top-right) on an image page; **0** on a firmware page — one in-place upgrade of its header line (2026-10-05; it used to be dropped there) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
 | Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
@@ -203,7 +203,7 @@ other three, so a swipe shipped three tiles.
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
 | Assistant answer show, then dismiss | 4 + 4 | 0 (one text rebuild) + 4 + one rebuild; receipts 2 + 2 |
-| Clock minute tick on a feature page | 1 | 1 |
+| Clock minute tick on a feature page | 1 | 1 on an image page; **0** on a firmware page (header upgrade) |
 
 Two host facts from Even's own display docs shape the pipeline
 (`hub.evenrealities.com/docs/build/display`, read 2026-09-02):
@@ -246,19 +246,19 @@ The levers that remain are design decisions, not code:
   layered over the tiles with `zOrderIndex`, updated with
   `textContainerUpgrade`. A voice-state change would then cost zero tiles.
   The price: the firmware's proportional font at a fixed 27 px line height
-  (see the `font-measurement` skill), not the 10-12 px canvas type.
-- ~~A native list for plain-row pages~~ — `FIRMWARE_LIST_TITLES` in
-  `CapabilityMenu` (2026-10-05: AGENT TERMINAL, the MESSAGES picker,
-  ACTIVITY). The presenter tracks which page the glass holds
-  (`pageOwner`): a native list rebuilds to `listLayout` with the live status
-  line in the rebuild, and any pixel surface (overview, reader,
-  confirmation, overlay) rebuilds the four-tile page first. Pages with a
-  plugin-owned cursor (the Planning grid, prose readers, the QuickNotes
-  archive pager) stay raster, and so do the NEWS and
-  SEARCH tabs, whose Back restores the row the wearer left. Extending it to
-  another list is one title in the set — the trade is the firmware font,
-  no rail, and a cursor that always starts on row one (the firmware has no
-  cursor-setting API).
+  (see the `font-measurement` skill), not the 10-12 px canvas type. Taken
+  for the firmware pages on 2026-10-05: their one header line (`9:41 ·
+  PAGE · ● · ▇`, composed from `HudStatusModel`) is upgraded in place on
+  every clock, mic or battery change. The image pages keep the 24 px
+  raster spine with icons, measured into the top tiles.
+- ~~A native list for plain-row pages~~ — 2026-10-05: every list is a
+  firmware list (`usesFirmwareList` in `CapabilityMenu`); the one exception
+  is the Planning month grid, which has no Even template. The presenter
+  tracks which page the glass holds (`pageOwner`): a native list rebuilds
+  to `listLayout` with the live header in the rebuild, and the image pages
+  (overview, month, map) rebuild the four-tile page first. The trade is the
+  firmware font, no rail on an expanded tab, and a cursor that always
+  starts on row one (the firmware has no cursor-setting API).
 - ~~Native conversation thread~~ — 2026-10-05: the firmware list emits
   clicks but no scroll events, so the Mac pages the thread itself. The
   `hud.list` for `MESSAGES · CONVERSATION` carries `pageControls`
@@ -272,9 +272,8 @@ The levers that remain are design decisions, not code:
   Verified with the probe: older page 0.2 s after the tap, zero image
   tiles from thread to Back.
 - ~~Native confirmation~~ — 2026-10-05: the gate is a firmware text page
-  (`confirmationLayout`, owner `confirmation-native`) whenever the visual
-  surface offers `withPageTransition`; dismissal recreates the four image
-  containers, or hands straight to a firmware list. Verified in the official
+  (`confirmationLayout`, owner `confirmation-native`); dismissal recreates
+  the four image containers, or hands straight to a firmware list. Verified in the official
   simulator with `scripts/simulator_messages_native_probe.py`. The decision
   clock fits inside the Mac's deadline: `confirmationDecisionWindowMs` in
   `ConfirmationCommit` takes the Mac's `expiresAtMs`, reserves four seconds
@@ -294,15 +293,13 @@ The levers that remain are design decisions, not code:
   (owner `text-page-native`) and pages in place on swipe; a swipe past
   the local edge is not consumed, so the menu asks the Mac for its
   neighbouring page through the same `cappage` request. The question page
-  is `promptQuestionLayout` (owner `prompt-native`) under the same barrier;
-  without it the raster `paintExact` prompt remains. Every Messages page on
+  is `promptQuestionLayout` (owner `prompt-native`). Every Messages page on
   the reply path is now firmware-drawn; the probe records zero image tiles
   from picker to result and back. `?joatTestPromptMic=1` (DEV) lets the
   simulator, which has no microphone, keep a question on screen.
 - ~~Native Brainstorm~~ — 2026-10-05: a `brainstorm.view` frame rides the
   Agent Terminal's two-text page (`NativeTerminalSurface`, owner
-  `terminal-conversation-native`) whenever the visual surface offers its
-  transition barrier: head `JOAT · BRAINSTORM`, a status row with the state
+  `terminal-conversation-native`): head `JOAT · BRAINSTORM`, a status row with the state
   and the live speaker, the Mac's activity text as the transcript (paged
   on the glasses by swipe), and a footer in the raster hint's words
   measured for the firmware font. The idle picker (`BRAINSTORM`) is a
@@ -325,8 +322,7 @@ The levers that remain are design decisions, not code:
   20-row cap) and a tap on either sends the `QUICKNOTES · LIST` page request
   the edge swipe used to. A spoken "show notifications" is adopted like the
   menu capabilities. Still raster: the Planning month grid (a calendar has no
-  Even template), its day/week lists, and the NEWS, SEARCH and POMODORO tabs
-  (rail and row memory). `scripts/simulator_quicknotes_native_probe.py`
+  Even template). `scripts/simulator_quicknotes_native_probe.py`
   records zero tiles across list, both pages, the note, Back, the
   Notifications list and a card's detail.
 - ~~Native panel tabs and Settings~~ — 2026-10-05: `openPanelTab` opts NEWS,
@@ -334,7 +330,7 @@ The levers that remain are design decisions, not code:
   into text pages; the Settings page is a firmware list too. The rail is
   the overview's; the expanded page has a title row instead. Row memory on
   Back is gone with the raster list (the firmware has no cursor-setting
-  API), so `restorePanelSelection` runs only for a raster page. The
+  API). The
   Pomodoro's per-second tile is replaced by a plugin-authored whole-minute
   first row (`pomodoroCountdownRow`) that the tap mapping skips
   (`panelRowOffset`); the presenter's panel ticker runs at 60 s on a
@@ -410,6 +406,34 @@ The levers that remain are design decisions, not code:
   firmware list and records zero image tiles on every step but the map.
   Still pixels by design: the overview, the Planning month grid, the live
   map.
+- ~~The raster duplicates~~ — 2026-10-05, the wearer's question: "are you
+  sure you are deleting any duplicates?" They were not deleted; they were
+  bypassed. The renderer still carried a canvas painter for every page the
+  firmware now draws (the question, the confirmation, Brainstorm and the
+  Agent Terminal transcript, the Calendar and Reminders pages, every
+  navigation frame but the map, the dense list, the readers, the Messages
+  thread, the Pomodoro page, the paged answer card), the presenter kept a
+  pixel branch for each behind a check of the visual surface's transition
+  barrier that production always passes, and `CapabilityMenu` kept the
+  prose pagers, the plugin-owned cursor and the title allowlist that
+  decided which list went native. All of it is gone: `HudCanvasRenderer`
+  draws the overview, the Planning month and dashboard, the live map, the
+  receipt strip and the conversation card and nothing else (2,300 lines,
+  from 4,500); the presenter has one path per page; a list is Even's own
+  unless it is the month grid (`usesFirmwareList`); the browser preview
+  hands pages over like the glass. The tests that pinned the pixel versions
+  went with them; the native pages keep theirs.
+- ~~Text measured by hand~~ — 2026-10-05: the plugin wrapped and paged
+  native text with its own word-wrap over `getTextWidth` and sized the
+  confirmation body by a 120-character guess. `FirmwareText.ts` measures
+  with `measureTextWrap` from `@evenrealities/pretext`, Even's model of the
+  LVGL renderer (per-glyph rounding, breaks at spaces, hyphens and CJK
+  boundaries, leading spaces dropped at a line start): a page goes to the
+  firmware unwrapped and `paginateMeasured` decides how many words it
+  holds; the confirmation's prompt is cut by `fitLines` to the three lines
+  it has, by glyph width rather than character count; a terminal row is one
+  line when the firmware's own width says so. Tests pin that no page
+  exceeds its container under that model.
 - ~~The due page completes by tap~~ — 2026-10-05: the pushed due Reminder
   page was the last page whose hint named a word to say. Its tap now sends
   `reminder_due.complete` with exactly the opaque occurrence and attempt
@@ -463,6 +487,8 @@ tells you it is blank.
 
 - **The Mac's WebSocket origin must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, including scheme and port. Direct development may use the gateway's plain `ws://…:8787`; an unattended Tailnet home brain instead exposes a private Tailscale Serve port-443 TLS edge and therefore uses `wss://<mini>.ts.net/glasses`. Do not label the local plain-WebSocket port as `wss://…:8787`. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
 - `navigator.geolocation` only works in a **published** Hub plugin, not via QR sideload — use `bridge.getAppLocation()` instead, which works in both.
+- **The guidance page follows the wearer (2026-10-05).** It used to repaint only when the maneuver or the rounded distance changed, so over a kilometre the dot, the progress bar and the ETA froze for a hundred metres at a time; the street tile was fetched once at the origin and never again; a fix the host reported without an `accuracy` figure, or with a `timestamp` in seconds, was rejected as uncertain for the whole walk; and a route could be acked as installed while the location stream had never started. Now: a fix that moved the wearer repaints the page (at most once a second, coalesced to the newest fix, and the Mac hears nothing — only semantic states are sent); the Mac prefetches tiles along the route and the plugin draws the one nearest the wearer; without a tile the pane draws the route's shape around the wearer instead of disappearing; a fix without `accuracy` is trusted at the policy's limit and a timestamp's unit is read against its arrival time; a navigation consumer retries the stream start and the route is rejected (the Mac shows "Navigation could not start") when it truly cannot run. The first fix of each route logs its shape (`[joat] navigation fix shape`, no position) so a field run can tell which optional fields the host fills.
+- **Saved places live on the phone page's Places tab** (`Places.ts`, `PlacesPanel.ts`): a name plus an address and/or the phone's pinned location, mirrored to the Even host's storage, sent whole to the Mac on every change and every connect (`places` uplink). The glasses' Navigation page lists them first; "JOAT, navigate home" resolves on the Mac.
 - Phone lock/background (official lifecycle doc): on **iOS the WebView keeps running** — JS state and usually the WebSocket survive, and the store QA gate is exactly this (5-minute lock, state preserved). What always stops when the app is suspended is **audio capture** — so the HUD keeps working through a lock, but voice needs the Even app foregrounded. Continuous listening still wants Guided Access / Auto-Lock Never, or Phase 5 (custom companion). Android WebViews may be killed under memory pressure — treat resume as a cold restart (localStorage survives; we already persist settings there).
 - Dev loop: the official CLI + simulator (`npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities/evenhub-simulator`). Binaries: `evenhub` (alias `eh`) — `evenhub init` scaffolds `app.json` only, `evenhub qr` sideloads with hot reload, `evenhub pack app.json dist` builds the `.ehpk`. The simulator (`evenhub-simulator <url> --automation-port 9898`) injects the bridge and exposes an HTTP automation API — see [TESTING.md](TESTING.md) tier 2. No Even account needed for dev; `evenhub login` is only for store submission.
 

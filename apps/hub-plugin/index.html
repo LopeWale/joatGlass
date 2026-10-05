@@ -33,11 +33,48 @@
       dl { margin: 0; padding: 8px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; font-size: 12px; }
       dt { color: var(--secondary); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
       details .support { padding-bottom: 12px; }
+      nav.tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+      nav.tabs button { flex: 1; border-radius: 10px; background: var(--surface); font-weight: 500; }
+      nav.tabs button[aria-selected="true"] { background: #FEF991; color: #232323; }
+      [hidden] { display: none !important; }
+      ul.places { list-style: none; margin: 0; padding: 0; }
+      .place { gap: 10px; }
+      .place-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .place-text span { color: var(--secondary); font-size: 12px; overflow-wrap: anywhere; }
+      .place button { padding: 6px 10px; min-height: 36px; font-size: 14px; background: var(--control); border-radius: 8px; }
+      form .row { flex-direction: column; align-items: stretch; gap: 6px; }
+      input[type="text"] { font: inherit; color: inherit; background: var(--control); border: 0; border-radius: 8px; padding: 10px 12px; min-height: 44px; }
+      .form-actions { display: flex; gap: 8px; padding: 10px 14px; }
+      .form-actions button { flex: 1; border-radius: 10px; background: var(--control); }
+      .form-actions button[type="submit"] { background: #FEF991; color: #232323; font-weight: 600; }
     </style>
   </head>
   <body>
     <main id="panel">
       <header><h1>JOAT</h1><span id="p-link" role="status">Starting…</span></header>
+      <nav class="tabs" role="tablist" aria-label="Pages">
+        <button type="button" role="tab" id="tab-connection" aria-selected="true" aria-controls="page-connection">Connection</button>
+        <button type="button" role="tab" id="tab-places" aria-selected="false" aria-controls="page-places">Places</button>
+      </nav>
+      <div id="page-places" role="tabpanel" aria-labelledby="tab-places" hidden>
+        <section aria-labelledby="places-title">
+          <h2 id="places-title">Saved places</h2>
+          <div class="group">
+            <ul id="p-places" class="places"></ul>
+            <p id="p-places-empty" class="support" style="padding: 12px 14px; margin: 0;">No places yet. Save Home, Work and the places you walk to; they appear on the glasses’ Navigation page, and “JOAT, navigate home” works from anywhere.</p>
+            <button id="p-place-add" class="action" type="button">Add a place</button>
+            <form id="p-place-form" hidden>
+              <div class="row"><label for="p-place-name">Name</label><input id="p-place-name" type="text" autocomplete="off" placeholder="Home" /></div>
+              <div class="row"><label for="p-place-address">Address</label><input id="p-place-address" type="text" autocomplete="street-address" placeholder="Street, city" /></div>
+              <div class="row"><span id="p-place-coords" class="support" style="margin: 0;">No pin yet.</span><button id="p-place-locate" class="action" type="button" style="border-top: 0; padding-left: 0;">Use my location</button></div>
+              <div class="form-actions"><button id="p-place-cancel" type="button">Cancel</button><button id="p-place-save" type="submit">Save</button></div>
+            </form>
+          </div>
+          <p id="p-place-feedback" class="feedback" role="status"></p>
+          <p class="support">An address is looked up by the Mac’s routing provider when you navigate; a pinned location is routed to directly.</p>
+        </section>
+      </div>
+      <div id="page-connection" role="tabpanel" aria-labelledby="tab-connection">
       <section aria-labelledby="connection-title">
         <h2 id="connection-title">Connection</h2>
         <div class="group">
@@ -59,6 +96,7 @@
         <button id="p-location-check" class="action" disabled type="button">Check phone location</button>
         <p id="p-location-result" class="support" role="status"></p>
       </details>
+      </div>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

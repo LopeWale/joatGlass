@@ -117,8 +117,9 @@ describe('Chrome', () => {
     chrome.stop();
     const bar = wrote(ContainerId.StatusBar);
     expect(bar.length).toBeGreaterThan(0);
-    expect(bar[bar.length - 1]!.content).toMatch(/\d{1,2}:\d{2}/);
-    expect(bar[bar.length - 1]!.content).toContain('bat 87%');
+    // clock · label · mic glyph · battery glyph (87% is seven blocks of
+    // eight), the firmware line HudStatus composes from the model.
+    expect(bar[bar.length - 1]!.content).toMatch(/^\d{1,2}:\d{2} · JOAT · CONNECTING · ○ · ▇$/);
   });
 
   it('keeps the status bar within the 46-character budget', () => {
@@ -146,29 +147,60 @@ describe('Chrome', () => {
     // The composed line keeps the clock and the battery and shortens only
     // the state word, within the 46-character status wire budget.
     const content = lastStatus();
-    expect(content).toContain('JOAT brainstorm');
-    expect(content).toMatch(/\sbat 100%$/);
-    expect(content.length).toBeLessThanOrEqual(46);
-    // The spine draws the shortened word; the battery survives beside it.
-    expect(lastSpine()).toMatch(/^JOAT · BRAINSTORM CONNECTION/);
+    expect(content).toContain('JOAT · BRAINSTORM CONNECTION TEST PREPA…');
+    expect(content).toMatch(/ · ○ · █$/);
+    // The frame carries the facts as data; the spine draws the shortened
+    // word from them, and the battery is an icon beside it, not a word.
+    expect(frames[frames.length - 1]!.statusModel).toMatchObject({
+      link: 'connected', mic: false, battery: 100, charging: false,
+      macState: 'brainstorm connection test preparing reconnect',
+    });
+    expect(lastSpine()).toBe('JOAT · BRAINSTORM CONNECTION TEST PREPA…');
     expect(lastSpine()).not.toContain('BAT');
   });
 
-  it('keeps the native status line to the phone\'s own facts, battery last', () => {
-    // Without a renderer the firmware text container shows only what the
-    // phone knows for certain — clock, mic, battery — never the Mac's
-    // transient word, which would be stale the moment the brain went away.
+  it('carries the Mac\'s word on the native line only while it is current', async () => {
+    // The firmware header used to keep to the phone's own facts because a
+    // firmware page could not be refreshed in place, so a transient word
+    // would have frozen there. It is refreshed in place now, and Chrome
+    // still retires the word after twelve seconds, so the line shows it
+    // while it is true and drops it when it is not.
     const hud = realPresenter();
     const chrome = new Chrome(hud);
     chrome.setBattery(100, false);
     chrome.setLink('connected');
     chrome.setMacState('brainstorm connection test preparing reconnect');
     chrome.start();
+    await vi.advanceTimersByTimeAsync(0);
+    // Shown fitted to the firmware line: the word is cut, never the glyphs.
+    expect(wrote(ContainerId.StatusBar).pop()!.content).toMatch(/^\d{1,2}:\d{2} · JOAT · BRAINSTORM CONNECTION TEST PREPA… · ○ · █$/);
+    await vi.advanceTimersByTimeAsync(12_500);
     chrome.stop();
-
     const content = wrote(ContainerId.StatusBar).pop()!.content!;
-    expect(content).toMatch(/^\d{1,2}:\d{2} · MIC OFF · bat 100%$/);
-    expect(content.length).toBeLessThanOrEqual(46);
+    expect(content).toMatch(/^\d{1,2}:\d{2} · JOAT · ○ · █$/);
+  });
+
+  it('treats the plugin\'s own "listening" and "mic off" announcements as rest', async () => {
+    // CapabilityMenu and DeviceMonitor still announce the mic in words.
+    // Those restate the glyph; as a state word they hid the page's name.
+    const hud = visualPresenter();
+    const chrome = new Chrome(hud);
+    chrome.setBattery(87, false);
+    chrome.setLink('connected');
+    chrome.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await hud.setStatus('JOAT · mic off');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastSpine()).toBe('JOAT');
+    expect(frames[frames.length - 1]!.statusModel?.macState).toBeUndefined();
+    await hud.setStatus('JOAT · listening');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastSpine()).toBe('JOAT');
+    // A real word still shows, and still retires.
+    await hud.setStatus('JOAT · glasses on');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastSpine()).toBe('JOAT · GLASSES ON');
+    chrome.stop();
   });
 
   it('reports the LINK before the mic — a wearer whose brain is gone needs that first', async () => {
@@ -179,20 +211,22 @@ describe('Chrome', () => {
     chrome.start();
     await vi.advanceTimersByTimeAsync(0);
     chrome.stop();
-    // The state word is the link, not "listening": the spine says so.
-    expect(lastStatus()).toContain('JOAT reconnecting');
+    // The state word is the link, not "listening": the spine says so, and
+    // the microphone is a glyph on the line, never a word.
+    expect(lastStatus()).toContain('JOAT · RECONNECTING');
     expect(lastStatus()).not.toContain('listening');
     expect(lastSpine()).toBe('JOAT · RECONNECTING');
     // The microphone keeps its own structured slot, on the lens and on the
     // native status line alike.
     expect(frames[frames.length - 1]!.micOn).toBe(true);
+    expect(frames[frames.length - 1]!.statusModel?.mic).toBe(true);
     const native = realPresenter();
     const nativeChrome = new Chrome(native);
     nativeChrome.setMic(true);
     nativeChrome.setLink('reconnecting');
     nativeChrome.start();
     nativeChrome.stop();
-    expect(wrote(ContainerId.StatusBar).pop()!.content).toMatch(/^\d{1,2}:\d{2} · MIC ON$/);
+    expect(wrote(ContainerId.StatusBar).pop()!.content).toMatch(/^\d{1,2}:\d{2} · JOAT · RECONNECTING · ●$/);
   });
 
   it('a 30s tick during a focus page NEVER rebuilds the page', async () => {
@@ -224,7 +258,7 @@ describe('Chrome', () => {
     // Composed INTO the line — clock and battery survive the announcement,
     // and nothing paints the raw announcement as a line of its own.
     expect(frames.every((frame) => frame.status !== 'JOAT · settings')).toBe(true);
-    expect(lastStatus()).toMatch(/^\d{1,2}:\d{2} JOAT settings bat 64%$/);
+    expect(lastStatus()).toMatch(/^\d{1,2}:\d{2} · JOAT · SETTINGS · ○ · ▅$/);
     expect(lastSpine()).toBe('JOAT · SETTINGS');
     // The native status line has the same single writer: the announcement
     // never reaches the firmware container as a second, competing write.
@@ -238,7 +272,7 @@ describe('Chrome', () => {
     nativeChrome.stop();
     expect(bar.length).toBeGreaterThan(0);
     expect(bar.every((p) => p.content !== 'JOAT · settings')).toBe(true);
-    expect(bar[bar.length - 1]!.content).toMatch(/^\d{1,2}:\d{2} · MIC OFF$/);
+    expect(bar[bar.length - 1]!.content).toMatch(/^\d{1,2}:\d{2} · JOAT · SETTINGS · ○$/);
   });
 
   it('stop() halts the interval so a torn-down Chrome cannot paint', () => {
