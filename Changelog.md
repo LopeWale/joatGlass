@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.93 control-surface package
+
+- Rebuilt the existing JOAT package from `be079a6` with the same `scripts/pack.sh`, the same `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158372 bytes, SHA-256 `f5a83d81dba1440100c000f4be4e1d1691118a8d339260cb12e751eda3d5f5d1`. Carries the `capability` prompt owner kind (a tapped row's question cannot reach an older plugin), the Pomodoro and Search tab copy, and the raster fallbacks without voice instructions. The Mac side (control rows, dictation, the Pomodoro lengths) is in the brain. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — Pages opened by hand are control surfaces
 
 - The wearer's rule: voice works from anywhere, so a page opened on the glasses is for hands. No page shows a "Say “JOAT, …”" row or empty state any more; each offers the tap that does the thing, and a tapped row asks its own question on the lens through the acknowledged prompt (`PromptedSpeechRuntime.ask_capability`, prompt owner kind `capability` on both sides of the wire, drawn by the same native question page the Messages body uses) and routes the answer.
