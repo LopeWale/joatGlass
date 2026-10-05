@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
-import { pxTruncate } from '@evenrealities/pretext';
+import { measureTextWrap, pxTruncate } from '@evenrealities/pretext';
 import { HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
@@ -252,7 +252,7 @@ describe('HudPageBuilder invariants', () => {
     expect(validateEvenHubPageContainer(page as never).valid).toBe(true);
   });
 
-  it('text overview: the tab rail captures swipes; the pane is a six-row, one-line-per-row preview', () => {
+  it('text overview: the tab rail captures swipes; the pane is a seven-row, one-line-per-row preview', () => {
     // With the pane capturing, an overflowing News card swallowed every
     // swipe (the firmware scrolled the card instead of reporting the
     // swipe) and the rail never moved — observed 2026-09-22.
@@ -267,8 +267,44 @@ describe('HudPageBuilder invariants', () => {
     expect(byName['pane']!.isEventCapture).toBe(0);
     expect(page.textObject.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
     const preview = byName['pane']!.content.split('\n');
-    expect(preview).toHaveLength(6);
-    for (const line of preview) expect(pxTruncate(line, byName['pane']!.width - 8)).toBe(line);
+    expect(preview).toHaveLength(7);
+    for (const line of preview) expect(pxTruncate(line, byName['pane']!.width - 4)).toBe(line);
+  });
+
+  it('text overview: ten firmware lines tile the whole 576x288 canvas, nothing overflows', () => {
+    const page = builder.overviewTextLayout({
+      status: 'Sun 10/5 · MIC OFF · bat 100%', clock: '9:52', date: 'Sun 10/5', ambient: '72° Clear',
+      extra: '3 unread',
+      tabs: [
+        { label: 'NOTIFICATIONS', active: true }, { label: 'NEWS', active: false },
+        { label: 'POMODORO', active: false }, { label: 'SEARCH', active: false },
+      ],
+      paneTitle: 'NOTIFICATIONS',
+      paneBody: Array.from({ length: 9 }, (_, i) => `Row ${i + 1} · a notification long enough to need the whole pane width`).join('\n'),
+      hint: 'tap: open · swipe: tabs',
+    }) as unknown as { textObject: Array<{
+      containerName: string; content: string; xPosition: number; yPosition: number;
+      width: number; height: number; paddingLength: number; borderWidth: number;
+    }> };
+    const by = Object.fromEntries(page.textObject.map((t) => [t.containerName, t]));
+    // Edge to edge, top to bottom: no unused band at the bottom or right.
+    expect(Math.max(...page.textObject.map((t) => t.yPosition + t.height))).toBe(288);
+    expect(Math.max(...page.textObject.map((t) => t.xPosition + t.width))).toBe(576);
+    expect(by['status']!.yPosition).toBe(0);
+    expect(by['hint']!.yPosition + by['hint']!.height).toBe(288);
+    // Every container's text fits its inner box: no firmware scrollbar.
+    for (const t of page.textObject.filter((c) => c.containerName !== 'divider')) {
+      const inset = t.paddingLength + t.borderWidth;
+      const inner = t.width - 2 * inset;
+      const lines = Math.floor((t.height - 2 * inset) / 27);
+      expect(measureTextWrap(t.content, inner).lineCount, t.containerName).toBeLessThanOrEqual(lines);
+    }
+    // The divider is a bordered 2px rule carrying a single space, the full
+    // height of the middle band.
+    expect(by['divider']).toMatchObject({ width: 2, borderWidth: 1, content: ' ', height: 216 });
+    // The time is printed once, in the clock column, not in the status line too.
+    expect(by['clock']!.content.split('\n')).toEqual(['9:52', '72° Clear', '3 unread']);
+    expect(by['pane']!.content.split('\n')).toHaveLength(7);
   });
 
   it('reader layout: an opened article is four firmware text containers, body captures, rows rejoined', () => {
