@@ -9,7 +9,6 @@ import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { HudVisualFrame } from './HudVisualSurface';
-import { selectedMessagesConversationRow } from './HudCanvasRenderer';
 import type { MacLink } from './MacLink';
 import { CAPABILITIES, type ProductivityHudModel } from './types';
 
@@ -223,212 +222,6 @@ describe('Brainstorm surface ownership', () => {
     menu.claimBrainstormVisit(visit);
     expect(await menu.presentList('MESSAGES', ['Old conversation'], 'old-request', true)).toBe(false);
     expect(menu.mayPresentBrainstorm(visit)).toBe(true);
-  });
-});
-
-function conversationSelectionRig(native = false) {
-  let completed: HudVisualFrame | undefined;
-  const frames: HudVisualFrame[] = [];
-  const sent: Array<Record<string, unknown>> = [];
-  const hooks: { paint?: (frame: HudVisualFrame) => Promise<void> } = {};
-  const client = {
-    require: () => ({
-      textContainerUpgrade: async () => true,
-      rebuildPageContainer: async () => true,
-    }),
-  } as unknown as BridgeClient;
-  const hud = new HudPresenter(client, new HudPageBuilder(), native ? undefined : {
-    paint: async (frame) => {
-      await hooks.paint?.(frame);
-      completed = frame;
-      frames.push(frame);
-      return true;
-    },
-    // The Messages picker is a firmware list; the conversation that follows
-    // is a pixel page. Crossing that boundary needs the real surface's page
-    // transition hooks, so the stub must answer them like production does.
-    withPageTransition: async (replace: () => Promise<boolean>) => replace(),
-    forgetPage: () => undefined,
-    whenIdle: async () => true,
-  });
-  // Same split as the main rig above: surface announcements retire ownership
-  // on the Mac and are not requests. Counting them here would make every
-  // "how many times did we ask the Mac?" assertion drift with page routing.
-  const surfaceEvents: Array<Record<string, unknown>> = [];
-  const link = { send: (message: Record<string, unknown>) => {
-    const event = message.event as { containerName?: string; selectedName?: string } | undefined;
-    if (event?.containerName === 'capability-lifecycle' && event.selectedName?.startsWith('surface-')) {
-      surfaceEvents.push(message);
-    } else sent.push(message);
-  } } as unknown as MacLink;
-  const menu = new CapabilityMenu(hud, new Settings(), link);
-  return { menu, hud, sent, surfaceEvents, frames, hooks, completed: () => completed };
-}
-
-async function openConversationSelection(r: ReturnType<typeof conversationSelectionRig>) {
-  await r.menu.openFromContextualMenu(0);
-  const requestId = latestRequestId(r.sent);
-  await r.menu.presentList('MESSAGES', ['New message', 'Alex · Preview'], requestId, true);
-  r.menu.handleList(click(1));
-  return requestId;
-}
-
-const actionableConversation = [
-  'Latest messages — down for older',
-  'Alex · First received body',
-  'You · Second message body',
-  'Say “JOAT, reply saying …”',
-  'Mic off? Long press to enable.',
-];
-
-describe('Conversation actionable selection', () => {
-  it.each(['text', 'native-zero', 'omitted-zero'] as const)(
-    'opens with the first message visibly selected and immediately readable (%s tap)', async (tap) => {
-      const r = conversationSelectionRig();
-      try {
-        const requestId = await openConversationSelection(r);
-        expect(await r.menu.presentList(
-          'MESSAGES · CONVERSATION', actionableConversation, requestId, true,
-          'down older · tap read · say reply · left x2: back',
-        )).toBe(true);
-        expect(r.completed()).toMatchObject({
-          kind: 'list', title: 'MESSAGES · CONVERSATION', selectedIndex: 1,
-        });
-        expect(r.frames.filter((frame) => frame.kind === 'list'
-          && frame.title === 'MESSAGES · CONVERSATION')).toHaveLength(1);
-        const frame = r.completed();
-        if (frame?.kind !== 'list') throw new Error('Expected completed conversation frame');
-        expect(selectedMessagesConversationRow(frame.items, frame.selectedIndex)).toBe(0);
-        if (tap === 'text') r.menu.handleClick();
-        else r.menu.handleList(tap === 'native-zero' ? click(0) : clickRow0());
-        expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
-          containerName: 'capmessage', selectedIndex: 1, requestId,
-        });
-      } finally { r.menu.releaseToLiveSession(); }
-    },
-  );
-
-  it('awaits the first actionable highlight before admitting an immediate tap', async () => {
-    const r = conversationSelectionRig();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let selectionStarted = false;
-    let opening: Promise<boolean> | undefined;
-    try {
-      const requestId = await openConversationSelection(r);
-      r.hooks.paint = async (frame) => {
-        if (frame.kind === 'list' && frame.title === 'MESSAGES · CONVERSATION'
-          && frame.selectedIndex === 1) {
-          selectionStarted = true;
-          await held;
-        }
-      };
-      let finished = false;
-      opening = r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true)
-        .then((result) => { finished = true; return result; });
-      await vi.waitFor(() => expect(selectionStarted).toBe(true));
-      expect(finished).toBe(false);
-      expect(r.menu.handleClick()).toBe(true);
-      expect(r.sent).toHaveLength(2);
-      release();
-      await opening;
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      r.menu.handleClick();
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1 });
-    } finally {
-      release();
-      await opening;
-      r.menu.releaseToLiveSession();
-    }
-  });
-
-  it('pages at the last actual message instead of stepping into invisible reply instructions', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true, 'down older');
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      await vi.waitFor(() => expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 2 }));
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      expect(r.sent).toHaveLength(3);
-      expect(r.sent[2]?.event).toMatchObject({
-        containerName: 'cappage', selectedName: 'MESSAGES',
-        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId,
-      });
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 2 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('pages upward from the first actual message without an invisible header stop', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true, 'up newer');
-      r.menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
-        containerName: 'cappage', eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId,
-      });
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  // Ordered gestures (2026-09-11, usesOrderedSelection): on the raster
-  // conversation a native List click wrapped around the custom surface taps
-  // the row the wearer SEES. Its hidden index owns nothing here: neither an
-  // instruction row nor another speaker can become the target.
-  it('does not turn a reported instruction row into an invisible tap target', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
-      r.menu.handleList(click(4));
-      expect(r.sent).toHaveLength(3);
-      expect(r.sent[2]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1, requestId });
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      // That read is in flight: a press neither repeats nor retargets it.
-      r.menu.handleClick();
-      expect(r.sent).toHaveLength(3);
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('keeps the visible message authoritative when a hidden native cursor reports another speaker', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      expect(r.menu.handleList(click(2))).toBe(true);
-      expect(r.sent).toHaveLength(3);
-      expect(r.sent[2]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1, requestId });
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      r.menu.handleClick();
-      expect(r.sent).toHaveLength(3);
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
-        containerName: 'capmessage', selectedIndex: 1, requestId,
-      });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('preserves arbitrary legacy conversation row indices', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', ['Legacy row one', 'Legacy row two'], requestId, true);
-      r.menu.handleClick();
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 0 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('preserves the actual firmware row index in native fallback', async () => {
-    const r = conversationSelectionRig(true);
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
-      r.menu.handleList(click(2));
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 2 });
-    } finally { r.menu.releaseToLiveSession(); }
   });
 });
 
@@ -777,7 +570,7 @@ describe('CapabilityMenu', () => {
       },
     });
   });
-  it('hands plain-row pages to the firmware list and keeps cursor-owning pages raster', async () => {
+  it('hands every list to the firmware list; only the month grid is the image dashboard', async () => {
     const { menu, listOptions, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
@@ -793,11 +586,12 @@ describe('CapabilityMenu', () => {
 
     await menu.openFromContextualMenu(1); // Planning
     await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(3));
-    // The loading page is a firmware list; only the month grid itself, a
-    // page with no Even template, stays raster.
+    // The loading page is a firmware list; so is a month that arrives
+    // without its grid. Only the grid itself, a page with no Even template,
+    // is the image dashboard.
     expect(listOptions[4]).toMatchObject({ title: 'PLANNING', nativeFirmwareList: true });
     expect(await menu.presentList('PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true)).toBe(true);
-    expect(listOptions[5]).not.toHaveProperty('nativeFirmwareList');
+    expect(listOptions[5]).toMatchObject({ title: 'PLANNING · PLAN · AUGUST 2026', nativeFirmwareList: true });
   });
 
   it('draws QuickNotes, Notifications and the readers natively, paging the archive by its rows', async () => {
@@ -1027,20 +821,6 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it('keeps a Messages conversation on the raster page even though the picker is a firmware list', async () => {
-    const { menu, listOptions, sent } = rig();
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
-    expect(menu.handleList(click(1))).toBe(true);
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', ['Ada · 2m · On my way', 'Say reply to answer'],
-      latestRequestId(sent), true, 'say reply',
-    )).toBe(true);
-    const conversation = listOptions[listOptions.length - 1];
-    expect(conversation?.title).toBe('MESSAGES · CONVERSATION');
-    expect(conversation).not.toHaveProperty('nativeFirmwareList');
-  });
 
   it('keeps rows four and five reachable after the Mac replaces the loading view', async () => {
     const { menu, moves, sent } = rig();
@@ -1228,7 +1008,8 @@ describe('CapabilityMenu', () => {
 
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(transcript);
-    expect(visibleSelection()).toBe(1);
+    // The thread is a firmware list: Back lands on row one.
+    expect(visibleSelection()).toBe(0);
     expect(sent[3]).toEqual({
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation', requestId, traceId: selectionId },

@@ -2,7 +2,8 @@ import {
   TextContainerUpgrade,
   type RebuildPageContainer,
 } from '@evenrealities/even_hub_sdk';
-import { getTextWidth, pxTruncate } from '@evenrealities/pretext';
+import { pxTruncate } from '@evenrealities/pretext';
+import { firmwareLineWidth } from './FirmwareText';
 import type { BridgeClient } from './BridgeClient';
 import { TerminalConversationViewport } from './TerminalConversation';
 import { wrapTerminalParagraph } from './TerminalText';
@@ -246,7 +247,7 @@ export function nativeTerminalFooter(
     ...scrollHint(older, newer),
     'double-click: back',
   ];
-  return oneMeasuredLine(parts.join(' · '), getTextWidth);
+  return oneMeasuredLine(parts.join(' · '), firmwareLineWidth);
 }
 
 function validLayout(layout: RebuildPageContainer, page: NativeTerminalPage): boolean {
@@ -298,7 +299,9 @@ export class NativeTerminalSurface {
     private readonly replacePage: (page: RebuildPageContainer) => Promise<boolean>,
     options: NativeTerminalSurfaceOptions = {},
   ) {
-    this.measureTextWidth = options.measureTextWidth ?? getTextWidth;
+    // A row is one firmware line when the firmware's own measurement
+    // (leading spaces dropped, glyphs rounded one by one) fits the width.
+    this.measureTextWidth = options.measureTextWidth ?? firmwareLineWidth;
   }
 
   async present(

@@ -10,6 +10,7 @@ import {
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
 import { pxTruncate } from '@evenrealities/pretext';
+import { FIRMWARE_LINE_HEIGHT, containerLineCapacity, fitLines } from './FirmwareText';
 import {
   CANVAS,
   CAPABILITIES,
@@ -30,7 +31,7 @@ import {
  * 2026-09-05 audit found the previous 32px strips could not render a single
  * line, and the confirmation body clipped its own 120-char maximum.
  */
-const FIRMWARE_LINE = 27;
+const FIRMWARE_LINE = FIRMWARE_LINE_HEIGHT;
 const LIST_ROW = 40;
 const REGION_PAD = 4;
 /** One firmware line inside the region padding: the header of every
@@ -99,10 +100,13 @@ export function clampUtf8Bytes(text: string, maxBytes: number): string {
  * bottom while its top moves upward through bounded line-count stages. */
 /** The firmware answer page: one status line, one tall body, one hint
  * line. The body holds seven firmware lines; longer answers page. */
+/** Firmware lines the confirmation page's body holds (its main is 144 px). */
+export const CONFIRMATION_BODY_LINES = 5;
+
 export const ASSISTANT_ANSWER_PAGE = {
   bodyY: NATIVE_HEADER_HEIGHT,
   bodyHeight: 253 - NATIVE_HEADER_HEIGHT, // 218: down to the hint line
-  lineCapacity: Math.floor((253 - NATIVE_HEADER_HEIGHT - 2 * REGION_PAD) / FIRMWARE_LINE),
+  lineCapacity: containerLineCapacity(253 - NATIVE_HEADER_HEIGHT, REGION_PAD), // 7, measured as the firmware wraps
   textWidth: REGION_TEXT_WIDTH,
 } as const;
 
@@ -656,10 +660,15 @@ export class HudPageBuilder {
   }
 
   /** Dedicated decision surface: one bright question, one horizontal CTA row.
-   * The body holds FIVE firmware lines because its own 120-char maximum
-   * measures five ("CONFIRM ACTION" + blank + up to three wrapped lines). */
+   * The body holds CONFIRMATION_BODY_LINES firmware lines: "CONFIRM ACTION",
+   * a blank, then the prompt on the three that remain, fitted by
+   * `measureTextWrap` (whole words, an ellipsis when cut) rather than by a
+   * character count — a prompt of wide glyphs never overflows, one of
+   * narrow glyphs is not cut short. */
   confirmationLayout(prompt: string, status?: string): RebuildPageContainer {
-    const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
+    const question = fitLines(
+      prompt.trim() || 'Confirm requested action.', REGION_TEXT_WIDTH, CONFIRMATION_BODY_LINES - 2,
+    );
     return new RebuildPageContainer({
       containerTotalNum: 5,
       ...this.menuConfig(),
@@ -667,7 +676,7 @@ export class HudPageBuilder {
         // Over the visual HUD this page is firmware-owned and the presenter
         // cannot upgrade its containers, so the live top line rides along.
         this.statusBar(status ?? ''),
-        this.main(5 * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`), // 144
+        this.main(CONFIRMATION_BODY_LINES * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${question}`), // 144
         this.region(
           ContainerId.Context, 'context', 183, 35, 3, 3,
           'TAP · confirm   SWIPE · cancel',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getTextWidth } from '@evenrealities/pretext';
+import { getTextWidth, measureTextWrap } from '@evenrealities/pretext';
 
 import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
 import {
@@ -58,6 +58,8 @@ function expectWithinBudget(body: string): void {
     expect(row).not.toBe('');
     expect(getTextWidth(row)).toBeLessThanOrEqual(ASSISTANT_ANSWER_PAGE.textWidth);
   }
+  // And as the firmware itself wraps the page: no row breaks into two.
+  expect(measureTextWrap(body, ASSISTANT_ANSWER_PAGE.textWidth).lineCount).toBe(rows.length);
 }
 
 describe('navigationNativeBody', () => {

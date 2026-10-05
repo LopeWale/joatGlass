@@ -116,9 +116,10 @@ async def main() -> None:
                 await snap('1-notes', 1.2)
                 report['notes_timing'] = timing_since(console(), ids); ids = last_id(console())
 
-                # The newest note is row 1 of this page (20 rows); "▼ Older
-                # notes" is the row after the last note.
-                rows_on_page = len(router._note_rows) + 1
+                # The page leads with the two control rows (record, dictate),
+                # then the notes; "▼ Older notes" is the row after the last
+                # note, so its index is the row count the Mac mapped.
+                rows_on_page = len(router._note_rows)
                 for _ in range(rows_on_page):
                     await press('down', 0.12)
                 t_page = time.monotonic()
@@ -128,16 +129,18 @@ async def main() -> None:
                 await snap('2-older-notes', 1.0)
                 report['older_timing'] = timing_since(console(), ids); ids = last_id(console())
 
-                # Back to the newest page by its row, then open the long note
-                # (the newest row on that page).
-                older_rows = len(router._note_rows) + 1
+                # Back to the newest page by its "▲ Newer notes" row (after the
+                # controls and the notes), then open the long note: the newest
+                # note is the first row after the two controls.
+                older_rows = len(router._note_rows)
                 for _ in range(older_rows):
                     await press('down', 0.12)
                 await press('click', 0.3)
                 await _wait_until(lambda: router._note_list is not None and router._note_list.index == 0, 30)
                 await snap('3-newest-again', 1.0)
                 report['newer_timing'] = timing_since(console(), ids); ids = last_id(console())
-                await press('down', 0.2)
+                for _ in range(3):
+                    await press('down', 0.2)
                 t_read = time.monotonic()
                 await press('click', 0.3)
                 await _wait_until(lambda: router._note_reader is not None, 30)

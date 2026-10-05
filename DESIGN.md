@@ -105,8 +105,11 @@ Leaving the right half untouched sends only the two tiles carrying the rail.
 Selecting a row removes the rail and gives the destination the full frame. Presenter updates are serialized across all four image tiles,
 and pending frames coalesce to the newest complete state so token streams and
 countdowns cannot build a stale BLE backlog. A failed partial frame triggers
-one bounded page rebuild; a failed first Confirmation then actively restores
-the prior four tiles before the input gate stays closed.
+one bounded page rebuild. Only the overview, the Planning month and the live
+map are tiles at all: the confirmation, the question, the readers, the lists
+and the conversation pages are the firmware's own pages (docs/HUB_PLUGIN.md),
+and a page the host refuses to show leaves the input gate closed and the page
+beneath untouched.
 
 Content never relies on pixel-perfect right alignment. Space is attention, not
 unused capacity. A mode that needs more than its visible line budget becomes a
