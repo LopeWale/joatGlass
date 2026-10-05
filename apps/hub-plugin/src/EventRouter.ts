@@ -1,5 +1,5 @@
 import { OsEventTypeList, EventSourceType, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
-import { GesturePolicy } from './GesturePolicy';
+import { GesturePolicy, type GestureSource } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
@@ -211,7 +211,7 @@ export class EventRouter {
     const gesture = this.gestures.resolve(event);
     if (gesture?.intent === 'back' && !this.contextualMenuOverlayOpen) {
       this.recordGesture('double_press', gesture.delivery);
-      this.handleBack();
+      this.handleBack(gesture.source);
       return;
     }
 
@@ -373,8 +373,10 @@ export class EventRouter {
   }
 
   /** One semantic Back action for every SDK delivery envelope and temple.
-   * The active owner determines what is left, never whether Back exits JOAT. */
-  private handleBack(): void {
+   * The active owner determines what is left, never whether Back exits JOAT.
+   * `source` is only consulted by the explicitly armed Brainstorm diagnostic,
+   * whose Mac-side contract is a named right/ring double press. */
+  private handleBack(source?: GestureSource): void {
     this.pendingMicLongPress = false;
     if (this.imu.isPending()) { this.imu.declineByTap(); return; }
     if (this.backPending) return;
@@ -382,6 +384,18 @@ export class EventRouter {
     if (this.handleAssistantConversation(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.dismissAssistantOverlayFor(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
+    // An armed acceptance frame is `ready`, a cancellable run is not, so the
+    // two owners never compete; the arm is off unless the Mac set it, and an
+    // ordinary Brainstorm falls through to the same Back as every surface.
+    if (
+      (source === 'right' || source === 'ring')
+      && this.brainstorm?.isActive()
+      && this.brainstorm.isAcceptanceArmed()
+      && this.brainstorm.handleAcceptance(source)
+    ) {
+      this.recordAcceptedBrainstormAction(source, 'double_press');
+      return;
+    }
     if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) return;
     this.backPending = true;
     void this.menu.toggle().finally(() => { this.backPending = false; });
@@ -423,17 +437,10 @@ export class EventRouter {
   }
 
   private recordAcceptedBrainstormAction(
-    source: number,
+    sourceName: GestureSource | undefined,
     gesture: 'tap' | 'double_press',
   ): void {
     const accepted = this.brainstorm?.consumeAcceptedAction();
-    const sourceName = source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
-      ? 'left'
-      : source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
-        ? 'right'
-        : source === EventSourceType.TOUCH_EVENT_FROM_RING
-          ? 'ring'
-          : undefined;
     if (!accepted || sourceName === undefined) return;
     // The acceptance trace keeps a deliberately BOUNDED vocabulary of
     // actions (see G2DiagnosticTrace). An approval decision is not part of
@@ -543,7 +550,7 @@ export class EventRouter {
       && this.isLocalTapSource(source)
       && this.brainstorm.handleClick()
     ) {
-      this.recordAcceptedBrainstormAction(source, 'tap');
+      this.recordAcceptedBrainstormAction(GesturePolicy.sourceOf(source), 'tap');
       return;
     }
 
