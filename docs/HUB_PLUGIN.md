@@ -239,13 +239,14 @@ The levers that remain are design decisions, not code:
   another list is one title in the set — the trade is the firmware font,
   no rail, and a cursor that always starts on row one (the firmware has no
   cursor-setting API).
-- **Native confirmation and answer overlay** — `confirmationLayout` and
-  `paintNativeAssistantOverlay` exist and run only without a visual surface.
-  Un-gating them would make "Send to X?" appear in ~165 ms instead of four
-  forced tiles (the 12 s Mac confirmation envelope is lost to those tiles
-  today), but ~30 presenter tests pin the exact-frame (`paintExact`)
-  semantics of the raster gate and the change needs a simulator pass before
-  it ships.
+- ~~Native confirmation~~ — 2026-10-05: the gate is a firmware text page
+  (`confirmationLayout`, owner `confirmation-native`) whenever the visual
+  surface offers `withPageTransition`; dismissal recreates the four image
+  containers, or hands straight to a firmware list. Verified in the official
+  simulator with `scripts/simulator_messages_native_probe.py`.
+- **Native answer overlay** — `paintNativeAssistantOverlay` still runs only
+  without a visual surface; the result card after a send is four tiles in
+  and four out. Same mechanism as the gate above; next.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.
