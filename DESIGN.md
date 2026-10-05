@@ -207,6 +207,15 @@ wearer's position ringed on it. The road is drawn in chrome so the eye
 still lands on the maneuver first, and the map carries no border: the map
 IS the content.
 
+The pane follows the wearer. The streets under the route are tiles the Mac
+fetched along the whole route the moment it was known; the pane shows the
+one nearest the wearer, so the ground ahead is always in view and nothing
+jumps when the next tile takes over. Until the first tile arrives, or when
+a tile fails, the pane shows the route's own shape around the wearer at
+the same zoom (fit to the whole route before the first fix); it never goes
+blank. The dot, the progress bar and the ETA move with every fix that moved
+the wearer, at most once a second — not only when the instruction changes.
+
 ## Components
 
 ### Foundational visual states

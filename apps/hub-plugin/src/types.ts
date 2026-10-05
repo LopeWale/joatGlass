@@ -71,6 +71,16 @@ export const CONFIRM_PROMPT_MAX_UNITS = 120;
  * Wearer-configurable on the G2 (left-temple double-tap → settings list).
  */
 export type ResumePolicy = 'auto' | 'mac' | 'confirm';
+
+/** A saved place on the wire (core/protocol.py `SavedPlace`): a name and an
+ * address to search for, coordinates to route to, or both. */
+export interface SavedPlaceWire {
+  id: string;
+  name: string;
+  address?: string;
+  latitude?: number;
+  longitude?: number;
+}
 export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system';
 /** A transient JOAT response is never a Messages, Brainstorm, or Hermes page. */
 export type AssistantOverlayOperation = 'replace' | 'append' | 'settle' | 'dismiss';
@@ -375,6 +385,9 @@ export type UplinkMessage =
   | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string; mic?: boolean; micSource?: 'glasses' | 'phone'; micPromptId?: string }
   | { kind: 'confirm'; actionId: string; accepted: boolean; challengeId?: string; sessionId?: string; payloadDigest?: string; previewDigest?: string }
   | { kind: 'policy'; resume: ResumePolicy }
+  /** The wearer's saved places, whole, whenever the phone page changes them
+   * and on every connect (core/protocol.py `Places`). */
+  | { kind: 'places'; places: SavedPlaceWire[] }
   /** Wearer position via bridge.getAppLocation — the sideload-safe API. */
   | {
     kind: 'location'; latitude: number; longitude: number; accuracy?: number;

@@ -949,6 +949,39 @@ class TestDownlinkWire:
             with pytest.raises(ProtocolError):
                 parse_uplink(broken)
 
+    def test_saved_places_arrive_whole_and_bounded(self) -> None:
+        from joat.core.protocol import Places, SavedPlace
+
+        wire = {
+            "kind": "places",
+            "places": [
+                {"id": "p1", "name": "  Home ", "address": " 12  Oak St "},
+                {"id": "p2", "name": "Work", "latitude": 35.2, "longitude": -97.4},
+                {"id": "p3", "name": "Gym", "address": "Campus", "latitude": 35.21, "longitude": -97.41},
+            ],
+        }
+        assert parse_uplink(wire) == Places(places=(
+            SavedPlace(place_id="p1", name="Home", address="12 Oak St"),
+            SavedPlace(place_id="p2", name="Work", latitude=35.2, longitude=-97.4),
+            SavedPlace(place_id="p3", name="Gym", address="Campus", latitude=35.21, longitude=-97.41),
+        ))
+        assert parse_uplink({"kind": "places", "places": []}) == Places(places=())
+        for broken in (
+            {"kind": "places"},
+            {"kind": "places", "places": "home"},
+            {"kind": "places", "places": [{"id": "p1", "name": "Nowhere"}]},
+            {"kind": "places", "places": [{"id": "p1", "name": "", "address": "x"}]},
+            {"kind": "places", "places": [{"id": "p1", "name": "Half", "latitude": 35.2}]},
+            {"kind": "places", "places": [{"id": "p1", "name": "Off", "latitude": 95, "longitude": 0}]},
+            {"kind": "places", "places": [{"id": "p1", "name": "x" * 41, "address": "a"}]},
+            {"kind": "places", "places": [{"id": "p1", "name": "A", "address": "a", "extra": 1}]},
+            {"kind": "places", "places": [{"id": "p1", "name": "A", "address": "a"}] * 2},
+            {"kind": "places", "places": [{"id": f"p{i}", "name": "A", "address": "a"} for i in range(51)]},
+            {"kind": "places", "places": [], "more": True},
+        ):
+            with pytest.raises(ProtocolError):
+                parse_uplink(broken)
+
     def test_verifying_view_receipt_is_content_free_and_phase_bound(self) -> None:
         receipt_id = "a76b12f1-45e4-41fd-aed8-086f6b6b1954"
         wire = ProductivityHudView(

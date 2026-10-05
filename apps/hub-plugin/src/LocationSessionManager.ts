@@ -47,6 +47,27 @@ const FIELD_SPEED = 2;
 const FIELD_HEADING = 4;
 const EARTH_RADIUS_M = 6_371_000;
 
+/**
+ * The SDK documents `AppLocation.timestamp` as "Unix milliseconds" in one
+ * place and leaves its units unstated in the type, and a host that reports
+ * seconds makes every fix look hours old: the tracker's stale window is
+ * five seconds, so the guidance page sat on "Finding your position" for the
+ * whole walk. The unit is read against the moment the fix arrived: a value
+ * is seconds when it sits nearer that moment as seconds than as
+ * milliseconds (1.7e9 against 1.7e12 for a real clock; a replay's small
+ * clock stays in whatever unit it was written in).
+ */
+export function locationTimestampMs(
+  value: number | undefined,
+  receivedAtMs: number = Date.now(),
+): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
+  const asSeconds = value * 1000;
+  return Math.abs(receivedAtMs - asSeconds) < Math.abs(receivedAtMs - value)
+    ? Math.round(asSeconds)
+    : Math.round(value);
+}
+
 type LocationBridge = Pick<
   EvenAppBridge,
   'getAppLocation' | 'startAppLocationUpdates' | 'stopAppLocationUpdates' | 'onAppLocationChanged'
@@ -121,7 +142,15 @@ export class LocationSessionManager {
       this.resetQualityWindow();
     }
     return this.enqueue(async () => {
-      if (!this.shouldRun || this.unsubscribe === undefined) return true;
+      // Clearing a consumer with no stream to switch is nothing to do. A
+      // consumer is a promise of fixes, though: a route used to be acked as
+      // installed here while the stream had never started (the boot start
+      // failed and nothing retried), and the glasses then said "Starting
+      // navigation" forever. Retry the start now, and report its truth.
+      if (!this.shouldRun) return consumer === undefined;
+      if (this.unsubscribe === undefined) {
+        return consumer === undefined ? true : this.startNow();
+      }
       return this.applyDesiredProfile(profileEpoch);
     });
   }
@@ -442,12 +471,8 @@ export class LocationSessionManager {
     if (latest === undefined) return undefined;
     const now = Date.now();
     if (now - latest.receivedAt > NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS) return undefined;
-    const timestamp = latest.location.timestamp;
-    if (
-      Number.isFinite(timestamp)
-      && timestamp !== undefined
-      && now - timestamp > NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS
-    ) return undefined;
+    const timestamp = locationTimestampMs(latest.location.timestamp, now);
+    if (timestamp !== undefined && now - timestamp > NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS) return undefined;
     return latest.location;
   }
 
@@ -469,10 +494,7 @@ export class LocationSessionManager {
       if (!moved && !stale) return false;
     }
     this.lastSent = { lat: latitude, lon: longitude, at: receivedAt };
-    const sourceTimestamp = location.timestamp;
-    const timestamp = Number.isSafeInteger(sourceTimestamp) && sourceTimestamp !== undefined && sourceTimestamp >= 0
-      ? sourceTimestamp
-      : receivedAt;
+    const timestamp = locationTimestampMs(location.timestamp, receivedAt) ?? receivedAt;
     this.link.sendLatestLocation({
       kind: 'location',
       latitude,

@@ -73,6 +73,7 @@ from ..core.protocol import (
     NavigationState,
     NavigationViewAck,
     PairingAck,
+    Places,
     PairingSet,
     Policy,
     ResumePolicy,
@@ -84,6 +85,7 @@ from ..core.protocol import (
     ProductivityViewAck,
     ReminderDueAck,
     ReminderDueComplete,
+    SavedPlace,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     PLUGIN_REPLACED_CLOSE_CODE,
     parse_uplink,
@@ -116,6 +118,7 @@ ProductivityViewAckCallback = Callable[[ProductivityViewAck], None]
 #: The wearer tapped a due Reminder page the current client had accepted;
 #: the argument is the opaque occurrence id.
 ReminderDueCompleteCallback = Callable[[str], None]
+PlacesCallback = Callable[[tuple[SavedPlace, ...]], None]
 
 
 @dataclass(slots=True)
@@ -208,6 +211,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._navigation_origin_failure_cbs: list[NavigationOriginFailureCallback] = []
         self._productivity_view_ack_cbs: list[ProductivityViewAckCallback] = []
         self._reminder_due_complete_cbs: list[ReminderDueCompleteCallback] = []
+        self._places_cbs: list[PlacesCallback] = []
         #: Due views the current client accepted: occurrence -> (attempt, generation).
         self._accepted_reminder_dues: dict[str, tuple[str, int]] = {}
         self._disconnect_cbs: list[Callable[[], None]] = []
@@ -453,6 +457,10 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self, callback: NavigationOriginFailureCallback,
     ) -> None:
         self._navigation_origin_failure_cbs.append(callback)
+
+    def on_places(self, callback: PlacesCallback) -> None:
+        """Observe the wearer's saved places, whole, whenever the phone sends them."""
+        self._places_cbs.append(callback)
 
     def on_reminder_due_complete(self, callback: ReminderDueCompleteCallback) -> None:
         """Observe a tap on a due Reminder page this client had accepted.
@@ -1306,6 +1314,10 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             case Policy():
                 log.info("wearer resume policy: %s", message.resume)
                 self.resume_policy = message.resume
+            case Places():
+                log.info("wearer saved places: %d", len(message.places))
+                for places_cb in self._places_cbs:
+                    places_cb(message.places)
             case Location():
                 first = self.location is None
                 self.location = message
