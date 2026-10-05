@@ -12,7 +12,7 @@ import {
   quickNotesProsePages,
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
-import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
+import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemainingMs } from './PanelRail';
 
 /**
  * Lists the G2 firmware draws itself (`ListContainerProperty`): plain rows
@@ -37,13 +37,26 @@ const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
   'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY', 'BRAINSTORM',
   'NOTIFICATIONS', 'NOTIFICATIONS · EMPTY',
   'QUICKNOTES', 'QUICKNOTES · EMPTY', 'QUICKNOTES · SETUP',
+  'NEWS', 'SEARCH', 'POMODORO',
 ]);
 
 /** Readers drawn as one firmware text page instead of four image tiles. */
 const TEXT_PAGE_TITLES = new Set([
   'MESSAGES · MESSAGE', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
-  'NOTIFICATIONS · DETAIL', 'NAVIGATION',
+  'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
 ]);
+
+/** The expanded Pomodoro's first row on the firmware list: the raster page
+ * drew a seconds countdown that cost one image tile every second over BLE.
+ * The firmware list cannot be upgraded in place, so the row carries whole
+ * minutes and the page is rebuilt once a minute (HudPresenter's panel
+ * ticker at its 60 s granularity). */
+export function pomodoroCountdownRow(pomodoro: HudPanelPomodoro | undefined, nowMs: number): string {
+  if (!pomodoro) return 'Say “JOAT, start a pomodoro”';
+  if (pomodoro.phase === 'idle') return pomodoroBlockLabel(pomodoro);
+  const minutes = Math.max(1, Math.ceil(pomodoroRemainingMs(pomodoro, nowMs) / 60_000));
+  return `${pomodoroBlockLabel(pomodoro)} · ${minutes} min left`;
+}
 
 /** A Planning entry page is titled by its origin and kind. */
 function usesTextPage(normalized: string): boolean {
@@ -61,6 +74,7 @@ import {
   type MessageUIMessage,
   type PromptPresentMessage,
   type BrainstormHudModel,
+  type HudPanelPomodoro,
   type PanelContentTab,
   type PlanningGridCell,
   type ProductivityHudModel,
@@ -265,6 +279,9 @@ export class CapabilityMenu {
    * schedule rather than throwing the wearer all the way to the overview. */
   private planningDrillDown = false;
   private planningBackPending = false;
+  /** Rows the plugin put above the Mac's on an expanded tab (the Pomodoro
+   * countdown); a tap below them maps back to the Mac's own index. */
+  private panelRowOffset = 0;
   /** The split Planning dashboard: hovered date, and whether the right pane
    * owns input. Plugin-local — a hover never costs a Mac round trip. */
   private dashboard?: {
@@ -286,7 +303,15 @@ export class CapabilityMenu {
     private readonly hud: HudPresenter,
     _settings: Settings,
     private readonly link: MacLink,
-  ) {}
+  ) {
+    // The firmware Pomodoro page carries whole minutes; the presenter's
+    // ticker asks for a rebuilt page at each minute boundary.
+    this.hud.onNativePanelTick = () => {
+      if (this.isPanelExpanded() && panelTabForTitle(this.pendingTitle) === 'pomodoro') {
+        void this.presentPanelContent('pomodoro');
+      }
+    };
+  }
 
   isOpen(): boolean {
     return this.view !== 'closed';
@@ -653,7 +678,7 @@ export class CapabilityMenu {
     this.selectedIndex = 0;
     const shown = await this.hud.showList(
       ['Manage listening and Mac connections', 'in JOAT’s phone controls in Even Hub.'],
-      { ...SETTINGS_SURFACE, selectable: false },
+      { ...SETTINGS_SURFACE, selectable: false, nativeFirmwareList: true },
     );
     if (!this.isCurrentTransition(transition)) return;
     if (shown) this.view = 'settings';
@@ -1559,6 +1584,12 @@ export class CapabilityMenu {
       return true;
     }
     if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
+    // A plugin-authored row above the Mac's (the Pomodoro countdown) is inert.
+    const panelOffset = this.isPanelExpanded() ? this.panelRowOffset : 0;
+    if (panelOffset > 0 && this.selectedIndex < panelOffset) {
+      this.dataSelectionPending = false;
+      return true;
+    }
     const random = globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const traceId = `hud-${random}`;
@@ -1590,7 +1621,7 @@ export class CapabilityMenu {
         containerName: readingMessage ? 'capmessage' : 'capdata',
         ...(this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.quickNotesPage
           ? { quickNotesPageIndex: this.dataSurface.quickNotesPage.index } : {}),
-        selectedIndex: this.selectedIndex,
+        selectedIndex: this.selectedIndex - panelOffset,
         selectedName: this.pendingTitle,
         traceId,
         requestId: this.pendingRequestId,
@@ -1750,8 +1781,16 @@ export class CapabilityMenu {
       : [content?.empty ?? PANEL_EMPTY_COPY[tab]];
     const selectable = rows.length > 0;
     const hint = tab === 'pomodoro' ? POMODORO_EXPANDED_HINT : PANEL_EXPANDED_HINT;
-    const shown = await this.hud.showList(items, {
+    // The tabs are firmware lists: the title row names the tab (the rail
+    // stays on the overview), and the Pomodoro carries its countdown as a
+    // first row the tap mapping skips.
+    const firmware = usesFirmwareList(title);
+    const countdown = firmware && tab === 'pomodoro' && !content?.empty
+      ? [pomodoroCountdownRow(content?.pomodoro, Date.now())] : [];
+    const shownItems = [...countdown, ...items];
+    const shown = await this.hud.showList(shownItems, {
       title, hint, selectable, railTab: tab,
+      ...(firmware ? { nativeFirmwareList: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -1763,13 +1802,16 @@ export class CapabilityMenu {
       // already stale. Paint once more from the new cache.
       return this.openPanelTab(tab, keepSelection, false);
     }
-    const selectedIndex = await this.restorePanelSelection(keepSelection, items.length, transition);
+    // The firmware has no cursor-setting API: a rebuilt list starts on row
+    // zero, so only the raster list restores the wearer's row.
+    const selectedIndex = firmware
+      ? 0 : await this.restorePanelSelection(keepSelection, items.length, transition);
     if (selectedIndex === undefined || !this.isCurrentTransition(transition)) return;
     if (this.hud.rail.requestId(tab) !== requestId) return this.openPanelTab(tab, keepSelection, false);
     this.view = 'data';
     this.pendingTitle = title;
     this.pendingRequestId = requestId;
-    this.dataItemCount = items.length;
+    this.dataItemCount = shownItems.length;
     this.dataRowsSelectable = selectable;
     this.dataSelectionPending = false;
     this.dataSelectionUsesStaleNativeIndex = false;
@@ -1777,9 +1819,10 @@ export class CapabilityMenu {
     this.dataHint = hint;
     this.dataPagePending = false;
     this.selectedIndex = selectedIndex;
+    this.panelRowOffset = countdown.length;
     this.dataSurface = {
       title,
-      items: [...items],
+      items: [...shownItems],
       selectable,
       hint,
       selectedIndex,

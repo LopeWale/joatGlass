@@ -1756,38 +1756,22 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it.each([true, false])('News Back completes a visible row restoration before accepting a tap (native accepted=%s)', async (nativeAccepted) => {
-    let releaseSelection!: () => void;
-    const selectionPaint = new Promise<void>((resolve) => { releaseSelection = resolve; });
-    let holdSelection = false;
-    let selectionPaintStarted = false;
-    let completedSurface: HudVisualFrame | { kind: 'native'; selectedIndex: number } | undefined;
+  it('News opens as a firmware list, reads an article on a text page, and returns to the list', async () => {
+    const rebuilds: RebuildPageContainer[] = [];
     const sent: Array<Record<string, unknown>> = [];
     const client = {
       require: () => ({
         textContainerUpgrade: async () => true,
-        rebuildPageContainer: async (page: RebuildPageContainer) => {
-          if (page.listObject?.length) {
-            if (nativeAccepted) completedSurface = { kind: 'native', selectedIndex: 0 };
-            return nativeAccepted;
-          }
-          return true;
-        },
+        rebuildPageContainer: async (page: RebuildPageContainer) => { rebuilds.push(page); return true; },
       }),
     } as unknown as BridgeClient;
     const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => {
-        if (holdSelection && frame.kind === 'list' && frame.title === 'NEWS'
-          && frame.selectedIndex === 1) {
-          selectionPaintStarted = true;
-          await selectionPaint;
-        }
-        completedSurface = frame;
-        return true;
-      },
-    });
-    // Surface announcements are ownership bookkeeping, not requests; this
-    // test counts what the row tap ASKED the Mac for.
+      paint: async () => true,
+      paintExact: async (_frame: HudVisualFrame, current: () => boolean) => current(),
+      forgetPage: () => undefined,
+      whenIdle: async () => true,
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as never);
     const link = { send: (message: Record<string, unknown>) => {
       const event = message.event as { containerName?: string; selectedName?: string } | undefined;
       if (event?.containerName === 'capability-lifecycle'
@@ -1797,83 +1781,30 @@ describe('CapabilityMenu', () => {
     const menu = new CapabilityMenu(hud, new Settings(), link);
     hud.rail.accept({ kind: 'hud.panel', tab: 'news', revision: 7, rows: ['Story 01', 'Story 02'] });
     await menu.openPanelTab('news');
+    expect(rebuilds[rebuilds.length - 1]?.listObject?.length ?? 0).toBe(1);
     menu.handleList(click(1));
     expect(sent).toHaveLength(1);
+    expect(sent[0]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 1, requestId: 'panel-news-7',
+    });
     expect(await menu.presentList(
-      'NEWS · ARTICLE', ['Story 02', 'Complete synthetic article.'], 'panel-news-7', false,
+      'NEWS · ARTICLE', ['1/1 · Story 02', 'Complete synthetic article.'], 'panel-news-7', false,
     )).toBe(true);
-    expect(completedSurface).toMatchObject({ kind: 'list', title: 'NEWS · ARTICLE' });
-
-    holdSelection = true;
-    let backFinished = false;
-    const returning = menu.toggle().then(() => { backFinished = true; });
-    try {
-      // A logical selectedIndex is insufficient: a rebuilt native list starts
-      // at row zero. Require the actual painter to restore the chosen row.
-      await vi.waitFor(() => expect(selectionPaintStarted).toBe(true));
-      expect(backFinished).toBe(false);
-      expect(completedSurface).not.toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-      expect(menu.handleClick()).toBe(true);
-      expect(sent).toHaveLength(1);
-
-      releaseSelection();
-      await returning;
-      expect(completedSurface).toMatchObject({
-        kind: 'list', title: 'NEWS', items: ['Story 01', 'Story 02'], selectedIndex: 1,
-      });
-      expect(hud.exportBackgroundState().surface).toMatchObject({
-        kind: 'list', options: { title: 'NEWS' }, selectedIndex: 1,
-      });
-      expect(menu.handleClick()).toBe(true);
-      expect(sent).toHaveLength(2);
-      expect(sent[1]?.event).toMatchObject({
-        containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 1, requestId: 'panel-news-7',
-      });
-    } finally {
-      releaseSelection();
-      await returning;
-      menu.releaseToLiveSession();
-    }
-  });
-
-  it.each([true, false])('keeps Home after cancelling pending highlight restoration (late result=%s)', async (lateResult) => {
-    let finishSelection!: (painted: boolean) => void;
-    const selectionPaint = new Promise<boolean>((resolve) => { finishSelection = resolve; });
-    const { menu, sent, selections, defaultsCount } = rig(true, true, true, selectionPaint);
-    await menu.openFromContextualMenu(0);
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList('MESSAGES', ['Refresh', 'Adele'], requestId, true)).toBe(true);
-    menu.handleList(click(1));
-    const selectionId = (sent[1]!.event as { traceId: string }).traceId;
-    expect(sent).toHaveLength(2);
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', ['Adele · Good morning'], requestId, false,
-    )).toBe(true);
-
-    const returning = menu.toggle();
-    await vi.waitFor(() => expect(selections).toEqual([1]));
-    // The first Back is still restoring the visible row; a tap cannot select
-    // from either the old conversation or the not-yet-ready picker.
-    expect(menu.handleClick()).toBe(true);
-    expect(sent).toHaveLength(2);
+    const article = rebuilds[rebuilds.length - 1];
+    expect(article?.listObject?.length ?? 0).toBe(0);
+    expect(article?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
 
     await menu.toggle();
-    expect(menu.isOpen()).toBe(false);
-    expect(defaultsCount()).toBe(1);
-    expect(sent.slice(2)).toEqual([{
-      kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
-    }]);
-
-    finishSelection(lateResult);
-    await returning;
-    expect(menu.isOpen()).toBe(false);
-    expect(menu.handleClick()).toBe(false);
-    expect(defaultsCount()).toBe(1);
-    expect(sent.slice(2)).toEqual([{
-      kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
-    }]);
+    expect(rebuilds[rebuilds.length - 1]?.listObject?.length ?? 0).toBe(1);
+    expect(hud.exportBackgroundState().surface).toMatchObject({
+      kind: 'list', options: { title: 'NEWS', nativeFirmwareList: true },
+    });
+    menu.handleList(clickRow0());
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 0, requestId: 'panel-news-7',
+    });
+    menu.releaseToLiveSession();
   });
 
   it('double-tap from the Messages root returns Home and clears Mac-private Messages state', async () => {
