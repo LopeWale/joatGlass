@@ -43,6 +43,7 @@ function rig(
   let visibleSelection = 0;
   let productivityCall = 0;
   const hud = {
+    usesCustomListSelection: () => true,
     showList: vi.fn(async (
       items: string[], options?: { title?: string; hint?: string; selectable?: boolean },
     ) => {
@@ -1899,6 +1900,7 @@ describe('Planning split dashboard', () => {
     const panes: Array<{ dateIndex: number; focused: boolean; itemIndex: number }> = [];
     const sent: Array<Record<string, unknown>> = [];
     const hud = {
+      usesCustomListSelection: () => true,
       showSidebar: vi.fn(async () => true),
       showList: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),

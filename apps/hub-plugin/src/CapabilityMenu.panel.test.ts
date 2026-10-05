@@ -26,6 +26,7 @@ function rig(activeTab: PanelTab = 'notifications', restorationResult: boolean |
   /** Runs while a paint is in flight — how a push lands mid-transition. */
   let duringPaint: (() => void) | undefined;
   const hud = {
+    usesCustomListSelection: () => true,
     rail,
     activeTab: () => rail.active(),
     stepTab: vi.fn(async (delta: number) => {
