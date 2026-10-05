@@ -1861,7 +1861,10 @@ async def main() -> None:
     notifications_changed = asyncio.Event()
     notifications_changed.set()
     notification_loop = asyncio.get_running_loop()
-    card_log.on_change(lambda: notification_loop.call_soon_threadsafe(notifications_changed.set))
+    def wake_notification_loop() -> None:
+        notification_loop.call_soon_threadsafe(notifications_changed.set)
+
+    card_log.on_change(wake_notification_loop)
     def refresh_notification_home_after_hello(_: Hello) -> None:
         sessions.reset_home_notification_identity()
         notifications_changed.set()
