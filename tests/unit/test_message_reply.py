@@ -319,8 +319,9 @@ class TestMessageReplyController:
         assert action_id.startswith("message-reply:hud-7:")
         assert prompt == "Send to Dele? “On my way”"
         # The plugin owns an eight-second VISIBLE window. The transport gets
-        # four extra seconds for the four-tile HUD paint before that begins.
-        assert timeout_s == 12.0
+        # the paint before that window begins AND the restore after the tap,
+        # since an acceptance is sent only once the page beneath is back.
+        assert timeout_s == 20.0
         assert confirm.bindings == [{"diagnostic_kind": "messages", "payload_digest": confirm.bindings[0]["payload_digest"]}]
 
     async def test_confirmed_draft_sends_exactly_once_to_the_selected_handle(self) -> None:

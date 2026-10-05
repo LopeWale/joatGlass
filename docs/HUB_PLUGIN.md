@@ -269,7 +269,14 @@ The levers that remain are design decisions, not code:
   (`confirmationLayout`, owner `confirmation-native`) whenever the visual
   surface offers `withPageTransition`; dismissal recreates the four image
   containers, or hands straight to a firmware list. Verified in the official
-  simulator with `scripts/simulator_messages_native_probe.py`.
+  simulator with `scripts/simulator_messages_native_probe.py`. The decision
+  clock fits inside the Mac's deadline: `confirmationDecisionWindowMs` in
+  `ConfirmationCommit` takes the Mac's `expiresAtMs`, reserves four seconds
+  for the restore an acceptance waits on, and clamps to 3-8 s, while the
+  Mac's envelope (`CONFIRM_TRANSPORT_SECONDS`, `_CONFIRM_SECONDS`) is 20 s
+  so the paint in, the eight-second window and the restore out all fit.
+  Before, the Mac timed 12 s from send and the plugin always took 8 s, so a
+  tap the wearer saw land could come back as "Reply cancelled.".
 - ~~Native answer page~~ — 2026-10-05: an `answer` overlay over the visual
   HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
   seven-line body paged in place with `textContainerUpgrade`, a hint line.
