@@ -184,6 +184,8 @@ other three, so a swipe shipped three tiles.
 | Open a message from the thread (`MESSAGES · MESSAGE`) | 4 | **0** — one rebuild to a firmware text page; a swipe pages it in place (`textContainerUpgrade`), and past its edge asks the Mac for its next page as before |
 | Back from the message to the thread | 4 | **0** — the thread returns as the firmware list it was |
 | The question page ("What should I say?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
+| Open Brainstorm (the idle picker) | 4 | **0** — one rebuild to a firmware list of past sessions plus NEW |
+| A Brainstorm frame (ready, listening, running, settled, unavailable) | 1-2 per revision, plus 1-2 **every second** while thinking | **0** — the Agent Terminal's two-text page; each revision is one `textContainerUpgrade`, and the per-second counter is gone |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -277,6 +279,23 @@ The levers that remain are design decisions, not code:
   the reply path is now firmware-drawn; the probe records zero image tiles
   from picker to result and back. `?joatTestPromptMic=1` (DEV) lets the
   simulator, which has no microphone, keep a question on screen.
+- ~~Native Brainstorm~~ — 2026-10-05: a `brainstorm.view` frame rides the
+  Agent Terminal's two-text page (`NativeTerminalSurface`, owner
+  `terminal-conversation-native`) whenever the visual surface offers its
+  transition barrier: head `JOAT · BRAINSTORM`, a status row with the state
+  and the live speaker, the Mac's activity text as the transcript (paged
+  on the glasses by swipe), and a footer in the raster hint's words
+  measured for the firmware font. The idle picker (`BRAINSTORM`) is a
+  firmware list. Three Mac-side causes of "Brainstorm does nothing" went
+  with it: `find_codex_binary` was PATH-only (a launchd-started brain
+  never saw the ChatGPT-bundled `codex`), the idle row promised "Ready for
+  a question" even with a seat missing (it now shows the host's
+  unavailable frame first), and the idle, NEW and unavailable frames were
+  sent without the `hud.rebuild reason=brainstorm` that claims the surface
+  — the plugin dropped them, so a voice-opened Brainstorm showed nothing
+  and its tap went nowhere. `scripts/simulator_brainstorm_native_probe.py`
+  plays the Mac's side of a session; its run shows zero image tiles from
+  picker to settled and the tap arriving as `begin_topic_capture`.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.

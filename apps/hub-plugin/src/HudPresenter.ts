@@ -449,7 +449,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.surface.kind === 'brainstorm'
-      && this.surface.brainstorm.screen === 'agent_terminal') {
+      && this.usesNativeConversation(this.surface.brainstorm)) {
       return this.nativeTerminal.present(this.surface.brainstorm,
         this.streams.get(ContainerId.StatusBar), displayCurrent);
     }
@@ -518,6 +518,15 @@ export class HudPresenter {
     if (next) return next.nativeFirmwareList !== true && !this.usesNativeTextPage(next);
     return !(this.surface.kind === 'list'
       && (this.surface.options.nativeFirmwareList || this.usesNativeTextPage(this.surface.options)));
+  }
+
+  /** The Agent Terminal is always Even's own text page. A Brainstorm is the
+   * same page whenever the visual surface can hand the page over under its
+   * transition barrier (or there is no visual surface); otherwise it keeps
+   * the raster transcript. */
+  private usesNativeConversation(brainstorm: Pick<BrainstormHudModel, 'screen'>): boolean {
+    if (brainstorm.screen === 'agent_terminal') return true;
+    return this.visual === undefined || this.visual.withPageTransition !== undefined;
   }
 
   /** A reader is Even's own text page whenever the visual surface can hand
@@ -724,6 +733,11 @@ export class HudPresenter {
       if (!this.isPromptCurrent(prompt)) return false;
       const pages = paginateAnswer(prompt.question);
       if (pages.length !== 1) return false;
+      // A native conversation page (Agent Terminal, Brainstorm) must hand
+      // over first, as it does for a confirmation, or its surface keeps
+      // writing into containers the question page has replaced.
+      if (!await this.prepareNativeTerminalHandoff()) return false;
+      if (!this.isPromptCurrent(prompt)) return false;
       const layout = this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.streams.get(ContainerId.StatusBar));
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
@@ -1530,7 +1544,7 @@ export class HudPresenter {
   /** Swipe on the brainstorm/terminal surface pages through history. */
   scrollTranscript(direction: 'up' | 'down'): boolean {
     if (this.surface.kind !== 'brainstorm') return false;
-    if (this.surface.brainstorm.screen === 'agent_terminal') {
+    if (this.usesNativeConversation(this.surface.brainstorm)) {
       return this.nativeTerminal.scroll(direction);
     }
     if (!this.visual) return false;
@@ -1546,7 +1560,7 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (this.confirmation || (isCurrent && !isCurrent())) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (brainstorm.screen === 'agent_terminal') {
+    if (this.usesNativeConversation(brainstorm)) {
       return this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
     }
     if (!this.visual || !await this.prepareNativeTerminalHandoff()) return false;
@@ -1594,7 +1608,7 @@ export class HudPresenter {
     isCurrent?: () => boolean,
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
-    if (!displayCurrent() || terminal.screen !== 'agent_terminal') return false;
+    if (!displayCurrent() || !this.usesNativeConversation(terminal)) return false;
     const prior = this.capturePresenterSnapshot();
     const wasActive = this.nativeTerminal.isActive();
     const surface: HudSurface = {
@@ -2836,7 +2850,7 @@ export class HudPresenter {
     this.visual?.forgetPage?.();
     if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
     if (this.surface.kind === 'brainstorm'
-      && this.surface.brainstorm.screen === 'agent_terminal') {
+      && this.usesNativeConversation(this.surface.brainstorm)) {
       if (this.nativeTerminal.isActive()) return this.nativeTerminal.repaint();
       return this.nativeTerminal.present(this.surface.brainstorm,
         this.streams.get(ContainerId.StatusBar), displayCurrent);
@@ -2995,7 +3009,7 @@ export class HudPresenter {
     }
     const assistantConversation = this.assistantConversation.exportState();
     const nativeTerminal = this.surface.kind === 'brainstorm'
-      && this.surface.brainstorm.screen === 'agent_terminal'
+      && this.usesNativeConversation(this.surface.brainstorm)
       ? this.nativeTerminal.exportState()
       : undefined;
     return {

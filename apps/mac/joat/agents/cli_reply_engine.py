@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -149,8 +150,30 @@ class McpDoor:
     token: str
 
 
+#: Where `codex` lives when it is not on PATH: the ChatGPT app bundle ships
+#: it, and the usual user-level symlink and package-manager prefixes. The brain
+#: is often launched by launchd or an app with a minimal PATH, which is how a
+#: working `codex` in a terminal still read as "codex CLI missing" on the glass.
+_CODEX_FALLBACKS = (
+    "~/.local/bin/codex",
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+    "~/.npm-global/bin/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "~/Applications/ChatGPT.app/Contents/Resources/codex",
+)
+
+
 def find_codex_binary() -> str | None:
-    return shutil.which("codex")
+    """PATH first; else the well-known install locations, newest layout last."""
+    on_path = shutil.which("codex")
+    if on_path:
+        return on_path
+    for candidate in _CODEX_FALLBACKS:
+        path = os.path.expanduser(candidate)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 def _classify_failure(name: str, login_command: str, output: str) -> str:
