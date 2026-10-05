@@ -30,6 +30,27 @@ if git -C "$plugin_dir" rev-parse --git-dir >/dev/null 2>&1; then
   fi
 fi
 
+# Every package is a new version. The Hub keys private builds by version and
+# silently REPLACES an existing one on upload, so a repacked number loses the
+# build it overwrites and leaves the glasses unable to say which code they
+# run. Changelog.md records every build as "Build JOAT X.Y.Z"; app.json must
+# be above all of them before a pack. JOAT_RELEASE_ALLOW_REBUILD=1 repacks a
+# recorded version deliberately (a rebuild of the same revision).
+version=$(node -p "JSON.parse(require('fs').readFileSync('app.json','utf8')).version")
+changelog="$plugin_dir/../../Changelog.md"
+if [[ -f "$changelog" ]]; then
+  last_built=$(grep -oE 'Build JOAT [0-9]+\.[0-9]+\.[0-9]+' "$changelog" | awk '{print $3}' | sort -V | tail -n 1)
+  if [[ -n "$last_built" && "$(print -l "$version" "$last_built" | sort -V | tail -n 1)" == "$last_built" ]]; then
+    if [[ "${JOAT_RELEASE_ALLOW_REBUILD:-0}" != "1" ]]; then
+      print -u2 "refusing to package version $version: Changelog.md already records a build of $last_built."
+      print -u2 "bump app.json above $last_built (every build is a new version), or set JOAT_RELEASE_ALLOW_REBUILD=1 to repack it."
+      exit 66
+    fi
+    print -u2 "WARNING: repacking version $version, which Changelog.md already records"
+  fi
+fi
+print -u2 "packaging version $version (last recorded build: ${last_built:-none})"
+
 # A deployable package must never inherit the ignored developer `.env` route.
 # The caller selects the reviewed, private WSS G2 gateway explicitly; the
 # validator then requires every candidate to be an exact app.json allowlist
