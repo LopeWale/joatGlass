@@ -48,12 +48,7 @@ describe('productivity escape copy', () => {
 
 describe('selected visual geometry', () => {
   it('pins the measured reference anchors instead of a generic wide menu', () => {
-    expect(HUD_VISUAL_GEOMETRY).toMatchObject({
-      statusDividerY: 23.5,
-      overviewMainX: 176,
-      overviewTrayY: 168,
-      listContentX: 93,
-    });
+    expect(HUD_VISUAL_GEOMETRY).toMatchObject({ spineHeight: 24, statusBaselineY: 12 });
   });
 
   it('uses the reference sentence-case focus heading', () => {

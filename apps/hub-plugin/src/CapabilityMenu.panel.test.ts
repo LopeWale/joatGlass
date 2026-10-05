@@ -174,8 +174,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
     const { menu, rail, sent } = rig('news');
     rail.accept(newsPush(7, ['[2m] Rates hold · BBC', '[5m] Rover lands · NPR']));
     await menu.openPanelTab('news');
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    expect(menu.handleClick()).toBe(true);
+    expect(menu.handleList({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 1 } as never)).toBe(true);
     const tap = sent.find((m) => (m.event as { containerName?: string }).containerName === 'capdata');
     expect(tap?.event).toMatchObject({
       containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 1, requestId: 'panel-news-7',

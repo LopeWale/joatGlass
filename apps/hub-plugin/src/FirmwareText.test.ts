@@ -6,7 +6,6 @@ import {
   firmwareLineCount,
   firmwareLineWidth,
   fitLines,
-  fitsOneLine,
   paginateMeasured,
 } from './FirmwareText';
 import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
@@ -111,8 +110,8 @@ describe('fitLines', () => {
 describe('single lines and containers', () => {
   it('counts lines and widths as the firmware draws them', () => {
     expect(firmwareLineCount('', WIDTH)).toBe(0);
-    expect(fitsOneLine('tap: dismiss', WIDTH)).toBe(true);
-    expect(fitsOneLine('W'.repeat(60), WIDTH)).toBe(false);
+    expect(firmwareLineCount('tap: dismiss', WIDTH)).toBe(1);
+    expect(firmwareLineCount('W'.repeat(60), WIDTH)).toBe(2);
     // The firmware drops leading spaces at the start of a line; the plain
     // glyph sum does not know that.
     expect(firmwareLineWidth('   indented')).toBeLessThan(getTextWidth('   indented'));

@@ -42,13 +42,6 @@ function upper(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
-/** Resting: the link is up and the Mac has nothing transient to say. The
- * microphone is NOT part of this — its glyph and icon carry it, so a page
- * no longer loses its name in the spine the moment the mic opens. */
-export function hudStatusResting(model: HudStatusModel): boolean {
-  return model.link === 'connected' && !model.macState?.trim();
-}
-
 /**
  * The spine's word. A degraded link outranks everything (a wearer whose
  * brain is gone needs to know that, not what page they are on); the Mac's
