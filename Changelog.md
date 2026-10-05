@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.97 navigation-follows package
+
+- Rebuilt the existing JOAT package from `126a2be` with the same `scripts/pack.sh`, the same `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.97 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 165374 bytes, SHA-256 `dcad799dfa773afc57ce847ca8836666b39614526f48a60080f6862b9a96d156`. Carries the following guidance page, the tile list, the tile-less pane, the fix tolerance, the stream retry and the Places tab; the Mac side (tile prefetch, the `places` uplink, `saved_places`, the Navigation page rows, place resolution) is in the brain and needs a restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — Navigation follows the wearer; saved places
 
 - The wearer's report: "the navigation is bad and does not update the visuals at all". Five causes, all in the code. The guidance page repainted only when the maneuver or the ROUNDED distance changed, so over a kilometre the dot, the progress bar and the ETA froze for a hundred metres at a time. The street tile was fetched once at the origin and never again (the 60 m refresh rule had no caller, and the Mac receives no positions during guidance by design), so the wearer walked off it within a few hundred metres. Without a tile there was no map at all: the "bare route shape" the comments promised was unreachable. A fix the host reported without an accuracy figure, or with a timestamp in seconds, was rejected as uncertain for the whole walk. And a route could be acked as installed while the location stream had never started, leaving "Starting navigation" on the glass forever.
