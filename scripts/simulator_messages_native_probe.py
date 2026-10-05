@@ -76,12 +76,29 @@ async def press(action: str, settle: float = 0.3) -> None:
     await asyncio.sleep(settle)
 
 
+async def _wait_for_history_index(router: CapabilityRouter, index: int) -> None:
+    while router._message_history is None or router._message_history.index != index:
+        await asyncio.sleep(0.05)
+
+
 async def main() -> None:
     connected = asyncio.Event()
     report: dict[str, object] = {}
     with tempfile.TemporaryDirectory(prefix='joat-drive-') as root:
         rootp = Path(root)
         store = accept.build_fixture_store(rootp / 'chat.db')
+        # The acceptance fixture gives Dele exactly one page. Add a few
+        # earlier messages so the thread has an older page to tap into.
+        import sqlite3
+        connection = sqlite3.connect(rootp / 'chat.db')
+        apple_now = int(time.time() - 978_307_200)
+        rows = [(1, f'Much earlier fixture message {index}', apple_now - (2000 - index * 60),
+                 0, 1, 0, 0, 0, 0, 0) for index in range(1, 7)]
+        connection.executemany('INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', rows)
+        first = connection.execute('SELECT MAX(rowid) FROM message').fetchone()[0] - len(rows)
+        connection.executemany('INSERT INTO chat_message_join VALUES (?, ?)',
+                               [(first + offset + 1, 1) for offset in range(len(rows))])
+        connection.commit(); connection.close()
         gateway = HubGatewayTransport(host='127.0.0.1', port=18791)
         gateway.on_hello(lambda _h: connected.set())
         hud = HudWriter(gateway)
@@ -107,7 +124,12 @@ async def main() -> None:
             report['picker_timing'] = timing_since(console(), 0)[-6:]
             ids = last_id(console())
 
-            await press('down', 0.4)
+            # Dele is the thread with an older page; the picker row after
+            # "New message" that carries it depends on fixture recency.
+            dele = next((index for index, thread in enumerate(router._message_rows)
+                         if getattr(thread, 'sender', '') == 'Dele'), 0)
+            for _ in range(1 + dele):
+                await press('down', 0.4)
             await snap('2-picker-down', 0.5)
             report['picker_down_timing'] = timing_since(console(), ids); ids = last_id(console())
 
@@ -118,6 +140,27 @@ async def main() -> None:
             await snap('3-conversation', 1.2)
             report['conversation_timing'] = timing_since(console(), ids); ids = last_id(console())
             report['selected_thread'] = getattr(replies.selected_thread, 'sender', None)
+
+            # Page the thread through its tappable rows: scroll the firmware
+            # highlight to the last row ("older"), tap, then back ("newer").
+            history = router._message_history
+            if history is not None and history.pages[0].has_older:
+                rows_on_page = 1 + len(history.pages[0].entries) + 2 + 1
+                for _ in range(rows_on_page - 1):
+                    await press('down', 0.15)
+                t_page = time.monotonic()
+                await press('click', 0.2)
+                await asyncio.wait_for(_wait_for_history_index(router, 1), timeout=30)
+                report['older_page_after_tap_s'] = round(time.monotonic() - t_page, 2)
+                await snap('3b-older-page', 1.0)
+                report['older_page_timing'] = timing_since(console(), ids); ids = last_id(console())
+                older_rows = 1 + len(history.pages[1].entries) + 2 + 1
+                for _ in range(older_rows - 1):
+                    await press('down', 0.15)
+                await press('click', 0.2)
+                await asyncio.wait_for(_wait_for_history_index(router, 0), timeout=30)
+                await snap('3c-latest-again', 1.0)
+                report['newer_page_timing'] = timing_since(console(), ids); ids = last_id(console())
 
             # voice draft injected exactly as the acceptance script does it
             t2 = time.monotonic()

@@ -772,6 +772,70 @@ describe('CapabilityMenu', () => {
     expect(listOptions[5]).not.toHaveProperty('nativeFirmwareList');
   });
 
+  it('draws a conversation with paging rows as a firmware list and turns their taps into page requests', async () => {
+    const { menu, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    const requestId = latestRequestId(sent);
+    const thread = [
+      'Latest messages',
+      'Dele · Unread · Attachment',
+      'You · Read · On my way',
+      'Say “JOAT, reply saying …”',
+      'Mic off? Long press to enable.',
+      '▼ Older messages',
+    ];
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', thread, requestId, true, 'tap read · say reply · left x2: back',
+      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { olderIndex: 5 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'MESSAGES · CONVERSATION', nativeFirmwareList: true,
+    });
+
+    // The firmware reports the tapped row. A heading or instruction row is inert.
+    sent.length = 0;
+    expect(menu.handleList(clickRow0())).toBe(true);
+    expect(menu.handleList(click(3))).toBe(true);
+    expect(sent).toEqual([]);
+
+    // A message row reads it, with the raw list index the Mac owns.
+    expect(menu.handleList(click(2))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capmessage', selectedName: 'MESSAGES', selectedIndex: 2, requestId,
+    });
+    // The Mac answers that read with the message page; a fresh thread frame
+    // restores the conversation before the paging row is used.
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', thread, requestId, true, 'tap read · say reply · left x2: back',
+      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { olderIndex: 5 },
+    )).toBe(true);
+
+    // The paging row is the page request the swipe used to send.
+    sent.length = 0;
+    expect(menu.handleList(click(5))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'cappage', selectedName: 'MESSAGES',
+      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId,
+    });
+    // Until that page lands, further taps on the thread are ignored.
+    sent.length = 0;
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent).toEqual([]);
+
+    const older = ['Older messages', 'Dele · Earlier', 'Say “JOAT, reply saying …”', '▲ Newer messages'];
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', older, requestId, true, 'tap read · say reply · left x2: back',
+      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { newerIndex: 3 },
+    )).toBe(true);
+    expect(menu.handleList(click(3))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'cappage', eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId,
+    });
+  });
+
   it('keeps a Messages conversation on the raster page even though the picker is a firmware list', async () => {
     const { menu, listOptions, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages

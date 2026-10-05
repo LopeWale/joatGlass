@@ -725,6 +725,19 @@ class TestDownlinkWire:
         assert wire["requestId"] == "hud-request-7"
         assert wire["selectable"] is True
 
+    def test_hud_list_page_controls_name_row_indices_and_drop_out_of_range(self) -> None:
+        # Mirror: `pageControls` on the hud.list downlink in types.ts. Present
+        # (even empty) means the paging rows exist, so the plugin may draw the
+        # thread as a firmware list; absent means the old swipe-paging thread.
+        items = ["Latest messages", "Dele · Hi", "▼ Older messages"]
+        wire = HudList(items=items, page_controls=(None, 2)).to_wire()
+        assert wire["pageControls"] == {"olderIndex": 2}
+        wire = HudList(items=items, page_controls=(0, 9)).to_wire()
+        assert wire["pageControls"] == {"newerIndex": 0}
+        wire = HudList(items=items, page_controls=(None, None)).to_wire()
+        assert wire["pageControls"] == {}
+        assert "pageControls" not in HudList(items=items).to_wire()
+
     def test_message_footer_preserves_paging_reply_and_complete_back_hint(self) -> None:
         hint = "up newer · down older · tap read · say reply · left x2: back"
         wire = HudList(items=["Latest messages"], title="MESSAGES · CONVERSATION", hint=hint).to_wire()

@@ -24,9 +24,11 @@ import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
  *
  * Only pages whose cursor the firmware can own belong here. The Planning
  * grid, prose readers (QuickNotes notes, prepared Messages results), the
- * QuickNotes archive pager and the Messages conversation keep JOAT's raster
- * treatment: they page or select by a plugin-owned cursor the firmware list
- * cannot express. The NEWS and SEARCH tabs stay raster too: Back from an
+ * QuickNotes archive pager keep JOAT's raster treatment: they page or select
+ * by a plugin-owned cursor the firmware list cannot express. A Messages
+ * conversation joins the firmware list only when the Mac sends
+ * `pageControls`, i.e. its paging travels as tappable rows instead of
+ * boundary swipes. The NEWS and SEARCH tabs stay raster too: Back from an
  * article restores the row the wearer left, and a firmware list always
  * starts on row one. Titles are the exact Mac-sent page names, so
  * "MESSAGES · CONVERSATION" is not "MESSAGES".
@@ -63,6 +65,8 @@ type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
 interface DataSurfaceSnapshot {
   planningNavigation?: { canGoBack: boolean; selectedIndex: number };
+  /** Firmware-list conversation: the rows whose tap pages the thread. */
+  pageControls?: { newerIndex?: number; olderIndex?: number };
   readerPage?: { id: string; index: number; count: number };
   quickNotesPage?: { index: number; count: number };
   title: string;
@@ -667,6 +671,7 @@ export class CapabilityMenu {
     quickNotesPage?: { index: number; count: number },
     readerPage?: { id: string; index: number; count: number },
     planningNavigation?: { canGoBack: boolean; selectedIndex: number },
+    pageControls?: { newerIndex?: number; olderIndex?: number },
   ): Promise<boolean> {
     // Read-only Planning details answer a row tap. Once Back retires that
     // tap, a delayed detail cannot replace its restored agenda.
@@ -779,7 +784,12 @@ export class CapabilityMenu {
     // Decided before any cursor question below: the presenter answers for
     // the page about to be shown, not the (possibly firmware-owned) one that
     // is still on the glass.
-    const firmwareList = usesFirmwareList(normalized) && !planningGrid && !readerPage && !quickNotesPage;
+    // A conversation whose paging travels as rows (`pageControls` present)
+    // is a firmware list too: the swipe-paging thread needs scroll events the
+    // firmware list does not report, so the Mac's opt-in decides.
+    const firmwareList = (usesFirmwareList(normalized)
+      || (normalized === 'MESSAGES · CONVERSATION' && pageControls !== undefined))
+      && !planningGrid && !readerPage && !quickNotesPage;
     const customSelection = (this.hud.usesCustomListSelection?.({ nativeFirmwareList: firmwareList }) ?? false)
       && !firmwareList;
     const messageRows = messagesState?.screen === 'conversation' && effectiveSelectable
@@ -865,6 +875,7 @@ export class CapabilityMenu {
     this.selectedIndex = initialSelection;
     this.dataSurface = {
       planningNavigation: planningOwner,
+      ...(firmwareList && pageControls ? { pageControls: { ...pageControls } } : {}),
       title,
       quickNotesPage: archivePage,
       readerPage: preparedReader,
@@ -1275,7 +1286,7 @@ export class CapabilityMenu {
   private usesOrderedSelection(): boolean {
     if (this.view !== 'data' || this.dashboard || !this.dataRowsSelectable
       || !this.dataSurface?.selectable || !this.hud.usesCustomListSelection()
-      || this.dataSurface.messageProse) return false;
+      || this.dataSurface.messageProse || this.dataSurface.pageControls !== undefined) return false;
     if (this.pendingTitle === 'PLANNING') return true;
     if (this.pendingTitle === 'QUICKNOTES') return !!this.dataSurface.quickNotesPage;
     return this.pendingTitle === 'MESSAGES' && this.messagesScreen !== 'review'
@@ -1476,6 +1487,28 @@ export class CapabilityMenu {
     if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
     if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
     if (this.dataSelectionPending) return true;
+    // `pageControls` is retained only when the thread was shown as a
+    // firmware list, so its presence is the whole test.
+    const firmwareConversation = this.pendingTitle === 'MESSAGES'
+      && this.messagesScreen === 'conversation'
+      && this.dataSurface?.pageControls !== undefined;
+    if (firmwareConversation && this.dataSurface) {
+      // The firmware reported the tapped row; only message rows read, the
+      // paging rows request their page, and headings and instructions are
+      // inert. A page already in flight owns the thread until it lands.
+      if (this.dataPagePending) return true;
+      const controls = this.dataSurface.pageControls;
+      if (controls?.newerIndex === this.selectedIndex) {
+        this.requestMessagePage(OsEventTypeList.SCROLL_TOP_EVENT);
+        return true;
+      }
+      if (controls?.olderIndex === this.selectedIndex) {
+        this.requestMessagePage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+        return true;
+      }
+      const row = this.dataSurface.items[this.selectedIndex];
+      if (row === undefined || parseMessagesConversationRow(row).kind === 'instruction') return true;
+    }
     this.dataSelectionPending = true;
     if (this.messagesScreen === 'review' && this.pendingRequestId) {
       // This is the current draft's review action, not a new recipient row.
@@ -2100,7 +2133,9 @@ export class CapabilityMenu {
   }
 
   private customMessageRows(): number[] | undefined {
+    // A firmware-list thread (paging rows present) has no plugin cursor.
     if (this.messagesScreen !== 'conversation' || !this.dataRowsSelectable
+      || this.dataSurface?.pageControls !== undefined
       || !this.hud.usesCustomListSelection?.()) return undefined;
     const rows = this.dataSurface?.items.flatMap((item, index) =>
       parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : []) ?? [];
