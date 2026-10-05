@@ -47,7 +47,7 @@ Rules that bite:
 - `createStartUpPageContainer` is **one-shot**. Use `rebuildPageContainer` for later full redraws and `textContainerUpgrade` for in-place text — the latter is our default for streaming HUD updates (no flicker).
 - `zOrderIndex` is **all-or-nothing per page** and must be **unique**. Violations fail SDK-side validation before reaching native: `createStartUpPageContainer` → `invalid`, `rebuildPageContainer` → `false`. Omit it everywhere to keep declaration-order behaviour.
 - Image containers have no `isEventCapture` — pair them with a text container as the capture layer.
-- `updateImageRawData` calls must be **serial** (await each). The SDK LZ4-compresses internally since 0.0.12; pass raw 4-bit greyscale pixels as before.
+- `updateImageRawData` calls must be **serial** (await each). The plugin sends each tile as PNG bytes; the host converts to Gray4 and LZ4-compresses before BLE (the pipeline table below has the costs).
 - Always call the unsubscribe function returned by `onEvenHubEvent` / `onDeviceStatusChanged` / `onLaunchSource`.
 
 ## Input routing — verified, and full of traps
@@ -330,6 +330,21 @@ The levers that remain are design decisions, not code:
   `scripts/simulator_panels_native_probe.py` pushes the three tabs and
   records zero tiles on each page, the article, its paging, Back and the
   minute rebuild; the overview's own rail swipes are the only tiles.
+
+### Downlinks and uplinks: what drives them (2026-10-05)
+
+The audit found frames defined on both sides that nothing sent. Where they
+stand now:
+
+| Frame | Status |
+|---|---|
+| `imu.control`, `imu.trace` ↓ / `imu` ↑ | **Wired.** `joat --imu-trace PATH` arms them on every hello and records samples (docs/NEXT_STEPS.md §5). Off by default: ~10 messages/s. |
+| `audio.control open=true` after a don | **Wired** for resume policy "mac": the Mac remembers the plugin's `policy` report and answers a worn report with the mic off by asking for ears. "auto" and "confirm" stay plugin-local. |
+| `policy.set` ↓ | Mac-side hook, no caller: the wearer sets the policy on the phone/glasses; the Mac only reads it. Kept so a Mac-app settings pane can drive it. |
+| `shutdown` ↓ | Mac-side hook, no caller: `shutDownPageContainer` exits the plugin on the glasses, which is wrong on a brain restart (the RECONNECTING card refreshes itself). Kept for an explicit quit. |
+| `assistant.conversation dismiss` ↓ | Mac-side hook, no caller: the conversation page leaves on Back. Kept. |
+| `brainstorm.action show_brainstorm` ↑ | Plugin never emits it (a running tap sends `show_terminal`). Harmless Mac branch, kept. |
+| `productivity.view.ack`, `confirm` callbacks ↑ | Parsed; the pending futures resolve them, the callback lists stay empty. |
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.
