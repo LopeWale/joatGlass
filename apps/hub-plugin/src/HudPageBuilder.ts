@@ -265,25 +265,9 @@ export class HudPageBuilder {
    * number of 27px lines plus its 4px padding, and the bands are laid out
    * head to tail so none can overlap:
    *
-   * A band's height is lines*27 PLUS its 4px padding top and bottom, so one
-   * line needs 35px, not 27. Sizing single-line bands at 30 overflowed every
-   * one of them by 5px and the firmware drew a scrollbar down the right edge
-   * of each — visible in the first capture as green ticks beside the status,
-   * the pane title and the hint.
-   *
-   *   y=0   h=35   status          1 line, full width
-   *   y=37  h=89   clock + date    3 lines, left column
-   *   y=128 h=116  tab rail        4 lines, left column   -> ends 244
-   *   y=37  h=35   pane title      1 line, right column
-   *   y=74  h=170  pane body       6 lines, right column  -> ends 244
-   *   y=246 h=35   hint            1 line, full width     -> ends 281
-   *
-   * A first cut of this put the rail at y=160 h=120, running to 280 while
-   * the hint started at 252: the rail printed through the hint and both
-   * containers overflowed into firmware scrollbars. That was arithmetic,
-   * not a limitation of text containers.
-   *
-   * Column split at x=168 keeps the left column clear of the right pane.
+   * A band's height is lines*27 PLUS its padding top and bottom. Sizing a
+   * band short of that overflows it, and the firmware draws a scrollbar
+   * down its right edge. The current table is in the body below.
    *
    * THE TAB RAIL IS THE CAPTURE CONTAINER, NOT THE PANE. A capturing text
    * container scrolls its own overflow and reports a swipe only at its
@@ -291,7 +275,7 @@ export class HudPageBuilder {
    * than six lines swallowed every swipe: the rail never moved and the
    * next tap expanded the wrong tab (observed 2026-09-22). The rail never
    * overflows, so every swipe reaches the plugin and steps the rail. The
-   * pane is a PREVIEW — six rows, each cut to one line — and the expanded
+   * pane is a PREVIEW — seven rows, each cut to one line — and the expanded
    * tab is where the whole list lives.
    */
   overviewTextLayout(view: {
@@ -300,18 +284,42 @@ export class HudPageBuilder {
     paneTitle: string; paneBody: string; hint: string;
     /** Mac urgency carries into the pane, same as the canvas overview. */
     paneBrightness?: number;
+    /** A fourth fact for the clock column, e.g. "3 unread". */
+    extra?: string;
   }): RebuildPageContainer {
-    /** n firmware lines plus the band's own 4px padding, top and bottom. */
-    const LINE_BAND = (lines: number): number => lines * 27 + 8;
-    const LEFT_W = 160;
-    const RIGHT_X = 168;
-    const RIGHT_W = CANVAS.width - RIGHT_X - 4;
+    // FULL-CANVAS GEOMETRY, measured with @evenrealities/pretext (27px
+    // firmware line, inner box = size − 2×padding). The 2026-10-05 audit of
+    // the previous cut found it left 7px unused at the bottom and 2px gaps
+    // between every band, showed six pane rows where seven fit, printed the
+    // time twice (status AND clock), and gave the 8px divider 4px padding —
+    // an inner width of ZERO, so its seven dots wrapped to fourteen lines
+    // and the firmware drew a scrollbar where the divider should be.
+    //
+    // Now ten firmware lines tile the whole 576x288 canvas, 2px inset:
+    //
+    //   y=0    h=31   status            1 line, full width
+    //   y=31   h=112  clock column      4 lines | pane title  1 line
+    //   y=143  h=112  tab rail          4 lines | pane        7 lines -> 255
+    //   y=257  h=31   hint              1 line, full width          -> 288
+    //
+    // Left column 150px: inner 146 holds "> NOTIFICATIONS" (144px).
+    // Divider: a 2px bordered rule centred in the 8px gutter at x=153.
+    // Right column 158..576: inner 414px per pane row.
+    const PAD = 2;
+    const LINE = 27;
+    const LINE_BAND = (lines: number): number => lines * LINE + 2 * PAD;
+    const LEFT_W = 150;
+    const DIVIDER_W = 8;   // gutter; the rule itself is 2px at its centre
+    const RIGHT_X = LEFT_W + DIVIDER_W;
+    const RIGHT_W = CANVAS.width - RIGHT_X;
+    const TOP = LINE_BAND(1);                       // 31
+    const PANE_LINES = 7;
+    const HINT_Y = CANVAS.height - LINE_BAND(1);    // 257
     const text = (value: string): string => value.trim() || ' ';
-    const PANE_LINES = 6;
     const preview = view.paneBody.split('\n')
       .map((row) => row.trim()).filter(Boolean)
       .slice(0, PANE_LINES)
-      .map((row) => pxTruncate(row, RIGHT_W - 2 * 4))
+      .map((row) => pxTruncate(row, RIGHT_W - 2 * PAD))
       .join('\n');
     // '>' as the cursor, which is Even's documented convention for marking
     // a selected row ("Prefix text items with > as a cursor indicator").
@@ -321,32 +329,39 @@ export class HudPageBuilder {
     const band = (
       containerID: number, containerName: string,
       x: number, y: number, width: number, height: number,
-      textColor: number, content: string, capture = 0, z = 1,
+      textColor: number, content: string, capture = 0, z = 1, padding = PAD,
     ): TextContainerProperty => new TextContainerProperty({
       containerID, containerName,
       xPosition: x, yPosition: y, width, height,
-      paddingLength: 4, borderWidth: 0,
+      paddingLength: padding, borderWidth: 0,
       isEventCapture: capture, zOrderIndex: z,
       textColor, content: fitUtf8(text(content), TEXT_CONTAINER_MAX_BYTES),
     });
+    // The time lives here only; the status line carries the date.
+    const clockColumn = [view.clock, view.ambient, view.extra ?? '']
+      .filter((l) => l.trim()).slice(0, 4).join('\n');
     return new RebuildPageContainer({
       containerTotalNum: 7,
       ...this.menuConfig(),
       textObject: [
-        band(ContainerId.StatusBar, 'status', 0, 0, CANVAS.width, LINE_BAND(1), 2, view.status, 0, 1),
-        band(ContainerId.Context, 'clock', 0, 37, LEFT_W, LINE_BAND(3), 4,
-          [view.clock, view.date, view.ambient].filter((l) => l.trim()).join('\n'), 0, 2),
-        band(ContainerId.Tray, 'tabs', 0, 128, LEFT_W, LINE_BAND(4), 2, rail, 1, 3),
-        band(ContainerId.List, 'pane-title', RIGHT_X, 37, RIGHT_W, LINE_BAND(1), 2, view.paneTitle, 0, 4),
-        band(ContainerId.Main, 'pane', RIGHT_X, 74, RIGHT_W, LINE_BAND(PANE_LINES),
+        band(ContainerId.StatusBar, 'status', 0, 0, CANVAS.width, TOP, 2, view.status, 0, 1),
+        band(ContainerId.Context, 'clock', 0, TOP, LEFT_W, LINE_BAND(4), 4, clockColumn, 0, 2),
+        band(ContainerId.Tray, 'tabs', 0, TOP + LINE_BAND(4), LEFT_W, LINE_BAND(4), 2, rail, 1, 3),
+        band(ContainerId.List, 'pane-title', RIGHT_X, TOP, RIGHT_W, LINE_BAND(1), 2, view.paneTitle, 0, 4),
+        band(ContainerId.Main, 'pane', RIGHT_X, TOP + LINE_BAND(1), RIGHT_W, LINE_BAND(PANE_LINES),
           view.paneBrightness ?? 4, preview, 0, 5),
-        // The dotted column between status and widgets, from Even's own
-        // Dashboard: one '·' per 27px line renders as the sparse dotted
-        // divider their reference shows. Static content, so it is never
-        // upgraded and never costs a call after the rebuild.
-        band(ContainerId.Image, 'divider', LEFT_W, 37, 8, LINE_BAND(7), 1,
-          Array(7).fill('\u00b7').join('\n'), 0, 7),
-        band(ContainerId.Hint, 'hint', 0, 246, CANVAS.width, LINE_BAND(1), 2,
+        // The column divider: a 2px box whose 1px border draws one solid
+        // vertical rule the full height of the middle band. The previous
+        // "line" was an accident — the dotted divider overflowed its
+        // zero-width box and the firmware drew a SCROLLBAR there, which
+        // stopped two-thirds of the way down. Static: never upgraded.
+        new TextContainerProperty({
+          containerID: ContainerId.Image, containerName: 'divider',
+          xPosition: LEFT_W + 3, yPosition: TOP + PAD, width: 2, height: 8 * LINE,
+          paddingLength: 0, borderWidth: 1, borderColor: 6, borderRadius: 0,
+          isEventCapture: 0, zOrderIndex: 7, textColor: 1, content: ' ',
+        }),
+        band(ContainerId.Hint, 'hint', 0, HINT_Y, CANVAS.width, LINE_BAND(1), 2,
           GesturePolicy.formatHint(view.hint), 0, 6),
       ],
     });

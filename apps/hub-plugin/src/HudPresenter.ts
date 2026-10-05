@@ -50,8 +50,19 @@ function nativeDocument(model: { screen: string }): boolean {
 function parseOverviewStatus(status: string): { time: string; date: string } {
   return {
     time: /\b(\d{1,2}:\d{2})\b/.exec(status)?.[1] ?? '',
-    date: /\b([A-Z][a-z]{2}\s+\d{1,2}\/\d{1,2})\b/.exec(status)?.[1] ?? '',
+    // The chrome's status text usually carries no date ("9:52 · MIC OFF ·
+    // bat 100%"), so the phone's own calendar date fills it: the plugin
+    // runs on the wearer's phone, in the wearer's zone.
+    date: /\b([A-Z][a-z]{2}\s+\d{1,2}\/\d{1,2})\b/.exec(status)?.[1] ?? overviewDate(new Date()),
   };
+}
+
+function overviewDate(now: Date): string {
+  try {
+    return now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  } catch {
+    return '';
+  }
 }
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
@@ -2950,8 +2961,11 @@ export class HudPresenter {
     const parsed = parseOverviewStatus(frame.status);
     // Mic state is structured (frame.micOn), never inferred from status
     // copy — same contract as the native compatibility status line.
+    // The date rides the status line and the time the clock column: the
+    // 2026-10-05 audit caught the time printed in both. One minute tick now
+    // changes ONE band (an in-place upgrade) instead of two (a rebuild).
     const status = [
-      parsed.date, parsed.time,
+      parsed.date,
       `MIC ${frame.micOn ? 'ON' : 'OFF'}`,
       /bat\s*\d+%\+?/i.exec(frame.status)?.[0],
     ].filter(Boolean).join(' · ');
@@ -2966,6 +2980,8 @@ export class HudPresenter {
     const ambientLine = frame.ambient
       ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim()
       : '';
+    const unread = frame.ambient?.unread ?? 0;
+    const extra = unread > 0 ? `${unread} unread` : '';
     const tabCard = {
       title: rail ? PANEL_TAB_TITLES[rail.activeTab] : '',
       body: content?.headline && rail?.activeTab !== 'pomodoro' ? `${content.headline}\n${tabRows}` : tabRows,
@@ -2980,7 +2996,7 @@ export class HudPresenter {
     const boot = overview.kind === 'empty' && overview.title !== 'Ready';
     const view = boot
       ? {
-        status, clock: parsed.time, date: parsed.date, ambient: ambientLine, tabs,
+        status, clock: parsed.time, date: parsed.date, extra, ambient: ambientLine, tabs,
         paneTitle: overview.title.toUpperCase(),
         paneBody: `${overview.primary}\n${overview.recovery}`,
         paneBrightness: frame.mainBrightness,
@@ -2988,14 +3004,14 @@ export class HudPresenter {
       }
       : overview.kind === 'content' && overview.main
         ? {
-          status, clock: parsed.time, date: parsed.date, ambient: ambientLine, tabs,
+          status, clock: parsed.time, date: parsed.date, extra, ambient: ambientLine, tabs,
           paneTitle: overview.main.label,
           paneBody: [overview.main.value, overview.tray].filter(Boolean).join('\n'),
           paneBrightness: frame.mainBrightness,
           hint: frame.hint,
         }
         : {
-          status, clock: parsed.time, date: parsed.date,
+          status, clock: parsed.time, date: parsed.date, extra,
           // Resting: the ambient row carries the ready copy when the Mac has
           // sent no weather, so the clock column is never a bare number.
           ambient: ambientLine
