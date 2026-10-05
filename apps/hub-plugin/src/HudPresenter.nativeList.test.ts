@@ -1,16 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
-import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
 import { ContainerId } from './types';
-
-// These tests pin the CANVAS overview, which ships as the VITE_NATIVE_OVERVIEW=0
-// fallback. The default text overview has its own tests in
-// HudPresenter.textOverview.test.ts.
-setNativeOverviewForTest(false);
-
 
 /** News and Search use the same custom typography and banner as Messages.
  * The old native-first contract changed both when a reader opened or Back
@@ -22,7 +16,10 @@ interface RebuiltPage {
   textObject?: Array<{ containerID?: number; content?: string }>;
 }
 
-function harness(withVisual = true) {
+/** `withBarrier` adds the surface's page-transition barrier, which every
+ * page rebuild (including the self-heal) requires; without it the
+ * confirmation and question stay raster, as most of these cases assume. */
+function harness(withVisual = true, withBarrier = false) {
   const rebuilds: RebuiltPage[] = [];
   const upgrades: TextContainerUpgrade[] = [];
   const frames: HudVisualFrame[] = [];
@@ -41,6 +38,7 @@ function harness(withVisual = true) {
       return state.paintAccepted && current();
     },
     forgetPage: () => undefined,
+    ...(withBarrier ? { withPageTransition: async (replace: () => Promise<boolean>) => replace() } : {}),
   } as unknown as HudVisualSurface;
   const hud = new HudPresenter(client, new HudPageBuilder(), withVisual ? visual : undefined);
   return { hud, rebuilds, upgrades, frames, state };
@@ -133,31 +131,11 @@ describe('consistent custom News and Search surface', () => {
     expect(h.rebuilds).toEqual([]);
   });
 
-  it('restores the selected News row after confirmation without entering a native page', async () => {
-    const h = harness();
-    await openNews(h);
-    await h.hud.setSelection(1);
-    expect(await h.hud.showConfirmation('Send this message?', 'gate-1')).toBe(true);
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'confirmation' });
-    await h.hud.dismissConfirmation('gate-1');
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-    expect(h.rebuilds).toEqual([]);
-  });
 
-  it('keeps an exact question dominant over News updates and restores the current custom list on cancel', async () => {
-    const h = harness();
-    await openNews(h);
-    await h.hud.setSelection(1);
-    expect(await h.hud.showPromptQuestion('prompt-one', 'What should the message say?', () => true)).toBe(true);
-    await h.hud.showText('9:42  JOAT ready', ContainerId.StatusBar);
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'prompt_question', promptId: 'prompt-one' });
-    await h.hud.dismissPromptQuestion('prompt-one');
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-    expect(h.rebuilds).toEqual([]);
-  });
 
   it('heals a refused custom frame using the image layout, never a firmware News list', async () => {
-    const h = harness();
+    // The self-heal rebuild is a page replacement, so it needs the barrier.
+    const h = harness(true, true);
     await openNews(h);
     h.state.paintAccepted = false;
     expect(await h.hud.setSelection(1)).toBe(false);

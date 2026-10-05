@@ -30,3 +30,29 @@ export async function deliverAfterConfirmationDismissal(
   barrier.deliver();
   return true;
 }
+
+/** The wearer's decision clock on a Mac challenge, once the gate is visible. */
+export const CONFIRMATION_DECISION_WINDOW_MS = 8_000;
+/**
+ * What the verdict still costs after the tap: an acceptance leaves the phone
+ * only once the page beneath the gate is back (`deliverAfterConfirmationDismissal`),
+ * and that restore is one firmware rebuild for a list or up to four image
+ * tiles for a raster page.
+ */
+export const CONFIRMATION_DISMISSAL_BUDGET_MS = 4_000;
+const CONFIRMATION_DECISION_FLOOR_MS = 3_000;
+
+/**
+ * Fit the decision window inside the Mac's own deadline. The Mac times its
+ * challenge from the moment it sends `confirm.request`; the phone's queue and
+ * the gate's paint eat into that before the clock here starts, and the
+ * dismissal eats into it after the tap. A fixed eight seconds therefore let
+ * the wearer tap into a window the Mac had already closed ("Reply
+ * cancelled." after a visible tap). The floor keeps a skewed phone clock from
+ * cancelling a gate the wearer can still see.
+ */
+export function confirmationDecisionWindowMs(expiresAtMs: number | undefined, nowMs = Date.now()): number {
+  if (typeof expiresAtMs !== 'number' || !Number.isFinite(expiresAtMs)) return CONFIRMATION_DECISION_WINDOW_MS;
+  const remaining = expiresAtMs - nowMs - CONFIRMATION_DISMISSAL_BUDGET_MS;
+  return Math.max(CONFIRMATION_DECISION_FLOOR_MS, Math.min(CONFIRMATION_DECISION_WINDOW_MS, remaining));
+}

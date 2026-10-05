@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reminderDueAckFor } from './ReminderDueReceipt';
+import { reminderDueAckFor, reminderDueCompleteFor } from './ReminderDueReceipt';
 
 const due = {
   domain: 'reminders' as const,
@@ -33,5 +33,18 @@ describe('reminder due receipt', () => {
     { ...due, reminderDueGeneration: Number.MAX_SAFE_INTEGER + 1 },
   ])('refuses an unbound or non-due receipt request', (productivity) => {
     expect(reminderDueAckFor(productivity)).toBeUndefined();
+  });
+});
+
+describe('reminder due completion', () => {
+  it('carries exactly the binding the acknowledgement carried', () => {
+    expect(reminderDueCompleteFor(due)).toEqual({
+      kind: 'reminder_due.complete',
+      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      generation: 7,
+    });
+    expect(reminderDueCompleteFor({ ...due, phase: 'failed' })).toBeUndefined();
+    expect(reminderDueCompleteFor({ ...due, reminderDueGeneration: 0 })).toBeUndefined();
   });
 });

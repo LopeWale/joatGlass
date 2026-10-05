@@ -49,9 +49,11 @@ MAP_STYLE = "navigation-night-v1"
 MAP_ZOOM = 16
 # The map is FULL-BLEED in its pane, like the reference HUD: it runs to the
 # right edge of the canvas and down to the fact line, with no border and no
-# inner padding. A map with a frame around it is a picture of a map.
+# inner padding. A map with a frame around it is a picture of a map. The
+# pane grew 12 px on 2026-10-05 when the status spine shrank (the plugin's
+# NAVIGATION_MAP_PANEL is 284x220); the tile fills it.
 MAP_WIDTH = 284
-MAP_HEIGHT = 208
+MAP_HEIGHT = 220
 # Mapbox Static Images works in 512-pixel tiles; the plugin must use the
 # same constant or the route it draws will not sit on the drawn roads.
 MAP_TILE_PIXELS = 512

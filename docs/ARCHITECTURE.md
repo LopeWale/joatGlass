@@ -71,7 +71,8 @@ spoken destination
   → explicit Walk or Cycle choice
   → fresh phone origin
   → Mapbox Directions route + complete geometry
-  → phone-local progress matcher
+  → Mapbox Static Images tiles, prefetched ALONG the route (every ~180 m)
+  → phone-local progress matcher; the guidance page follows the wearer
   → semantic HUD state + content-free receipt to Mac
 ```
 
@@ -81,7 +82,21 @@ the Mac in order to produce canonical candidates. Canonical confirmation
 therefore happens after search but before directions. Once a route is
 installed, high-rate fixes stay in the plugin; the Mac receives semantic state
 only. A precise coordinate leaves the phone again only for the fresh route
-origin or after sustained off-route evidence requests a reroute.
+origin or after sustained off-route evidence requests a reroute. The street
+tiles under the guidance page respect the same boundary: the Mac fetches
+them along the route's geometry as soon as the route is known (a centre
+every ~180 m of road, at most 24 per route, the origin tile first) and the
+plugin draws the one nearest the wearer, so the map follows them without a
+live position ever reaching the Mac. A position-only repaint of the
+guidance page (the dot, the progress bar, the ETA; at most once a second)
+sends nothing; only a semantic state change does.
+
+Saved places are the one exception to "spoken destination": the wearer
+saves Home, Work and the rest on the phone page, the phone sends the list
+whole to the Mac (`places` uplink, kept in `saved_places`), and "navigate
+home" resolves on the Mac to the saved coordinates without a provider
+search, or searches the saved address when that is all the place has. The
+Navigation page lists them first, one tap from a route.
 
 The Mac owns destination, mode, provider generation, route revision, and
 restart-safe workflow state. The plugin is a disposable renderer/sensor: it

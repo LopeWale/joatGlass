@@ -108,6 +108,12 @@ would not have admitted anyway.
 """
 
 CONVERSATION_WINDOW_S = 30.0
+#: Least time between two streamed "answering" frames. Every frame carries
+#: the whole transcript, so a CLI that yields a token at a time had the Mac
+#: re-send the entire answer per token; the plugin coalesces paints anyway.
+#: The first chunk is never held back (that is the wearer's first sign of an
+#: answer) and the final "ready" frame always carries the complete text.
+STREAM_PUBLISH_INTERVAL_S = 0.2
 """How long JOAT keeps listening after it has finished answering.
 
 Measured against the wearer's own speech: the follow-ups this window
@@ -259,8 +265,12 @@ class VoiceOrchestrator:
         selected_message_reply: Callable[[str, UtteranceProvenance], Awaitable[bool]] | None = None,
         surface_revision: Callable[[], int] | None = None,
         feature_navigation: Callable[[str], Awaitable[str | None]] | None = None,
+        stream_publish_interval_s: float = STREAM_PUBLISH_INTERVAL_S,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._transport = transport
+        self._stream_publish_interval_s = stream_publish_interval_s
+        self._monotonic = monotonic
         # An interposed source (the AudioRouter) lets an exclusive Voice Note
         # capture own the microphone; the orchestrator hears nothing while a
         # meeting is being recorded and resumes when the capture lane closes.
@@ -1066,6 +1076,7 @@ class VoiceOrchestrator:
             stream_produced = False
             first_model_chunk_seen = False
             first_reply_sent = False
+            last_stream_publish = 0.0
             async for chunk in self._replier.stream(query):
                 stream_produced = True
                 if not first_model_chunk_seen:
@@ -1081,12 +1092,20 @@ class VoiceOrchestrator:
                     continue
                 parts.append(chunk)
                 accumulated = "".join(parts).strip()
-                if accumulated:
-                    self._set_assistant_conversation_answer(accumulated)
-                    await self._publish_assistant_conversation("answering")
-                    if not first_reply_sent:
-                        first_reply_sent = True
-                        self._observe_latency(latency_turn, "first_reply_sent", started_at)
+                if not accumulated:
+                    continue
+                self._set_assistant_conversation_answer(accumulated)
+                now = self._monotonic()
+                if first_reply_sent and now - last_stream_publish < self._stream_publish_interval_s:
+                    # Coalesce: the next frame, or the final "ready" one,
+                    # carries this text. Nothing is lost, every frame is
+                    # cumulative.
+                    continue
+                last_stream_publish = now
+                await self._publish_assistant_conversation("answering")
+                if not first_reply_sent:
+                    first_reply_sent = True
+                    self._observe_latency(latency_turn, "first_reply_sent", started_at)
             if not parts:
                 if stream_produced:
                     # A model tool intentionally transferred the display to

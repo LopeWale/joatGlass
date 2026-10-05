@@ -126,7 +126,11 @@ describe('NativeTerminalSurface', () => {
     expect(rebuilds[0]?.textObject?.filter((item) => item.isEventCapture === 1)
       .map((item) => item.containerName)).toEqual(['terminal-body']);
     expect(pages[0]?.bodyText.split('\n')).toHaveLength(NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity);
-    expect(pages[0]?.bodyText).toContain('OPENCLAW > READY · MIC OFF');
+    // The status line given to present() is the head; the body's state
+    // row no longer repeats it.
+    expect(pages[0]?.headText).toBe('MIC OFF');
+    expect(pages[0]?.bodyText).toContain('OPENCLAW > READY');
+    expect(pages[0]?.bodyText).not.toContain('OPENCLAW > READY · MIC OFF');
     expect(footer(pages[0]!)).toBe('tap: speak · double-click: back');
     expect(surface.scroll('up')).toBe(false);
     expect(surface.scroll('down')).toBe(false);
@@ -324,5 +328,69 @@ describe('NativeTerminalSurface', () => {
     ]);
     expect(rebuilds[1]?.imageObject ?? []).toHaveLength(0);
     expect(imageWrites).not.toHaveBeenCalled();
+  });
+});
+
+
+/** Brainstorm (Codex proposes, Claude critiques) shares the native page.
+ * The head names the feature, the status row carries the state and the
+ * live speaker, the transcript is the Mac's activity text, and the footer
+ * names the gestures BrainstormController accepts in that state. */
+describe('Brainstorm on the native page', () => {
+  function brainstorm(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudModel {
+    return {
+      screen: 'brainstorm',
+      state: 'ready',
+      topic: 'Ready for a question',
+      collaborators: ['Codex', 'Claude'],
+      activity: 'Tap to choose a question, then speak.',
+      ...overrides,
+    };
+  }
+
+  it('draws the ready frame as the two-text page with no image or list objects', async () => {
+    const r = rig();
+    expect(await r.surface.present(brainstorm(), '12:34 JOAT mic off bat 80%')).toBe(true);
+    expect(r.rebuilds).toHaveLength(1);
+    expect(r.imageWrites).not.toHaveBeenCalled();
+    const page = r.pages[0]!;
+    expect(page.headText).toBe('12:34 JOAT mic off bat 80%');
+    const lines = page.bodyText.split('\n');
+    expect(lines[0]).toBe('READY · Ready for a question');
+    expect(lines).toContain('Tap to choose a question, then speak.');
+    expect(footer(page)).toBe('tap: speak · double-click: menu');
+  });
+
+  it('streams a running session through body upgrades and names the live speaker', async () => {
+    const r = rig();
+    await r.surface.present(brainstorm());
+    const running = brainstorm({
+      state: 'running', topic: 'Should the glasses cache the picker?',
+      activeSpeaker: 'Codex · round 1/3 · 2 calls',
+      activity: 'YOU > Should the glasses cache the picker?\nCODEX > A cache saves a round trip but',
+    });
+    expect(await r.surface.present(running)).toBe(true);
+    expect(await r.surface.present({ ...running, activity: `${running.activity} risks stale rows.` })).toBe(true);
+    expect(r.rebuilds).toHaveLength(1);
+    expect(r.upgrades.length).toBeGreaterThanOrEqual(2);
+    // Revisions are body upgrades; the installed page is not rebuilt.
+    const lines = (last(r.upgrades)?.content ?? '').split('\n');
+    expect(lines[0]).toBe('WORKING · Codex · round 1/3 · 2 calls');
+    expect(lines.some((line) => line.startsWith('CODEX > '))).toBe(true);
+    expect(lines[lines.length - 1]).toContain('double-click: cancel');
+  });
+
+  it('shows the listening and unavailable states with their own footers', async () => {
+    const r = rig();
+    expect(await r.surface.present(brainstorm({ state: 'topic_capture', topic: 'Speak your question' }))).toBe(true);
+    expect(last(r.pages)!.bodyText.split('\n')[0]).toBe('LISTENING · Speak your question');
+    expect(footer(last(r.pages)!)).toBe('speak your question · double-click: cancel');
+    expect(await r.surface.present(brainstorm({
+      state: 'unavailable', topic: 'Brainstorm', collaborators: ['Claude'],
+      activity: 'codex CLI missing on the Mac — install to enable.',
+    }))).toBe(true);
+    const body = last(r.upgrades)?.content ?? '';
+    expect(body.split('\n')[0]).toBe('UNAVAILABLE · Brainstorm');
+    expect(body).toContain('codex CLI missing on the Mac');
   });
 });

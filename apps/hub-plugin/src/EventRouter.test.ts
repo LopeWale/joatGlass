@@ -41,7 +41,9 @@ function make(
     declineByTap: vi.fn(() => false),
   };
   const menu = {
-    toggle: vi.fn(),
+    // Production `CapabilityMenu.toggle()` is async; the router chains on it
+    // to hold one Back at a time.
+    toggle: vi.fn(async () => {}),
     handleList: vi.fn(() => menuConsumesLists),
     handleScroll: vi.fn(() => menuConsumesLists),
     handleClick: vi.fn(() => menuConsumesLists),
@@ -459,19 +461,21 @@ describe('EventRouter — double press', () => {
     expect(sent).toEqual([]);
   });
 
-  it('right temple opens the system exit dialog, not an immediate exit', () => {
-    const { fire, menu, shutDownPageContainer, lifecycle } = make();
+  it('right temple is the same local Back as the left, never the OS exit dialog', () => {
+    // GesturePolicy owns double press independently of the hand (the
+    // simulator's generic double-click is right-sourced, and it used to open
+    // the exit confirmation). Exit is the host's own lifecycle, not a gesture.
+    const { fire, menu, sent, shutDownPageContainer, lifecycle } = make();
     fire({
       sysEvent: {
         eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
         eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
       },
     });
-    expect(menu.toggle).not.toHaveBeenCalled();
-    // Mode 1 = confirmation dialog. Mode 0 would close under the wearer.
-    expect(shutDownPageContainer).toHaveBeenCalledWith(1);
-    // Teardown waits for SYSTEM_EXIT — the wearer can still cancel.
+    expect(menu.toggle).toHaveBeenCalledTimes(1);
+    expect(shutDownPageContainer).not.toHaveBeenCalled();
     expect(lifecycle.onExit).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
   });
 
   it.each([
@@ -499,7 +503,7 @@ describe('EventRouter — double press', () => {
 
   it('does not route a right double press into acceptance on ordinary Brainstorm', () => {
     const events: unknown[] = [];
-    const { fire, brainstorm, shutDownPageContainer } = make(
+    const { fire, brainstorm, menu, sent, shutDownPageContainer } = make(
       false, { record: (event) => events.push(event) }, false, true,
     );
 
@@ -512,7 +516,12 @@ describe('EventRouter — double press', () => {
 
     expect(brainstorm.isAcceptanceArmed).toHaveBeenCalledTimes(1);
     expect(brainstorm.handleAcceptance).not.toHaveBeenCalled();
-    expect(shutDownPageContainer).toHaveBeenCalledWith(1);
+    // Unarmed, the right double press is the same Back as the left: it
+    // cancels the live run and never reaches the OS exit dialog.
+    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(shutDownPageContainer).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
     expect(events).not.toContainEqual(expect.objectContaining({
       type: 'brainstorm_action', action: 'begin_acceptance',
     }));
@@ -955,7 +964,10 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.sent).toEqual([]);
   });
 
-  it('refreshes globally through tap-then-long-press without toggling the mic', () => {
+  it('routes a cached Refresh row through tap-then-long-press without toggling the mic', () => {
+    // Connection settings moved to the phone (HudPageBuilder.systemMenu):
+    // the retired Refresh id stays routed to the settings guidance because a
+    // host may still show a cached menu, and it must not mute on the way.
     const r = make();
 
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
@@ -964,7 +976,8 @@ describe('EventRouter — long-press mutes the mic', () => {
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } });
 
-    expect(r.link.connect).toHaveBeenCalledTimes(1);
+    expect(r.menu.openSettings).toHaveBeenCalledTimes(1);
+    expect(r.link.connect).not.toHaveBeenCalled();
     expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.audio.start).not.toHaveBeenCalled();
     expect(r.lifecycle.onForegroundEnter).not.toHaveBeenCalled();
@@ -995,12 +1008,13 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.menu.openSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('routes the global Refresh tap through the real gateway recovery path', () => {
+  it('routes a cached Refresh tap to the phone-owned connection settings, not a local reconnect', () => {
     const r = make();
 
     r.fire({ menuItemClickEvent: { itemID: 3 } });
 
-    expect(r.link.connect).toHaveBeenCalledTimes(1);
+    expect(r.menu.openSettings).toHaveBeenCalledTimes(1);
+    expect(r.link.connect).not.toHaveBeenCalled();
     expect(r.sent).toEqual([]);
   });
 
@@ -1026,8 +1040,21 @@ describe('EventRouter — production Messages menu composition', () => {
   it('routes physical menu and list events into the bound Mac request, then walks back to Home', async () => {
     let dispatch: (event: EvenHubEvent) => void = () => {};
     const sent: UplinkMessage[] = [];
+    // Mirrors HudPresenter.usesCustomListSelection: a page drawn as the
+    // firmware's own list (the Messages picker and thread since 2026-10-05)
+    // lets the firmware cursor own the reported row index.
+    type NativeListOptions = { nativeFirmwareList?: boolean; nativeTextPage?: boolean };
+    let shownOptions: NativeListOptions | undefined;
+    const ownsCustomCursor = (options: NativeListOptions | undefined) => options !== undefined
+      && options.nativeFirmwareList !== true && options.nativeTextPage !== true;
     const hud = {
-      showList: vi.fn(async () => true),
+      usesCustomListSelection: (next?: NativeListOptions) => next
+        ? ownsCustomCursor(next)
+        : ownsCustomCursor(shownOptions),
+      showList: vi.fn(async (_items: string[], options?: NativeListOptions) => {
+        shownOptions = options;
+        return true;
+      }),
       showDefault: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),
       setSelection: vi.fn(async () => true),
@@ -1121,6 +1148,11 @@ describe('EventRouter — production Messages menu composition', () => {
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId: request.event.requestId, traceId: selection.event.traceId },
     }));
+    // That lifecycle message is the return path's last act, but the Back
+    // owner's promise settles a few microtasks later, and the router refuses
+    // a second Back until it has (one Back at a time). Yield one macrotask so
+    // the next press is the deliberate second Back, not a dropped repeat.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     dispatch({ sysEvent: {
       eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,

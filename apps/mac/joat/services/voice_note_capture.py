@@ -197,6 +197,16 @@ class VoiceNoteCaptureController:
     async def control_stop(self) -> str:
         return await self._stop()
 
+    def control_start(self) -> str:
+        """Start a recording from a tapped row; the title is the clock.
+
+        The spoken grammar insists on a title because a one-word utterance
+        is usually a mishearing. A tap is deliberate, and the wearer's hands
+        are on the glasses, not a keyboard: the time is the title until the
+        transcript gives it a better one.
+        """
+        return self._start(time.strftime("Note %H:%M"))
+
     def interrupt_for_shutdown(self) -> bool:
         """Close an active lane and retain raw data without claiming a save."""
         note = self._active_note()

@@ -50,6 +50,7 @@ function rig() {
   } = {};
   let visible = 'Overview';
   const hud = {
+    usesCustomListSelection: () => true,
     showList: vi.fn(async (items: string[], options?: { title?: string; selectable?: boolean; hint?: string }, current?: () => boolean) => {
       guards.push(current);
       await hooks.paint?.(options?.title);
@@ -97,8 +98,24 @@ function ui(selection: InputEventPayload, overrides: Partial<MessageUIMessage> =
   };
 }
 
-beforeEach(() => vi.useFakeTimers());
-afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+beforeEach(() => {
+  vi.useFakeTimers();
+  // The Messages reader wraps the Mac's rows against JOAT's canvas face
+  // (quickNotesProsePages); node has no DOM, so stub the measurement
+  // backend the way HudCanvasRenderer.test does. Rows stay lossless slices
+  // of the source text, which is all these tests read back.
+  const state: Record<string, unknown> = { font: '12px monospace' };
+  const fontSize = () => Number(/([\d.]+)px/.exec(String(state.font))?.[1] ?? 12);
+  const width = (value: string) => Array.from(value).length * fontSize() * 0.6;
+  Object.assign(state, {
+    measureText: (value: string) => ({ width: width(value) }),
+    fillText: () => undefined,
+    getImageData: () => ({ data: new Uint8ClampedArray(576 * 288 * 4) }),
+  });
+  const context = new Proxy(state, { get: (target, key) => target[String(key)] ?? (() => undefined) });
+  vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => context }) });
+});
+afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('Messages action ownership at wire ingress', () => {
   it('gates a confirmation journal request by its exact UI action, including local cancellation and Home', async () => {
@@ -218,9 +235,24 @@ describe('Messages terminal receipts and contextual Back', () => {
     const message = ui(selected, { state, text });
     expect(observe(r.menu, message)).toBe(true);
     expect(await show(r.menu, message)).toBe(true);
+    // The receipt is the full-width prose reader (2026-09-12): a counter row
+    // names the state and the part, the rows beneath are lossless slices of
+    // the text, and a long receipt pages on swipe instead of being cut off.
     const receipt = r.frames[r.frames.length - 1]!;
-    expect(receipt.items.join('')).toBe(text);
+    expect(receipt.title).toBe(`MESSAGES · ${state.toUpperCase()}`);
+    expect(receipt.items[0]).toMatch(/^1\/1 · [A-Za-z]+( · part 1\/\d+)?$/);
     expect(receipt.selectable).toBe(false);
+    let read = receipt.items.slice(1).join('');
+    while (!read.endsWith('FINAL STATUS MARKER')) {
+      const shown = r.frames.length;
+      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      await vi.waitFor(() => expect(r.frames.length).toBe(shown + 1));
+      const part = r.frames[r.frames.length - 1]!;
+      expect(part.title).toBe(receipt.title);
+      expect(part.selectable).toBe(false);
+      read += part.items.slice(1).join('');
+    }
+    expect(read).toBe(text);
     const sends = events(r, 'capdata').length;
     r.menu.handleClick();
     expect(events(r, 'capdata')).toHaveLength(sends);

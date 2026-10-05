@@ -2,15 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
-import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter } from './HudPresenter';
 import { ContainerId, type AssistantConversationSnapshot } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
-
-// These tests pin the CANVAS overview, which ships as the VITE_NATIVE_OVERVIEW=0
-// fallback. The default text overview has its own tests in
-// HudPresenter.textOverview.test.ts.
-setNativeOverviewForTest(false);
-
 
 function conversation(
   revision: number,
@@ -120,7 +114,7 @@ describe('HudPresenter retained assistant conversation integration', () => {
   });
 
   it('makes a transactional receipt visible by completing a page handoff first', async () => {
-    const { hud, rebuilds } = rig();
+    const { hud, frames } = rig();
     await hud.showAssistantConversation(conversation(1, 'ready', [
       { role: 'user', text: 'Save this note.' },
       { role: 'assistant', text: 'I can do that.' },
@@ -130,13 +124,9 @@ describe('HudPresenter retained assistant conversation integration', () => {
 
     expect(hud.hasAssistantConversation()).toBe(false);
     expect(hud.hasAssistantOverlay()).toBe(true);
-    // The receipt is text, so it lands on a firmware text container rather
-    // than in a raster frame. Asserting the container proves the handoff
-    // completed AND that the words reached the glass — the visual frame
-    // only ever proved the canvas had been asked to draw them.
-    const page = rebuilds[rebuilds.length - 1];
-    const body = page?.textObject?.find((c) => c.containerName === 'main');
-    expect(body?.content).toContain('Saved QuickNote.');
+    expect(frames[frames.length - 1]).toMatchObject({
+      assistantOverlay: { text: 'Saved QuickNote.', presentation: 'receipt' },
+    });
   });
 
   it('rolls a failed feature handoff back to the conversation and can resume the same id', async () => {

@@ -80,6 +80,7 @@ from .channels.notifications import NotificationStore
 from .core.interfaces import NavigationProvider, ReplyEngine, SttEngine
 from .core.navigation import NavigationPoint
 from .core.protocol import (
+    AudioControl,
     Device,
     BrainstormAction,
     AgentTerminalHudView,
@@ -105,6 +106,7 @@ from .native.bridge import (
     NativeBridgeUnavailable,
 )
 from .persistence.actions import ActionJournal
+from .persistence.places import PlaceStore
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.pomodoro import PomodoroStore
@@ -114,6 +116,7 @@ from .persistence.tasks import TaskOccurrenceStore
 from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
+from .services.imu_trace import ImuTraceRecorder
 from .services.brainstorm_history import (
     BrainstormHistory,
     BrainstormHistoryCommands,
@@ -176,6 +179,7 @@ from .services.task_monitor import (
     evaluate_reminder_occurrence,
 )
 from .services.session import (
+    BrainstormStartResult,
     DebateSession, Session, SessionManager, seat_participants,
 )
 from .services.shutdown import (
@@ -280,6 +284,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="opt in to a bounded, content-free local voice-latency receipt",
     )
+    parser.add_argument("--imu-trace", type=Path, default=None, metavar="PATH",
+                        help="record raw IMU samples from the glasses to PATH as JSON lines "
+                             "(motion calibration, docs/NEXT_STEPS.md §5)")
     parser.add_argument("--location-probe", action="store_true",
                         help="request high-accuracy, privacy-bucketed Gate-0 location telemetry")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -319,6 +326,9 @@ async def main() -> None:
         Path.home() / "Library/Application Support/JOAT/joat.sqlite3"
     )
     action_journal = ActionJournal(durable_store)
+    # The wearer's saved places, edited on the phone page and kept here so
+    # "navigate home" resolves after a restart.
+    place_store = PlaceStore(durable_store)
     recovered = action_journal.recover_after_restart(
         now_us=time.time_ns() // 1000
     )
@@ -340,6 +350,10 @@ async def main() -> None:
         g2_diagnostics=g2_diagnostics,
         location_probe=args.location_probe,
     )
+    if args.imu_trace is not None:
+        # The plugin relays samples only while asked; the recorder asks on
+        # every hello, so a reconnect keeps recording.
+        ImuTraceRecorder(args.imu_trace).attach(transport)
     native_bridge_path = os.environ.get("JOAT_NATIVE_BRIDGE")
     personal_data = (
         NativeBridgeClient(Path(native_bridge_path))
@@ -1067,6 +1081,7 @@ async def main() -> None:
             # Same credential as search/routing, and it stays on this Mac:
             # the session sends rendered pixels, never a tile URL.
             map_token=mapbox_token,
+            places=place_store.list,
         )
 
     def publish_brainstorm_phase(phase: str) -> None:
@@ -1737,6 +1752,21 @@ async def main() -> None:
         on_message_prompt_retired=lambda action_id: message_ui.cancel(action_id),
     )
 
+    async def start_route_from_tap(destination: str) -> str | None:
+        """The Navigation page's control row answered: start the route."""
+        result = sessions.start_navigation(destination)
+        if result is BrainstormStartResult.STARTED or result is BrainstormStartResult.CLOSED:
+            return None
+        return {
+            BrainstormStartResult.BUSY: "Finish the current session first.",
+            BrainstormStartResult.UNAVAILABLE: "Navigation is unavailable on this Mac.",
+            BrainstormStartResult.INVALID: "I didn't catch a destination.",
+        }.get(result, None)
+
+    # The Search tab's control row asks for its query through the same
+    # acknowledged prompt; a late answer republishes the tab itself.
+    search.attach_prompt(prompted_speech.ask_capability, lambda: panels.activate("search"))
+
     def revoke_message_prompt(action_id: str) -> None:
         ticket = prompted_speech.dispatcher.current_ticket
         if ticket is not None and ticket.owner_kind == "messages" and ticket.owner_id == action_id:
@@ -1810,8 +1840,24 @@ async def main() -> None:
             active.cancel()
         capabilities.on_disconnect()
 
+    worn_before: dict[str, bool | None] = {"wearing": None}
+
     def on_device(device: Device) -> None:
         prompted_speech.handle_device(device)
+        # Resume policy "mac": the plugin leaves the mic off when the glasses
+        # go back on and waits for this process to want ears. It always
+        # does, so a don with the mic off is answered with one open request.
+        # The plugin's own policy report is the authority; nothing is sent
+        # under "auto" (it resumes itself) or "confirm" (it asks the wearer).
+        if (
+            device.wearing is True
+            and worn_before["wearing"] is not True
+            and device.mic is False
+            and transport.resume_policy == "mac"
+        ):
+            log.info("glasses worn again under resume policy mac — asking for ears")
+            asyncio.get_running_loop().create_task(transport.send(AudioControl(open=True)))
+        worn_before["wearing"] = device.wearing
         # Battery reaches the dashboard, not just the model.
         hello = transport.hello
         who = f"{hello.model} / {hello.sn}" if hello else "glasses"
@@ -1870,9 +1916,16 @@ async def main() -> None:
         terminal_current=lambda: agent_terminal.focused,
         terminal_busy=lambda: agent_terminal.busy,
         brainstorm_recent=brainstorm_history.rows,
+        brainstorm_unavailable=lambda: None if brainstorm_available() else topic_capture_view(False),
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
         wearer_zone=wearer_zone,
+        # A page opened by hand is a control surface: a tapped row asks its
+        # own question on the lens ("Where to?", "What should I note?") and
+        # routes the answer. Voice works from anywhere and needs no row.
+        ask=prompted_speech.ask_capability,
+        navigate=start_route_from_tap,
+        places=place_store.list,
     )
     if belt is not None:
         for tool in feature_tools(
@@ -1977,7 +2030,10 @@ async def main() -> None:
     notifications_changed = asyncio.Event()
     notifications_changed.set()
     notification_loop = asyncio.get_running_loop()
-    card_log.on_change(lambda: notification_loop.call_soon_threadsafe(notifications_changed.set))
+    def wake_notification_loop() -> None:
+        notification_loop.call_soon_threadsafe(notifications_changed.set)
+
+    card_log.on_change(wake_notification_loop)
     def refresh_notification_home_after_hello(_: Hello) -> None:
         sessions.reset_home_notification_identity()
         notifications_changed.set()
@@ -2017,7 +2073,22 @@ async def main() -> None:
         deliver_task_alert,
         evaluate=lambda occurrence: evaluate_reminder_occurrence(occurrence, personal_data),
         card_log=card_log,
+        # The due page is a control surface: its tap completes the reminder
+        # through the same confirmed flow the spoken "complete reminder" uses.
+        complete=productivity_actions.complete_reminder_by_identity,
     )
+
+    def complete_due_from_glasses(occurrence_id: str) -> None:
+        async def complete() -> None:
+            explanation = await task_monitor.complete_from_glasses(occurrence_id)
+            if explanation:
+                await hud.receipt(explanation)
+                await hud.settle_assistant()
+
+        asyncio.get_running_loop().create_task(complete())
+
+    transport.on_reminder_due_complete(complete_due_from_glasses)
+    transport.on_places(place_store.replace_all)
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
     # The feeds are polled on the wearer's cadence (news.json, default every
     # fifteen minutes) and pushed after every pass; the first pass is what

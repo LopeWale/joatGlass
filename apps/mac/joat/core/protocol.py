@@ -255,6 +255,69 @@ class Policy:
     resume: ResumePolicy
 
 
+#: Bounds for a saved place as the phone page sends it. A place is a name
+#: and either an address to search for or coordinates to route to (or both);
+#: the whole list replaces the Mac's copy on every change.
+PLACE_NAME_MAX_CHARS = 40
+PLACE_ADDRESS_MAX_CHARS = 120
+PLACES_MAX = 50
+
+
+@dataclass(frozen=True, slots=True)
+class SavedPlace:
+    """One place the wearer saved on the phone page (Home, Work, ...)."""
+
+    place_id: str
+    name: str
+    address: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Places:
+    """The wearer's saved places, whole: the phone page is their editor."""
+
+    places: tuple[SavedPlace, ...]
+
+
+def _saved_place(raw: object) -> SavedPlace:
+    if not isinstance(raw, dict):
+        raise ProtocolError("saved place must be an object")
+    allowed = {"id", "name", "address", "latitude", "longitude"}
+    if not set(raw) <= allowed or "id" not in raw or "name" not in raw:
+        raise ProtocolError("saved place has unsupported fields")
+    place_id = raw["id"]
+    name = raw["name"]
+    if not isinstance(place_id, str) or not 1 <= len(place_id) <= 64 or not place_id.isprintable():
+        raise ProtocolError("saved place id is invalid")
+    if not isinstance(name, str):
+        raise ProtocolError("saved place name is invalid")
+    name = " ".join(name.split())
+    if not 1 <= len(name) <= PLACE_NAME_MAX_CHARS:
+        raise ProtocolError("saved place name is invalid")
+    address = raw.get("address")
+    if address is not None:
+        if not isinstance(address, str):
+            raise ProtocolError("saved place address is invalid")
+        address = " ".join(address.split()) or None
+        if address is not None and len(address) > PLACE_ADDRESS_MAX_CHARS:
+            raise ProtocolError("saved place address is invalid")
+    latitude = raw.get("latitude")
+    longitude = raw.get("longitude")
+    if (latitude is None) != (longitude is None):
+        raise ProtocolError("saved place coordinates are incomplete")
+    if latitude is not None:
+        latitude = _navigation_number(latitude, "latitude", minimum=-90, maximum=90)
+        longitude = _navigation_number(longitude, "longitude", minimum=-180, maximum=180)
+    if address is None and latitude is None:
+        raise ProtocolError("saved place needs an address or coordinates")
+    return SavedPlace(
+        place_id=place_id, name=name, address=address,
+        latitude=latitude, longitude=longitude,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Location:
     """Wearer position from the phone (bridge.getAppLocation — the
@@ -390,6 +453,22 @@ class ReminderDueAck:
 
 
 @dataclass(frozen=True, slots=True)
+class ReminderDueComplete:
+    """The wearer tapped the due Reminder page: complete that occurrence.
+
+    Bound like the acknowledgement: the same opaque occurrence and attempt
+    UUIDs and the connection generation the due view was accepted under, so
+    a late or forged tap can neither complete another reminder nor one the
+    current client never showed. Completion itself still runs the confirmed
+    productivity flow on the Mac.
+    """
+
+    reminder_due_id: str
+    reminder_due_attempt_id: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProductivityViewAck:
     """Current-client receipt for an opaque verifying HUD operation.
 
@@ -476,11 +555,11 @@ class ControlAction:
 
 
 UplinkMessage = (
-    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
+    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | Places | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
-    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ProductivityViewAck
-    | PromptAck | PromptCancel | ControlAction
+    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ReminderDueComplete
+    | ProductivityViewAck | PromptAck | PromptCancel | ControlAction
 )
 
 
@@ -671,7 +750,9 @@ class PromptPresent:
     connection_generation: str
     source: AudioSource
     expires_in_ms: int
-    owner_kind: Literal["messages", "brainstorm", "terminal"]
+    #: "capability" is a question a tapped page row asks for itself (a place
+    #: to navigate to, a search query, a note to dictate).
+    owner_kind: Literal["messages", "brainstorm", "terminal", "capability"]
     owner_id: str
     field: str
 
@@ -796,6 +877,12 @@ class HudList:
     control_start_index: int | None = None
     planning_entries: tuple[PlanningGridEntry | None, ...] | None = None
     planning_navigation: tuple[bool, int] | None = None
+    # Row indices of the "newer"/"older" paging rows appended to a Messages
+    # conversation. Present (even empty) means the rows carry paging, so the
+    # plugin may draw the thread as a firmware list, which emits no scroll
+    # events; a tap on one of these rows is the page request. Mirror:
+    # `pageControls` in apps/hub-plugin/src/types.ts.
+    page_controls: tuple[int | None, int | None] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -837,6 +924,15 @@ class HudList:
             message["contextLabel"] = utf16_slice(self.context_label, 96)
         if self.control_start_index is not None:
             message["controlStartIndex"] = max(0, min(self.control_start_index, len(message["items"])))
+        if self.page_controls is not None:
+            newer, older = self.page_controls
+            limit = len(message["items"]) - 1
+            controls: dict[str, int] = {}
+            if newer is not None and 0 <= newer <= limit:
+                controls["newerIndex"] = newer
+            if older is not None and 0 <= older <= limit:
+                controls["olderIndex"] = older
+            message["pageControls"] = controls
         if self.planning_grid is not None:
             # A Planning month has a fixed Monday-first six-week grid. Keep
             # the payload redacted and bounded even if a caller misbehaves;
@@ -1858,7 +1954,7 @@ def _prompt_source(value: Any) -> AudioSource:
     raise ProtocolError("prompt source is invalid")
 
 
-def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "terminal"]:
+def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "terminal", "capability"]:
     if not isinstance(value, str):
         raise ProtocolError("prompt owner kind is invalid")
     if value == "messages":
@@ -1867,6 +1963,8 @@ def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "termina
         return "brainstorm"
     if value == "terminal":
         return "terminal"
+    if value == "capability":
+        return "capability"
     raise ProtocolError("prompt owner kind is invalid")
 
 
@@ -2803,6 +2901,18 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 success=success,
                 audio_epoch=epoch,
             )
+        case "reminder_due.complete":
+            if set(payload) != {"kind", "reminderDueId", "reminderDueAttemptId", "generation"}:
+                raise ProtocolError("reminder due completion has unsupported fields")
+            return ReminderDueComplete(
+                reminder_due_id=_reminder_due_identifier(
+                    _require(payload, "reminderDueId", kind),
+                ),
+                reminder_due_attempt_id=_reminder_due_identifier(
+                    _require(payload, "reminderDueAttemptId", kind),
+                ),
+                generation=_navigation_generation(_require(payload, "generation", kind)),
+            )
         case "reminder_due.ack":
             if set(payload) != {
                 "kind", "reminderDueId", "reminderDueAttemptId", "generation", "outcome",
@@ -2903,5 +3013,15 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             return Policy(resume=resume)
         case "control.action":
             return _parse_control_action(payload)
+        case "places":
+            if set(payload) != {"kind", "places"}:
+                raise ProtocolError("places update has unsupported fields")
+            raw_places = payload["places"]
+            if not isinstance(raw_places, list) or len(raw_places) > PLACES_MAX:
+                raise ProtocolError("places update is invalid")
+            places = tuple(_saved_place(item) for item in raw_places)
+            if len({place.place_id for place in places}) != len(places):
+                raise ProtocolError("places update repeats an id")
+            return Places(places=places)
         case _:
             raise ProtocolError(f"unknown uplink kind {kind!r}")

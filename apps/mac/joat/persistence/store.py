@@ -583,6 +583,41 @@ _MIGRATION_12 = (
     """,
 )
 
+_MIGRATION_13 = (
+    # The wearer's focus and break lengths, set by tapping the idle Pomodoro
+    # page. Migration 11's checkpoint table is checksummed history and the
+    # manifest recognises only CREATE and DROP, so the lengths get a
+    # single-row table of their own: a database from before they were
+    # configurable has no row and loads the classic 25/5/15 cycle.
+    """
+    CREATE TABLE pomodoro_lengths (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        focus_ms INTEGER NOT NULL CHECK (focus_ms BETWEEN 1 AND 86400000),
+        short_break_ms INTEGER NOT NULL CHECK (short_break_ms BETWEEN 1 AND 86400000),
+        long_break_ms INTEGER NOT NULL CHECK (long_break_ms BETWEEN 1 AND 86400000)
+    ) STRICT
+    """,
+)
+
+_MIGRATION_14 = (
+    # The wearer's saved places (Home, Work, ...), edited on the phone page
+    # and sent whole on every change. A place is a name and an address to
+    # search for, coordinates to route to, or both.
+    """
+    CREATE TABLE saved_places (
+        place_id TEXT PRIMARY KEY CHECK (length(place_id) BETWEEN 1 AND 64),
+        position INTEGER NOT NULL CHECK (position >= 0),
+        name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 40),
+        address TEXT CHECK (address IS NULL OR length(address) BETWEEN 1 AND 120),
+        latitude REAL CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+        longitude REAL CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180),
+        updated_at_unix_ms INTEGER NOT NULL CHECK (updated_at_unix_ms >= 0),
+        CHECK ((latitude IS NULL) = (longitude IS NULL)),
+        CHECK (address IS NOT NULL OR latitude IS NOT NULL)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -596,6 +631,8 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (10, "drop_calendar_starting_soon_alerts", _MIGRATION_10),
     (11, "durable_pomodoro_checkpoint", _MIGRATION_11),
     (12, "durable_terminal_conversations", _MIGRATION_12),
+    (13, "durable_pomodoro_lengths", _MIGRATION_13),
+    (14, "durable_saved_places", _MIGRATION_14),
 )
 
 

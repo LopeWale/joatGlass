@@ -47,7 +47,7 @@ Rules that bite:
 - `createStartUpPageContainer` is **one-shot**. Use `rebuildPageContainer` for later full redraws and `textContainerUpgrade` for in-place text — the latter is our default for streaming HUD updates (no flicker).
 - `zOrderIndex` is **all-or-nothing per page** and must be **unique**. Violations fail SDK-side validation before reaching native: `createStartUpPageContainer` → `invalid`, `rebuildPageContainer` → `false`. Omit it everywhere to keep declaration-order behaviour.
 - Image containers have no `isEventCapture` — pair them with a text container as the capture layer.
-- `updateImageRawData` calls must be **serial** (await each). The SDK LZ4-compresses internally since 0.0.12; pass raw 4-bit greyscale pixels as before.
+- `updateImageRawData` calls must be **serial** (await each). The plugin sends each tile as PNG bytes; the host converts to Gray4 and LZ4-compresses before BLE (the pipeline table below has the costs).
 - Always call the unsubscribe function returned by `onEvenHubEvent` / `onDeviceStatusChanged` / `onLaunchSource`.
 
 ## Input routing — verified, and full of traps
@@ -88,11 +88,17 @@ Every app is expected to offer an exit via the glasses. The canonical pattern is
 
 The wearer's menu is the **firmware contextual menu** (tap, then
 long-press) carrying the CAPABILITIES rows — see "The three ways to draw a
-menu, measured". **Left**-temple double-press is BACK (a no-op on the
-overview), **right**-temple double-press is the exit dialog, and a left
-SINGLE press on the resting overview drills into the notifications tray.
-On a live Brainstorm the left double press CANCELS the session; the
-firmware menu remains reachable mid-session for everything else.
+menu, measured". A double-press on EITHER temple, or on the ring, is BACK
+(a no-op on the overview; `GesturePolicy` gives every source the same
+meaning because the simulator's generic double-click is right-sourced and
+kept opening the exit confirmation), and a left SINGLE press on the
+resting overview drills into the notifications tray. The exit dialog is
+reachable only through the Mac's `shutdown` downlink. On a live Brainstorm
+the double press CANCELS the session; the firmware menu remains reachable
+mid-session for everything else. The one named press: while the Mac has
+ARMED a Brainstorm acceptance run, a right-temple or ring double press
+starts it (the Mac's contract names the source), and the ready frame says
+"right/ring x2: test" only then.
 
 ### Lifecycle events (all `sysEvent`)
 
@@ -135,7 +141,7 @@ between them is not a matter of taste:
 | Mechanism | Cost | Rows visible of 8 | Type | Verdict |
 |---|---|---|---|---|
 | `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
-| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch | **In use for NEWS and SEARCH** since 2026-09-02 (`NATIVE_LIST_TITLES`): the wearer took the font for the scroll. Rejected for the menu itself — no denser, and it costs a page. |
+| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch; **each row ≤ 63 UTF-8 bytes** (the host refuses the rebuild with a silent `false` from 64 bytes, measured in the 0.9.5 simulator; `listLayout` clamps) | **In use for every list but the Planning month** (`usesFirmwareList` in `CapabilityMenu`: a list is Even's own unless it carries the month grid, which has no firmware template; a reader is a text page; the thread and the archive page by tappable rows when the Mac sends `pageControls`). Rejected for the menu itself — no denser, and it costs a page. |
 | Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
 
 Both native mechanisms render in the firmware's own proportional font at a
@@ -175,15 +181,29 @@ other three, so a swipe shipped three tiles.
 
 | Interaction | Tiles before | Tiles after |
 |---|---|---|
-| Mac state word ("hearing you…") | 2 | **0** — native text (`ContainerId.SpineLabel`, `textContainerUpgrade`) |
-| Mic on/off, battery | 2 / 1 | **1** (top-right) |
+| Mac state word ("hearing you…") | 2 | **1** — drawn inside `SPINE_LABEL_BOX`, which ends on the seam, so only the top-left tile changes (the native-text twin was never wired; see "levers" below) |
+| Mic on/off, battery | 2 / 1 | **1** (top-right) on an image page; **0** on a firmware page — one in-place upgrade of its header line (2026-10-05; it used to be dropped there) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
-| Open NEWS or SEARCH | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
-| Scroll NEWS or SEARCH rows | 2-4 per step | **0** — the firmware moves the highlight |
-| Back from NEWS/SEARCH to the overview | 4 | 4 + one rebuild |
+| Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
+| Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
+| Page an older or newer slice of the thread | 2-4 | **0** — tap the Mac-appended "▲ Newer messages" / "▼ Older messages" row; the Mac answers with the next `hud.list` (0.2 s in the simulator) |
+| Open a message from the thread (`MESSAGES · MESSAGE`) | 4 | **0** — one rebuild to a firmware text page; a swipe pages it in place (`textContainerUpgrade`), and past its edge asks the Mac for its next page as before |
+| Back from the message to the thread | 4 | **0** — the thread returns as the firmware list it was |
+| The question page ("What should I say?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
+| Open Brainstorm (the idle picker) | 4 | **0** — one rebuild to a firmware list of past sessions plus NEW |
+| A Brainstorm frame (ready, listening, running, settled, unavailable) | 1-2 per revision, plus 1-2 **every second** while thinking | **0** — the Agent Terminal's two-text page; each revision is one `textContainerUpgrade`, and the per-second counter is gone |
+| Open QuickNotes or Notifications | 4 | **0** — firmware lists; the archive pages by its own "▲ Newer notes" / "▼ Older notes" rows (18 notes a page, so both rows fit the list's 20) |
+| Open a note, a notification's detail, a Planning entry, or the Navigation instructions | 4 | **0** — firmware text pages (`TEXT_PAGE_TITLES`), paged in place; Back returns the list as the firmware list it was |
+| Expand the NEWS, SEARCH or POMODORO tab from the rail | 4 | **0** — firmware lists; the title row names the tab, the rail stays on the overview |
+| Open a headline or a result | 4 | **0** — `NEWS · ARTICLE` / `SEARCH · RESULT` text pages, paged in place; the Mac is asked only past the local edge |
+| The expanded Pomodoro countdown | **1 tile every second** | **0** — a whole-minute first row ("Focus · block 2 of 4 · 24 min left"); the page is rebuilt once a minute |
+| The Settings page | 4 | **0** — firmware list |
+| Planning week and day pages, and Back between them | 4 per page | **0** — firmware lists; the Mac resolves every row by index and owns Back. The month dashboard keeps its four tiles |
+| Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
+| Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
-| Assistant overlay show, then dismiss | 4 + 4 | 4 + 4 |
-| Clock minute tick on a feature page | 1 | 1 |
+| Assistant answer show, then dismiss | 4 + 4 | 0 (one text rebuild) + 4 + one rebuild; receipts 2 + 2 |
+| Clock minute tick on a feature page | 1 | 1 on an image page; **0** on a firmware page (header upgrade) |
 
 Two host facts from Even's own display docs shape the pipeline
 (`hub.evenrealities.com/docs/build/display`, read 2026-09-02):
@@ -226,14 +246,218 @@ The levers that remain are design decisions, not code:
   layered over the tiles with `zOrderIndex`, updated with
   `textContainerUpgrade`. A voice-state change would then cost zero tiles.
   The price: the firmware's proportional font at a fixed 27 px line height
-  (see the `font-measurement` skill), not the 10-12 px canvas type.
-- ~~A native list for news and search~~ — landed 2026-09-02 (`NATIVE_LIST_TITLES`
-  in `HudPresenter`). The presenter tracks which page the glass holds
-  (`glassPage`): NEWS/SEARCH rebuild to the compat `listLayout`, status and
-  hint are written to its native containers, only NEW rows rebuild, and any
-  pixel surface (overview, reader, confirmation, overlay) rebuilds the
-  four-tile page first. Extending it to another list is one title in the
-  set — the trade is the firmware font and no rail.
+  (see the `font-measurement` skill), not the 10-12 px canvas type. Taken
+  for the firmware pages on 2026-10-05: their one header line (`9:41 ·
+  PAGE · ● · ▇`, composed from `HudStatusModel`) is upgraded in place on
+  every clock, mic or battery change. The image pages keep the 24 px
+  raster spine with icons, measured into the top tiles.
+- ~~A native list for plain-row pages~~ — 2026-10-05: every list is a
+  firmware list (`usesFirmwareList` in `CapabilityMenu`); the one exception
+  is the Planning month grid, which has no Even template. The presenter
+  tracks which page the glass holds (`pageOwner`): a native list rebuilds
+  to `listLayout` with the live header in the rebuild, and the image pages
+  (overview, month, map) rebuild the four-tile page first. The trade is the
+  firmware font, no rail on an expanded tab, and a cursor that always
+  starts on row one (the firmware has no cursor-setting API).
+- ~~Native conversation thread~~ — 2026-10-05: the firmware list emits
+  clicks but no scroll events, so the Mac pages the thread itself. The
+  `hud.list` for `MESSAGES · CONVERSATION` carries `pageControls`
+  (`newerIndex`, `olderIndex`): the Mac appends "▲ Newer messages" and
+  "▼ Older messages" rows and names them, and `CapabilityMenu` turns a tap
+  on either into the same `SCROLL_TOP/BOTTOM` page request the raster
+  thread sent, ignoring the label and instruction rows. Rows are clamped
+  to 63 UTF-8 bytes (`clampUtf8Bytes` in `HudPageBuilder`): the host
+  refused every list whose row reached 64 bytes and the plugin fell to
+  Home, which is why the thread first looked broken in the simulator.
+  Verified with the probe: older page 0.2 s after the tap, zero image
+  tiles from thread to Back.
+- ~~Native confirmation~~ — 2026-10-05: the gate is a firmware text page
+  (`confirmationLayout`, owner `confirmation-native`); dismissal recreates
+  the four image containers, or hands straight to a firmware list. Verified in the official
+  simulator with `scripts/simulator_messages_native_probe.py`. The decision
+  clock fits inside the Mac's deadline: `confirmationDecisionWindowMs` in
+  `ConfirmationCommit` takes the Mac's `expiresAtMs`, reserves four seconds
+  for the restore an acceptance waits on, and clamps to 3-8 s, while the
+  Mac's envelope (`CONFIRM_TRANSPORT_SECONDS`, `_CONFIRM_SECONDS`) is 20 s
+  so the paint in, the eight-second window and the restore out all fit.
+  Before, the Mac timed 12 s from send and the plugin always took 8 s, so a
+  tap the wearer saw land could come back as "Reply cancelled.".
+- ~~Native answer page~~ — 2026-10-05: an `answer` overlay over the visual
+  HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
+  seven-line body paged in place with `textContainerUpgrade`, a hint line.
+  Receipts stay on the image page (two tiles beat a page swap).
+- ~~Native message reader and question page~~ — 2026-10-05: a `hud.list`
+  titled `MESSAGES · MESSAGE` (`TEXT_PAGE_TITLES` in `CapabilityMenu`)
+  opts into `nativeTextPage`: the presenter joins the Mac's rows, pages
+  them for the firmware font with `paginateAnswer`, draws `textPageLayout`
+  (owner `text-page-native`) and pages in place on swipe; a swipe past
+  the local edge is not consumed, so the menu asks the Mac for its
+  neighbouring page through the same `cappage` request. The question page
+  is `promptQuestionLayout` (owner `prompt-native`). Every Messages page on
+  the reply path is now firmware-drawn; the probe records zero image tiles
+  from picker to result and back. `?joatTestPromptMic=1` (DEV) lets the
+  simulator, which has no microphone, keep a question on screen.
+- ~~Native Brainstorm~~ — 2026-10-05: a `brainstorm.view` frame rides the
+  Agent Terminal's two-text page (`NativeTerminalSurface`, owner
+  `terminal-conversation-native`): head `JOAT · BRAINSTORM`, a status row with the state
+  and the live speaker, the Mac's activity text as the transcript (paged
+  on the glasses by swipe), and a footer in the raster hint's words
+  measured for the firmware font. The idle picker (`BRAINSTORM`) is a
+  firmware list. Three Mac-side causes of "Brainstorm does nothing" went
+  with it: `find_codex_binary` was PATH-only (a launchd-started brain
+  never saw the ChatGPT-bundled `codex`), the idle row promised "Ready for
+  a question" even with a seat missing (it now shows the host's
+  unavailable frame first), and the idle, NEW and unavailable frames were
+  sent without the `hud.rebuild reason=brainstorm` that claims the surface
+  — the plugin dropped them, so a voice-opened Brainstorm showed nothing
+  and its tap went nowhere. `scripts/simulator_brainstorm_native_probe.py`
+  plays the Mac's side of a session; its run shows zero image tiles from
+  picker to settled and the tap arriving as `begin_topic_capture`.
+- ~~Native QuickNotes, Notifications, readers~~ — 2026-10-05: `QUICKNOTES`,
+  `NOTIFICATIONS` (and their EMPTY/SETUP pages) join the firmware list;
+  `QUICKNOTES · NOTE/DETAIL`, `NOTIFICATIONS · DETAIL`, `PLANNING · EVENT`
+  (any origin and kind) and the static `NAVIGATION` page are text pages.
+  The archive carries `pageControls` like the thread: the Mac appends the
+  paging rows (`_NOTE_LIST_PAGE_SIZE` dropped to 18 so both fit the list's
+  20-row cap) and a tap on either sends the `QUICKNOTES · LIST` page request
+  the edge swipe used to. A spoken "show notifications" is adopted like the
+  menu capabilities. Still raster: the Planning month grid (a calendar has no
+  Even template). `scripts/simulator_quicknotes_native_probe.py`
+  records zero tiles across list, both pages, the note, Back, the
+  Notifications list and a card's detail.
+- ~~Native panel tabs and Settings~~ — 2026-10-05: `openPanelTab` opts NEWS,
+  SEARCH and POMODORO into the firmware list and the article/result readers
+  into text pages; the Settings page is a firmware list too. The rail is
+  the overview's; the expanded page has a title row instead. Row memory on
+  Back is gone with the raster list (the firmware has no cursor-setting
+  API). The
+  Pomodoro's per-second tile is replaced by a plugin-authored whole-minute
+  first row (`pomodoroCountdownRow`) that the tap mapping skips
+  (`panelRowOffset`); the presenter's panel ticker runs at 60 s on a
+  firmware page and calls `onNativePanelTick`, which the menu answers by
+  rebuilding the page.
+- ~~Native Planning week and day~~ — 2026-10-05: a Planning page that
+  carries the Mac's row map (`planningNavigation`) and no month grid is a
+  firmware list (`planningList` in `presentList`). Every row is a Mac
+  action by index (day, entry, previous, next, scope, earlier/more
+  entries) and Back is the Mac's `planning-back`, so nothing changes on
+  the wire; the day page's 13-entry paging keeps it under the list's 20
+  rows. The month dashboard (grid plus hovered-day pane) is the one raster
+  capability page left: a calendar grid has no Even template. (A
+  `PLANNING · EVENT` or `· REMINDER` page carries the row map too, so it is
+  a firmware list, not the text page the earlier note above says.)
+  `scripts/simulator_planning_native_probe.py` drives month → week → day →
+  event and Back over a fake EventKit bridge: zero tiles on every page but
+  the month.
+  `scripts/simulator_panels_native_probe.py` pushes the three tabs and
+  records zero tiles on each page, the article, its paging, Back and the
+  minute rebuild; the overview's own rail swipes are the only tiles.
+
+- ~~Pages as control surfaces~~ — 2026-10-05, the wearer's rule: a page
+  opened by hand is for hands. Voice works from anywhere, so no page shows
+  a "Say “JOAT, …”" row or empty state any more; each offers the tap that
+  does the thing. The row asks its own question through the acknowledged
+  prompt (`PromptedSpeechRuntime.ask_capability`, owner kind `capability`
+  on `prompt.present`, the same native question page the Messages body
+  uses) and routes the answer: NAVIGATION "➤ Navigate to a place" asks
+  "Where to?" and starts the route; QUICKNOTES leads every page with
+  "● Record a voice note" (a tap-started capture titled by the clock) and
+  "✎ Dictate a note" ("What should I note?", saved as exact text; the page
+  size dropped to 16 so both fit under the 20-row cap); the Messages
+  conversation ends in "✎ Reply", the same prepared reply the spoken word
+  starts; the SEARCH tab's last row "⌕ Look something up" asks for the
+  query and republishes the tab; the expanded POMODORO shows its controls
+  and, while idle, the three lengths as rows that cycle presets on tap and
+  persist. Brainstorm's idle frame says "Tap to speak a topic." and its
+  picker already carried "+ New brainstorm".
+
+- ~~The modals a tap lands on~~ — 2026-10-05, the wearer's point: fixing a
+  page is not enough when the page its tap redirects to is still pixels. A
+  surface-and-transition map (every page, every tap, Back and push target)
+  found thirteen raster targets one gesture away from a firmware page, and
+  one presenter fault: from a firmware text page, Home, a receipt, a
+  productivity frame or a navigation frame never repainted the glass at all
+  (only the firmware list owner triggered the image rebuild). Now:
+  - every native content owner (`terminal-list-native`,
+    `text-page-native`, `navigation-native`) recreates the four image
+    containers before an image paint (`NATIVE_CONTENT_OWNERS`);
+  - a receipt or an outcome strip over a firmware page is a firmware page
+    (`usesNativeAnswerPage`, `showActionPill`): one rebuild in, and the
+    list or reader comes back as the page it was when the strip settles;
+    before, a saved reminder over the Planning day rebuilt the image page
+    and repainted the list as pixels under a two-tile strip;
+  - a Calendar or Reminders page (failed, uncertain, due) is a firmware
+    text page (`renderNativeProductivityPage`), paged in place;
+  - every navigation frame before the live map (confirm the place, repair,
+    mode, preview, the warnings, arrival, error) is a firmware text page
+    (`navigationNativeBody` in `NavigationHud`, owner `navigation-native`);
+    a cursor move upgrades the page in place; only the guidance frame with
+    its map is pixels;
+  - the Messages result (`MESSAGES · SENT/FAILED/CANCELLED/UNCERTAIN`), the
+    draft review, compose, setup, access and retry pages, the QuickNotes
+    recorder (`RECORDING/PAUSED/DISCARD?`), the saved Brainstorm reader,
+    `ACTIVITY · EMPTY`, the Planning refresh and reminder notices, the
+    Planning loading page and every `X · RETRY` timeout page joined the
+    firmware sets; a reader with a tap action is selectable so its tap
+    reaches the Mac; the legacy review's staged return keeps the
+    conversation's firmware-list shape; Back on a resting Brainstorm frame
+    is Home.
+  `scripts/simulator_transitions_native_probe.py` drives all of it from a
+  firmware list and records zero image tiles on every step but the map.
+  Still pixels by design: the overview, the Planning month grid, the live
+  map.
+- ~~The raster duplicates~~ — 2026-10-05, the wearer's question: "are you
+  sure you are deleting any duplicates?" They were not deleted; they were
+  bypassed. The renderer still carried a canvas painter for every page the
+  firmware now draws (the question, the confirmation, Brainstorm and the
+  Agent Terminal transcript, the Calendar and Reminders pages, every
+  navigation frame but the map, the dense list, the readers, the Messages
+  thread, the Pomodoro page, the paged answer card), the presenter kept a
+  pixel branch for each behind a check of the visual surface's transition
+  barrier that production always passes, and `CapabilityMenu` kept the
+  prose pagers, the plugin-owned cursor and the title allowlist that
+  decided which list went native. All of it is gone: `HudCanvasRenderer`
+  draws the overview, the Planning month and dashboard, the live map, the
+  receipt strip and the conversation card and nothing else (2,300 lines,
+  from 4,500); the presenter has one path per page; a list is Even's own
+  unless it is the month grid (`usesFirmwareList`); the browser preview
+  hands pages over like the glass. The tests that pinned the pixel versions
+  went with them; the native pages keep theirs.
+- ~~Text measured by hand~~ — 2026-10-05: the plugin wrapped and paged
+  native text with its own word-wrap over `getTextWidth` and sized the
+  confirmation body by a 120-character guess. `FirmwareText.ts` measures
+  with `measureTextWrap` from `@evenrealities/pretext`, Even's model of the
+  LVGL renderer (per-glyph rounding, breaks at spaces, hyphens and CJK
+  boundaries, leading spaces dropped at a line start): a page goes to the
+  firmware unwrapped and `paginateMeasured` decides how many words it
+  holds; the confirmation's prompt is cut by `fitLines` to the three lines
+  it has, by glyph width rather than character count; a terminal row is one
+  line when the firmware's own width says so. Tests pin that no page
+  exceeds its container under that model.
+- ~~The due page completes by tap~~ — 2026-10-05: the pushed due Reminder
+  page was the last page whose hint named a word to say. Its tap now sends
+  `reminder_due.complete` with exactly the opaque occurrence and attempt
+  UUIDs and the generation the Mac bound the page to when the plugin
+  acknowledged it; the gateway admits the tap only against that accepted
+  page, once, and never after the socket it was shown on; the task monitor
+  resolves the occurrence to its native item and runs the same confirmed
+  completion the spoken "complete reminder" runs, so the glasses still ask
+  before anything is written. The hint reads "tap: complete".
+
+### Downlinks and uplinks: what drives them (2026-10-05)
+
+The audit found frames defined on both sides that nothing sent. Where they
+stand now:
+
+| Frame | Status |
+|---|---|
+| `imu.control`, `imu.trace` ↓ / `imu` ↑ | **Wired.** `joat --imu-trace PATH` arms them on every hello and records samples (docs/NEXT_STEPS.md §5). Off by default: ~10 messages/s. |
+| `audio.control open=true` after a don | **Wired** for resume policy "mac": the Mac remembers the plugin's `policy` report and answers a worn report with the mic off by asking for ears. "auto" and "confirm" stay plugin-local. |
+| `policy.set` ↓ | Mac-side hook, no caller: the wearer sets the policy on the phone/glasses; the Mac only reads it. Kept so a Mac-app settings pane can drive it. |
+| `shutdown` ↓ | Mac-side hook, no caller: `shutDownPageContainer` exits the plugin on the glasses, which is wrong on a brain restart (the RECONNECTING card refreshes itself). Kept for an explicit quit. |
+| `assistant.conversation dismiss` ↓ | Mac-side hook, no caller: the conversation page leaves on Back. Kept. |
+| `brainstorm.action show_brainstorm` ↑ | Plugin never emits it (a running tap sends `show_terminal`). Harmless Mac branch, kept. |
+| `productivity.view.ack`, `confirm` callbacks ↑ | Parsed; the pending futures resolve them, the callback lists stay empty. |
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.
@@ -263,6 +487,8 @@ tells you it is blank.
 
 - **The Mac's WebSocket origin must be in `app.json`'s `network` permission `whitelist`** (there is no `websocketDomains` key — that was a pre-verification guess). The Hub silently blocks anything unlisted: the socket simply never opens, indistinguishable from an offline Mac. Keep `VITE_MAC_WS_URL` and the whitelist in sync, including scheme and port. Direct development may use the gateway's plain `ws://…:8787`; an unattended Tailnet home brain instead exposes a private Tailscale Serve port-443 TLS edge and therefore uses `wss://<mini>.ts.net/glasses`. Do not label the local plain-WebSocket port as `wss://…:8787`. Stable hostname over churning DHCP IP (Tailscale MagicDNS or the Mac's `.local` mDNS name).
 - `navigator.geolocation` only works in a **published** Hub plugin, not via QR sideload — use `bridge.getAppLocation()` instead, which works in both.
+- **The guidance page follows the wearer (2026-10-05).** It used to repaint only when the maneuver or the rounded distance changed, so over a kilometre the dot, the progress bar and the ETA froze for a hundred metres at a time; the street tile was fetched once at the origin and never again; a fix the host reported without an `accuracy` figure, or with a `timestamp` in seconds, was rejected as uncertain for the whole walk; and a route could be acked as installed while the location stream had never started. Now: a fix that moved the wearer repaints the page (at most once a second, coalesced to the newest fix, and the Mac hears nothing — only semantic states are sent); the Mac prefetches tiles along the route and the plugin draws the one nearest the wearer; without a tile the pane draws the route's shape around the wearer instead of disappearing; a fix without `accuracy` is trusted at the policy's limit and a timestamp's unit is read against its arrival time; a navigation consumer retries the stream start and the route is rejected (the Mac shows "Navigation could not start") when it truly cannot run. The first fix of each route logs its shape (`[joat] navigation fix shape`, no position) so a field run can tell which optional fields the host fills.
+- **Saved places live on the phone page's Places tab** (`Places.ts`, `PlacesPanel.ts`): a name plus an address and/or the phone's pinned location, mirrored to the Even host's storage, sent whole to the Mac on every change and every connect (`places` uplink). The glasses' Navigation page lists them first; "JOAT, navigate home" resolves on the Mac.
 - Phone lock/background (official lifecycle doc): on **iOS the WebView keeps running** — JS state and usually the WebSocket survive, and the store QA gate is exactly this (5-minute lock, state preserved). What always stops when the app is suspended is **audio capture** — so the HUD keeps working through a lock, but voice needs the Even app foregrounded. Continuous listening still wants Guided Access / Auto-Lock Never, or Phase 5 (custom companion). Android WebViews may be killed under memory pressure — treat resume as a cold restart (localStorage survives; we already persist settings there).
 - Dev loop: the official CLI + simulator (`npm install -g --prefix="$HOME/.local" @evenrealities/evenhub-cli @evenrealities/evenhub-simulator`). Binaries: `evenhub` (alias `eh`) — `evenhub init` scaffolds `app.json` only, `evenhub qr` sideloads with hot reload, `evenhub pack app.json dist` builds the `.ehpk`. The simulator (`evenhub-simulator <url> --automation-port 9898`) injects the bridge and exposes an HTTP automation API — see [TESTING.md](TESTING.md) tier 2. No Even account needed for dev; `evenhub login` is only for store submission.
 

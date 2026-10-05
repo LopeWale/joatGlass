@@ -938,6 +938,7 @@ class TestStreamedReply:
         orch = VoiceOrchestrator(
             transport, engine, vad=TEST_VAD(), replier=replier, wake_words=WAKE,
             latency_observer=lambda turn, stage, bucket: latency_events.append((turn, stage, bucket)),
+            stream_publish_interval_s=0.0,
         )
 
         turn = asyncio.create_task(orch._handle_utterance(LOUD))
@@ -1056,6 +1057,7 @@ class TestStreamedReply:
             replier=StreamingReplier([secret_reply[:8], secret_reply[8:]]),
             wake_words=WAKE,
             latency_observer=lambda turn, stage, bucket: latency_events.append((turn, stage, bucket)),
+            stream_publish_interval_s=0.0,
         )
 
         await orch._handle_utterance(LOUD)
@@ -1186,6 +1188,7 @@ class TestStreamedReply:
         orch = VoiceOrchestrator(
             transport, engine, vad=TEST_VAD(),
             replier=StreamingReplier(["Once ", "upon ", "a time. \n"]),
+            stream_publish_interval_s=0.0,
         )
         orch.attach()
         assert transport.audio_cb is not None
@@ -1202,6 +1205,57 @@ class TestStreamedReply:
         ]
         assert not any(isinstance(message, AssistantOverlay) for message in transport.sent)
         assert conversation_role_text(transport, "user") == ["tell me a story"]
+
+    async def test_streamed_frames_are_coalesced_to_the_publish_interval(self) -> None:
+        """A token-at-a-time CLI must not re-send the whole transcript per token."""
+        transport, engine = FakeTransport(), FakeEngine("tell me a story")
+        clock = [100.0]
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(),
+            replier=StreamingReplier(["Once ", "upon ", "a ", "time."]),
+            stream_publish_interval_s=0.2, monotonic=lambda: clock[0],
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        views = conversation_views(transport)
+        # The first chunk goes out at once; the rest ride the final frame.
+        assert [view.state for view in views] == ["thinking", "answering", "ready"]
+        assert [view.turns[-1].text for view in views[1:]] == ["Once", "Once upon a time."]
+
+    async def test_streamed_frames_resume_once_the_publish_interval_has_passed(self) -> None:
+        transport, engine = FakeTransport(), FakeEngine("tell me a story")
+        clock = [100.0]
+
+        class PacedReplier(ReplyEngine):
+            async def reply(self, text: str) -> str | None:
+                return None
+
+            async def stream(self, text: str):
+                yield "Once "
+                clock[0] += 0.05
+                yield "upon "       # 50 ms later: held
+                clock[0] += 0.3
+                yield "a time."     # 350 ms after the first frame: sent
+
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=PacedReplier(),
+            stream_publish_interval_s=0.2, monotonic=lambda: clock[0],
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        for i, pcm in enumerate([LOUD, LOUD, QUIET, QUIET, QUIET, QUIET]):
+            transport.audio_cb(pcm, i)
+        await drain()
+
+        views = conversation_views(transport)
+        assert [view.state for view in views] == ["thinking", "answering", "answering", "ready"]
+        assert [view.turns[-1].text for view in views[1:]] == [
+            "Once", "Once upon a time.", "Once upon a time.",
+        ]
 
     async def test_single_chunk_stream_has_thinking_answering_and_ready_states(self) -> None:
         transport, engine = FakeTransport(), FakeEngine("hi")

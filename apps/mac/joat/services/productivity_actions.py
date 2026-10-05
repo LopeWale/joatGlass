@@ -76,7 +76,10 @@ _EVENT_USAGE = (
 _REMINDER_USAGE = (
     "Say: remind me to TITLE on YYYY-MM-DD at HH:MM in America/Chicago."
 )
-_CONFIRM_SECONDS = 12.0
+# Same envelope as a Messages reply (message_reply.CONFIRM_TRANSPORT_SECONDS):
+# the plugin's eight-second window plus the gate's paint before it and the
+# page restore after the tap, which an acceptance waits for before leaving.
+_CONFIRM_SECONDS = 20.0
 log = logging.getLogger(__name__)
 
 

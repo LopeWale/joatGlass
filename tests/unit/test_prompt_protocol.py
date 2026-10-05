@@ -87,6 +87,8 @@ def test_present_serializes_exact_question_and_ownership_without_extra_keys() ->
 
 @pytest.mark.parametrize(("owner", "field"), [
     ("messages", "recipient"), ("brainstorm", "topic"), ("terminal", "instruction"),
+    # A tapped page row asking its own question ("Where to?").
+    ("capability", "destination"),
 ])
 @pytest.mark.parametrize("source", ["glasses", "phone"])
 def test_present_supports_declared_owners_and_sources(owner: str, field: str, source: str) -> None:

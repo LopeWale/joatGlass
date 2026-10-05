@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
+import secrets
 import time
+from typing import Protocol
 
 from ..core.protocol import AudioSource, Device
 from .hud import HudWriter
@@ -18,6 +21,30 @@ from .prompted_input import PromptedInputDispatcher, PromptTicket, RetirementRea
 from .session import SessionManager, TopicCapture
 
 log = logging.getLogger(__name__)
+
+#: How long a tapped page row's question stays open for an answer.
+CAPABILITY_QUESTION_TTL_S = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityCapture:
+    """One question a tapped page row asks for itself ("Where to?")."""
+
+    capture_id: str
+    question: str
+    expires_at: float
+    field: str
+
+
+class OwnedCapture(Protocol):
+    """What a publication needs from any capture: identity, words, deadline."""
+
+    @property
+    def capture_id(self) -> str: ...
+    @property
+    def question(self) -> str: ...
+    @property
+    def expires_at(self) -> float: ...
 
 
 class PromptedSpeechRuntime:
@@ -43,7 +70,8 @@ class PromptedSpeechRuntime:
         self._monotonic = monotonic
         self._on_message_prompt_retired = on_message_prompt_retired
         self._closed = False
-        self._captures: dict[str, tuple[TopicCapture | TerminalCapture, Callable[[], None]]] = {}
+        self._captures: dict[str, tuple[OwnedCapture, Callable[[], None]]] = {}
+        self._capability_capture: CapabilityCapture | None = None
         self._publications: dict[str, asyncio.Task[bool]] = {}
         self._cancellations: dict[str, asyncio.Task[None]] = {}
         self.dispatcher = PromptedInputDispatcher(
@@ -96,8 +124,41 @@ class PromptedSpeechRuntime:
             clear=clear, consume=consume,
         )
 
+    async def ask_capability(
+        self, question: str, field: str, consume: Callable[[str], Awaitable[None]],
+        *, ttl_s: float = CAPABILITY_QUESTION_TTL_S,
+    ) -> bool:
+        """Ask one question on behalf of a tapped page row; route the answer.
+
+        The wearer opened a page by hand and tapped "Navigate to a place" or
+        "Dictate a note": the row asks its own question through the same
+        acknowledged prompt the Messages body and a Brainstorm topic use, so
+        the answer is admitted only from the glasses, only after the question
+        is visibly on the lens, and only once. A newer question replaces an
+        older one; Back on the glasses revokes it like any other prompt.
+        """
+        capture = CapabilityCapture(
+            capture_id=f"capability-{secrets.token_hex(12)}", question=question,
+            expires_at=self._monotonic() + ttl_s, field=field,
+        )
+        self._capability_capture = capture
+
+        def clear() -> None:
+            if self._capability_capture is capture:
+                self._capability_capture = None
+
+        async def consume_once(text: str) -> None:
+            clear()
+            await consume(text)
+
+        return await self._publish_owned_capture(
+            capture, owner_kind="capability", field=field,
+            is_current=lambda: self._capability_capture is capture,
+            clear=clear, consume=consume_once,
+        )
+
     async def _publish_owned_capture(
-        self, capture: TopicCapture | TerminalCapture, *, owner_kind: str, field: str,
+        self, capture: OwnedCapture, *, owner_kind: str, field: str,
         is_current: Callable[[], bool], clear: Callable[[], None],
         consume: Callable[[str], Awaitable[None]],
     ) -> bool:

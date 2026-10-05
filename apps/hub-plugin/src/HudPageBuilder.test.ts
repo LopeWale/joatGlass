@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
 import { getTextWidth, measureTextWrap, pxTruncate } from '@evenrealities/pretext';
-import { HudPageBuilder } from './HudPageBuilder';
+import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
 type Page = {
@@ -160,18 +160,23 @@ describe('HudPageBuilder invariants', () => {
       compatible.visualLayout() as Page,
     ];
     expect(pages.every((page) => page.menuObject === undefined)).toBe(true);
+    // Settings lives on the phone and has no firmware menu row; every
+    // other capability is offered.
     expect((builder.defaultLayout() as Page).menuObject?.menuItems)
-      .toHaveLength(CAPABILITIES.length);
+      .toHaveLength(CAPABILITIES.filter((name) => name !== 'Settings').length);
   });
 
   it('keeps the contextual escape available on every image-first rebuild', () => {
     const visual = builder.visualLayout() as Page;
     // The firmware menu offers exactly the wearer's capability rows — one
     // menu, reached by the platform's own gesture, costing zero image tiles.
+    // Settings is phone-owned and has no row, but the ids keep their
+    // original index so no surviving action id moves when it drops out.
     const expected = CAPABILITIES.map((name, index) => ({
       itemID: CAPABILITY_MENU_ID_BASE + index,
       itemName: name,
-    }));
+    })).filter(({ itemName }) => itemName !== 'Settings');
+    expect(expected).toHaveLength(CAPABILITIES.length - 1);
     expect(visual.menuObject?.menuItems).toEqual(expected);
     expect((builder.visualCompatibilityLayout() as Page).menuObject?.menuItems).toEqual(expected);
   });
@@ -204,10 +209,27 @@ describe('HudPageBuilder invariants', () => {
   // The bug this file exists to prevent: the list draws, but capture stays on
   // the main TEXT container, so the firmware never moves the selection and
   // never emits listEvent — "menu shows but won't navigate".
+  it('keeps every firmware list row under the host\'s 63-byte cap, on a code-point boundary', () => {
+    // Measured in the official simulator: a 64-byte row fails the whole
+    // rebuild. "·" is two bytes, so a 64-character Messages row overflows.
+    const narrow = 'i'.repeat(64);
+    const dotted = `You · Read · ${'x'.repeat(51)}`; // 64 chars, 66 bytes
+    const page = builder.listLayout([narrow, dotted, 'short']) as Page;
+    const names = page.listObject?.[0]?.itemContainer?.itemName ?? [];
+    for (const row of names) {
+      expect(new TextEncoder().encode(row).length).toBeLessThanOrEqual(LIST_ROW_MAX_UTF8_BYTES);
+    }
+    expect(names[0]).toBe('i'.repeat(63));
+    expect(names[1]?.startsWith('You · Read · ')).toBe(true);
+    expect(names[2]).toBe('short');
+    expect(clampUtf8Bytes('ab·cd', 3)).toBe('ab');
+    expect(clampUtf8Bytes('ab·cd', 4)).toBe('ab·');
+  });
+
   it('list layout: the LIST container is the one that captures', () => {
     const page = builder.listLayout(['a', 'b', 'c']) as Page;
     expect(page.listObject?.[0]?.isEventCapture).toBe(1);
-    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)?.isEventCapture).toBe(0);
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.isEventCapture).toBe(0);
   });
 
   it('list layout: caps at 20 items x 64 chars and fits the canvas', () => {
@@ -333,56 +355,44 @@ describe('HudPageBuilder invariants', () => {
     expect(new Set(rail.map(indent)).size).toBe(1);
   });
 
-  it('reader layout: an opened article is four firmware text containers, body captures, rows rejoined', () => {
-    const page = builder.listLayout(
-      ['1/5 · BBC · 16m · Woman and three children die', 'A woman and three children have died in a house fire on ', 'Merseyside.\n', 'Six fire engines were at the scene.'],
-      { title: 'NEWS · ARTICLE', hint: 'down more · left x2: back', nativeReaderPage: true },
-    ) as unknown as {
-      containerTotalNum: number;
-      textObject: Array<{ containerID: number; containerName: string; content: string; isEventCapture: number; zOrderIndex: number; yPosition: number; height: number }>;
-      listObject?: unknown[];
-      imageObject?: unknown[];
-    };
-    expect(page.containerTotalNum).toBe(4);
-    expect(page.textObject).toHaveLength(4);
-    expect(page.listObject ?? []).toHaveLength(0);
-    expect(page.imageObject ?? []).toHaveLength(0);
-    expect(validateEvenHubPageContainer(page as never).valid).toBe(true);
-    const byName = Object.fromEntries(page.textObject.map((t) => [t.containerName, t]));
-    expect(byName['reader-head']!.content).toBe('NEWS · 1/5 · BBC · 16m · Woman and three children die');
-    // The Mac's 62-column rows concatenate losslessly; the firmware wraps.
-    expect(byName['main']!.content).toBe('A woman and three children have died in a house fire on Merseyside.\nSix fire engines were at the scene.');
-    expect(byName['main']!.isEventCapture).toBe(1);
-    expect(page.textObject.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
-    expect(byName['hint']!.content).toBe('swipe: more · double-click: back');
-    // Every band is whole 27px lines inside its 4px padding and on-canvas.
-    for (const t of page.textObject) {
-      expect(t.yPosition + t.height).toBeLessThanOrEqual(CANVAS.height);
-      expect((t.height - 2 * (t.containerName === 'status' ? 6 : 4)) % 27).toBe(0);
-    }
-  });
-
   it('list layout gives full-focus content a title and quiet bottom action rail', () => {
     const page = builder.listLayout(['Messages', 'Settings'], {
       title: 'CAPABILITIES',
       hint: 'SWIPE move · TAP open · LEFT x2 back',   // authored form
     }) as Page;
-    const title = page.textObject?.find((c) => c.containerID === ContainerId.Main);
+    // One header line carries the page's name (the presenter composes the
+    // clock · page · mic · battery line in; a bare title is the fallback),
+    // and the list starts straight under it: five rows, not four.
+    const header = page.textObject?.find((c) => c.containerID === ContainerId.StatusBar);
     const list = page.listObject?.[0];
 
     const hint = page.textObject?.find((c) => c.containerID === ContainerId.Hint);
 
-    expect(page.containerTotalNum).toBe(4);
-    expect(title).toMatchObject({ yPosition: 39, height: 38, textColor: 4, content: 'CAPABILITIES' });
-    expect(list).toMatchObject({ yPosition: 77, height: 176 });
+    expect(page.containerTotalNum).toBe(3);
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toBeUndefined();
+    expect(header).toMatchObject({ yPosition: 0, height: 35, textColor: 2, content: 'CAPABILITIES' });
+    expect(list).toMatchObject({ yPosition: 35, height: 216 });
     expect(hint).toMatchObject({ yPosition: 253, height: 35, textColor: 1 });
-    // The wearer sees the FORMATTED hint. Hints are authored in the legacy
-    // "left x2" form and GesturePolicy.formatHint rewrites them at render, so
-    // a wearer on the R1 ring is never told to press a left temple they do
-    // not have. Asserting the authored form here meant this test would have
-    // passed while the glasses said "LEFT x2".
+    // The builder rewrites a Mac's old left-only wording to the gesture
+    // GesturePolicy honours on every source (GesturePolicy.formatHint).
     expect(hint?.content).toBe('SWIPE move · TAP open · double-click back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
+  });
+
+  it('fits a long header by shortening the page word, never the mic and battery glyphs', () => {
+    const short = '9:41 · NEWS · ● · ▇';
+    expect(fitHeader(short)).toBe(short);
+    // A word that overruns the 568 px line loses characters to an ellipsis;
+    // the clock stays first and the two glyphs stay last.
+    const long = `9:41 · ${'MESSAGES · CONVERSATION WITH A VERY LONG NAME'} · ● · ▂ 12%`;
+    const fitted = fitHeader(long);
+    expect(fitted).not.toBe(long);
+    expect(fitted.startsWith('9:41 · MESSAGES · ')).toBe(true);
+    expect(fitted.endsWith(' · ● · ▂ 12%')).toBe(true);
+    expect(fitted).toContain('…');
+    // The layouts apply it: a list's header is never tail-cut.
+    const page = builder.listLayout(['a'], { status: long }) as Page;
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content).toBe(fitted);
   });
 
   it('confirmation is a dedicated full-screen decision surface with no list or button chrome', () => {
@@ -392,7 +402,7 @@ describe('HudPageBuilder invariants', () => {
     expect(page.listObject).toBeUndefined();
     expect(page.containerTotalNum).toBe(5);
     expect(byId(ContainerId.Main)).toMatchObject({
-      yPosition: 39, height: 144, textColor: 4,
+      yPosition: 35, height: 144, textColor: 4,
       content: 'CONFIRM ACTION\n\nSend reply to Adele?',
     });
     expect(byId(ContainerId.Context)?.content).toBe('TAP · confirm   SWIPE · cancel');

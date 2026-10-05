@@ -9,17 +9,8 @@ import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { HudVisualFrame } from './HudVisualSurface';
-import { selectedMessagesConversationRow } from './HudCanvasRenderer';
 import type { MacLink } from './MacLink';
 import { CAPABILITIES, type ProductivityHudModel } from './types';
-import { setNativePanelTabsForTest } from './CapabilityMenu';
-
-// These tests pin the plugin-side cursor-restoration path, which ships as the
-// fallback when VITE_NATIVE_PANEL_TABS narrows the firmware-list set. On a
-// firmware list there is nothing to restore: the glasses own the highlight
-// and report it back (see restorePanelSelection).
-setNativePanelTabsForTest([]);
-
 
 /**
  * The wearer's report from hardware: double-tap opened "a menu modal, but
@@ -50,12 +41,33 @@ function rig(
   let listCall = 0;
   let visibleSelection = 0;
   let productivityCall = 0;
+  // The list page on the glass, as HudPresenter tracks its surface: a
+  // firmware list or text page owns its own cursor; a raster list or any
+  // non-list surface leaves the cursor to the plugin.
+  type PageOptions = {
+    title?: string; hint?: string; selectable?: boolean;
+    nativeFirmwareList?: boolean; nativeTextPage?: boolean; initialSelectedIndex?: number;
+  };
+  let currentList: PageOptions | undefined;
+  const setSelection = vi.fn(async (index: number) => {
+    visibleSelection = index;
+    selections.push(index);
+    return selectionResult;
+  });
   const hud = {
-    showList: vi.fn(async (
-      items: string[], options?: { title?: string; hint?: string; selectable?: boolean },
-    ) => {
+    // As the real presenter answers (HudPresenter.usesCustomListSelection):
+    // with `next`, for the page about to be shown by its opt-in; without it,
+    // for the page on the glass.
+    usesCustomListSelection: (next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (next
+      ? next.nativeFirmwareList !== true && next.nativeTextPage !== true
+      : !(currentList?.nativeFirmwareList || currentList?.nativeTextPage)),
+    showList: vi.fn(async (items: string[], options?: PageOptions) => {
       operations.push('list');
-      visibleSelection = 0;
+      currentList = options;
+      // HudPresenter.initialListSelection: a raster list opens on the
+      // requested row; a firmware list always starts on row one (the
+      // firmware has no cursor-setting API).
+      visibleSelection = options?.nativeFirmwareList ? 0 : (options?.initialSelectedIndex ?? 0);
       lists.push(items);
       listOptions.push(options);
       const result = Array.isArray(listResult)
@@ -69,11 +81,8 @@ function rig(
       statuses.push(t);
       return true;
     }),
-    setSelection: vi.fn(async (index: number) => {
-      visibleSelection = index;
-      selections.push(index);
-      return selectionResult;
-    }),
+    setSelection,
+    restoreSelection: vi.fn(async (index: number) => setSelection(index)),
     moveSelection: vi.fn(async (delta: number) => {
       moves.push(delta);
       return true;
@@ -84,6 +93,7 @@ function rig(
       onDeferredProductivityVisible?: () => void,
     ) => {
       operations.push('productivity');
+      currentList = undefined;
       productivities.push(productivity);
       deferredProductivityVisibleCallbacks.push(onDeferredProductivityVisible);
       const result = Array.isArray(productivityResult)
@@ -93,10 +103,7 @@ function rig(
       return result;
     }),
     isProductivityVisible: vi.fn(() => productivityVisible),
-    showDefault: vi.fn(async () => { defaults += 1; return true; }),
-    // See CapabilityMenu.panel.test.ts: two call sites invoke this without
-    // `?.`, so omitting it throws rather than degrading.
-    usesCustomListSelection: () => true,
+    showDefault: vi.fn(async () => { defaults += 1; currentList = undefined; return true; }),
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => {
     const event = m.event as { containerName?: string; selectedName?: string } | undefined;
@@ -218,197 +225,6 @@ describe('Brainstorm surface ownership', () => {
   });
 });
 
-function conversationSelectionRig(native = false) {
-  let completed: HudVisualFrame | undefined;
-  const frames: HudVisualFrame[] = [];
-  const sent: Array<Record<string, unknown>> = [];
-  const hooks: { paint?: (frame: HudVisualFrame) => Promise<void> } = {};
-  const client = {
-    require: () => ({
-      textContainerUpgrade: async () => true,
-      rebuildPageContainer: async () => true,
-    }),
-  } as unknown as BridgeClient;
-  const hud = new HudPresenter(client, new HudPageBuilder(), native ? undefined : {
-    paint: async (frame) => {
-      await hooks.paint?.(frame);
-      completed = frame;
-      frames.push(frame);
-      return true;
-    },
-  });
-  // Same split as the main rig above: surface announcements retire ownership
-  // on the Mac and are not requests. Counting them here would make every
-  // "how many times did we ask the Mac?" assertion drift with page routing.
-  const surfaceEvents: Array<Record<string, unknown>> = [];
-  const link = { send: (message: Record<string, unknown>) => {
-    const event = message.event as { containerName?: string; selectedName?: string } | undefined;
-    if (event?.containerName === 'capability-lifecycle' && event.selectedName?.startsWith('surface-')) {
-      surfaceEvents.push(message);
-    } else sent.push(message);
-  } } as unknown as MacLink;
-  const menu = new CapabilityMenu(hud, new Settings(), link);
-  return { menu, hud, sent, surfaceEvents, frames, hooks, completed: () => completed };
-}
-
-async function openConversationSelection(r: ReturnType<typeof conversationSelectionRig>) {
-  await r.menu.openFromContextualMenu(0);
-  const requestId = latestRequestId(r.sent);
-  await r.menu.presentList('MESSAGES', ['New message', 'Alex · Preview'], requestId, true);
-  r.menu.handleList(click(1));
-  return requestId;
-}
-
-const actionableConversation = [
-  'Latest messages — down for older',
-  'Alex · First received body',
-  'You · Second message body',
-  'Say “JOAT, reply saying …”',
-  'Mic off? Long press to enable.',
-];
-
-describe('Conversation actionable selection', () => {
-  it.each(['text', 'native-zero', 'omitted-zero'] as const)(
-    'opens with the first message visibly selected and immediately readable (%s tap)', async (tap) => {
-      const r = conversationSelectionRig();
-      try {
-        const requestId = await openConversationSelection(r);
-        expect(await r.menu.presentList(
-          'MESSAGES · CONVERSATION', actionableConversation, requestId, true,
-          'down older · tap read · say reply · left x2: back',
-        )).toBe(true);
-        expect(r.completed()).toMatchObject({
-          kind: 'list', title: 'MESSAGES · CONVERSATION', selectedIndex: 1,
-        });
-        expect(r.frames.filter((frame) => frame.kind === 'list'
-          && frame.title === 'MESSAGES · CONVERSATION')).toHaveLength(1);
-        const frame = r.completed();
-        if (frame?.kind !== 'list') throw new Error('Expected completed conversation frame');
-        expect(selectedMessagesConversationRow(frame.items, frame.selectedIndex)).toBe(0);
-        if (tap === 'text') r.menu.handleClick();
-        else r.menu.handleList(tap === 'native-zero' ? click(0) : clickRow0());
-        expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
-          containerName: 'capmessage', selectedIndex: 1, requestId,
-        });
-      } finally { r.menu.releaseToLiveSession(); }
-    },
-  );
-
-  it('awaits the first actionable highlight before admitting an immediate tap', async () => {
-    const r = conversationSelectionRig();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let selectionStarted = false;
-    let opening: Promise<boolean> | undefined;
-    try {
-      const requestId = await openConversationSelection(r);
-      r.hooks.paint = async (frame) => {
-        if (frame.kind === 'list' && frame.title === 'MESSAGES · CONVERSATION'
-          && frame.selectedIndex === 1) {
-          selectionStarted = true;
-          await held;
-        }
-      };
-      let finished = false;
-      opening = r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true)
-        .then((result) => { finished = true; return result; });
-      await vi.waitFor(() => expect(selectionStarted).toBe(true));
-      expect(finished).toBe(false);
-      expect(r.menu.handleClick()).toBe(true);
-      expect(r.sent).toHaveLength(2);
-      release();
-      await opening;
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      r.menu.handleClick();
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1 });
-    } finally {
-      release();
-      await opening;
-      r.menu.releaseToLiveSession();
-    }
-  });
-
-  it('pages at the last actual message instead of stepping into invisible reply instructions', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true, 'down older');
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      await vi.waitFor(() => expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 2 }));
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      expect(r.sent).toHaveLength(3);
-      expect(r.sent[2]?.event).toMatchObject({
-        containerName: 'cappage', selectedName: 'MESSAGES',
-        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId,
-      });
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 2 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('pages upward from the first actual message without an invisible header stop', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true, 'up newer');
-      r.menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
-        containerName: 'cappage', eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId,
-      });
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('does not turn a reported instruction row into an invisible tap target', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
-      r.menu.handleList(click(4));
-      expect(r.sent).toHaveLength(2);
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      r.menu.handleClick();
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 1 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('keeps the visible message authoritative when a hidden native cursor reports another speaker', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      expect(r.menu.handleList(click(2))).toBe(true);
-      expect(r.sent).toHaveLength(2);
-      expect(r.completed()).toMatchObject({ kind: 'list', selectedIndex: 1 });
-      r.menu.handleClick();
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({
-        containerName: 'capmessage', selectedIndex: 1, requestId,
-      });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('preserves arbitrary legacy conversation row indices', async () => {
-    const r = conversationSelectionRig();
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', ['Legacy row one', 'Legacy row two'], requestId, true);
-      r.menu.handleClick();
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 0 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-
-  it('preserves the actual firmware row index in native fallback', async () => {
-    const r = conversationSelectionRig(true);
-    try {
-      const requestId = await openConversationSelection(r);
-      await r.menu.presentList('MESSAGES · CONVERSATION', actionableConversation, requestId, true);
-      r.menu.handleList(click(2));
-      expect(r.sent[r.sent.length - 1]?.event).toMatchObject({ containerName: 'capmessage', selectedIndex: 2 });
-    } finally { r.menu.releaseToLiveSession(); }
-  });
-});
-
 describe('CapabilityMenu', () => {
   it('recognizes only the explicit safe-action lifecycle namespace', () => {
     expect(isActionLifecycleTitle('ACTION · VERIFYING')).toBe(true);
@@ -430,7 +246,7 @@ describe('CapabilityMenu', () => {
     await menu.openFromContextualMenu(0); // Messages, via the firmware menu
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
-    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back' });
+    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back', nativeFirmwareList: true });
     // Ownership is announced BEFORE the loading frame paints: the Mac must
     // know Home no longer owns the glass before any response can arrive.
     expect(operations).toEqual(['surface-feature', 'list']);
@@ -754,6 +570,258 @@ describe('CapabilityMenu', () => {
       },
     });
   });
+  it('hands every list to the firmware list; only the month grid is the image dashboard', async () => {
+    const { menu, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(listOptions[0]).toMatchObject({ title: 'MESSAGES', nativeFirmwareList: true });
+    expect(await menu.presentList('MESSAGES', rows(3), latestRequestId(sent), true)).toBe(true);
+    expect(listOptions[1]).toMatchObject({ title: 'MESSAGES', nativeFirmwareList: true });
+
+    await menu.openFromContextualMenu(6); // Activity
+    await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(2));
+    expect(listOptions[2]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
+    expect(await menu.presentList('ACTIVITY', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(listOptions[3]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
+
+    await menu.openFromContextualMenu(1); // Planning
+    await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(3));
+    // The loading page is a firmware list; so is a month that arrives
+    // without its grid. Only the grid itself, a page with no Even template,
+    // is the image dashboard.
+    expect(listOptions[4]).toMatchObject({ title: 'PLANNING', nativeFirmwareList: true });
+    expect(await menu.presentList('PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(listOptions[5]).toMatchObject({ title: 'PLANNING · PLAN · AUGUST 2026', nativeFirmwareList: true });
+  });
+
+  it('draws QuickNotes, Notifications and the readers natively, paging the archive by its rows', async () => {
+    const { menu, hud, listOptions, sent } = rig();
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
+    ));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    const page = [...rows(20), '▼ Older notes'];
+    expect(await menu.presentList(
+      'QUICKNOTES', page, requestId, true, 'down older · tap: open · left x2: back',
+      undefined, undefined, undefined, undefined, { index: 0, count: 2 }, undefined, undefined, { olderIndex: 20 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES', nativeFirmwareList: true });
+
+    // The paging row is the archive page request the edge swipe used to send.
+    sent.length = 0;
+    expect(menu.handleList(click(20))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'cappage', selectedName: 'QUICKNOTES · LIST', selectedIndex: 0, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId },
+    });
+    expect(await menu.presentList(
+      'QUICKNOTES', ['Row 21', 'Row 22', '▲ Newer notes'], requestId, true, 'up newer · tap: open · left x2: back',
+      undefined, undefined, undefined, undefined, { index: 1, count: 2 }, undefined, undefined, { newerIndex: 2 },
+    )).toBe(true);
+    sent.length = 0;
+    expect(menu.handleList(click(2))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      event: { containerName: 'cappage', selectedName: 'QUICKNOTES · LIST', selectedIndex: 1, eventType: OsEventTypeList.SCROLL_TOP_EVENT },
+    });
+    expect(await menu.presentList(
+      'QUICKNOTES', page, requestId, true, 'down older · tap: open · left x2: back',
+      undefined, undefined, undefined, undefined, { index: 0, count: 2 }, undefined, undefined, { olderIndex: 20 },
+    )).toBe(true);
+
+    // A note row opens its reader, which is a firmware text page.
+    sent.length = 0;
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({ event: { containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 1 } });
+    expect(await menu.presentList(
+      'QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page'], requestId, false, 'down more · left x2: back',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES · DETAIL', nativeTextPage: true });
+  });
+
+  it('draws the Planning week and day pages as firmware lists and keeps Back with the Mac', async () => {
+    const { menu, hud, listOptions, sent } = rig();
+    // As the presenter answers: the page about to be shown by its opt-in,
+    // the page on the glass by what was shown last.
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true
+        : !(listOptions[listOptions.length - 1] as { nativeFirmwareList?: boolean } | undefined)?.nativeFirmwareList
+    ));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
+    const requestId = latestRequestId(sent);
+    const week = [
+      'MON OCT 5 · 2 events', 'TUE OCT 6 · free', 'WED OCT 7 · 1 reminder', 'THU OCT 8 · free',
+      'FRI OCT 9 · free', 'SAT OCT 10 · free', 'SUN OCT 11 · free',
+      '‹ SEP 28', 'OCT 12 ›', '○ VIEW · MONTH', '● VIEW · WEEK', '○ VIEW · DAY',
+    ];
+    expect(await menu.presentList(
+      'PLANNING · PLAN · OCT 5–11', week, requestId, true, 'tap: open · left x2: back',
+      undefined, 'Planning · OCT 5–11', 7, undefined, undefined, undefined, { canGoBack: true, selectedIndex: 0 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · OCT 5–11', nativeFirmwareList: true });
+
+    // The firmware reports the tapped row; the Mac resolves it by index.
+    sent.length = 0;
+    expect(menu.handleList(click(2))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input', event: { containerName: 'capdata', selectedName: 'PLANNING', selectedIndex: 2, requestId },
+    });
+    const day = ['[09:00] Standup', '[16:30] □ Call the dentist', '‹ TUE OCT 6', 'THU OCT 8 ›', '○ VIEW · MONTH', '○ VIEW · WEEK', '● VIEW · DAY'];
+    expect(await menu.presentList(
+      'PLANNING · PLAN · WED OCT 7', day, requestId, true, 'tap: open · left x2: back',
+      undefined, 'Planning · WED OCT 7', 2,
+      [{ time: 'Today, 09:00', kind: 'event', title: 'Standup' }, { time: 'Today, 16:30', kind: 'reminder', title: 'Call the dentist' }, null, null, null, null, null],
+      undefined, undefined, { canGoBack: true, selectedIndex: 2 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · WED OCT 7', nativeFirmwareList: true });
+
+    // Back is the Mac's: one planning-back lifecycle, no local repaint.
+    sent.length = 0;
+    await menu.toggle();
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input', event: { containerName: 'capability-lifecycle', selectedName: 'planning-back', requestId },
+    });
+  });
+
+  it('draws Notifications and a Planning entry natively', async () => {
+    const { menu, hud, listOptions, sent } = rig();
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
+    ));
+    await menu.openNotifications();
+    await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
+    expect(await menu.presentList(
+      'NOTIFICATIONS', ['[2m] Dele · Call me', 'Clear JOAT notifications'], latestRequestId(sent), true,
+      'tap: read · left x2: back', undefined, undefined, 1,
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS', nativeFirmwareList: true });
+    expect(await menu.presentList(
+      'NOTIFICATIONS · DETAIL', ['Dele · Messages', 'Call me when you arrive.'], latestRequestId(sent), false,
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS · DETAIL', nativeTextPage: true });
+
+    await menu.toggle();
+    sent.length = 0;
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
+    const planning = latestRequestId(sent);
+    expect(await menu.presentList('PLANNING', ['14:00 · Design review'], planning, true, 'tap: open')).toBe(true);
+    // A read-only entry answers a row tap and is a firmware text page.
+    expect(menu.handleList(click(0))).toBe(true);
+    expect(await menu.presentList(
+      'PLANNING · EVENT', ['Design review', '14:00 · Event'], planning, false, 'left x2 Planning',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · EVENT', nativeTextPage: true });
+  });
+
+  it('draws the message reader as a firmware text page, pages it locally, then asks the Mac past its edge', async () => {
+    const { menu, hud, listOptions, lists, sent } = rig();
+    let localPages = 1;
+    hud.scrollTextPage = vi.fn((direction: 'up' | 'down') => {
+      if (direction === 'down' && localPages > 0) { localPages -= 1; return true; }
+      return false;
+    });
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
+    ));
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', ['Latest messages', 'Dele · Opening words', 'Say reply'], requestId, true,
+      'tap read · say reply · left x2: back',
+    )).toBe(true);
+    menu.handleList(click(1));
+    const items = ['1/2 · From Dele', 'Opening words of a long message'];
+    expect(await menu.presentList(
+      'MESSAGES · MESSAGE', items, requestId, false, 'down more · say reply · left x2: back',
+    )).toBe(true);
+    // The rows go to the presenter untouched (no raster prose pager) with the opt-in.
+    expect(lists[lists.length - 1]).toEqual(items);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'MESSAGES · MESSAGE', nativeTextPage: true });
+
+    const before = sent.length;
+    // First swipe: the text page turns its own page; nothing goes to the Mac.
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(before);
+    // Past the local edge the Mac's footer offers "down more", so the Mac is asked.
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(before + 1);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'cappage', selectedName: 'MESSAGES', eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId },
+    });
+  });
+
+  it('draws a conversation with paging rows as a firmware list and turns their taps into page requests', async () => {
+    const { menu, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    const requestId = latestRequestId(sent);
+    const thread = [
+      'Latest messages',
+      'Dele · Unread · Attachment',
+      'You · Read · On my way',
+      'Say “JOAT, reply saying …”',
+      'Mic off? Long press to enable.',
+      '▼ Older messages',
+    ];
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', thread, requestId, true, 'tap read · say reply · left x2: back',
+      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { olderIndex: 5 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'MESSAGES · CONVERSATION', nativeFirmwareList: true,
+    });
+
+    // The firmware reports the tapped row. A heading or instruction row is inert.
+    sent.length = 0;
+    expect(menu.handleList(clickRow0())).toBe(true);
+    expect(menu.handleList(click(3))).toBe(true);
+    expect(sent).toEqual([]);
+
+    // A message row reads it, with the raw list index the Mac owns.
+    expect(menu.handleList(click(2))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capmessage', selectedName: 'MESSAGES', selectedIndex: 2, requestId,
+    });
+    // The Mac answers that read with the message page; a fresh thread frame
+    // restores the conversation before the paging row is used.
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', thread, requestId, true, 'tap read · say reply · left x2: back',
+      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { olderIndex: 5 },
+    )).toBe(true);
+
+    // The paging row is the page request the swipe used to send.
+    sent.length = 0;
+    expect(menu.handleList(click(5))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'cappage', selectedName: 'MESSAGES',
+      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId,
+    });
+    // Until that page lands, further taps on the thread are ignored.
+    sent.length = 0;
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent).toEqual([]);
+
+    const older = ['Older messages', 'Dele · Earlier', 'Say “JOAT, reply saying …”', '▲ Newer messages'];
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', older, requestId, true, 'tap read · say reply · left x2: back',
+      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { newerIndex: 3 },
+    )).toBe(true);
+    expect(menu.handleList(click(3))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'cappage', eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId,
+    });
+  });
+
+
   it('keeps rows four and five reachable after the Mac replaces the loading view', async () => {
     const { menu, moves, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages
@@ -940,7 +1008,8 @@ describe('CapabilityMenu', () => {
 
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(transcript);
-    expect(visibleSelection()).toBe(1);
+    // The thread is a firmware list: Back lands on row one.
+    expect(visibleSelection()).toBe(0);
     expect(sent[3]).toEqual({
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation', requestId, traceId: selectionId },
@@ -948,7 +1017,9 @@ describe('CapabilityMenu', () => {
 
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(conversations);
-    expect(visibleSelection()).toBe(1);
+    // The picker is a firmware list: Back lands on row one (the firmware
+    // has no cursor-setting API), so the row the wearer left is not restored.
+    expect(visibleSelection()).toBe(0);
     expect(sent[4]).toEqual({
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId, traceId: selectionId },
@@ -1000,7 +1071,15 @@ describe('CapabilityMenu', () => {
   });
 
   it.each(['text', 'native'] as const)('QuickNotes reader pages through %s input and restores the Back target', async (input) => {
-    const { menu, sent, lists, visibleSelection } = rig();
+    const { menu, hud, sent, lists, visibleSelection } = rig();
+    // The reader is a firmware text page (2026-10-05): the presenter turns
+    // its own local page first; past that edge the Mac's footer decides.
+    // One local page here, consumed by the first swipe down.
+    let localPages = 1;
+    hud.scrollTextPage = vi.fn((direction: 'up' | 'down') => {
+      if (direction === 'down' && localPages > 0) { localPages -= 1; return true; }
+      return false;
+    });
     await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
     const requestId = latestRequestId(sent);
     const picker = ['Other note', 'Long exact note'];
@@ -1029,7 +1108,9 @@ describe('CapabilityMenu', () => {
     expect(sent[sent.length - 1]).toMatchObject({event: {selectedIndex: 1, traceId}});
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(picker);
-    expect(visibleSelection()).toBe(1);
+    // The archive is a firmware list: Back lands on row one (no
+    // cursor-setting API), not on the note the wearer opened.
+    expect(visibleSelection()).toBe(0);
     expect(sent[sent.length - 1]).toEqual({kind: 'input', event: {
       containerName: 'capability-lifecycle', selectedName: 'quicknotes-list', requestId,
     }});
@@ -1178,19 +1259,15 @@ describe('CapabilityMenu', () => {
 
   it.each([
     { domain: 'calendar', phase: 'verifying', title: 'Design review', secondary: 'Checking native read-back' },
-    { domain: 'calendar', phase: 'saved', title: 'Design review', secondary: 'Calendar read-back matched' },
     { domain: 'calendar', phase: 'failed', title: 'Design review', secondary: 'No calendar item was changed.' },
     { domain: 'calendar', phase: 'check', title: 'Design review', secondary: 'It may have changed. Do not retry.' },
     { domain: 'calendar', phase: 'cancelled', title: 'Design review', secondary: 'No calendar item was changed.' },
     { domain: 'calendar', phase: 'not_saved', title: 'Design review', secondary: 'No calendar item was changed.' },
     { domain: 'reminders', phase: 'verifying', title: 'Buy filters', secondary: 'Checking native read-back' },
-    { domain: 'reminders', phase: 'saved', title: 'Buy filters', secondary: 'Native alarm set · JOAT monitoring armed.' },
-    { domain: 'reminders', phase: 'monitoring', title: 'Buy filters', secondary: 'Native alarm is scheduled. JOAT will check at due time.' },
     { domain: 'reminders', phase: 'failed', title: 'Buy filters', secondary: 'No reminders item was changed.' },
     { domain: 'reminders', phase: 'check', title: 'Buy filters', secondary: 'It may have changed. Do not retry.' },
     { domain: 'reminders', phase: 'cancelled', title: 'Buy filters', secondary: 'No reminders item was changed.' },
     { domain: 'reminders', phase: 'not_saved', title: 'Buy filters', secondary: 'No reminders item was changed.' },
-    { domain: 'reminders', phase: 'completed', title: 'Buy filters', secondary: 'Reminders read-back matched' },
     { domain: 'reminders', phase: 'due', title: 'Buy filters', secondary: 'This reminder is still incomplete.' },
   ] satisfies ReadonlyArray<{
     domain: ProductivityHudModel['domain'];
@@ -1223,6 +1300,52 @@ describe('CapabilityMenu', () => {
     });
   });
 
+  it.each([
+    { domain: 'calendar', phase: 'saved', title: 'Design review', secondary: 'Calendar read-back matched' },
+    { domain: 'reminders', phase: 'saved', title: 'Buy filters', secondary: 'Native alarm set · JOAT monitoring armed.' },
+    { domain: 'reminders', phase: 'monitoring', title: 'Buy filters', secondary: 'Native alarm is scheduled. JOAT will check at due time.' },
+    { domain: 'reminders', phase: 'completed', title: 'Buy filters', secondary: 'Reminders read-back matched' },
+  ] satisfies ReadonlyArray<{
+    domain: ProductivityHudModel['domain'];
+    phase: ProductivityHudModel['phase'];
+    title: string;
+    secondary: string;
+  }>)('refreshes unified Planning at once after a verified $domain $phase outcome, keeping its receipt', async (outcome) => {
+    // 2026-09-11: a saved native-model result refreshes the selected agenda
+    // immediately while its receipt stays on the glass — no Loading page, no
+    // wait for Back, and the anchor rides the request.
+    const { menu, lists, listOptions, sent, operations } = rig();
+    expect(await menu.presentProductivity({
+      domain: outcome.domain,
+      phase: outcome.phase,
+      title: outcome.title,
+      primary: 'Status',
+      secondary: outcome.secondary,
+      hint: 'left x2 Planning',
+      planningAnchorUnixMs: 1_788_274_200_000,
+    })).toBe(true);
+    expect(operations).toEqual(['productivity', 'surface-feature']);
+    expect(lists).toEqual([]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      kind: 'input',
+      event: {
+        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Planning',
+        planningAnchorUnixMs: 1_788_274_200_000,
+      },
+    });
+    expect(menu.handleClick()).toBe(true); // the retained receipt never writes
+    expect(sent).toHaveLength(1);
+
+    // The refreshed agenda lands over the receipt it was requested from.
+    expect(await menu.presentList(
+      'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
+    )).toBe(true);
+    expect(listOptions[0]).toMatchObject({
+      title: 'PLANNING · PLAN · AUGUST 2026', retainProductivityReceipt: true,
+    });
+  });
+
   it('does not report a failed or superseded due paint as visible', async () => {
     const due: ProductivityHudModel = {
       domain: 'reminders', phase: 'due', title: 'Private reminder',
@@ -1241,6 +1364,38 @@ describe('CapabilityMenu', () => {
     expect(await menu.presentProductivity({ ...due, reminderDueAttemptId: '9b38eafb-6fda-4d4c-bb6e-80b9365854b5' })).toBe(true);
     resolveFirst(true);
     expect(await stale).toBe(false);
+  });
+
+  it('a tap on the due page asks the Mac to complete that occurrence, once bound', async () => {
+    const { menu, sent } = rig(true, true, true);
+    const due: ProductivityHudModel = {
+      domain: 'reminders', phase: 'due', title: 'Private reminder',
+      primary: 'Due now', secondary: 'Still incomplete', hint: 'tap: complete',
+      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      reminderDueGeneration: 7,
+    };
+    expect(await menu.presentProductivity(due)).toBe(true);
+    const before = sent.length;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent.slice(before)).toEqual([{
+      kind: 'reminder_due.complete',
+      reminderDueId: due.reminderDueId,
+      reminderDueAttemptId: due.reminderDueAttemptId,
+      generation: 7,
+    }]);
+    expect(sent.slice(before).some((message) => JSON.stringify(message).includes('Private reminder'))).toBe(false);
+  });
+
+  it('a tap on any other productivity page sends nothing', async () => {
+    const { menu, sent } = rig(true, true, true);
+    expect(await menu.presentProductivity({
+      domain: 'reminders', phase: 'failed', title: 'Buy filters',
+      primary: 'Not saved', secondary: 'No reminders item was changed.', hint: 'left x2 Planning',
+    })).toBe(true);
+    const before = sent.length;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent.slice(before)).toEqual([]);
   });
 
   it('hands a deferred due acknowledgement to the presenter without sending it early', async () => {
@@ -1298,13 +1453,52 @@ describe('CapabilityMenu', () => {
 
   it.each([
     { domain: 'calendar', phase: 'saved' },
+    { domain: 'reminders', phase: 'saved' },
+    { domain: 'reminders', phase: 'monitoring' },
+    { domain: 'reminders', phase: 'completed' },
+  ] satisfies ReadonlyArray<{
+    domain: ProductivityHudModel['domain'];
+    phase: ProductivityHudModel['phase'];
+  }>)('returns a verified $domain $phase to its anchored Planning day at once', async (outcome) => {
+    // A verified outcome needs no reading time before the agenda: the
+    // receipt stays while the anchored refresh is requested immediately,
+    // and no second return fires behind it.
+    vi.useFakeTimers();
+    try {
+      const { menu, sent } = rig();
+      const planningAnchorUnixMs = 1_788_274_200_000;
+      await menu.presentProductivity({
+        ...outcome,
+        title: 'Native-backed item',
+        primary: 'Outcome recorded',
+        secondary: 'Read-back complete',
+        hint: 'left x2 Planning',
+        planningAnchorUnixMs,
+      });
+
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        kind: 'input',
+        event: {
+          containerName: 'capmenu',
+          selectedIndex: 1,
+          selectedName: 'Planning',
+          planningAnchorUnixMs,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sent).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
     { domain: 'calendar', phase: 'failed' },
     { domain: 'calendar', phase: 'check' },
     { domain: 'calendar', phase: 'cancelled' },
     { domain: 'calendar', phase: 'not_saved' },
-    { domain: 'reminders', phase: 'saved' },
-    { domain: 'reminders', phase: 'monitoring' },
-    { domain: 'reminders', phase: 'completed' },
     { domain: 'reminders', phase: 'failed' },
     { domain: 'reminders', phase: 'check' },
     { domain: 'reminders', phase: 'cancelled' },
@@ -1346,13 +1540,16 @@ describe('CapabilityMenu', () => {
   });
 
   it('contextual Planning preserves the current safe-write day anchor', async () => {
+    // The anchored outcome still on the glass is what the contextual escape
+    // must carry. A verified save no longer waits here (it refreshes Planning
+    // at once, anchor included — pinned above); a write in flight does.
     const { menu, lists, sent } = rig();
     expect(await menu.presentProductivity({
       domain: 'reminders',
-      phase: 'saved',
+      phase: 'verifying',
       title: 'Prepare report',
-      primary: 'Saved and verified',
-      secondary: 'Native alarm set',
+      primary: 'Verifying',
+      secondary: 'Checking native read-back',
       hint: 'Back: left x2 to Planning',
       planningAnchorUnixMs: 1_788_274_200_000,
     })).toBe(true);
@@ -1372,10 +1569,13 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it('keeps an independently verified reminder visible as monitoring before returning to Planning', async () => {
+  it('keeps an independently verified reminder visible as monitoring over the reloaded agenda', async () => {
+    // 2026-09-11: the bridge verified the Reminder and the Mac persisted its
+    // monitor, so Planning is reloaded now (anchor included, receipt kept)
+    // and the monitoring fact is shown over that agenda once it lands.
     vi.useFakeTimers();
     try {
-      const { menu, productivities, sent } = rig();
+      const { menu, productivities, lists, listOptions, sent } = rig();
       const planningAnchorUnixMs = 1_788_274_200_000;
       await menu.presentProductivity({
         domain: 'reminders',
@@ -1388,9 +1588,24 @@ describe('CapabilityMenu', () => {
         monitoringArmed: true,
       });
 
+      expect(productivities).toHaveLength(1);
+      expect(lists).toEqual([]);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        kind: 'input',
+        event: { containerName: 'capmenu', selectedName: 'Planning', planningAnchorUnixMs },
+      });
+
+      // The monitoring receipt waits for the agenda, not for a clock.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(productivities).toHaveLength(1);
+
+      expect(await menu.presentList(
+        'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
+      )).toBe(true);
+      expect(listOptions[0]).toMatchObject({ retainProductivityReceipt: true });
       await vi.advanceTimersByTimeAsync(4_999);
       expect(productivities).toHaveLength(1);
-      expect(sent).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(1);
       expect(productivities).toHaveLength(2);
@@ -1400,17 +1615,15 @@ describe('CapabilityMenu', () => {
         title: 'Buy filters',
         primary: 'Monitoring armed',
         secondary: 'Native alarm is scheduled. JOAT will check at due time.',
-        hint: 'Planning in 5s · left x2 now',
+        hint: 'left x2: back',
         planningAnchorUnixMs,
       });
-      expect(sent).toEqual([]);
 
+      // The receipt rides over the agenda already shown: nothing is
+      // requested or reloaded again.
       await vi.advanceTimersByTimeAsync(5_000);
       expect(sent).toHaveLength(1);
-      expect(sent[0]).toMatchObject({
-        kind: 'input',
-        event: { containerName: 'capmenu', selectedName: 'Planning', planningAnchorUnixMs },
-      });
+      expect(lists).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1456,6 +1669,9 @@ describe('CapabilityMenu', () => {
         planningAnchorUnixMs: 1_788_274_200_000,
         monitoringArmed: true,
       });
+      // The verified save asked for its anchored agenda at once.
+      expect(sent).toHaveLength(1);
+      const refresh = latestRequestId(sent);
       await menu.presentProductivity({
         domain: 'reminders',
         phase: 'due',
@@ -1466,8 +1682,11 @@ describe('CapabilityMenu', () => {
         planningAnchorUnixMs: 1_788_274_200_000,
       });
 
+      // The due page stays: no return fires behind it, and the agenda the
+      // save requested can no longer paint over it.
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(sent).toEqual([]);
+      expect(sent).toHaveLength(1);
+      expect(await menu.presentList('PLANNING · PLAN · AUGUST 2026', rows(2), refresh, true)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -1541,38 +1760,22 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it.each([true, false])('News Back completes a visible row restoration before accepting a tap (native accepted=%s)', async (nativeAccepted) => {
-    let releaseSelection!: () => void;
-    const selectionPaint = new Promise<void>((resolve) => { releaseSelection = resolve; });
-    let holdSelection = false;
-    let selectionPaintStarted = false;
-    let completedSurface: HudVisualFrame | { kind: 'native'; selectedIndex: number } | undefined;
+  it('News opens as a firmware list, reads an article on a text page, and returns to the list', async () => {
+    const rebuilds: RebuildPageContainer[] = [];
     const sent: Array<Record<string, unknown>> = [];
     const client = {
       require: () => ({
         textContainerUpgrade: async () => true,
-        rebuildPageContainer: async (page: RebuildPageContainer) => {
-          if (page.listObject?.length) {
-            if (nativeAccepted) completedSurface = { kind: 'native', selectedIndex: 0 };
-            return nativeAccepted;
-          }
-          return true;
-        },
+        rebuildPageContainer: async (page: RebuildPageContainer) => { rebuilds.push(page); return true; },
       }),
     } as unknown as BridgeClient;
     const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => {
-        if (holdSelection && frame.kind === 'list' && frame.title === 'NEWS'
-          && frame.selectedIndex === 1) {
-          selectionPaintStarted = true;
-          await selectionPaint;
-        }
-        completedSurface = frame;
-        return true;
-      },
-    });
-    // Surface announcements are ownership bookkeeping, not requests; this
-    // test counts what the row tap ASKED the Mac for.
+      paint: async () => true,
+      paintExact: async (_frame: HudVisualFrame, current: () => boolean) => current(),
+      forgetPage: () => undefined,
+      whenIdle: async () => true,
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as never);
     const link = { send: (message: Record<string, unknown>) => {
       const event = message.event as { containerName?: string; selectedName?: string } | undefined;
       if (event?.containerName === 'capability-lifecycle'
@@ -1582,83 +1785,30 @@ describe('CapabilityMenu', () => {
     const menu = new CapabilityMenu(hud, new Settings(), link);
     hud.rail.accept({ kind: 'hud.panel', tab: 'news', revision: 7, rows: ['Story 01', 'Story 02'] });
     await menu.openPanelTab('news');
+    expect(rebuilds[rebuilds.length - 1]?.listObject?.length ?? 0).toBe(1);
     menu.handleList(click(1));
     expect(sent).toHaveLength(1);
+    expect(sent[0]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 1, requestId: 'panel-news-7',
+    });
     expect(await menu.presentList(
-      'NEWS · ARTICLE', ['Story 02', 'Complete synthetic article.'], 'panel-news-7', false,
+      'NEWS · ARTICLE', ['1/1 · Story 02', 'Complete synthetic article.'], 'panel-news-7', false,
     )).toBe(true);
-    expect(completedSurface).toMatchObject({ kind: 'list', title: 'NEWS · ARTICLE' });
-
-    holdSelection = true;
-    let backFinished = false;
-    const returning = menu.toggle().then(() => { backFinished = true; });
-    try {
-      // A logical selectedIndex is insufficient: a rebuilt native list starts
-      // at row zero. Require the actual painter to restore the chosen row.
-      await vi.waitFor(() => expect(selectionPaintStarted).toBe(true));
-      expect(backFinished).toBe(false);
-      expect(completedSurface).not.toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-      expect(menu.handleClick()).toBe(true);
-      expect(sent).toHaveLength(1);
-
-      releaseSelection();
-      await returning;
-      expect(completedSurface).toMatchObject({
-        kind: 'list', title: 'NEWS', items: ['Story 01', 'Story 02'], selectedIndex: 1,
-      });
-      expect(hud.exportBackgroundState().surface).toMatchObject({
-        kind: 'list', options: { title: 'NEWS' }, selectedIndex: 1,
-      });
-      expect(menu.handleClick()).toBe(true);
-      expect(sent).toHaveLength(2);
-      expect(sent[1]?.event).toMatchObject({
-        containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 1, requestId: 'panel-news-7',
-      });
-    } finally {
-      releaseSelection();
-      await returning;
-      menu.releaseToLiveSession();
-    }
-  });
-
-  it.each([true, false])('keeps Home after cancelling pending highlight restoration (late result=%s)', async (lateResult) => {
-    let finishSelection!: (painted: boolean) => void;
-    const selectionPaint = new Promise<boolean>((resolve) => { finishSelection = resolve; });
-    const { menu, sent, selections, defaultsCount } = rig(true, true, true, selectionPaint);
-    await menu.openFromContextualMenu(0);
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList('MESSAGES', ['Refresh', 'Adele'], requestId, true)).toBe(true);
-    menu.handleList(click(1));
-    const selectionId = (sent[1]!.event as { traceId: string }).traceId;
-    expect(sent).toHaveLength(2);
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', ['Adele · Good morning'], requestId, false,
-    )).toBe(true);
-
-    const returning = menu.toggle();
-    await vi.waitFor(() => expect(selections).toEqual([1]));
-    // The first Back is still restoring the visible row; a tap cannot select
-    // from either the old conversation or the not-yet-ready picker.
-    expect(menu.handleClick()).toBe(true);
-    expect(sent).toHaveLength(2);
+    const article = rebuilds[rebuilds.length - 1];
+    expect(article?.listObject?.length ?? 0).toBe(0);
+    expect(article?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
 
     await menu.toggle();
-    expect(menu.isOpen()).toBe(false);
-    expect(defaultsCount()).toBe(1);
-    expect(sent.slice(2)).toEqual([{
-      kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
-    }]);
-
-    finishSelection(lateResult);
-    await returning;
-    expect(menu.isOpen()).toBe(false);
-    expect(menu.handleClick()).toBe(false);
-    expect(defaultsCount()).toBe(1);
-    expect(sent.slice(2)).toEqual([{
-      kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-home', requestId, traceId: selectionId },
-    }]);
+    expect(rebuilds[rebuilds.length - 1]?.listObject?.length ?? 0).toBe(1);
+    expect(hud.exportBackgroundState().surface).toMatchObject({
+      kind: 'list', options: { title: 'NEWS', nativeFirmwareList: true },
+    });
+    menu.handleList(clickRow0());
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'NEWS', selectedIndex: 0, requestId: 'panel-news-7',
+    });
+    menu.releaseToLiveSession();
   });
 
   it('double-tap from the Messages root returns Home and clears Mac-private Messages state', async () => {
@@ -1778,26 +1928,33 @@ describe('CapabilityMenu', () => {
     expect(defaultsCount()).toBe(1);
   });
 
-  it('Settings renders a selectable G2 policy list and applies its scrolled cursor', async () => {
-    const { menu, lists, listOptions, selections, sent } = rig();
+  it('Settings is phone guidance on a firmware list: no local choice, no Mac action, only Back', async () => {
+    // 2026-09-11: listening policy and reconnect belong to the phone's
+    // controls. The glasses' Settings slot is a cached firmware menu link, so
+    // a scroll or press on any old row index must apply nothing and send
+    // nothing; the page is consumed locally until Back.
+    const { menu, lists, listOptions, selections, moves, sent } = rig();
     await menu.openSettings(); // contextual-menu item
-    expect(lists[0]?.map((row) => row.replace('*', ' '))).toEqual([
-      '  Resume mic: instantly',
-      '  Resume mic: Mac decides',
-      '  Resume mic: ask me first',
-      'Repeat last reply',
-      'Reconnect JOAT',
+    expect(lists[0]).toEqual([
+      'Manage listening and Mac connections',
+      'in JOAT’s phone controls in Even Hub.',
     ]);
     expect(listOptions[0]).toEqual({
-      title: 'LISTENING RESUME',
-      hint: 'tap: apply · left x2: back',
-      selectable: true,
+      title: 'PHONE CONTROLS',
+      hint: 'left x2: back',
+      selectable: false,
+      nativeFirmwareList: true,
     });
+    expect(menu.isOpen()).toBe(true);
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(selections).toEqual([1]);
-    expect(menu.handleClick()).toBe(true); // pick the visibly highlighted Mac policy
-    expect(sent.some((m) => m.kind === 'policy' && (m as { resume?: string }).resume === 'mac')).toBe(true);
-    expect(menu.isOpen()).toBe(false); // applied and closed home
+    expect(selections).toEqual([]);
+    expect(moves).toEqual([]);
+    expect(menu.handleClick()).toBe(true); // the row that used to apply "Mac decides"
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent).toEqual([]);
+    expect(menu.isOpen()).toBe(true);
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false);
   });
 
   it('adopts a Mac voice generation so speech paints without a menu tap', async () => {
@@ -1910,6 +2067,7 @@ describe('Planning split dashboard', () => {
     const panes: Array<{ dateIndex: number; focused: boolean; itemIndex: number }> = [];
     const sent: Array<Record<string, unknown>> = [];
     const hud = {
+      usesCustomListSelection: () => true,
       showSidebar: vi.fn(async () => true),
       showList: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),
@@ -1922,7 +2080,6 @@ describe('Planning split dashboard', () => {
       showProductivity: vi.fn(async () => true),
       isProductivityVisible: vi.fn(() => true),
       showDefault: vi.fn(async () => true),
-      usesCustomListSelection: () => true,
     } as unknown as HudPresenter;
     const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
     const menu = new CapabilityMenu(hud, new Settings(), link);
@@ -1964,32 +2121,44 @@ describe('Planning split dashboard', () => {
     return { ...rigParts, requestId };
   }
 
+  // Dashboard input is queued behind the previous pane paint
+  // (queueDashboardInteraction: a gesture binds to the month it was made on
+  // and follows visible paints), so each gesture lands a microtask later.
+  const painted = () => vi.advanceTimersByTimeAsync(0);
+
   it('scroll hovers dates, tap hands focus to the pane, tap opens the entry', async () => {
     const { menu, panes, sent, requestId } = await openDashboard();
 
     // Hover moves locally — no Mac traffic, one repaint per move.
     const before = sent.length;
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    await painted();
     expect(sent.length).toBe(before);
-    expect(panes[panes.length - 1]).toMatchObject({ focused: false });
+    expect(panes).toHaveLength(1);
+    expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 2, focused: false });
 
     // Return to Sep 1. Today is pinned outside this month, so hover starts
     // on the first in-month day, index 1; the scroll above moved it to 2.
     menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
+    await painted();
     expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: false });
 
     // First tap: the pane takes input. Second tap: the entry opens via the
     // date+position wire, no identifiers.
     menu.handleClick();
+    await painted();
     expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 0 });
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    await painted();
     expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 1 });
     menu.handleClick();
+    await painted();
     const grid = sent[sent.length - 1] as { event: Record<string, unknown> };
     expect(grid.event.containerName).toBe('capgrid');
     expect(grid.event.selectedIndex).toBe(1);
     expect(grid.event.requestId).toBe(requestId);
-    expect(typeof grid.event.planningAnchorUnixMs).toBe('number');
+    expect(grid.event.planningDay).toBe('2026-09-01');
+    expect(grid.event).not.toHaveProperty('planningAnchorUnixMs');
   });
 
   it('hover starts on today when the shown month contains it', async () => {
@@ -1999,12 +2168,14 @@ describe('Planning split dashboard', () => {
     vi.setSystemTime(new Date(2026, 8, 1, 9, 0, 0)); // 1 Sep 2026, local
     const { menu, panes } = await openDashboard();
     menu.handleClick(); // the pane takes focus only if today has entries
+    await painted();
     expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: true });
   });
 
   it('Back walks pane to grid before leaving the dashboard', async () => {
     const { menu, panes } = await openDashboard();
     menu.handleClick(); // pane focus
+    await painted();
     expect(panes[panes.length - 1]).toMatchObject({ focused: true });
     await menu.toggle(); // Back: pane -> grid, still on the dashboard
     expect(panes[panes.length - 1]).toMatchObject({ focused: false });
@@ -2015,18 +2186,27 @@ describe('Planning split dashboard', () => {
     const { menu, sent } = await openDashboard();
     // Walk hover to date 0, then one more up crosses the edge.
     for (let i = 0; i < 42; i += 1) menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
+    await painted();
     const monthFlip = sent[sent.length - 1] as { event: Record<string, unknown> };
     expect(monthFlip.event.containerName).toBe('capdata');
     expect(monthFlip.event.selectedIndex).toBe(6); // the month list's ‹ previous row
+    // One request per edge crossing, however many swipes queued behind it.
+    expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capdata')).toHaveLength(1);
   });
 
-  it('a tap on a free day does not steal focus into an empty pane', async () => {
+  it('a tap on a free day focuses the pane on its Open day row', async () => {
+    // Empty dates also have Open day (dashboardTap), so the pane takes
+    // focus on every date; the one row to land on is index 0. The old
+    // version of this test asserted the opposite without awaiting the
+    // queued paint, so it passed vacuously.
     const { menu, panes } = await openDashboard();
     menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // a free day
+    await painted();
     const before = panes.length;
     menu.handleClick();
-    // No pane repaint claiming focus happened.
-    expect(panes.slice(before).every((p) => !p.focused)).toBe(true);
+    await painted();
+    expect(panes.length).toBe(before + 1);
+    expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 0 });
   });
 });
 

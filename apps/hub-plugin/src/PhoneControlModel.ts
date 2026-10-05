@@ -13,11 +13,12 @@ import type {
  * phone is decided here.
  */
 
-export type PhoneTab = 'brainstorm' | 'accounts' | 'connection';
-export const PHONE_TABS: readonly PhoneTab[] = ['brainstorm', 'accounts', 'connection'];
+export type PhoneTab = 'brainstorm' | 'accounts' | 'places' | 'connection';
+export const PHONE_TABS: readonly PhoneTab[] = ['brainstorm', 'accounts', 'places', 'connection'];
 export const PHONE_TAB_TITLES: Record<PhoneTab, string> = {
   brainstorm: 'Brainstorm',
   accounts: 'Accounts',
+  places: 'Places',
   connection: 'Connection',
 };
 

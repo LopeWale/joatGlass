@@ -100,13 +100,6 @@ export async function activateVisualHudPage(
   throw new Error('visual HUD rejected and every compatibility restoration failed');
 }
 
-export function restoreTextHudPage(
-  client: HudPageBootClient,
-  layouts: Pick<HudPageBuilder, 'defaultLayout'>,
-): Promise<boolean> {
-  return rebuild(client, layouts.defaultLayout());
-}
-
 export function restoreMinimalHudPage(
   client: HudPageBootClient,
   layouts: Pick<HudPageBuilder, 'compatibilityLayout'>,

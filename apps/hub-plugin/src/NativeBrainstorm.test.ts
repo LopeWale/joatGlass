@@ -10,8 +10,6 @@ import {
   NativeTerminalContainer,
   NativeTerminalSurface,
   isBrainstormThinking,
-  nativeBrainstormFooter,
-  nativeHeadText,
   type NativeTerminalPage,
 } from './NativeTerminalSurface';
 import type { BrainstormHudModel } from './types';
@@ -79,20 +77,21 @@ const shown = (r: ReturnType<typeof rig>) => {
 describe('native Brainstorm document', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('draws the room as firmware text: question in the head, state line, turns, hints', async () => {
+  it('draws the room as firmware text: state line, turns, the controller gestures', async () => {
     const { surface, pages, rebuilds, imageWrites } = rig();
     expect(await surface.present(brainstorm())).toBe(true);
     expect(rebuilds).toHaveLength(1);
     expect(rebuilds[0]?.imageObject ?? []).toHaveLength(0);
     expect(imageWrites).not.toHaveBeenCalled();
     const page = pages[0]!;
-    expect(page.headText).toBe('BRAINSTORM · Should JOAT cache embeddings on disk?');
+    // The head is the presenter's live status line; without one, the page name.
+    expect(page.headText).toBe('JOAT · BRAINSTORM');
     const body = lines(page);
     expect(body).toHaveLength(NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity);
-    expect(body[0]).toBe('DISCUSSING · Claude · round 1/2 · 2 calls');
+    expect(body[0]).toBe('WORKING · Claude · round 1/2 · 2 calls');
     expect(body).toContain('CODEX > Cache only with a size cap and an eviction rule');
     expect(body).toContain('CLAUDE > Measure hit rate first');
-    expect(body[body.length - 1]).toBe('double-click: stop');
+    expect(body[body.length - 1]).toBe('swipe: scroll · tap: terminal · double-click: cancel');
   });
 
   it('streams a growing turn as one body upgrade, never a rebuild', async () => {
@@ -106,14 +105,6 @@ describe('native Brainstorm document', () => {
     expect(upgrades[0]?.containerName).toBe(NativeTerminalContainer.Body.name);
   });
 
-  it('rebuilds once when a new question changes the head', async () => {
-    const { surface, rebuilds } = rig();
-    await surface.present(brainstorm({ state: 'ready', topic: 'Ready for a question', activity: '' }));
-    await surface.present(brainstorm({ topic: 'A different question', activity: 'JOAT > Preparing collaborators…' }));
-    expect(rebuilds).toHaveLength(2);
-    expect(rebuilds[1]?.textObject?.[0]?.content).toBe('BRAINSTORM · A different question');
-  });
-
   it('counts silence locally with body upgrades only', async () => {
     vi.useFakeTimers({ now: 1_000_000 });
     const r = rig();
@@ -125,26 +116,18 @@ describe('native Brainstorm document', () => {
     vi.setSystemTime(1_007_400);
     expect(surface.tick()).toBe(true);
     await surface.whenIdle();
-    expect(shown(r)[0]).toBe('DISCUSSING · Claude · round 1/2 · 2 calls · 7s');
+    expect(shown(r)[0]).toBe('WORKING · Claude · round 1/2 · 2 calls · 7s');
     expect(rebuilds).toHaveLength(1);
     await surface.present(brainstorm({ activity: 'CODEX > first point\nCLAUDE > The answer' }));
     expect(surface.isThinking()).toBe(false);
     expect(surface.tick()).toBe(false);
   });
 
-  it('only offers gestures the Brainstorm controller accepts', () => {
-    expect(nativeBrainstormFooter(brainstorm({ state: 'ready' }), 0, 0)).toBe('tap: ask a question · double-click: back');
-    expect(nativeBrainstormFooter(brainstorm({ state: 'topic_capture' }), 0, 0))
-      .toBe('Listening · speak your question · double-click: cancel');
-    expect(nativeBrainstormFooter(brainstorm(), 3, 0)).toBe('double-click: stop · up: older');
-    expect(nativeBrainstormFooter(brainstorm({ state: 'unavailable' }), 0, 0))
-      .toBe('fix it on your phone: JOAT › Brainstorm');
-    expect(nativeBrainstormFooter(brainstorm({ state: 'settled' }), 0, 0)).toBe('double-click: back');
-  });
-
-  it('keeps the plain title while no question is in the room', () => {
-    expect(nativeHeadText(brainstorm({ state: 'ready', topic: 'Ready for a question' }))).toBe('JOAT · BRAINSTORM');
-    expect(nativeHeadText(brainstorm({ screen: 'agent_terminal' }))).toBe('JOAT · AGENT TERMINAL');
+  it('sends an unavailable room to the phone page that can fix it', async () => {
+    const { surface, pages } = rig();
+    await surface.present(brainstorm({ state: 'unavailable', activity: 'JOAT > Codex is signed out', activeSpeaker: undefined }));
+    const body = lines(pages[pages.length - 1]);
+    expect(body[body.length - 1]).toBe('fix on phone: JOAT › Brainstorm · double-click: menu');
   });
 
   it('scrolls a long room through older turns', async () => {
