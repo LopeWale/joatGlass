@@ -1561,30 +1561,26 @@ describe('HudPresenter modal surfaces', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('actively restores the prior complete frame after a partial confirmation upload', async () => {
+  it('shows the gate as a firmware text page on the real surface, so no partial tile can tear it', async () => {
     const updates: number[] = [];
-    const rendered: HudVisualFrame[] = [];
+    const pages: Array<{ images: number; texts: number }> = [];
     const client = {
       require: () => ({
         updateImageRawData: async (update: { containerID?: number }) => {
           updates.push(update.containerID ?? -1);
-          // Home is calls 1-4. Fail the second tile in both the first
-          // confirmation paint and its one bounded self-heal retry.
-          return updates.length === 6 || updates.length === 8
-            ? ImageRawDataUpdateResult.sendFailed
-            : ImageRawDataUpdateResult.success;
+          return ImageRawDataUpdateResult.success;
         },
-        rebuildPageContainer: async () => true,
+        rebuildPageContainer: async (page: { imageObject?: unknown[]; textObject?: unknown[] }) => {
+          pages.push({ images: page.imageObject?.length ?? 0, texts: page.textObject?.length ?? 0 });
+          return true;
+        },
       }),
     } as unknown as BridgeClient;
     const renderer: HudFrameRenderer = {
-      render: async (frame) => {
-        rendered.push(frame);
-        return [ContainerId.Image, 8, 9, 10].map((containerId) => ({
-          containerId,
-          pixels: new Uint8Array(4),
-        }));
-      },
+      render: async () => [ContainerId.Image, 8, 9, 10].map((containerId) => ({
+        containerId,
+        pixels: new Uint8Array(4),
+      })),
     };
     const hud = new HudPresenter(
       client,
@@ -1593,10 +1589,17 @@ describe('HudPresenter modal surfaces', () => {
     );
 
     expect(await hud.showText('home', ContainerId.Main)).toBe(true);
-    expect(await hud.showConfirmation('Send this message?', 'partial-frame')).toBe(false);
+    const tilesBeforeGate = updates.length;
+    expect(await hud.showConfirmation('Send this message?', 'native-gate')).toBe(true);
 
+    // The gate itself is one text-only rebuild; it uploads no image tile.
+    expect(pages[pages.length - 1]).toEqual({ images: 0, texts: 5 });
+    expect(updates).toHaveLength(tilesBeforeGate);
+
+    expect(await hud.dismissConfirmation('native-gate')).toBe(true);
+    // Back to the image page: the four containers return, then Home repaints.
+    expect(pages[pages.length - 1]).toEqual({ images: 4, texts: 1 });
     expect(updates.slice(-4)).toEqual([ContainerId.Image, 8, 9, 10]);
-    expect(rendered[rendered.length - 1]).toMatchObject({ kind: 'overview', main: 'home' });
     expect(vi.getTimerCount()).toBe(0);
   });
 

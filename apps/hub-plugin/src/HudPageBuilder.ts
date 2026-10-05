@@ -546,13 +546,15 @@ export class HudPageBuilder {
   /** Dedicated decision surface: one bright question, one horizontal CTA row.
    * The body holds FIVE firmware lines because its own 120-char maximum
    * measures five ("CONFIRM ACTION" + blank + up to three wrapped lines). */
-  confirmationLayout(prompt: string): RebuildPageContainer {
+  confirmationLayout(prompt: string, status?: string): RebuildPageContainer {
     const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
     return new RebuildPageContainer({
       containerTotalNum: 5,
       ...this.menuConfig(),
       textObject: [
-        this.statusBar(),
+        // Over the visual HUD this page is firmware-owned and the presenter
+        // cannot upgrade its containers, so the live top line rides along.
+        this.statusBar(pxTruncate((status ?? '').slice(0, 46), REGION_TEXT_WIDTH)),
         this.main(5 * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`), // 144
         this.region(
           ContainerId.Context, 'context', 183, 35, 3, 3,

@@ -198,7 +198,8 @@ type DisplayPageOwner =
   | 'visual'
   | 'assistant-native'
   | 'terminal-list-native'
-  | 'terminal-conversation-native';
+  | 'terminal-conversation-native'
+  | 'confirmation-native';
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -1951,7 +1952,13 @@ export class HudPresenter {
       return false;
     }
     const liveStatus = this.captureLiveStatus();
-    if (this.visual) {
+    // The decision gate is a firmware text page whenever the visual surface
+    // can hand the page over under its transition barrier: one
+    // rebuildPageContainer (~165 ms) instead of four forced image tiles at
+    // 0.2–2 s each, so "Send to X?" is readable before the Mac's
+    // confirmation envelope has been spent on pixels. A visual surface
+    // without that barrier keeps the exact raster gate below.
+    if (this.visual && !this.visual.withPageTransition) {
       this.resetAll();
       this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
       this.streams.set(ContainerId.Context, 'TAP · confirm   SWIPE · cancel');
@@ -2001,11 +2008,20 @@ export class HudPresenter {
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', painted ? 'success' : 'failed');
       return painted;
     }
-    const ok = await this.rebuildPage(this.layouts.confirmationLayout(current.prompt));
+    const layout = this.layouts.confirmationLayout(current.prompt, liveStatus?.text);
+    const ok = this.visual
+      ? await this.replaceNativePage(layout, 'confirmation-native')
+      : await this.rebuildPage(layout);
     if (!displayCurrent()) return false;
     if (this.confirmation?.id !== id) return true;
-    if (!ok) {
-      if (openedHere) {
+    if (!ok || (current.isCurrent && !this.isConfirmationCurrent(current))) {
+      // A bound gate that was retired while its page was being replaced is
+      // not visible authority; restore its own return surface, exactly as
+      // the raster path does.
+      if (current.isCurrent && this.confirmation === current) {
+        this.confirmation = undefined;
+        await this.restoreAfterConfirmation(current);
+      } else if (!ok && openedHere) {
         this.confirmation = undefined;
       }
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', 'failed');
@@ -2020,7 +2036,9 @@ export class HudPresenter {
     this.brightness.set(ContainerId.Context, 3);
     this.brightness.set(ContainerId.Tray, 3);
     this.brightness.set(ContainerId.Hint, 1);
-    const restored = await this.restoreLiveStatus(liveStatus);
+    // The native page already carries the status line; the compatibility
+    // surface still writes it so a later status change can be upgraded.
+    const restored = this.visual ? true : await this.restoreLiveStatus(liveStatus);
     this.recordPageTransition(from, 'confirmation', 'show_confirmation', restored ? 'success' : 'failed');
     return restored;
   }
@@ -2050,6 +2068,15 @@ export class HudPresenter {
   private async restoreAfterConfirmation(prior: ConfirmationReturnState): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    // Leaving the firmware decision page: recreate the four image containers
+    // first unless the prior page is itself firmware-owned, in which case its
+    // own replacement below moves the page directly.
+    if (this.pageOwner === 'confirmation-native'
+      && !(prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList)
+      && !await this.rebuildVisualPage()) {
+      this.recordPageTransition('confirmation', this.tracePage(), 'dismiss_confirmation', 'failed');
+      return false;
+    }
     if (prior.surface.kind === 'list') {
       this.focusReturn = {
         streams: new Map(prior.streams),

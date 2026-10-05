@@ -47,6 +47,7 @@ import {
   ContainerId,
   VOICE_REQUEST_PREFIX,
   type BrainstormHudModel,
+  type CapabilityName,
   type DownlinkMessage,
   type ProductivityHudModel,
 } from './types';
@@ -179,8 +180,14 @@ const BROWSER_VISUAL_PREVIEW = import.meta.env.DEV
  * normal authenticated Mac link alive and merely opens the same sidebar a
  * left-temple double press would open. It lets the official simulator prove
  * a live capability request even though it hardcodes right-temple input. */
-const LIVE_MENU_ACCEPTANCE = import.meta.env.DEV
-  && new URLSearchParams(window.location.search).get('joatTestOpenMenu') === '1';
+const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | undefined => {
+  if (!import.meta.env.DEV) return undefined;
+  const requested = new URLSearchParams(window.location.search).get('joatTestOpenMenu');
+  // `1` keeps the historical Planning entry; a capability name opens that
+  // row, so an acceptance run can start on Messages without a sidebar.
+  if (requested === '1') return 'Planning';
+  return CAPABILITIES.find((name) => name === requested);
+})();
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
 function setPanel(id: string, text: string): void {
@@ -1090,7 +1097,7 @@ async function boot(): Promise<void> {
   // strips this bounded acceptance-only delay from a package.
   if (LIVE_MENU_ACCEPTANCE) {
     await new Promise<void>((resolve) => setTimeout(resolve, 750));
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf(LIVE_MENU_ACCEPTANCE));
     console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
   }
 
