@@ -2456,7 +2456,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       }
       const pomodoro = content?.pomodoro;
       if (!pomodoro) {
-        quiet(['Say “JOAT, start a pomodoro”'], layout.mainTopBaselineY);
+        quiet(['Focus timer · open the tab to start'], layout.mainTopBaselineY);
         return;
       }
       const now = Date.now();
@@ -2569,7 +2569,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     } else if (!pomodoro) {
       context.fillStyle = gray(SUPPORT);
       context.font = TYPE.primary;
-      context.fillText('Say “JOAT, start a pomodoro”', 52, 96);
+      context.fillText('Focus timer · open the tab to start', 52, 96);
       context.fillStyle = gray(CHROME);
       context.font = TYPE.secondary;
       context.fillText('25 min focus, 5 min break, a long one after four.', 52, 120);

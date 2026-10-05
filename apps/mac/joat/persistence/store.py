@@ -583,6 +583,22 @@ _MIGRATION_12 = (
     """,
 )
 
+_MIGRATION_13 = (
+    # The wearer's focus and break lengths, set by tapping the idle Pomodoro
+    # page. Migration 11's checkpoint table is checksummed history and the
+    # manifest recognises only CREATE and DROP, so the lengths get a
+    # single-row table of their own: a database from before they were
+    # configurable has no row and loads the classic 25/5/15 cycle.
+    """
+    CREATE TABLE pomodoro_lengths (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        focus_ms INTEGER NOT NULL CHECK (focus_ms BETWEEN 1 AND 86400000),
+        short_break_ms INTEGER NOT NULL CHECK (short_break_ms BETWEEN 1 AND 86400000),
+        long_break_ms INTEGER NOT NULL CHECK (long_break_ms BETWEEN 1 AND 86400000)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -596,6 +612,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (10, "drop_calendar_starting_soon_alerts", _MIGRATION_10),
     (11, "durable_pomodoro_checkpoint", _MIGRATION_11),
     (12, "durable_terminal_conversations", _MIGRATION_12),
+    (13, "durable_pomodoro_lengths", _MIGRATION_13),
 )
 
 

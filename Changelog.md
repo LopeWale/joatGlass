@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-05 — Pages opened by hand are control surfaces
+
+- The wearer's rule: voice works from anywhere, so a page opened on the glasses is for hands. No page shows a "Say “JOAT, …”" row or empty state any more; each offers the tap that does the thing, and a tapped row asks its own question on the lens through the acknowledged prompt (`PromptedSpeechRuntime.ask_capability`, prompt owner kind `capability` on both sides of the wire, drawn by the same native question page the Messages body uses) and routes the answer.
+- Navigation: "➤ Navigate to a place" asks "Where to?" and starts the route. QuickNotes: every page leads with "● Record a voice note" (a tap-started capture titled by the clock) and "✎ Dictate a note" ("What should I note?", saved as exact text); the page holds 16 notes so both fit the firmware list's 20-row cap. Messages: the conversation ends in "✎ Reply", the same prepared reply the spoken word starts, and the reader's hint no longer names a word to say. Search: the tab's last row "⌕ Look something up" asks for the query and republishes the tab. Brainstorm's idle frame says "Tap to speak a topic."; its picker already carried "+ New brainstorm".
+- The expanded Pomodoro tab shows its controls and, while idle, the three lengths as rows ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min") that cycle through presets on tap and persist across restarts (a new `pomodoro_lengths` table, migration 13; an older database loads the classic cycle). The plugin's empty copy for the Pomodoro and Search tabs, the raster Pomodoro card and the raster Brainstorm fallback stopped instructing voice.
+- Tests: the Mac suite passes with the new navigation, dictation, recording, reply-row, search-control, prompted-speech and pomodoro-length cases; the plugin suite passes with the new prompt owner kind. The installed package must be 0.1.93 or later for a tapped row's question to reach the glasses: an older plugin rejects the `capability` owner kind.
+
 ## 2026-10-05 — Build JOAT 0.1.92 confirmation-window package
 
 - Rebuilt the existing JOAT package from `b898db1` (version bump on top of the confirmation-window, streamed-frame and green-suite commits) with the same `scripts/pack.sh`, the same `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
