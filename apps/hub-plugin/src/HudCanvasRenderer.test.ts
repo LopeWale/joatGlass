@@ -5,6 +5,7 @@ import type { HudStatusModel } from './HudStatus';
 import { SPINE_LABEL_BOX } from './types';
 import {
   HudCanvasRenderer,
+  SPINE_ICONS,
   HUD_VISUAL_GEOMETRY,
   hudBrightnessGray,
   hudDisplayTitle,
@@ -508,6 +509,17 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
   const hearing: HudStatusModel = {
     clock: '9:41', link: 'connected', mic: true, battery: 87, charging: false, macState: 'hearing you…',
   };
+
+  it('draws the running features right-aligned against the mic, inside the right tile', () => {
+    const { texts } = shell({ ...hearing, macState: undefined, activities: ['Focus 12m', '→ 80 m'] });
+    const chips = texts.find((entry) => entry.text === 'Focus 12m · → 80 m');
+    expect(chips).toBeDefined();
+    expect(chips!.x).toBe(SPINE_ICONS.activityRightX);
+    expect(SPINE_ICONS.activityLeftX).toBeGreaterThanOrEqual(SEAM);
+    expect(SPINE_ICONS.activityRightX).toBeLessThan(SPINE_ICONS.micX);
+    // Without running features nothing is drawn there.
+    expect(shell({ ...hearing, macState: undefined }).texts.some((entry) => entry.x === SPINE_ICONS.activityRightX)).toBe(false);
+  });
 
   it('paints the state word in the compact banner and keeps the icons east of the seam', () => {
     const { texts, icons } = shell(hearing);

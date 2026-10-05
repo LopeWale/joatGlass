@@ -1,4 +1,4 @@
-import type { HudPresenter } from './HudPresenter';
+import { isRouteProgressView } from './ActivityChips';
 import type { NavigationHudModel, NavigationMapPanelModel } from './NavigationHud';
 import { formatNavigationDistance } from './NavigationHud';
 import {
@@ -93,6 +93,11 @@ type NavigationUplink = Extract<UplinkMessage, {
 
 interface NavigationHudSink {
   showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean>;
+  /** A route's progress: repaints when the route owns the glass, and
+   * otherwise only updates the retained page and the header chip. */
+  updateNavigation?(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean>;
+  /** The route ended: its chip leaves every header. */
+  navigationEnded?(): void;
 }
 
 interface NavigationLink {
@@ -150,7 +155,7 @@ export class NavigationController {
   private originOperation = 0;
 
   constructor(
-    private readonly hud: NavigationHudSink | Pick<HudPresenter, 'showNavigation'>,
+    private readonly hud: NavigationHudSink,
     private readonly link: NavigationLink,
     private readonly location?: NavigationLocationSession,
     private readonly diagnostics?: G2DiagnosticTrace,
@@ -185,7 +190,12 @@ export class NavigationController {
     this.pendingPresentation = pendingPresentation;
     let painted: boolean;
     try {
-      painted = await this.hud.showNavigation(candidate.navigation, statusOverride);
+      // A view that belongs to a route in progress (guidance, a warning,
+      // arrival) never takes the glass from a page the wearer opened; the
+      // pages that ask the wearer something (place, mode, preview, error) do.
+      painted = isRouteProgressView(candidate.navigation) && this.hud.updateNavigation
+        ? await this.hud.updateNavigation(candidate.navigation, statusOverride)
+        : await this.hud.showNavigation(candidate.navigation, statusOverride);
     } finally {
       if (this.pendingPresentation === pendingPresentation) {
         this.pendingPresentation = undefined;
@@ -380,6 +390,7 @@ export class NavigationController {
       this.route = undefined;
       await this.location?.setNavigationConsumer(undefined).catch(() => false);
     }
+    if (ownsRoute || ownsView) this.hud.navigationEnded?.();
     if (ownsView) this.current = undefined;
     if (ownsView || ownsPendingView) this.recordCue('stopped', true);
     // The caller uses this result to decide whether to restore Overview. An
@@ -575,7 +586,9 @@ export class NavigationController {
     if (route.pausedForReroute) return;
     route.repaintRequested = false;
     const navigation = this.progressModel(route, state, fix);
-    const painted = await this.hud.showNavigation(navigation);
+    const painted = this.hud.updateNavigation
+      ? await this.hud.updateNavigation(navigation)
+      : await this.hud.showNavigation(navigation);
     if (this.route !== route) return;
     if (semanticChange) this.recordCue(navigation.view, painted);
     if (!painted) return;

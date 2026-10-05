@@ -1,5 +1,7 @@
+import { measureTextWrap } from '@evenrealities/pretext';
 import { describe, expect, it } from 'vitest';
 import {
+  HEADER_TEXT_WIDTH,
   HUD_LOW_BATTERY_PCT,
   type HudStatusModel,
   batteryGlyph,
@@ -92,3 +94,26 @@ describe('the legacy line, parsed back into a model', () => {
     expect(statusModelFromText('', false)).toEqual({ clock: '', link: 'connected', mic: false, charging: false });
   });
 });
+
+describe('the header carries the other running features', () => {
+  const live: HudStatusModel = { clock: '9:41', link: 'connected', mic: true, battery: 80, charging: false };
+
+  it('puts the chips between the page and the glyphs', () => {
+    expect(nativeStatusLine({ ...live, activities: ['Focus 12m', '→ 80 m'] }, 'NEWS'))
+      .toBe('9:41 · NEWS · Focus 12m · → 80 m · ● · ▆');
+  });
+
+  it('shortens the page word first, then drops it, and never cuts a chip or a glyph', () => {
+    const model = { ...live, activities: ['Focus 12m', '→ 1.2 km'] };
+    const long = 'PLANNING · PLAN · AUG 31–SEP 6 · TWENTY-SIX PLANNED ITEMS';
+    const line = nativeStatusLine(model, long);
+    expect(measureTextWrap(line, HEADER_TEXT_WIDTH).lineCount).toBe(1);
+    expect(line.startsWith('9:41 · PLANNING')).toBe(true);
+    expect(line.endsWith(' · Focus 12m · → 1.2 km · ● · ▆')).toBe(true);
+    expect(line).toContain('…');
+    // A page so wide nothing of its word fits keeps the facts alone.
+    const narrow = nativeStatusLine(model, 'NEWS', 180);
+    expect(narrow).toBe('9:41 · Focus 12m · → 1.2 km · ● · ▆');
+  });
+});
+

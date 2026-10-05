@@ -11,9 +11,10 @@ import {
   type AssistantConversationPage,
   type HudPageBuilder,
 } from './HudPageBuilder';
-import type {
-  AssistantConversationSnapshot,
-  AssistantConversationTurn,
+import {
+  ContainerId,
+  type AssistantConversationSnapshot,
+  type AssistantConversationTurn,
 } from './types';
 
 export type {
@@ -47,6 +48,8 @@ interface AssistantConversationSurfaceOptions {
   /** Own the page-type transition when a visual HUD is mounted underneath.
    * Native text must never rebuild while an image upload is still in flight. */
   replacePage?: (page: RebuildPageContainer) => Promise<boolean>;
+  /** The page's live header line (HudPresenter.nativeHeader) at rebuild. */
+  statusText?: () => string;
 }
 
 export type ConversationExitResult = 'inactive' | 'prompted' | 'exited' | 'failed';
@@ -301,6 +304,11 @@ export class AssistantConversationSurface {
   private readonly indicatorIntervalMs: number;
   private readonly continuationPromptEnabled: boolean;
   private readonly replacePage?: AssistantConversationSurfaceOptions['replacePage'];
+  private readonly statusText?: AssistantConversationSurfaceOptions['statusText'];
+  /** The header as the glass shows it, and the one it should show. */
+  private shownStatus = '';
+  private desiredStatus = '';
+  private statusDirty = false;
   private readonly viewportOptions: ConversationViewportOptions;
 
   constructor(
@@ -312,6 +320,7 @@ export class AssistantConversationSurface {
     this.indicatorIntervalMs = Math.max(0, options.indicatorIntervalMs ?? 450);
     this.continuationPromptEnabled = options.continuationPromptEnabled ?? true;
     this.replacePage = options.replacePage;
+    this.statusText = options.statusText;
     this.viewportOptions = {};
   }
 
@@ -564,15 +573,18 @@ export class AssistantConversationSurface {
     const tracked = work.finally(() => {
       if (this.draining !== tracked) return;
       this.draining = undefined;
-      if ((this.snapshotDirty || this.footerDirty) && this.canWrite()) void this.ensureDrain();
+      if ((this.snapshotDirty || this.footerDirty || this.statusDirty) && this.canWrite()) void this.ensureDrain();
     });
     this.draining = tracked;
     return tracked;
   }
 
   private async drain(): Promise<void> {
-    while (this.canWrite() && (this.snapshotDirty || this.footerDirty)) {
-      if (this.snapshotDirty) {
+    while (this.canWrite() && (this.snapshotDirty || this.footerDirty || this.statusDirty)) {
+      if (this.statusDirty && !this.snapshotDirty && this.lastView !== undefined) {
+        this.statusDirty = false;
+        await this.paintStatus();
+      } else if (this.snapshotDirty) {
         this.snapshotDirty = false;
         this.footerDirty = false;
         this.lastPaintSucceeded = await this.paintSnapshot();
@@ -632,11 +644,43 @@ export class AssistantConversationSurface {
     return ok;
   }
 
-  private rebuild(view: ConversationViewport): Promise<boolean> {
-    const page = this.layouts.assistantConversationLayout(view);
-    return this.replacePage
-      ? this.replacePage(page)
-      : this.client.require().rebuildPageContainer(page);
+  private async rebuild(view: ConversationViewport): Promise<boolean> {
+    const status = this.statusText?.() ?? this.desiredStatus;
+    const page = this.layouts.assistantConversationLayout(view, status);
+    const rebuilt = this.replacePage
+      ? await this.replacePage(page)
+      : await this.client.require().rebuildPageContainer(page);
+    if (rebuilt) {
+      this.shownStatus = status;
+      this.desiredStatus = status;
+      this.statusDirty = false;
+    }
+    return rebuilt;
+  }
+
+  /**
+   * The header line changed (the clock, the mic, the battery, a running
+   * Pomodoro or route): one in-place upgrade, serialized with the
+   * transcript writes so the two never race on the bridge.
+   */
+  setStatus(text: string): Promise<boolean> {
+    this.desiredStatus = text;
+    if (!this.canWrite() || this.lastView === undefined) return Promise.resolve(true);
+    if (text === this.shownStatus) {
+      this.statusDirty = false;
+      return Promise.resolve(true);
+    }
+    this.statusDirty = true;
+    return this.ensureDrain().then(() => this.shownStatus === text);
+  }
+
+  private async paintStatus(): Promise<boolean> {
+    const text = this.desiredStatus;
+    if (text === this.shownStatus) return true;
+    const previous = this.shownStatus;
+    const ok = await this.upgrade(ContainerId.StatusBar, 'status', text, previous);
+    if (ok) this.shownStatus = text;
+    return ok;
   }
 
   private async upgradeView(view: ConversationViewport): Promise<boolean> {

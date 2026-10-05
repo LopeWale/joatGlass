@@ -239,6 +239,10 @@ export const HUD_VISUAL_GEOMETRY = {
  * 14 px glyph; the battery is Phosphor's wide 18 px cell. From the
  * low-battery threshold down the number returns to the left of the cell. */
 export const SPINE_ICONS = {
+  /** The running-feature chips ("Focus 12m · → 80 m") sit right-aligned
+   * between the tile seam and the mic, so a chip change dirties one tile. */
+  activityLeftX: 296,
+  activityRightX: 476,
   micX: 486,
   micY: 5,
   micSize: 14,
@@ -1061,6 +1065,23 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         context.fillText(`${Math.round(status.battery)}%`, SPINE_ICONS.lowBatteryTextRightX, baseline);
         context.textAlign = 'left';
       }
+    }
+
+    // The other running features, right-aligned against the mic: the
+    // Pomodoro's minutes on the map, the next turn on the dashboard.
+    const chips = (status.activities ?? []).filter((chip) => chip.trim().length > 0);
+    if (chips.length > 0) {
+      context.font = TYPE.statusMeta;
+      context.fillStyle = gray(SUPPORT);
+      context.textAlign = 'right';
+      const room = SPINE_ICONS.activityRightX - SPINE_ICONS.activityLeftX;
+      let text = chips.join(' · ');
+      if (context.measureText(text).width > room) {
+        while (text.length > 1 && context.measureText(`${text}…`).width > room) text = text.slice(0, -1);
+        text = `${text.trimEnd()}…`;
+      }
+      context.fillText(text, SPINE_ICONS.activityRightX, baseline);
+      context.textAlign = 'left';
     }
 
     // No rule under the spine. It separated nothing that the gap below it
