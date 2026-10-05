@@ -68,7 +68,18 @@ function replayHarness(mode: NavigationMode) {
         events.push(`tile:${update.containerID ?? -1}`);
         return ImageRawDataUpdateResult.success;
       },
-      rebuildPageContainer: async () => true,
+      // A page with image containers is the four-tile map page; a page of
+      // text containers is a frame before the live map (confirm the place,
+      // a warning, arrival), Even's own text page.
+      rebuildPageContainer: async (page: { imageObject?: unknown[] }) => {
+        events.push(page.imageObject?.length ? 'page:image' : 'page:text');
+        return true;
+      },
+      // A cursor move or a new step on the same text page upgrades it in place.
+      textContainerUpgrade: async (update: { containerName?: string }) => {
+        events.push(`upgrade:${update.containerName ?? '?'}`);
+        return true;
+      },
     }),
   } as unknown as BridgeClient;
   const renderer: HudFrameRenderer = {
@@ -135,15 +146,25 @@ function replayHarness(mode: NavigationMode) {
   };
 }
 
+/** The live map is the one navigation frame drawn as pixels: a guidance
+ * state follows its four tiles. Every other frame (uncertain, off-route,
+ * arrival) is Even's own text page, so its state follows no tile at all. */
 function expectEveryStateAfterFourTiles(events: readonly string[]): void {
   events.forEach((event, index) => {
     if (!event.startsWith('state:')) return;
-    expect(events.slice(index - 4, index)).toEqual([
-      `tile:${ContainerId.Image}`,
-      `tile:${ContainerId.VisualTopRight}`,
-      `tile:${ContainerId.VisualBottomLeft}`,
-      `tile:${ContainerId.VisualBottomRight}`,
-    ]);
+    if (event === 'state:guidance') {
+      expect(events.slice(index - 4, index)).toEqual([
+        `tile:${ContainerId.Image}`,
+        `tile:${ContainerId.VisualTopRight}`,
+        `tile:${ContainerId.VisualBottomLeft}`,
+        `tile:${ContainerId.VisualBottomRight}`,
+      ]);
+      return;
+    }
+    const previousState = events.slice(0, index).findLastIndex((entry) => entry.startsWith('state:'));
+    const sinceLastState = events.slice(previousState + 1, index);
+    expect(sinceLastState.filter((entry) => entry.startsWith('tile:'))).toEqual([]);
+    expect(sinceLastState.some((entry) => entry === 'page:text' || entry === 'upgrade:main')).toBe(true);
   });
 }
 
@@ -164,7 +185,8 @@ describe('navigation production-path replay', () => {
     ]);
     expect(replay.sent.filter((message) => message.kind === 'navigation.reroute.request'))
       .toHaveLength(1);
-    expect(replay.views).toEqual(['uncertain', 'guidance', 'uncertain', 'off_route']);
+    // The renderer draws only the live map; the warnings are text pages.
+    expect(replay.views).toEqual(['guidance']);
     expectEveryStateAfterFourTiles(replay.events);
   });
 
@@ -188,8 +210,9 @@ describe('navigation production-path replay', () => {
     expect(states).toContain('wrong_way');
     expect(states.slice(states.indexOf('wrong_way') + 1)).toContain('guidance');
     expect(states[states.length - 1]).toBe('arrived');
-    expect(replay.views).toContain('wrong_way');
-    expect(replay.views[replay.views.length - 1]).toBe('arrived');
+    expect(replay.views).not.toContain('wrong_way');
+    expect(replay.views.every((view) => view === 'guidance')).toBe(true);
+    expect(replay.events[replay.events.length - 1]).toBe('state:arrived');
     expect(replay.locationActive()).toBe(false);
     expectEveryStateAfterFourTiles(replay.events);
   });
