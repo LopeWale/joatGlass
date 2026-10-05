@@ -101,10 +101,11 @@ describe('HudPageBuilder invariants', () => {
   });
 
   it('builds the conversation as one bordered, bottom-anchored native surface', () => {
+    // A three-line card on the card's fixed lower edge (274).
     const page = builder.assistantConversationLayout({
-      cardTop: 128,
+      cardTop: 142,
       cardHeight: 132,
-      transcriptTop: 140,
+      transcriptTop: 154,
       transcriptHeight: 81,
       dimText: 'Tell me a joke.\n \n ',
       brightText: ' \nWhy did the byte cross the bus?\n ',
@@ -114,9 +115,12 @@ describe('HudPageBuilder invariants', () => {
     const byName = (name: string) => page.textObject?.find((entry) => entry.containerName === name);
 
     expect(page.imageObject).toBeUndefined();
-    expect(page.textObject).toHaveLength(5);
+    // The live header line, then the card: a running Pomodoro or route
+    // stays visible above a conversation.
+    expect(page.textObject).toHaveLength(6);
+    expect(page.textObject?.[0]).toMatchObject({ containerName: 'status', yPosition: 0, height: 35 });
     expect(byName('conversation')).toMatchObject({
-      yPosition: 128,
+      yPosition: 142,
       height: 132,
       borderWidth: 1,
       isEventCapture: 1,

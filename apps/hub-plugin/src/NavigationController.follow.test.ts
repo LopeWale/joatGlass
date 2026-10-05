@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NavigationController, nearestMapPanel } from './NavigationController';
+import { navigationVisualFixture } from './NavigationHud';
 import type { NavigationHudModel, NavigationMapPanelModel } from './NavigationHud';
 import type { NavigationRoutePlan } from './NavigationProgress';
 import type { UplinkMessage } from './types';
@@ -164,3 +165,55 @@ describe('the guidance page follows the wearer', () => {
     expect(h.frames[2]).toMatchObject({ view: 'uncertain', secondary: 'Route match is uncertain' });
   });
 });
+
+describe('a route in progress never takes the glass on its own', () => {
+  it('sends progress and route views through the background-aware path, and the questions through the page', async () => {
+    const shown: NavigationHudModel[] = [];
+    const updated: NavigationHudModel[] = [];
+    let ended = 0;
+    let consumer: ((fix: object, receivedAt: number) => void) | undefined;
+    const now = 1_700_000_000_000;
+    const controller = new NavigationController(
+      {
+        showNavigation: async (frame) => { shown.push(frame); return true; },
+        updateNavigation: async (frame) => { updated.push(frame); return true; },
+        navigationEnded: () => { ended += 1; },
+      },
+      { sendNavigation: () => undefined },
+      {
+        setNavigationConsumer: async (next) => { consumer = next as typeof consumer; return true; },
+        requestNavigationOrigin: async () => null,
+      },
+      undefined,
+      () => now,
+    );
+    // A question for the wearer takes the page.
+    await controller.present({
+      kind: 'navigation.view', sessionId: 'nav-1', requestId: 'r1', generation: 1,
+      navigation: { ...navigationVisualFixture('nav-destination') },
+    });
+    expect(shown).toHaveLength(1);
+    expect(updated).toHaveLength(0);
+    // The route's own progress does not.
+    await controller.installRoute({
+      kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
+      generation: 10, routeId: 'route-1', revision: 1,
+      destinationLabel: 'Cajun Corner', etaMinutes: 24, plan,
+    });
+    consumer?.({ latitude: 0, longitude: 100 * METRE_DEG, accuracy: 5, timestamp: now - 100 }, now);
+    await controller.whenIdle();
+    expect(updated[updated.length - 1]).toMatchObject({ view: 'guidance' });
+    expect(shown).toHaveLength(1);
+    await controller.present({
+      // Newer than the installed route's generation (10).
+      kind: 'navigation.view', sessionId: 'nav-1', requestId: 'r2', generation: 11,
+      navigation: { ...navigationVisualFixture('nav-off-route') },
+    });
+    expect(updated[updated.length - 1]).toMatchObject({ view: 'off_route' });
+    expect(shown).toHaveLength(1);
+
+    expect(await controller.stopRoute('nav-1')).toBe(true);
+    expect(ended).toBe(1);
+  });
+});
+
