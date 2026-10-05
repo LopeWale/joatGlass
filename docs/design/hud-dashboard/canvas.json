@@ -55,7 +55,7 @@
       "x": 0,
       "y": -170,
       "w": 400,
-      "text": "Gestures (one vocabulary, sides named)\nswipe: move highlight / scroll\nright-temple tap or R1 ring: select / confirm / open\nleft-temple double-tap: menu open, close, back, dismiss\nlong-press: repeat last reply\nright double-tap: system exit dialog (OS-owned)"
+      "text": "Gestures (one vocabulary, sides named)\nswipe: move highlight / scroll\nright-temple tap or R1 ring: select / confirm / open\ndouble-tap (either temple or ring): back, dismiss\nlong-press: repeat last reply\napp exit: Mac shutdown only (no glasses gesture)"
     },
     {
       "id": "hud-constraints",
