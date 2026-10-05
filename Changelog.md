@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.91 firmware-pages package
+
+- Rebuilt the existing JOAT package from merged main (`87a4ea5`, version bump only on top of the firmware-pages merge) with the same `scripts/pack.sh`, the same `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158173 bytes, SHA-256 `03b3a6f10b1aaa36e0cdf194cdb5f448ae9ed02391655975a41e95ad19587c91`. Not uploaded to Even Hub, not installed, not verified on physical glasses; the glasses still run 0.1.88.
+
 ## 2026-10-05 — Even Hub skills evaluation and the first dedupe slice
 
 - Audit against the official `everything-evenhub` skills and SDK 0.0.14 types in `docs/audits/2026-10-05-even-hub-skills-evaluation.md`: unwired frames and rows, raster surfaces that duplicate native containers, why the assistant feels slower than Even AI, and the gates behind an unsent Messages reply. The installed package is still 0.1.88; 0.1.90's native conversation has not reached the glasses.
