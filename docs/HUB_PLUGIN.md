@@ -192,6 +192,7 @@ other three, so a swipe shipped three tiles.
 | Open a headline or a result | 4 | **0** — `NEWS · ARTICLE` / `SEARCH · RESULT` text pages, paged in place; the Mac is asked only past the local edge |
 | The expanded Pomodoro countdown | **1 tile every second** | **0** — a whole-minute first row ("Focus · block 2 of 4 · 24 min left"); the page is rebuilt once a minute |
 | The Settings page | 4 | **0** — firmware list |
+| Planning week and day pages, and Back between them | 4 per page | **0** — firmware lists; the Mac resolves every row by index and owns Back. The month dashboard keeps its four tiles |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -325,8 +326,18 @@ The levers that remain are design decisions, not code:
   first row (`pomodoroCountdownRow`) that the tap mapping skips
   (`panelRowOffset`); the presenter's panel ticker runs at 60 s on a
   firmware page and calls `onNativePanelTick`, which the menu answers by
-  rebuilding the page. The only raster page left in the capability views is
-  the Planning month grid and its day/week lists.
+  rebuilding the page.
+- ~~Native Planning week and day~~ — 2026-10-05: a Planning page that
+  carries the Mac's row map (`planningNavigation`) and no month grid is a
+  firmware list (`planningList` in `presentList`). Every row is a Mac
+  action by index (day, entry, previous, next, scope, earlier/more
+  entries) and Back is the Mac's `planning-back`, so nothing changes on
+  the wire; the day page's 13-entry paging keeps it under the list's 20
+  rows. The month dashboard (grid plus hovered-day pane) is the one raster
+  capability page left: a calendar grid has no Even template.
+  `scripts/simulator_planning_native_probe.py` drives month → week → day →
+  event and Back over a fake EventKit bridge: zero tiles on every page but
+  the month.
   `scripts/simulator_panels_native_probe.py` pushes the three tabs and
   records zero tiles on each page, the article, its paging, Back and the
   minute rebuild; the overview's own rail swipes are the only tiles.

@@ -829,7 +829,12 @@ export class CapabilityMenu {
     // is a firmware list too: the swipe-paging thread needs scroll events the
     // firmware list does not report, so the Mac's opt-in decides.
     const pagedByRows = pageControls !== undefined;
-    const firmwareList = (usesFirmwareList(normalized) || pagedByRows)
+    // A Planning week or day page is the Mac's own row map (planningOwner)
+    // without the month grid: every row is a Mac action by index and Back
+    // is the Mac's, so the firmware list serves it as it serves Activity.
+    // The month keeps the split dashboard: a calendar grid has no template.
+    const planningList = planningOwner !== undefined && !planningGrid;
+    const firmwareList = (usesFirmwareList(normalized) || pagedByRows || planningList)
       && !planningGrid && !readerPage && (!quickNotesPage || pagedByRows);
     // The message reader is a firmware text page: Even draws the prose and
     // the presenter pages it in place, so no raster prose pager is prepared.
