@@ -18,8 +18,8 @@ import { agentTerminalTranscriptLayout } from './HudCanvasRenderer';
 import type { BrainstormHudModel } from './types';
 
 /** Baselines drawn on this surface, from drawBrainstorm. */
-const SUMMARY_Y = 58;      // 11px — "HERMES > RUNNING · …"
-const SECOND_ROW_Y = 72;   // 9px — LANES when running, HOST when recovering
+const SUMMARY_Y = 46;      // 11px — "HERMES > RUNNING · …"
+const SECOND_ROW_Y = 60;   // 9px — LANES when running, HOST when recovering
 const HINT_Y = 267;        // 9px  — the gesture footer, centred
 const LINE_HEIGHT = 14;    // drawBrainstormTranscript
 const CANVAS_HEIGHT = 288;

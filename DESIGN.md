@@ -8,7 +8,7 @@ typography:
   mono:
     fontFamily: "SF Mono, SFMono-Regular, Menlo, monospace"
 spacing:
-  status-spine: "36px"
+  status-spine: "24px"
   sidebar-width: "160px"
   shell-radius: "20px"
 components:
@@ -90,7 +90,7 @@ capture input and the SDK permits no image larger than 288×144.
 Overview, Sidebar, and live-session states share the 20px rounded shell; every
 list, confirmation, productivity, and stationary navigation page (confirm
 destination, repair, travel mode, route preview, arrival, error) renders FLAT
-under the 36px status spine (wearer's ruling, 2026-08-31: the card was the
+under the 24px status spine (wearer's ruling, 2026-08-31: the card was the
 waste — its border, margins, and per-row chrome, not any single line). Only
 the moving navigation states (guidance, GPS-uncertain, wrong-way, off-route,
 rerouting) keep the live-session shell, alongside Brainstorm. Overview is sparse and
@@ -192,9 +192,11 @@ what the Mac last pushed; nothing on the glass ever fetches.
 
 On a feature page the spine reads MESSAGES or PLANNING where it reads JOAT
 at home, and the body below it belongs entirely to that feature — no second
-title bar. That reclaimed band is worth a whole extra row of content (ten
-dense rows per list, ten reader lines, eight transcript rows). A degraded
-link outranks the label: if JOAT is not READY, the spine says so instead.
+title bar. That reclaimed band is worth a whole extra row of content
+(eleven dense rows per list under the 24 px spine, ten reader lines, eight
+transcript rows; five rows on a firmware list, where the name shares the
+header line). A degraded link outranks the label: if JOAT is not READY, the
+spine says so instead.
 
 ### Guidance is two panes: act, then see
 
@@ -322,11 +324,38 @@ Calendar/Planning, Messages, Notifications, Tasks, Navigation, QuickNotes,
 Brainstorm, Agent Terminal, Activity, Settings,
 microphone, and battery use one stroke family and are rasterized with the
 surrounding frame. Short text labels remain mandatory; icons never carry
-meaning alone — with one deliberate exception. The overview's tab rail is
+meaning alone — with two deliberate exceptions. The overview's tab rail is
 four icons without labels: four fixed positions in a fixed order, learned
 once, on a rail the wearer swipes through in seconds, and the tab's name
 appears in the status spine the moment it is expanded. A label per tab
-would cost the pane the width the rail exists to preserve.
+would cost the pane the width the rail exists to preserve. And the status
+spine's microphone and battery are icons alone (wearer's ruling,
+2026-10-05: "simple icons and smaller"): a slashed mic is a closed mic, the
+cell's fill is the level, the charging cell is charging, and the number
+returns beside the cell only from 15% down, when it matters. The firmware
+pages, which cannot draw a bitmap, spell the same two facts with glyphs the
+firmware font has: ● and ○ for the microphone, ▁ to █ for the battery, a
+trailing + for charging, the number from 15% down.
+
+### The status spine
+
+One 24 px band (it was 36). Left tile: the phone's clock (the date on the
+overview, which prints the time at full size) and the spine's WORD. Right
+tile: the two icons. The word is the page's name at rest, JOAT at home, a
+degraded link above everything ("JOAT · RECONNECTING"), and the Mac's
+transient state ("JOAT · HEARING YOU…") while it lasts. The microphone is
+no longer a word: a page keeps its name while the wearer talks, where it
+used to read "JOAT · LISTENING" the moment the mic opened.
+
+A firmware page spends one line on the same facts, in the same order:
+`9:41 · POMODORO · ● · ▇`. It used to spend two — a status line in words
+("9:41 JOAT mic off bat 100%") and a separate title line — and that second
+line is where every firmware list's fifth row came from. The line is live:
+a clock, microphone or battery change on a firmware page is one in-place
+`textContainerUpgrade` of its header container, never a rebuild and never
+a tile; before 2026-10-05 it was dropped, so a list opened at 9:41 still
+said 9:41 at 10:05. When the line overruns the glass, the word is
+shortened, never the clock or the glyphs (`HudPageBuilder.fitHeader`).
 
 ### Motion
 

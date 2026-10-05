@@ -96,8 +96,9 @@ describe('HudPresenter native Agent Terminal journey', () => {
     expect(r.rebuilds[0]?.imageObject ?? []).toHaveLength(0);
     // The firmware owns this page, so the live top line travels in the
     // rebuild; a blank status container would hide the clock and battery.
+    // It is also the page's only title line.
     expect(r.rebuilds[0]?.textObject?.find((c) => c.containerName === 'status')?.content)
-      .toBe('9:41 JOAT listening bat 87%');
+      .toBe('AGENT TERMINAL · 9:41 JOAT listening bat 87%');
     expect(r.hud.usesCustomListSelection()).toBe(false);
 
     expect(await r.hud.showBrainstorm(terminal())).toBe(true);
@@ -204,7 +205,8 @@ describe('HudPresenter Brainstorm on the native page', () => {
     expect(r.operations.filter((op) => op === 'rebuild:0:2:0')).toHaveLength(1);
     expect(r.frames).toHaveLength(framesBefore);
     const page = last(r.rebuilds);
-    expect(page?.textObject?.find((c) => c.containerName === 'terminal-head')?.content).toBe('JOAT · BRAINSTORM');
+    // The head line is the page's status header: name, then the live line.
+    expect(page?.textObject?.find((c) => c.containerName === 'terminal-head')?.content).toBe('BRAINSTORM · 12:34 JOAT listening bat 80%');
     expect(body(page)).toContain('CODEX > A cache saves a round trip.');
     expect(body(page).split('\n')[0]).toContain('WORKING · Codex · round 1/3 · 2 calls');
 

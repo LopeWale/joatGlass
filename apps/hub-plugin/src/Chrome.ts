@@ -1,6 +1,7 @@
 import { ContainerId } from './types';
 import type { HudPresenter } from './HudPresenter';
 import type { LinkState } from './MacLink';
+import type { HudStatusModel } from './HudStatus';
 
 /**
  * Plugin-owned chrome: the parts of the HUD that must render WITHOUT the Mac.
@@ -14,16 +15,17 @@ import type { LinkState } from './MacLink';
  *
  * Everything here is derived from state the PHONE already has, so it keeps
  * updating through a Mac outage — which is the whole point.
+ *
+ * Chrome hands the presenter a `HudStatusModel`, not a composed line: the
+ * raster spine draws icons from its fields and the firmware pages compose
+ * their one-line header from it (HudStatus.ts), so nothing downstream has
+ * to parse words back into facts.
  */
 // The resting overview's gestures, truthfully: tap expands the tab the
 // rail has lit, swipe moves along the rail, hold is the microphone. The
 // menu is the firmware's (tap, then hold) and needs no line of its own.
-const HINT = 'tap: open \u00b7 swipe: tabs \u00b7 hold: mic \u00b7 \u201cJOAT \u2026\u201d';
-// The visual renderer centers this text between a fixed clock and microphone
-// region.  Thirty source characters become at most a 32-character rendered
-// state after its JOAT separator, which leaves the microphone/battery chrome
-// clear on the 576px optics.
-const STATUS_STATE_MAX_CHARS = 30;
+const HINT = 'tap: open · swipe: tabs · hold: mic · “JOAT …”';
+const RESTING_WORDS = /^(?:listening|mic off|ready|online)$/i;
 
 export class Chrome {
   private timer?: ReturnType<typeof setInterval>;
@@ -74,7 +76,11 @@ export class Chrome {
    */
   setMacState(text: string): void {
     if (!this.active) return;
-    this.macState = text.replace(/^JOAT\s*[·-]?\s*/i, '').trim() || undefined;
+    const word = text.replace(/^JOAT\s*[·-]?\s*/i, '').trim();
+    // "listening", "mic off" and "ready" restate what the microphone glyph
+    // and icon already show; as a state word they would hide the page's
+    // name in the spine. They mean rest, so they clear the word.
+    this.macState = word && !RESTING_WORDS.test(word) ? word : undefined;
     void this.paint();
     // Transient by nature: fall back to the derived state so the bar cannot
     // latch a stale word (a latched status is what stranded the wearer once).
@@ -87,7 +93,6 @@ export class Chrome {
 
   setMic(open: boolean): void {
     this.mic = open;
-    this.hud.setMicState(open);
     void this.paint();
   }
 
@@ -103,39 +108,23 @@ export class Chrome {
     return `${h}:${String(d.getMinutes()).padStart(2, '0')}`;
   }
 
-  private state(): string {
-    // The LINK matters more than the mic: a wearer whose brain is gone needs
-    // to know that, not that the microphone is dutifully recording nothing.
-    if (this.link !== 'connected') return `JOAT ${this.link}`;
-    if (this.macState) return `JOAT ${this.macState}`;
-    return this.mic ? 'JOAT listening' : 'JOAT mic off';
+  /** The facts as they stand, for the presenter to draw however the page
+   * it holds can draw them. */
+  model(): HudStatusModel {
+    return {
+      clock: this.clock(),
+      link: this.link,
+      mic: this.mic,
+      ...(this.battery !== undefined ? { battery: this.battery } : {}),
+      charging: this.charging,
+      ...(this.macState ? { macState: this.macState } : {}),
+    };
   }
 
   private async paint(): Promise<void> {
     if (!this.active) return;
     const generation = this.paintGeneration;
-    const left = this.clock();
-    const right = this.battery !== undefined
-      ? `bat ${this.battery}%${this.charging ? '+' : ''}`
-      : '';
-    // The status wire format is limited to 46 characters, but `slice()` at
-    // the end used to cut the battery suffix off first. The visual renderer
-    // then mistook the partial `bat 10` as state text and centered it through
-    // the microphone icon. Reserve stable chrome first; truncate only the
-    // semantic state that can safely be shortened.
-    const middleBudget = Math.max(
-      0,
-      Math.min(
-        STATUS_STATE_MAX_CHARS,
-        46 - left.length - 1 - (right ? right.length + 1 : 0),
-      ),
-    );
-    const state = this.state();
-    const middle = state.length <= middleBudget
-      ? state
-      : `${state.slice(0, Math.max(0, middleBudget - 1)).trimEnd()}…`;
-    const line = right ? `${left} ${middle} ${right}` : `${left} ${middle}`;
-    await this.hud.showText(line, ContainerId.StatusBar);
+    await this.hud.setStatusModel(this.model());
     if (!this.active || generation !== this.paintGeneration) return;
     await this.hud.showText(HINT, ContainerId.Hint);
   }

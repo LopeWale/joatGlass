@@ -182,7 +182,7 @@ other three, so a swipe shipped three tiles.
 | Interaction | Tiles before | Tiles after |
 |---|---|---|
 | Mac state word ("hearing you…") | 2 | **1** — drawn inside `SPINE_LABEL_BOX`, which ends on the seam, so only the top-left tile changes (the native-text twin was never wired; see "levers" below) |
-| Mic on/off, battery | 2 / 1 | **1** (top-right) |
+| Mic on/off, battery | 2 / 1 | **1** (top-right) on an image page; **0** on a firmware page — one in-place upgrade of its header line (2026-10-05; it used to be dropped there) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
 | Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
@@ -203,7 +203,7 @@ other three, so a swipe shipped three tiles.
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
 | Assistant answer show, then dismiss | 4 + 4 | 0 (one text rebuild) + 4 + one rebuild; receipts 2 + 2 |
-| Clock minute tick on a feature page | 1 | 1 |
+| Clock minute tick on a feature page | 1 | 1 on an image page; **0** on a firmware page (header upgrade) |
 
 Two host facts from Even's own display docs shape the pipeline
 (`hub.evenrealities.com/docs/build/display`, read 2026-09-02):
@@ -246,7 +246,11 @@ The levers that remain are design decisions, not code:
   layered over the tiles with `zOrderIndex`, updated with
   `textContainerUpgrade`. A voice-state change would then cost zero tiles.
   The price: the firmware's proportional font at a fixed 27 px line height
-  (see the `font-measurement` skill), not the 10-12 px canvas type.
+  (see the `font-measurement` skill), not the 10-12 px canvas type. Taken
+  for the firmware pages on 2026-10-05: their one header line (`9:41 ·
+  PAGE · ● · ▇`, composed from `HudStatusModel`) is upgraded in place on
+  every clock, mic or battery change. The image pages keep the 24 px
+  raster spine with icons, measured into the top tiles.
 - ~~A native list for plain-row pages~~ — `FIRMWARE_LIST_TITLES` in
   `CapabilityMenu` (2026-10-05: AGENT TERMINAL, the MESSAGES picker,
   ACTIVITY). The presenter tracks which page the glass holds

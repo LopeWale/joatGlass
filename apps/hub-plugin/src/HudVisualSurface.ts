@@ -4,6 +4,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
+import type { HudStatusModel } from './HudStatus';
 import { isNavigationSetupStatus, type NavigationHudModel } from './NavigationHud';
 import type { PanelRailVisual } from './PanelRail';
 import {
@@ -151,6 +152,10 @@ type HudVisualBaseFrame =
  * `actionOverlay`: transient outcome strip over the page the action came from;
  * truth states (failed/check/due) still arrive as a full productivity frame. */
 export type HudVisualFrame = HudVisualBaseFrame & {
+  /** The phone's status facts as data (HudStatus.ts). Present on every
+   * production frame once Chrome has started; the renderer falls back to
+   * parsing `status` only for frames built without it. */
+  statusModel?: HudStatusModel;
   assistantOverlay?: AssistantOverlayVisual;
   assistantConversation?: AssistantConversationVisual;
   actionOverlay?: { productivity: ProductivityHudModel };

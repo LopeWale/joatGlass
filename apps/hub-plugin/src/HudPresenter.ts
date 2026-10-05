@@ -15,7 +15,8 @@ import {
   wrapConversationText,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
-import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
+import { ASSISTANT_ANSWER_PAGE, fitHeader } from './HudPageBuilder';
+import { type HudStatusModel, nativeStatusLine } from './HudStatus';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
 import { navigationNativeBody, type NavigationHudModel } from './NavigationHud';
@@ -224,6 +225,18 @@ const NATIVE_CONTENT_OWNERS: ReadonlySet<DisplayPageOwner> = new Set<DisplayPage
   'terminal-list-native', 'text-page-native', 'navigation-native',
 ]);
 
+/** Firmware pages whose layout declares the `status` text container (id 1)
+ * as their one-line header. A clock, microphone or battery change on one of
+ * them is a single in-place `textContainerUpgrade` of that container, not a
+ * rebuild — and not a dropped update, which is what it was until 2026-10-05:
+ * `paint()` is a no-op while the firmware owns the page, so the header
+ * froze at whatever the rebuild carried. The Agent Terminal page composes
+ * its own head line and the conversation page has no header. */
+const NATIVE_STATUS_OWNERS: ReadonlySet<DisplayPageOwner> = new Set<DisplayPageOwner>([
+  'terminal-list-native', 'text-page-native', 'navigation-native',
+  'confirmation-native', 'overlay-native', 'prompt-native',
+]);
+
 /** How long an outcome strip stays on a firmware page before the page
  * beneath returns; the raster pill's own failsafe is eight seconds. */
 const NATIVE_PILL_DISMISS_MS = 5_000;
@@ -368,6 +381,13 @@ export class HudPresenter {
   private assistantOverlayPaintStartedAt = 0;
   private notificationReturn?: NotificationReturnState;
   private micOn = false;
+  /** The phone's status facts (HudStatus.ts), set by Chrome. The raster
+   * spine and the firmware headers both draw from this; the StatusBar
+   * stream keeps only its untitled line for the legacy text paths. */
+  private statusModel?: HudStatusModel;
+  /** What the native `status` container currently shows, so a live
+   * refresh can size its in-place upgrade. Set by every native rebuild. */
+  private nativeStatusPainted?: string;
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
@@ -410,9 +430,14 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     const visual = this.visual;
     const replace = () => this.client.require().rebuildPageContainer(page);
+    const statusShown = page.textObject?.find((container) =>
+      container.containerID === ContainerId.StatusBar)?.content;
     if (!visual) {
       const replaced = await replace();
-      if (replaced && displayCurrent()) this.pageOwner = owner;
+      if (replaced && displayCurrent()) {
+        this.pageOwner = owner;
+        this.nativeStatusPainted = statusShown;
+      }
       return replaced && displayCurrent();
     }
     if (!visual.withPageTransition) return false;
@@ -421,6 +446,7 @@ export class HudPresenter {
       if (replaced && displayCurrent()) {
         visual.forgetPage?.();
         this.pageOwner = owner;
+        this.nativeStatusPainted = statusShown;
       }
       return replaced && displayCurrent();
     } catch {
@@ -468,7 +494,7 @@ export class HudPresenter {
     if (this.surface.kind === 'brainstorm'
       && this.usesNativeConversation(this.surface.brainstorm)) {
       return this.nativeTerminal.present(this.surface.brainstorm,
-        this.streams.get(ContainerId.StatusBar), displayCurrent);
+        this.nativeHeader(this.nativePageTitle()), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
       return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
@@ -763,7 +789,7 @@ export class HudPresenter {
       // writing into containers the question page has replaced.
       if (!await this.prepareNativeTerminalHandoff()) return false;
       if (!this.isPromptCurrent(prompt)) return false;
-      const layout = this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.streams.get(ContainerId.StatusBar));
+      const layout = this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.nativeHeader(this.nativePageTitle()));
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
     } catch {
@@ -997,7 +1023,7 @@ export class HudPresenter {
   private nativeListLayout(surface: Extract<HudSurface, { kind: 'list' }>): RebuildPageContainer {
     return this.layouts.listLayout(surface.items, {
       ...surface.options,
-      status: this.streams.get(ContainerId.StatusBar),
+      status: this.nativeHeader(surface.options.title),
     });
   }
 
@@ -1118,7 +1144,7 @@ export class HudPresenter {
     const next = { revision, pages, page, body, hint };
     if (this.pageOwner !== 'overlay-native') {
       const replaced = await this.replaceNativePage(
-        this.layouts.assistantAnswerLayout(body, { status: this.streams.get(ContainerId.StatusBar), hint }),
+        this.layouts.assistantAnswerLayout(body, { status: this.nativeHeader(this.nativePageTitle()), hint }),
         'overlay-native',
       );
       if (!replaced || !displayCurrent()) return false;
@@ -1326,6 +1352,61 @@ export class HudPresenter {
    * status word such as "connecting" or "paused". */
   setMicState(open: boolean): void {
     this.micOn = open;
+    if (this.statusModel) this.statusModel = { ...this.statusModel, mic: open };
+  }
+
+  /**
+   * The status facts, from Chrome. On the visual page they ride the next
+   * frame; on a firmware page that declares the status container they are
+   * one in-place upgrade of its header line; on the two native pages
+   * without one they wait in the stream for the next page. The untitled
+   * line also goes into the StatusBar stream so the text-only paths and the
+   * capture/restore logic see the same facts.
+   */
+  async setStatusModel(model: HudStatusModel): Promise<boolean> {
+    this.statusModel = { ...model };
+    this.micOn = model.mic;
+    if (this.pageOwner === 'terminal-conversation-native') {
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      return this.nativeTerminal.setStatus(this.nativeHeader(this.nativePageTitle()));
+    }
+    if (this.pageOwner !== 'visual' && NATIVE_STATUS_OWNERS.has(this.pageOwner)) {
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      const header = this.nativeHeader(this.nativePageTitle());
+      const previous = this.nativeStatusPainted;
+      if (header === previous) return true;
+      const displayCurrent = this.captureDisplayGuard();
+      this.nativeStatusPainted = header;
+      try {
+        const ok = await this.upgradeNativeText(ContainerId.StatusBar, 'status', header, previous ?? '');
+        return ok && displayCurrent();
+      } catch {
+        return false;
+      }
+    }
+    return this.showText(nativeStatusLine(model), ContainerId.StatusBar);
+  }
+
+  /** The one-line header a firmware page shows: clock · page · mic · battery
+   * from the model when Chrome has supplied one; otherwise the page's name
+   * and whatever line the StatusBar stream holds. */
+  private nativeHeader(pageTitle?: string): string {
+    if (this.statusModel) return fitHeader(nativeStatusLine(this.statusModel, pageTitle));
+    return fitHeader([pageTitle?.trim(), this.streams.get(ContainerId.StatusBar)?.trim()]
+      .filter((part): part is string => Boolean(part))
+      .join(' · '));
+  }
+
+  /** The name the header carries for the page the presenter holds. */
+  private nativePageTitle(): string | undefined {
+    switch (this.surface.kind) {
+      case 'list': return this.surface.options.title;
+      case 'navigation': return 'NAVIGATION';
+      case 'productivity': return 'PLANNING';
+      case 'brainstorm':
+        return this.surface.brainstorm.screen === 'agent_terminal' ? 'AGENT TERMINAL' : 'BRAINSTORM';
+      default: return undefined;
+    }
   }
 
   private guardedListPaintRevision = 0;
@@ -1393,7 +1474,8 @@ export class HudPresenter {
     const body = pages[page] ?? ' ';
     const hint = textPageHint(page, pages.length, surface.options.hint);
     const ok = await this.replaceNativePage(
-      this.layouts.textPageLayout(body, { status: liveStatus?.text, hint }), 'text-page-native',
+      this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }),
+      'text-page-native',
     );
     if (!ok || !current()) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
@@ -1556,7 +1638,7 @@ export class HudPresenter {
     const previous = this.pageOwner === 'navigation-native' ? this.nativeNavigation : undefined;
     if (previous === undefined) {
       const ok = await this.replaceNativePage(
-        this.layouts.textPageLayout(native.body, { status: liveStatus?.text, hint: native.hint }),
+        this.layouts.textPageLayout(native.body, { status: this.nativeHeader('NAVIGATION'), hint: native.hint }),
         'navigation-native',
       );
       if (!ok || !displayCurrent()) {
@@ -1734,7 +1816,7 @@ export class HudPresenter {
     const stillCurrent = () => displayCurrent() && this.surface === surface && (isCurrent?.() ?? true);
     const painted = await this.nativeTerminal.present(
       surface.brainstorm,
-      liveStatus?.text,
+      this.nativeHeader(this.nativePageTitle()),
       stillCurrent,
     );
     if (!stillCurrent()) return false;
@@ -1845,7 +1927,7 @@ export class HudPresenter {
     const macHint = productivityActionHint(model);
     const hint = textPageHint(page, pages.length, macHint);
     const ok = await this.replaceNativePage(
-      this.layouts.textPageLayout(body, { status: liveStatus?.text, hint }), 'text-page-native',
+      this.layouts.textPageLayout(body, { status: this.nativeHeader('PLANNING'), hint }), 'text-page-native',
     );
     if (!ok || !displayCurrent()) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
@@ -2069,7 +2151,9 @@ export class HudPresenter {
       ? true
       : await this.rebuildPage(nativeReplyPage
           ? this.layouts.defaultLayout()
-          : this.layouts.listLayout(surface.items, surface.options));
+          : this.layouts.listLayout(surface.items, {
+            ...surface.options, status: this.nativeHeader(surface.options.title),
+          }));
     if (!ok || !displayCurrent()) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
       return false;
@@ -2451,7 +2535,9 @@ export class HudPresenter {
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', painted ? 'success' : 'failed');
       return painted;
     }
-    const layout = this.layouts.confirmationLayout(current.prompt, liveStatus?.text);
+    const layout = this.layouts.confirmationLayout(
+      current.prompt, this.visual ? this.nativeHeader(this.nativePageTitle()) : liveStatus?.text,
+    );
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')
       : await this.rebuildPage(layout);
@@ -2675,9 +2761,11 @@ export class HudPresenter {
       const layout = this.visual
         ? this.layouts.visualLayout()
         : this.confirmation
-        ? this.layouts.confirmationLayout(this.confirmation.prompt)
+        ? this.layouts.confirmationLayout(this.confirmation.prompt, this.nativeHeader(this.nativePageTitle()))
         : this.surface.kind === 'list' && !this.nativeReplyPage
-          ? this.layouts.listLayout(this.surface.items, this.surface.options)
+          ? this.layouts.listLayout(this.surface.items, {
+            ...this.surface.options, status: this.nativeHeader(this.surface.options.title),
+          })
           : this.layouts.defaultLayout();
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'heal-rebuild-start');
       const rebuilt = await this.rebuildPage(layout);
@@ -2720,8 +2808,10 @@ export class HudPresenter {
     // shell. Keep transient activity in the conversation, and use the
     // structured microphone state rather than inferring it from wording.
     const full = containerId === ContainerId.StatusBar
-      ? [stored.match(/^\d{1,2}:\d{2}/)?.[0], `MIC ${this.micOn ? 'ON' : 'OFF'}`,
-        stored.match(/bat\s*\d+%\+?/i)?.[0]].filter(Boolean).join(' · ')
+      ? this.statusModel
+        ? this.nativeHeader(this.nativePageTitle())
+        : [stored.match(/^\d{1,2}:\d{2}/)?.[0], `MIC ${this.micOn ? 'ON' : 'OFF'}`,
+          stored.match(/bat\s*\d+%\+?/i)?.[0]].filter(Boolean).join(' · ')
       : containerId === ContainerId.Hint ? GesturePolicy.formatHint(stored) : stored;
     // Overflow keeps the TAIL: mid-stream, the newest words are the ones
     // being read; the opening lines are already consumed.
@@ -2914,6 +3004,11 @@ export class HudPresenter {
   }
 
   private visualFrame(): HudVisualFrame {
+    const frame = this.baseVisualFrame();
+    return this.statusModel ? { ...frame, statusModel: { ...this.statusModel } } : frame;
+  }
+
+  private baseVisualFrame(): HudVisualFrame {
     const status = this.streams.get(ContainerId.StatusBar) ?? '';
     if (this.confirmation) {
       return {
@@ -3038,7 +3133,7 @@ export class HudPresenter {
       && this.usesNativeConversation(this.surface.brainstorm)) {
       if (this.nativeTerminal.isActive()) return this.nativeTerminal.repaint();
       return this.nativeTerminal.present(this.surface.brainstorm,
-        this.streams.get(ContainerId.StatusBar), displayCurrent);
+        this.nativeHeader(this.nativePageTitle()), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
       return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
@@ -3064,7 +3159,9 @@ export class HudPresenter {
       const surface = this.surface;
       const rebuilt = surface.kind === 'list'
         ? await this.rebuildPage(
-          this.layouts.listLayout(surface.items, surface.options),
+          this.layouts.listLayout(surface.items, {
+            ...surface.options, status: this.nativeHeader(surface.options.title),
+          }),
         )
         : await this.rebuildPage(this.layouts.defaultLayout());
       if (!rebuilt) return false;

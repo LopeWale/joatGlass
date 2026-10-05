@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as HudCanvas from './HudCanvasRenderer';
 import type { HudVisualFrame } from './HudVisualSurface';
+import type { HudStatusModel } from './HudStatus';
 import { SPINE_LABEL_BOX } from './types';
 import {
   ASSISTANT_OVERLAY_DISMISS_HINT,
@@ -79,7 +80,7 @@ describe('prompt question rendering', () => {
         status: "9:41 JOAT ONLINE — SAY 'JOAT …'"});
       expect(text.some(({ value }) => /say.*joat/i.test(value))).toBe(false);
       expect(text.some(({ value }) => value === 'speak your answer · double-click: cancel')).toBe(true);
-      expect(text.some(({ value, y }) => value === 'JOAT' && y === 20)).toBe(true);
+      expect(text.some(({ value, y }) => value === 'JOAT' && y === 12)).toBe(true);
     } finally { vi.unstubAllGlobals(); }
   });
 
@@ -87,7 +88,7 @@ describe('prompt question rendering', () => {
     const { renderer, text } = canvasFixture();
     try {
       await renderer.render(questionFrame('Recipient Sam selected. Say the message.'));
-      const body = text.filter(({ y }) => y >= 76 && y <= 240);
+      const body = text.filter(({ y }) => y >= 64 && y <= 240);
       expect(body.length).toBeGreaterThan(0);
       expect(body.every(({ font, fontSize }) => font.includes('Helvetica Neue')
         && font.startsWith('400 ') && fontSize === 14)).toBe(true);
@@ -100,7 +101,7 @@ describe('prompt question rendering', () => {
       + `漢字 😀 café ${'key'.repeat(28)} FINAL question?`;
     try {
       const tiles = await renderer.render(questionFrame(question));
-      const body = text.filter(({ y }) => y >= 80 && y <= 240);
+      const body = text.filter(({ y }) => y >= 68 && y <= 240);
       expect(body.map(({ value }) => value).join('').replace(/\s/g, ''))
         .toBe(question.replace(/\s/g, ''));
       expect(body.every(({ fontSize, x, width }) => fontSize >= 12 && x >= 14 && x + width <= 562)).toBe(true);
@@ -192,10 +193,10 @@ describe('QuickNotes exact reader', () => {
       kind: 'list', title, items: ['1/1 · Exact text', ...body],
       selectedIndex: 0, selectable: false, hint: 'left x2: back',
     }, {});
-    expect(painted.filter(({y}) => y >= 84 && y <= 237)).toEqual(body.map((line, index) => ({
-      text: line.replace(/\r?\n$/, ''), y: 84 + index * 17,
+    expect(painted.filter(({y}) => y >= 72 && y <= 237)).toEqual(body.map((line, index) => ({
+      text: line.replace(/\r?\n$/, ''), y: 72 + index * 17,
     })));
-    expect(painted).toContainEqual({text: '1/1 · Exact text', y: 58});
+    expect(painted).toContainEqual({text: '1/1 · Exact text', y: 46});
     expect(painted).toContainEqual({text: 'left x2: back', y: 267});
   });
 });
@@ -229,11 +230,11 @@ describe('flat productivity chrome', () => {
     expect(HudCanvas.confirmationReviewLayout()).toEqual({
       headerIconX: 36,
       headerTextX: 62,
-      headerBaselineY: 60,
-      dividerY: 78.5,
+      headerBaselineY: 48,
+      dividerY: 66.5,
       contentX: 36,
       contentWidth: 504,
-      promptTopBaselineY: 104,
+      promptTopBaselineY: 92,
       promptFontSize: 16,
       promptLineHeight: 20,
       promptMaxLines: 4,
@@ -279,7 +280,7 @@ describe('flat productivity chrome', () => {
 describe('selected visual geometry', () => {
   it('pins the measured reference anchors instead of a generic wide menu', () => {
     expect(HUD_VISUAL_GEOMETRY).toMatchObject({
-      statusDividerY: 35.5,
+      statusDividerY: 23.5,
       overviewMainX: 176,
       overviewTrayY: 168,
       listContentX: 93,
@@ -358,14 +359,14 @@ describe('compact focus list rows', () => {
     // The two-line agenda variant existed only because a day row spelled out
     // "16:30 · EVENT · Title". Rows now read "[16:30] \u25a1 Title", so they
     // fit one line — and with the page name moved into the status spine,
-    // rows start at y60 instead of y84: ten entries per glance.
+    // rows start at y48 under the 24 px spine: eleven entries per glance.
     expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 4)).toEqual([
-      { primaryBaselineY: 60, railTopY: 50, railHeight: 19 },
-      { primaryBaselineY: 80, railTopY: 70, railHeight: 19 },
-      { primaryBaselineY: 100, railTopY: 90, railHeight: 19 },
-      { primaryBaselineY: 120, railTopY: 110, railHeight: 19 },
+      { primaryBaselineY: 48, railTopY: 38, railHeight: 19 },
+      { primaryBaselineY: 68, railTopY: 58, railHeight: 19 },
+      { primaryBaselineY: 88, railTopY: 78, railHeight: 19 },
+      { primaryBaselineY: 108, railTopY: 98, railHeight: 19 },
     ]);
-    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 12)).toHaveLength(10);
+    expect(HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 12)).toHaveLength(11);
     // No row carries a second line any more.
     expect(
       HudCanvas.planningFocusRows('PLANNING · PLAN · TUE SEP 1', 4)[0]?.secondaryBaselineY,
@@ -377,13 +378,13 @@ describe('compact focus list rows', () => {
     // title are gone. The wearer's ruling: unused canvas on a content page
     // is waste, not calm — and the page's name belongs in the spine.
     expect(HudCanvas.planningFocusRows('PLANNING · PLAN · AUG 31–SEP 6', 7)).toEqual([
-      { primaryBaselineY: 60, railTopY: 50, railHeight: 19 },
-      { primaryBaselineY: 80, railTopY: 70, railHeight: 19 },
-      { primaryBaselineY: 100, railTopY: 90, railHeight: 19 },
-      { primaryBaselineY: 120, railTopY: 110, railHeight: 19 },
-      { primaryBaselineY: 140, railTopY: 130, railHeight: 19 },
-      { primaryBaselineY: 160, railTopY: 150, railHeight: 19 },
-      { primaryBaselineY: 180, railTopY: 170, railHeight: 19 },
+      { primaryBaselineY: 48, railTopY: 38, railHeight: 19 },
+      { primaryBaselineY: 68, railTopY: 58, railHeight: 19 },
+      { primaryBaselineY: 88, railTopY: 78, railHeight: 19 },
+      { primaryBaselineY: 108, railTopY: 98, railHeight: 19 },
+      { primaryBaselineY: 128, railTopY: 118, railHeight: 19 },
+      { primaryBaselineY: 148, railTopY: 138, railHeight: 19 },
+      { primaryBaselineY: 168, railTopY: 158, railHeight: 19 },
     ]);
   });
 
@@ -430,9 +431,10 @@ describe('compact focus list rows', () => {
 
   it('applies the one dense list language to every title', () => {
     expect(HudCanvas.planningFocusRows('MESSAGES', 4)).toHaveLength(4);
-    // An eleven-row note now fits ten rows on the first glance; the rest is
-    // one swipe away, not three.
-    expect(HudCanvas.planningFocusRows('QUICKNOTES · NOTE', 11)).toHaveLength(10);
+    // An eleven-row note now fits on the first glance under the 24 px
+    // spine; a twelfth row is one swipe away, not three.
+    expect(HudCanvas.planningFocusRows('QUICKNOTES · NOTE', 11)).toHaveLength(11);
+    expect(HudCanvas.planningFocusRows('QUICKNOTES · NOTE', 12)).toHaveLength(11);
     expect(HudCanvas.planningFocusRows('QUICKNOTES', 4)).toHaveLength(4);
     expect(HudCanvas.planningFocusRows('QUICKNOTES · RECORDING', 3)).toHaveLength(3);
     expect(
@@ -445,10 +447,10 @@ describe('compact focus list rows', () => {
 describe('compact productivity outcome geometry', () => {
   it('uses a compact text stack without a card or progress strip', () => {
     expect(HudCanvas.productivityOutcomeLayout()).toEqual({
-      titleBaselineY: 98,
-      dividerY: 136.5,
-      primaryBaselineY: 158,
-      secondaryBaselineY: 181,
+      titleBaselineY: 86,
+      dividerY: 124.5,
+      primaryBaselineY: 146,
+      secondaryBaselineY: 169,
       footerBaselineY: 267,
     });
   });
@@ -622,7 +624,7 @@ describe('Planning month geometry', () => {
   it('marks the selected month week with a slim rail instead of an enclosing box', () => {
     expect(HudCanvas.planningMonthSelectionRail(3)).toEqual({
       x: 28,
-      y: 153,
+      y: 141,
       width: 3,
       height: 22,
     });
@@ -686,8 +688,8 @@ describe('Brainstorm wearable actions', () => {
         // A2A work is not a streaming connection; match the chooser state.
         summary: 'HERMES > WORKING',
         // Dense: header + LANES in two tight rows, 12 transcript rows.
-        dividerY: 78.5,
-        transcriptBaselineY: 92,
+        dividerY: 66.5,
+        transcriptBaselineY: 80,
         transcriptLineCapacity: 12,
         showRecoveryDetails: false,
       });
@@ -699,8 +701,8 @@ describe('Brainstorm wearable actions', () => {
     }))
       .toEqual({
         summary: 'HERMES > NEEDS APPROVAL',
-        dividerY: 118.5,
-        transcriptBaselineY: 132,
+        dividerY: 106.5,
+        transcriptBaselineY: 120,
         transcriptLineCapacity: 9,
         showRecoveryDetails: true,
       });
@@ -1290,14 +1292,15 @@ describe('the spine\'s left slot', () => {
       drawIcon(): void;
       fitText(c: CanvasRenderingContext2D, t: string): void;
       drawShell(
-        c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
+        c: CanvasRenderingContext2D, s: HudStatusModel, i: unknown,
         f: boolean, showTime: boolean,
       ): void;
     };
     stub.drawIcon = () => {};
     stub.fitText = (c, t) => { c.fillText(t, 0, 0); };
     stub.drawShell(
-      context, '9:41  JOAT ready  bat 87%', false, {} as unknown, true, showTime,
+      context, { clock: '9:41', link: 'connected', mic: false, battery: 87, charging: false },
+      {} as unknown, true, showTime,
     );
     return texts;
   }
@@ -1316,9 +1319,12 @@ describe('the spine\'s left slot', () => {
 describe('the compact JOAT banner uses the existing canvas font', () => {
   const SEAM = 288;
 
-  function shell(status: string): { texts: Array<{ text: string; x: number; font: string }>; icons: number[] } {
+  function shell(status: HudStatusModel): {
+    texts: Array<{ text: string; x: number; font: string }>;
+    icons: Array<{ name: string; x: number; y: number; size: number }>;
+  } {
     const texts: Array<{ text: string; x: number; font: string }> = [];
-    const icons: number[] = [];
+    const icons: Array<{ name: string; x: number; y: number; size: number }> = [];
     const context = {
       fillStyle: '', font: '', textAlign: 'left', textBaseline: 'middle',
       measureText: (value: string) => ({ width: value.length * 5.18 }),
@@ -1328,36 +1334,65 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
     } as unknown as CanvasRenderingContext2D;
     const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
     const stub = renderer as never as {
-      drawIcon(c: unknown, i: unknown, x: number): void;
+      drawIcon(c: unknown, i: unknown, x: number, y: number, size: number): void;
       drawShell(
-        c: CanvasRenderingContext2D, s: string, m: boolean, i: unknown,
+        c: CanvasRenderingContext2D, s: HudStatusModel, i: unknown,
         f: boolean, showTime: boolean,
       ): void;
     };
-    stub.drawIcon = (_c, _i, x) => { icons.push(x); };
-    stub.drawShell(context, status, true, {} as unknown, true, true);
+    stub.drawIcon = (_c, i, x, y, size) => { icons.push({ name: String(i), x, y, size }); };
+    // Named stand-ins, so the assertions can tell which cell was drawn.
+    const iconSet = Object.fromEntries(
+      ['microphone', 'microphoneSlash', 'batteryFull', 'batteryHigh', 'batteryMedium',
+        'batteryLow', 'batteryEmpty', 'batteryCharging'].map((name) => [name, name]),
+    );
+    stub.drawShell(context, status, iconSet, true, true);
     return { texts, icons };
   }
 
-  it('paints the state word in the compact banner and keeps the mic east of the seam', () => {
-    const { texts, icons } = shell('9:41  JOAT hearing you…  bat 87%');
-    expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'JOAT · HEARING YOU…', 'ON', '87%']);
+  const hearing: HudStatusModel = {
+    clock: '9:41', link: 'connected', mic: true, battery: 87, charging: false, macState: 'hearing you…',
+  };
+
+  it('paints the state word in the compact banner and keeps the icons east of the seam', () => {
+    const { texts, icons } = shell(hearing);
+    // No words for the mic or the battery any more: the clock, the state
+    // word, and two icons.
+    expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'JOAT · HEARING YOU…']);
     const label = texts.find((entry) => entry.text === 'JOAT · HEARING YOU…');
     expect(label?.font).toContain('10px');
     expect(label?.font).toContain('SF Mono');
     const spineClock = texts.find((entry) => entry.text === '9:41');
-    expect(spineClock?.font).toContain('12px');
-    expect(texts.filter((entry) => entry !== spineClock)
-      .every((entry) => entry.font === label?.font)).toBe(true);
+    expect(spineClock?.font).toContain('11px');
     expect((label?.x ?? 0) + 'JOAT · HEARING YOU…'.length * 6).toBeLessThan(SEAM);
-    const mic = texts.find((entry) => entry.text === 'ON');
-    expect(mic?.x).toBeGreaterThanOrEqual(SEAM);
-    const [micIcon, batteryIcon] = icons;
-    expect(micIcon).toBeGreaterThanOrEqual(SEAM);
-    expect(batteryIcon).toBeGreaterThanOrEqual(SEAM);
+    expect(icons.map((icon) => icon.name)).toEqual(['microphone', 'batteryHigh']);
+    for (const icon of icons) {
+      expect(icon.x).toBeGreaterThanOrEqual(SEAM);
+      // Inside the 24 px band.
+      expect(icon.y + icon.size).toBeLessThanOrEqual(HUD_VISUAL_GEOMETRY.spineHeight);
+    }
     // Clock and changing label remain separate inside the top-left tile.
     const clock = texts.find((entry) => entry.text === '9:41');
     expect((clock?.x ?? 0) + '9:41'.length * 7.2).toBeLessThan(SPINE_LABEL_BOX.x);
+  });
+
+  it('draws the slashed mic when closed, the level-correct cell, and the number only when low', () => {
+    expect(shell({ ...hearing, mic: false }).icons.map((icon) => icon.name))
+      .toEqual(['microphoneSlash', 'batteryHigh']);
+    expect(shell({ ...hearing, battery: 100 }).icons[1]?.name).toBe('batteryFull');
+    expect(shell({ ...hearing, battery: 45 }).icons[1]?.name).toBe('batteryMedium');
+    expect(shell({ ...hearing, battery: 20 }).icons[1]?.name).toBe('batteryLow');
+    // Charging wins whatever the level — the mark the string parser used
+    // to strip before the spine could draw it.
+    expect(shell({ ...hearing, battery: 20, charging: true }).icons[1]?.name).toBe('batteryCharging');
+    const low = shell({ ...hearing, battery: 12 });
+    expect(low.icons[1]?.name).toBe('batteryEmpty');
+    expect(low.texts.map((entry) => entry.text)).toContain('12%');
+    expect(shell({ ...hearing, battery: 12, charging: true }).texts.map((entry) => entry.text))
+      .not.toContain('12%');
+    // No battery reported yet: no cell, no number, no crash.
+    const { battery: _omit, ...unknown } = hearing;
+    expect(shell(unknown).icons.map((icon) => icon.name)).toEqual(['microphone']);
   });
 
   const overview = (status: string): HudVisualFrame => ({
@@ -1370,7 +1405,8 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
   });
 
   it('hudSpineLabel names the link state at home and the page elsewhere', () => {
-    expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT ready  bat 87%'))).toBe('JOAT · READY');
+    // Ready is resting: the spine says JOAT, and the mic icon says the rest.
+    expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT ready  bat 87%'))).toBe('JOAT');
     expect(HudCanvas.hudSpineLabel(overview('9:41  JOAT hearing you…'))).toBe('JOAT · HEARING YOU…');
     expect(HudCanvas.hudSpineLabel(list('9:41  JOAT ready', 'NEWS'))).toBe('NEWS');
     expect(HudCanvas.hudSpineLabel(list('9:41 JOAT mic off', 'NEWS'))).toBe('NEWS');
@@ -1495,7 +1531,7 @@ describe('reader width respects the active tab rail', () => {
       hint: 'left x2: back', selectable: false, selectedIndex: 0,
       rail: {activeTab: 'news'},
     }, {});
-    const body = text.filter(({y}) => y >= 78 && y <= 245);
+    const body = text.filter(({y}) => y >= 66 && y <= 245);
     expect(body.length).toBeGreaterThan(0);
     expect(body.every(({x}) => x >= 36)).toBe(true);
   });
@@ -1527,11 +1563,11 @@ describe('exact prepared readers across feature boundaries', () => {
         selectedIndex: 0, selectable: false, hint: 'down: next · left x2: back',
         ...(panel ? {rail: {activeTab: title.startsWith('NEWS') ? 'news' : 'search'}} : {}),
       }, {});
-      const bodyPainted = painted.filter(({y}) => y >= 84 && y <= 237);
+      const bodyPainted = painted.filter(({y}) => y >= 72 && y <= 237);
       expect(bodyPainted.map(({text}) => text)).toEqual(body.map(line =>
         line.replace(/\r\n$|[\r\n]$/u, '').replace(/\t/g, '        ')));
       expect(bodyPainted.every(({x, width}) => x === (panel ? 36 : 14) && x + width <= 562)).toBe(true);
-      expect(painted.find(({y}) => y === 58)?.text).toBe('1/2 · Source');
+      expect(painted.find(({y}) => y === 46)?.text).toBe('1/2 · Source');
       expect(painted.find(({y}) => y === 267)?.text).toBe('down: next · left x2: back');
     },
   );

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
-import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, HudPageBuilder } from './HudPageBuilder';
+import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
 type Page = {
@@ -220,7 +220,7 @@ describe('HudPageBuilder invariants', () => {
   it('list layout: the LIST container is the one that captures', () => {
     const page = builder.listLayout(['a', 'b', 'c']) as Page;
     expect(page.listObject?.[0]?.isEventCapture).toBe(1);
-    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)?.isEventCapture).toBe(0);
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.isEventCapture).toBe(0);
   });
 
   it('list layout: caps at 20 items x 64 chars and fits the canvas', () => {
@@ -245,19 +245,39 @@ describe('HudPageBuilder invariants', () => {
       title: 'CAPABILITIES',
       hint: 'SWIPE move · TAP open · LEFT x2 back',
     }) as Page;
-    const title = page.textObject?.find((c) => c.containerID === ContainerId.Main);
+    // One header line carries the page's name (the presenter composes the
+    // clock · page · mic · battery line in; a bare title is the fallback),
+    // and the list starts straight under it: five rows, not four.
+    const header = page.textObject?.find((c) => c.containerID === ContainerId.StatusBar);
     const list = page.listObject?.[0];
 
     const hint = page.textObject?.find((c) => c.containerID === ContainerId.Hint);
 
-    expect(page.containerTotalNum).toBe(4);
-    expect(title).toMatchObject({ yPosition: 39, height: 38, textColor: 4, content: 'CAPABILITIES' });
-    expect(list).toMatchObject({ yPosition: 77, height: 176 });
+    expect(page.containerTotalNum).toBe(3);
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toBeUndefined();
+    expect(header).toMatchObject({ yPosition: 0, height: 35, textColor: 2, content: 'CAPABILITIES' });
+    expect(list).toMatchObject({ yPosition: 35, height: 216 });
     expect(hint).toMatchObject({ yPosition: 253, height: 35, textColor: 1 });
     // The builder rewrites a Mac's old left-only wording to the gesture
     // GesturePolicy honours on every source (GesturePolicy.formatHint).
     expect(hint?.content).toBe('SWIPE move · TAP open · double-click back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
+  });
+
+  it('fits a long header by shortening the page word, never the mic and battery glyphs', () => {
+    const short = '9:41 · NEWS · ● · ▇';
+    expect(fitHeader(short)).toBe(short);
+    // A word that overruns the 568 px line loses characters to an ellipsis;
+    // the clock stays first and the two glyphs stay last.
+    const long = `9:41 · ${'MESSAGES · CONVERSATION WITH A VERY LONG NAME'} · ● · ▂ 12%`;
+    const fitted = fitHeader(long);
+    expect(fitted).not.toBe(long);
+    expect(fitted.startsWith('9:41 · MESSAGES · ')).toBe(true);
+    expect(fitted.endsWith(' · ● · ▂ 12%')).toBe(true);
+    expect(fitted).toContain('…');
+    // The layouts apply it: a list's header is never tail-cut.
+    const page = builder.listLayout(['a'], { status: long }) as Page;
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content).toBe(fitted);
   });
 
   it('confirmation is a dedicated full-screen decision surface with no list or button chrome', () => {
@@ -267,7 +287,7 @@ describe('HudPageBuilder invariants', () => {
     expect(page.listObject).toBeUndefined();
     expect(page.containerTotalNum).toBe(5);
     expect(byId(ContainerId.Main)).toMatchObject({
-      yPosition: 39, height: 144, textColor: 4,
+      yPosition: 35, height: 144, textColor: 4,
       content: 'CONFIRM ACTION\n\nSend reply to Adele?',
     });
     expect(byId(ContainerId.Context)?.content).toBe('TAP · confirm   SWIPE · cancel');
