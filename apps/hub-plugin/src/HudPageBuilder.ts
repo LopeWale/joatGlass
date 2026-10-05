@@ -37,6 +37,28 @@ const REGION_PAD = 4;
 const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
 /** A list row's text width: container pad (8) + firmware row pad (12/side). */
 const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
+/**
+ * The host's real per-row limit, measured in the official simulator on
+ * 2026-10-05: a row of 64 UTF-8 bytes or more makes `rebuildPageContainer`
+ * return false for the WHOLE page (a 64-byte buffer with its terminator), and
+ * the SDK validates nothing. The skill's "64 chars" is 63 bytes, and a
+ * middle dot is two of them. A Messages thread row at the Mac's 64-unit cap
+ * reproduced it: the thread never appeared and the menu fell back Home.
+ */
+export const LIST_ROW_MAX_UTF8_BYTES = 63;
+
+/** Cut on a code-point boundary so the row stays under the host's byte cap. */
+export function clampUtf8Bytes(text: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = '';
+  for (const point of text) {
+    const size = new TextEncoder().encode(point).length;
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    out += point;
+  }
+  return out;
+}
 
 /** Native conversation geometry. The card is anchored at the same optical
  * bottom while its top moves upward through bounded line-count stages. */
@@ -510,7 +532,7 @@ export class HudPageBuilder {
     chrome: { title?: string; hint?: string; status?: string } = {},
   ): RebuildPageContainer {
     const capped = items.slice(0, 20)
-      .map((s) => pxTruncate(s.slice(0, 64), LIST_ROW_TEXT_WIDTH));
+      .map((s) => pxTruncate(clampUtf8Bytes(s, LIST_ROW_MAX_UTF8_BYTES), LIST_ROW_TEXT_WIDTH));
     const title = pxTruncate((chrome.title?.trim() || 'JOAT').slice(0, 46), REGION_TEXT_WIDTH);
     // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
     // below is the real bound; a tighter char pre-cut here silently dropped
