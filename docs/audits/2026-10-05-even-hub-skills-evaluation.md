@@ -225,7 +225,10 @@ installed (0.1.88), is four image tiles per streamed revision. In addition:
    (section 2b), and every revision is 1–4 serial text writes sharing one lane
    with a 450 ms indicator tick (`src/AssistantConversationSurface.ts:699-763`).
    The Mac re-sends the entire transcript per chunk with no throttle
-   (`orchestrator.py:1027-1031`).
+   (`orchestrator.py:1027-1031`). *Fixed later the same day: streamed
+   "answering" frames are coalesced to one per 200 ms
+   (`STREAM_PUBLISH_INTERVAL_S`); the first chunk and the final frame are
+   never held.*
 
 **The Even AI door is the shortcut you already built.**
 `joat/services/agent_endpoint.py` serves an OpenAI-shaped
@@ -268,6 +271,12 @@ marks send `not_proven`).
 Ranked causes, with how to tell which one you are hitting:
 
 ### 6.1 The confirmation round trip blows the Mac's 12 s deadline
+
+*Fixed later the same day: the gate is a firmware text page (one rebuild
+each way when the page beneath is a list), the Mac's envelope is 20 s
+(`CONFIRM_TRANSPORT_SECONDS`, `_CONFIRM_SECONDS`), and the plugin derives
+its decision window from the Mac's `expiresAtMs`
+(`confirmationDecisionWindowMs`). The analysis below describes 0.1.88-0.1.91.*
 
 - Mac: `CONFIRM_TRANSPORT_SECONDS = 12.0` (`joat/services/message_reply.py:51`),
   enforced by `asyncio.wait_for(future, 12)` and `time.time() <=
