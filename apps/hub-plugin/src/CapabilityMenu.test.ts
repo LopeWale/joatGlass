@@ -226,6 +226,12 @@ function conversationSelectionRig(native = false) {
       frames.push(frame);
       return true;
     },
+    // The Messages picker is a firmware list; the conversation that follows
+    // is a pixel page. Crossing that boundary needs the real surface's page
+    // transition hooks, so the stub must answer them like production does.
+    withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    forgetPage: () => undefined,
+    whenIdle: async () => true,
   });
   // Same split as the main rig above: surface announcements retire ownership
   // on the Mac and are not requests. Counting them here would make every
@@ -420,7 +426,7 @@ describe('CapabilityMenu', () => {
     await menu.openFromContextualMenu(0); // Messages, via the firmware menu
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
-    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back' });
+    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back', nativeFirmwareList: true });
     // Ownership is announced BEFORE the loading frame paints: the Mac must
     // know Home no longer owns the glass before any response can arrive.
     expect(operations).toEqual(['surface-feature', 'list']);
@@ -744,6 +750,43 @@ describe('CapabilityMenu', () => {
       },
     });
   });
+  it('hands plain-row pages to the firmware list and keeps cursor-owning pages raster', async () => {
+    const { menu, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(listOptions[0]).toMatchObject({ title: 'MESSAGES', nativeFirmwareList: true });
+    expect(await menu.presentList('MESSAGES', rows(3), latestRequestId(sent), true)).toBe(true);
+    expect(listOptions[1]).toMatchObject({ title: 'MESSAGES', nativeFirmwareList: true });
+
+    await menu.openFromContextualMenu(6); // Activity
+    await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(2));
+    expect(listOptions[2]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
+    expect(await menu.presentList('ACTIVITY', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(listOptions[3]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
+
+    await menu.openFromContextualMenu(1); // Planning
+    await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(3));
+    expect(listOptions[4]?.title).toBe('PLANNING');
+    expect(listOptions[4]).not.toHaveProperty('nativeFirmwareList');
+    expect(await menu.presentList('PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(listOptions[5]).not.toHaveProperty('nativeFirmwareList');
+  });
+
+  it('keeps a Messages conversation on the raster page even though the picker is a firmware list', async () => {
+    const { menu, listOptions, sent } = rig();
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', ['Ada · 2m · On my way', 'Say reply to answer'],
+      latestRequestId(sent), true, 'say reply',
+    )).toBe(true);
+    const conversation = listOptions[listOptions.length - 1];
+    expect(conversation?.title).toBe('MESSAGES · CONVERSATION');
+    expect(conversation).not.toHaveProperty('nativeFirmwareList');
+  });
+
   it('keeps rows four and five reachable after the Mac replaces the loading view', async () => {
     const { menu, moves, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages

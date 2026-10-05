@@ -135,7 +135,7 @@ between them is not a matter of taste:
 | Mechanism | Cost | Rows visible of 8 | Type | Verdict |
 |---|---|---|---|---|
 | `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
-| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch | **In use for NEWS and SEARCH** since 2026-09-02 (`NATIVE_LIST_TITLES`): the wearer took the font for the scroll. Rejected for the menu itself — no denser, and it costs a page. |
+| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch | **In use for AGENT TERMINAL, the MESSAGES picker and ACTIVITY** (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`, opted in per page with `nativeFirmwareList`). NEWS and SEARCH were native in 2026-09-02 and went back to pixels for the rail and row memory. Rejected for the menu itself — no denser, and it costs a page. |
 | Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
 
 Both native mechanisms render in the firmware's own proportional font at a
@@ -175,12 +175,12 @@ other three, so a swipe shipped three tiles.
 
 | Interaction | Tiles before | Tiles after |
 |---|---|---|
-| Mac state word ("hearing you…") | 2 | **0** — native text (`ContainerId.SpineLabel`, `textContainerUpgrade`) |
+| Mac state word ("hearing you…") | 2 | **1** — drawn inside `SPINE_LABEL_BOX`, which ends on the seam, so only the top-left tile changes (the native-text twin was never wired; see "levers" below) |
 | Mic on/off, battery | 2 / 1 | **1** (top-right) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
-| Open NEWS or SEARCH | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
-| Scroll NEWS or SEARCH rows | 2-4 per step | **0** — the firmware moves the highlight |
-| Back from NEWS/SEARCH to the overview | 4 | 4 + one rebuild |
+| Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
+| Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
+| Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
 | Assistant overlay show, then dismiss | 4 + 4 | 4 + 4 |
 | Clock minute tick on a feature page | 1 | 1 |
@@ -227,13 +227,25 @@ The levers that remain are design decisions, not code:
   `textContainerUpgrade`. A voice-state change would then cost zero tiles.
   The price: the firmware's proportional font at a fixed 27 px line height
   (see the `font-measurement` skill), not the 10-12 px canvas type.
-- ~~A native list for news and search~~ — landed 2026-09-02 (`NATIVE_LIST_TITLES`
-  in `HudPresenter`). The presenter tracks which page the glass holds
-  (`glassPage`): NEWS/SEARCH rebuild to the compat `listLayout`, status and
-  hint are written to its native containers, only NEW rows rebuild, and any
-  pixel surface (overview, reader, confirmation, overlay) rebuilds the
-  four-tile page first. Extending it to another list is one title in the
-  set — the trade is the firmware font and no rail.
+- ~~A native list for plain-row pages~~ — `FIRMWARE_LIST_TITLES` in
+  `CapabilityMenu` (2026-10-05: AGENT TERMINAL, the MESSAGES picker,
+  ACTIVITY). The presenter tracks which page the glass holds
+  (`pageOwner`): a native list rebuilds to `listLayout` with the live status
+  line in the rebuild, and any pixel surface (overview, reader,
+  confirmation, overlay) rebuilds the four-tile page first. Pages with a
+  plugin-owned cursor (the Planning grid, prose readers, the QuickNotes
+  archive pager, Messages conversations) stay raster, and so do the NEWS and
+  SEARCH tabs, whose Back restores the row the wearer left. Extending it to
+  another list is one title in the set — the trade is the firmware font,
+  no rail, and a cursor that always starts on row one (the firmware has no
+  cursor-setting API).
+- **Native confirmation and answer overlay** — `confirmationLayout` and
+  `paintNativeAssistantOverlay` exist and run only without a visual surface.
+  Un-gating them would make "Send to X?" appear in ~165 ms instead of four
+  forced tiles (the 12 s Mac confirmation envelope is lost to those tiles
+  today), but ~30 presenter tests pin the exact-frame (`paintExact`)
+  semantics of the raster gate and the change needs a simulator pass before
+  it ships.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.

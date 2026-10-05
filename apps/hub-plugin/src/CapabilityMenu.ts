@@ -13,6 +13,31 @@ import {
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
+
+/**
+ * Lists the G2 firmware draws itself (`ListContainerProperty`): plain rows
+ * the wearer scrolls and taps. The firmware moves the highlight at zero BLE
+ * cost and the page is one `rebuildPageContainer` (~165 ms) instead of four
+ * image tiles at 0.2–2 s each, which is the trade Even's `glasses-ui` skill
+ * recommends for anything that must feel instant. The price is the firmware
+ * font, no tab rail, and four visible rows.
+ *
+ * Only pages whose cursor the firmware can own belong here. The Planning
+ * grid, prose readers (QuickNotes notes, prepared Messages results), the
+ * QuickNotes archive pager and the Messages conversation keep JOAT's raster
+ * treatment: they page or select by a plugin-owned cursor the firmware list
+ * cannot express. The NEWS and SEARCH tabs stay raster too: Back from an
+ * article restores the row the wearer left, and a firmware list always
+ * starts on row one. Titles are the exact Mac-sent page names, so
+ * "MESSAGES · CONVERSATION" is not "MESSAGES".
+ */
+const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
+  'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY',
+]);
+
+export function usesFirmwareList(title: string | undefined): boolean {
+  return title !== undefined && FIRMWARE_LIST_TITLES.has(title.trim().toUpperCase());
+}
 import {
   CAPABILITIES,
   VOICE_REQUEST_PREFIX,
@@ -751,8 +776,14 @@ export class CapabilityMenu {
     // An opened headline or result is still inside its tab: the rail
     // stays on the reader so the wearer sees where they are.
     const railTab = panelTabForTitle(this.pendingTitle);
+    // Decided before any cursor question below: the presenter answers for
+    // the page about to be shown, not the (possibly firmware-owned) one that
+    // is still on the glass.
+    const firmwareList = usesFirmwareList(normalized) && !planningGrid && !readerPage && !quickNotesPage;
+    const customSelection = (this.hud.usesCustomListSelection?.({ nativeFirmwareList: firmwareList }) ?? false)
+      && !firmwareList;
     const messageRows = messagesState?.screen === 'conversation' && effectiveSelectable
-      && this.hud.usesCustomListSelection?.()
+      && customSelection
       ? items.flatMap((item, index) => parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : [])
       : [];
     const refreshSelection = normalized === 'NOTIFICATIONS'
@@ -787,10 +818,10 @@ export class CapabilityMenu {
     const initialSelection = archiveSelection ?? restoredPlanningIndex ?? authoritativePlanningIndex ?? (refreshSelection === undefined ? messageRows[0] ?? 0
       : Math.max(0, Math.min(refreshSelection, items.length - 1)));
     if (refreshSelection !== undefined) this.notificationRefreshSelection = undefined;
-    const noteProse = usesQuickNotesReaderLayout(title, items) && this.hud.usesCustomListSelection?.()
+    const noteProse = usesQuickNotesReaderLayout(title, items) && customSelection
       ? { pages: quickNotesProsePages(items), index: 0 } : undefined;
     if (noteProse && this.notePageDirection < 0) noteProse.index = noteProse.pages.length - 1;
-    const messageProse = usesMessagesPreparedReaderLayout(title, items) && this.hud.usesCustomListSelection?.()
+    const messageProse = usesMessagesPreparedReaderLayout(title, items) && customSelection
       ? { pages: quickNotesProsePages(items), index: 0 } : undefined;
     if (messageProse && this.messagePageDirection < 0 && this.dataPagePending
       && this.dataSurface?.title === title) messageProse.index = messageProse.pages.length - 1;
@@ -808,7 +839,7 @@ export class CapabilityMenu {
       planningPane: this.dashboardPane(),
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
-      ...(normalized === 'AGENT TERMINAL' ? { nativeFirmwareList: true } : {}),
+      ...(firmwareList ? { nativeFirmwareList: true } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -1887,7 +1918,7 @@ export class CapabilityMenu {
     const shown = receiptRefresh !== undefined || await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
       title,
       hint: 'left x2: back',
-      ...(picked === 'Agent Terminal' ? { nativeFirmwareList: true } : {}),
+      ...(usesFirmwareList(title) ? { nativeFirmwareList: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {

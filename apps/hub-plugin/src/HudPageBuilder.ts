@@ -94,7 +94,7 @@ export class HudPageBuilder {
     return new HudPageBuilder(enabled);
   }
 
-  private statusBar(): TextContainerProperty {
+  private statusBar(content = ''): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.StatusBar,
       containerName: 'status',
@@ -107,7 +107,7 @@ export class HudPageBuilder {
       isEventCapture: 0,
       zOrderIndex: 1,
       textColor: 2,
-      content: '',
+      content,
     });
   }
 
@@ -498,7 +498,7 @@ export class HudPageBuilder {
    */
   listLayout(
     items: string[],
-    chrome: { title?: string; hint?: string } = {},
+    chrome: { title?: string; hint?: string; status?: string } = {},
   ): RebuildPageContainer {
     const capped = items.slice(0, 20)
       .map((s) => pxTruncate(s.slice(0, 64), LIST_ROW_TEXT_WIDTH));
@@ -512,7 +512,10 @@ export class HudPageBuilder {
       ...this.menuConfig(),
       // Capture moves OFF main and ONTO the list — see main()'s note.
       textObject: [
-        this.statusBar(),
+        // The presenter cannot upgrade this container while the firmware
+        // list owns the page, so the live clock/battery line rides in the
+        // rebuild itself instead of leaving the top line blank.
+        this.statusBar(pxTruncate((chrome.status ?? '').slice(0, 46), REGION_TEXT_WIDTH)),
         this.main(FIRMWARE_LINE + 2 * REGION_PAD + 3, 0, 4, title), // 38: one line
         this.region(ContainerId.Hint, 'hint', 253, 35, 4, 1, hint),
       ],

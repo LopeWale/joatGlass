@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-05 — Even Hub skills evaluation and the first dedupe slice
+
+- Audit against the official `everything-evenhub` skills and SDK 0.0.14 types in `docs/audits/2026-10-05-even-hub-skills-evaluation.md`: unwired frames and rows, raster surfaces that duplicate native containers, why the assistant feels slower than Even AI, and the gates behind an unsent Messages reply. The installed package is still 0.1.88; 0.1.90's native conversation has not reached the glasses.
+- Plugin test doubles gained `usesCustomListSelection`, taking the suite from 151 to 88 failures; the remaining failures predate this work and are unchanged.
+- The spine draws the Mac's state word again ("hearing you…", "reconnecting") inside `SPINE_LABEL_BOX`: since 2026-09-11 the renderer returned an empty label and the lens showed nothing during speech-to-text. One top-left tile per state change. Three renderer tests that had kept asserting the word pass again.
+- `scripts/setup_even_ai_door.sh` does the Mac half of pointing Even AI's Agent Configure at the brain: verifies the loopback door and its token, mounts `/agent` on the tailnet beside `/glasses`, checks the mount, Funnel and the tailnet answer, copies the token and prints the URL. `--probe` sends one real question.
+- The Messages picker and Activity join the Agent Terminal picker on the firmware list (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`): one rebuild instead of four image tiles to open, zero tiles per scroll. The firmware list page now carries the live status line in its rebuild. `usesCustomListSelection(next)` answers for the page about to be shown, so a raster conversation opened from the firmware picker keeps its own cursor; the text compatibility surface hands the page back after a firmware list instead of skipping its writes. NEWS and SEARCH stay raster for the rail and row memory. Simulator and physical-glasses verification have not been run for this slice.
+
 ## 2026-09-13 — Build JOAT 0.1.90 native conversation update
 
 - Built the existing JOAT package from committed source `a62f19c` in an isolated export. Eight release-candidate and release-manifest checks, TypeScript checking, and the production Vite build passed. The package keeps ID `com.example.joat`, minimum Even App 2.2.9, SDK 0.0.14, and the reviewed secure MacBook-first, Mac Mini-second Tailscale candidates.

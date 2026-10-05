@@ -405,10 +405,7 @@ export class HudPresenter {
         this.streams.get(ContainerId.StatusBar), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
-      return this.replaceNativePage(
-        this.layouts.listLayout(this.surface.items, this.surface.options),
-        'terminal-list-native',
-      );
+      return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
     }
     return this.restoreVisualPage();
   }
@@ -458,10 +455,15 @@ export class HudPresenter {
     return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
   }
 
-  /** The custom list owns its cursor; the compatibility list is firmware-owned. */
-  usesCustomListSelection(): boolean {
-    return this.visual !== undefined
-      && !(this.surface.kind === 'list' && this.surface.options.nativeFirmwareList);
+  /** The custom list owns its cursor; the compatibility list is firmware-owned.
+   * Without `next` this describes the page on the glass. With `next` it
+   * describes the page about to be shown: a menu deciding how the NEXT page
+   * selects must not read the answer off the current one, or a raster
+   * conversation opened from a firmware picker inherits the picker's cursor. */
+  usesCustomListSelection(next?: { nativeFirmwareList?: boolean }): boolean {
+    if (this.visual === undefined) return false;
+    if (next) return next.nativeFirmwareList !== true;
+    return !(this.surface.kind === 'list' && this.surface.options.nativeFirmwareList);
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -834,9 +836,14 @@ export class HudPresenter {
   /** Quiesce a terminal body before a graphical page replaces its containers. */
   private async prepareNativeTerminalHandoff(): Promise<boolean> {
     if (!this.nativeTerminal.isActive()) {
-      return this.pageOwner === 'terminal-list-native'
-        ? this.rebuildVisualPage()
-        : true;
+      if (this.pageOwner !== 'terminal-list-native') return true;
+      if (!this.visual) {
+        // The text compatibility surface replaces the firmware list with its
+        // own rebuild; hand the page back so its text writes are not skipped.
+        this.pageOwner = 'visual';
+        return true;
+      }
+      return this.rebuildVisualPage();
     }
     if (!await this.nativeTerminal.pauseForHandoff()) return false;
     try {
@@ -852,6 +859,15 @@ export class HudPresenter {
   }
 
   /** Back from a selected provider goes directly to the firmware picker. */
+  /** The firmware list page for a native list surface, carrying the live
+   * status line: `paint()` is a no-op while the firmware owns the page. */
+  private nativeListLayout(surface: Extract<HudSurface, { kind: 'list' }>): RebuildPageContainer {
+    return this.layouts.listLayout(surface.items, {
+      ...surface.options,
+      status: this.streams.get(ContainerId.StatusBar),
+    });
+  }
+
   private async replaceWithNativeTerminalList(page: RebuildPageContainer): Promise<boolean> {
     const active = this.nativeTerminal.isActive();
     if (active && !await this.nativeTerminal.pauseForHandoff()) return false;
@@ -1376,10 +1392,7 @@ export class HudPresenter {
       this.nativeTerminal.retire();
       if (this.pageOwner === 'terminal-conversation-native') {
         if (prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList) {
-          await this.replaceNativePage(
-            this.layouts.listLayout(prior.surface.items, prior.surface.options),
-            'terminal-list-native',
-          );
+          await this.replaceNativePage(this.nativeListLayout(prior.surface), 'terminal-list-native');
         } else {
           await this.restoreVisualPage();
         }
@@ -1620,9 +1633,7 @@ export class HudPresenter {
     const firmwareList = surface.options.nativeFirmwareList === true;
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = firmwareList
-      ? await this.replaceWithNativeTerminalList(
-        this.layouts.listLayout(surface.items, surface.options),
-      )
+      ? await this.replaceWithNativeTerminalList(this.nativeListLayout(surface))
       : this.visual
       ? true
       : await this.rebuildPage(nativeReplyPage
@@ -2557,10 +2568,7 @@ export class HudPresenter {
         this.streams.get(ContainerId.StatusBar), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
-      return this.replaceNativePage(
-        this.layouts.listLayout(this.surface.items, this.surface.options),
-        'terminal-list-native',
-      );
+      return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
     }
     return this.paintVisual();
   }
