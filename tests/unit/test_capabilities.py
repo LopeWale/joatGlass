@@ -568,6 +568,47 @@ def make_router(
 
 
 class TestCapabilityViews:
+    async def test_note_list_pages_through_tappable_rows(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """The firmware list reports taps, never scrolls: each archive page
+        names its neighbours as rows and says which rows they are."""
+        with DurableStore(tmp_path / "paged-notes.sqlite3") as durable:
+            notes = NoteStore(durable)
+            for index in range(1, 24):
+                notes.create(
+                    note_id=f"note-{index:02d}", idempotency_key=f"key-{index:02d}",
+                    text=f"Fixture note {index}", source=NoteSource(kind="dictation"),
+                    now_us=1_000_000 * index,
+                )
+            router, transport, _ = make_router(tmp_path, notes=notes)
+            await router.open("QuickNotes")
+            first = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert first.title == "QUICKNOTES"
+            assert first.items[-1] == "▼ Older notes"
+            assert len(first.items) == 19
+            assert first.page_controls == (None, 18)
+            assert first.quick_notes_page == (0, 2)
+
+            router.on_input(InputEvent(
+                container_name="cappage", selected_name="QUICKNOTES · LIST", selected_index=0,
+                event_type=EventType.SCROLL_BOTTOM,
+            ))
+            await wait_until(lambda: router._note_list is not None and router._note_list.index == 1)
+            await wait_until(lambda: any(
+                isinstance(m, HudList) and m.title == "QUICKNOTES" and m.items[-1] == "▲ Newer notes"
+                for m in transport.sent
+            ))
+            older = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert older.page_controls == (5, None)
+            assert older.items[0].endswith("Fixture note 5")
+
+            # A tap on the paging row never opens a note: it is past the rows.
+            router.on_input(InputEvent(
+                container_name="capdata", selected_name="QUICKNOTES", selected_index=5,
+                quick_notes_page_index=1,
+            ))
+            await asyncio.sleep(0)
+            assert router._note_reader is None
+
     async def test_brainstorm_row_shows_the_missing_seat_instead_of_a_promise(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         """A missing CLI seat used to surface only after the tap: the row opened
         on "Ready for a question" and the tap went nowhere useful."""

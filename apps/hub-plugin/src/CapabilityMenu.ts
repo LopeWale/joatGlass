@@ -35,10 +35,21 @@ import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
  */
 const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
   'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY', 'BRAINSTORM',
+  'NOTIFICATIONS', 'NOTIFICATIONS · EMPTY',
+  'QUICKNOTES', 'QUICKNOTES · EMPTY', 'QUICKNOTES · SETUP',
 ]);
 
 /** Readers drawn as one firmware text page instead of four image tiles. */
-const TEXT_PAGE_TITLES = new Set(['MESSAGES · MESSAGE']);
+const TEXT_PAGE_TITLES = new Set([
+  'MESSAGES · MESSAGE', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+  'NOTIFICATIONS · DETAIL', 'NAVIGATION',
+]);
+
+/** A Planning entry page is titled by its origin and kind. */
+function usesTextPage(normalized: string): boolean {
+  return TEXT_PAGE_TITLES.has(normalized)
+    || /^(PLANNING|CALENDAR|TASKS) · (EVENT|REMINDER)$/u.test(normalized);
+}
 
 export function usesFirmwareList(title: string | undefined): boolean {
   return title !== undefined && FIRMWARE_LIST_TITLES.has(title.trim().toUpperCase());
@@ -792,12 +803,12 @@ export class CapabilityMenu {
     // A conversation whose paging travels as rows (`pageControls` present)
     // is a firmware list too: the swipe-paging thread needs scroll events the
     // firmware list does not report, so the Mac's opt-in decides.
-    const firmwareList = (usesFirmwareList(normalized)
-      || (normalized === 'MESSAGES · CONVERSATION' && pageControls !== undefined))
-      && !planningGrid && !readerPage && !quickNotesPage;
+    const pagedByRows = pageControls !== undefined;
+    const firmwareList = (usesFirmwareList(normalized) || pagedByRows)
+      && !planningGrid && !readerPage && (!quickNotesPage || pagedByRows);
     // The message reader is a firmware text page: Even draws the prose and
     // the presenter pages it in place, so no raster prose pager is prepared.
-    const textPage = TEXT_PAGE_TITLES.has(normalized) && !firmwareList;
+    const textPage = usesTextPage(normalized) && !firmwareList;
     const customSelection = (this.hud.usesCustomListSelection?.({
       nativeFirmwareList: firmwareList, nativeTextPage: textPage,
     }) ?? false) && !firmwareList;
@@ -1508,27 +1519,29 @@ export class CapabilityMenu {
     if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
     if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
     if (this.dataSelectionPending) return true;
-    // `pageControls` is retained only when the thread was shown as a
-    // firmware list, so its presence is the whole test.
-    const firmwareConversation = this.pendingTitle === 'MESSAGES'
-      && this.messagesScreen === 'conversation'
-      && this.dataSurface?.pageControls !== undefined;
-    if (firmwareConversation && this.dataSurface) {
-      // The firmware reported the tapped row; only message rows read, the
-      // paging rows request their page, and headings and instructions are
-      // inert. A page already in flight owns the thread until it lands.
+    // `pageControls` is retained only when the page was shown as a
+    // firmware list, so its presence is the whole test. The firmware
+    // reported the tapped row: a paging row requests its page the way the
+    // swipe used to, and a page already in flight owns the list until it
+    // lands. On a thread, headings and instructions are inert.
+    if (this.dataSurface?.pageControls !== undefined) {
       if (this.dataPagePending) return true;
       const controls = this.dataSurface.pageControls;
-      if (controls?.newerIndex === this.selectedIndex) {
-        this.requestMessagePage(OsEventTypeList.SCROLL_TOP_EVENT);
+      const quickNotes = this.pendingTitle === 'QUICKNOTES';
+      if (controls.newerIndex === this.selectedIndex) {
+        if (quickNotes) this.requestQuickNotesListPage(OsEventTypeList.SCROLL_TOP_EVENT);
+        else this.requestMessagePage(OsEventTypeList.SCROLL_TOP_EVENT);
         return true;
       }
-      if (controls?.olderIndex === this.selectedIndex) {
-        this.requestMessagePage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      if (controls.olderIndex === this.selectedIndex) {
+        if (quickNotes) this.requestQuickNotesListPage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+        else this.requestMessagePage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
         return true;
       }
-      const row = this.dataSurface.items[this.selectedIndex];
-      if (row === undefined || parseMessagesConversationRow(row).kind === 'instruction') return true;
+      if (this.messagesScreen === 'conversation') {
+        const row = this.dataSurface.items[this.selectedIndex];
+        if (row === undefined || parseMessagesConversationRow(row).kind === 'instruction') return true;
+      }
     }
     this.dataSelectionPending = true;
     if (this.messagesScreen === 'review' && this.pendingRequestId) {
@@ -2027,7 +2040,10 @@ export class CapabilityMenu {
    * leaves state untouched so the ordinary guards drop the frame. */
   private adoptVoiceGeneration(title: string, requestId: string): void {
     const family = (title.split('·')[0] ?? '').trim().toUpperCase();
-    const known = CAPABILITIES.some((name) => name.toUpperCase() === family);
+    // Notifications is a page the Mac opens by voice too ("show my
+    // notifications") without being a menu capability.
+    const known = family === 'NOTIFICATIONS'
+      || CAPABILITIES.some((name) => name.toUpperCase() === family);
     if (!known) return;
     this.leaveMessages();
     this.retireTerminalOpening();
@@ -2299,7 +2315,8 @@ export class CapabilityMenu {
     // list (the Messages thread, Activity) or a text page keeps that type,
     // or the return would redraw it as four image tiles.
     const parentFirmwareList = (usesFirmwareList(parent.title) || parent.pageControls !== undefined)
-      && !parent.planningGrid && !parent.readerPage && !parent.quickNotesPage;
+      && !parent.planningGrid && !parent.readerPage
+      && (!parent.quickNotesPage || parent.pageControls !== undefined);
     const shown = await this.hud.showList(parent.messageProse
       ? this.noteDisplayItems(parent.items, parent.messageProse) : parent.items, {
       title: parent.title,

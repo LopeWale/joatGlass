@@ -772,6 +772,83 @@ describe('CapabilityMenu', () => {
     expect(listOptions[5]).not.toHaveProperty('nativeFirmwareList');
   });
 
+  it('draws QuickNotes, Notifications and the readers natively, paging the archive by its rows', async () => {
+    const { menu, hud, listOptions, sent } = rig();
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
+    ));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    const page = [...rows(20), '▼ Older notes'];
+    expect(await menu.presentList(
+      'QUICKNOTES', page, requestId, true, 'down older · tap: open · left x2: back',
+      undefined, undefined, undefined, undefined, { index: 0, count: 2 }, undefined, undefined, { olderIndex: 20 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES', nativeFirmwareList: true });
+
+    // The paging row is the archive page request the edge swipe used to send.
+    sent.length = 0;
+    expect(menu.handleList(click(20))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'cappage', selectedName: 'QUICKNOTES · LIST', selectedIndex: 0, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId },
+    });
+    expect(await menu.presentList(
+      'QUICKNOTES', ['Row 21', 'Row 22', '▲ Newer notes'], requestId, true, 'up newer · tap: open · left x2: back',
+      undefined, undefined, undefined, undefined, { index: 1, count: 2 }, undefined, undefined, { newerIndex: 2 },
+    )).toBe(true);
+    sent.length = 0;
+    expect(menu.handleList(click(2))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      event: { containerName: 'cappage', selectedName: 'QUICKNOTES · LIST', selectedIndex: 1, eventType: OsEventTypeList.SCROLL_TOP_EVENT },
+    });
+    expect(await menu.presentList(
+      'QUICKNOTES', page, requestId, true, 'down older · tap: open · left x2: back',
+      undefined, undefined, undefined, undefined, { index: 0, count: 2 }, undefined, undefined, { olderIndex: 20 },
+    )).toBe(true);
+
+    // A note row opens its reader, which is a firmware text page.
+    sent.length = 0;
+    expect(menu.handleList(click(1))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({ event: { containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 1 } });
+    expect(await menu.presentList(
+      'QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page'], requestId, false, 'down more · left x2: back',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES · DETAIL', nativeTextPage: true });
+  });
+
+  it('draws Notifications and a Planning entry natively', async () => {
+    const { menu, hud, listOptions, sent } = rig();
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
+    ));
+    await menu.openNotifications();
+    await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
+    expect(await menu.presentList(
+      'NOTIFICATIONS', ['[2m] Dele · Call me', 'Clear JOAT notifications'], latestRequestId(sent), true,
+      'tap: read · left x2: back', undefined, undefined, 1,
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS', nativeFirmwareList: true });
+    expect(await menu.presentList(
+      'NOTIFICATIONS · DETAIL', ['Dele · Messages', 'Call me when you arrive.'], latestRequestId(sent), false,
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS · DETAIL', nativeTextPage: true });
+
+    await menu.toggle();
+    sent.length = 0;
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
+    const planning = latestRequestId(sent);
+    expect(await menu.presentList('PLANNING', ['14:00 · Design review'], planning, true, 'tap: open')).toBe(true);
+    // A read-only entry answers a row tap and is a firmware text page.
+    expect(menu.handleList(click(0))).toBe(true);
+    expect(await menu.presentList(
+      'PLANNING · EVENT', ['Design review', '14:00 · Event'], planning, false, 'left x2 Planning',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · EVENT', nativeTextPage: true });
+  });
+
   it('draws the message reader as a firmware text page, pages it locally, then asks the Mac past its edge', async () => {
     const { menu, hud, listOptions, lists, sent } = rig();
     let localPages = 1;

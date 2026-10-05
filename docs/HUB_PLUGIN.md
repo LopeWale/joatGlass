@@ -186,6 +186,8 @@ other three, so a swipe shipped three tiles.
 | The question page ("What should I say?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
 | Open Brainstorm (the idle picker) | 4 | **0** — one rebuild to a firmware list of past sessions plus NEW |
 | A Brainstorm frame (ready, listening, running, settled, unavailable) | 1-2 per revision, plus 1-2 **every second** while thinking | **0** — the Agent Terminal's two-text page; each revision is one `textContainerUpgrade`, and the per-second counter is gone |
+| Open QuickNotes or Notifications | 4 | **0** — firmware lists; the archive pages by its own "▲ Newer notes" / "▼ Older notes" rows (18 notes a page, so both rows fit the list's 20) |
+| Open a note, a notification's detail, a Planning entry, or the Navigation instructions | 4 | **0** — firmware text pages (`TEXT_PAGE_TITLES`), paged in place; Back returns the list as the firmware list it was |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -296,6 +298,19 @@ The levers that remain are design decisions, not code:
   and its tap went nowhere. `scripts/simulator_brainstorm_native_probe.py`
   plays the Mac's side of a session; its run shows zero image tiles from
   picker to settled and the tap arriving as `begin_topic_capture`.
+- ~~Native QuickNotes, Notifications, readers~~ — 2026-10-05: `QUICKNOTES`,
+  `NOTIFICATIONS` (and their EMPTY/SETUP pages) join the firmware list;
+  `QUICKNOTES · NOTE/DETAIL`, `NOTIFICATIONS · DETAIL`, `PLANNING · EVENT`
+  (any origin and kind) and the static `NAVIGATION` page are text pages.
+  The archive carries `pageControls` like the thread: the Mac appends the
+  paging rows (`_NOTE_LIST_PAGE_SIZE` dropped to 18 so both fit the list's
+  20-row cap) and a tap on either sends the `QUICKNOTES · LIST` page request
+  the edge swipe used to. A spoken "show notifications" is adopted like the
+  menu capabilities. Still raster: the Planning month grid (a calendar has no
+  Even template), its day/week lists, and the NEWS, SEARCH and POMODORO tabs
+  (rail and row memory). `scripts/simulator_quicknotes_native_probe.py`
+  records zero tiles across list, both pages, the note, Back, the
+  Notifications list and a card's detail.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.
