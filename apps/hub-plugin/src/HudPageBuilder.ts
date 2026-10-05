@@ -40,6 +40,15 @@ const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
 
 /** Native conversation geometry. The card is anchored at the same optical
  * bottom while its top moves upward through bounded line-count stages. */
+/** The firmware answer page: one status line, one tall body, one hint
+ * line. The body holds seven firmware lines; longer answers page. */
+export const ASSISTANT_ANSWER_PAGE = {
+  bodyY: 39,
+  bodyHeight: 214,
+  lineCapacity: Math.floor((214 - 2 * REGION_PAD) / FIRMWARE_LINE),
+  textWidth: REGION_TEXT_WIDTH,
+} as const;
+
 export const ASSISTANT_CONVERSATION_GEOMETRY = {
   cardLeft: 36,
   cardWidth: 504,
@@ -539,6 +548,27 @@ export class HudPageBuilder {
             itemName: capped,
           }),
         }),
+      ],
+    });
+  }
+
+  /** A JOAT answer as Even's own text page: a command result, an error, a
+   * capability answer. One rebuild in, in-place upgrades for paging and
+   * streaming, and the four image containers return on dismissal. */
+  assistantAnswerLayout(
+    body: string,
+    chrome: { status?: string; hint?: string } = {},
+  ): RebuildPageContainer {
+    return new RebuildPageContainer({
+      containerTotalNum: 3,
+      ...this.menuConfig(),
+      textObject: [
+        this.statusBar(pxTruncate((chrome.status ?? '').slice(0, 46), REGION_TEXT_WIDTH)),
+        this.main(ASSISTANT_ANSWER_PAGE.bodyHeight, 1, 4, (body || ' ').slice(0, 1000)),
+        this.region(
+          ContainerId.Hint, 'hint', 253, 35, 3, 1,
+          pxTruncate((chrome.hint ?? 'tap: dismiss').slice(0, 96), REGION_TEXT_WIDTH),
+        ),
       ],
     });
   }

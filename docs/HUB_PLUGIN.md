@@ -182,7 +182,7 @@ other three, so a swipe shipped three tiles.
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
-| Assistant overlay show, then dismiss | 4 + 4 | 4 + 4 |
+| Assistant answer show, then dismiss | 4 + 4 | 0 (one text rebuild) + 4 + one rebuild; receipts 2 + 2 |
 | Clock minute tick on a feature page | 1 | 1 |
 
 Two host facts from Even's own display docs shape the pipeline
@@ -244,9 +244,13 @@ The levers that remain are design decisions, not code:
   surface offers `withPageTransition`; dismissal recreates the four image
   containers, or hands straight to a firmware list. Verified in the official
   simulator with `scripts/simulator_messages_native_probe.py`.
-- **Native answer overlay** — `paintNativeAssistantOverlay` still runs only
-  without a visual surface; the result card after a send is four tiles in
-  and four out. Same mechanism as the gate above; next.
+- ~~Native answer page~~ — 2026-10-05: an `answer` overlay over the visual
+  HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
+  seven-line body paged in place with `textContainerUpgrade`, a hint line.
+  Receipts stay on the image page (two tiles beat a page swap). Still
+  image pages in Messages: the conversation thread (needs tap-to-page rows,
+  since the firmware list emits no scroll events), the prompt question and
+  the message reader.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.
