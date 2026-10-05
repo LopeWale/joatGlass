@@ -47,7 +47,7 @@ Rules that bite:
 - `createStartUpPageContainer` is **one-shot**. Use `rebuildPageContainer` for later full redraws and `textContainerUpgrade` for in-place text — the latter is our default for streaming HUD updates (no flicker).
 - `zOrderIndex` is **all-or-nothing per page** and must be **unique**. Violations fail SDK-side validation before reaching native: `createStartUpPageContainer` → `invalid`, `rebuildPageContainer` → `false`. Omit it everywhere to keep declaration-order behaviour.
 - Image containers have no `isEventCapture` — pair them with a text container as the capture layer.
-- `updateImageRawData` calls must be **serial** (await each). The SDK LZ4-compresses internally since 0.0.12; pass raw 4-bit greyscale pixels as before.
+- `updateImageRawData` calls must be **serial** (await each). The plugin sends each tile as PNG bytes; the host converts to Gray4 and LZ4-compresses before BLE (the pipeline table below has the costs).
 - Always call the unsubscribe function returned by `onEvenHubEvent` / `onDeviceStatusChanged` / `onLaunchSource`.
 
 ## Input routing — verified, and full of traps
@@ -135,7 +135,7 @@ between them is not a matter of taste:
 | Mechanism | Cost | Rows visible of 8 | Type | Verdict |
 |---|---|---|---|---|
 | `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
-| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch | **In use for AGENT TERMINAL, the MESSAGES picker and ACTIVITY** (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`, opted in per page with `nativeFirmwareList`). NEWS and SEARCH were native in 2026-09-02 and went back to pixels for the rail and row memory. Rejected for the menu itself — no denser, and it costs a page. |
+| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch; **each row ≤ 63 UTF-8 bytes** (the host refuses the rebuild with a silent `false` from 64 bytes, measured in the 0.9.5 simulator; `listLayout` clamps) | **In use for AGENT TERMINAL, the MESSAGES picker, the MESSAGES conversation thread and ACTIVITY** (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`, opted in per page with `nativeFirmwareList`; the thread opts in when the Mac sends `pageControls`). NEWS and SEARCH were native in 2026-09-02 and went back to pixels for the rail and row memory. Rejected for the menu itself — no denser, and it costs a page. |
 | Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
 
 Both native mechanisms render in the firmware's own proportional font at a
@@ -179,6 +179,20 @@ other three, so a swipe shipped three tiles.
 | Mic on/off, battery | 2 / 1 | **1** (top-right) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
+| Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
+| Page an older or newer slice of the thread | 2-4 | **0** — tap the Mac-appended "▲ Newer messages" / "▼ Older messages" row; the Mac answers with the next `hud.list` (0.2 s in the simulator) |
+| Open a message from the thread (`MESSAGES · MESSAGE`) | 4 | **0** — one rebuild to a firmware text page; a swipe pages it in place (`textContainerUpgrade`), and past its edge asks the Mac for its next page as before |
+| Back from the message to the thread | 4 | **0** — the thread returns as the firmware list it was |
+| The question page ("What should I say?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
+| Open Brainstorm (the idle picker) | 4 | **0** — one rebuild to a firmware list of past sessions plus NEW |
+| A Brainstorm frame (ready, listening, running, settled, unavailable) | 1-2 per revision, plus 1-2 **every second** while thinking | **0** — the Agent Terminal's two-text page; each revision is one `textContainerUpgrade`, and the per-second counter is gone |
+| Open QuickNotes or Notifications | 4 | **0** — firmware lists; the archive pages by its own "▲ Newer notes" / "▼ Older notes" rows (18 notes a page, so both rows fit the list's 20) |
+| Open a note, a notification's detail, a Planning entry, or the Navigation instructions | 4 | **0** — firmware text pages (`TEXT_PAGE_TITLES`), paged in place; Back returns the list as the firmware list it was |
+| Expand the NEWS, SEARCH or POMODORO tab from the rail | 4 | **0** — firmware lists; the title row names the tab, the rail stays on the overview |
+| Open a headline or a result | 4 | **0** — `NEWS · ARTICLE` / `SEARCH · RESULT` text pages, paged in place; the Mac is asked only past the local edge |
+| The expanded Pomodoro countdown | **1 tile every second** | **0** — a whole-minute first row ("Focus · block 2 of 4 · 24 min left"); the page is rebuilt once a minute |
+| The Settings page | 4 | **0** — firmware list |
+| Planning week and day pages, and Back between them | 4 per page | **0** — firmware lists; the Mac resolves every row by index and owns Back. The month dashboard keeps its four tiles |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -234,11 +248,23 @@ The levers that remain are design decisions, not code:
   line in the rebuild, and any pixel surface (overview, reader,
   confirmation, overlay) rebuilds the four-tile page first. Pages with a
   plugin-owned cursor (the Planning grid, prose readers, the QuickNotes
-  archive pager, Messages conversations) stay raster, and so do the NEWS and
+  archive pager) stay raster, and so do the NEWS and
   SEARCH tabs, whose Back restores the row the wearer left. Extending it to
   another list is one title in the set — the trade is the firmware font,
   no rail, and a cursor that always starts on row one (the firmware has no
   cursor-setting API).
+- ~~Native conversation thread~~ — 2026-10-05: the firmware list emits
+  clicks but no scroll events, so the Mac pages the thread itself. The
+  `hud.list` for `MESSAGES · CONVERSATION` carries `pageControls`
+  (`newerIndex`, `olderIndex`): the Mac appends "▲ Newer messages" and
+  "▼ Older messages" rows and names them, and `CapabilityMenu` turns a tap
+  on either into the same `SCROLL_TOP/BOTTOM` page request the raster
+  thread sent, ignoring the label and instruction rows. Rows are clamped
+  to 63 UTF-8 bytes (`clampUtf8Bytes` in `HudPageBuilder`): the host
+  refused every list whose row reached 64 bytes and the plugin fell to
+  Home, which is why the thread first looked broken in the simulator.
+  Verified with the probe: older page 0.2 s after the tap, zero image
+  tiles from thread to Back.
 - ~~Native confirmation~~ — 2026-10-05: the gate is a firmware text page
   (`confirmationLayout`, owner `confirmation-native`) whenever the visual
   surface offers `withPageTransition`; dismissal recreates the four image
@@ -247,10 +273,89 @@ The levers that remain are design decisions, not code:
 - ~~Native answer page~~ — 2026-10-05: an `answer` overlay over the visual
   HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
   seven-line body paged in place with `textContainerUpgrade`, a hint line.
-  Receipts stay on the image page (two tiles beat a page swap). Still
-  image pages in Messages: the conversation thread (needs tap-to-page rows,
-  since the firmware list emits no scroll events), the prompt question and
-  the message reader.
+  Receipts stay on the image page (two tiles beat a page swap).
+- ~~Native message reader and question page~~ — 2026-10-05: a `hud.list`
+  titled `MESSAGES · MESSAGE` (`TEXT_PAGE_TITLES` in `CapabilityMenu`)
+  opts into `nativeTextPage`: the presenter joins the Mac's rows, pages
+  them for the firmware font with `paginateAnswer`, draws `textPageLayout`
+  (owner `text-page-native`) and pages in place on swipe; a swipe past
+  the local edge is not consumed, so the menu asks the Mac for its
+  neighbouring page through the same `cappage` request. The question page
+  is `promptQuestionLayout` (owner `prompt-native`) under the same barrier;
+  without it the raster `paintExact` prompt remains. Every Messages page on
+  the reply path is now firmware-drawn; the probe records zero image tiles
+  from picker to result and back. `?joatTestPromptMic=1` (DEV) lets the
+  simulator, which has no microphone, keep a question on screen.
+- ~~Native Brainstorm~~ — 2026-10-05: a `brainstorm.view` frame rides the
+  Agent Terminal's two-text page (`NativeTerminalSurface`, owner
+  `terminal-conversation-native`) whenever the visual surface offers its
+  transition barrier: head `JOAT · BRAINSTORM`, a status row with the state
+  and the live speaker, the Mac's activity text as the transcript (paged
+  on the glasses by swipe), and a footer in the raster hint's words
+  measured for the firmware font. The idle picker (`BRAINSTORM`) is a
+  firmware list. Three Mac-side causes of "Brainstorm does nothing" went
+  with it: `find_codex_binary` was PATH-only (a launchd-started brain
+  never saw the ChatGPT-bundled `codex`), the idle row promised "Ready for
+  a question" even with a seat missing (it now shows the host's
+  unavailable frame first), and the idle, NEW and unavailable frames were
+  sent without the `hud.rebuild reason=brainstorm` that claims the surface
+  — the plugin dropped them, so a voice-opened Brainstorm showed nothing
+  and its tap went nowhere. `scripts/simulator_brainstorm_native_probe.py`
+  plays the Mac's side of a session; its run shows zero image tiles from
+  picker to settled and the tap arriving as `begin_topic_capture`.
+- ~~Native QuickNotes, Notifications, readers~~ — 2026-10-05: `QUICKNOTES`,
+  `NOTIFICATIONS` (and their EMPTY/SETUP pages) join the firmware list;
+  `QUICKNOTES · NOTE/DETAIL`, `NOTIFICATIONS · DETAIL`, `PLANNING · EVENT`
+  (any origin and kind) and the static `NAVIGATION` page are text pages.
+  The archive carries `pageControls` like the thread: the Mac appends the
+  paging rows (`_NOTE_LIST_PAGE_SIZE` dropped to 18 so both fit the list's
+  20-row cap) and a tap on either sends the `QUICKNOTES · LIST` page request
+  the edge swipe used to. A spoken "show notifications" is adopted like the
+  menu capabilities. Still raster: the Planning month grid (a calendar has no
+  Even template), its day/week lists, and the NEWS, SEARCH and POMODORO tabs
+  (rail and row memory). `scripts/simulator_quicknotes_native_probe.py`
+  records zero tiles across list, both pages, the note, Back, the
+  Notifications list and a card's detail.
+- ~~Native panel tabs and Settings~~ — 2026-10-05: `openPanelTab` opts NEWS,
+  SEARCH and POMODORO into the firmware list and the article/result readers
+  into text pages; the Settings page is a firmware list too. The rail is
+  the overview's; the expanded page has a title row instead. Row memory on
+  Back is gone with the raster list (the firmware has no cursor-setting
+  API), so `restorePanelSelection` runs only for a raster page. The
+  Pomodoro's per-second tile is replaced by a plugin-authored whole-minute
+  first row (`pomodoroCountdownRow`) that the tap mapping skips
+  (`panelRowOffset`); the presenter's panel ticker runs at 60 s on a
+  firmware page and calls `onNativePanelTick`, which the menu answers by
+  rebuilding the page.
+- ~~Native Planning week and day~~ — 2026-10-05: a Planning page that
+  carries the Mac's row map (`planningNavigation`) and no month grid is a
+  firmware list (`planningList` in `presentList`). Every row is a Mac
+  action by index (day, entry, previous, next, scope, earlier/more
+  entries) and Back is the Mac's `planning-back`, so nothing changes on
+  the wire; the day page's 13-entry paging keeps it under the list's 20
+  rows. The month dashboard (grid plus hovered-day pane) is the one raster
+  capability page left: a calendar grid has no Even template.
+  `scripts/simulator_planning_native_probe.py` drives month → week → day →
+  event and Back over a fake EventKit bridge: zero tiles on every page but
+  the month.
+  `scripts/simulator_panels_native_probe.py` pushes the three tabs and
+  records zero tiles on each page, the article, its paging, Back and the
+  minute rebuild; the overview's own rail swipes are the only tiles.
+
+### Downlinks and uplinks: what drives them (2026-10-05)
+
+The audit found frames defined on both sides that nothing sent. Where they
+stand now:
+
+| Frame | Status |
+|---|---|
+| `imu.control`, `imu.trace` ↓ / `imu` ↑ | **Wired.** `joat --imu-trace PATH` arms them on every hello and records samples (docs/NEXT_STEPS.md §5). Off by default: ~10 messages/s. |
+| `audio.control open=true` after a don | **Wired** for resume policy "mac": the Mac remembers the plugin's `policy` report and answers a worn report with the mic off by asking for ears. "auto" and "confirm" stay plugin-local. |
+| `policy.set` ↓ | Mac-side hook, no caller: the wearer sets the policy on the phone/glasses; the Mac only reads it. Kept so a Mac-app settings pane can drive it. |
+| `shutdown` ↓ | Mac-side hook, no caller: `shutDownPageContainer` exits the plugin on the glasses, which is wrong on a brain restart (the RECONNECTING card refreshes itself). Kept for an explicit quit. |
+| `assistant.conversation dismiss` ↓ | Mac-side hook, no caller: the conversation page leaves on Back. Kept. |
+| `brainstorm.action show_brainstorm` ↑ | Plugin never emits it (a running tap sends `show_terminal`). Harmless Mac branch, kept. |
+| `productivity.view.ack`, `confirm` callbacks ↑ | Parsed; the pending futures resolve them, the callback lists stay empty. |
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.

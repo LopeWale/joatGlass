@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
-import { HudPageBuilder } from './HudPageBuilder';
+import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
 type Page = {
@@ -195,6 +195,23 @@ describe('HudPageBuilder invariants', () => {
   // The bug this file exists to prevent: the list draws, but capture stays on
   // the main TEXT container, so the firmware never moves the selection and
   // never emits listEvent — "menu shows but won't navigate".
+  it('keeps every firmware list row under the host\'s 63-byte cap, on a code-point boundary', () => {
+    // Measured in the official simulator: a 64-byte row fails the whole
+    // rebuild. "·" is two bytes, so a 64-character Messages row overflows.
+    const narrow = 'i'.repeat(64);
+    const dotted = `You · Read · ${'x'.repeat(51)}`; // 64 chars, 66 bytes
+    const page = builder.listLayout([narrow, dotted, 'short']) as Page;
+    const names = page.listObject?.[0]?.itemContainer?.itemName ?? [];
+    for (const row of names) {
+      expect(new TextEncoder().encode(row).length).toBeLessThanOrEqual(LIST_ROW_MAX_UTF8_BYTES);
+    }
+    expect(names[0]).toBe('i'.repeat(63));
+    expect(names[1]?.startsWith('You · Read · ')).toBe(true);
+    expect(names[2]).toBe('short');
+    expect(clampUtf8Bytes('ab·cd', 3)).toBe('ab');
+    expect(clampUtf8Bytes('ab·cd', 4)).toBe('ab·');
+  });
+
   it('list layout: the LIST container is the one that captures', () => {
     const page = builder.listLayout(['a', 'b', 'c']) as Page;
     expect(page.listObject?.[0]?.isEventCapture).toBe(1);

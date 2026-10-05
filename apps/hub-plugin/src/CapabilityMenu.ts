@@ -12,7 +12,7 @@ import {
   quickNotesProsePages,
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
-import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
+import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemainingMs } from './PanelRail';
 
 /**
  * Lists the G2 firmware draws itself (`ListContainerProperty`): plain rows
@@ -24,16 +24,45 @@ import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
  *
  * Only pages whose cursor the firmware can own belong here. The Planning
  * grid, prose readers (QuickNotes notes, prepared Messages results), the
- * QuickNotes archive pager and the Messages conversation keep JOAT's raster
- * treatment: they page or select by a plugin-owned cursor the firmware list
- * cannot express. The NEWS and SEARCH tabs stay raster too: Back from an
+ * QuickNotes archive pager keep JOAT's raster treatment: they page or select
+ * by a plugin-owned cursor the firmware list cannot express. A Messages
+ * conversation joins the firmware list only when the Mac sends
+ * `pageControls`, i.e. its paging travels as tappable rows instead of
+ * boundary swipes. The NEWS and SEARCH tabs stay raster too: Back from an
  * article restores the row the wearer left, and a firmware list always
  * starts on row one. Titles are the exact Mac-sent page names, so
  * "MESSAGES · CONVERSATION" is not "MESSAGES".
  */
 const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
-  'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY',
+  'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY', 'BRAINSTORM',
+  'NOTIFICATIONS', 'NOTIFICATIONS · EMPTY',
+  'QUICKNOTES', 'QUICKNOTES · EMPTY', 'QUICKNOTES · SETUP',
+  'NEWS', 'SEARCH', 'POMODORO',
 ]);
+
+/** Readers drawn as one firmware text page instead of four image tiles. */
+const TEXT_PAGE_TITLES = new Set([
+  'MESSAGES · MESSAGE', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+  'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
+]);
+
+/** The expanded Pomodoro's first row on the firmware list: the raster page
+ * drew a seconds countdown that cost one image tile every second over BLE.
+ * The firmware list cannot be upgraded in place, so the row carries whole
+ * minutes and the page is rebuilt once a minute (HudPresenter's panel
+ * ticker at its 60 s granularity). */
+export function pomodoroCountdownRow(pomodoro: HudPanelPomodoro | undefined, nowMs: number): string {
+  if (!pomodoro) return 'Say “JOAT, start a pomodoro”';
+  if (pomodoro.phase === 'idle') return pomodoroBlockLabel(pomodoro);
+  const minutes = Math.max(1, Math.ceil(pomodoroRemainingMs(pomodoro, nowMs) / 60_000));
+  return `${pomodoroBlockLabel(pomodoro)} · ${minutes} min left`;
+}
+
+/** A Planning entry page is titled by its origin and kind. */
+function usesTextPage(normalized: string): boolean {
+  return TEXT_PAGE_TITLES.has(normalized)
+    || /^(PLANNING|CALENDAR|TASKS) · (EVENT|REMINDER)$/u.test(normalized);
+}
 
 export function usesFirmwareList(title: string | undefined): boolean {
   return title !== undefined && FIRMWARE_LIST_TITLES.has(title.trim().toUpperCase());
@@ -45,6 +74,7 @@ import {
   type MessageUIMessage,
   type PromptPresentMessage,
   type BrainstormHudModel,
+  type HudPanelPomodoro,
   type PanelContentTab,
   type PlanningGridCell,
   type ProductivityHudModel,
@@ -63,6 +93,10 @@ type ListEvent = NonNullable<EvenHubEvent['listEvent']>;
 
 interface DataSurfaceSnapshot {
   planningNavigation?: { canGoBack: boolean; selectedIndex: number };
+  /** Firmware-list conversation: the rows whose tap pages the thread. */
+  pageControls?: { newerIndex?: number; olderIndex?: number };
+  /** A reader shown as one firmware text page, paged locally by swipe. */
+  nativeTextPage?: boolean;
   readerPage?: { id: string; index: number; count: number };
   quickNotesPage?: { index: number; count: number };
   title: string;
@@ -245,6 +279,9 @@ export class CapabilityMenu {
    * schedule rather than throwing the wearer all the way to the overview. */
   private planningDrillDown = false;
   private planningBackPending = false;
+  /** Rows the plugin put above the Mac's on an expanded tab (the Pomodoro
+   * countdown); a tap below them maps back to the Mac's own index. */
+  private panelRowOffset = 0;
   /** The split Planning dashboard: hovered date, and whether the right pane
    * owns input. Plugin-local — a hover never costs a Mac round trip. */
   private dashboard?: {
@@ -266,7 +303,15 @@ export class CapabilityMenu {
     private readonly hud: HudPresenter,
     _settings: Settings,
     private readonly link: MacLink,
-  ) {}
+  ) {
+    // The firmware Pomodoro page carries whole minutes; the presenter's
+    // ticker asks for a rebuilt page at each minute boundary.
+    this.hud.onNativePanelTick = () => {
+      if (this.isPanelExpanded() && panelTabForTitle(this.pendingTitle) === 'pomodoro') {
+        void this.presentPanelContent('pomodoro');
+      }
+    };
+  }
 
   isOpen(): boolean {
     return this.view !== 'closed';
@@ -633,7 +678,7 @@ export class CapabilityMenu {
     this.selectedIndex = 0;
     const shown = await this.hud.showList(
       ['Manage listening and Mac connections', 'in JOAT’s phone controls in Even Hub.'],
-      { ...SETTINGS_SURFACE, selectable: false },
+      { ...SETTINGS_SURFACE, selectable: false, nativeFirmwareList: true },
     );
     if (!this.isCurrentTransition(transition)) return;
     if (shown) this.view = 'settings';
@@ -667,6 +712,7 @@ export class CapabilityMenu {
     quickNotesPage?: { index: number; count: number },
     readerPage?: { id: string; index: number; count: number },
     planningNavigation?: { canGoBack: boolean; selectedIndex: number },
+    pageControls?: { newerIndex?: number; olderIndex?: number },
   ): Promise<boolean> {
     // Read-only Planning details answer a row tap. Once Back retires that
     // tap, a delayed detail cannot replace its restored agenda.
@@ -779,9 +825,28 @@ export class CapabilityMenu {
     // Decided before any cursor question below: the presenter answers for
     // the page about to be shown, not the (possibly firmware-owned) one that
     // is still on the glass.
-    const firmwareList = usesFirmwareList(normalized) && !planningGrid && !readerPage && !quickNotesPage;
-    const customSelection = (this.hud.usesCustomListSelection?.({ nativeFirmwareList: firmwareList }) ?? false)
-      && !firmwareList;
+    // A conversation whose paging travels as rows (`pageControls` present)
+    // is a firmware list too: the swipe-paging thread needs scroll events the
+    // firmware list does not report, so the Mac's opt-in decides.
+    const pagedByRows = pageControls !== undefined;
+    // A Planning week or day page is the Mac's own row map (planningOwner)
+    // without the month grid: every row is a Mac action by index and Back
+    // is the Mac's, so the firmware list serves it as it serves Activity.
+    // The month keeps the split dashboard: a calendar grid has no template.
+    const planningList = planningOwner !== undefined && !planningGrid;
+    const firmwareList = (usesFirmwareList(normalized) || pagedByRows || planningList)
+      && !planningGrid && !readerPage && (!quickNotesPage || pagedByRows);
+    // The message reader is a firmware text page: Even draws the prose and
+    // the presenter pages it in place, so no raster prose pager is prepared.
+    const textPage = usesTextPage(normalized) && !firmwareList;
+    const customSelection = (this.hud.usesCustomListSelection?.({
+      nativeFirmwareList: firmwareList, nativeTextPage: textPage,
+    }) ?? false) && !firmwareList;
+    const nativeTextPage = textPage && !customSelection;
+    // The Mac answered a swipe up with its previous page: open on its last
+    // local page, as the raster prose pager did.
+    const textPageFromEnd = nativeTextPage && this.messagePageDirection < 0
+      && this.dataPagePending && this.dataSurface?.title === title;
     const messageRows = messagesState?.screen === 'conversation' && effectiveSelectable
       && customSelection
       ? items.flatMap((item, index) => parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : [])
@@ -840,6 +905,8 @@ export class CapabilityMenu {
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
       ...(firmwareList ? { nativeFirmwareList: true } : {}),
+      ...(nativeTextPage ? { nativeTextPage: true } : {}),
+      ...(textPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -865,6 +932,8 @@ export class CapabilityMenu {
     this.selectedIndex = initialSelection;
     this.dataSurface = {
       planningNavigation: planningOwner,
+      ...(firmwareList && pageControls ? { pageControls: { ...pageControls } } : {}),
+      ...(nativeTextPage ? { nativeTextPage: true } : {}),
       title,
       quickNotesPage: archivePage,
       readerPage: preparedReader,
@@ -1223,6 +1292,10 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
+      // A firmware text page pages itself first; past its edge the Mac's own
+      // footer decides whether a neighbouring page exists, as before.
+      if (this.dataSurface?.nativeTextPage
+        && this.hud.scrollTextPage?.(delta > 0 ? 'down' : 'up')) return true;
       if (this.usesOrderedSelection()) {
         this.moveRowSelection(delta, eventType);
         return true;
@@ -1275,7 +1348,7 @@ export class CapabilityMenu {
   private usesOrderedSelection(): boolean {
     if (this.view !== 'data' || this.dashboard || !this.dataRowsSelectable
       || !this.dataSurface?.selectable || !this.hud.usesCustomListSelection()
-      || this.dataSurface.messageProse) return false;
+      || this.dataSurface.messageProse || this.dataSurface.pageControls !== undefined) return false;
     if (this.pendingTitle === 'PLANNING') return true;
     if (this.pendingTitle === 'QUICKNOTES') return !!this.dataSurface.quickNotesPage;
     return this.pendingTitle === 'MESSAGES' && this.messagesScreen !== 'review'
@@ -1476,6 +1549,30 @@ export class CapabilityMenu {
     if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
     if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
     if (this.dataSelectionPending) return true;
+    // `pageControls` is retained only when the page was shown as a
+    // firmware list, so its presence is the whole test. The firmware
+    // reported the tapped row: a paging row requests its page the way the
+    // swipe used to, and a page already in flight owns the list until it
+    // lands. On a thread, headings and instructions are inert.
+    if (this.dataSurface?.pageControls !== undefined) {
+      if (this.dataPagePending) return true;
+      const controls = this.dataSurface.pageControls;
+      const quickNotes = this.pendingTitle === 'QUICKNOTES';
+      if (controls.newerIndex === this.selectedIndex) {
+        if (quickNotes) this.requestQuickNotesListPage(OsEventTypeList.SCROLL_TOP_EVENT);
+        else this.requestMessagePage(OsEventTypeList.SCROLL_TOP_EVENT);
+        return true;
+      }
+      if (controls.olderIndex === this.selectedIndex) {
+        if (quickNotes) this.requestQuickNotesListPage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+        else this.requestMessagePage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+        return true;
+      }
+      if (this.messagesScreen === 'conversation') {
+        const row = this.dataSurface.items[this.selectedIndex];
+        if (row === undefined || parseMessagesConversationRow(row).kind === 'instruction') return true;
+      }
+    }
     this.dataSelectionPending = true;
     if (this.messagesScreen === 'review' && this.pendingRequestId) {
       // This is the current draft's review action, not a new recipient row.
@@ -1492,6 +1589,12 @@ export class CapabilityMenu {
       return true;
     }
     if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
+    // A plugin-authored row above the Mac's (the Pomodoro countdown) is inert.
+    const panelOffset = this.isPanelExpanded() ? this.panelRowOffset : 0;
+    if (panelOffset > 0 && this.selectedIndex < panelOffset) {
+      this.dataSelectionPending = false;
+      return true;
+    }
     const random = globalThis.crypto?.randomUUID?.()
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const traceId = `hud-${random}`;
@@ -1523,7 +1626,7 @@ export class CapabilityMenu {
         containerName: readingMessage ? 'capmessage' : 'capdata',
         ...(this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.quickNotesPage
           ? { quickNotesPageIndex: this.dataSurface.quickNotesPage.index } : {}),
-        selectedIndex: this.selectedIndex,
+        selectedIndex: this.selectedIndex - panelOffset,
         selectedName: this.pendingTitle,
         traceId,
         requestId: this.pendingRequestId,
@@ -1683,8 +1786,16 @@ export class CapabilityMenu {
       : [content?.empty ?? PANEL_EMPTY_COPY[tab]];
     const selectable = rows.length > 0;
     const hint = tab === 'pomodoro' ? POMODORO_EXPANDED_HINT : PANEL_EXPANDED_HINT;
-    const shown = await this.hud.showList(items, {
+    // The tabs are firmware lists: the title row names the tab (the rail
+    // stays on the overview), and the Pomodoro carries its countdown as a
+    // first row the tap mapping skips.
+    const firmware = usesFirmwareList(title);
+    const countdown = firmware && tab === 'pomodoro' && !content?.empty
+      ? [pomodoroCountdownRow(content?.pomodoro, Date.now())] : [];
+    const shownItems = [...countdown, ...items];
+    const shown = await this.hud.showList(shownItems, {
       title, hint, selectable, railTab: tab,
+      ...(firmware ? { nativeFirmwareList: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -1696,13 +1807,16 @@ export class CapabilityMenu {
       // already stale. Paint once more from the new cache.
       return this.openPanelTab(tab, keepSelection, false);
     }
-    const selectedIndex = await this.restorePanelSelection(keepSelection, items.length, transition);
+    // The firmware has no cursor-setting API: a rebuilt list starts on row
+    // zero, so only the raster list restores the wearer's row.
+    const selectedIndex = firmware
+      ? 0 : await this.restorePanelSelection(keepSelection, items.length, transition);
     if (selectedIndex === undefined || !this.isCurrentTransition(transition)) return;
     if (this.hud.rail.requestId(tab) !== requestId) return this.openPanelTab(tab, keepSelection, false);
     this.view = 'data';
     this.pendingTitle = title;
     this.pendingRequestId = requestId;
-    this.dataItemCount = items.length;
+    this.dataItemCount = shownItems.length;
     this.dataRowsSelectable = selectable;
     this.dataSelectionPending = false;
     this.dataSelectionUsesStaleNativeIndex = false;
@@ -1710,9 +1824,10 @@ export class CapabilityMenu {
     this.dataHint = hint;
     this.dataPagePending = false;
     this.selectedIndex = selectedIndex;
+    this.panelRowOffset = countdown.length;
     this.dataSurface = {
       title,
-      items: [...items],
+      items: [...shownItems],
       selectable,
       hint,
       selectedIndex,
@@ -1973,7 +2088,10 @@ export class CapabilityMenu {
    * leaves state untouched so the ordinary guards drop the frame. */
   private adoptVoiceGeneration(title: string, requestId: string): void {
     const family = (title.split('·')[0] ?? '').trim().toUpperCase();
-    const known = CAPABILITIES.some((name) => name.toUpperCase() === family);
+    // Notifications is a page the Mac opens by voice too ("show my
+    // notifications") without being a menu capability.
+    const known = family === 'NOTIFICATIONS'
+      || CAPABILITIES.some((name) => name.toUpperCase() === family);
     if (!known) return;
     this.leaveMessages();
     this.retireTerminalOpening();
@@ -2100,7 +2218,9 @@ export class CapabilityMenu {
   }
 
   private customMessageRows(): number[] | undefined {
+    // A firmware-list thread (paging rows present) has no plugin cursor.
     if (this.messagesScreen !== 'conversation' || !this.dataRowsSelectable
+      || this.dataSurface?.pageControls !== undefined
       || !this.hud.usesCustomListSelection?.()) return undefined;
     const rows = this.dataSurface?.items.flatMap((item, index) =>
       parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : []) ?? [];
@@ -2239,10 +2359,18 @@ export class CapabilityMenu {
         paneIndex: 0,
       };
     }
+    // Back lands on the parent as the page type it was shown as: a firmware
+    // list (the Messages thread, Activity) or a text page keeps that type,
+    // or the return would redraw it as four image tiles.
+    const parentFirmwareList = (usesFirmwareList(parent.title) || parent.pageControls !== undefined)
+      && !parent.planningGrid && !parent.readerPage
+      && (!parent.quickNotesPage || parent.pageControls !== undefined);
     const shown = await this.hud.showList(parent.messageProse
       ? this.noteDisplayItems(parent.items, parent.messageProse) : parent.items, {
       title: parent.title,
       initialSelectedIndex: this.dashboard ? 0 : parent.selectedIndex,
+      ...(parentFirmwareList ? { nativeFirmwareList: true } : {}),
+      ...(parent.nativeTextPage ? { nativeTextPage: true } : {}),
       contextLabel: parent.contextLabel,
       controlStartIndex: parent.controlStartIndex,
       planningEntries: parent.planningEntries,
@@ -2260,7 +2388,8 @@ export class CapabilityMenu {
     }
     // Rebuilding a list resets its visible cursor. Restore that cursor before
     // accepting a tap, so the highlighted row and the target stay identical.
-    if (parent.selectedIndex > 0 && !this.dashboard && !this.hud.usesCustomListSelection()) {
+    if (parent.selectedIndex > 0 && !this.dashboard && !parentFirmwareList && !parent.nativeTextPage
+      && !this.hud.usesCustomListSelection()) {
       const selected = await this.hud.setSelection(parent.selectedIndex);
       if (!this.isCurrentTransition(transition)) return;
       if (!selected) {
