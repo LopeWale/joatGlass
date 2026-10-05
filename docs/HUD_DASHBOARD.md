@@ -409,8 +409,8 @@ Corrections, verified against the source and `node_modules/@evenrealities/even_h
 | **Ring** single | `sysEvent` t0 s2 | **confirm only** | confirm only | confirm only | select row |
 | Long press → release | `sysEvent` t9 → t10 | open INBOX (rebuild) | open full card | stop stream | back to DASH |
 | Swipe up / down | `textEvent` t1 / t2 | scroll `MAIN` | scroll `MAIN` | scroll the log | SDK-internal, no event |
-| Left temple double | `sysEvent` t3 s3 | settings | settings | settings | settings |
-| Right temple double | `sysEvent` t3 s1 | `shutDownPageContainer(1)` | same | same | same |
+| Left temple double | `sysEvent` t3 s3 | Back (menu toggle) | Back | Back | Back |
+| Right temple double | `sysEvent` t3 s1 | same Back (no exit dialog; exit is the Mac's `shutdown`) | same | same | same |
 | OS contextual menu | `menuItemClickEvent` | Mic on/off · Inbox · Repeat · Settings | — | — | — |
 
 Sources per `protocol.py:34-40` (LEFT is 3, RING is 2). Long-press 9/10 exists in the enum (`index.d.ts:880-883`) and is CONSUMED for the microphone control — it does not relay. Note `eventSource` exists only on `sysEvent` (`index.d.ts:989`): swipes and list events are source-blind by SDK design, so no left/right distinction is possible for them. Menu items: ≤10, 32-byte labels, non-zero unique ids (`index.d.ts:514-532`).

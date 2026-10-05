@@ -47,8 +47,14 @@ _NEW_MESSAGE = re.compile(
 )
 ContactSearch = Callable[[str], list[tuple[str, str]]]
 # The plugin begins its eight-second decision clock only after the complete
-# frame is visible. The gateway envelope also has to include that BLE paint.
-CONFIRM_TRANSPORT_SECONDS = 12.0
+# gate is visible, and an acceptance leaves the phone only after the page
+# beneath the gate is restored. The gateway envelope has to cover both paints
+# around that window: up to four image tiles each way at 0.2-2 s per tile on
+# the lens (one firmware rebuild when the page is a list). Twelve seconds
+# covered the paint in but not the restore, so a tap the wearer saw land came
+# back as "Reply cancelled." The plugin fits its own window inside this
+# deadline (`confirmationDecisionWindowMs`).
+CONFIRM_TRANSPORT_SECONDS = 20.0
 MESSAGE_SELECTION_TTL_SECONDS = 120.0
 # A bare "reply" prompt stays armed briefly; the wearer answers in one breath.
 REPLY_PROMPT_TTL_SECONDS = 60.0

@@ -35,6 +35,7 @@ import {
   type PanelTab,
   type PlanningGridCell,
   type ProductivityHudDomain,
+  type PromptOwnerKind,
   type ProductivityHudModel,
 } from './types';
 
@@ -659,7 +660,7 @@ export class HudPresenter {
 
   /** Present one complete question without replacing the feature beneath it.
    * Only this prompt's current, completed frame may acknowledge publication. */
-  showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean, ownerKind?: 'messages' | 'brainstorm' | 'terminal'): Promise<boolean> {
+  showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean, ownerKind?: PromptOwnerKind): Promise<boolean> {
     if (this.confirmation || !promptId || !question.trim() || question.length > 1000) {
       return Promise.resolve(false);
     }

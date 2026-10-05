@@ -47,7 +47,7 @@ from ..native.bridge import (
     NativeBridgeUnavailable,
 )
 from ..persistence.actions import ActionActivity, ActionJournal
-from ..persistence.notes import NoteStore, QuickNote
+from ..persistence.notes import NoteSource, NoteStore, QuickNote
 from ..persistence.voice_notes import VoiceNote, VoiceNoteStore
 from .hud import HudWriter
 from .sinks import DebateSnapshot
@@ -180,6 +180,8 @@ class VoiceCaptureControls(Protocol):
 
     async def control_stop(self) -> str: ...
 
+    def control_start(self) -> str: ...
+
 
 _RECORDING_CONTROLS: dict[str, tuple[tuple[str, str], ...]] = {
     "recording": (
@@ -221,7 +223,21 @@ class _NoteListState:
 
 # The firmware list draws at most 20 rows (HudPageBuilder.listLayout caps
 # there), and an archive page carries up to two paging rows after its notes.
-_NOTE_LIST_PAGE_SIZE = 18
+#: Sixteen notes, two control rows and two paging rows fit the firmware
+#: list's twenty-row cap on every page.
+_NOTE_LIST_PAGE_SIZE = 16
+#: The QuickNotes page is a control surface: its first rows start a
+#: recording or take dictation by tap. Voice works from anywhere.
+_NOTE_CONTROLS: tuple[tuple[str, str], ...] = (
+    ("● Record a voice note", "start"),
+    ("✎ Dictate a note", "dictate"),
+)
+#: The Navigation page's one control; the row asks for the place itself.
+_NAVIGATION_CONTROL_ROW = "➤ Navigate to a place"
+#: The conversation page's reply control, drawn after the messages.
+_REPLY_CONTROL_ROW = "✎ Reply"
+#: ask(question, field, consume) -> published; PromptedSpeechRuntime.ask_capability.
+AskWearer = Callable[[str, str, Callable[[str], Awaitable[None]]], Awaitable[bool]]
 
 
 @dataclass(slots=True)
@@ -253,6 +269,8 @@ class _MessageHistoryState:
     thread: MessageThread
     pages: list[MessageHistoryPage]
     index: int = 0
+    #: Row index of the "✎ Reply" control on the page as drawn, or None.
+    reply_index: int | None = None
 
 
 @dataclass(slots=True)
@@ -345,8 +363,14 @@ class CapabilityRouter:
         terminal_current: Callable[[], str | None] | None = None,
         message_ui: MessageUIController | None = None,
         complete_reminder: Callable[[str], Awaitable[str | None]] | None = None,
+        ask: AskWearer | None = None,
+        navigate: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         self._hud = hud
+        # A tapped control row asks its own question on the lens and routes
+        # the answer; `navigate` starts a route to a spoken destination.
+        self._ask = ask
+        self._navigate = navigate
         # Defaults to this Mac's zone, which is exactly the pre-wearer-zone
         # behaviour for any construction that does not inject one.
         self._wearer_zone = wearer_zone or WearerZone(system_home_zone)
@@ -529,7 +553,9 @@ class CapabilityRouter:
                     return
                 self._terminal_opening_revision += 1
                 terminal_revision = self._terminal_opening_revision
-            schedule = asyncio.get_running_loop().create_task
+            schedule: Callable[[Coroutine[Any, Any, None]], asyncio.Task[None]] = (
+                asyncio.get_running_loop().create_task
+            )
             if event.selected_name in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}:
                 if (event.request_id != self._active_request_id or self._planning_back_pending
                         or self._planning_completion_active):
@@ -827,7 +853,7 @@ class CapabilityRouter:
             await self._show_focus(
                 "BRAINSTORM",
                 [_NEW_BRAINSTORM_ROW, *(_session_row(p) for p in history)],
-                hint="tap: open · say “JOAT, brainstorm …” to start",
+                hint="tap: open · left x2: back",
                 selectable=True,
             )
             return
@@ -849,7 +875,7 @@ class CapabilityRouter:
             collaborators=list(recap.speakers[:3]) if recap is not None and recap.speakers
             else ["Codex", "Claude"],
             activity=("\n".join(rows) if rows
-                      else 'Say “JOAT, brainstorm …” to begin.'),
+                      else "Tap to speak a topic."),
             acceptance_armed=self._acceptance_armed,
         ))
 
@@ -1115,7 +1141,7 @@ class CapabilityRouter:
                 state="ready",
                 topic="Ready for a question",
                 collaborators=["Codex", "Claude"],
-                activity='Say “JOAT, brainstorm …” to begin.',
+                activity="Tap to speak a topic.",
                 acceptance_armed=self._acceptance_armed,
             ))
             return
@@ -1144,7 +1170,7 @@ class CapabilityRouter:
                     await self._show_focus(
                         "BRAINSTORM",
                         ["That session could not be reopened.",
-                         "Say “JOAT, brainstorm …” to start a new one."],
+                         f"Tap “{_NEW_BRAINSTORM_ROW}” to start another."],
                     )
 
             body = "\n\n".join(f"[{label}]\n{text}" for label, text in turns)
@@ -1157,7 +1183,7 @@ class CapabilityRouter:
             await self._show_focus(
                 "BRAINSTORM",
                 ["That session could not be reopened.",
-                 "Say “JOAT, brainstorm …” to start a new one."],
+                 f"Tap “{_NEW_BRAINSTORM_ROW}” to start another."],
             )
 
     async def _select_message(self, index: int, trace_id: str, selection_epoch: int | None = None) -> None:
@@ -1253,10 +1279,16 @@ class CapabilityRouter:
             return
         history = self._message_history
         page = history.pages[history.index]
+        if index == history.reply_index and self._message_ui is not None:
+            # The tapped "✎ Reply" row: the same prepared reply the spoken
+            # "reply" starts, with its question on the lens.
+            self._message_selection_active = True
+            await self._message_ui.begin_reply()
+            return
         token = self._request_context.set(request_id)
         try:
-            # Row zero is the page heading; speaker rows follow it. The final
-            # voice instructions are intentionally not message actions.
+            # Row zero is the page heading; speaker rows follow it, then
+            # the reply control, which is not a message.
             if not 1 <= index <= len(page.entries):
                 await self._show_message_history_page()
                 return
@@ -1396,14 +1428,16 @@ class CapabilityRouter:
         # events. A tap on one of these rows is the page request; their
         # indices ride in `page_controls` so the plugin never matches copy.
         hint = " · ".join([
-            "tap read", "say reply" if can_reply else "read-only", BACK_HINT,
+            "tap read" if can_reply else "tap read · read-only", BACK_HINT,
         ])
         context = [self._message_history_row(state.thread, entry) for entry in page.entries]
-        instructions = (
-            ['Say “JOAT, reply saying …”', "Mic off? Long press to enable."]
-            if can_reply else []
-        )
-        items = [page_label, *context, *instructions]
+        items = [page_label, *context]
+        # The page is a control surface: replying is a row to tap, which
+        # asks "What should I say?" on the lens. Voice works from anywhere.
+        state.reply_index = None
+        if can_reply and self._message_ui is not None:
+            state.reply_index = len(items)
+            items.append(_REPLY_CONTROL_ROW)
         newer_index: int | None = None
         older_index: int | None = None
         if state.index > 0:
@@ -1432,8 +1466,10 @@ class CapabilityRouter:
         if state.index + 1 < total:
             hint_parts.append("down more")
         can_reply = state.thread.reply_target is not None and self._replies is not None
+        # Back lands on the conversation, whose "✎ Reply" row is the reply
+        # control; the reader itself only reads.
         hint = " · ".join([
-            *hint_parts, "say reply" if can_reply else "read-only", BACK_HINT,
+            *hint_parts, *([] if can_reply else ["read-only"]), BACK_HINT,
         ])
         await self._send_list(HudList(
             items=[
@@ -1589,6 +1625,8 @@ class CapabilityRouter:
                     await self._select_note(index, trace_id, quick_notes_page_index)
                 case "ACTIVITY":
                     await self._select_activity(index)
+                case "NAVIGATION":
+                    await self._select_navigation(index)
         except Exception:
             # One guard for all eight selections. There was a `try` with
             # only a `finally`, so a handler that raised — a lane that
@@ -2227,7 +2265,7 @@ class CapabilityRouter:
                 self._note_rows = []
             await self._show_focus(
                 "QUICKNOTES · SETUP",
-                ['Say “JOAT, note …” to save exact text.'],
+                ["Notes storage is unavailable on this Mac."],
             )
             return
         rows: list[_NoteRow] = []
@@ -2255,10 +2293,10 @@ class CapabilityRouter:
         if not self._request_is_current():
             return
         def chronology(row: _NoteRow) -> tuple[int, str, str]:
-            note = row.voice_note or row.text_note
-            assert note is not None
-            identity = row.voice_note.capture_id if row.voice_note else row.text_note.note_id
-            return (-note.updated_at_us, row.kind, identity)
+            if row.voice_note is not None:
+                return (-row.voice_note.updated_at_us, row.kind, row.voice_note.capture_id)
+            assert row.text_note is not None
+            return (-row.text_note.updated_at_us, row.kind, row.text_note.note_id)
         self._note_list = _NoteListState(tuple(sorted(rows, key=chronology)))
         await self._show_note_list_page()
 
@@ -2267,18 +2305,23 @@ class CapabilityRouter:
         if state is None or not self._request_is_current():
             return
         start = state.index * _NOTE_LIST_PAGE_SIZE
-        rows = list(state.rows[start:start + _NOTE_LIST_PAGE_SIZE])
+        notes = list(state.rows[start:start + _NOTE_LIST_PAGE_SIZE])
+        # The page is a control surface: recording and dictation are rows
+        # to tap, ahead of the notes on every page, so the tap mapping
+        # (`_note_rows`) and the drawn list agree row for row.
+        controls = [
+            _NoteRow(label=label, kind="control", control=action)
+            for label, action in _NOTE_CONTROLS
+        ]
+        rows = [*controls, *notes]
         self._note_rows = rows
         count = max(1, (len(state.rows) + _NOTE_LIST_PAGE_SIZE - 1) // _NOTE_LIST_PAGE_SIZE)
-        hints = [DETAIL_HINT if rows else BACK_HINT]
+        hints = [DETAIL_HINT if notes else "tap: choose · " + BACK_HINT]
         if state.index:
             hints.insert(0, "up newer")
         if state.index + 1 < count:
             hints.insert(0, "down older")
-        labels = [row.label for row in rows] or [
-            'Say “JOAT, start a quicknote …” to record.',
-            'Say “JOAT, note …” to save exact text.',
-        ]
+        labels = [row.label for row in rows]
         # The firmware list reports taps, never scrolls, so the archive pages
         # through rows: the plugin turns a tap on either into the page request
         # the swipe used to send. Both sit past the note rows, so a tap on
@@ -2291,10 +2334,10 @@ class CapabilityRouter:
             older_index = len(labels)
             labels.append("▼ Older notes")
         await self._show_focus(
-            "QUICKNOTES" if rows else "QUICKNOTES · EMPTY",
+            "QUICKNOTES" if notes else "QUICKNOTES · EMPTY",
             labels,
             hint=" · ".join(hints),
-            selectable=bool(rows),
+            selectable=True,
             quick_notes_page=(state.index, count),
             page_controls=(newer_index, older_index),
         )
@@ -2444,12 +2487,48 @@ class CapabilityRouter:
         finally:
             reader.page_pending = False
 
+    async def _dictate_note(self) -> None:
+        """The tapped "✎ Dictate a note" row: ask, then save the exact text."""
+        notes = self._notes
+        if self._ask is None or notes is None:
+            await self._hud.receipt("Dictation is unavailable on this Mac.")
+            return
+
+        async def consume(text: str) -> None:
+            visible = " ".join(text.split())
+            if not visible:
+                return
+            identifier = secrets.token_urlsafe(18)
+            notes.create(
+                note_id=identifier,
+                idempotency_key=f"quick-note:{identifier}",
+                text=visible,
+                source=NoteSource(kind="hud.quick-note", identifier=identifier),
+                now_us=time.time_ns() // 1_000,
+            )
+            preview = visible if len(visible) <= 72 else visible[:69] + "…"
+            await self._hud.receipt(f"Saved QuickNote: {preview}")
+            await self._hud.settle_assistant()
+            await self._show_notes()
+
+        if not await self._ask("What should I note?", "note", consume):
+            await self._hud.receipt("The question did not reach the glasses — try again.")
+
     async def _apply_recording_control(self, action: str) -> None:
         capture = self._voice_capture
         if capture is None:
+            if action == "dictate":
+                await self._dictate_note()
+            else:
+                await self._hud.receipt("Recording is unavailable on this Mac.")
             return
         receipt: str | None = None
-        if action == "stop":
+        if action == "start":
+            receipt = capture.control_start()
+        elif action == "dictate":
+            await self._dictate_note()
+            return
+        elif action == "stop":
             # Transcription of a long recording takes real time, so the
             # wearer needs to know it is happening — but a whole page for
             # one transient line is waste (the wearer's ruling). It goes out
@@ -2526,11 +2605,29 @@ class CapabilityRouter:
         await self._show_focus(
             "NAVIGATION",
             [
-                'Say “JOAT, navigate to …”',
+                _NAVIGATION_CONTROL_ROW,
                 "I’ll confirm the place. Then choose Walk or Cycle.",
             ],
-            hint="say destination · left x2: back",
+            hint="tap: choose · left x2: back",
+            selectable=True,
         )
+
+    async def _select_navigation(self, index: int) -> None:
+        """The tapped control row asks "Where to?" and starts the route."""
+        if index != 0:
+            return
+        navigate = self._navigate
+        if self._ask is None or navigate is None:
+            await self._hud.receipt("Navigation cannot be started from this Mac.")
+            return
+
+        async def consume(destination: str) -> None:
+            receipt = await navigate(destination)
+            if receipt:
+                await self._hud.receipt(receipt)
+
+        if not await self._ask("Where to?", "destination", consume):
+            await self._hud.receipt("The question did not reach the glasses — try again.")
 
     async def _show_activity(self) -> None:
         if self._actions is None:

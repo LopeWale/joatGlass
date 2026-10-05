@@ -72,7 +72,8 @@ function parse(value: unknown): PromptPresentMessage | PromptCancelMessage | und
     || (data.source !== 'glasses' && data.source !== 'phone')
     || typeof data.expiresInMs !== 'number' || !Number.isInteger(data.expiresInMs)
     || data.expiresInMs < 1 || data.expiresInMs > 45000
-    || (data.ownerKind !== 'messages' && data.ownerKind !== 'brainstorm' && data.ownerKind !== 'terminal')
+    || (data.ownerKind !== 'messages' && data.ownerKind !== 'brainstorm'
+      && data.ownerKind !== 'terminal' && data.ownerKind !== 'capability')
     || !ownerIdentifier(data.ownerId, 256) || !ownerIdentifier(data.field, 64)) return;
   return {
     kind: data.kind, promptId: data.promptId, question: data.question,

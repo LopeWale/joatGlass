@@ -619,11 +619,16 @@ describe('HudVisualSurface', () => {
     // later frame queued behind it forever and the HUD simply stopped.
     const events: Array<{ outcome: string; durationMs?: number }> = [];
     let calls = 0;
+    let settleFirst!: () => void;
     const client = {
       require: () => ({
         updateImageRawData: () => {
           calls += 1;
-          if (calls === 1) return new Promise<ImageRawDataUpdateResult>(() => undefined);
+          if (calls === 1) {
+            return new Promise<ImageRawDataUpdateResult>((resolve) => {
+              settleFirst = () => resolve(ImageRawDataUpdateResult.success);
+            });
+          }
           return Promise.resolve(ImageRawDataUpdateResult.success);
         },
       }),
@@ -652,8 +657,16 @@ describe('HudVisualSurface', () => {
     expect(events).toEqual([expect.objectContaining({ outcome: 'error', order: 0 })]);
     expect(events[0]?.durationMs).toBeGreaterThanOrEqual(10);
 
-    // The lane is free, and nothing is remembered as delivered: the next
-    // frame ships all four tiles again.
+    // The lane is free: the next frame is answered, not stranded behind the
+    // hung write. A host timeout does not cancel the SDK call, though, so
+    // the native single-writer boundary still refuses a new tile until that
+    // write settles (a late old upload must not land behind newer pixels).
+    expect(await surface.paint(frame)).toBe(false);
+    expect(calls).toBe(1);
+
+    // Once it settles, nothing is remembered as delivered: the next frame
+    // ships all four tiles again.
+    settleFirst();
     expect(await surface.paint(frame)).toBe(true);
     expect(calls).toBe(5);
   });

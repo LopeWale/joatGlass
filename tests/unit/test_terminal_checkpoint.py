@@ -76,7 +76,7 @@ def test_migration_12_preserves_v11_ledger_and_timer_data(tmp_path, monkeypatch)
             db.execute("INSERT INTO pomodoro_checkpoint VALUES(1,'focus',0,60000,60000,0,NULL,42)")
             timer = db.execute('SELECT * FROM pomodoro_checkpoint').fetchone()
     with DurableStore(path) as db:
-        assert db.schema_version == 12
+        assert db.schema_version == 13  # 12 added terminal_checkpoints; 13 appended pomodoro_lengths
         assert db.execute('SELECT * FROM schema_migrations WHERE version<=11 ORDER BY version').fetchall() == ledger
         assert db.execute('SELECT * FROM pomodoro_checkpoint').fetchone() == timer
         assert db.execute('SELECT count(*) FROM terminal_checkpoints').fetchone() == (0,)

@@ -105,7 +105,9 @@ class MlxReplyEngine(ReplyEngine):
         return True
 
     def _load(self) -> tuple[Any, Any]:
-        from mlx_lm import load  # lazy: optional dependency
+        # Lazy: mlx_lm is an optional macOS-only dependency with no stubs;
+        # availability is gated at runtime by mlx_available().
+        from mlx_lm import load  # type: ignore[import-not-found]
 
         loaded = load(self._model_id)  # 2-tuple, or 3-tuple with config
         return loaded[0], loaded[1]

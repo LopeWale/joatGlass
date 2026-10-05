@@ -392,6 +392,13 @@ def test_engine_stub_is_private_pid_bound_bridge_proxy(
     assert stub.bridge_path == stub.repo / "acceptance-native-bridge.sock"
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason=(
+        "the generated engine stub verifies peers with the macOS-only "
+        "LOCAL_PEERPID/LOCAL_PEERTOKEN socket options (SOL_LOCAL)"
+    ),
+)
 @pytest.mark.asyncio
 async def test_engine_stub_relays_only_the_authorized_harness_pid(tmp_path: Path) -> None:
     socket_context = tempfile.TemporaryDirectory(prefix="joat-proxy-test-", dir="/tmp")
@@ -536,6 +543,21 @@ class _RestoreFailingPreflightLease(_PreflightLease):
         raise RuntimeError("restore failed")
 
 
+@pytest.fixture
+def hermetic_audit_token(monkeypatch: pytest.MonkeyPatch) -> bytes:
+    """Stand in for the macOS-only LOCAL_PEERTOKEN read.
+
+    The preflight tests stub the app lease and the bridge client, so the
+    generated engine stub never runs; only the kernel audit-token read,
+    which is unavailable off macOS, needs a stand-in. It mirrors the
+    explicit token the engine-stub source test passes.
+    """
+
+    token = b"x" * 32
+    monkeypatch.setattr(acceptance, "_self_audit_token", lambda: token)
+    return token
+
+
 def _preflight_args(tmp_path: Path, *extra: str) -> object:
     return acceptance._parser().parse_args([
         "--evidence-root",
@@ -546,6 +568,7 @@ def _preflight_args(tmp_path: Path, *extra: str) -> object:
     ])
 
 
+@pytest.mark.usefixtures("hermetic_audit_token")
 @pytest.mark.asyncio
 async def test_calendar_preflight_uses_only_authorization_and_skips_watcher(
     monkeypatch: pytest.MonkeyPatch,
@@ -573,6 +596,7 @@ async def test_calendar_preflight_uses_only_authorization_and_skips_watcher(
     assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.usefixtures("hermetic_audit_token")
 @pytest.mark.asyncio
 async def test_reminder_preflight_retains_only_content_free_watcher_readiness(
     monkeypatch: pytest.MonkeyPatch,
@@ -631,6 +655,7 @@ async def test_reminder_preflight_retains_only_content_free_watcher_readiness(
     assert "native_identifier" not in serialized
 
 
+@pytest.mark.usefixtures("hermetic_audit_token")
 @pytest.mark.asyncio
 async def test_reminder_preflight_rejects_status_not_correlated_with_fresh_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
@@ -679,6 +704,7 @@ async def test_reminder_preflight_rejects_status_not_correlated_with_fresh_heart
     assert receipt["eventkit_mutations_attempted"] is False
 
 
+@pytest.mark.usefixtures("hermetic_audit_token")
 @pytest.mark.asyncio
 async def test_preflight_restore_failure_cannot_be_reported_ready(
     monkeypatch: pytest.MonkeyPatch,

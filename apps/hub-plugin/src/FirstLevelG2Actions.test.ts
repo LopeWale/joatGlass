@@ -162,8 +162,17 @@ async function openSettingsFromFirmwareMenu(
   await vi.waitFor(() => expect(harness.lists).toHaveLength(1));
 }
 
+/**
+ * 2026-09-11: listening policy, Repeat and Reconnect moved to the phone's
+ * controls (Changelog, "phone controls"). The glasses' Settings slot is a
+ * cached firmware menu link, so it shows directions and owns nothing but
+ * Back. These tests drive the real EventRouter and pin that retirement: the
+ * gestures that used to apply a policy, repeat a reply or recycle the link
+ * reach neither the policy, the link nor the Mac — while the surface
+ * announcements that retire capability ownership on the Mac still travel.
+ */
 describe('wearer G2 actions through Settings', () => {
-  it('routes Repeat from Settings through the Mac-held last-reply contract', async () => {
+  it('a press on the retired Repeat row reaches the Mac only as the surface announcements', async () => {
     const harness = rig();
     harness.link.connect();
     sockets[0]?.open();
@@ -171,12 +180,15 @@ describe('wearer G2 actions through Settings', () => {
 
     await openSettingsFromFirmwareMenu(harness);
     for (let index = 0; index < 3; index += 1) harness.fire(scrollDown());
-    harness.fire(rightPress());
+    harness.fire(rightPress()); // the row index that used to be "Repeat last reply"
+    expect(harness.menu.isOpen()).toBe(true);
+    expect(harness.hud.showDefault).not.toHaveBeenCalled();
+    harness.fire(leftDoublePress());
 
-    // Opening Settings announces the surface, Repeat rides the Mac-held
-    // last-reply contract, and closing announces Home again. All three are
-    // load-bearing: services/capabilities.py retires capability ownership on
-    // the surface messages, so dropping them strands the previous page.
+    // Opening Settings announces the surface and closing announces Home.
+    // Both are load-bearing: services/capabilities.py retires capability
+    // ownership on the surface messages, so dropping them strands the
+    // previous page. Nothing rides between them.
     await vi.waitFor(() => expect(sockets[0]?.sent).toEqual([
       JSON.stringify({ kind: 'auth', token: null }),
       JSON.stringify({
@@ -185,16 +197,14 @@ describe('wearer G2 actions through Settings', () => {
       }),
       JSON.stringify({
         kind: 'input',
-        event: { containerName: 'sysmenu', selectedIndex: 1 },
-      }),
-      JSON.stringify({
-        kind: 'input',
         event: { containerName: 'capability-lifecycle', selectedName: 'surface-home' },
       }),
     ]));
+    expect(harness.hud.showDefault).toHaveBeenCalledTimes(1);
+    expect(harness.menu.isOpen()).toBe(false);
   });
 
-  it('routes Reconnect from Settings through the real link recovery entry point', async () => {
+  it('a press on the retired Reconnect row cannot recycle the link', async () => {
     const harness = rig();
     harness.link.connect();
     sockets[0]?.open();
@@ -202,30 +212,31 @@ describe('wearer G2 actions through Settings', () => {
 
     await openSettingsFromFirmwareMenu(harness);
     for (let index = 0; index < 4; index += 1) harness.fire(scrollDown());
-    harness.fire(rightPress());
+    harness.fire(rightPress()); // the row index that used to be "Reconnect JOAT"
 
-    await vi.waitFor(() => expect(sockets).toHaveLength(2));
-    expect(sockets[0]?.closed).toBe(true);
-    expect(harness.link.linkState).toBe('connecting');
-    sockets[1]?.open();
-    expect(harness.link.linkState).toBe('connecting');
-    sockets[1]?.receive({ kind: 'auth.accepted' });
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.closed).toBe(false);
     expect(harness.link.linkState).toBe('connected');
+    expect(sockets[0]?.sent).toEqual([
+      JSON.stringify({ kind: 'auth', token: null }),
+      JSON.stringify({
+        kind: 'input',
+        event: { containerName: 'capability-lifecycle', selectedName: 'surface-settings' },
+      }),
+    ]);
+    expect(harness.menu.isOpen()).toBe(true);
   });
 
-  it('opens the persisted listening Settings surface and returns Home on left-double', async () => {
+  it('opens the phone-controls Settings surface and returns Home on left-double', async () => {
     const harness = rig();
 
     await openSettingsFromFirmwareMenu(harness);
-    expect(harness.lists[0]?.items.map((item) => item.replace('*', ' '))).toEqual([
-      '  Resume mic: instantly',
-      '  Resume mic: Mac decides',
-      '  Resume mic: ask me first',
-      'Repeat last reply',
-      'Reconnect JOAT',
+    expect(harness.lists[0]?.items).toEqual([
+      'Manage listening and Mac connections',
+      'in JOAT’s phone controls in Even Hub.',
     ]);
     expect(harness.lists[0]?.options).toEqual({
-      title: 'LISTENING RESUME', hint: 'tap: apply · left x2: back', selectable: true,
+      title: 'PHONE CONTROLS', hint: 'left x2: back', selectable: false, nativeFirmwareList: true,
     });
 
     harness.fire(leftDoublePress());
@@ -233,17 +244,27 @@ describe('wearer G2 actions through Settings', () => {
     expect(sockets).toEqual([]);
   });
 
-  it('scrolls and applies the visibly highlighted Settings policy through EventRouter', async () => {
+  it('a scroll and press on Settings never changes the persisted policy through EventRouter', async () => {
     const harness = rig();
 
     await openSettingsFromFirmwareMenu(harness);
+    expect(harness.settings.resumePolicy).toBe('confirm');
 
     harness.fire(scrollDown());
-    await vi.waitFor(() => expect(harness.hud.setSelection).toHaveBeenCalledWith(1));
+    harness.fire(rightPress()); // the row that used to apply "Mac decides"
+    harness.fire(scrollDown());
     harness.fire(rightPress());
 
-    await vi.waitFor(() => expect(harness.settings.resumePolicy).toBe('mac'));
-    expect(harness.hud.showDefault).toHaveBeenCalledTimes(1);
+    // No cursor to move, no policy to apply, no page to leave.
+    expect(harness.hud.setSelection).not.toHaveBeenCalled();
+    expect(harness.hud.moveSelection).not.toHaveBeenCalled();
+    expect(harness.settings.resumePolicy).toBe('confirm');
+    expect(harness.hud.showDefault).not.toHaveBeenCalled();
+    expect(harness.menu.isOpen()).toBe(true);
     expect(sockets).toEqual([]);
+
+    harness.fire(leftDoublePress());
+    await vi.waitFor(() => expect(harness.hud.showDefault).toHaveBeenCalledTimes(1));
+    expect(harness.settings.resumePolicy).toBe('confirm');
   });
 });

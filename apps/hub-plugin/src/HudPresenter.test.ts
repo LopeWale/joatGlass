@@ -134,8 +134,9 @@ describe('guarded Messages receipt list ownership', () => {
     });
     const work = showBound(hud, () => current);
     try {
-      await Promise.resolve();
-      expect(entered).toBe(true);
+      // The list first lets a native conversation/terminal hand the page
+      // over, so the exact paint is a few turns away, not one microtask.
+      await vi.waitFor(() => expect(entered).toBe(true));
       current = false;
       await hud.showDefault();
       release();
@@ -240,33 +241,45 @@ describe('prompt question ownership', () => {
   }
 
   it('publishes a terminal question inline only after its exact paint and restores the conversation on cancel', async () => {
-    const frames: HudVisualFrame[] = [];
+    // The Agent Terminal is Even's own two-text page (2026-09-13): the
+    // question rides the terminal body as one serialized text upgrade, so
+    // the exact paint to wait for is that bridge write, not a raster frame.
+    const upgrades: TextContainerUpgrade[] = [];
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     let entered = false;
-    const hud = rig(async frame => {
-      frames.push(frame);
-      if (frame.kind === 'brainstorm' && frame.brainstorm.terminalPrompt) {
-        entered = true; await held;
-      }
-      return true;
+    const client = {
+      require: () => ({
+        rebuildPageContainer: async () => true,
+        textContainerUpgrade: async (upgrade: TextContainerUpgrade) => {
+          upgrades.push(upgrade);
+          if (upgrade.content?.includes('QUESTION >')) { entered = true; await held; }
+          return true;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const hud = new HudPresenter(client, new HudPageBuilder(), {
+      paint: async () => true,
+      paintExact: async (_value: HudVisualFrame, isCurrent: () => boolean) => isCurrent(),
+      forgetPage: () => undefined,
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
     });
+    const body = () => lastOf(upgrades.filter(u => u.containerName === 'terminal-body')).content ?? '';
     const model = {screen: 'agent_terminal' as const, state: 'ready' as const,
       topic: 'OpenClaw · ready', collaborators: [], activity: '', conversationId: 'conversation-a',
       messages: [{id:'answer-one', role:'assistant' as const, text:'Previous answer remains visible.'}]};
-    await hud.showBrainstorm(model);
+    expect(await hud.showBrainstorm(model)).toBe(true);
     let settled = false;
     const publication = hud.showPromptQuestion('terminal-prompt', 'Speak to OpenClaw.', () => true, 'terminal')
       .then(ok => { settled = true; return ok; });
     await vi.waitFor(() => expect(entered).toBe(true));
     expect(settled).toBe(false);
-    expect(frames[frames.length-1]).toMatchObject({kind:'brainstorm', brainstorm: {
-      messages: model.messages, terminalPrompt:{id:'terminal-prompt', question:'Speak to OpenClaw.'}}});
+    expect(body()).toContain('QUESTION > Speak to OpenClaw.');
+    expect(body()).toContain('Previous answer remains visible.');
     release(); expect(await publication).toBe(true);
     expect(await hud.dismissPromptQuestion('terminal-prompt')).toBe(true);
-    expect(frames[frames.length-1]).toMatchObject({kind:'brainstorm', brainstorm:model});
-    const restored = frames[frames.length-1];
-    if (restored?.kind === 'brainstorm') expect(restored.brainstorm.terminalPrompt).toBeUndefined();
+    expect(body()).not.toContain('QUESTION >');
+    expect(body()).toContain('Previous answer remains visible.');
   });
 
   it('rejects terminal publication when its conversation is absent', async () => {
@@ -530,6 +543,8 @@ describe('custom News list recovery', () => {
     } as unknown as BridgeClient;
     const hud = new HudPresenter(client, new HudPageBuilder(), {
       paint: async (frame) => { frames.push(frame); return false; },
+      // The self-heal rebuild runs under the surface's transition barrier.
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
     });
 
     expect(await hud.showList(['A headline'], { title: 'NEWS', selectable: true, railTab: 'news' }))
@@ -586,12 +601,15 @@ beforeEach(() => {
 
 it.each([false, true])('settles an in-flight native reply before actionable confirmation (reject=%s)', async (reject) => {
   let finishReply!: () => void;
+  let replyDispatched!: () => void;
+  const dispatched = new Promise<void>((resolve) => { replyDispatched = resolve; });
   let visible = '';
   let rebuilds = 0;
   const client = {
     require: () => ({
       textContainerUpgrade: async (update: TextContainerUpgrade) => {
         if (update.containerID === ContainerId.Main) {
+          replyDispatched();
           await new Promise<void>((resolve, fail) => {
             finishReply = () => reject ? fail(new Error('native reply failed')) : resolve();
           });
@@ -608,6 +626,9 @@ it.each([false, true])('settles an in-flight native reply before actionable conf
   } as unknown as BridgeClient;
   const hud = new HudPresenter(client, new HudPageBuilder());
   const reply = hud.showAssistantOverlay('Old reply').catch(() => false);
+  // The reply yields to the native-terminal handoff before its write; the
+  // gate under test is the one that finds that write already on the bridge.
+  await dispatched;
   const confirmation = hud.showConfirmation('Send this message?', 'send-1');
   await vi.advanceTimersByTimeAsync(500);
   expect(rebuilds).toBe(0);
@@ -706,12 +727,15 @@ describe('HudPresenter streaming', () => {
 
   it('status bar and main stream independently', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
+    hud.setMicState(true);
     await hud.appendText('reply text');
-    await hud.setStatus('JOAT · listening');
+    await hud.setStatus('9:41 JOAT · listening bat 80%');
     vi.advanceTimersByTime(400);
     expect(lastOf(mainPaints()).content).toBe('reply text');
     const status = paints.filter((p) => p.containerID === ContainerId.StatusBar);
-    expect(lastOf(status).content).toBe('JOAT · listening');
+    // The text compatibility top line is the structured clock · mic ·
+    // battery triple; the activity word stays in the conversation.
+    expect(lastOf(status).content).toBe('9:41 · MIC ON · bat 80%');
   });
 });
 
@@ -792,7 +816,10 @@ describe('HudPresenter modal surfaces', () => {
     );
 
     const oldPaint = hud.showText('old generation', ContainerId.Main);
-    await Promise.resolve();
+    // The surface settles its single-writer barrier before rendering, so
+    // wait for the old frame to reach the renderer rather than counting
+    // microtasks; the newer frame must then queue behind its blocked upload.
+    await vi.waitFor(() => expect(rendered).toEqual(['old generation']));
     const newPaint = hud.showText('new generation', ContainerId.Main);
     await Promise.resolve();
     expect(rendered).toEqual(['old generation']);
@@ -1403,8 +1430,11 @@ describe('HudPresenter modal surfaces', () => {
     expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toMatchObject({
       content: 'CAPABILITIES', textColor: 4,
     });
+    // The page builder rewrites gesture wording to the shared GesturePolicy
+    // vocabulary ("left x2" → "double-click") so every footer names the
+    // same Back gesture.
     expect(page.textObject?.find((c) => c.containerID === ContainerId.Hint)).toMatchObject({
-      content: 'tap open · left x2 back', textColor: 1,
+      content: 'tap open · double-click back', textColor: 1,
     });
 
     // Chrome repaints its home hint on every state/clock change. In a focus
@@ -1421,13 +1451,16 @@ describe('HudPresenter modal surfaces', () => {
       title: 'CAPABILITIES',
       hint: 'tap open · left x2 back',
     });
+    // The compatibility top line carries the structured clock · mic ·
+    // battery triple with the Mac's brightness; the activity word is not
+    // inferred from it.
     expect(lastOf(paints.filter((p) => p.containerID === ContainerId.StatusBar))).toMatchObject({
-      content: '12:34   JOAT listening   bat 80%', textColor: 2,
+      content: '12:34 · MIC OFF · bat 80%', textColor: 2,
     });
 
     await hud.showConfirmation('Send this message?', 'status-proof');
     expect(lastOf(paints.filter((p) => p.containerID === ContainerId.StatusBar))).toMatchObject({
-      content: '12:34   JOAT listening   bat 80%', textColor: 2,
+      content: '12:34 · MIC OFF · bat 80%', textColor: 2,
     });
   });
 
@@ -1642,7 +1675,7 @@ describe('HudPresenter modal surfaces', () => {
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
       .toBe('LISTENING RESUME');
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.Hint)?.content)
-      .toBe('tap apply · left x2 back');
+      .toBe('tap apply · double-click back');
   });
 
   it('ignores a stale dismissal after a replacement action claims the modal', async () => {
@@ -1901,28 +1934,50 @@ describe('Terminal opening paint ownership', () => {
   });
 
   it.each([true, false])('a held opening settling %s cannot acknowledge or restore over Home', async (paintResult) => {
+    // The Agent Terminal opens as Even's own two-text page (2026-09-13):
+    // the held write is the terminal page rebuild under the transition
+    // barrier, and Home waits behind that in-flight write before it owns
+    // the glass. A retired opening may neither acknowledge nor paint its
+    // old snapshot back over Home once the write settles.
     const frames: HudVisualFrame[] = [];
+    const pages: RebuildPageContainer[] = [];
+    const isTerminalPage = (page: RebuildPageContainer) =>
+      page.textObject?.some((c) => c.containerName === 'terminal-body') ?? false;
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let entered!: () => void;
     const began = new Promise<void>((resolve) => { entered = resolve; });
     let current = true;
-    const paint = async (frame: HudVisualFrame) => {
-      frames.push(frame);
-      if (frame.kind === 'brainstorm') { entered(); await held; return paintResult; }
-      return true;
+    const client = {
+      require: () => ({
+        textContainerUpgrade: async () => true,
+        rebuildPageContainer: async (page: RebuildPageContainer) => {
+          pages.push(page);
+          if (isTerminalPage(page)) { entered(); await held; return paintResult; }
+          return true;
+        },
+      }),
+    } as unknown as BridgeClient;
+    const paint = async (frame: HudVisualFrame) => { frames.push(frame); return true; };
+    const visual = {
+      paint,
+      paintExact: async (frame: HudVisualFrame, valid: () => boolean) => valid() && await paint(frame) && valid(),
+      forgetPage: () => undefined,
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
     };
-    const visual = { paint, paintExact: async (frame: HudVisualFrame, valid: () => boolean) => valid() && await paint(frame) && valid() };
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
+    const hud = new HudPresenter(client, new HudPageBuilder(), visual);
     await hud.showText('Original feature', ContainerId.Main);
     const opening = hud.showBrainstorm({ ...model, collaborators: [] }, undefined, () => current);
     await began;
     current = false;
-    await hud.showDefault();
-    const countAfterHome = frames.length;
+    const home = hud.showDefault();
     release();
     expect(await opening).toBe(false);
-    expect(frames).toHaveLength(countAfterHome);
-    expect(frames[frames.length - 1]?.kind).toBe('overview');
+    expect(await home).toBe(true);
+    expect(frames.map((frame) => frame.kind)).toEqual(['overview', 'overview']);
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', main: 'Original feature' });
+    // One terminal page was ever written; the retired opening never
+    // reinstalled it or its prior snapshot after the write settled.
+    expect(pages.filter(isTerminalPage)).toHaveLength(1);
   });
 });

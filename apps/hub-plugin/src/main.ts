@@ -79,7 +79,7 @@ import { NavigationController } from './NavigationController';
 import { BrainstormController } from './BrainstormController';
 import { reminderDueAckFor } from './ReminderDueReceipt';
 import { productivityViewAckFor } from './ProductivityViewReceipt';
-import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
+import { confirmationDecisionWindowMs, deliverAfterConfirmationDismissal } from './ConfirmationCommit';
 import {
   replaySyntheticAudioFixture,
   syntheticAudioFixtureUrl,
@@ -951,7 +951,7 @@ async function boot(): Promise<void> {
           // Content-free acceptance synchronization for the official desktop
           // simulator. Vite removes this branch from packed builds.
           if (import.meta.env.DEV) console.info('[joat] acceptance confirmation-visible');
-          imu.activate(msg.actionId, 8000);
+          imu.activate(msg.actionId, confirmationDecisionWindowMs(msg.expiresAtMs));
         } else {
           imu.cancel(msg.actionId);
           if (msg.messageUIActionId !== undefined) await hud.dismissConfirmation(msg.actionId);

@@ -52,7 +52,7 @@ const TEXT_PAGE_TITLES = new Set([
  * minutes and the page is rebuilt once a minute (HudPresenter's panel
  * ticker at its 60 s granularity). */
 export function pomodoroCountdownRow(pomodoro: HudPanelPomodoro | undefined, nowMs: number): string {
-  if (!pomodoro) return 'Say “JOAT, start a pomodoro”';
+  if (!pomodoro) return 'Focus timer';
   if (pomodoro.phase === 'idle') return pomodoroBlockLabel(pomodoro);
   const minutes = Math.max(1, Math.ceil(pomodoroRemainingMs(pomodoro, nowMs) / 60_000));
   return `${pomodoroBlockLabel(pomodoro)} · ${minutes} min left`;
@@ -81,12 +81,13 @@ import {
 } from './types';
 
 /** What an expanded tab says before the Mac has pushed anything for it.
- * Truthful about the way in: news and search only fill by voice or by
- * the Mac's own poll; the timer starts with a word. */
+ * A page opened by hand is a control surface, so the empty line names the
+ * gesture that fills it, never a phrase to say: voice works from anywhere
+ * and the Mac pushes every tab's rows on its own. */
 const PANEL_EMPTY_COPY: Readonly<Record<PanelContentTab, string>> = {
   news: 'No headlines yet — hold to refresh.',
-  pomodoro: 'Say “JOAT, start a pomodoro” to begin.',
-  search: 'Say “JOAT, look up …” to search.',
+  pomodoro: 'Timer not loaded — hold to retry.',
+  search: 'Search not loaded — hold to retry.',
 };
 
 type ListEvent = NonNullable<EvenHubEvent['listEvent']>;

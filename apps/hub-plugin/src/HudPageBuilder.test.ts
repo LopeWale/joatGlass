@@ -151,18 +151,23 @@ describe('HudPageBuilder invariants', () => {
       compatible.visualLayout() as Page,
     ];
     expect(pages.every((page) => page.menuObject === undefined)).toBe(true);
+    // Settings lives on the phone and has no firmware menu row; every
+    // other capability is offered.
     expect((builder.defaultLayout() as Page).menuObject?.menuItems)
-      .toHaveLength(CAPABILITIES.length);
+      .toHaveLength(CAPABILITIES.filter((name) => name !== 'Settings').length);
   });
 
   it('keeps the contextual escape available on every image-first rebuild', () => {
     const visual = builder.visualLayout() as Page;
     // The firmware menu offers exactly the wearer's capability rows — one
     // menu, reached by the platform's own gesture, costing zero image tiles.
+    // Settings is phone-owned and has no row, but the ids keep their
+    // original index so no surviving action id moves when it drops out.
     const expected = CAPABILITIES.map((name, index) => ({
       itemID: CAPABILITY_MENU_ID_BASE + index,
       itemName: name,
-    }));
+    })).filter(({ itemName }) => itemName !== 'Settings');
+    expect(expected).toHaveLength(CAPABILITIES.length - 1);
     expect(visual.menuObject?.menuItems).toEqual(expected);
     expect((builder.visualCompatibilityLayout() as Page).menuObject?.menuItems).toEqual(expected);
   });
@@ -249,7 +254,9 @@ describe('HudPageBuilder invariants', () => {
     expect(title).toMatchObject({ yPosition: 39, height: 38, textColor: 4, content: 'CAPABILITIES' });
     expect(list).toMatchObject({ yPosition: 77, height: 176 });
     expect(hint).toMatchObject({ yPosition: 253, height: 35, textColor: 1 });
-    expect(hint?.content).toBe('SWIPE move · TAP open · LEFT x2 back');
+    // The builder rewrites a Mac's old left-only wording to the gesture
+    // GesturePolicy honours on every source (GesturePolicy.formatHint).
+    expect(hint?.content).toBe('SWIPE move · TAP open · double-click back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
   });
 
