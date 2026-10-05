@@ -28,6 +28,25 @@ export function setNativeOverviewForTest(on: boolean): void {
   nativeOverviewEnabled = on;
 }
 
+/** The Brainstorm on firmware text (the Agent Terminal's two-container
+ * native document) instead of four image tiles. A streamed token is one
+ * textContainerUpgrade (~80ms) where a tile write was 0.5-2s over BLE, and
+ * the local "Thinking… 12s" counter costs one text write per second.
+ *
+ * ON by default; VITE_NATIVE_BRAINSTORM=0 restores the canvas page. */
+let nativeBrainstormEnabled = String(import.meta.env.VITE_NATIVE_BRAINSTORM ?? '1') !== '0';
+
+/** Tests that pin the CANVAS Brainstorm select the fallback here. */
+export function setNativeBrainstormForTest(on: boolean): void {
+  nativeBrainstormEnabled = on;
+}
+
+/** Whether this frame draws as the native text document. */
+function nativeDocument(model: { screen: string }): boolean {
+  return model.screen === 'agent_terminal'
+    || (model.screen === 'brainstorm' && nativeBrainstormEnabled);
+}
+
 function parseOverviewStatus(status: string): { time: string; date: string } {
   return {
     time: /\b(\d{1,2}:\d{2})\b/.exec(status)?.[1] ?? '',
@@ -268,6 +287,8 @@ interface AssistantOverlayState extends AssistantOverlayVisual {
 interface PromptQuestionState {
   terminalConversationId?: string;
   inlineTerminal?: boolean;
+  /** Which native document the inline question belongs to. */
+  inlineScreen?: 'agent_terminal' | 'brainstorm';
   id: string;
   question: string;
   isCurrent: () => boolean;
@@ -464,7 +485,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.surface.kind === 'brainstorm'
-      && this.surface.brainstorm.screen === 'agent_terminal') {
+      && nativeDocument(this.surface.brainstorm)) {
       return this.nativeTerminal.present(this.surface.brainstorm,
         this.streams.get(ContainerId.StatusBar), displayCurrent);
     }
@@ -664,9 +685,13 @@ export class HudPresenter {
     if (this.confirmation || !promptId || !question.trim() || question.length > 1000) {
       return Promise.resolve(false);
     }
-    if (ownerKind === 'terminal') {
+    const inlineScreen = ownerKind === 'terminal' ? 'agent_terminal'
+      : ownerKind === 'brainstorm' && nativeBrainstormEnabled
+        && this.surface.kind === 'brainstorm' && this.surface.brainstorm.screen === 'brainstorm'
+        && this.nativeTerminal.isActive() ? 'brainstorm' : undefined;
+    if (inlineScreen !== undefined) {
       if (!this.nativeTerminal.isActive() || this.surface.kind !== 'brainstorm'
-        || this.surface.brainstorm.screen !== 'agent_terminal') return Promise.resolve(false);
+        || this.surface.brainstorm.screen !== inlineScreen) return Promise.resolve(false);
       const existing = this.promptQuestion;
       if (existing?.id === promptId) {
         return existing.question === question && this.isPromptCurrent(existing)
@@ -678,6 +703,7 @@ export class HudPresenter {
         question,
         isCurrent,
         inlineTerminal: true,
+        inlineScreen,
         terminalConversationId: this.surface.brainstorm.conversationId,
       };
       this.promptQuestion = prompt;
@@ -741,7 +767,7 @@ export class HudPresenter {
       return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent()
         && (!prompt.inlineTerminal || (this.nativeTerminal.isActive()
           && this.surface.kind === 'brainstorm'
-          && this.surface.brainstorm.screen === 'agent_terminal'
+          && this.surface.brainstorm.screen === (prompt.inlineScreen ?? 'agent_terminal')
           && this.surface.brainstorm.conversationId === prompt.terminalConversationId));
     } catch {
       return false;
@@ -1436,7 +1462,11 @@ export class HudPresenter {
     if (!this.displayActive) return;
     if (this.thinkingTicker !== undefined) return;
     if (this.surface.kind !== 'brainstorm') return;
-    if (!(this.visual?.transcriptIsThinking?.() ?? false)) {
+    const native = nativeDocument(this.surface.brainstorm);
+    const thinking = native
+      ? this.nativeTerminal.isThinking()
+      : (this.visual?.transcriptIsThinking?.() ?? false);
+    if (!thinking) {
       this.thinkingTicks = 0;
       return;
     }
@@ -1453,6 +1483,12 @@ export class HudPresenter {
     this.thinkingTicker = setTimeout(() => {
       this.thinkingTicker = undefined;
       if (this.surface.kind !== 'brainstorm') return;
+      if (nativeDocument(this.surface.brainstorm)) {
+        // One body upgrade with new digits; then keep counting.
+        if (this.nativeTerminal.tick()) this.armThinkingTicker();
+        else this.thinkingTicks = 0;
+        return;
+      }
       // localTick: only the counter's digits moved, so this repaint is
       // NOT recorded as a wearer-visible frame receipt.
       void this.paintVisual(true);
@@ -1462,7 +1498,7 @@ export class HudPresenter {
   /** Swipe on the brainstorm/terminal surface pages through history. */
   scrollTranscript(direction: 'up' | 'down'): boolean {
     if (this.surface.kind !== 'brainstorm') return false;
-    if (this.surface.brainstorm.screen === 'agent_terminal') {
+    if (nativeDocument(this.surface.brainstorm)) {
       return this.nativeTerminal.scroll(direction);
     }
     if (!this.visual) return false;
@@ -1478,8 +1514,10 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (this.confirmation || (isCurrent && !isCurrent())) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (brainstorm.screen === 'agent_terminal') {
-      return this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
+    if (nativeDocument(brainstorm)) {
+      const shown = await this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
+      if (shown && brainstorm.screen === 'brainstorm') this.armThinkingTicker();
+      return shown;
     }
     if (!this.visual || !await this.prepareNativeTerminalHandoff()) return false;
     this.clearActionOverlay();
@@ -1526,7 +1564,7 @@ export class HudPresenter {
     isCurrent?: () => boolean,
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
-    if (!displayCurrent() || terminal.screen !== 'agent_terminal') return false;
+    if (!displayCurrent() || !nativeDocument(terminal)) return false;
     const prior = this.capturePresenterSnapshot();
     const wasActive = this.nativeTerminal.isActive();
     const surface: HudSurface = {
@@ -2706,7 +2744,7 @@ export class HudPresenter {
     }
     if (this.promptQuestion) {
       if (this.promptQuestion.inlineTerminal && this.surface.kind === 'brainstorm'
-        && this.surface.brainstorm.screen === 'agent_terminal') {
+        && nativeDocument(this.surface.brainstorm)) {
         return {kind: 'brainstorm', status, micOn: this.micOn,
           brainstorm: {...this.cloneBrainstorm(this.surface.brainstorm),
             terminalPrompt: {id: this.promptQuestion.id, question: this.promptQuestion.question}}};
@@ -2812,7 +2850,7 @@ export class HudPresenter {
     this.visual?.forgetPage?.();
     if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
     if (this.surface.kind === 'brainstorm'
-      && this.surface.brainstorm.screen === 'agent_terminal') {
+      && nativeDocument(this.surface.brainstorm)) {
       if (this.nativeTerminal.isActive()) return this.nativeTerminal.repaint();
       return this.nativeTerminal.present(this.surface.brainstorm,
         this.streams.get(ContainerId.StatusBar), displayCurrent);
@@ -3141,7 +3179,7 @@ export class HudPresenter {
     }
     const assistantConversation = this.assistantConversation.exportState();
     const nativeTerminal = this.surface.kind === 'brainstorm'
-      && this.surface.brainstorm.screen === 'agent_terminal'
+      && nativeDocument(this.surface.brainstorm)
       ? this.nativeTerminal.exportState()
       : undefined;
     return {

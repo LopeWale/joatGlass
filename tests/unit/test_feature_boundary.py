@@ -90,7 +90,13 @@ class TestBrainstormSeats:
             and node.target.id == "seats"
         ]
         assert seats, "the seat list is gone"
-        block = code_identifiers(seats[0])
+        # The list is rebuilt on demand (phone Reset/Refresh, account
+        # switch) by build_seats(); the boundary applies to what it seats.
+        builders = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "build_seats"
+        ]
+        block = code_identifiers(builders[0] if builders else seats[0])
         assert COLLABORATOR_WORDS.search(block), block
         assert not WORKER_WORDS.search(block), block
 
