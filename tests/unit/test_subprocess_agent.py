@@ -64,6 +64,17 @@ class TestDiscovery:
         found = find_claude_binary()
         assert found is None or found.endswith("claude")
 
+    def test_find_claude_binary_falls_back_to_the_native_install(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from joat.agents import subprocess_agent
+
+        monkeypatch.setattr(subprocess_agent.shutil, "which", lambda _name: None)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        binary = tmp_path / ".claude" / "local" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        assert find_claude_binary() == str(binary)
+
 
 class TestFailureIsVisibleButNotQuotable:
     """A collaborator's failure prints on STDOUT, not stderr.

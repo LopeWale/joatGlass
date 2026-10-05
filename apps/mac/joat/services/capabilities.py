@@ -219,7 +219,9 @@ class _NoteListState:
     page_pending: bool = False
 
 
-_NOTE_LIST_PAGE_SIZE = 20
+# The firmware list draws at most 20 rows (HudPageBuilder.listLayout caps
+# there), and an archive page carries up to two paging rows after its notes.
+_NOTE_LIST_PAGE_SIZE = 18
 
 
 @dataclass(slots=True)
@@ -336,6 +338,7 @@ class CapabilityRouter:
         terminal_focus: Callable[[str], Awaitable[None]] | None = None,
         terminal_busy: Callable[[], bool] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
+        brainstorm_unavailable: Callable[[], BrainstormHudView | None] | None = None,
         panels: PanelPublisher | None = None,
         wearer_zone: WearerZone | None = None,
         terminal_open: Callable[[str, str | None, str, Callable[[], bool]], Awaitable[None]] | None = None,
@@ -379,6 +382,10 @@ class CapabilityRouter:
         self._terminal_busy = terminal_busy
         self._terminal_row_names: list[str] = []
         self._brainstorm_recent = brainstorm_recent
+        # The host's own word on a missing seat: when it answers with a frame,
+        # the idle row and NEW show that frame instead of a promise the tap
+        # cannot keep.
+        self._brainstorm_unavailable = brainstorm_unavailable
         # The overview's News / Pomodoro / Search tabs. Their rows are
         # pushed, not requested, so their taps carry a content revision
         # instead of one of this router's request generations.
@@ -791,6 +798,14 @@ class CapabilityRouter:
         # a reconstruction would drop the streaming turn in progress.
         if self._brainstorm_replay is not None and await self._brainstorm_replay():
             return
+        # A missing CLI seat used to be invisible here: the row opened on
+        # "Ready for a question", the tap went to the Mac, and only then did
+        # the unavailable frame appear. Say it on the first screen.
+        unavailable = self._brainstorm_unavailable() if self._brainstorm_unavailable else None
+        if unavailable is not None:
+            await self._hud.begin_brainstorm()
+            await self._hud.show_brainstorm(unavailable)
+            return
         # IDLE: the picker. docs/SESSION_MODEL.md:47 — "open Brainstorm while
         # idle → show recent sessions plus NEW."
         #
@@ -822,6 +837,11 @@ class CapabilityRouter:
             past = self._brainstorm_recent(4)
             if past:
                 rows = ["Recent:", *past]
+        # The plugin paints a Brainstorm frame only after the Mac has claimed
+        # the surface with this rebuild — a spoken start always sends it
+        # (DebateStateSink.open). The idle frame did not, so a voice-opened
+        # Brainstorm showed nothing and its tap went nowhere.
+        await self._hud.begin_brainstorm()
         await self._hud.show_brainstorm(BrainstormHudView(
             state="settled" if rows else "ready",
             topic=(recap.topic[:40] if recap is not None and recap.topic
@@ -1085,6 +1105,12 @@ class CapabilityRouter:
         whatever had shifted into that position.
         """
         if index == 0:
+            unavailable = self._brainstorm_unavailable() if self._brainstorm_unavailable else None
+            # NEW from the picker claims the surface exactly as a spoken start.
+            await self._hud.begin_brainstorm()
+            if unavailable is not None:
+                await self._hud.show_brainstorm(unavailable)
+                return
             await self._hud.show_brainstorm(BrainstormHudView(
                 state="ready",
                 topic="Ready for a question",
@@ -1360,37 +1386,39 @@ class CapabilityRouter:
             return
         page = state.pages[state.index]
         if state.index == 0:
-            page_label = (
-                "Latest messages — down for older"
-                if page.has_older else "Complete conversation on this Mac"
-            )
+            page_label = "Latest messages" if page.has_older else "Complete conversation on this Mac"
         else:
-            page_label = (
-                "Older messages — up newer, down older"
-                if page.has_older else "Older messages — up for newer"
-            )
-        # The Hub's boundary gesture gate consumes these paging affordances.
-        # Keep the wire hint and visible actions aligned with the cursor.
-        hint_parts = []
-        if state.index > 0:
-            hint_parts.append("up newer")
-        if page.has_older:
-            hint_parts.append("down older")
+            page_label = "Older messages"
         can_reply = state.thread.reply_target is not None and self._replies is not None
+        # Paging travels as rows, not swipes: the Hub draws this thread as a
+        # firmware list (Even's own ListContainerProperty, one rebuild, no
+        # image tiles), and a firmware list reports taps but no scroll
+        # events. A tap on one of these rows is the page request; their
+        # indices ride in `page_controls` so the plugin never matches copy.
         hint = " · ".join([
-            *hint_parts, "tap read", "say reply" if can_reply else "read-only", BACK_HINT,
+            "tap read", "say reply" if can_reply else "read-only", BACK_HINT,
         ])
         context = [self._message_history_row(state.thread, entry) for entry in page.entries]
         instructions = (
             ['Say “JOAT, reply saying …”', "Mic off? Long press to enable."]
             if can_reply else []
         )
+        items = [page_label, *context, *instructions]
+        newer_index: int | None = None
+        older_index: int | None = None
+        if state.index > 0:
+            newer_index = len(items)
+            items.append("▲ Newer messages")
+        if page.has_older:
+            older_index = len(items)
+            items.append("▼ Older messages")
         await self._send_list(HudList(
-            items=[page_label, *context, *instructions],
+            items=items,
             title="MESSAGES · CONVERSATION",
             context_label=state.thread.sender,
             hint=hint,
             selectable=bool(page.entries),
+            page_controls=(newer_index, older_index),
         ))
 
     async def _show_message_detail(self) -> None:
@@ -2247,15 +2275,28 @@ class CapabilityRouter:
             hints.insert(0, "up newer")
         if state.index + 1 < count:
             hints.insert(0, "down older")
+        labels = [row.label for row in rows] or [
+            'Say “JOAT, start a quicknote …” to record.',
+            'Say “JOAT, note …” to save exact text.',
+        ]
+        # The firmware list reports taps, never scrolls, so the archive pages
+        # through rows: the plugin turns a tap on either into the page request
+        # the swipe used to send. Both sit past the note rows, so a tap on
+        # them never reaches _select_note.
+        newer_index = older_index = None
+        if state.index:
+            newer_index = len(labels)
+            labels.append("▲ Newer notes")
+        if state.index + 1 < count:
+            older_index = len(labels)
+            labels.append("▼ Older notes")
         await self._show_focus(
             "QUICKNOTES" if rows else "QUICKNOTES · EMPTY",
-            [row.label for row in rows] or [
-                'Say “JOAT, start a quicknote …” to record.',
-                'Say “JOAT, note …” to save exact text.',
-            ],
+            labels,
             hint=" · ".join(hints),
             selectable=bool(rows),
             quick_notes_page=(state.index, count),
+            page_controls=(newer_index, older_index),
         )
 
     async def _page_note_list(self, state: _NoteListState, event: InputEvent) -> None:
@@ -2542,9 +2583,11 @@ class CapabilityRouter:
         quick_notes_page: tuple[int, int] | None = None,
         reader_page: tuple[str, int, int] | None = None,
         control_start_index: int | None = None,
+        page_controls: tuple[int | None, int | None] | None = None,
     ) -> None:
         """Render non-dashboard capability states in the shared focus shell."""
         await self._send_list(HudList(
+            page_controls=page_controls,
             items=items,
             title=title,
             hint=hint,

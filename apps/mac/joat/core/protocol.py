@@ -755,6 +755,12 @@ class HudList:
     control_start_index: int | None = None
     planning_entries: tuple[PlanningGridEntry | None, ...] | None = None
     planning_navigation: tuple[bool, int] | None = None
+    # Row indices of the "newer"/"older" paging rows appended to a Messages
+    # conversation. Present (even empty) means the rows carry paging, so the
+    # plugin may draw the thread as a firmware list, which emits no scroll
+    # events; a tap on one of these rows is the page request. Mirror:
+    # `pageControls` in apps/hub-plugin/src/types.ts.
+    page_controls: tuple[int | None, int | None] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -796,6 +802,15 @@ class HudList:
             message["contextLabel"] = utf16_slice(self.context_label, 96)
         if self.control_start_index is not None:
             message["controlStartIndex"] = max(0, min(self.control_start_index, len(message["items"])))
+        if self.page_controls is not None:
+            newer, older = self.page_controls
+            limit = len(message["items"]) - 1
+            controls: dict[str, int] = {}
+            if newer is not None and 0 <= newer <= limit:
+                controls["newerIndex"] = newer
+            if older is not None and 0 <= older <= limit:
+                controls["olderIndex"] = older
+            message["pageControls"] = controls
         if self.planning_grid is not None:
             # A Planning month has a fixed Monday-first six-week grid. Keep
             # the payload redacted and bounded even if a caller misbehaves;

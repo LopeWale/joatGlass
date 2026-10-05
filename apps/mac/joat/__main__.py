@@ -78,6 +78,7 @@ from .channels.notifications import NotificationStore
 from .core.interfaces import NavigationProvider, ReplyEngine, SttEngine
 from .core.navigation import NavigationPoint
 from .core.protocol import (
+    AudioControl,
     Device,
     BrainstormAction,
     AgentTerminalHudView,
@@ -112,6 +113,7 @@ from .persistence.tasks import TaskOccurrenceStore
 from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
+from .services.imu_trace import ImuTraceRecorder
 from .services.brainstorm_history import (
     BrainstormHistory,
     BrainstormHistoryCommands,
@@ -275,6 +277,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="opt in to a bounded, content-free local voice-latency receipt",
     )
+    parser.add_argument("--imu-trace", type=Path, default=None, metavar="PATH",
+                        help="record raw IMU samples from the glasses to PATH as JSON lines "
+                             "(motion calibration, docs/NEXT_STEPS.md §5)")
     parser.add_argument("--location-probe", action="store_true",
                         help="request high-accuracy, privacy-bucketed Gate-0 location telemetry")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -334,6 +339,10 @@ async def main() -> None:
         g2_diagnostics=g2_diagnostics,
         location_probe=args.location_probe,
     )
+    if args.imu_trace is not None:
+        # The plugin relays samples only while asked; the recorder asks on
+        # every hello, so a reconnect keeps recording.
+        ImuTraceRecorder(args.imu_trace).attach(transport)
     native_bridge_path = os.environ.get("JOAT_NATIVE_BRIDGE")
     personal_data = (
         NativeBridgeClient(Path(native_bridge_path))
@@ -1668,8 +1677,24 @@ async def main() -> None:
             active.cancel()
         capabilities.on_disconnect()
 
+    worn_before: dict[str, bool | None] = {"wearing": None}
+
     def on_device(device: Device) -> None:
         prompted_speech.handle_device(device)
+        # Resume policy "mac": the plugin leaves the mic off when the glasses
+        # go back on and waits for this process to want ears. It always
+        # does, so a don with the mic off is answered with one open request.
+        # The plugin's own policy report is the authority; nothing is sent
+        # under "auto" (it resumes itself) or "confirm" (it asks the wearer).
+        if (
+            device.wearing is True
+            and worn_before["wearing"] is not True
+            and device.mic is False
+            and transport.resume_policy == "mac"
+        ):
+            log.info("glasses worn again under resume policy mac — asking for ears")
+            asyncio.get_running_loop().create_task(transport.send(AudioControl(open=True)))
+        worn_before["wearing"] = device.wearing
         # Battery reaches the dashboard, not just the model.
         hello = transport.hello
         who = f"{hello.model} / {hello.sn}" if hello else "glasses"
@@ -1728,6 +1753,7 @@ async def main() -> None:
         terminal_current=lambda: agent_terminal.focused,
         terminal_busy=lambda: agent_terminal.busy,
         brainstorm_recent=brainstorm_history.rows,
+        brainstorm_unavailable=lambda: None if brainstorm_available() else topic_capture_view(False),
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
         wearer_zone=wearer_zone,

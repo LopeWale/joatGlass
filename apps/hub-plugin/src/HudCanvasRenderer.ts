@@ -1734,56 +1734,6 @@ export function projectMercatorPanel(
   ];
 }
 
-/**
- * Project a lat/lon polyline into the map panel.
- *
- * Equirectangular with a cos(latitude) correction on longitude: over a
- * walking or cycling route the error is far below one HUD pixel, and it
- * costs no projection library on a battery-bound phone. The route is scaled
- * to fit the panel with its aspect ratio intact, so the shape a wearer sees
- * is the shape of the road, not a stretched one.
- */
-export function projectNavigationMap(
-  map: NavigationMapModel,
-  panel: { x: number; y: number; width: number; height: number; padding: number }
-    = NAVIGATION_MAP_PANEL,
-): NavigationMapProjection | undefined {
-  const geometry = map.geometry;
-  if (geometry.length < 2) return undefined;
-  const midLatitude = (geometry[0]?.latitude ?? 0) * Math.PI / 180;
-  const scaleX = Math.max(0.01, Math.cos(midLatitude));
-  const raw: ReadonlyArray<readonly [number, number]> = geometry.map(
-    (point) => [point.longitude * scaleX, point.latitude] as const,
-  );
-  const xs = raw.map(([x]: readonly [number, number]) => x);
-  const ys = raw.map(([, y]: readonly [number, number]) => y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const spanX = Math.max(maxX - minX, 1e-9);
-  const spanY = Math.max(maxY - minY, 1e-9);
-  const usableWidth = panel.width - panel.padding * 2;
-  const usableHeight = panel.height - panel.padding * 2;
-  const scale = Math.min(usableWidth / spanX, usableHeight / spanY);
-  // Centre the drawn route inside the panel rather than pinning it to a
-  // corner: a route is a picture, and a picture is centred.
-  const offsetX = panel.x + panel.padding + (usableWidth - spanX * scale) / 2;
-  const offsetY = panel.y + panel.padding + (usableHeight - spanY * scale) / 2;
-  const place = (longitude: number, latitude: number): readonly [number, number] => [
-    offsetX + (longitude * scaleX - minX) * scale,
-    // Screen y grows downward; latitude grows north, so it is inverted.
-    offsetY + (maxY - latitude) * scale,
-  ];
-  return {
-    points: raw.map((_entry: readonly [number, number], index: number) => place(
-      geometry[index]?.longitude ?? 0, geometry[index]?.latitude ?? 0,
-    )),
-    ...(map.position
-      ? { position: place(map.position.longitude, map.position.latitude) }
-      : {}),
-  };
-}
 
 export class HudCanvasRenderer implements HudFrameRenderer {
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;

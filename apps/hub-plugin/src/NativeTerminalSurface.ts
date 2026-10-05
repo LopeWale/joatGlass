@@ -34,6 +34,45 @@ const MAX_PROMPT_ROWS = NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity - BODY_FIXED_R
 const MAX_LINE_UNITS = 190;
 const MAX_UPGRADE_UNITS = 2_000;
 const HEAD_TEXT = 'JOAT · AGENT TERMINAL';
+const BRAINSTORM_HEAD_TEXT = 'JOAT · BRAINSTORM';
+
+/** Brainstorm (Codex proposes, Claude critiques) shares this page with the
+ * Agent Terminal: one head line, a status row, the transcript, a footer
+ * naming the gestures the BrainstormController accepts. */
+function isBrainstorm(model: Pick<BrainstormHudModel, 'screen'>): boolean {
+  return model.screen === 'brainstorm';
+}
+
+function headTextFor(model: Pick<BrainstormHudModel, 'screen'>): string {
+  return isBrainstorm(model) ? BRAINSTORM_HEAD_TEXT : HEAD_TEXT;
+}
+
+/** The gestures BrainstormController accepts in each state, in the raster
+ * footer's words but measured for the firmware font: the raster running
+ * hint also named the spoken "send that to hermes" verb and does not fit
+ * one firmware line. Scrolled up, the row says how far from the live tail
+ * the wearer is and what the double-press does there. */
+function brainstormFooter(model: BrainstormHudModel, newer: number): string {
+  if (newer > 0) {
+    return `▼ ${newer} newer · swipe down · double-click: ${model.state === 'running' ? 'cancel' : 'menu'}`;
+  }
+  switch (model.state) {
+    case 'running': return 'swipe: scroll · tap: terminal · double-click: cancel';
+    case 'acceptance_ready': return 'tap: start test · double-click: menu';
+    case 'topic_capture': return 'speak your question · double-click: cancel';
+    case 'ready': return 'tap: speak · double-click: menu';
+    default: return 'swipe: scroll · double-click: menu';
+  }
+}
+
+/** The Brainstorm status row: its state, then who is speaking and the round
+ * cost while it runs, else the question it is about. */
+function brainstormStatusRow(model: BrainstormHudModel): string {
+  const live = model.state === 'running' && model.activeSpeaker?.trim()
+    ? model.activeSpeaker.trim()
+    : model.topic.replace(/\s+/gu, ' ').trim();
+  return live ? `${stateName(model)} · ${live}` : stateName(model);
+}
 
 export interface NativeTerminalPage {
   headText: string;
@@ -265,7 +304,8 @@ export class NativeTerminalSurface {
     status?: string,
     isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
-    if (model.screen !== 'agent_terminal' || !current(isCurrent) || this.paused) return false;
+    if ((model.screen !== 'agent_terminal' && !isBrainstorm(model))
+      || !current(isCurrent) || this.paused) return false;
     const copy = copyModel(model);
     const key = this.conversationKey(copy);
     const entering = !this.active || this.desired === undefined;
@@ -432,6 +472,7 @@ export class NativeTerminalSurface {
   }
 
   private conversationKey(model: BrainstormHudModel): string {
+    if (isBrainstorm(model)) return `brainstorm:${model.topic.replace(/\s+/gu, ' ').trim()}`;
     return model.conversationId?.trim() || `agent:${focusName(model.topic)}`;
   }
 
@@ -454,21 +495,27 @@ export class NativeTerminalSurface {
       desired.model.historyTruncated,
       `${NATIVE_TERMINAL_GEOMETRY.bodyTextWidth}|${MAX_LINE_UNITS}`,
     );
-    const visible = page.lines.length > 0 ? page.lines : ['Tap to speak to this agent.'];
+    const brainstorm = isBrainstorm(desired.model);
+    const visible = page.lines.length > 0 ? page.lines
+      : [brainstorm ? 'Say “JOAT, brainstorm …” or tap to speak.' : 'Tap to speak to this agent.'];
     const bodyRows = [...visible, ...question];
     while (bodyRows.length < contentRows) bodyRows.push(' ');
     const status = oneMeasuredLine([
-      `${focusName(desired.model.topic)} > ${stateName(desired.model)}`,
+      brainstorm
+        ? brainstormStatusRow(desired.model)
+        : `${focusName(desired.model.topic)} > ${stateName(desired.model)}`,
       desired.status,
     ].filter(Boolean).join(' · '), this.measureTextWidth);
     const footer = oneMeasuredLine(
-      nativeTerminalFooter(desired.model, page.older, page.newer, prompt !== undefined),
+      brainstorm && prompt === undefined
+        ? brainstormFooter(desired.model, page.newer)
+        : nativeTerminalFooter(desired.model, page.older, page.newer, prompt !== undefined),
       this.measureTextWidth,
     );
     const bodyText = [status, ...bodyRows.slice(0, contentRows), footer].join('\n');
     if (bodyText.length > MAX_UPGRADE_UNITS) return;
     return {
-      headText: HEAD_TEXT,
+      headText: headTextFor(desired.model),
       bodyText,
       conversationKey: this.conversationKey(desired.model),
       older: page.older,

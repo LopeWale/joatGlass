@@ -99,12 +99,16 @@ that surfaces only a verdict. Visibility is the proof it was debated.
 The old `threshold = 0.35` / `windowMs = 1200` nod detector was removed:
 `ImuMonitor` now treats motion as observational only, and confirmation is an
 explicit temple/ring TAP (swipe or timeout refuses). That is the deliberate
-fail-safe until real data exists. The calibration path is already wired —
-`imu.trace` relays every raw sample uplink (~10/s at P100), and the
-`imu.control` downlink accepts a `paceMs` in the SDK's closed 100…1000 set.
-Record labelled traces (nod / head-shake / walking / nothing), derive
-thresholds from the data, and only then consider promoting a motion gesture
-back into the confirm gate (RULES.md #6).
+fail-safe until real data exists. The calibration path is wired on both
+sides as of 2026-10-05: the plugin relays every raw sample uplink (~10/s at
+P100) once asked, and the Mac asks when started with `--imu-trace PATH`
+(`joat/services/imu_trace.py`: `imu.control` at 100 ms plus `imu.trace` on
+every hello, samples appended to PATH as JSON lines). Before that flag
+existed nothing on the Mac ever sent those downlinks, so this section
+described a path that could not run. Record labelled traces (nod /
+head-shake / walking / nothing), derive thresholds from the data, and only
+then consider promoting a motion gesture back into the confirm gate
+(RULES.md #6).
 
 ## 6. The mind on the wearer's subscriptions, and the Even AI door — WIRED 2026-09-03
 

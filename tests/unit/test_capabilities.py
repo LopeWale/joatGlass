@@ -528,6 +528,7 @@ def make_router(
     brainstorm_replay=None,
     brainstorm_sessions=None,
     brainstorm_continue=None,
+    brainstorm_unavailable=None,
     terminal_rows=None,
     terminal_focus=None,
     terminal_view=None,
@@ -556,6 +557,7 @@ def make_router(
         brainstorm_replay=brainstorm_replay,
         brainstorm_sessions=brainstorm_sessions,
         brainstorm_continue=brainstorm_continue,
+        brainstorm_unavailable=brainstorm_unavailable,
         terminal_rows=terminal_rows,
         terminal_focus=terminal_focus,
         terminal_view=terminal_view,
@@ -566,6 +568,63 @@ def make_router(
 
 
 class TestCapabilityViews:
+    async def test_note_list_pages_through_tappable_rows(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """The firmware list reports taps, never scrolls: each archive page
+        names its neighbours as rows and says which rows they are."""
+        with DurableStore(tmp_path / "paged-notes.sqlite3") as durable:
+            notes = NoteStore(durable)
+            for index in range(1, 24):
+                notes.create(
+                    note_id=f"note-{index:02d}", idempotency_key=f"key-{index:02d}",
+                    text=f"Fixture note {index}", source=NoteSource(kind="dictation"),
+                    now_us=1_000_000 * index,
+                )
+            router, transport, _ = make_router(tmp_path, notes=notes)
+            await router.open("QuickNotes")
+            first = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert first.title == "QUICKNOTES"
+            assert first.items[-1] == "▼ Older notes"
+            assert len(first.items) == 19
+            assert first.page_controls == (None, 18)
+            assert first.quick_notes_page == (0, 2)
+
+            router.on_input(InputEvent(
+                container_name="cappage", selected_name="QUICKNOTES · LIST", selected_index=0,
+                event_type=EventType.SCROLL_BOTTOM,
+            ))
+            await wait_until(lambda: router._note_list is not None and router._note_list.index == 1)
+            await wait_until(lambda: any(
+                isinstance(m, HudList) and m.title == "QUICKNOTES" and m.items[-1] == "▲ Newer notes"
+                for m in transport.sent
+            ))
+            older = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert older.page_controls == (5, None)
+            assert older.items[0].endswith("Fixture note 5")
+
+            # A tap on the paging row never opens a note: it is past the rows.
+            router.on_input(InputEvent(
+                container_name="capdata", selected_name="QUICKNOTES", selected_index=5,
+                quick_notes_page_index=1,
+            ))
+            await asyncio.sleep(0)
+            assert router._note_reader is None
+
+    async def test_brainstorm_row_shows_the_missing_seat_instead_of_a_promise(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """A missing CLI seat used to surface only after the tap: the row opened
+        on "Ready for a question" and the tap went nowhere useful."""
+        gone = BrainstormHudView(
+            state="unavailable", topic="Brainstorm", collaborators=["Claude"],
+            activity="codex CLI missing on the Mac — install to enable.",
+        )
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_unavailable=lambda: gone,
+            brainstorm_sessions=lambda: [],
+        )
+        await router.open("Brainstorm")
+        frames = [item for item in transport.sent if isinstance(item, BrainstormHudView)]
+        assert frames[-1].state == "unavailable"
+        assert "codex CLI missing" in frames[-1].activity
+
     async def test_brainstorm_and_agent_terminal_open_real_hud_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, status = make_router(tmp_path)
         status.set_openclaw(
@@ -1040,14 +1099,17 @@ class TestCapabilityViews:
 
         latest = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert latest.items == [
-            "Latest messages — down for older",
+            "Latest messages",
             "Dele · Unread · Attachment",
             "You · Read · On my way",
             "Dele · Are you coming?",
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
+            "▼ Older messages",
         ]
-        assert latest.hint == "down older · tap read · say reply · left x2: back"
+        assert latest.hint == "tap read · say reply · left x2: back"
+        # The paging rows are addressed by index, never by their copy.
+        assert latest.page_controls == (None, 6)
 
         router.on_input(InputEvent(
             container_name="cappage",
@@ -1059,18 +1121,20 @@ class TestCapabilityViews:
         await wait_until(lambda: any(
             isinstance(item, HudList)
             and item.items
-            and item.items[0] == "Older messages — up for newer"
+            and item.items[0] == "Older messages"
             for item in transport.sent
         ))
         older = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert messages.page_calls == [None, 10]
         assert older.items == [
-            "Older messages — up for newer",
+            "Older messages",
             "Dele · Earlier",
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
+            "▲ Newer messages",
         ]
-        assert older.hint == "up newer · tap read · say reply · left x2: back"
+        assert older.hint == "tap read · say reply · left x2: back"
+        assert older.page_controls == (4, None)
         # The async page task clears its duplicate-input guard after its
         # replacement frame is committed, as the production bridge does.
         await asyncio.sleep(0)
@@ -1085,7 +1149,7 @@ class TestCapabilityViews:
         await wait_until(lambda: any(
             isinstance(item, HudList)
             and item.items
-            and item.items[0] == "Latest messages — down for older"
+            and item.items[0] == "Latest messages"
             for item in transport.sent[2:]
         ))
         assert messages.page_calls == [None, 10]
