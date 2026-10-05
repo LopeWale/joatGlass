@@ -156,9 +156,16 @@ To turn it on:
 2. **The token.** The first boot writes
    `~/Library/Application Support/JOAT/agent-token` (0600); `JOAT_AGENT_TOKEN`
    overrides it.
-3. **Expose the door over the tailnet**, next to the glasses proxy:
+3. **Expose the door over the tailnet**, next to the glasses proxy. One
+   script does the Mac half and checks each step (door up, token enforced,
+   mount present, Funnel off, door answering through the tailnet), then
+   copies the token to the clipboard and prints the URL for step 4:
 
-       tailscale serve --bg --set-path /agent http://127.0.0.1:8788
+       ./scripts/setup_even_ai_door.sh            # add --probe for one real question
+
+   By hand, it is:
+
+       tailscale serve --bg --https=443 --set-path=/agent http://127.0.0.1:8788
 
 4. **On the phone** (Tailscale on): Even app → Settings → Even AI →
    Agent Configure → add an agent with
