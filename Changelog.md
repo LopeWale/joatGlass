@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.96 icon-spine package
+
+- Rebuilt the existing JOAT package from `b7ebf83` with the same `scripts/pack.sh`, the same `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.96 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 161791 bytes, SHA-256 `fee6635c6f0c058c148a333a5471e31891f60ada84a2b792298c4fa3501f058f`. Carries the 24 px icon spine, the one live header line on every firmware page and the status model; nothing changed on the Mac side. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — A smaller spine with icons, and one live header line on firmware pages
 
 - The wearer's ask: "the top header with the battery and mic, could those not be better designed with simple icons and smaller?" The image spine is 24 px (it was 36): the clock a point smaller, the page's word beside it, and the microphone and battery as icons alone on the right tile — a slashed mic for a closed mic, the Phosphor cell that matches the level (the old spine drew the full cell at 100% and at 12%), the charging cell while charging (the mark used to be stripped by the string parser before the spine saw it), and the number beside the cell only from 15% down. Every page's content moved up with it: eleven dense list rows, the live map 12 px taller, the reader, Pomodoro, Planning, confirmation, question, navigation, Brainstorm and terminal rows all 12 px higher.
