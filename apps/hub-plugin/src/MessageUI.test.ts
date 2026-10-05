@@ -50,6 +50,7 @@ function rig() {
   } = {};
   let visible = 'Overview';
   const hud = {
+    usesCustomListSelection: () => true,
     showList: vi.fn(async (items: string[], options?: { title?: string; selectable?: boolean; hint?: string }, current?: () => boolean) => {
       guards.push(current);
       await hooks.paint?.(options?.title);

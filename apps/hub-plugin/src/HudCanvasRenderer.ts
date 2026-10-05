@@ -29,6 +29,7 @@ import {
 import {
   CANVAS,
   PANEL_TABS,
+  SPINE_LABEL_BOX,
   type BrainstormHudModel,
   type HudContentKind,
   type PanelTab,
@@ -1620,10 +1621,22 @@ export function visibleHudListItems(
   }));
 }
 
-/** Retained for callers that query the old banner slot. That slot is now
- * deliberately empty; activity is shown within the conversation itself. */
-export function hudSpineLabel(_frame: HudVisualFrame): string {
-  return '';
+/** The compact banner names the current page, or the Mac's live state word
+ * when it is not resting ("hearing you…", "reconnecting"). The native
+ * conversation page carries its own in-card indicator, but it only opens
+ * once speech-to-text has finished; this word is the sole lens-visible
+ * acknowledgement during that window, and the Mac sends it first precisely
+ * so an unchanged HUD never reads as "the assistant is dead". The box sits
+ * inside the top-left tile, so a state change dirties one tile, not two. */
+export function hudSpineLabel(frame: HudVisualFrame): string {
+  // A displayed question accepts the answer directly. The resting banner's
+  // wake-word instruction would contradict the question and its footer.
+  if (frame.kind === 'prompt_question') return 'JOAT';
+  const status = parseStatus(frame.status);
+  const pageTitle = hudSpinePageTitle(frame);
+  const resting = /(?:READY|MIC OFF)$/.test(status.state);
+  if (pageTitle && resting) return upper(pageTitle);
+  return status.state.endsWith('MIC OFF') ? 'JOAT' : status.state;
 }
 
 export function hudSpinePageTitle(frame: HudVisualFrame): string {
@@ -1877,6 +1890,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         frame.kind === 'navigation' ? frame.navigation.view : undefined,
       ),
       frame.kind !== 'overview',
+      hudSpineLabel(frame),
     );
     if (frame.kind !== 'prompt_question' && frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
@@ -1912,6 +1926,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
      * and carries the DATE in that slot instead, where a banner normally
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
+    label = parseStatus(statusText).state,
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1930,8 +1945,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       30,
       HUD_VISUAL_GEOMETRY.statusBaselineY,
     );
-    // The top line carries only time, microphone privacy, and battery.
-    // Conversation activity belongs to its retained in-card indicator.
+    // Same compact face as the clock and privacy indicator. The label box
+    // is measured (types.ts SPINE_LABEL_BOX) and ends on the tile seam, so
+    // the changing word stays inside the top-left tile.
+    context.font = TYPE.statusMeta;
+    this.fitText(context, label, SPINE_LABEL_BOX.x, HUD_VISUAL_GEOMETRY.statusBaselineY, SPINE_LABEL_BOX.width);
     this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
     context.font = TYPE.statusMeta;
     context.textAlign = 'left';

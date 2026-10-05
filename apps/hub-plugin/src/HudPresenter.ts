@@ -12,8 +12,10 @@ import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import {
   AssistantConversationSurface,
   validAssistantConversationSnapshot,
+  wrapConversationText,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
+import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { usesActionPillLayout } from './HudCanvasRenderer';
 import type { NavigationHudModel } from './NavigationHud';
@@ -198,7 +200,27 @@ type DisplayPageOwner =
   | 'visual'
   | 'assistant-native'
   | 'terminal-list-native'
-  | 'terminal-conversation-native';
+  | 'terminal-conversation-native'
+  | 'confirmation-native'
+  | 'overlay-native';
+
+/** Split an answer into firmware pages with the installed glyph metrics. */
+export function paginateAnswer(
+  text: string,
+  lineCapacity: number = ASSISTANT_ANSWER_PAGE.lineCapacity,
+  width: number = ASSISTANT_ANSWER_PAGE.textWidth,
+): string[] {
+  const rows = wrapConversationText(text, width);
+  const pages: string[] = [];
+  for (let start = 0; start < rows.length; start += lineCapacity) {
+    pages.push(rows.slice(start, start + lineCapacity).join('\n'));
+  }
+  return pages.length > 0 ? pages : [' '];
+}
+
+function answerPageHint(page: number, count: number): string {
+  return count > 1 ? `${page + 1}/${count} · swipe: page · tap: dismiss` : 'tap: dismiss';
+}
 
 interface ConfirmationReturnState extends HudContentState {
   id: string;
@@ -292,6 +314,8 @@ export class HudPresenter {
   private confirmationQueue: Promise<unknown> = Promise.resolve();
   private assistantOverlay?: AssistantOverlayState;
   private assistantOverlayRevision = 0;
+  /** The answer as the firmware page shows it: pages and the one on glass. */
+  private nativeOverlay?: { revision: number; pages: string[]; page: number; body: string; hint: string };
   private promptQuestion?: PromptQuestionState;
   private promptQuestionPaint?: Promise<boolean>;
   private actionOverlay?: ActionOverlayState;
@@ -405,10 +429,7 @@ export class HudPresenter {
         this.streams.get(ContainerId.StatusBar), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
-      return this.replaceNativePage(
-        this.layouts.listLayout(this.surface.items, this.surface.options),
-        'terminal-list-native',
-      );
+      return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
     }
     return this.restoreVisualPage();
   }
@@ -429,6 +450,7 @@ export class HudPresenter {
     this.assistantOverlayPaint = undefined;
     if (this.assistantOverlay?.dismissTimer !== undefined) clearTimeout(this.assistantOverlay.dismissTimer);
     this.assistantOverlay = undefined;
+    this.nativeOverlay = undefined;
     this.assistantConversation.retireForHandoff();
     this.nativeTerminal.retireForHandoff();
     this.pageOwner = 'visual';
@@ -458,10 +480,15 @@ export class HudPresenter {
     return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
   }
 
-  /** The custom list owns its cursor; the compatibility list is firmware-owned. */
-  usesCustomListSelection(): boolean {
-    return this.visual !== undefined
-      && !(this.surface.kind === 'list' && this.surface.options.nativeFirmwareList);
+  /** The custom list owns its cursor; the compatibility list is firmware-owned.
+   * Without `next` this describes the page on the glass. With `next` it
+   * describes the page about to be shown: a menu deciding how the NEXT page
+   * selects must not read the answer off the current one, or a raster
+   * conversation opened from a firmware picker inherits the picker's cursor. */
+  usesCustomListSelection(next?: { nativeFirmwareList?: boolean }): boolean {
+    if (this.visual === undefined) return false;
+    if (next) return next.nativeFirmwareList !== true;
+    return !(this.surface.kind === 'list' && this.surface.options.nativeFirmwareList);
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -834,9 +861,14 @@ export class HudPresenter {
   /** Quiesce a terminal body before a graphical page replaces its containers. */
   private async prepareNativeTerminalHandoff(): Promise<boolean> {
     if (!this.nativeTerminal.isActive()) {
-      return this.pageOwner === 'terminal-list-native'
-        ? this.rebuildVisualPage()
-        : true;
+      if (this.pageOwner !== 'terminal-list-native') return true;
+      if (!this.visual) {
+        // The text compatibility surface replaces the firmware list with its
+        // own rebuild; hand the page back so its text writes are not skipped.
+        this.pageOwner = 'visual';
+        return true;
+      }
+      return this.rebuildVisualPage();
     }
     if (!await this.nativeTerminal.pauseForHandoff()) return false;
     try {
@@ -852,6 +884,15 @@ export class HudPresenter {
   }
 
   /** Back from a selected provider goes directly to the firmware picker. */
+  /** The firmware list page for a native list surface, carrying the live
+   * status line: `paint()` is a no-op while the firmware owns the page. */
+  private nativeListLayout(surface: Extract<HudSurface, { kind: 'list' }>): RebuildPageContainer {
+    return this.layouts.listLayout(surface.items, {
+      ...surface.options,
+      status: this.streams.get(ContainerId.StatusBar),
+    });
+  }
+
   private async replaceWithNativeTerminalList(page: RebuildPageContainer): Promise<boolean> {
     const active = this.nativeTerminal.isActive();
     if (active && !await this.nativeTerminal.pauseForHandoff()) return false;
@@ -913,7 +954,11 @@ export class HudPresenter {
       return Promise.resolve(true);
     }
     this.assistantOverlayPaintStartedAt = Date.now();
-    const paint = this.visual ? this.paintVisual() : this.paintNativeAssistantOverlay();
+    const paint = this.visual
+      ? this.usesNativeAnswerPage() || this.pageOwner === 'overlay-native'
+        ? this.paintNativeAnswerPage()
+        : this.paintVisual()
+      : this.paintNativeAssistantOverlay();
     this.assistantOverlayPaint = paint;
     const completed = (): void => {
       if (this.assistantOverlayPaint !== paint) return;
@@ -924,6 +969,71 @@ export class HudPresenter {
     };
     void paint.then(completed, completed);
     return paint;
+  }
+
+  /** An answer over the visual HUD is Even's own text page whenever the
+   * surface can hand the page over under its transition barrier. Receipts
+   * stay on the image page: a short strip is two tiles, cheaper than a
+   * page swap and its four-tile return. */
+  private usesNativeAnswerPage(): boolean {
+    return this.visual?.withPageTransition !== undefined
+      && this.assistantOverlay?.presentation === 'answer';
+  }
+
+  private async paintNativeAnswerPage(): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    const overlay = this.assistantOverlay;
+    if (!overlay || overlay.presentation !== 'answer') {
+      // Dismissed, or replaced by a receipt: leave the firmware page and
+      // repaint whatever JOAT feature is retained underneath.
+      this.nativeOverlay = undefined;
+      if (this.pageOwner !== 'overlay-native') return this.paintVisual();
+      return this.restoreRetainedPage();
+    }
+    const pages = paginateAnswer(overlay.text);
+    const revision = overlay.revision ?? 0;
+    const previous = this.nativeOverlay;
+    // The same answer keeps its page across streamed appends; a new answer
+    // starts on page one.
+    const page = previous && previous.revision === revision
+      ? Math.min(previous.page, pages.length - 1)
+      : 0;
+    const body = pages[page] ?? ' ';
+    const hint = answerPageHint(page, pages.length);
+    const next = { revision, pages, page, body, hint };
+    if (this.pageOwner !== 'overlay-native') {
+      const replaced = await this.replaceNativePage(
+        this.layouts.assistantAnswerLayout(body, { status: this.streams.get(ContainerId.StatusBar), hint }),
+        'overlay-native',
+      );
+      if (!replaced || !displayCurrent()) return false;
+      this.nativeOverlay = next;
+      return true;
+    }
+    this.nativeOverlay = next;
+    let ok = true;
+    if (!previous || previous.body !== body) {
+      ok = await this.upgradeNativeText(ContainerId.Main, 'main', body, previous?.body) && ok;
+      if (!displayCurrent()) return false;
+    }
+    if (!previous || previous.hint !== hint) {
+      ok = await this.upgradeNativeText(ContainerId.Hint, 'hint', hint, previous?.hint) && ok;
+    }
+    return ok && displayCurrent();
+  }
+
+  private upgradeNativeText(
+    containerID: number, containerName: string, content: string, previous = '',
+  ): Promise<boolean> {
+    const replacement = content || ' ';
+    return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
+      containerID,
+      containerName,
+      contentOffset: 0,
+      contentLength: Math.max(previous.length, replacement.length),
+      content: replacement,
+    }));
   }
 
   private async paintNativeAssistantOverlay(): Promise<boolean> {
@@ -980,6 +1090,15 @@ export class HudPresenter {
    * they can never operate the obscured feature or dismiss unread copy. */
   scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
     if (!this.assistantOverlay) return false;
+    const native = this.nativeOverlay;
+    if (native && this.pageOwner === 'overlay-native') {
+      const page = direction === 'down' ? native.page + 1 : native.page - 1;
+      if (page >= 0 && page < native.pages.length) {
+        native.page = page;
+        void this.paintAssistantOverlayNow();
+      }
+      return true;
+    }
     if (this.visual?.scrollAssistantOverlay?.(direction)) {
       void this.paintAssistantOverlayNow();
     }
@@ -1376,10 +1495,7 @@ export class HudPresenter {
       this.nativeTerminal.retire();
       if (this.pageOwner === 'terminal-conversation-native') {
         if (prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList) {
-          await this.replaceNativePage(
-            this.layouts.listLayout(prior.surface.items, prior.surface.options),
-            'terminal-list-native',
-          );
+          await this.replaceNativePage(this.nativeListLayout(prior.surface), 'terminal-list-native');
         } else {
           await this.restoreVisualPage();
         }
@@ -1620,9 +1736,7 @@ export class HudPresenter {
     const firmwareList = surface.options.nativeFirmwareList === true;
     const nativeReplyPage = !this.visual && !!this.assistantOverlay && !this.confirmation;
     const ok = firmwareList
-      ? await this.replaceWithNativeTerminalList(
-        this.layouts.listLayout(surface.items, surface.options),
-      )
+      ? await this.replaceWithNativeTerminalList(this.nativeListLayout(surface))
       : this.visual
       ? true
       : await this.rebuildPage(nativeReplyPage
@@ -1940,7 +2054,13 @@ export class HudPresenter {
       return false;
     }
     const liveStatus = this.captureLiveStatus();
-    if (this.visual) {
+    // The decision gate is a firmware text page whenever the visual surface
+    // can hand the page over under its transition barrier: one
+    // rebuildPageContainer (~165 ms) instead of four forced image tiles at
+    // 0.2–2 s each, so "Send to X?" is readable before the Mac's
+    // confirmation envelope has been spent on pixels. A visual surface
+    // without that barrier keeps the exact raster gate below.
+    if (this.visual && !this.visual.withPageTransition) {
       this.resetAll();
       this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
       this.streams.set(ContainerId.Context, 'TAP · confirm   SWIPE · cancel');
@@ -1990,11 +2110,20 @@ export class HudPresenter {
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', painted ? 'success' : 'failed');
       return painted;
     }
-    const ok = await this.rebuildPage(this.layouts.confirmationLayout(current.prompt));
+    const layout = this.layouts.confirmationLayout(current.prompt, liveStatus?.text);
+    const ok = this.visual
+      ? await this.replaceNativePage(layout, 'confirmation-native')
+      : await this.rebuildPage(layout);
     if (!displayCurrent()) return false;
     if (this.confirmation?.id !== id) return true;
-    if (!ok) {
-      if (openedHere) {
+    if (!ok || (current.isCurrent && !this.isConfirmationCurrent(current))) {
+      // A bound gate that was retired while its page was being replaced is
+      // not visible authority; restore its own return surface, exactly as
+      // the raster path does.
+      if (current.isCurrent && this.confirmation === current) {
+        this.confirmation = undefined;
+        await this.restoreAfterConfirmation(current);
+      } else if (!ok && openedHere) {
         this.confirmation = undefined;
       }
       this.recordPageTransition(from, 'confirmation', 'show_confirmation', 'failed');
@@ -2009,7 +2138,9 @@ export class HudPresenter {
     this.brightness.set(ContainerId.Context, 3);
     this.brightness.set(ContainerId.Tray, 3);
     this.brightness.set(ContainerId.Hint, 1);
-    const restored = await this.restoreLiveStatus(liveStatus);
+    // The native page already carries the status line; the compatibility
+    // surface still writes it so a later status change can be upgraded.
+    const restored = this.visual ? true : await this.restoreLiveStatus(liveStatus);
     this.recordPageTransition(from, 'confirmation', 'show_confirmation', restored ? 'success' : 'failed');
     return restored;
   }
@@ -2039,6 +2170,15 @@ export class HudPresenter {
   private async restoreAfterConfirmation(prior: ConfirmationReturnState): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    // Leaving the firmware decision page: recreate the four image containers
+    // first unless the prior page is itself firmware-owned, in which case its
+    // own replacement below moves the page directly.
+    if (this.pageOwner === 'confirmation-native'
+      && !(prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList)
+      && !await this.rebuildVisualPage()) {
+      this.recordPageTransition('confirmation', this.tracePage(), 'dismiss_confirmation', 'failed');
+      return false;
+    }
     if (prior.surface.kind === 'list') {
       this.focusReturn = {
         streams: new Map(prior.streams),
@@ -2557,10 +2697,7 @@ export class HudPresenter {
         this.streams.get(ContainerId.StatusBar), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
-      return this.replaceNativePage(
-        this.layouts.listLayout(this.surface.items, this.surface.options),
-        'terminal-list-native',
-      );
+      return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
     }
     return this.paintVisual();
   }

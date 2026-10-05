@@ -80,6 +80,7 @@ function rig() {
     track: (unsubscribe: () => void) => unsubscribe,
   } as unknown as BridgeClient;
   const hud = {
+    usesCustomListSelection: () => true,
     showSidebar: vi.fn(async (items: string[]) => {
       sidebars.push(items);
       return true;

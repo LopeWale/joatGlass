@@ -1027,6 +1027,7 @@ describe('EventRouter — production Messages menu composition', () => {
     let dispatch: (event: EvenHubEvent) => void = () => {};
     const sent: UplinkMessage[] = [];
     const hud = {
+      usesCustomListSelection: () => true,
       showList: vi.fn(async () => true),
       showDefault: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),
