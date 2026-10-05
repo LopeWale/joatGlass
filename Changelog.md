@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.99 three-at-once package
+
+- Rebuilt the existing JOAT package from `dd4a71f` with the same `scripts/pack.sh`, the same `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.99 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 153816 bytes, SHA-256 `29cac9133909d2e158d51892bd0d6ddc38b946052b6fc6e2252f26fb9096d336`. Carries the route behind any page, the activity chips in every header and spine, the conversation page's header line, and the completed deletion of the raster duplicates and the plugin-owned list cursor. The Mac side changed only in a docstring and its tests; the brain needs no restart beyond the one 0.1.97 asked for. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — Three features at once: a route behind any page, every header says what else is running
 
 - The wearer's reason for building their own plugin, and the third item of the plan agreed on 2026-10-05 (header, then navigation, then the composite page) that had not been built: Even's Navigate, Conversate and a timer hold the lens one at a time; JOAT's features should not. They did, and worse: every navigation frame (once a second while walking, since 0.1.97) went through `showNavigation`, which hands off whatever is on the glass, so a conversation, a terminal or a Pomodoro page lasted until the wearer's next step and the map came back on its own.
