@@ -184,3 +184,61 @@ describe('HudPresenter native Agent Terminal journey', () => {
     expect(body(last(r.rebuilds))).toContain('OPENCLAW > COMPLETE');
   });
 });
+
+
+describe('HudPresenter Brainstorm on the native page', () => {
+  const session: BrainstormHudModel = {
+    screen: 'brainstorm', state: 'running', topic: 'Should the glasses cache the picker?',
+    collaborators: ['Codex', 'Claude'], activeSpeaker: 'Codex · round 1/3 · 2 calls',
+    activity: 'YOU > Should the glasses cache the picker?\nCODEX > A cache saves a round trip.',
+  };
+
+  it('shows a Brainstorm as the two-text page under the transition barrier, with no image tiles', async () => {
+    const r = rig();
+    await r.hud.showText('12:34 JOAT listening bat 80%', ContainerId.StatusBar);
+    await r.hud.showText('home card', ContainerId.Main);
+    const framesBefore = r.frames.length;
+
+    expect(await r.hud.showBrainstorm(session)).toBe(true);
+
+    expect(r.operations.filter((op) => op === 'rebuild:0:2:0')).toHaveLength(1);
+    expect(r.frames).toHaveLength(framesBefore);
+    const page = last(r.rebuilds);
+    expect(page?.textObject?.find((c) => c.containerName === 'terminal-head')?.content).toBe('JOAT · BRAINSTORM');
+    expect(body(page)).toContain('CODEX > A cache saves a round trip.');
+    expect(body(page).split('\n')[0]).toContain('WORKING · Codex · round 1/3 · 2 calls');
+
+    // A streamed revision is one body upgrade, never another rebuild.
+    const rebuilds = r.rebuilds.length;
+    expect(await r.hud.showBrainstorm({ ...session, activity: `${session.activity} It also risks stale rows.` })).toBe(true);
+    expect(r.rebuilds).toHaveLength(rebuilds);
+    expect(last(r.upgrades)?.content).toContain('stale rows');
+    expect(r.frames).toHaveLength(framesBefore);
+  });
+
+  it('pages the transcript natively on swipe and returns to the page after a question', async () => {
+    const r = rig();
+    const long = { ...session, activity: Array.from({ length: 30 }, (_, i) => `CODEX > point ${i + 1}`).join('\n') };
+    expect(await r.hud.showBrainstorm(long)).toBe(true);
+    const rebuilds = r.rebuilds.length;
+    expect(r.hud.scrollTranscript('up')).toBe(true);
+    await vi.waitFor(() => expect(last(r.upgrades)?.content).toContain('newer · swipe down · double-click: cancel'));
+    expect(r.rebuilds).toHaveLength(rebuilds);
+
+    expect(await r.hud.showPromptQuestion('q-1', 'What would you like to brainstorm?', () => true, 'brainstorm')).toBe(true);
+    expect(last(r.rebuilds)?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
+    const before = r.operations.length;
+    expect(await r.hud.dismissPromptQuestion('q-1')).toBe(true);
+    const since = r.operations.slice(before);
+    expect(since.filter((op) => op === 'rebuild:0:2:0')).toHaveLength(1);
+    expect(since.filter((op) => op.startsWith('rebuild:0:1:4') || op.startsWith('visual:'))).toHaveLength(0);
+  });
+
+  it('keeps the raster transcript when the visual surface has no transition barrier', async () => {
+    const r = rig();
+    delete (r.visual as { withPageTransition?: unknown }).withPageTransition;
+    expect(await r.hud.showBrainstorm(session)).toBe(true);
+    expect(r.rebuilds).toHaveLength(0);
+    expect(last(r.frames)).toMatchObject({ kind: 'brainstorm' });
+  });
+});

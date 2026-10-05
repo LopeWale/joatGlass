@@ -336,6 +336,7 @@ class CapabilityRouter:
         terminal_focus: Callable[[str], Awaitable[None]] | None = None,
         terminal_busy: Callable[[], bool] | None = None,
         brainstorm_recent: Callable[..., list[str]] | None = None,
+        brainstorm_unavailable: Callable[[], BrainstormHudView | None] | None = None,
         panels: PanelPublisher | None = None,
         wearer_zone: WearerZone | None = None,
         terminal_open: Callable[[str, str | None, str, Callable[[], bool]], Awaitable[None]] | None = None,
@@ -379,6 +380,10 @@ class CapabilityRouter:
         self._terminal_busy = terminal_busy
         self._terminal_row_names: list[str] = []
         self._brainstorm_recent = brainstorm_recent
+        # The host's own word on a missing seat: when it answers with a frame,
+        # the idle row and NEW show that frame instead of a promise the tap
+        # cannot keep.
+        self._brainstorm_unavailable = brainstorm_unavailable
         # The overview's News / Pomodoro / Search tabs. Their rows are
         # pushed, not requested, so their taps carry a content revision
         # instead of one of this router's request generations.
@@ -791,6 +796,14 @@ class CapabilityRouter:
         # a reconstruction would drop the streaming turn in progress.
         if self._brainstorm_replay is not None and await self._brainstorm_replay():
             return
+        # A missing CLI seat used to be invisible here: the row opened on
+        # "Ready for a question", the tap went to the Mac, and only then did
+        # the unavailable frame appear. Say it on the first screen.
+        unavailable = self._brainstorm_unavailable() if self._brainstorm_unavailable else None
+        if unavailable is not None:
+            await self._hud.begin_brainstorm()
+            await self._hud.show_brainstorm(unavailable)
+            return
         # IDLE: the picker. docs/SESSION_MODEL.md:47 — "open Brainstorm while
         # idle → show recent sessions plus NEW."
         #
@@ -822,6 +835,11 @@ class CapabilityRouter:
             past = self._brainstorm_recent(4)
             if past:
                 rows = ["Recent:", *past]
+        # The plugin paints a Brainstorm frame only after the Mac has claimed
+        # the surface with this rebuild — a spoken start always sends it
+        # (DebateStateSink.open). The idle frame did not, so a voice-opened
+        # Brainstorm showed nothing and its tap went nowhere.
+        await self._hud.begin_brainstorm()
         await self._hud.show_brainstorm(BrainstormHudView(
             state="settled" if rows else "ready",
             topic=(recap.topic[:40] if recap is not None and recap.topic
@@ -1085,6 +1103,12 @@ class CapabilityRouter:
         whatever had shifted into that position.
         """
         if index == 0:
+            unavailable = self._brainstorm_unavailable() if self._brainstorm_unavailable else None
+            # NEW from the picker claims the surface exactly as a spoken start.
+            await self._hud.begin_brainstorm()
+            if unavailable is not None:
+                await self._hud.show_brainstorm(unavailable)
+                return
             await self._hud.show_brainstorm(BrainstormHudView(
                 state="ready",
                 topic="Ready for a question",

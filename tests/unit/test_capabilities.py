@@ -528,6 +528,7 @@ def make_router(
     brainstorm_replay=None,
     brainstorm_sessions=None,
     brainstorm_continue=None,
+    brainstorm_unavailable=None,
     terminal_rows=None,
     terminal_focus=None,
     terminal_view=None,
@@ -556,6 +557,7 @@ def make_router(
         brainstorm_replay=brainstorm_replay,
         brainstorm_sessions=brainstorm_sessions,
         brainstorm_continue=brainstorm_continue,
+        brainstorm_unavailable=brainstorm_unavailable,
         terminal_rows=terminal_rows,
         terminal_focus=terminal_focus,
         terminal_view=terminal_view,
@@ -566,6 +568,22 @@ def make_router(
 
 
 class TestCapabilityViews:
+    async def test_brainstorm_row_shows_the_missing_seat_instead_of_a_promise(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """A missing CLI seat used to surface only after the tap: the row opened
+        on "Ready for a question" and the tap went nowhere useful."""
+        gone = BrainstormHudView(
+            state="unavailable", topic="Brainstorm", collaborators=["Claude"],
+            activity="codex CLI missing on the Mac — install to enable.",
+        )
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_unavailable=lambda: gone,
+            brainstorm_sessions=lambda: [],
+        )
+        await router.open("Brainstorm")
+        frames = [item for item in transport.sent if isinstance(item, BrainstormHudView)]
+        assert frames[-1].state == "unavailable"
+        assert "codex CLI missing" in frames[-1].activity
+
     async def test_brainstorm_and_agent_terminal_open_real_hud_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, status = make_router(tmp_path)
         status.set_openclaw(

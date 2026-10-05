@@ -624,3 +624,27 @@ async def test_the_switch_says_so_when_no_seat_can_speak() -> None:
 
 def test_failed_notice_is_generic_text() -> None:
     assert "again" in FAILED_NOTICE
+
+
+class TestCodexDiscovery:
+    """A brain started by launchd has a minimal PATH; `codex` ships inside the
+    ChatGPT app bundle with a user-level symlink. PATH-only discovery read a
+    working CLI as "codex CLI missing" on the glass."""
+
+    def test_falls_back_to_the_user_symlink_when_not_on_path(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from joat.agents import cli_reply_engine
+
+        monkeypatch.setattr(cli_reply_engine.shutil, "which", lambda _name: None)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert cli_reply_engine.find_codex_binary() is None
+        binary = tmp_path / ".local" / "bin" / "codex"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        assert cli_reply_engine.find_codex_binary() == str(binary)
+
+    def test_path_still_wins(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from joat.agents import cli_reply_engine
+
+        monkeypatch.setattr(cli_reply_engine.shutil, "which", lambda _name: "/usr/bin/codex")
+        assert cli_reply_engine.find_codex_binary() == "/usr/bin/codex"

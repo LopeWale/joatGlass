@@ -34,7 +34,7 @@ import { PANEL_TAB_TITLES, panelTabForTitle } from './PanelRail';
  * "MESSAGES · CONVERSATION" is not "MESSAGES".
  */
 const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
-  'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY',
+  'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY', 'BRAINSTORM',
 ]);
 
 /** Readers drawn as one firmware text page instead of four image tiles. */

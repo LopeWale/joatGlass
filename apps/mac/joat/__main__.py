@@ -1728,6 +1728,7 @@ async def main() -> None:
         terminal_current=lambda: agent_terminal.focused,
         terminal_busy=lambda: agent_terminal.busy,
         brainstorm_recent=brainstorm_history.rows,
+        brainstorm_unavailable=lambda: None if brainstorm_available() else topic_capture_view(False),
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
         wearer_zone=wearer_zone,
