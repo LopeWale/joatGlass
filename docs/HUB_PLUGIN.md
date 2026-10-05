@@ -355,6 +355,24 @@ The levers that remain are design decisions, not code:
   records zero tiles on each page, the article, its paging, Back and the
   minute rebuild; the overview's own rail swipes are the only tiles.
 
+- ~~Pages as control surfaces~~ — 2026-10-05, the wearer's rule: a page
+  opened by hand is for hands. Voice works from anywhere, so no page shows
+  a "Say “JOAT, …”" row or empty state any more; each offers the tap that
+  does the thing. The row asks its own question through the acknowledged
+  prompt (`PromptedSpeechRuntime.ask_capability`, owner kind `capability`
+  on `prompt.present`, the same native question page the Messages body
+  uses) and routes the answer: NAVIGATION "➤ Navigate to a place" asks
+  "Where to?" and starts the route; QUICKNOTES leads every page with
+  "● Record a voice note" (a tap-started capture titled by the clock) and
+  "✎ Dictate a note" ("What should I note?", saved as exact text; the page
+  size dropped to 16 so both fit under the 20-row cap); the Messages
+  conversation ends in "✎ Reply", the same prepared reply the spoken word
+  starts; the SEARCH tab's last row "⌕ Look something up" asks for the
+  query and republishes the tab; the expanded POMODORO shows its controls
+  and, while idle, the three lengths as rows that cycle presets on tap and
+  persist. Brainstorm's idle frame says "Tap to speak a topic." and its
+  picker already carried "+ New brainstorm".
+
 ### Downlinks and uplinks: what drives them (2026-10-05)
 
 The audit found frames defined on both sides that nothing sent. Where they

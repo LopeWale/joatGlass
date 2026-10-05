@@ -173,6 +173,7 @@ from .services.task_monitor import (
     evaluate_reminder_occurrence,
 )
 from .services.session import (
+    BrainstormStartResult,
     DebateSession, Session, SessionManager, seat_participants,
 )
 from .services.shutdown import (
@@ -1604,6 +1605,21 @@ async def main() -> None:
         on_message_prompt_retired=lambda action_id: message_ui.cancel(action_id),
     )
 
+    async def start_route_from_tap(destination: str) -> str | None:
+        """The Navigation page's control row answered: start the route."""
+        result = sessions.start_navigation(destination)
+        if result is BrainstormStartResult.STARTED or result is BrainstormStartResult.CLOSED:
+            return None
+        return {
+            BrainstormStartResult.BUSY: "Finish the current session first.",
+            BrainstormStartResult.UNAVAILABLE: "Navigation is unavailable on this Mac.",
+            BrainstormStartResult.INVALID: "I didn't catch a destination.",
+        }.get(result, None)
+
+    # The Search tab's control row asks for its query through the same
+    # acknowledged prompt; a late answer republishes the tab itself.
+    search.attach_prompt(prompted_speech.ask_capability, lambda: panels.activate("search"))
+
     def revoke_message_prompt(action_id: str) -> None:
         ticket = prompted_speech.dispatcher.current_ticket
         if ticket is not None and ticket.owner_kind == "messages" and ticket.owner_id == action_id:
@@ -1757,6 +1773,11 @@ async def main() -> None:
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
         wearer_zone=wearer_zone,
+        # A page opened by hand is a control surface: a tapped row asks its
+        # own question on the lens ("Where to?", "What should I note?") and
+        # routes the answer. Voice works from anywhere and needs no row.
+        ask=prompted_speech.ask_capability,
+        navigate=start_route_from_tap,
     )
     if belt is not None:
         for tool in feature_tools(
