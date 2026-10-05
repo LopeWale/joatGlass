@@ -347,7 +347,9 @@ The levers that remain are design decisions, not code:
   entries) and Back is the Mac's `planning-back`, so nothing changes on
   the wire; the day page's 13-entry paging keeps it under the list's 20
   rows. The month dashboard (grid plus hovered-day pane) is the one raster
-  capability page left: a calendar grid has no Even template.
+  capability page left: a calendar grid has no Even template. (A
+  `PLANNING · EVENT` or `· REMINDER` page carries the row map too, so it is
+  a firmware list, not the text page the earlier note above says.)
   `scripts/simulator_planning_native_probe.py` drives month → week → day →
   event and Back over a fake EventKit bridge: zero tiles on every page but
   the month.
@@ -372,6 +374,43 @@ The levers that remain are design decisions, not code:
   and, while idle, the three lengths as rows that cycle presets on tap and
   persist. Brainstorm's idle frame says "Tap to speak a topic." and its
   picker already carried "+ New brainstorm".
+
+- ~~The modals a tap lands on~~ — 2026-10-05, the wearer's point: fixing a
+  page is not enough when the page its tap redirects to is still pixels. A
+  surface-and-transition map (every page, every tap, Back and push target)
+  found thirteen raster targets one gesture away from a firmware page, and
+  one presenter fault: from a firmware text page, Home, a receipt, a
+  productivity frame or a navigation frame never repainted the glass at all
+  (only the firmware list owner triggered the image rebuild). Now:
+  - every native content owner (`terminal-list-native`,
+    `text-page-native`, `navigation-native`) recreates the four image
+    containers before an image paint (`NATIVE_CONTENT_OWNERS`);
+  - a receipt or an outcome strip over a firmware page is a firmware page
+    (`usesNativeAnswerPage`, `showActionPill`): one rebuild in, and the
+    list or reader comes back as the page it was when the strip settles;
+    before, a saved reminder over the Planning day rebuilt the image page
+    and repainted the list as pixels under a two-tile strip;
+  - a Calendar or Reminders page (failed, uncertain, due) is a firmware
+    text page (`renderNativeProductivityPage`), paged in place;
+  - every navigation frame before the live map (confirm the place, repair,
+    mode, preview, the warnings, arrival, error) is a firmware text page
+    (`navigationNativeBody` in `NavigationHud`, owner `navigation-native`);
+    a cursor move upgrades the page in place; only the guidance frame with
+    its map is pixels;
+  - the Messages result (`MESSAGES · SENT/FAILED/CANCELLED/UNCERTAIN`), the
+    draft review, compose, setup, access and retry pages, the QuickNotes
+    recorder (`RECORDING/PAUSED/DISCARD?`), the saved Brainstorm reader,
+    `ACTIVITY · EMPTY`, the Planning refresh and reminder notices, the
+    Planning loading page and every `X · RETRY` timeout page joined the
+    firmware sets; a reader with a tap action is selectable so its tap
+    reaches the Mac; the legacy review's staged return keeps the
+    conversation's firmware-list shape; Back on a resting Brainstorm frame
+    is Home.
+  `scripts/simulator_transitions_native_probe.py` drives all of it from a
+  firmware list and records zero image tiles on every step but the map.
+  Still pixels by design: the overview, the Planning month grid, the live
+  map. Still a voice hint: the due reminder page ("say: complete reminder"),
+  until its tap completes the reminder.
 
 ### Downlinks and uplinks: what drives them (2026-10-05)
 

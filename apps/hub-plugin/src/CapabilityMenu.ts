@@ -37,13 +37,24 @@ const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
   'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY', 'BRAINSTORM',
   'NOTIFICATIONS', 'NOTIFICATIONS · EMPTY',
   'QUICKNOTES', 'QUICKNOTES · EMPTY', 'QUICKNOTES · SETUP',
+  // The live recorder's control rows (save, pause, discard, keep).
+  'QUICKNOTES · RECORDING', 'QUICKNOTES · PAUSED', 'QUICKNOTES · DISCARD?',
+  // The Planning loading page; the month grid itself opts out by its grid.
+  'PLANNING',
   'NEWS', 'SEARCH', 'POMODORO',
 ]);
 
-/** Readers drawn as one firmware text page instead of four image tiles. */
+/** Readers and plain text pages drawn as one firmware text page instead of
+ * four image tiles: a reader the Mac pages, a result, a setup notice. A tap
+ * on one of them reaches the Mac as its row zero (the Navigation control,
+ * a reader's "tap: continue" / "tap: confirm"). */
 const TEXT_PAGE_TITLES = new Set([
   'MESSAGES · MESSAGE', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
   'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
+  'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
+  'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
+  'MESSAGES · UNCERTAIN', 'BRAINSTORM · SAVED', 'ACTIVITY · EMPTY',
+  'PLANNING · REFRESH', 'PLANNING · REMINDER',
 ]);
 
 /** The expanded Pomodoro's first row on the firmware list: the raster page
@@ -445,6 +456,7 @@ export class CapabilityMenu {
       || !reader || reader.index !== reader.count - 1 || !parent
       || this.reviewVisit?.requestId !== this.pendingRequestId
       || this.reviewVisit?.activeId !== reader.id) return;
+    const parentFirmwareList = usesFirmwareList(parent.title) || parent.pageControls !== undefined;
     const staged = this.hud.stageConfirmationReturnList(confirmationId,
       parent.messageProse ? this.noteDisplayItems(parent.items, parent.messageProse) : parent.items, {
         title: parent.title, initialSelectedIndex: parent.selectedIndex,
@@ -452,6 +464,12 @@ export class CapabilityMenu {
         hint: parent.messageProse ? this.messageDisplayHint(parent.hint, parent.messageProse) : parent.hint,
         selectable: parent.selectable && (!parent.messageProse
           || parent.messageProse.index === parent.messageProse.pages.length - 1),
+        // The conversation the gate returns to was a firmware list when
+        // the wearer left it; staged without its shape it came back as
+        // four image tiles while the menu still treated it as a list.
+        ...(parentFirmwareList ? { nativeFirmwareList: true } : {}),
+        ...(parentFirmwareList && parent.pageControls ? { pageControls: { ...parent.pageControls } } : {}),
+        ...(parent.nativeTextPage ? { nativeTextPage: true } : {}),
       });
     if (!staged) return;
     this.retireReviewReader();
@@ -530,13 +548,14 @@ export class CapabilityMenu {
     }
     if (parent === this.dataSurface && parent) parent = { ...parent, selectedIndex: this.selectedIndex };
     const rows = [`1/1 · ${accepted.state === 'sent' ? 'Submitted' : accepted.state}`, accepted.text];
-    const messageProse = { pages: quickNotesProsePages(rows), index: 0 };
     const title = `MESSAGES · ${accepted.state.toUpperCase()}`;
     const hint = 'left x2: back';
     const transition = this.beginTransition();
     const stillCurrent = () => current() && this.transitionId === transition;
-    const shown = await this.hud.showList(this.noteDisplayItems(rows, messageProse), {
-      title, hint: this.messageDisplayHint(hint, messageProse), selectable: false,
+    // The result is Even's own text page, paged in place by swipe; it used
+    // to be a raster prose pager drawn with four image tiles.
+    const shown = await this.hud.showList(rows, {
+      title, hint, selectable: false, nativeTextPage: true,
     }, stillCurrent);
     if (!stillCurrent()) return false;
     this.view = 'data';
@@ -551,7 +570,10 @@ export class CapabilityMenu {
     this.messagesRetry = false;
     this.messagesScreen = 'read_only';
     this.dataHint = hint;
-    this.dataSurface = { title, items: rows, hint, messageProse, selectable: false, selectedIndex: 0, messagesRetry: false, messagesScreen: 'read_only' };
+    this.dataSurface = {
+      title, items: rows, hint, selectable: false, selectedIndex: 0, messagesRetry: false,
+      messagesScreen: 'read_only', nativeTextPage: true,
+    };
     return true;
   }
 
@@ -1075,6 +1097,11 @@ export class CapabilityMenu {
       if (this.terminalOpening) {
         this.retireTerminalOpening();
         await this.openCapability('Agent Terminal', CAPABILITIES.indexOf('Agent Terminal'));
+      } else if (this.brainstormOwnsSurface) {
+        // A resting Brainstorm frame (ready, settled, unavailable) has no
+        // run to cancel, so Back used to do nothing and the frame stayed up.
+        // It is a page like any other: Back is Home.
+        await this.close();
       }
       return;
     } else if (this.view === 'productivity' && this.productivityReturn) {
@@ -2034,7 +2061,8 @@ export class CapabilityMenu {
     const shown = receiptRefresh !== undefined || await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
       title,
       hint: 'left x2: back',
-      ...(usesFirmwareList(title) ? { nativeFirmwareList: true } : {}),
+      ...(usesFirmwareList(title) ? { nativeFirmwareList: true }
+        : usesTextPage(title) ? { nativeTextPage: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -2157,6 +2185,8 @@ export class CapabilityMenu {
       title: `${title} · RETRY`,
       hint: isMessagesRetry ? 'tap: retry · left x2: back' : 'left x2: back',
       selectable: isMessagesRetry,
+      // The timeout page replaced a firmware page with four image tiles.
+      nativeTextPage: true,
     });
     if (
       this.view !== 'data'
