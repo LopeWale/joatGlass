@@ -161,7 +161,10 @@ function expectEveryStateAfterFourTiles(events: readonly string[]): void {
       ]);
       return;
     }
-    const previousState = events.slice(0, index).findLastIndex((entry) => entry.startsWith('state:'));
+    let previousState = -1;
+    for (let at = index - 1; at >= 0; at -= 1) {
+      if (events[at]?.startsWith('state:')) { previousState = at; break; }
+    }
     const sinceLastState = events.slice(previousState + 1, index);
     expect(sinceLastState.filter((entry) => entry.startsWith('tile:'))).toEqual([]);
     expect(sinceLastState.some((entry) => entry === 'page:text' || entry === 'upgrade:main')).toBe(true);
