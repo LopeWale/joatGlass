@@ -135,7 +135,7 @@ between them is not a matter of taste:
 | Mechanism | Cost | Rows visible of 8 | Type | Verdict |
 |---|---|---|---|---|
 | `menuObject` (firmware contextual menu) | **zero image tiles** | ~5, then scrolls | OS font, OS row pitch, no icons | **In use.** The wearer's menu. |
-| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch | **In use for AGENT TERMINAL, the MESSAGES picker and ACTIVITY** (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`, opted in per page with `nativeFirmwareList`). NEWS and SEARCH were native in 2026-09-02 and went back to pixels for the rail and row memory. Rejected for the menu itself — no denser, and it costs a page. |
+| `ListContainerProperty` (native list) | text only, no tiles; **scrolls in firmware at zero BLE** | ~4.5 in a 184 px container, then the firmware scrolls (Even's display docs; the simulator clipped) | identical OS font and pitch; **each row ≤ 63 UTF-8 bytes** (the host refuses the rebuild with a silent `false` from 64 bytes, measured in the 0.9.5 simulator; `listLayout` clamps) | **In use for AGENT TERMINAL, the MESSAGES picker, the MESSAGES conversation thread and ACTIVITY** (`FIRMWARE_LIST_TITLES` in `CapabilityMenu`, opted in per page with `nativeFirmwareList`; the thread opts in when the Mac sends `pageControls`). NEWS and SEARCH were native in 2026-09-02 and went back to pixels for the rail and row memory. Rejected for the menu itself — no denser, and it costs a page. |
 | Four image tiles (our own canvas) | 2 tile writes, 0.5-2s each over BLE | 8 + icons + rail + live dashboard beside it | ours | The only way to get JOAT's density — and the reason page opens feel slow. |
 
 Both native mechanisms render in the firmware's own proportional font at a
@@ -179,6 +179,8 @@ other three, so a swipe shipped three tiles.
 | Mic on/off, battery | 2 / 1 | **1** (top-right) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
+| Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
+| Page an older or newer slice of the thread | 2-4 | **0** — tap the Mac-appended "▲ Newer messages" / "▼ Older messages" row; the Mac answers with the next `hud.list` (0.2 s in the simulator) |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -234,11 +236,23 @@ The levers that remain are design decisions, not code:
   line in the rebuild, and any pixel surface (overview, reader,
   confirmation, overlay) rebuilds the four-tile page first. Pages with a
   plugin-owned cursor (the Planning grid, prose readers, the QuickNotes
-  archive pager, Messages conversations) stay raster, and so do the NEWS and
+  archive pager) stay raster, and so do the NEWS and
   SEARCH tabs, whose Back restores the row the wearer left. Extending it to
   another list is one title in the set — the trade is the firmware font,
   no rail, and a cursor that always starts on row one (the firmware has no
   cursor-setting API).
+- ~~Native conversation thread~~ — 2026-10-05: the firmware list emits
+  clicks but no scroll events, so the Mac pages the thread itself. The
+  `hud.list` for `MESSAGES · CONVERSATION` carries `pageControls`
+  (`newerIndex`, `olderIndex`): the Mac appends "▲ Newer messages" and
+  "▼ Older messages" rows and names them, and `CapabilityMenu` turns a tap
+  on either into the same `SCROLL_TOP/BOTTOM` page request the raster
+  thread sent, ignoring the label and instruction rows. Rows are clamped
+  to 63 UTF-8 bytes (`clampUtf8Bytes` in `HudPageBuilder`): the host
+  refused every list whose row reached 64 bytes and the plugin fell to
+  Home, which is why the thread first looked broken in the simulator.
+  Verified with the probe: older page 0.2 s after the tap, zero image
+  tiles from thread to Back.
 - ~~Native confirmation~~ — 2026-10-05: the gate is a firmware text page
   (`confirmationLayout`, owner `confirmation-native`) whenever the visual
   surface offers `withPageTransition`; dismissal recreates the four image
@@ -248,8 +262,7 @@ The levers that remain are design decisions, not code:
   HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
   seven-line body paged in place with `textContainerUpgrade`, a hint line.
   Receipts stay on the image page (two tiles beat a page swap). Still
-  image pages in Messages: the conversation thread (needs tap-to-page rows,
-  since the firmware list emits no scroll events), the prompt question and
+  image pages in Messages: the prompt question ("What should I say?") and
   the message reader.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the

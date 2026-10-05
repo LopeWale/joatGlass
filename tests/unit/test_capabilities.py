@@ -1040,14 +1040,17 @@ class TestCapabilityViews:
 
         latest = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert latest.items == [
-            "Latest messages — down for older",
+            "Latest messages",
             "Dele · Unread · Attachment",
             "You · Read · On my way",
             "Dele · Are you coming?",
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
+            "▼ Older messages",
         ]
-        assert latest.hint == "down older · tap read · say reply · left x2: back"
+        assert latest.hint == "tap read · say reply · left x2: back"
+        # The paging rows are addressed by index, never by their copy.
+        assert latest.page_controls == (None, 6)
 
         router.on_input(InputEvent(
             container_name="cappage",
@@ -1059,18 +1062,20 @@ class TestCapabilityViews:
         await wait_until(lambda: any(
             isinstance(item, HudList)
             and item.items
-            and item.items[0] == "Older messages — up for newer"
+            and item.items[0] == "Older messages"
             for item in transport.sent
         ))
         older = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert messages.page_calls == [None, 10]
         assert older.items == [
-            "Older messages — up for newer",
+            "Older messages",
             "Dele · Earlier",
             'Say “JOAT, reply saying …”',
             "Mic off? Long press to enable.",
+            "▲ Newer messages",
         ]
-        assert older.hint == "up newer · tap read · say reply · left x2: back"
+        assert older.hint == "tap read · say reply · left x2: back"
+        assert older.page_controls == (4, None)
         # The async page task clears its duplicate-input guard after its
         # replacement frame is committed, as the production bridge does.
         await asyncio.sleep(0)
@@ -1085,7 +1090,7 @@ class TestCapabilityViews:
         await wait_until(lambda: any(
             isinstance(item, HudList)
             and item.items
-            and item.items[0] == "Latest messages — down for older"
+            and item.items[0] == "Latest messages"
             for item in transport.sent[2:]
         ))
         assert messages.page_calls == [None, 10]

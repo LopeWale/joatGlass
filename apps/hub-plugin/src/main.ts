@@ -848,6 +848,7 @@ async function boot(): Promise<void> {
           msg.quickNotesPage,
           msg.readerPage,
           msg.planningNavigation,
+          msg.pageControls,
         ))) {
           break;
         }

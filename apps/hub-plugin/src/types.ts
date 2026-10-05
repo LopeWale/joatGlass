@@ -518,6 +518,12 @@ export type DownlinkMessage =
     selectable?: boolean;
     planningGrid?: PlanningGridCell[];
     planningNavigation?: { canGoBack: boolean; selectedIndex: number };
+    /** Row indices of the "newer"/"older" paging rows a Messages conversation
+     * carries. Present (even empty) means paging travels as rows, so the
+     * thread may be a firmware list, which reports taps but no scroll
+     * events; a tap on one of these rows is the page request. Mac
+     * counterpart: HudList.page_controls in core/protocol.py. */
+    pageControls?: { newerIndex?: number; olderIndex?: number };
   }
   | { kind: 'brainstorm.view'; brainstorm: BrainstormViewPayload }
   | { kind: 'agent_terminal.view'; terminal: AgentTerminalHudModel }

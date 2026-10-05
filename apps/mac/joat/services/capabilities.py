@@ -1360,37 +1360,39 @@ class CapabilityRouter:
             return
         page = state.pages[state.index]
         if state.index == 0:
-            page_label = (
-                "Latest messages — down for older"
-                if page.has_older else "Complete conversation on this Mac"
-            )
+            page_label = "Latest messages" if page.has_older else "Complete conversation on this Mac"
         else:
-            page_label = (
-                "Older messages — up newer, down older"
-                if page.has_older else "Older messages — up for newer"
-            )
-        # The Hub's boundary gesture gate consumes these paging affordances.
-        # Keep the wire hint and visible actions aligned with the cursor.
-        hint_parts = []
-        if state.index > 0:
-            hint_parts.append("up newer")
-        if page.has_older:
-            hint_parts.append("down older")
+            page_label = "Older messages"
         can_reply = state.thread.reply_target is not None and self._replies is not None
+        # Paging travels as rows, not swipes: the Hub draws this thread as a
+        # firmware list (Even's own ListContainerProperty, one rebuild, no
+        # image tiles), and a firmware list reports taps but no scroll
+        # events. A tap on one of these rows is the page request; their
+        # indices ride in `page_controls` so the plugin never matches copy.
         hint = " · ".join([
-            *hint_parts, "tap read", "say reply" if can_reply else "read-only", BACK_HINT,
+            "tap read", "say reply" if can_reply else "read-only", BACK_HINT,
         ])
         context = [self._message_history_row(state.thread, entry) for entry in page.entries]
         instructions = (
             ['Say “JOAT, reply saying …”', "Mic off? Long press to enable."]
             if can_reply else []
         )
+        items = [page_label, *context, *instructions]
+        newer_index: int | None = None
+        older_index: int | None = None
+        if state.index > 0:
+            newer_index = len(items)
+            items.append("▲ Newer messages")
+        if page.has_older:
+            older_index = len(items)
+            items.append("▼ Older messages")
         await self._send_list(HudList(
-            items=[page_label, *context, *instructions],
+            items=items,
             title="MESSAGES · CONVERSATION",
             context_label=state.thread.sender,
             hint=hint,
             selectable=bool(page.entries),
+            page_controls=(newer_index, older_index),
         ))
 
     async def _show_message_detail(self) -> None:
