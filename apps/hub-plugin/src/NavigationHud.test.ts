@@ -88,3 +88,65 @@ describe('navigation HUD contract', () => {
     expect(formatNavigationDistance(12_800)).toBe('13 km');
   });
 });
+
+describe('the guidance pane without a street tile', () => {
+  const route = {
+    geometry: [
+      { latitude: 0, longitude: 0 },
+      { latitude: 0, longitude: 0.009 },
+      { latitude: 0.009, longitude: 0.009 },
+    ],
+  };
+
+  it('centres on the wearer at the tiles\' own zoom, or fits the whole route before the first fix', async () => {
+    const { navigationMapFallbackCentre, NAVIGATION_MAP_PANEL, projectNavigationMapToPanel } = await import('./HudCanvasRenderer');
+    expect(navigationMapFallbackCentre({ ...route, position: { latitude: 0, longitude: 0.001 } }))
+      .toEqual({ latitude: 0, longitude: 0.001, zoom: 16 });
+    const fitted = navigationMapFallbackCentre(route);
+    expect(fitted).toMatchObject({ latitude: 0.0045, longitude: 0.0045 });
+    expect(fitted!.zoom).toBeLessThan(16);
+    const projection = projectNavigationMapToPanel(route, fitted!)!;
+    for (const [x, y] of projection.points) {
+      expect(x).toBeGreaterThanOrEqual(NAVIGATION_MAP_PANEL.x);
+      expect(x).toBeLessThanOrEqual(NAVIGATION_MAP_PANEL.x + NAVIGATION_MAP_PANEL.width);
+      expect(y).toBeGreaterThanOrEqual(NAVIGATION_MAP_PANEL.y);
+      expect(y).toBeLessThanOrEqual(NAVIGATION_MAP_PANEL.y + NAVIGATION_MAP_PANEL.height);
+    }
+    expect(navigationMapFallbackCentre({ geometry: [{ latitude: 0, longitude: 0 }] })).toBeUndefined();
+  });
+
+  it('draws the route\'s shape and the wearer in the pane when no tile has arrived', async () => {
+    const { HudCanvasRenderer } = await import('./HudCanvasRenderer');
+    const strokes: number[] = [];
+    const arcs: Array<[number, number]> = [];
+    let images = 0;
+    const texts: Array<{ text: string; x: number }> = [];
+    const state: Record<string, unknown> = {
+      font: '', textAlign: 'left', lineWidth: 0,
+      measureText: (value: string) => ({ width: value.length * 6 }),
+      fillText: (text: string, x: number) => texts.push({ text, x }),
+      stroke: () => strokes.push(state.lineWidth as number),
+      arc: (x: number, y: number) => arcs.push([x, y]),
+      drawImage: () => { images += 1; },
+    };
+    const context = new Proxy(state, {
+      get: (target, key) => (key in target ? target[String(key)] : () => undefined),
+      set: (target, key, value) => { target[String(key)] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as InstanceType<typeof HudCanvasRenderer>;
+    (renderer as unknown as { drawNavigation(c: unknown, n: unknown): void }).drawNavigation(context, {
+      view: 'guidance', primary: 'Turn right', secondary: 'onto Test Ave', hint: 'Then continue',
+      interaction: 'none', options: [], selectedIndex: 0, mode: 'walking',
+      maneuver: 'turn_right', maneuverDistanceM: 80, remainingDistanceM: 900, etaMinutes: 13,
+      progress: 0.1,
+      map: { ...route, position: { latitude: 0, longitude: 0.001 } },
+    });
+    // No tile was blitted, the route was traced once in the thin "shape"
+    // weight, and the wearer's marker was drawn — nothing disappeared.
+    expect(images).toBe(0);
+    expect(strokes).toContain(2);
+    expect(arcs.length).toBeGreaterThan(0);
+    // The instruction kept to its own pane: nothing drawn past the seam.
+    expect(texts.filter(({ text }) => text === 'Turn right').every(({ x }) => x < 288)).toBe(true);
+  });
+});

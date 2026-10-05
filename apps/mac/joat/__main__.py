@@ -104,6 +104,7 @@ from .native.bridge import (
     NativeBridgeUnavailable,
 )
 from .persistence.actions import ActionJournal
+from .persistence.places import PlaceStore
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.pomodoro import PomodoroStore
@@ -319,6 +320,9 @@ async def main() -> None:
         Path.home() / "Library/Application Support/JOAT/joat.sqlite3"
     )
     action_journal = ActionJournal(durable_store)
+    # The wearer's saved places, edited on the phone page and kept here so
+    # "navigate home" resolves after a restart.
+    place_store = PlaceStore(durable_store)
     recovered = action_journal.recover_after_restart(
         now_us=time.time_ns() // 1000
     )
@@ -1039,6 +1043,7 @@ async def main() -> None:
             # Same credential as search/routing, and it stays on this Mac:
             # the session sends rendered pixels, never a tile URL.
             map_token=mapbox_token,
+            places=place_store.list,
         )
 
     def publish_brainstorm_phase(phase: str) -> None:
@@ -1778,6 +1783,7 @@ async def main() -> None:
         # routes the answer. Voice works from anywhere and needs no row.
         ask=prompted_speech.ask_capability,
         navigate=start_route_from_tap,
+        places=place_store.list,
     )
     if belt is not None:
         for tool in feature_tools(
@@ -1940,6 +1946,7 @@ async def main() -> None:
         asyncio.get_running_loop().create_task(complete())
 
     transport.on_reminder_due_complete(complete_due_from_glasses)
+    transport.on_places(place_store.replace_all)
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
     # The feeds are polled on the wearer's cadence (news.json, default every
     # fifteen minutes) and pushed after every pass; the first pass is what

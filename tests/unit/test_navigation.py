@@ -31,7 +31,9 @@ from joat.core.protocol import (
     NavigationView,
     NavigationViewAck,
 )
-from joat.services.navigation import NavigationSession
+from joat.navigation.map_image import NavigationMapTile
+from joat.core.protocol import NavigationMapPanel
+from joat.services.navigation import NavigationSession, route_map_centres
 from joat.services.navigation import NavigationUnavailableSession, navigation_query
 
 
@@ -1023,3 +1025,189 @@ class TestRouteFailuresNameTheirCause:
         assert error.navigation.hint == "tap/say retry · swipe cancel"
         session.cancel()
         await task
+
+
+def _metres(a: NavigationPoint, b: NavigationPoint) -> float:
+    return navigation_service.map_move_meters(a.latitude, a.longitude, b.latitude, b.longitude)
+
+
+class TestRouteMapCentres:
+    """The street tiles are fetched ALONG the route, every stride of road.
+
+    The Mac receives no live position during guidance, so it cannot follow
+    the wearer with tile fetches; it covers the route up front instead and
+    the plugin draws the tile nearest the wearer.
+    """
+
+    def test_a_straight_kilometre_gets_a_tile_every_stride_and_one_at_the_end(self) -> None:
+        start = NavigationCoordinate(latitude=0.0, longitude=0.0)
+        end = NavigationCoordinate(latitude=0.0, longitude=0.009)  # ~1002 m
+        centres = route_map_centres([start, end], stride_m=180)
+        assert len(centres) == 7
+        assert centres[0] == NavigationPoint(0.0, 0.0)
+        gaps = [_metres(a, b) for a, b in zip(centres, centres[1:])]
+        assert all(abs(gap - 180) < 1 for gap in gaps[:-1])
+        assert _metres(centres[-1], NavigationPoint(0.0, 0.009)) < 1
+
+    def test_a_long_route_gets_a_longer_stride_instead_of_more_tiles(self) -> None:
+        start = NavigationCoordinate(latitude=0.0, longitude=0.0)
+        end = NavigationCoordinate(latitude=0.0, longitude=0.09)  # ~10 km
+        centres = route_map_centres([start, end], stride_m=180, max_tiles=24)
+        assert len(centres) == 24
+        gaps = [_metres(a, b) for a, b in zip(centres, centres[1:])]
+        assert min(gaps) > 400
+
+    def test_a_short_hop_is_one_tile_and_a_bend_is_walked_not_sampled(self) -> None:
+        start = NavigationCoordinate(latitude=0.0, longitude=0.0)
+        near = NavigationCoordinate(latitude=0.0, longitude=0.0001)  # ~11 m
+        assert route_map_centres([start, near]) == [NavigationPoint(0.0, 0.0)]
+        bend = [
+            NavigationCoordinate(latitude=0.0, longitude=0.0),
+            NavigationCoordinate(latitude=0.0, longitude=0.0027),   # ~300 m east
+            NavigationCoordinate(latitude=0.0027, longitude=0.0027),  # ~300 m north
+        ]
+        centres = route_map_centres(bend, stride_m=180)
+        # 0, 180 (on the first leg), 360 (60 m up the second leg), 540, end.
+        assert len(centres) == 5
+        assert centres[2].longitude == pytest.approx(0.0027)
+        assert 0.0 < centres[2].latitude < 0.0027
+
+
+class TestRouteTilePrefetch:
+    @pytest.mark.asyncio
+    async def test_the_streets_along_the_route_are_fetched_once_the_route_is_known(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fetched: list[tuple[float, float]] = []
+
+        async def fake_tile(token: str, latitude: float, longitude: float, **_: object) -> NavigationMapTile:
+            assert token == "map-token"
+            fetched.append((latitude, longitude))
+            return NavigationMapTile(
+                latitude=latitude, longitude=longitude, zoom=16, width=284, height=220,
+                png=b"\x89PNG fake",
+            )
+
+        monkeypatch.setattr(navigation_service, "render_map_tile", fake_tile)
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        provider = FakeProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Cajun Corner", provider, transport, session_id="nav-test", map_token="map-token",
+        )
+        task = asyncio.create_task(session.run())
+        try:
+            destination = await wait_for(transport, NavigationView)
+            assert isinstance(destination, NavigationView)
+            session.accept_action(action(destination, "confirm_destination"))
+            mode = await wait_for(transport, NavigationView, count=2)
+            assert isinstance(mode, NavigationView)
+            session.accept_action(action(mode, "select_mode", "walking"))
+            origin_request = await wait_for(transport, NavigationOriginRequest)
+            assert isinstance(origin_request, NavigationOriginRequest)
+            session.accept_origin(NavigationOrigin(
+                session_id=origin_request.session_id,
+                request_id=origin_request.request_id,
+                generation=origin_request.generation,
+                latitude=41.9, longitude=-87.65, accuracy=6,
+            ))
+            preview = await wait_for(transport, NavigationView, count=5)
+            assert isinstance(preview, NavigationView)
+            assert preview.navigation.view == "preview"
+            # Let the one-at-a-time fetch worker drain the route's centres.
+            for _ in range(40):
+                await asyncio.sleep(0)
+            panels = [m for m in transport.sent if isinstance(m, NavigationMapPanel)]
+            # The plan runs ~836 m: the origin tile, then every 180 m, then
+            # the end — and the origin is not fetched twice when the route's
+            # first centre lands on it.
+            centres = route_map_centres(plan().geometry)
+            assert len(panels) == len(centres) == 6
+            assert panels[0].latitude == 41.9 and panels[0].longitude == -87.65
+            assert fetched == [(p.latitude, p.longitude) for p in panels]
+            assert all(p.width == 284 and p.height == 220 and p.zoom == 16 for p in panels)
+            assert len({(round(p.latitude, 6), round(p.longitude, 6)) for p in panels}) == 6
+            assert all(p.session_id == "nav-test" for p in panels)
+        finally:
+            session.cancel()
+            await task
+
+
+class TestSavedPlaces:
+    @pytest.mark.asyncio
+    async def test_a_pinned_saved_place_skips_the_provider_and_keeps_its_name(self) -> None:
+        from joat.core.protocol import SavedPlace
+
+        saved = [SavedPlace(place_id="p1", name="Home", address="12 Oak St", latitude=41.92, longitude=-87.65)]
+        provider = FakeProvider([])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "my home", provider, transport, session_id="nav-test", places=lambda: saved,
+        )
+        task = asyncio.create_task(session.run())
+        try:
+            destination = await wait_for(transport, NavigationView)
+            assert isinstance(destination, NavigationView)
+            assert destination.navigation.view == "destination"
+            assert destination.navigation.primary == "Home"
+            assert destination.navigation.secondary == "12 Oak St"
+            assert provider.searches == []
+        finally:
+            session.cancel()
+            await task
+
+    @pytest.mark.asyncio
+    async def test_an_address_only_saved_place_searches_its_address_under_its_name(self) -> None:
+        from joat.core.protocol import SavedPlace
+
+        saved = [SavedPlace(place_id="p2", name="Work", address="2301 N Lincoln Ave, Chicago")]
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        provider = FakeProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Work", provider, transport, session_id="nav-test", places=lambda: saved,
+        )
+        task = asyncio.create_task(session.run())
+        try:
+            destination = await wait_for(transport, NavigationView)
+            assert isinstance(destination, NavigationView)
+            assert destination.navigation.view == "destination"
+            assert destination.navigation.primary == "Work"
+            assert "2301 N Lincoln" in destination.navigation.secondary
+            assert provider.searches == ["2301 N Lincoln Ave, Chicago"]
+        finally:
+            session.cancel()
+            await task
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_name_still_goes_to_the_provider(self) -> None:
+        from joat.core.protocol import SavedPlace
+
+        saved = [SavedPlace(place_id="p1", name="Home", address="12 Oak St")]
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        provider = FakeProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "Cajun Corner", provider, transport, session_id="nav-test", places=lambda: saved,
+        )
+        task = asyncio.create_task(session.run())
+        try:
+            destination = await wait_for(transport, NavigationView)
+            assert isinstance(destination, NavigationView)
+            assert destination.navigation.primary == "Cajun Corner"
+            assert provider.searches == ["Cajun Corner"]
+        finally:
+            session.cancel()
+            await task

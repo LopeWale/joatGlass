@@ -20,7 +20,7 @@ import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Awaitable, Coroutine
+from collections.abc import Awaitable, Coroutine, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone, tzinfo
@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ..channels.cards import Card, CardLog
 from ..channels.imessage import IMessageStore, MessageEntry, MessageHistoryPage, MessageThread
 from ..core.protocol import (
+    SavedPlace,
     VOICE_REQUEST_PREFIX,
     AgentTerminalHudView,
     BrainstormHudView,
@@ -232,8 +233,10 @@ _NOTE_CONTROLS: tuple[tuple[str, str], ...] = (
     ("● Record a voice note", "start"),
     ("✎ Dictate a note", "dictate"),
 )
-#: The Navigation page's one control; the row asks for the place itself.
+#: The Navigation page's open control; the row asks for the place itself.
 _NAVIGATION_CONTROL_ROW = "➤ Navigate to a place"
+#: Saved places listed above it; the firmware list holds 20 rows.
+_NAVIGATION_PLACE_ROWS = 16
 #: The conversation page's reply control, drawn after the messages.
 _REPLY_CONTROL_ROW = "✎ Reply"
 #: ask(question, field, consume) -> published; PromptedSpeechRuntime.ask_capability.
@@ -365,12 +368,17 @@ class CapabilityRouter:
         complete_reminder: Callable[[str], Awaitable[str | None]] | None = None,
         ask: AskWearer | None = None,
         navigate: Callable[[str], Awaitable[str | None]] | None = None,
+        places: Callable[[], Sequence[SavedPlace]] | None = None,
     ) -> None:
         self._hud = hud
         # A tapped control row asks its own question on the lens and routes
         # the answer; `navigate` starts a route to a spoken destination.
         self._ask = ask
         self._navigate = navigate
+        # The wearer's saved places (phone page), listed first on the
+        # Navigation page so a tap on "Home" starts the route outright.
+        self._places = places
+        self._place_rows: list[SavedPlace] = []
         # Defaults to this Mac's zone, which is exactly the pre-wearer-zone
         # behaviour for any construction that does not inject one.
         self._wearer_zone = wearer_zone or WearerZone(system_home_zone)
@@ -2605,21 +2613,36 @@ class CapabilityRouter:
         from becoming a destination. The NavigationSession then resolves and
         shows the canonical place before any routing begins.
         """
+        places = list(self._places()) if self._places is not None else []
+        # The saved places first, each one tap from a route; the open
+        # question last. Both fit a firmware list's rows with room to spare.
+        self._place_rows = places[:_NAVIGATION_PLACE_ROWS]
+        rows = [f"➤ {place.name}" for place in self._place_rows] + [
+            _NAVIGATION_CONTROL_ROW,
+            "I’ll confirm the place. Then choose Walk or Cycle."
+            if not self._place_rows
+            else "Add places on the phone page.",
+        ]
         await self._show_focus(
             "NAVIGATION",
-            [
-                _NAVIGATION_CONTROL_ROW,
-                "I’ll confirm the place. Then choose Walk or Cycle.",
-            ],
+            rows,
             hint="tap: choose · left x2: back",
             selectable=True,
         )
 
     async def _select_navigation(self, index: int) -> None:
-        """The tapped control row asks "Where to?" and starts the route."""
-        if index != 0:
-            return
+        """A saved place starts its route; the control row asks "Where to?"."""
         navigate = self._navigate
+        if index < len(self._place_rows):
+            if navigate is None:
+                await self._hud.receipt("Navigation cannot be started from this Mac.")
+                return
+            receipt = await navigate(self._place_rows[index].name)
+            if receipt:
+                await self._hud.receipt(receipt)
+            return
+        if index != len(self._place_rows):
+            return
         if self._ask is None or navigate is None:
             await self._hud.receipt("Navigation cannot be started from this Mac.")
             return

@@ -1728,9 +1728,48 @@ export interface NavigationMapProjection {
 }
 
 /** Project the route onto the Mac-rendered panel, so line meets road. */
+/** What a projection needs from a tile: where it is centred and how far in. */
+export type NavigationMapCentre = Pick<NavigationMapPanelModel, 'latitude' | 'longitude' | 'zoom'>;
+
+/** The map's own zoom: the Mac's tiles are rendered at it (map_image.py). */
+const NAVIGATION_MAP_ZOOM = 16;
+
+/**
+ * Where to centre the pane when no street tile has arrived: on the wearer
+ * at the tiles' own zoom, so the frame does not jump when a tile does
+ * arrive; before the first fix, on the whole route, zoomed to fit it.
+ * Until 2026-10-05 the pane simply disappeared without a tile — the
+ * "bare route shape" the comments promised was never reachable — so any
+ * Mapbox failure took the map away entirely.
+ */
+export function navigationMapFallbackCentre(map: NavigationMapModel): NavigationMapCentre | undefined {
+  if (map.geometry.length < 2) return undefined;
+  if (map.position) {
+    return { latitude: map.position.latitude, longitude: map.position.longitude, zoom: NAVIGATION_MAP_ZOOM };
+  }
+  const latitudes = map.geometry.map((point) => point.latitude);
+  const longitudes = map.geometry.map((point) => point.longitude);
+  const centre = {
+    latitude: (Math.min(...latitudes) + Math.max(...latitudes)) / 2,
+    longitude: (Math.min(...longitudes) + Math.max(...longitudes)) / 2,
+  };
+  // Zoom out until the route's bounding box fits the pane, at most to a
+  // district-scale 12; the fit is checked by projecting, not estimated.
+  for (let zoom = NAVIGATION_MAP_ZOOM; zoom > 12; zoom -= 1) {
+    const probe = { ...centre, zoom };
+    const fits = map.geometry.every((point) => {
+      const [x, y] = projectMercatorPanel(point, probe, NAVIGATION_MAP_PANEL);
+      return x >= NAVIGATION_MAP_PANEL.x + 8 && x <= NAVIGATION_MAP_PANEL.x + NAVIGATION_MAP_PANEL.width - 8
+        && y >= NAVIGATION_MAP_PANEL.y + 8 && y <= NAVIGATION_MAP_PANEL.y + NAVIGATION_MAP_PANEL.height - 8;
+    });
+    if (fits) return probe;
+  }
+  return { ...centre, zoom: 12 };
+}
+
 export function projectNavigationMapToPanel(
   map: NavigationMapModel,
-  panel: NavigationMapPanelModel,
+  panel: NavigationMapCentre,
 ): NavigationMapProjection | undefined {
   if (map.geometry.length < 2) return undefined;
   const bounds = NAVIGATION_MAP_PANEL;
@@ -1750,7 +1789,7 @@ export function projectNavigationMapToPanel(
  */
 export function projectMercatorPanel(
   point: { latitude: number; longitude: number },
-  panel: NavigationMapPanelModel,
+  panel: NavigationMapCentre,
   bounds: { x: number; y: number; width: number; height: number },
 ): readonly [number, number] {
   const worldPixels = 512 * Math.pow(2, panel.zoom);
@@ -3929,13 +3968,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     navigation: NavigationHudModel,
   ): void {
     const panel = navigation.map?.panel;
-    const projection = navigation.map && panel
-      ? projectNavigationMapToPanel(navigation.map, panel)
+    const centre = navigation.map
+      ? (panel ?? navigationMapFallbackCentre(navigation.map))
+      : undefined;
+    const projection = navigation.map && centre
+      ? projectNavigationMapToPanel(navigation.map, centre)
       : undefined;
     // Four bands, as the reference HUD lays them out: the status spine, two
-    // panes side by side, and one fact line along the bottom. Without real
-    // streets there is nothing worth splitting the frame for, so the
-    // instruction simply takes the whole width.
+    // panes side by side, and one fact line along the bottom. The pane holds
+    // the streets when a tile has arrived and the route's own shape around
+    // the wearer when none has; only a route with no geometry at all gives
+    // the instruction the whole width.
     const actWidth = projection ? 236 : 504;
 
     context.textBaseline = 'middle';
