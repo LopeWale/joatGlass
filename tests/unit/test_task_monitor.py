@@ -424,3 +424,35 @@ def test_registration_is_idempotent_but_rejects_changed_due_time(tmp_path: Path)
             pass
         else:
             raise AssertionError("changed task data must conflict")
+
+
+async def test_a_tap_on_the_due_page_completes_the_reminder_behind_the_occurrence(
+    tmp_path: Path,
+) -> None:
+    completed: list[str] = []
+
+    async def complete(native_identifier: str) -> str | None:
+        completed.append(native_identifier)
+        return None
+
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        occurrences, occurrence = register(store)
+        monitor = TaskMonitor(occurrences, accepted_delivery([]), complete=complete)
+        assert await monitor.complete_from_glasses(occurrence.occurrence_id) is None
+        assert completed == ["eventkit-1"]
+        # An occurrence that is no longer tracked, or already done, writes nothing.
+        assert await monitor.complete_from_glasses("00000000-0000-4000-8000-000000000000") == (
+            "That reminder is no longer tracked. Open Planning again."
+        )
+        occurrences.mark_completed(occurrence.occurrence_id, now_us=20)
+        assert await monitor.complete_from_glasses(occurrence.occurrence_id) is None
+        assert completed == ["eventkit-1"]
+
+
+async def test_a_tap_without_a_completion_path_explains_itself(tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        occurrences, occurrence = register(store)
+        monitor = TaskMonitor(occurrences, accepted_delivery([]))
+        assert await monitor.complete_from_glasses(occurrence.occurrence_id) == (
+            "Reminder completion is unavailable. Open JOAT on the Mac."
+        )

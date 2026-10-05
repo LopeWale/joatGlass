@@ -60,6 +60,7 @@ from joat.core.protocol import (
     ProductivityHudView,
     ProductivityViewAck,
     ReminderDueAck,
+    ReminderDueComplete,
     Input,
     Policy,
     ProtocolError,
@@ -928,6 +929,25 @@ class TestDownlinkWire:
             generation=7,
             outcome="accepted",
         )
+        # The tap on the due page carries the same opaque binding, nothing else.
+        completion = {
+            "kind": "reminder_due.complete",
+            "reminderDueId": reminder_due_id,
+            "reminderDueAttemptId": attempt_id,
+            "generation": 7,
+        }
+        assert parse_uplink(completion) == ReminderDueComplete(
+            reminder_due_id=reminder_due_id,
+            reminder_due_attempt_id=attempt_id,
+            generation=7,
+        )
+        for broken in (
+            {**completion, "reminderDueId": "private title"},
+            {**completion, "generation": -1},
+            {**completion, "title": "Private reminder"},
+        ):
+            with pytest.raises(ProtocolError):
+                parse_uplink(broken)
 
     def test_verifying_view_receipt_is_content_free_and_phase_bound(self) -> None:
         receipt_id = "a76b12f1-45e4-41fd-aed8-086f6b6b1954"

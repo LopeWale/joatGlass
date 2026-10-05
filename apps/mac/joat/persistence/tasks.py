@@ -151,6 +151,11 @@ class TaskOccurrenceStore:
             )
             return self._get_with(db, occurrence_id)
 
+    def get(self, occurrence_id: str) -> TaskOccurrence:
+        """One occurrence by its opaque id; raises when it does not exist."""
+        with self._store.transaction() as db:
+            return self._get_with(db, occurrence_id)
+
     def mark_completed(self, occurrence_id: str, *, now_us: int) -> TaskOccurrence:
         with self._store.transaction() as db:
             current = self._get_with(db, occurrence_id)

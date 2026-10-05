@@ -390,6 +390,22 @@ class ReminderDueAck:
 
 
 @dataclass(frozen=True, slots=True)
+class ReminderDueComplete:
+    """The wearer tapped the due Reminder page: complete that occurrence.
+
+    Bound like the acknowledgement: the same opaque occurrence and attempt
+    UUIDs and the connection generation the due view was accepted under, so
+    a late or forged tap can neither complete another reminder nor one the
+    current client never showed. Completion itself still runs the confirmed
+    productivity flow on the Mac.
+    """
+
+    reminder_due_id: str
+    reminder_due_attempt_id: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProductivityViewAck:
     """Current-client receipt for an opaque verifying HUD operation.
 
@@ -438,8 +454,8 @@ UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
-    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ProductivityViewAck
-    | PromptAck | PromptCancel
+    | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ReminderDueComplete
+    | ProductivityViewAck | PromptAck | PromptCancel
 )
 
 
@@ -2547,6 +2563,18 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 source=source,
                 success=success,
                 audio_epoch=epoch,
+            )
+        case "reminder_due.complete":
+            if set(payload) != {"kind", "reminderDueId", "reminderDueAttemptId", "generation"}:
+                raise ProtocolError("reminder due completion has unsupported fields")
+            return ReminderDueComplete(
+                reminder_due_id=_reminder_due_identifier(
+                    _require(payload, "reminderDueId", kind),
+                ),
+                reminder_due_attempt_id=_reminder_due_identifier(
+                    _require(payload, "reminderDueAttemptId", kind),
+                ),
+                generation=_navigation_generation(_require(payload, "generation", kind)),
             )
         case "reminder_due.ack":
             if set(payload) != {

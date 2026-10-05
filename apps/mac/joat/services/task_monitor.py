@@ -19,7 +19,7 @@ from ..native.bridge import (
     NativeBridgeProtocolError,
     NativeBridgeUnavailable,
 )
-from ..persistence.tasks import TaskOccurrence, TaskOccurrenceStore
+from ..persistence.tasks import TaskOccurrence, TaskOccurrenceError, TaskOccurrenceStore
 
 log = logging.getLogger(__name__)
 
@@ -199,11 +199,15 @@ class TaskMonitor:
             [TaskOccurrence], Awaitable[ReminderNativeState | None]
         ] | None = None,
         card_log: CardLog | None = None,
+        complete: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         if poll_interval_s <= 0:
             raise ValueError("poll interval must be positive")
         self._occurrences = occurrences
         self._deliver = deliver
+        # Completes the native Reminder behind an occurrence through the
+        # ordinary confirmed flow; a returned string is a preflight explanation.
+        self._complete = complete
         self._interval = poll_interval_s
         self._evaluate = evaluate
         # History only. Due reminders keep their own acknowledged delivery
@@ -211,6 +215,25 @@ class TaskMonitor:
         # notifications instead of in a separate silo.
         self._card_log = card_log
         self._running = False
+
+    async def complete_from_glasses(self, occurrence_id: str) -> str | None:
+        """The wearer tapped the due page: complete the Reminder behind it.
+
+        The gateway has already bound the tap to a due view this client
+        accepted. The occurrence names the native item; completing it runs
+        the same confirmed productivity flow the spoken "complete reminder"
+        does, so the glasses still ask before anything is written. A
+        returned string is what to show the wearer instead.
+        """
+        if self._complete is None:
+            return "Reminder completion is unavailable. Open JOAT on the Mac."
+        try:
+            occurrence = self._occurrences.get(occurrence_id)
+        except TaskOccurrenceError:
+            return "That reminder is no longer tracked. Open Planning again."
+        if occurrence.state == "completed":
+            return None
+        return await self._complete(occurrence.external_item_id)
 
     async def run(self) -> None:
         self._running = True
