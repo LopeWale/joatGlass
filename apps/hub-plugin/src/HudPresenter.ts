@@ -156,6 +156,10 @@ export interface ListSurfaceOptions {
   railTab?: PanelContentTab;
   /** Opt into the firmware-owned list and its native gesture cursor. */
   nativeFirmwareList?: boolean;
+  /** Show these rows as one firmware text page (a reader), paged in place. */
+  nativeTextPage?: boolean;
+  /** Open the text page on its last local page: the Mac answered a swipe up. */
+  nativeTextPageFromEnd?: boolean;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -170,6 +174,9 @@ interface ResolvedListSurfaceOptions {
   railTab?: PanelContentTab;
   /** This page is intentionally rendered by the G2 firmware list. */
   nativeFirmwareList?: boolean;
+  /** This page is a firmware text page when the visual surface can hand over. */
+  nativeTextPage?: boolean;
+  nativeTextPageFromEnd?: boolean;
 }
 
 interface HudContentState {
@@ -202,7 +209,24 @@ type DisplayPageOwner =
   | 'terminal-list-native'
   | 'terminal-conversation-native'
   | 'confirmation-native'
-  | 'overlay-native';
+  | 'overlay-native'
+  | 'prompt-native'
+  | 'text-page-native';
+
+/** Local paging state of a Mac-paged reader shown as a firmware text page. */
+interface NativeTextPageState {
+  /** The rows this page was paged from: a restore of the same rows resumes
+   * the page the wearer was reading; new rows start at the first page. */
+  source: string;
+  pages: string[];
+  page: number;
+  body: string;
+  hint: string;
+}
+
+function textPageHint(page: number, count: number, macHint: string): string {
+  return count > 1 ? `${page + 1}/${count} · ${macHint}` : macHint;
+}
 
 /** Split an answer into firmware pages with the installed glyph metrics. */
 export function paginateAnswer(
@@ -318,6 +342,7 @@ export class HudPresenter {
   private nativeOverlay?: { revision: number; pages: string[]; page: number; body: string; hint: string };
   private promptQuestion?: PromptQuestionState;
   private promptQuestionPaint?: Promise<boolean>;
+  private nativeTextPage?: NativeTextPageState;
   private actionOverlay?: ActionOverlayState;
   private nativeReplyPage = false;
   private assistantOverlayPaint?: Promise<boolean>;
@@ -431,6 +456,9 @@ export class HudPresenter {
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
       return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
     }
+    if (this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)) {
+      return this.renderNativeTextPage(this.surface);
+    }
     return this.restoreVisualPage();
   }
 
@@ -485,10 +513,17 @@ export class HudPresenter {
    * describes the page about to be shown: a menu deciding how the NEXT page
    * selects must not read the answer off the current one, or a raster
    * conversation opened from a firmware picker inherits the picker's cursor. */
-  usesCustomListSelection(next?: { nativeFirmwareList?: boolean }): boolean {
+  usesCustomListSelection(next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }): boolean {
     if (this.visual === undefined) return false;
-    if (next) return next.nativeFirmwareList !== true;
-    return !(this.surface.kind === 'list' && this.surface.options.nativeFirmwareList);
+    if (next) return next.nativeFirmwareList !== true && !this.usesNativeTextPage(next);
+    return !(this.surface.kind === 'list'
+      && (this.surface.options.nativeFirmwareList || this.usesNativeTextPage(this.surface.options)));
+  }
+
+  /** A reader is Even's own text page whenever the visual surface can hand
+   * the page over under its transition barrier; otherwise it stays raster. */
+  private usesNativeTextPage(options: { nativeTextPage?: boolean }): boolean {
+    return options.nativeTextPage === true && this.visual?.withPageTransition !== undefined;
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -652,7 +687,8 @@ export class HudPresenter {
       this.promptQuestionPaint = paint;
       return paint;
     }
-    if (!this.visual?.paintExact) return Promise.resolve(false);
+    const nativePrompt = this.visual?.withPageTransition !== undefined;
+    if (!this.visual?.paintExact && !nativePrompt) return Promise.resolve(false);
     if (this.assistantConversation.isActive()) {
       return this.prepareAssistantConversationHandoff().then((ready) => (
         ready ? this.showPromptQuestion(promptId, question, isCurrent, ownerKind) : false
@@ -668,10 +704,37 @@ export class HudPresenter {
     this.promptQuestion = prompt;
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
-    const paint = this.renderPromptQuestion(prompt, this.promptQuestionPaint);
+    const paint = nativePrompt
+      ? this.renderNativePromptQuestion(prompt, this.promptQuestionPaint)
+      : this.renderPromptQuestion(prompt, this.promptQuestionPaint);
     prompt.paint = paint;
     this.promptQuestionPaint = paint;
     return paint;
+  }
+
+  /** The question as Even's own text page: one rebuild in, and the retained
+   * feature (image page, firmware list or terminal) returns on dismissal.
+   * The raster prompt refused a question that did not fit its region; the
+   * text page refuses one that needs more than one firmware page. */
+  private async renderNativePromptQuestion(prompt: PromptQuestionState, previous?: Promise<boolean>): Promise<boolean> {
+    let painted = false;
+    try {
+      await previous?.catch(() => false);
+      await this.assistantOverlayPaint?.catch(() => false);
+      if (!this.isPromptCurrent(prompt)) return false;
+      const pages = paginateAnswer(prompt.question);
+      if (pages.length !== 1) return false;
+      const layout = this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.streams.get(ContainerId.StatusBar));
+      painted = await this.replaceNativePage(layout, 'prompt-native');
+      return painted && this.isPromptCurrent(prompt);
+    } catch {
+      return false;
+    } finally {
+      if ((!painted || !this.isPromptCurrent(prompt)) && this.promptQuestion === prompt) {
+        this.promptQuestion = undefined;
+        await this.restoreRetainedPage().catch(() => false);
+      }
+    }
   }
 
   async dismissPromptQuestion(promptId: string): Promise<boolean> {
@@ -688,6 +751,7 @@ export class HudPresenter {
     await prompt.paint?.catch(() => false);
     if (!displayCurrent()) return false;
     if (this.promptQuestion || this.confirmation) return false;
+    if (this.pageOwner === 'prompt-native') return this.restoreRetainedPage();
     return this.paintVisual();
   }
 
@@ -1221,6 +1285,11 @@ export class HudPresenter {
   ): Promise<boolean> {
     if (!await this.prepareAssistantConversationHandoff()) return false;
     if (!options.nativeFirmwareList && !await this.prepareNativeTerminalHandoff()) return false;
+    if (isCurrent && this.usesNativeTextPage(options)) {
+      return this.renderNativeTextPage({
+        kind: 'list', items: [...items], options: this.resolveListOptions(options), selectedIndex: 0,
+      }, isCurrent);
+    }
     if (isCurrent) return this.renderBoundList(items, options, isCurrent);
     const resolved = this.resolveListOptions(options);
     const surface: HudSurface = {
@@ -1252,6 +1321,76 @@ export class HudPresenter {
   /** Stage an owned raster list without adopting it before its exact receipt.
    * A failed or superseded upload leaves both the prior view and its Back
    * snapshot intact; it cannot become a deferred confirmation surface. */
+  /** A Mac-paged reader as one firmware text page. The Mac's rows are
+   * joined and re-paged for the firmware font; swipes page locally through
+   * `textContainerUpgrade`, and a swipe past the local edge is left to the
+   * menu, which asks the Mac for its neighbouring page exactly as before. */
+  private async renderNativeTextPage(
+    surface: Extract<HudSurface, { kind: 'list' }>,
+    isCurrent?: () => boolean,
+  ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    const current = () => displayCurrent() && !this.confirmation && !this.promptQuestion
+      && (isCurrent?.() ?? true);
+    if (!current()) return false;
+    const from = this.tracePage();
+    const liveStatus = this.captureLiveStatus();
+    const source = surface.items.join('\n');
+    const pages = paginateAnswer(source);
+    const page = this.nativeTextPage?.source === source
+      ? Math.min(this.nativeTextPage.page, pages.length - 1)
+      : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
+    const body = pages[page] ?? ' ';
+    const hint = textPageHint(page, pages.length, surface.options.hint);
+    const ok = await this.replaceNativePage(
+      this.layouts.textPageLayout(body, { status: liveStatus?.text, hint }), 'text-page-native',
+    );
+    if (!ok || !current()) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams), brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
+      };
+    }
+    this.clearActionOverlay();
+    this.resetAll();
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, surface.options.title);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, surface.options.hint);
+    this.brightness.set(ContainerId.Hint, 1);
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+    }
+    this.nativeTextPage = { source, pages, page, body, hint };
+    this.recordPageTransition(from, 'list', 'show_list', 'success');
+    return true;
+  }
+
+  /** Page the firmware text page locally. False at an edge, so the caller
+   * can ask the Mac for its neighbouring page. */
+  scrollTextPage(direction: 'up' | 'down'): boolean {
+    const state = this.nativeTextPage;
+    if (!state || this.pageOwner !== 'text-page-native' || this.surface.kind !== 'list'
+      || !this.usesNativeTextPage(this.surface.options)) return false;
+    const page = direction === 'down' ? state.page + 1 : state.page - 1;
+    if (page < 0 || page >= state.pages.length) return false;
+    const previous = { body: state.body, hint: state.hint };
+    state.page = page;
+    state.body = state.pages[page] ?? ' ';
+    state.hint = textPageHint(page, state.pages.length, this.surface.options.hint);
+    void (async () => {
+      await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body);
+      if (this.nativeTextPage !== state) return;
+      await this.upgradeNativeText(ContainerId.Hint, 'hint', state.hint, previous.hint);
+    })().catch(() => undefined);
+    return true;
+  }
+
   private async renderBoundList(
     items: string[], options: ListSurfaceOptions, isCurrent: () => boolean,
   ): Promise<boolean> {
@@ -1496,6 +1635,8 @@ export class HudPresenter {
       if (this.pageOwner === 'terminal-conversation-native') {
         if (prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList) {
           await this.replaceNativePage(this.nativeListLayout(prior.surface), 'terminal-list-native');
+        } else if (prior.surface.kind === 'list' && this.usesNativeTextPage(prior.surface.options)) {
+          await this.renderNativeTextPage(prior.surface);
         } else {
           await this.restoreVisualPage();
         }
@@ -1728,6 +1869,7 @@ export class HudPresenter {
   private async renderList(surface: Extract<HudSurface, { kind: 'list' }>): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    if (this.usesNativeTextPage(surface.options)) return this.renderNativeTextPage(surface);
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     // Agent selection is a firmware-owned list: its highlight and paging stay
@@ -2174,7 +2316,8 @@ export class HudPresenter {
     // first unless the prior page is itself firmware-owned, in which case its
     // own replacement below moves the page directly.
     if (this.pageOwner === 'confirmation-native'
-      && !(prior.surface.kind === 'list' && prior.surface.options.nativeFirmwareList)
+      && !(prior.surface.kind === 'list'
+        && (prior.surface.options.nativeFirmwareList || this.usesNativeTextPage(prior.surface.options)))
       && !await this.rebuildVisualPage()) {
       this.recordPageTransition('confirmation', this.tracePage(), 'dismiss_confirmation', 'failed');
       return false;
@@ -2558,6 +2701,8 @@ export class HudPresenter {
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
       ...(options.nativeFirmwareList ? { nativeFirmwareList: true } : {}),
+      ...(options.nativeTextPage ? { nativeTextPage: true } : {}),
+      ...(options.nativeTextPage && options.nativeTextPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
       ...(planningEntries ? { planningEntries } : {}),
@@ -2698,6 +2843,9 @@ export class HudPresenter {
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
       return this.replaceNativePage(this.nativeListLayout(this.surface), 'terminal-list-native');
+    }
+    if (this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)) {
+      return this.renderNativeTextPage(this.surface);
     }
     return this.paintVisual();
   }

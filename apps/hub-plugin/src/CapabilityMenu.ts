@@ -37,6 +37,9 @@ const FIRMWARE_LIST_TITLES: ReadonlySet<string> = new Set([
   'AGENT TERMINAL', 'MESSAGES', 'ACTIVITY',
 ]);
 
+/** Readers drawn as one firmware text page instead of four image tiles. */
+const TEXT_PAGE_TITLES = new Set(['MESSAGES · MESSAGE']);
+
 export function usesFirmwareList(title: string | undefined): boolean {
   return title !== undefined && FIRMWARE_LIST_TITLES.has(title.trim().toUpperCase());
 }
@@ -67,6 +70,8 @@ interface DataSurfaceSnapshot {
   planningNavigation?: { canGoBack: boolean; selectedIndex: number };
   /** Firmware-list conversation: the rows whose tap pages the thread. */
   pageControls?: { newerIndex?: number; olderIndex?: number };
+  /** A reader shown as one firmware text page, paged locally by swipe. */
+  nativeTextPage?: boolean;
   readerPage?: { id: string; index: number; count: number };
   quickNotesPage?: { index: number; count: number };
   title: string;
@@ -790,8 +795,17 @@ export class CapabilityMenu {
     const firmwareList = (usesFirmwareList(normalized)
       || (normalized === 'MESSAGES · CONVERSATION' && pageControls !== undefined))
       && !planningGrid && !readerPage && !quickNotesPage;
-    const customSelection = (this.hud.usesCustomListSelection?.({ nativeFirmwareList: firmwareList }) ?? false)
-      && !firmwareList;
+    // The message reader is a firmware text page: Even draws the prose and
+    // the presenter pages it in place, so no raster prose pager is prepared.
+    const textPage = TEXT_PAGE_TITLES.has(normalized) && !firmwareList;
+    const customSelection = (this.hud.usesCustomListSelection?.({
+      nativeFirmwareList: firmwareList, nativeTextPage: textPage,
+    }) ?? false) && !firmwareList;
+    const nativeTextPage = textPage && !customSelection;
+    // The Mac answered a swipe up with its previous page: open on its last
+    // local page, as the raster prose pager did.
+    const textPageFromEnd = nativeTextPage && this.messagePageDirection < 0
+      && this.dataPagePending && this.dataSurface?.title === title;
     const messageRows = messagesState?.screen === 'conversation' && effectiveSelectable
       && customSelection
       ? items.flatMap((item, index) => parseMessagesConversationRow(item).kind !== 'instruction' ? [index] : [])
@@ -850,6 +864,8 @@ export class CapabilityMenu {
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
       ...(firmwareList ? { nativeFirmwareList: true } : {}),
+      ...(nativeTextPage ? { nativeTextPage: true } : {}),
+      ...(textPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -876,6 +892,7 @@ export class CapabilityMenu {
     this.dataSurface = {
       planningNavigation: planningOwner,
       ...(firmwareList && pageControls ? { pageControls: { ...pageControls } } : {}),
+      ...(nativeTextPage ? { nativeTextPage: true } : {}),
       title,
       quickNotesPage: archivePage,
       readerPage: preparedReader,
@@ -1234,6 +1251,10 @@ export class CapabilityMenu {
         : 0;
     if (delta === 0) return true;
     if (this.view === 'data') {
+      // A firmware text page pages itself first; past its edge the Mac's own
+      // footer decides whether a neighbouring page exists, as before.
+      if (this.dataSurface?.nativeTextPage
+        && this.hud.scrollTextPage?.(delta > 0 ? 'down' : 'up')) return true;
       if (this.usesOrderedSelection()) {
         this.moveRowSelection(delta, eventType);
         return true;
@@ -2274,10 +2295,17 @@ export class CapabilityMenu {
         paneIndex: 0,
       };
     }
+    // Back lands on the parent as the page type it was shown as: a firmware
+    // list (the Messages thread, Activity) or a text page keeps that type,
+    // or the return would redraw it as four image tiles.
+    const parentFirmwareList = (usesFirmwareList(parent.title) || parent.pageControls !== undefined)
+      && !parent.planningGrid && !parent.readerPage && !parent.quickNotesPage;
     const shown = await this.hud.showList(parent.messageProse
       ? this.noteDisplayItems(parent.items, parent.messageProse) : parent.items, {
       title: parent.title,
       initialSelectedIndex: this.dashboard ? 0 : parent.selectedIndex,
+      ...(parentFirmwareList ? { nativeFirmwareList: true } : {}),
+      ...(parent.nativeTextPage ? { nativeTextPage: true } : {}),
       contextLabel: parent.contextLabel,
       controlStartIndex: parent.controlStartIndex,
       planningEntries: parent.planningEntries,
@@ -2295,7 +2323,8 @@ export class CapabilityMenu {
     }
     // Rebuilding a list resets its visible cursor. Restore that cursor before
     // accepting a tap, so the highlighted row and the target stay identical.
-    if (parent.selectedIndex > 0 && !this.dashboard && !this.hud.usesCustomListSelection()) {
+    if (parent.selectedIndex > 0 && !this.dashboard && !parentFirmwareList && !parent.nativeTextPage
+      && !this.hud.usesCustomListSelection()) {
       const selected = await this.hud.setSelection(parent.selectedIndex);
       if (!this.isCurrentTransition(transition)) return;
       if (!selected) {

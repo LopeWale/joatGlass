@@ -772,6 +772,47 @@ describe('CapabilityMenu', () => {
     expect(listOptions[5]).not.toHaveProperty('nativeFirmwareList');
   });
 
+  it('draws the message reader as a firmware text page, pages it locally, then asks the Mac past its edge', async () => {
+    const { menu, hud, listOptions, lists, sent } = rig();
+    let localPages = 1;
+    hud.scrollTextPage = vi.fn((direction: 'up' | 'down') => {
+      if (direction === 'down' && localPages > 0) { localPages -= 1; return true; }
+      return false;
+    });
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
+    ));
+    await menu.openFromContextualMenu(0); // Messages
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
+    expect(menu.handleList(click(1))).toBe(true);
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION', ['Latest messages', 'Dele · Opening words', 'Say reply'], requestId, true,
+      'tap read · say reply · left x2: back',
+    )).toBe(true);
+    menu.handleList(click(1));
+    const items = ['1/2 · From Dele', 'Opening words of a long message'];
+    expect(await menu.presentList(
+      'MESSAGES · MESSAGE', items, requestId, false, 'down more · say reply · left x2: back',
+    )).toBe(true);
+    // The rows go to the presenter untouched (no raster prose pager) with the opt-in.
+    expect(lists[lists.length - 1]).toEqual(items);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'MESSAGES · MESSAGE', nativeTextPage: true });
+
+    const before = sent.length;
+    // First swipe: the text page turns its own page; nothing goes to the Mac.
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(before);
+    // Past the local edge the Mac's footer offers "down more", so the Mac is asked.
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(before + 1);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input',
+      event: { containerName: 'cappage', selectedName: 'MESSAGES', eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId },
+    });
+  });
+
   it('draws a conversation with paging rows as a firmware list and turns their taps into page requests', async () => {
     const { menu, listOptions, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages

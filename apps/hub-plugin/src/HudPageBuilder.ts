@@ -47,6 +47,9 @@ const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
  */
 export const LIST_ROW_MAX_UTF8_BYTES = 63;
 
+/** The raster prompt's footer, kept word for word on the text page. */
+export const PROMPT_QUESTION_HINT = 'speak your answer · double-click: cancel';
+
 /** Cut on a code-point boundary so the row stays under the host's byte cap. */
 export function clampUtf8Bytes(text: string, maxBytes: number): string {
   let bytes = 0;
@@ -592,6 +595,24 @@ export class HudPageBuilder {
           pxTruncate((chrome.hint ?? 'tap: dismiss').slice(0, 96), REGION_TEXT_WIDTH),
         ),
       ],
+    });
+  }
+
+  /** A Mac-paged reader (a Messages message, a note) as Even's own text
+   * page: the same three containers as an answer, so the presenter can page
+   * it in place with `textContainerUpgrade`. */
+  textPageLayout(
+    body: string,
+    chrome: { status?: string; hint?: string } = {},
+  ): RebuildPageContainer {
+    return this.assistantAnswerLayout(body, chrome);
+  }
+
+  /** One complete application question ("What should I say?") as a text
+   * page. The wearer answers by voice, so the only chrome is the cancel. */
+  promptQuestionLayout(question: string, status?: string): RebuildPageContainer {
+    return this.assistantAnswerLayout(question, {
+      status, hint: PROMPT_QUESTION_HINT,
     });
   }
 
