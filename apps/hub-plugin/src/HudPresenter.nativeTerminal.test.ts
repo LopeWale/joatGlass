@@ -236,11 +236,4 @@ describe('HudPresenter Brainstorm on the native page', () => {
     expect(since.filter((op) => op.startsWith('rebuild:0:1:4') || op.startsWith('visual:'))).toHaveLength(0);
   });
 
-  it('keeps the raster transcript when the visual surface has no transition barrier', async () => {
-    const r = rig();
-    delete (r.visual as { withPageTransition?: unknown }).withPageTransition;
-    expect(await r.hud.showBrainstorm(session)).toBe(true);
-    expect(r.rebuilds).toHaveLength(0);
-    expect(last(r.frames)).toMatchObject({ kind: 'brainstorm' });
-  });
 });

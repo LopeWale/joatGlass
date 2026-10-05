@@ -131,28 +131,7 @@ describe('consistent custom News and Search surface', () => {
     expect(h.rebuilds).toEqual([]);
   });
 
-  it('restores the selected News row after confirmation without entering a native page', async () => {
-    const h = harness();
-    await openNews(h);
-    await h.hud.setSelection(1);
-    expect(await h.hud.showConfirmation('Send this message?', 'gate-1')).toBe(true);
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'confirmation' });
-    await h.hud.dismissConfirmation('gate-1');
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-    expect(h.rebuilds).toEqual([]);
-  });
 
-  it('keeps an exact question dominant over News updates and restores the current custom list on cancel', async () => {
-    const h = harness();
-    await openNews(h);
-    await h.hud.setSelection(1);
-    expect(await h.hud.showPromptQuestion('prompt-one', 'What should the message say?', () => true)).toBe(true);
-    await h.hud.showText('9:42  JOAT ready', ContainerId.StatusBar);
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'prompt_question', promptId: 'prompt-one' });
-    await h.hud.dismissPromptQuestion('prompt-one');
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-    expect(h.rebuilds).toEqual([]);
-  });
 
   it('heals a refused custom frame using the image layout, never a firmware News list', async () => {
     // The self-heal rebuild is a page replacement, so it needs the barrier.

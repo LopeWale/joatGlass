@@ -12,9 +12,9 @@ import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import {
   AssistantConversationSurface,
   validAssistantConversationSnapshot,
-  wrapConversationText,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
+import { paginateMeasured } from './FirmwareText';
 import { ASSISTANT_ANSWER_PAGE, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, nativeStatusLine } from './HudStatus';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
@@ -35,7 +35,6 @@ import {
   type PanelContentTab,
   type PanelTab,
   type PlanningGridCell,
-  type ProductivityHudDomain,
   type PromptOwnerKind,
   type ProductivityHudModel,
 } from './types';
@@ -258,18 +257,15 @@ function textPageHint(page: number, count: number, macHint: string): string {
   return count > 1 ? `${page + 1}/${count} · ${hint}` : hint;
 }
 
-/** Split an answer into firmware pages with the installed glyph metrics. */
+/** An answer, a reader or a question as firmware pages: the firmware wraps
+ * each page's words at its own break points, and `measureTextWrap` decides
+ * how many a page holds (FirmwareText). */
 export function paginateAnswer(
   text: string,
   lineCapacity: number = ASSISTANT_ANSWER_PAGE.lineCapacity,
   width: number = ASSISTANT_ANSWER_PAGE.textWidth,
 ): string[] {
-  const rows = wrapConversationText(text, width);
-  const pages: string[] = [];
-  for (let start = 0; start < rows.length; start += lineCapacity) {
-    pages.push(rows.slice(start, start + lineCapacity).join('\n'));
-  }
-  return pages.length > 0 ? pages : [' '];
+  return paginateMeasured(text, width, lineCapacity);
 }
 
 function answerPageHint(page: number, count: number): string {
@@ -491,8 +487,7 @@ export class HudPresenter {
   private async restoreRetainedPage(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
-    if (this.surface.kind === 'brainstorm'
-      && this.usesNativeConversation(this.surface.brainstorm)) {
+    if (this.surface.kind === 'brainstorm') {
       return this.nativeTerminal.present(this.surface.brainstorm,
         this.nativeHeader(this.nativePageTitle()), displayCurrent);
     }
@@ -502,11 +497,11 @@ export class HudPresenter {
     if (this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)) {
       return this.renderNativeTextPage(this.surface);
     }
-    if (this.surface.kind === 'productivity' && this.visual?.withPageTransition !== undefined
+    if (this.surface.kind === 'productivity'
       && !usesActionPillLayout(this.surface.productivity.phase)) {
       return this.renderNativeProductivityPage(this.surface);
     }
-    if (this.surface.kind === 'navigation' && this.visual?.withPageTransition !== undefined) {
+    if (this.surface.kind === 'navigation') {
       const native = navigationNativeBody(this.surface.navigation);
       if (native !== undefined) return this.renderNativeNavigationPage(this.surface, native);
     }
@@ -521,9 +516,6 @@ export class HudPresenter {
     this.client.suspendDisplay?.();
     this.visual?.suspendDisplay?.();
     this.guardedListPaintRevision += 1;
-    if (this.thinkingTicker !== undefined) clearTimeout(this.thinkingTicker);
-    this.thinkingTicker = undefined;
-    this.thinkingTicks = 0;
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
     this.assistantOverlayPaint = undefined;
@@ -571,19 +563,10 @@ export class HudPresenter {
       && (this.surface.options.nativeFirmwareList || this.usesNativeTextPage(this.surface.options)));
   }
 
-  /** The Agent Terminal is always Even's own text page. A Brainstorm is the
-   * same page whenever the visual surface can hand the page over under its
-   * transition barrier (or there is no visual surface); otherwise it keeps
-   * the raster transcript. */
-  private usesNativeConversation(brainstorm: Pick<BrainstormHudModel, 'screen'>): boolean {
-    if (brainstorm.screen === 'agent_terminal') return true;
-    return this.visual === undefined || this.visual.withPageTransition !== undefined;
-  }
-
-  /** A reader is Even's own text page whenever the visual surface can hand
-   * the page over under its transition barrier; otherwise it stays raster. */
+  /** A reader is Even's own text page over the visual HUD; the text
+   * compatibility surface (no visual HUD) shows it as its text layout. */
   private usesNativeTextPage(options: { nativeTextPage?: boolean }): boolean {
-    return options.nativeTextPage === true && this.visual?.withPageTransition !== undefined;
+    return options.nativeTextPage === true && this.visual !== undefined;
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -747,8 +730,6 @@ export class HudPresenter {
       this.promptQuestionPaint = paint;
       return paint;
     }
-    const nativePrompt = this.visual?.withPageTransition !== undefined;
-    if (!this.visual?.paintExact && !nativePrompt) return Promise.resolve(false);
     if (this.assistantConversation.isActive()) {
       return this.prepareAssistantConversationHandoff().then((ready) => (
         ready ? this.showPromptQuestion(promptId, question, isCurrent, ownerKind) : false
@@ -764,9 +745,7 @@ export class HudPresenter {
     this.promptQuestion = prompt;
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
-    const paint = nativePrompt
-      ? this.renderNativePromptQuestion(prompt, this.promptQuestionPaint)
-      : this.renderPromptQuestion(prompt, this.promptQuestionPaint);
+    const paint = this.renderNativePromptQuestion(prompt, this.promptQuestionPaint);
     prompt.paint = paint;
     this.promptQuestionPaint = paint;
     return paint;
@@ -832,29 +811,6 @@ export class HudPresenter {
     }
   }
 
-  private async renderPromptQuestion(prompt: PromptQuestionState, previous?: Promise<boolean>): Promise<boolean> {
-    let painted = false;
-    try {
-      // Serialize prompt layout changes too, and drain an already-dispatched
-      // assistant frame before claiming an exact question receipt.
-      await previous?.catch(() => false);
-      await this.assistantOverlayPaint?.catch(() => false);
-      if (!this.isPromptCurrent(prompt) || !this.visual?.paintExact) return false;
-      if (!this.isPromptCurrent(prompt)) return false;
-      painted = await this.visual.paintExact(this.visualFrame(), () => this.isPromptCurrent(prompt));
-      return painted && this.isPromptCurrent(prompt);
-    } catch {
-      return false;
-    } finally {
-      if ((!painted || !this.isPromptCurrent(prompt)) && this.promptQuestion === prompt) {
-        this.promptQuestion = undefined;
-        // Recover the latest underlying content without converting that
-        // different frame's successful paint into a question acknowledgement.
-        await this.paintVisual().catch(() => false);
-      }
-    }
-  }
-
   /** JOAT replies leave the current feature intact; a question or consent
    * surface has priority over incidental assistant content. */
   async showAssistantOverlay(
@@ -885,7 +841,6 @@ export class HudPresenter {
     // Over a firmware page the overlay is a firmware page too (see
     // usesNativeAnswerPage); the image rebuild would be four wasted tiles.
     const overNativePage = !this.nativeTerminal.isActive()
-      && this.visual?.withPageTransition !== undefined
       && (NATIVE_CONTENT_OWNERS.has(this.pageOwner) || this.pageOwner === 'overlay-native');
     if (!overNativePage && !await this.prepareNativeTerminalHandoff()) return false;
     const current = this.assistantOverlay;
@@ -924,8 +879,6 @@ export class HudPresenter {
       }
       this.assistantOverlay = undefined;
       this.clearPanelTicker();
-      if (this.thinkingTicker !== undefined) clearTimeout(this.thinkingTicker);
-      this.thinkingTicker = undefined;
       if (!displayCurrent()) return false;
     }
     const presented = await this.assistantConversation.present(snapshot);
@@ -1051,9 +1004,7 @@ export class HudPresenter {
     // A multipage answer must remain until the wearer explicitly dismisses
     // it. Starting a timer on page one recreates the recorded loss even when
     // the hidden rows technically exist.
-    const pageCount = this.nativeOverlay !== undefined
-      ? this.nativeOverlay.pages.length
-      : (this.visual?.assistantOverlayPageCount?.() ?? 1);
+    const pageCount = this.nativeOverlay?.pages.length ?? 1;
     if (pageCount > 1) return true;
     overlay.dismissTimer = setTimeout(() => {
       if (this.assistantOverlay === overlay) void this.dismissAssistantOverlay();
@@ -1108,12 +1059,11 @@ export class HudPresenter {
     return paint;
   }
 
-  /** An answer over the visual HUD is Even's own text page whenever the
-   * surface can hand the page over under its transition barrier. Receipts
-   * stay on the image page: a short strip is two tiles, cheaper than a
-   * page swap and its four-tile return. */
+  /** An answer over the visual HUD is Even's own text page. Receipts stay
+   * on an image page: a short strip is two tiles, cheaper than a page swap
+   * and its four-tile return. */
   private usesNativeAnswerPage(): boolean {
-    if (this.visual?.withPageTransition === undefined || !this.assistantOverlay) return false;
+    if (this.visual === undefined || !this.assistantOverlay) return false;
     if (this.assistantOverlay.presentation === 'answer') return true;
     // A receipt over a page the firmware owns is a firmware page as well:
     // one rebuild in, and the retained page comes back on dismissal.
@@ -1238,9 +1188,6 @@ export class HudPresenter {
         void this.paintAssistantOverlayNow();
       }
       return true;
-    }
-    if (this.visual?.scrollAssistantOverlay?.(direction)) {
-      void this.paintAssistantOverlayNow();
     }
     return true;
   }
@@ -1421,7 +1368,9 @@ export class HudPresenter {
         kind: 'list', items: [...items], options: this.resolveListOptions(options), selectedIndex: 0,
       }, isCurrent);
     }
-    if (isCurrent) return this.renderBoundList(items, options, isCurrent);
+    if (isCurrent) {
+      try { if (!isCurrent()) return false; } catch { return false; }
+    }
     const resolved = this.resolveListOptions(options);
     const surface: HudSurface = {
       kind: 'list', items: [...items], options: resolved,
@@ -1525,59 +1474,6 @@ export class HudPresenter {
     return true;
   }
 
-  private async renderBoundList(
-    items: string[], options: ListSurfaceOptions, isCurrent: () => boolean,
-  ): Promise<boolean> {
-    if (!this.visual?.paintExact || this.confirmation || this.promptQuestion) return false;
-    const priorSurface = this.surface;
-    const surface: Extract<HudSurface, { kind: 'list' }> = {
-      kind: 'list', items: [...items], options: this.resolveListOptions(options),
-      selectedIndex: this.initialListSelection(items, options),
-    };
-    const revision = ++this.guardedListPaintRevision;
-    let committed = false;
-    const current = () => {
-      try {
-        return revision === this.guardedListPaintRevision && isCurrent()
-          && !this.confirmation && !this.promptQuestion
-          && this.surface === (committed ? surface : priorSurface);
-      } catch { return false; }
-    };
-    if (!current()) return false;
-    const frame: HudVisualFrame = {
-      kind: 'list', status: this.streams.get(ContainerId.StatusBar) ?? '', micOn: this.micOn,
-      title: surface.options.title, items: [...surface.items], selectedIndex: surface.selectedIndex,
-      contextLabel: surface.options.contextLabel,
-      controlStartIndex: surface.options.controlStartIndex,
-      planningEntries: surface.options.planningEntries,
-      selectable: surface.options.selectable, hint: surface.options.hint,
-      planningGrid: surface.options.planningGrid, planningPane: surface.options.planningPane,
-      ...(surface.options.railTab ? { rail: this.rail.visualFor(surface.options.railTab) } : {}),
-    };
-    let painted = false;
-    try { painted = await this.visual.paintExact(frame, current); } catch { /* No exact receipt. */ }
-    if (!painted || !current()) return false;
-    const liveStatus = this.captureLiveStatus();
-    if (priorSurface.kind === 'default' && !this.focusReturn) {
-      this.focusReturn = {
-        streams: new Map(this.streams), brightness: new Map(this.brightness), kinds: new Map(this.kinds), notificationId: this.notificationId,
-      };
-    }
-    this.clearActionOverlay();
-    this.resetAll();
-    committed = true;
-    this.surface = surface;
-    this.streams.set(ContainerId.Main, surface.options.title);
-    this.brightness.set(ContainerId.Main, 4);
-    this.streams.set(ContainerId.Hint, surface.options.hint);
-    this.brightness.set(ContainerId.Hint, 1);
-    if (liveStatus) {
-      this.streams.set(ContainerId.StatusBar, liveStatus.text);
-      if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-    }
-    return true;
-  }
-
   /** Paint a complete navigation snapshot. The Mac/session owns the state;
    * this presenter only gives it exclusive focus and exact restoration. */
   /** A retained route does not own input over a different visible feature. */
@@ -1592,9 +1488,11 @@ export class HudPresenter {
     // the preview, the warnings, arrival, an error) is a text card: Even's
     // own text page, one rebuild in and an in-place upgrade for a cursor
     // move. Only the guidance frame with its map is pixels.
-    const native = this.visual.withPageTransition !== undefined && !this.nativeTerminal.isActive()
-      ? navigationNativeBody(navigation) : undefined;
-    if (native === undefined && !await this.prepareNativeTerminalHandoff()) return false;
+    const native = navigationNativeBody(navigation);
+    // The map rebuilds the image page; a text page replaces whatever page is
+    // on the glass directly, unless the terminal must hand over first.
+    if ((native === undefined || this.nativeTerminal.isActive())
+      && !await this.prepareNativeTerminalHandoff()) return false;
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
       kind: 'navigation',
@@ -1673,63 +1571,10 @@ export class HudPresenter {
   }
 
   /** Dedicated four-tile production page for a live Brainstorm or Hermes. */
-  private thinkingTicker?: ReturnType<typeof setTimeout>;
-
-  /** While the transcript tail is a silent "Thinking…" marker, repaint
-   * locally once a second so the elapsed counter moves.
-   *
-   * No frame arrives from the Mac until the collaborator produces a
-   * token — the engine used to compute this counter and re-ship a whole
-   * frame over BLE every three seconds, which the wearer spotted on
-   * sight: "it's only changing every three seconds … we're doing it the
-   * difficult way." Device-local animation is smooth and costs the link
-   * nothing. */
-  /** How long the counter has been ticking, so it can slow down. */
-  private thinkingTicks = 0;
-
-  /** Whole seconds of silence after which the counter stops needing to be
-   * precise. A turn measured against the real CLIs runs 12-40s, so a
-   * minute of silence means something is wrong, not slow — and past that
-   * the wearer is deciding whether to cancel, not reading digits. */
-  private static readonly THINKING_PRECISE_S = 60;
-
-  private armThinkingTicker(): void {
-    if (!this.displayActive) return;
-    if (this.thinkingTicker !== undefined) return;
-    if (this.surface.kind !== 'brainstorm') return;
-    if (!(this.visual?.transcriptIsThinking?.() ?? false)) {
-      this.thinkingTicks = 0;
-      return;
-    }
-    // Measured, not assumed: this costs ONE bridge write per tick. The
-    // engine's old version shipped a whole frame every three seconds, so
-    // at 1Hz this is 3x the writes — cheaper per update, more often, and
-    // unbounded for as long as a turn stays silent. A hung collaborator
-    // could hold the link at 1Hz indefinitely. So: one second while the
-    // number is worth reading, five after that.
-    this.thinkingTicks += 1;
-    const interval = this.thinkingTicks < HudPresenter.THINKING_PRECISE_S
-      ? 1000
-      : 5000;
-    this.thinkingTicker = setTimeout(() => {
-      this.thinkingTicker = undefined;
-      if (this.surface.kind !== 'brainstorm') return;
-      // localTick: only the counter's digits moved, so this repaint is
-      // NOT recorded as a wearer-visible frame receipt.
-      void this.paintVisual(true);
-    }, interval);
-  }
-
   /** Swipe on the brainstorm/terminal surface pages through history. */
   scrollTranscript(direction: 'up' | 'down'): boolean {
     if (this.surface.kind !== 'brainstorm') return false;
-    if (this.usesNativeConversation(this.surface.brainstorm)) {
-      return this.nativeTerminal.scroll(direction);
-    }
-    if (!this.visual) return false;
-    if (!(this.visual.scrollTranscript?.(direction) ?? false)) return true;
-    void this.paintVisual();
-    return true;
+    return this.nativeTerminal.scroll(direction);
   }
 
   async showBrainstorm(
@@ -1739,46 +1584,7 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (this.confirmation || (isCurrent && !isCurrent())) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (this.usesNativeConversation(brainstorm)) {
-      return this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
-    }
-    if (!this.visual || !await this.prepareNativeTerminalHandoff()) return false;
-    this.clearActionOverlay();
-    const prior = this.capturePresenterSnapshot();
-    const surface: HudSurface = {
-      kind: 'brainstorm',
-      brainstorm: this.cloneBrainstorm(brainstorm),
-    };
-    if (this.surface.kind === 'default' && !this.focusReturn) {
-      this.focusReturn = {
-        streams: new Map(this.streams),
-        brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds), notificationId: this.notificationId,
-      };
-    }
-    const liveStatus = statusOverride === undefined
-      ? this.captureLiveStatus()
-      : { text: statusOverride, brightness: 2 };
-    this.resetAll();
-    this.surface = surface;
-    if (liveStatus) {
-      this.streams.set(ContainerId.StatusBar, liveStatus.text);
-      if (liveStatus.brightness !== undefined) {
-        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-      }
-    }
-    const stillCurrent = () => displayCurrent() && this.surface === surface && (isCurrent?.() ?? true);
-    const painted = isCurrent
-      ? await (this.visual.paintExact?.(this.visualFrame(), stillCurrent) ?? Promise.resolve(false))
-      : await this.paintVisual();
-    // A departed opening cannot acknowledge or restore its old snapshot over
-    // Home, another feature, or a newer Terminal selection.
-    if (!stillCurrent()) return false;
-    if (!painted) {
-      this.restorePresenterSnapshot(prior);
-      await this.paintRollbackSurface();
-    }
-    return painted;
+    return this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
   }
 
   private async showNativeTerminal(
@@ -1787,7 +1593,7 @@ export class HudPresenter {
     isCurrent?: () => boolean,
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
-    if (!displayCurrent() || !this.usesNativeConversation(terminal)) return false;
+    if (!displayCurrent()) return false;
     const prior = this.capturePresenterSnapshot();
     const wasActive = this.nativeTerminal.isActive();
     const surface: HudSurface = {
@@ -1852,8 +1658,7 @@ export class HudPresenter {
     // A firmware list or text page hands straight to the firmware page this
     // outcome becomes (a strip or a text page); recreating the four image
     // containers first was four tiles for nothing.
-    const stayNative = this.visual.withPageTransition !== undefined
-      && !this.nativeTerminal.isActive() && NATIVE_CONTENT_OWNERS.has(this.pageOwner);
+    const stayNative = !this.nativeTerminal.isActive() && NATIVE_CONTENT_OWNERS.has(this.pageOwner);
     if (!stayNative && !await this.prepareNativeTerminalHandoff()) return false;
     if (usesActionPillLayout(productivity.phase)) {
       return this.showActionPill(productivity, onDeferredProductivityVisible);
@@ -1871,35 +1676,7 @@ export class HudPresenter {
       this.confirmation.onDeferredProductivityVisible = onDeferredProductivityVisible;
       return true;
     }
-    if (this.visual.withPageTransition !== undefined) {
-      return this.renderNativeProductivityPage(surface, statusOverride);
-    }
-    const prior = this.capturePresenterSnapshot();
-    if (this.surface.kind === 'default' && !this.focusReturn) {
-      this.focusReturn = {
-        streams: new Map(this.streams),
-        brightness: new Map(this.brightness),
-        kinds: new Map(this.kinds), notificationId: this.notificationId,
-      };
-    }
-    const liveStatus = statusOverride === undefined
-      ? this.captureLiveStatus()
-      : { text: statusOverride, brightness: 2 };
-    this.resetAll();
-    this.surface = surface;
-    if (liveStatus) {
-      this.streams.set(ContainerId.StatusBar, liveStatus.text);
-      if (liveStatus.brightness !== undefined) {
-        this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-      }
-    }
-    const painted = await this.paintVisual();
-    if (!displayCurrent()) return false;
-    if (!painted) {
-      this.restorePresenterSnapshot(prior);
-      await this.paintRollbackSurface();
-    }
-    return painted;
+    return this.renderNativeProductivityPage(surface, statusOverride);
   }
 
   /** A Calendar or Reminders outcome page (failed, uncertain, due) as Even's
@@ -1962,7 +1739,7 @@ export class HudPresenter {
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
-    if (this.visual?.withPageTransition !== undefined && !this.confirmation
+    if (this.visual !== undefined && !this.confirmation
       && this.surface.kind !== 'productivity' && NATIVE_CONTENT_OWNERS.has(this.pageOwner)) {
       // The outcome over a firmware list (a saved reminder over the Planning
       // day) used to rebuild the four image containers and repaint the list
@@ -2404,7 +2181,6 @@ export class HudPresenter {
     isCurrent?: () => boolean,
   ): Promise<boolean> {
     if (isCurrent) {
-      if (!this.visual?.paintExact) return Promise.resolve(false);
       try { if (!isCurrent()) return Promise.resolve(false); } catch { return Promise.resolve(false); }
     }
     const priorPage = this.tracePage();
@@ -2479,62 +2255,10 @@ export class HudPresenter {
       return false;
     }
     const liveStatus = this.captureLiveStatus();
-    // The decision gate is a firmware text page whenever the visual surface
-    // can hand the page over under its transition barrier: one
-    // rebuildPageContainer (~165 ms) instead of four forced image tiles at
-    // 0.2–2 s each, so "Send to X?" is readable before the Mac's
-    // confirmation envelope has been spent on pixels. A visual surface
-    // without that barrier keeps the exact raster gate below.
-    if (this.visual && !this.visual.withPageTransition) {
-      this.resetAll();
-      this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
-      this.streams.set(ContainerId.Context, 'TAP · confirm   SWIPE · cancel');
-      this.streams.set(ContainerId.Tray, '');
-      this.streams.set(ContainerId.Hint, '8 seconds · timeout cancels');
-      if (liveStatus) {
-        this.streams.set(ContainerId.StatusBar, liveStatus.text);
-        if (liveStatus.brightness !== undefined) {
-          this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-        }
-      }
-      const painted = (await this.paintVisual()) && (!current.isCurrent || this.isConfirmationCurrent(current));
-      if (!displayCurrent()) return false;
-      if (!painted && current.isCurrent) {
-        // A failed or retired exact preview cannot keep an invisible gate.
-        // Restore only this claim; a successor owns its own return surface.
-        if (this.confirmation === current) {
-          this.confirmation = undefined;
-          await this.restoreAfterConfirmation(current);
-        }
-        this.recordPageTransition(from, 'confirmation', 'show_confirmation', 'failed');
-        return false;
-      }
-      if (!painted && openedHere && this.confirmation?.id === id) {
-        // A failed first paint must not leave an invisible decision gate owning
-        // every later content update. Restore the logical surface snapshot so
-        // the next healthy frame can recover, while still returning false so
-        // the IMU/tap gate never activates.
-        this.confirmation = undefined;
-        this.surface = this.cloneSurface(current.surface);
-        this.streams = new Map(current.streams);
-        this.brightness = new Map(current.brightness);
-        this.kinds = new Map(current.kinds);
-        this.notificationId = current.notificationId;
-        this.paintedNotificationId = undefined;
-        // One failed tile can leave a torn confirmation visible even though
-        // the logical gate has rolled back. Actively repaint the complete
-        // prior frame before returning failure to the input gate.
-        if (liveStatus) {
-          this.streams.set(ContainerId.StatusBar, liveStatus.text);
-          if (liveStatus.brightness !== undefined) {
-            this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
-          }
-        }
-        await this.paintVisual();
-      }
-      this.recordPageTransition(from, 'confirmation', 'show_confirmation', painted ? 'success' : 'failed');
-      return painted;
-    }
+    // The decision gate is a firmware text page: one rebuildPageContainer
+    // (~165 ms) instead of four forced image tiles at 0.2–2 s each, so
+    // "Send to X?" is readable before the Mac's confirmation envelope has
+    // been spent on pixels.
     const layout = this.layouts.confirmationLayout(
       current.prompt, this.visual ? this.nativeHeader(this.nativePageTitle()) : liveStatus?.text,
     );
@@ -3010,30 +2734,9 @@ export class HudPresenter {
 
   private baseVisualFrame(): HudVisualFrame {
     const status = this.streams.get(ContainerId.StatusBar) ?? '';
-    if (this.confirmation) {
-      return {
-        kind: 'confirmation',
-        status,
-        micOn: this.micOn,
-        prompt: this.confirmation.prompt,
-        reviewDomain: this.productivityReviewDomain(this.confirmation.prompt),
-        ...(this.confirmation.diagnosticKind
-          ? { diagnosticKind: this.confirmation.diagnosticKind }
-          : {}),
-      };
-    }
-    if (this.promptQuestion) {
-      if (this.promptQuestion.inlineTerminal && this.surface.kind === 'brainstorm'
-        && this.surface.brainstorm.screen === 'agent_terminal') {
-        return {kind: 'brainstorm', status, micOn: this.micOn,
-          brainstorm: {...this.cloneBrainstorm(this.surface.brainstorm),
-            terminalPrompt: {id: this.promptQuestion.id, question: this.promptQuestion.question}}};
-      }
-      return {
-        kind: 'prompt_question', status, micOn: this.micOn,
-        promptId: this.promptQuestion.id, question: this.promptQuestion.question,
-      };
-    }
+    // A confirmation, a question, a conversation page and a Planning outcome
+    // are firmware pages; while one is on the glass the image page beneath
+    // is not painted (pageOwner), so this frame describes the retained page.
     if (this.surface.kind === 'list') {
       const railTab = this.surface.options.railTab;
       return this.withOverlays({
@@ -3059,22 +2762,6 @@ export class HudPresenter {
         status,
         micOn: this.micOn,
         navigation: this.cloneNavigation(this.surface.navigation),
-      });
-    }
-    if (this.surface.kind === 'brainstorm') {
-      return this.withOverlays({
-        kind: 'brainstorm',
-        status,
-        micOn: this.micOn,
-        brainstorm: this.cloneBrainstorm(this.surface.brainstorm),
-      });
-    }
-    if (this.surface.kind === 'productivity') {
-      return this.withOverlays({
-        kind: 'productivity',
-        status,
-        micOn: this.micOn,
-        productivity: this.cloneProductivity(this.surface.productivity),
       });
     }
     return this.withOverlays({
@@ -3129,8 +2816,7 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     this.visual?.forgetPage?.();
     if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
-    if (this.surface.kind === 'brainstorm'
-      && this.usesNativeConversation(this.surface.brainstorm)) {
+    if (this.surface.kind === 'brainstorm') {
       if (this.nativeTerminal.isActive()) return this.nativeTerminal.repaint();
       return this.nativeTerminal.present(this.surface.brainstorm,
         this.nativeHeader(this.nativePageTitle()), displayCurrent);
@@ -3150,7 +2836,6 @@ export class HudPresenter {
       if (this.visual) {
         const painted = await this.restoreRetainedPage();
         if (painted) {
-          this.armThinkingTicker();
           this.armPanelTicker();
         }
         return painted;
@@ -3203,20 +2888,9 @@ export class HudPresenter {
     if (this.assistantConversation.isActive() && !this.restoringAssistantConversation) return true;
     if (this.pageOwner !== 'visual') return true;
     if (!this.visual) return false;
-    const confirmation = this.confirmation;
-    if (confirmation?.isCurrent) {
-      if (!this.isConfirmationCurrent(confirmation)) return false;
-      try {
-        return await (this.visual.paintExact?.(this.visualFrame(), () => this.isConfirmationCurrent(confirmation))
-          ?? Promise.resolve(false));
-      } catch { return false; }
-    }
-    const prompt = this.promptQuestion;
-    // Incidental status/content paints must retain the same question owner,
-    // and must never heal to a different frame while reporting its success.
-    if (prompt) {
-      return this.visual.paintExact?.(this.visualFrame(), () => this.isPromptCurrent(prompt)) ?? false;
-    }
+    // A decision gate or a question on its way to the glass is a firmware
+    // page: the image page beneath it is not repainted while it is pending.
+    if (this.confirmation || this.promptQuestion) return true;
     const notificationId = this.hasVisibleNotification() ? this.notificationId : undefined;
     const ok = await this.visual.paint(this.visualFrame(), localTick);
     if (ok && displayCurrent() && notificationId === this.notificationId) {
@@ -3224,7 +2898,6 @@ export class HudPresenter {
     }
     if (!displayCurrent()) return false;
     // Keep the local elapsed counter moving between Mac frames.
-    this.armThinkingTicker();
     this.armPanelTicker();
     if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
     return ok;
@@ -3291,7 +2964,6 @@ export class HudPresenter {
     }
     const assistantConversation = this.assistantConversation.exportState();
     const nativeTerminal = this.surface.kind === 'brainstorm'
-      && this.usesNativeConversation(this.surface.brainstorm)
       ? this.nativeTerminal.exportState()
       : undefined;
     return {
@@ -3381,15 +3053,6 @@ export class HudPresenter {
 
   private cloneProductivity(productivity: ProductivityHudModel): ProductivityHudModel {
     return { ...productivity };
-  }
-
-  private productivityReviewDomain(prompt: string): ProductivityHudDomain | undefined {
-    const normalized = prompt.trim().toLowerCase();
-    if (normalized.startsWith('create event ')) return 'calendar';
-    if (normalized.startsWith('create reminder ') || normalized.startsWith('complete reminder ')) {
-      return 'reminders';
-    }
-    return undefined;
   }
 
   private resetAll(): void {

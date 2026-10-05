@@ -163,8 +163,6 @@ export type HudVisualFrame = HudVisualBaseFrame & {
 
 export interface HudFrameRenderer {
   measureAssistantConversationText?(text: string): number;
-  scrollAssistantOverlay?(direction: 'up' | 'down'): boolean;
-  assistantOverlayPageCount?(): number;
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   transcriptIsThinking?(): boolean;
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
@@ -181,10 +179,6 @@ export interface HudFramePainter {
   /** Measure JOAT's authored assistant face, so controller wrapping and
    * rendered pixels use one width contract rather than firmware text metrics. */
   measureAssistantConversationText?(text: string): number;
-  /** Move a transient assistant answer between complete measured pages. */
-  scrollAssistantOverlay?(direction: 'up' | 'down'): boolean;
-  /** Page count from the most recently rendered assistant answer. */
-  assistantOverlayPageCount?(): number;
   /** Move the brainstorm/terminal transcript window; true if it moved. */
   scrollTranscript?(direction: 'up' | 'down'): boolean;
   /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
@@ -506,14 +500,6 @@ export class HudVisualSurface implements HudFramePainter {
 
   scrollTranscript(direction: 'up' | 'down'): boolean {
     return this.renderer.scrollTranscript?.(direction) ?? false;
-  }
-
-  scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
-    return this.renderer.scrollAssistantOverlay?.(direction) ?? false;
-  }
-
-  assistantOverlayPageCount(): number {
-    return this.renderer.assistantOverlayPageCount?.() ?? 1;
   }
 
   measureAssistantConversationText(text: string): number {
