@@ -3,7 +3,7 @@ import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
-import type { BrainstormHudModel } from './types';
+import { ContainerId, type BrainstormHudModel } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
 function terminal(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudModel {
@@ -82,6 +82,8 @@ function last<T>(values: readonly T[]): T | undefined {
 describe('HudPresenter native Agent Terminal journey', () => {
   it('uses firmware list selection, one native terminal body, truthful paging, and explicit Back transitions', async () => {
     const r = rig();
+    expect(await r.hud.showText('9:41 JOAT listening bat 87%', ContainerId.StatusBar)).toBe(true);
+    const framesBeforeList = r.frames.length; // the status paint, before any native page
 
     expect(await r.hud.showList(['OpenClaw', 'Hermes'], {
       title: 'AGENT TERMINAL',
@@ -92,6 +94,10 @@ describe('HudPresenter native Agent Terminal journey', () => {
     expect(r.rebuilds).toHaveLength(1);
     expect(r.rebuilds[0]?.listObject).toHaveLength(1);
     expect(r.rebuilds[0]?.imageObject ?? []).toHaveLength(0);
+    // The firmware owns this page, so the live top line travels in the
+    // rebuild; a blank status container would hide the clock and battery.
+    expect(r.rebuilds[0]?.textObject?.find((c) => c.containerName === 'status')?.content)
+      .toBe('9:41 JOAT listening bat 87%');
     expect(r.hud.usesCustomListSelection()).toBe(false);
 
     expect(await r.hud.showBrainstorm(terminal())).toBe(true);
@@ -100,7 +106,7 @@ describe('HudPresenter native Agent Terminal journey', () => {
       'terminal-head', 'terminal-body',
     ]);
     expect(r.rebuilds[1]?.imageObject ?? []).toHaveLength(0);
-    expect(r.frames).toHaveLength(0);
+    expect(r.frames).toHaveLength(framesBeforeList);
     expect(r.hud.scrollTranscript('up')).toBe(false);
     expect(r.hud.scrollTranscript('down')).toBe(false);
 
