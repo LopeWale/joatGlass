@@ -17,8 +17,8 @@ import {
 } from './AssistantConversationSurface';
 import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
-import { usesActionPillLayout } from './HudCanvasRenderer';
-import type { NavigationHudModel } from './NavigationHud';
+import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
+import { navigationNativeBody, type NavigationHudModel } from './NavigationHud';
 import {
   PanelRail,
   pomodoroTickDelayMs,
@@ -212,7 +212,21 @@ type DisplayPageOwner =
   | 'confirmation-native'
   | 'overlay-native'
   | 'prompt-native'
-  | 'text-page-native';
+  | 'text-page-native'
+  | 'navigation-native';
+
+/** Firmware pages that hold JOAT content of their own (a list, a reader, a
+ * navigation card). An image paint over one of them must recreate the four
+ * image containers first; a receipt or an outcome strip over one of them is
+ * drawn as a firmware page instead, because an image strip cannot land on
+ * a page that has no image containers and a rebuild costs four tiles. */
+const NATIVE_CONTENT_OWNERS: ReadonlySet<DisplayPageOwner> = new Set<DisplayPageOwner>([
+  'terminal-list-native', 'text-page-native', 'navigation-native',
+]);
+
+/** How long an outcome strip stays on a firmware page before the page
+ * beneath returns; the raster pill's own failsafe is eight seconds. */
+const NATIVE_PILL_DISMISS_MS = 5_000;
 
 /** Local paging state of a Mac-paged reader shown as a firmware text page. */
 interface NativeTextPageState {
@@ -226,7 +240,9 @@ interface NativeTextPageState {
 }
 
 function textPageHint(page: number, count: number, macHint: string): string {
-  return count > 1 ? `${page + 1}/${count} · ${macHint}` : macHint;
+  // The Mac still writes "left x2"; every page says "double-click".
+  const hint = GesturePolicy.formatHint(macHint);
+  return count > 1 ? `${page + 1}/${count} · ${hint}` : hint;
 }
 
 /** Split an answer into firmware pages with the installed glyph metrics. */
@@ -459,6 +475,14 @@ export class HudPresenter {
     }
     if (this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)) {
       return this.renderNativeTextPage(this.surface);
+    }
+    if (this.surface.kind === 'productivity' && this.visual?.withPageTransition !== undefined
+      && !usesActionPillLayout(this.surface.productivity.phase)) {
+      return this.renderNativeProductivityPage(this.surface);
+    }
+    if (this.surface.kind === 'navigation' && this.visual?.withPageTransition !== undefined) {
+      const native = navigationNativeBody(this.surface.navigation);
+      if (native !== undefined) return this.renderNativeNavigationPage(this.surface, native);
     }
     return this.restoreVisualPage();
   }
@@ -832,7 +856,12 @@ export class HudPresenter {
     // may resume later under the same Mac identity.
     if (this.assistantConversation.isActive()
       && !await this.prepareAssistantConversationHandoff()) return false;
-    if (!await this.prepareNativeTerminalHandoff()) return false;
+    // Over a firmware page the overlay is a firmware page too (see
+    // usesNativeAnswerPage); the image rebuild would be four wasted tiles.
+    const overNativePage = !this.nativeTerminal.isActive()
+      && this.visual?.withPageTransition !== undefined
+      && (NATIVE_CONTENT_OWNERS.has(this.pageOwner) || this.pageOwner === 'overlay-native');
+    if (!overNativePage && !await this.prepareNativeTerminalHandoff()) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
     const revision = append && current
@@ -940,7 +969,7 @@ export class HudPresenter {
   /** Quiesce a terminal body before a graphical page replaces its containers. */
   private async prepareNativeTerminalHandoff(): Promise<boolean> {
     if (!this.nativeTerminal.isActive()) {
-      if (this.pageOwner !== 'terminal-list-native') return true;
+      if (!NATIVE_CONTENT_OWNERS.has(this.pageOwner)) return true;
       if (!this.visual) {
         // The text compatibility surface replaces the firmware list with its
         // own rebuild; hand the page back so its text writes are not skipped.
@@ -996,7 +1025,10 @@ export class HudPresenter {
     // A multipage answer must remain until the wearer explicitly dismisses
     // it. Starting a timer on page one recreates the recorded loss even when
     // the hidden rows technically exist.
-    if ((this.visual?.assistantOverlayPageCount?.() ?? 1) > 1) return true;
+    const pageCount = this.nativeOverlay !== undefined
+      ? this.nativeOverlay.pages.length
+      : (this.visual?.assistantOverlayPageCount?.() ?? 1);
+    if (pageCount > 1) return true;
     overlay.dismissTimer = setTimeout(() => {
       if (this.assistantOverlay === overlay) void this.dismissAssistantOverlay();
     }, dismissAfterMs);
@@ -1055,17 +1087,20 @@ export class HudPresenter {
    * stay on the image page: a short strip is two tiles, cheaper than a
    * page swap and its four-tile return. */
   private usesNativeAnswerPage(): boolean {
-    return this.visual?.withPageTransition !== undefined
-      && this.assistantOverlay?.presentation === 'answer';
+    if (this.visual?.withPageTransition === undefined || !this.assistantOverlay) return false;
+    if (this.assistantOverlay.presentation === 'answer') return true;
+    // A receipt over a page the firmware owns is a firmware page as well:
+    // one rebuild in, and the retained page comes back on dismissal.
+    return NATIVE_CONTENT_OWNERS.has(this.pageOwner) || this.nativeOverlay !== undefined;
   }
 
   private async paintNativeAnswerPage(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     const overlay = this.assistantOverlay;
-    if (!overlay || overlay.presentation !== 'answer') {
-      // Dismissed, or replaced by a receipt: leave the firmware page and
-      // repaint whatever JOAT feature is retained underneath.
+    if (!overlay || !this.usesNativeAnswerPage()) {
+      // Dismissed, or replaced by an image-strip receipt: leave the firmware
+      // page and repaint whatever JOAT feature is retained underneath.
       this.nativeOverlay = undefined;
       if (this.pageOwner !== 'overlay-native') return this.paintVisual();
       return this.restoreRetainedPage();
@@ -1390,14 +1425,16 @@ export class HudPresenter {
    * can ask the Mac for its neighbouring page. */
   scrollTextPage(direction: 'up' | 'down'): boolean {
     const state = this.nativeTextPage;
-    if (!state || this.pageOwner !== 'text-page-native' || this.surface.kind !== 'list'
-      || !this.usesNativeTextPage(this.surface.options)) return false;
+    const macHint = this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)
+      ? this.surface.options.hint
+      : this.surface.kind === 'productivity' ? productivityActionHint(this.surface.productivity) : undefined;
+    if (!state || this.pageOwner !== 'text-page-native' || macHint === undefined) return false;
     const page = direction === 'down' ? state.page + 1 : state.page - 1;
     if (page < 0 || page >= state.pages.length) return false;
     const previous = { body: state.body, hint: state.hint };
     state.page = page;
     state.body = state.pages[page] ?? ' ';
-    state.hint = textPageHint(page, state.pages.length, this.surface.options.hint);
+    state.hint = textPageHint(page, state.pages.length, macHint);
     void (async () => {
       await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body);
       if (this.nativeTextPage !== state) return;
@@ -1469,7 +1506,13 @@ export class HudPresenter {
   async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (!await this.prepareNativeTerminalHandoff()) return false;
+    // Every frame before the live map (confirm the place, choose the mode,
+    // the preview, the warnings, arrival, an error) is a text card: Even's
+    // own text page, one rebuild in and an in-place upgrade for a cursor
+    // move. Only the guidance frame with its map is pixels.
+    const native = this.visual.withPageTransition !== undefined && !this.nativeTerminal.isActive()
+      ? navigationNativeBody(navigation) : undefined;
+    if (native === undefined && !await this.prepareNativeTerminalHandoff()) return false;
     const prior = this.capturePresenterSnapshot();
     const surface: HudSurface = {
       kind: 'navigation',
@@ -1491,7 +1534,60 @@ export class HudPresenter {
     // Route progress updates the SAME page; only entering navigation
     // supersedes a receipt strip.
     if (this.surface.kind !== 'navigation') this.clearActionOverlay();
+    if (native !== undefined) return this.renderNativeNavigationPage(surface, native, statusOverride);
     return this.renderNavigation(surface, statusOverride, prior);
+  }
+
+  /** The text page on the glass for a navigation frame, so the next frame
+   * of the same step can move its cursor marker in place. */
+  private nativeNavigation?: { body: string; hint: string };
+
+  private async renderNativeNavigationPage(
+    surface: Extract<HudSurface, { kind: 'navigation' }>,
+    native: { body: string; hint: string },
+    statusOverride?: string,
+  ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    const from = this.tracePage();
+    const liveStatus = statusOverride === undefined
+      ? this.captureLiveStatus()
+      : { text: statusOverride, brightness: 2 };
+    const previous = this.pageOwner === 'navigation-native' ? this.nativeNavigation : undefined;
+    if (previous === undefined) {
+      const ok = await this.replaceNativePage(
+        this.layouts.textPageLayout(native.body, { status: liveStatus?.text, hint: native.hint }),
+        'navigation-native',
+      );
+      if (!ok || !displayCurrent()) {
+        this.recordPageTransition(from, 'navigation', 'show_navigation', 'failed');
+        return false;
+      }
+    } else {
+      let ok = true;
+      if (previous.body !== native.body) {
+        ok = await this.upgradeNativeText(ContainerId.Main, 'main', native.body, previous.body) && ok;
+        if (!displayCurrent()) return false;
+      }
+      if (previous.hint !== native.hint) {
+        ok = await this.upgradeNativeText(ContainerId.Hint, 'hint', native.hint, previous.hint) && ok;
+        if (!displayCurrent()) return false;
+      }
+      if (!ok) return false;
+    }
+    this.resetAll();
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, native.body);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, native.hint);
+    this.brightness.set(ContainerId.Hint, 1);
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+    }
+    this.nativeNavigation = native;
+    this.recordPageTransition(from, 'navigation', 'show_navigation', 'success');
+    return true;
   }
 
   /** Dedicated four-tile production page for a live Brainstorm or Hermes. */
@@ -1671,7 +1767,12 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (!this.visual) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (!await this.prepareNativeTerminalHandoff()) return false;
+    // A firmware list or text page hands straight to the firmware page this
+    // outcome becomes (a strip or a text page); recreating the four image
+    // containers first was four tiles for nothing.
+    const stayNative = this.visual.withPageTransition !== undefined
+      && !this.nativeTerminal.isActive() && NATIVE_CONTENT_OWNERS.has(this.pageOwner);
+    if (!stayNative && !await this.prepareNativeTerminalHandoff()) return false;
     if (usesActionPillLayout(productivity.phase)) {
       return this.showActionPill(productivity, onDeferredProductivityVisible);
     }
@@ -1687,6 +1788,9 @@ export class HudPresenter {
       this.confirmation.surface = surface;
       this.confirmation.onDeferredProductivityVisible = onDeferredProductivityVisible;
       return true;
+    }
+    if (this.visual.withPageTransition !== undefined) {
+      return this.renderNativeProductivityPage(surface, statusOverride);
     }
     const prior = this.capturePresenterSnapshot();
     if (this.surface.kind === 'default' && !this.focusReturn) {
@@ -1716,6 +1820,59 @@ export class HudPresenter {
     return painted;
   }
 
+  /** A Calendar or Reminders outcome page (failed, uncertain, due) as Even's
+   * own text page: the same chrome as a reader, paged in place when its
+   * explanation is long. The raster page cost four tiles in and four out. */
+  private async renderNativeProductivityPage(
+    surface: Extract<HudSurface, { kind: 'productivity' }>,
+    statusOverride?: string,
+  ): Promise<boolean> {
+    const displayCurrent = this.captureDisplayGuard();
+    if (!displayCurrent()) return false;
+    const from = this.tracePage();
+    const model = surface.productivity;
+    const liveStatus = statusOverride === undefined
+      ? this.captureLiveStatus()
+      : { text: statusOverride, brightness: 2 };
+    const label = model.domain === 'calendar' ? 'Calendar' : 'Reminders';
+    const source = [
+      `${label} · ${productivityPhaseLabel(model.phase)}`, model.title, model.primary, model.secondary,
+    ].filter((line) => line.trim().length > 0).join('\n');
+    const pages = paginateAnswer(source);
+    const page = this.nativeTextPage?.source === source
+      ? Math.min(this.nativeTextPage.page, pages.length - 1) : 0;
+    const body = pages[page] ?? ' ';
+    const macHint = productivityActionHint(model);
+    const hint = textPageHint(page, pages.length, macHint);
+    const ok = await this.replaceNativePage(
+      this.layouts.textPageLayout(body, { status: liveStatus?.text, hint }), 'text-page-native',
+    );
+    if (!ok || !displayCurrent()) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams), brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
+      };
+    }
+    this.clearActionOverlay();
+    this.resetAll();
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, model.title);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, macHint);
+    this.brightness.set(ContainerId.Hint, 1);
+    if (liveStatus) {
+      this.streams.set(ContainerId.StatusBar, liveStatus.text);
+      if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
+    }
+    this.nativeTextPage = { source, pages, page, body, hint };
+    this.recordPageTransition(from, 'list', 'show_list', 'success');
+    return true;
+  }
+
   /** Receipt strip over whatever page the wearer is on; no surface swap. */
   private async showActionPill(
     productivity: ProductivityHudModel,
@@ -1723,6 +1880,20 @@ export class HudPresenter {
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    if (this.visual?.withPageTransition !== undefined && !this.confirmation
+      && this.surface.kind !== 'productivity' && NATIVE_CONTENT_OWNERS.has(this.pageOwner)) {
+      // The outcome over a firmware list (a saved reminder over the Planning
+      // day) used to rebuild the four image containers and repaint the list
+      // as pixels under a two-tile strip. It is one firmware page now, and
+      // the list returns, still a firmware list, when the strip settles.
+      this.clearActionOverlay();
+      const text = `${productivityPhaseLabel(productivity.phase)} · ${productivity.title}\n${productivity.primary}`;
+      const shown = await this.showAssistantOverlay(text, false, true, 'receipt');
+      if (!shown || !displayCurrent()) return false;
+      this.settleAssistantOverlay(NATIVE_PILL_DISMISS_MS);
+      onVisible?.();
+      return true;
+    }
     this.clearActionOverlay();
     if (this.confirmation) {
       // A retained truth page under the gate is superseded by this newer
