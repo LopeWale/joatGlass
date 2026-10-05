@@ -188,6 +188,10 @@ other three, so a swipe shipped three tiles.
 | A Brainstorm frame (ready, listening, running, settled, unavailable) | 1-2 per revision, plus 1-2 **every second** while thinking | **0** — the Agent Terminal's two-text page; each revision is one `textContainerUpgrade`, and the per-second counter is gone |
 | Open QuickNotes or Notifications | 4 | **0** — firmware lists; the archive pages by its own "▲ Newer notes" / "▼ Older notes" rows (18 notes a page, so both rows fit the list's 20) |
 | Open a note, a notification's detail, a Planning entry, or the Navigation instructions | 4 | **0** — firmware text pages (`TEXT_PAGE_TITLES`), paged in place; Back returns the list as the firmware list it was |
+| Expand the NEWS, SEARCH or POMODORO tab from the rail | 4 | **0** — firmware lists; the title row names the tab, the rail stays on the overview |
+| Open a headline or a result | 4 | **0** — `NEWS · ARTICLE` / `SEARCH · RESULT` text pages, paged in place; the Mac is asked only past the local edge |
+| The expanded Pomodoro countdown | **1 tile every second** | **0** — a whole-minute first row ("Focus · block 2 of 4 · 24 min left"); the page is rebuilt once a minute |
+| The Settings page | 4 | **0** — firmware list |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -311,6 +315,21 @@ The levers that remain are design decisions, not code:
   (rail and row memory). `scripts/simulator_quicknotes_native_probe.py`
   records zero tiles across list, both pages, the note, Back, the
   Notifications list and a card's detail.
+- ~~Native panel tabs and Settings~~ — 2026-10-05: `openPanelTab` opts NEWS,
+  SEARCH and POMODORO into the firmware list and the article/result readers
+  into text pages; the Settings page is a firmware list too. The rail is
+  the overview's; the expanded page has a title row instead. Row memory on
+  Back is gone with the raster list (the firmware has no cursor-setting
+  API), so `restorePanelSelection` runs only for a raster page. The
+  Pomodoro's per-second tile is replaced by a plugin-authored whole-minute
+  first row (`pomodoroCountdownRow`) that the tap mapping skips
+  (`panelRowOffset`); the presenter's panel ticker runs at 60 s on a
+  firmware page and calls `onNativePanelTick`, which the menu answers by
+  rebuilding the page. The only raster page left in the capability views is
+  the Planning month grid and its day/week lists.
+  `scripts/simulator_panels_native_probe.py` pushes the three tabs and
+  records zero tiles on each page, the article, its paging, Back and the
+  minute rebuild; the overview's own rail swipes are the only tiles.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.

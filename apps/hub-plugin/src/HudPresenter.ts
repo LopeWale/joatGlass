@@ -1928,6 +1928,8 @@ export class HudPresenter {
     }
     if (firmwareList) {
       const painted = displayCurrent();
+      // paintVisual arms this for raster pages; a firmware page arms it here.
+      if (painted) this.armPanelTicker();
       this.recordPageTransition(from, 'list', 'show_list', painted ? 'success' : 'failed');
       return painted;
     }
@@ -1999,6 +2001,11 @@ export class HudPresenter {
    * wearer-visible frame receipt, and it stops the moment the timer is not
    * on the glass or not running.
    */
+  /** The expanded Pomodoro on the firmware list cannot be upgraded in
+   * place: once a minute the owner of its rows (CapabilityMenu) rebuilds
+   * the page with a fresh countdown row. */
+  onNativePanelTick?: () => void;
+
   private armPanelTicker(): void {
     if (!this.displayActive) return;
     if (this.panelTicker !== undefined) return;
@@ -2007,6 +2014,10 @@ export class HudPresenter {
     this.panelTicker = setTimeout(() => {
       this.panelTicker = undefined;
       if (this.panelTickDelay() === undefined) return;
+      if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
+        this.onNativePanelTick?.();
+        return;
+      }
       void this.paintVisual(true);
     }, delay);
   }
@@ -2019,7 +2030,9 @@ export class HudPresenter {
       return pomodoroTickDelayMs(pomodoro, now, 60_000);
     }
     if (this.surface.kind === 'list' && this.surface.options.railTab === 'pomodoro') {
-      return pomodoroTickDelayMs(pomodoro, now, 1000);
+      // A firmware list is rebuilt per minute; the raster page repainted
+      // one tile per second.
+      return pomodoroTickDelayMs(pomodoro, now, this.surface.options.nativeFirmwareList ? 60_000 : 1000);
     }
     return undefined;
   }
