@@ -630,7 +630,9 @@ class PromptPresent:
     connection_generation: str
     source: AudioSource
     expires_in_ms: int
-    owner_kind: Literal["messages", "brainstorm", "terminal"]
+    #: "capability" is a question a tapped page row asks for itself (a place
+    #: to navigate to, a search query, a note to dictate).
+    owner_kind: Literal["messages", "brainstorm", "terminal", "capability"]
     owner_id: str
     field: str
 
@@ -1700,7 +1702,7 @@ def _prompt_source(value: Any) -> AudioSource:
     raise ProtocolError("prompt source is invalid")
 
 
-def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "terminal"]:
+def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "terminal", "capability"]:
     if not isinstance(value, str):
         raise ProtocolError("prompt owner kind is invalid")
     if value == "messages":
@@ -1709,6 +1711,8 @@ def _prompt_owner_kind(value: Any) -> Literal["messages", "brainstorm", "termina
         return "brainstorm"
     if value == "terminal":
         return "terminal"
+    if value == "capability":
+        return "capability"
     raise ProtocolError("prompt owner kind is invalid")
 
 

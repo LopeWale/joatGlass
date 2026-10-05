@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from joat.services.search import SearchResult, SearchService, ddgs_search
+from joat.services.search import SEARCH_CONTROL_ROW, SearchResult, SearchService, ddgs_search
 
 
 def results() -> list[SearchResult]:
@@ -42,23 +42,36 @@ class TestLookup:
         assert "2. G2 on Wikipedia, en.wikipedia.org." in spoken
         snapshot = svc.snapshot()
         assert snapshot.headline == "Even Realities G2"
+        # The page is a control surface: the "look up" tap row follows the
+        # results, so a hand-opened tab offers a tap rather than a hint.
         assert snapshot.rows == (
             "Even Realities G2 review · example.com",
             "G2 on Wikipedia · en.wikipedia.org",
+            SEARCH_CONTROL_ROW,
         )
+        assert snapshot.empty is None
 
     async def test_an_empty_query_asks_instead_of_searching(self) -> None:
         svc, queries = service()
         assert await svc.lookup(" ?") == "What should I look up?"
         assert queries == []
-        assert svc.snapshot().empty == "Say “JOAT, look up …” to search."
+        snapshot = svc.snapshot()
+        assert snapshot.rows == ("⌕ Look something up",)
+        assert snapshot.headline is None
+        assert snapshot.empty is None
 
     async def test_no_results_and_a_dead_engine_are_told_apart(self) -> None:
         svc, _ = service()
         assert await svc.lookup("nothing") == "I found nothing for nothing."
-        assert svc.snapshot().empty == "No results — say a different query."
+        snapshot = svc.snapshot()
+        assert snapshot.rows == ("⌕ Look something up",)
+        assert snapshot.headline == "nothing — no results"
+        assert snapshot.empty is None
         assert await svc.lookup("boom") == "I couldn't reach a search engine for boom."
-        assert svc.snapshot().empty == "Search unavailable — hold to retry."
+        snapshot = svc.snapshot()
+        assert snapshot.rows == ("⌕ Look something up",)
+        assert snapshot.headline == "boom — search unavailable"
+        assert snapshot.empty is None
 
     async def test_refresh_reruns_the_last_query(self) -> None:
         svc, queries = service()
@@ -100,6 +113,71 @@ class TestOpen:
         assert reader is not None
         assert "".join(reader.pages) == body
         assert len(reader.pages) > 1
+
+
+class TestControlRow:
+    """The last row of the tab asks for a query by tap: ask → lookup → republish."""
+
+    async def test_tapping_the_control_row_asks_then_looks_up_then_republishes(self) -> None:
+        svc, queries = service()
+        await svc.lookup("g2")
+        events: list[str] = []
+
+        async def ask(question: str, field: str, consume) -> bool:
+            assert question == "What should I look up?"
+            assert field == "query"
+            events.append("asked")
+            await consume("g2 review")
+            return True
+
+        async def after_lookup() -> None:
+            events.append("republished")
+
+        svc.attach_prompt(ask, after_lookup)
+        assert await svc.open(len(svc.results)) is None
+        assert queries == ["g2", "g2 review"]
+        assert svc.query == "g2 review"
+        assert events == ["asked", "republished"]
+        assert svc.snapshot().headline == "g2 review"
+        assert svc.snapshot().rows[-1] == SEARCH_CONTROL_ROW
+
+    async def test_the_control_row_works_before_any_query(self) -> None:
+        svc, queries = service()
+        published: list[str] = []
+
+        async def ask(question: str, field: str, consume) -> bool:
+            await consume("fresh")
+            return True
+
+        async def after_lookup() -> None:
+            published.append("yes")
+
+        svc.attach_prompt(ask, after_lookup)
+        assert svc.snapshot().rows == (SEARCH_CONTROL_ROW,)
+        assert await svc.open(0) is None
+        assert queries == ["fresh"]
+        assert published == ["yes"]
+
+    async def test_ask_for_query_reports_whether_the_question_was_published(self) -> None:
+        svc, queries = service()
+
+        async def ask(question: str, field: str, consume) -> bool:
+            return False
+
+        async def after_lookup() -> None:
+            raise AssertionError("no answer, so no republish")
+
+        svc.attach_prompt(ask, after_lookup)
+        assert await svc.ask_for_query() is False
+        assert queries == []
+
+    async def test_without_a_prompt_the_control_row_is_inert(self) -> None:
+        svc, queries = service()
+        await svc.lookup("g2")
+        assert await svc.ask_for_query() is False
+        assert await svc.open(len(svc.results)) is None
+        assert await svc.open(len(svc.results) + 1) is None
+        assert queries == ["g2"]
 
 
 class TestRows:

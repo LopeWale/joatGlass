@@ -56,6 +56,12 @@ never sends it. Wearers who pick "mac" get a mic that never resumes.
 
 ### 1c. Capability rows that land on nothing useful
 
+*Later the same day: Navigation and Search became control surfaces (a
+tapped row asks "Where to?" / "What should I look up?" through the
+acknowledged prompt), Settings is a firmware guidance page, and every page
+lost its "Say “JOAT, …”" rows; see HUB_PLUGIN.md "Pages as control
+surfaces". Agent Terminal without lanes is unchanged.*
+
 | Row | Where it lands |
 |---|---|
 | Navigation | `_show_navigation` (`joat/services/capabilities.py:2478`) paints a static two-line instruction page. Routing needs `MAPBOX_ACCESS_TOKEN` (`joat/__main__.py:424`); without it: "Mapbox is not configured on this Mac". |

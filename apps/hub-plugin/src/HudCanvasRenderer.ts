@@ -3648,7 +3648,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.font = TYPE.secondary;
       this.fitText(
         context,
-        model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
+        model.topic || 'Brainstorm — tap to speak a topic.',
         HUD_EDGE + 20,
         58,
         HUD_CONTENT_WIDTH - 210,

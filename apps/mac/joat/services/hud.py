@@ -59,7 +59,7 @@ class HudWriter:
         remaining_ms = math.floor((ticket.expires_at - time.monotonic()) * 1000)
         if remaining_ms <= 0 or ticket.source not in ("glasses", "phone"):
             return False
-        if ticket.owner_kind not in ("messages", "brainstorm", "terminal"):
+        if ticket.owner_kind not in ("messages", "brainstorm", "terminal", "capability"):
             return False
         request = PromptPresent(
             prompt_id=ticket.prompt_id, question=question,
@@ -67,7 +67,9 @@ class HudWriter:
             connection_generation=ticket.connection_generation,
             source="glasses" if ticket.source == "glasses" else "phone",
             expires_in_ms=min(45_000, remaining_ms),
-            owner_kind=cast(Literal["messages", "brainstorm", "terminal"], ticket.owner_kind),
+            owner_kind=cast(
+                Literal["messages", "brainstorm", "terminal", "capability"], ticket.owner_kind,
+            ),
             owner_id=ticket.owner_id, field=ticket.field,
         )
 
