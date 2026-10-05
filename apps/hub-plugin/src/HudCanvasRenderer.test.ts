@@ -746,16 +746,16 @@ describe('Brainstorm wearable actions', () => {
   });
 
   it('shows the diagnostic test gesture only when the Mac explicitly arms it', () => {
-    // GesturePolicy makes a double-click Back on every source, so the old
-    // "right/ring x2: test" press no longer exists to advertise: an armed
-    // but ordinary ready screen keeps the plain hint, and the test action
-    // is disclosed only by the Mac's explicit `acceptance_ready` state.
+    // GesturePolicy makes a double-click Back on every source except the
+    // one the Mac explicitly armed: a right-temple or ring double press
+    // starts the acceptance run (EventRouter.handleBack), so an armed ready
+    // screen says so and an ordinary one never mentions it.
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
       noToolsChecked: true,
       acceptanceArmed: true,
-    } as Parameters<typeof brainstormActionHint>[0])).toBe('tap: speak · double-click: menu');
+    })).toBe('tap: speak · right/ring x2: test · double-click: menu');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',

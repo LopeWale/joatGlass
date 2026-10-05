@@ -578,7 +578,12 @@ export function brainstormActionHint(
     // armed diagnostic went invisible the same way. Caught by the
     // acceptance flow, which noticed three captures were pixel-identical.
     if (model.state === 'ready') {
-      return 'tap: speak · double-click: menu';
+      // The armed diagnostic is the one Back that is not Back: the Mac's
+      // acceptance contract names a right-temple or ring double press
+      // (EventRouter.handleBack), so the frame has to say so.
+      return model.acceptanceArmed
+        ? 'tap: speak · right/ring x2: test · double-click: menu'
+        : 'tap: speak · double-click: menu';
     }
     return 'swipe: scroll · double-click: menu · long-press: mic';
   }
