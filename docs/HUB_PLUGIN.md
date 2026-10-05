@@ -88,11 +88,17 @@ Every app is expected to offer an exit via the glasses. The canonical pattern is
 
 The wearer's menu is the **firmware contextual menu** (tap, then
 long-press) carrying the CAPABILITIES rows — see "The three ways to draw a
-menu, measured". **Left**-temple double-press is BACK (a no-op on the
-overview), **right**-temple double-press is the exit dialog, and a left
-SINGLE press on the resting overview drills into the notifications tray.
-On a live Brainstorm the left double press CANCELS the session; the
-firmware menu remains reachable mid-session for everything else.
+menu, measured". A double-press on EITHER temple, or on the ring, is BACK
+(a no-op on the overview; `GesturePolicy` gives every source the same
+meaning because the simulator's generic double-click is right-sourced and
+kept opening the exit confirmation), and a left SINGLE press on the
+resting overview drills into the notifications tray. The exit dialog is
+reachable only through the Mac's `shutdown` downlink. On a live Brainstorm
+the double press CANCELS the session; the firmware menu remains reachable
+mid-session for everything else. The one named press: while the Mac has
+ARMED a Brainstorm acceptance run, a right-temple or ring double press
+starts it (the Mac's contract names the source), and the ready frame says
+"right/ring x2: test" only then.
 
 ### Lifecycle events (all `sysEvent`)
 
@@ -269,7 +275,14 @@ The levers that remain are design decisions, not code:
   (`confirmationLayout`, owner `confirmation-native`) whenever the visual
   surface offers `withPageTransition`; dismissal recreates the four image
   containers, or hands straight to a firmware list. Verified in the official
-  simulator with `scripts/simulator_messages_native_probe.py`.
+  simulator with `scripts/simulator_messages_native_probe.py`. The decision
+  clock fits inside the Mac's deadline: `confirmationDecisionWindowMs` in
+  `ConfirmationCommit` takes the Mac's `expiresAtMs`, reserves four seconds
+  for the restore an acceptance waits on, and clamps to 3-8 s, while the
+  Mac's envelope (`CONFIRM_TRANSPORT_SECONDS`, `_CONFIRM_SECONDS`) is 20 s
+  so the paint in, the eight-second window and the restore out all fit.
+  Before, the Mac timed 12 s from send and the plugin always took 8 s, so a
+  tap the wearer saw land could come back as "Reply cancelled.".
 - ~~Native answer page~~ — 2026-10-05: an `answer` overlay over the visual
   HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
   seven-line body paged in place with `textContainerUpgrade`, a hint line.
@@ -341,6 +354,24 @@ The levers that remain are design decisions, not code:
   `scripts/simulator_panels_native_probe.py` pushes the three tabs and
   records zero tiles on each page, the article, its paging, Back and the
   minute rebuild; the overview's own rail swipes are the only tiles.
+
+- ~~Pages as control surfaces~~ — 2026-10-05, the wearer's rule: a page
+  opened by hand is for hands. Voice works from anywhere, so no page shows
+  a "Say “JOAT, …”" row or empty state any more; each offers the tap that
+  does the thing. The row asks its own question through the acknowledged
+  prompt (`PromptedSpeechRuntime.ask_capability`, owner kind `capability`
+  on `prompt.present`, the same native question page the Messages body
+  uses) and routes the answer: NAVIGATION "➤ Navigate to a place" asks
+  "Where to?" and starts the route; QUICKNOTES leads every page with
+  "● Record a voice note" (a tap-started capture titled by the clock) and
+  "✎ Dictate a note" ("What should I note?", saved as exact text; the page
+  size dropped to 16 so both fit under the 20-row cap); the Messages
+  conversation ends in "✎ Reply", the same prepared reply the spoken word
+  starts; the SEARCH tab's last row "⌕ Look something up" asks for the
+  query and republishes the tab; the expanded POMODORO shows its controls
+  and, while idle, the three lengths as rows that cycle presets on tap and
+  persist. Brainstorm's idle frame says "Tap to speak a topic." and its
+  picker already carried "+ New brainstorm".
 
 ### Downlinks and uplinks: what drives them (2026-10-05)
 

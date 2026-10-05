@@ -74,11 +74,17 @@ function replayHarness(mode: NavigationMode) {
   const renderer: HudFrameRenderer = {
     render: async (frame: HudVisualFrame) => {
       if (frame.kind === 'navigation') views.push(frame.navigation.view);
+      // Every view draws different pixels in every region, as the real
+      // renderer does for a changing state word, header and footer. The
+      // visual surface skips a region whose delivered pixels are unchanged
+      // on the same page, so identical tiles would hide the ordering this
+      // replay exists to prove: a state is reported only after its frame.
+      const revision = views.length;
       return [
-        { containerId: ContainerId.Image, pixels: new Uint8Array(4) },
-        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(4) },
-        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(4) },
-        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(4) },
+        { containerId: ContainerId.Image, pixels: Uint8Array.of(revision, 1, 0, 0) },
+        { containerId: ContainerId.VisualTopRight, pixels: Uint8Array.of(revision, 2, 0, 0) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: Uint8Array.of(revision, 3, 0, 0) },
+        { containerId: ContainerId.VisualBottomRight, pixels: Uint8Array.of(revision, 4, 0, 0) },
       ];
     },
   };

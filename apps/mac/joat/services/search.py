@@ -13,7 +13,7 @@ from the assistant's own tool call.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
 import time
@@ -71,6 +71,13 @@ SearchFn = Callable[[str, int], list[SearchResult]]
 FetchPage = Callable[[str], tuple[str, str]]
 
 
+#: The tap that asks for a query; the page's one control.
+SEARCH_CONTROL_ROW = "⌕ Look something up"
+
+#: ask(question, field, consume) -> published; see PromptedSpeechRuntime.ask_capability.
+AskWearer = Callable[[str, str, Callable[[str], Awaitable[None]]], Awaitable[bool]]
+
+
 class SearchService:
     """Owns the last lookup: its results, and the page the wearer opened."""
 
@@ -88,6 +95,8 @@ class SearchService:
         self._fetch_page = fetch_page
         self._clock = clock
         self._max = max_results
+        self._ask: AskWearer | None = None
+        self._after_lookup: Callable[[], Awaitable[None]] | None = None
         self._query = ""
         self._results: list[SearchResult] = []
         self._searched_at: float | None = None
@@ -100,6 +109,32 @@ class SearchService:
     @property
     def results(self) -> tuple[SearchResult, ...]:
         return tuple(self._results)
+
+    def attach_prompt(
+        self, ask: AskWearer, after_lookup: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Give the tab's control row a voice: a tap asks for the query.
+
+        The tab is a page the wearer opened by hand, so it offers a row to
+        tap rather than telling them what to say; the row asks "What should I
+        look up?" through the acknowledged prompt, and the answer runs the
+        same lookup the spoken grammar does. `after_lookup` republishes the
+        tab, which the publisher does for a tap but not for a late answer.
+        """
+        self._ask = ask
+        self._after_lookup = after_lookup
+
+    async def ask_for_query(self) -> bool:
+        """The tapped control row: ask, then look up what was said."""
+        if self._ask is None:
+            return False
+
+        async def consume(text: str) -> None:
+            await self.lookup(text)
+            if self._after_lookup is not None:
+                await self._after_lookup()
+
+        return await self._ask("What should I look up?", "query", consume)
 
     async def lookup(self, query: str) -> str:
         """Run the query; return what JOAT should say. Never raises."""
@@ -134,17 +169,19 @@ class SearchService:
     # ── PanelProvider ────────────────────────────────────────────────────
 
     def snapshot(self) -> PanelSnapshot:
+        # The page is a control surface: its last row always starts a new
+        # search by tap. Voice works from anywhere and needs no row.
         if not self._query:
-            return PanelSnapshot(rows=(), empty="Say “JOAT, look up …” to search.")
+            return PanelSnapshot(rows=(SEARCH_CONTROL_ROW,))
         if not self._results:
-            empty = (
-                "Search unavailable — hold to retry."
+            headline = (
+                f"{self._query} — search unavailable"
                 if self._failed
-                else "No results — say a different query."
+                else f"{self._query} — no results"
             )
-            return PanelSnapshot(rows=(), headline=self._query, empty=empty)
+            return PanelSnapshot(rows=(SEARCH_CONTROL_ROW,), headline=headline)
         return PanelSnapshot(
-            rows=tuple(r.row() for r in self._results),
+            rows=tuple(r.row() for r in self._results) + (SEARCH_CONTROL_ROW,),
             headline=self._query,
         )
 
@@ -153,6 +190,10 @@ class SearchService:
             await self.lookup(self._query)
 
     async def open(self, index: int) -> Reader | None:
+        if index == len(self._results):
+            # The control row: its answer arrives later and republishes.
+            await self.ask_for_query()
+            return None
         if not 0 <= index < len(self._results):
             return None
         result = self._results[index]

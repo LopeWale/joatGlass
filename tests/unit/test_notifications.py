@@ -6,6 +6,7 @@ import asyncio
 import logging
 import plistlib
 import sqlite3
+import time
 from pathlib import Path
 
 from joat.channels.cards import Card, Urgency
@@ -138,13 +139,19 @@ class TestChannel:
         task = asyncio.get_running_loop().create_task(channel.run())
         await asyncio.sleep(0.05)  # channel snapshots rec_id=1 as baseline
         conn = sqlite3.connect(db)
+        # Delivered "now" in Cocoa seconds: a card older than STALE_CARD_S
+        # is logged and kept for the tray but never interrupts the lens, so
+        # a fixed 2026-05 stamp would (correctly) deliver nothing here.
+        delivered_cocoa = time.time() - COCOA_EPOCH_UNIX
         for rid, (app, title, body) in enumerate([
             ("com.apple.MobileSMS", "Dele", "are you coming?"),
             ("com.spam.deals", "50% OFF", "act now"),
         ], start=10):
             blob = plistlib.dumps({"req": {"titl": title, "body": body}}, fmt=plistlib.FMT_BINARY)
             conn.execute("INSERT INTO app VALUES (?, ?)", (rid, app))
-            conn.execute("INSERT INTO record VALUES (?, ?, 800000001.0, ?)", (rid, rid, blob))
+            conn.execute(
+                "INSERT INTO record VALUES (?, ?, ?, ?)", (rid, rid, delivered_cocoa, blob)
+            )
         conn.commit(); conn.close()
         await asyncio.sleep(0.1)
         channel.stop()
@@ -153,6 +160,30 @@ class TestChannel:
         # SHORT message shown verbatim rather than model-paraphrased. The
         # promo is still classified IGNORE by the model and never delivered.
         assert [c.render() for c in delivered] == ["Dele · Messages\nare you coming?"]
+
+    async def test_stale_card_is_withheld_from_the_lens(self) -> None:
+        """A backlog draining after a reconnect must not seize the screen for
+        something that happened minutes or days ago (measured 2026-09-08:
+        15 of 109 delivered cards were over a minute old). The channel still
+        delivers a card that just arrived."""
+        delivered: list[Card] = []
+        channel = NotificationChannel(
+            None,  # type: ignore[arg-type] -- _handle is the unit under test
+            None,
+            delivered.append,
+        )
+        stale = Notification(
+            rec_id=1, app="com.apple.MobileSMS", title="Dele", subtitle="",
+            body="old news", delivered_unix=time.time() - NotificationChannel.STALE_CARD_S - 60,
+        )
+        fresh = Notification(
+            rec_id=2, app="com.apple.MobileSMS", title="Dele", subtitle="",
+            body="just now", delivered_unix=time.time(),
+        )
+
+        assert await channel._handle(stale) is False
+        assert await channel._handle(fresh) is True
+        assert [c.render() for c in delivered] == ["Dele · Messages\njust now"]
 
     async def test_unreadable_store_goes_dormant_not_fatal(self, tmp_path: Path) -> None:
         channel = NotificationChannel(

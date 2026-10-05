@@ -36,14 +36,18 @@ def make(lengths: PomodoroLengths = PomodoroLengths()) -> tuple[PomodoroService,
 
 
 class TestStateMachine:
-    def test_starts_idle_with_one_start_row(self) -> None:
+    def test_starts_idle_with_start_and_the_three_length_rows(self) -> None:
         service, _, _, _ = make()
         assert service.phase == "idle"
-        assert service.rows() == ("▶ Start a focus block",)
+        # A page opened by hand is a control surface: Start, then the lengths.
+        assert service.rows() == (
+            "▶ Start a focus block", "Focus: 25 min", "Short break: 5 min", "Long break: 15 min",
+        )
         state = service.state()
         assert state.phase == "idle" and state.running is False
         assert state.remaining_ms == state.length_ms == 25 * 60_000
-        assert "No pomodoro running" in service.status_text()
+        assert service.status_text() == "No pomodoro running. A focus block is 25 minutes."
+        assert "Say" not in service.status_text()
 
     def test_start_runs_a_focus_block_with_an_end_instant(self) -> None:
         service, clock, _, _ = make()
@@ -128,6 +132,81 @@ class TestStateMachine:
         assert service.control(0).startswith("Resumed")  # "▶ Resume"
         assert service.control(2) == "Pomodoro reset."  # "Reset"
         assert service.control(9) == ""
+        assert service.control(-1) == ""
+
+
+class TestLengths:
+    def test_a_tap_on_a_length_row_steps_to_the_next_preset_and_the_idle_countdown_follows(self) -> None:
+        service, _, _, changes = make()
+        assert service.control(1) == "Focus blocks: 30 minutes."
+        assert service.rows() == (
+            "▶ Start a focus block", "Focus: 30 min", "Short break: 5 min", "Long break: 15 min",
+        )
+        state = service.state()
+        assert state.phase == "idle" and state.running is False
+        assert state.remaining_ms == state.length_ms == 30 * 60_000
+        assert service.status_text() == "No pomodoro running. A focus block is 30 minutes."
+        assert service.control(2) == "Short breaks: 10 minutes."
+        assert service.control(3) == "Long breaks: 20 minutes."
+        assert service.rows()[1:] == ("Focus: 30 min", "Short break: 10 min", "Long break: 20 min")
+        assert service.lengths == PomodoroLengths(30 * 60_000, 10 * 60_000, 20 * 60_000)
+
+    @pytest.mark.parametrize(("index", "noun", "presets"), [
+        (1, "Focus blocks", (30, 45, 50, 60, 15, 20, 25)),
+        (2, "Short breaks", (10, 15, 3, 5)),
+        (3, "Long breaks", (20, 30, 10, 15)),
+    ])
+    def test_each_length_cycles_through_its_presets_and_wraps(
+        self, index: int, noun: str, presets: tuple[int, ...],
+    ) -> None:
+        service, _, _, _ = make()
+        receipts = [service.control(index) for _ in presets]
+        assert receipts == [f"{noun}: {minutes} minutes." for minutes in presets]
+
+    def test_a_length_off_the_preset_ladder_steps_to_the_next_larger_preset(self) -> None:
+        service, _, _, _ = make(PomodoroLengths(focus_ms=120_000, short_break_ms=16 * 60_000))
+        assert service.rows()[1:] == ("Focus: 2 min", "Short break: 16 min", "Long break: 15 min")
+        assert service.control(1) == "Focus blocks: 15 minutes."
+        assert service.control(2) == "Short breaks: 3 minutes."  # past the top: wraps
+
+    def test_new_lengths_drive_the_blocks_and_breaks_that_follow(self) -> None:
+        service, clock, cards, _ = make()
+        service.control(1)  # focus 30
+        service.control(2)  # short break 10
+        service.control(3)  # long break 20
+        assert service.control(0) == "Focus block 1 of 4. 30 minutes."
+        assert service.state().length_ms == 30 * 60_000
+        assert service.state().ends_at_unix_ms == int((clock.now + 1800) * 1000)
+        clock.now += 1800
+        service.tick()
+        assert service.phase == "break" and service.state().length_ms == 10 * 60_000
+        assert cards[-1].summary == "Break for 10 min"
+        for _ in range(3):
+            clock.now += 600
+            service.tick()
+            clock.now += 1800
+            service.tick()
+        assert service.phase == "long_break" and service.state().length_ms == 20 * 60_000
+        assert cards[-1].summary == "Four blocks done — long break, 20 min"
+
+    def test_a_length_changed_mid_block_applies_from_the_next_block(self) -> None:
+        service, clock, _, _ = make()
+        service.start()
+        clock.now += 60
+        before = service.state()
+        assert service.cycle_length("focus") == "Focus blocks: 30 minutes."
+        assert service.state() == before, "the block under way keeps its length and deadline"
+        assert service.rows() == ("Pause", "Skip to break", "Reset")
+        service.skip()
+        clock.now += 300
+        service.tick()
+        assert service.phase == "focus" and service.state().length_ms == 30 * 60_000
+
+    def test_an_unknown_length_kind_is_refused(self) -> None:
+        service, _, _, _ = make()
+        with pytest.raises(ValueError, match="unknown pomodoro length"):
+            service.cycle_length("nap")
+        assert service.rows()[1:] == ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min")
 
 
 class TestAsyncIntegration:
@@ -155,6 +234,8 @@ class TestAsyncIntegration:
 
     async def test_open_applies_the_control_and_returns_no_reader(self) -> None:
         service, _, _, _ = make()
+        assert await service.open(1) is None
+        assert service.phase == "idle" and service.rows()[1] == "Focus: 30 min"
         assert await service.open(0) is None
         assert service.phase == "focus"
         assert service.snapshot().pomodoro is not None
@@ -239,7 +320,7 @@ class TestDurableRecovery:
             assert second.state() == state
             assert len(cards) == 1, "the same offline interval must not manufacture further phases"
 
-    def test_reset_is_durable_and_active_phase_length_survives_new_defaults(self, tmp_path: Path) -> None:
+    def test_reset_is_durable_and_the_saved_lengths_outlive_the_constructor_defaults(self, tmp_path: Path) -> None:
         path = tmp_path / "timer.sqlite3"
         clock = Clock()
         with DurableStore(path) as durable:
@@ -254,10 +335,55 @@ class TestDurableRecovery:
             assert recovered.remaining_ms() == 108_000
             recovered.reset()
         with DurableStore(path) as durable:
+            # The checkpoint's lengths are the wearer's; this build's defaults
+            # only seed a database that has none.
             recovered = PomodoroService(store=PomodoroStore(durable), clock=clock)
             recovered.activate_restored()
             assert recovered.phase == "idle" and recovered.completed == 0
-            assert recovered.state().length_ms == 25 * 60_000
+            assert recovered.state().length_ms == 120_000
+            assert recovered.lengths == PomodoroLengths(focus_ms=120_000)
+
+    def test_lengths_set_by_tap_survive_a_restart(self, tmp_path: Path) -> None:
+        path = tmp_path / "timer.sqlite3"
+        clock = Clock()
+        with DurableStore(path) as durable:
+            original = PomodoroService(store=PomodoroStore(durable), clock=clock)
+            assert original.control(1) == "Focus blocks: 30 minutes."
+            assert original.control(2) == "Short breaks: 10 minutes."
+            assert original.control(3) == "Long breaks: 20 minutes."
+            saved = PomodoroStore(durable).load()
+            assert saved is not None
+            assert (saved.focus_ms, saved.short_break_ms, saved.long_break_ms) == (
+                30 * 60_000, 10 * 60_000, 20 * 60_000)
+        with DurableStore(path) as durable:
+            recovered = PomodoroService(store=PomodoroStore(durable), clock=clock)
+            recovered.activate_restored()
+            assert recovered.rows() == (
+                "▶ Start a focus block", "Focus: 30 min", "Short break: 10 min", "Long break: 20 min",
+            )
+            assert recovered.state().length_ms == recovered.state().remaining_ms == 30 * 60_000
+            assert recovered.status_text() == "No pomodoro running. A focus block is 30 minutes."
+            assert recovered.start() == "Focus block 1 of 4. 30 minutes."
+            clock.now += 1800
+            recovered.tick()
+            assert recovered.phase == "break" and recovered.state().length_ms == 10 * 60_000
+
+    def test_a_checkpoint_from_before_the_lengths_were_configurable_loads_the_classic_cycle(
+        self, tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "timer.sqlite3"
+        clock = Clock()
+        with DurableStore(path) as durable:
+            PomodoroStore(durable).save(PomodoroCheckpoint("focus", False, 7000, 9000, 2, None, 100_000,
+                focus_ms=30 * 60_000, short_break_ms=10 * 60_000, long_break_ms=20 * 60_000))
+            durable.execute("DELETE FROM pomodoro_lengths")  # what a pre-13 database looks like
+        with DurableStore(path) as durable:
+            recovered = PomodoroService(store=PomodoroStore(durable), clock=clock)
+            recovered.activate_restored()
+            assert recovered.phase == "focus" and recovered.state().length_ms == 9000
+            assert recovered.lengths == PomodoroLengths()
+            recovered.reset()
+            assert recovered.rows()[1:] == ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min")
 
     async def test_constructor_waits_for_explicit_activation_before_callbacks(self, tmp_path: Path) -> None:
         clock = Clock()
@@ -287,7 +413,7 @@ class RejectingPomodoroStore(PomodoroStore):
 
 
 class TestDurableMutationBoundary:
-    @pytest.mark.parametrize("operation", ["start", "pause", "resume", "skip", "reset", "tick"])
+    @pytest.mark.parametrize("operation", ["start", "pause", "resume", "skip", "reset", "tick", "cycle"])
     def test_failed_save_preserves_memory_disk_and_phase_notification(
         self, tmp_path: Path, operation: str,
     ) -> None:
@@ -296,18 +422,20 @@ class TestDurableMutationBoundary:
         with DurableStore(tmp_path / "timer.sqlite3") as durable:
             store = RejectingPomodoroStore(durable)
             service = PomodoroService(store=store, clock=clock, notify=cards.append)
-            if operation != "start":
+            if operation not in ("start", "cycle"):
                 service.start()
             if operation == "resume":
                 service.pause()
             if operation == "tick":
                 clock.now += 1500
-            before, checkpoint = service.state(), store.load()
+            before, checkpoint, rows = service.state(), store.load(), service.rows()
             store.reject = True
-            reply = getattr(service, operation)()
+            reply = service.control(1) if operation == "cycle" else getattr(service, operation)()
             if operation != "tick":
                 assert "failed" in reply.lower()
             assert service.state() == before
+            assert service.rows() == rows
+            assert service.lengths == PomodoroLengths()
             assert store.load() == checkpoint
             assert "failed" in service.status_text().lower()
             assert service.snapshot().headline == "Timer change failed"

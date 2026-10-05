@@ -42,6 +42,11 @@ Phase 0. Two real packages, each with a wired test command:
   must print the worktree. (The plugin has no equivalent trap — vitest
   compiles the worktree's own `src/`; only `node_modules` need be linked.)
 
+**Every package is a new version.** Bump `apps/hub-plugin/app.json` before
+`npm run pack`; the Hub replaces an existing private build of the same
+version on upload. `scripts/pack.sh` refuses a version that `Changelog.md`
+already records as built, and each build gets its own Changelog entry.
+
 The wire protocol lives twice by design: `apps/hub-plugin/src/types.ts` and
 `apps/mac/joat/core/protocol.py` must change in the same commit
 (`tests/unit/test_protocol.py` pins the wire shapes).

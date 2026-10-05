@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from joat.channels.cards import Card
@@ -28,9 +29,13 @@ class ScriptedSource:
 
 
 def notification(rec_id: int, *, app: str, title: str, body: str) -> Notification:
-    return Notification(
-        rec_id, app, title, "", body, 1_700_000_000 + rec_id, str(rec_id)
-    )
+    # Stamped "now": the channel refuses to interrupt the lens with a card
+    # older than NotificationChannel.STALE_CARD_S (120 s, since 2026-09-08),
+    # and a fixed 2023 epoch made every fan-in test below assert on a card
+    # the guard had correctly withheld. These tests pin ingestion and
+    # authority suppression, not staleness; the guard has its own test in
+    # test_notifications.py.
+    return Notification(rec_id, app, title, "", body, time.time(), str(rec_id))
 
 
 def test_prune_drops_settled_history_but_never_an_undelivered_notification(

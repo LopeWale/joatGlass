@@ -312,6 +312,8 @@ export type NavigationAction =
   | 'cancel';
 
 /** Exact application question; distinct from an ordinary assistant reply. */
+export type PromptOwnerKind = 'messages' | 'brainstorm' | 'terminal' | 'capability';
+
 export interface PromptPresentMessage {
   kind: 'prompt.present';
   promptId: string;
@@ -321,7 +323,8 @@ export interface PromptPresentMessage {
   connectionGeneration: string;
   source: 'glasses' | 'phone';
   expiresInMs: number;
-  ownerKind: 'messages' | 'brainstorm' | 'terminal';
+  /** 'capability': a question a tapped page row asks for itself. */
+  ownerKind: PromptOwnerKind;
   ownerId: string;
   field: string;
 }

@@ -578,7 +578,12 @@ export function brainstormActionHint(
     // armed diagnostic went invisible the same way. Caught by the
     // acceptance flow, which noticed three captures were pixel-identical.
     if (model.state === 'ready') {
-      return 'tap: speak · double-click: menu';
+      // The armed diagnostic is the one Back that is not Back: the Mac's
+      // acceptance contract names a right-temple or ring double press
+      // (EventRouter.handleBack), so the frame has to say so.
+      return model.acceptanceArmed
+        ? 'tap: speak · right/ring x2: test · double-click: menu'
+        : 'tap: speak · double-click: menu';
     }
     return 'swipe: scroll · double-click: menu · long-press: mic';
   }
@@ -2451,7 +2456,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       }
       const pomodoro = content?.pomodoro;
       if (!pomodoro) {
-        quiet(['Say “JOAT, start a pomodoro”'], layout.mainTopBaselineY);
+        quiet(['Focus timer · open the tab to start'], layout.mainTopBaselineY);
         return;
       }
       const now = Date.now();
@@ -2564,7 +2569,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     } else if (!pomodoro) {
       context.fillStyle = gray(SUPPORT);
       context.font = TYPE.primary;
-      context.fillText('Say “JOAT, start a pomodoro”', 52, 96);
+      context.fillText('Focus timer · open the tab to start', 52, 96);
       context.fillStyle = gray(CHROME);
       context.font = TYPE.secondary;
       context.fillText('25 min focus, 5 min break, a long one after four.', 52, 120);
@@ -3643,7 +3648,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.font = TYPE.secondary;
       this.fitText(
         context,
-        model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
+        model.topic || 'Brainstorm — tap to speak a topic.',
         HUD_EDGE + 20,
         58,
         HUD_CONTENT_WIDTH - 210,
