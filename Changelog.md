@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.94 firmware-modals package
+
+- Rebuilt the existing JOAT package from `ed72d9c` with the same `scripts/pack.sh`, the same `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.94 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 160045 bytes, SHA-256 `384aa955acc33f96e766c138beff4e3cd0e108f7303d8f054f03793b1c11810d`. Carries the firmware receipts, outcome strips, productivity pages, pre-route navigation frames and the remaining firmware titles; the Mac side (a reader with a tap action is selectable) is in the brain. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — The modals a tap lands on are firmware pages too
 
 - The wearer's point: fixing a page is not enough when the page its tap redirects to is still pixels. A map of every HUD surface and every transition between them (tap, Back, scroll past an edge, Mac push) found thirteen raster targets one gesture away from a firmware page and one presenter fault: from a firmware text page, Home, a receipt, a productivity frame or a navigation frame never repainted the glass at all, because only the firmware-list owner triggered the image rebuild. Every native content owner now recreates the four image containers before an image paint.
