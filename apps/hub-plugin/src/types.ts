@@ -465,6 +465,14 @@ export type UplinkMessage =
     generation: number;
     outcome: 'accepted';
   }
+  /** The wearer tapped the due page: complete that occurrence. Bound like
+   * the acknowledgement; the Mac still runs its confirmed completion flow. */
+  | {
+    kind: 'reminder_due.complete';
+    reminderDueId: string;
+    reminderDueAttemptId: string;
+    generation: number;
+  }
   /** Current-client acceptance of a typed verifying surface. This is not
    * native EventKit delivery, physical G2 pixels, or wearer attention. */
   | {

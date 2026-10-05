@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — The due page completes by tap
+
+- The pushed due Reminder page was the last page whose hint named a word to say. Its tap now sends `reminder_due.complete`, carrying exactly the opaque occurrence and attempt UUIDs and the connection generation the Mac bound the page to when the plugin acknowledged it. The gateway admits the tap only against that accepted page, once, and never after the socket it was shown on; the task monitor resolves the occurrence to its native item and runs the same confirmed completion the spoken "complete reminder" runs, so the glasses still ask before anything is written. The hint reads "tap: complete · Back: double-click to Planning".
+- Tests: the wire shape and its rejections on both sides, the gateway binding (one tap, one occurrence, wrong generation or attempt or socket dropped), the monitor's completion path, and the menu's tap on a due page versus any other productivity page.
+
 ## 2026-10-05 — Build JOAT 0.1.94 firmware-modals package
 
 - Rebuilt the existing JOAT package from `ed72d9c` with the same `scripts/pack.sh`, the same `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.94 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.

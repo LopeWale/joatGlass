@@ -409,8 +409,16 @@ The levers that remain are design decisions, not code:
   `scripts/simulator_transitions_native_probe.py` drives all of it from a
   firmware list and records zero image tiles on every step but the map.
   Still pixels by design: the overview, the Planning month grid, the live
-  map. Still a voice hint: the due reminder page ("say: complete reminder"),
-  until its tap completes the reminder.
+  map.
+- ~~The due page completes by tap~~ — 2026-10-05: the pushed due Reminder
+  page was the last page whose hint named a word to say. Its tap now sends
+  `reminder_due.complete` with exactly the opaque occurrence and attempt
+  UUIDs and the generation the Mac bound the page to when the plugin
+  acknowledged it; the gateway admits the tap only against that accepted
+  page, once, and never after the socket it was shown on; the task monitor
+  resolves the occurrence to its native item and runs the same confirmed
+  completion the spoken "complete reminder" runs, so the glasses still ask
+  before anything is written. The hint reads "tap: complete".
 
 ### Downlinks and uplinks: what drives them (2026-10-05)
 

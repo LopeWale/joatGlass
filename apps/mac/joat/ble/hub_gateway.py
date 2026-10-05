@@ -83,6 +83,7 @@ from ..core.protocol import (
     ProductivityHudView,
     ProductivityViewAck,
     ReminderDueAck,
+    ReminderDueComplete,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     PLUGIN_REPLACED_CLOSE_CODE,
     parse_uplink,
@@ -112,6 +113,9 @@ NavigationRerouteCallback = Callable[[NavigationRerouteRequest], None]
 NavigationOriginCallback = Callable[[NavigationOrigin], None]
 NavigationOriginFailureCallback = Callable[[NavigationOriginFailure], None]
 ProductivityViewAckCallback = Callable[[ProductivityViewAck], None]
+#: The wearer tapped a due Reminder page the current client had accepted;
+#: the argument is the opaque occurrence id.
+ReminderDueCompleteCallback = Callable[[str], None]
 
 
 @dataclass(slots=True)
@@ -203,6 +207,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._navigation_origin_cbs: list[NavigationOriginCallback] = []
         self._navigation_origin_failure_cbs: list[NavigationOriginFailureCallback] = []
         self._productivity_view_ack_cbs: list[ProductivityViewAckCallback] = []
+        self._reminder_due_complete_cbs: list[ReminderDueCompleteCallback] = []
+        #: Due views the current client accepted: occurrence -> (attempt, generation).
+        self._accepted_reminder_dues: dict[str, tuple[str, int]] = {}
         self._disconnect_cbs: list[Callable[[], None]] = []
 
         self._pending_confirms: dict[str, _PendingConfirm] = {}
@@ -446,6 +453,16 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self, callback: NavigationOriginFailureCallback,
     ) -> None:
         self._navigation_origin_failure_cbs.append(callback)
+
+    def on_reminder_due_complete(self, callback: ReminderDueCompleteCallback) -> None:
+        """Observe a tap on a due Reminder page this client had accepted.
+
+        The tap is admitted only with the exact occurrence and attempt UUIDs
+        of an acknowledged due view under the current connection generation;
+        anything else is dropped without a word. Completing the reminder is
+        the subscriber's business and still runs the confirmed flow.
+        """
+        self._reminder_due_complete_cbs.append(callback)
 
     def on_productivity_view_ack(self, callback: ProductivityViewAckCallback) -> None:
         """Observe a content-free verifying-view acknowledgement.
@@ -694,6 +711,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     def _clear_reminder_due_acks(self, session_id: str | None = None) -> None:
         """Resolve in-flight due receipts false when their socket is gone."""
 
+        # A due page the glass showed under a closed socket cannot be tapped
+        # into completion under the next one.
+        self._accepted_reminder_dues.clear()
         for reminder_due_id, pending in tuple(self._pending_reminder_due_acks.items()):
             if session_id is not None and pending.session_id != session_id:
                 continue
@@ -1371,6 +1391,23 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     and not reminder_pending.future.done()
                 ):
                     reminder_pending.future.set_result(True)
+                    self._accepted_reminder_dues[message.reminder_due_id] = (
+                        message.reminder_due_attempt_id, message.generation,
+                    )
+            case ReminderDueComplete():
+                accepted = self._accepted_reminder_dues.get(message.reminder_due_id)
+                if (
+                    accepted is not None
+                    and session_id == self._session_id
+                    and accepted == (message.reminder_due_attempt_id, message.generation)
+                    and message.generation == self._connection_generation
+                ):
+                    # One tap completes one occurrence once.
+                    self._accepted_reminder_dues.pop(message.reminder_due_id, None)
+                    for reminder_due_complete_cb in self._reminder_due_complete_cbs:
+                        reminder_due_complete_cb(message.reminder_due_id)
+                else:
+                    log.info("reminder due tap ignored reason=binding-mismatch")
             case ProductivityViewAck():
                 if message.generation == self._connection_generation:
                     for productivity_view_ack_cb in self._productivity_view_ack_cbs:

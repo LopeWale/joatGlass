@@ -1585,6 +1585,38 @@ describe('CapabilityMenu', () => {
     expect(await stale).toBe(false);
   });
 
+  it('a tap on the due page asks the Mac to complete that occurrence, once bound', async () => {
+    const { menu, sent } = rig(true, true, true);
+    const due: ProductivityHudModel = {
+      domain: 'reminders', phase: 'due', title: 'Private reminder',
+      primary: 'Due now', secondary: 'Still incomplete', hint: 'tap: complete',
+      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
+      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
+      reminderDueGeneration: 7,
+    };
+    expect(await menu.presentProductivity(due)).toBe(true);
+    const before = sent.length;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent.slice(before)).toEqual([{
+      kind: 'reminder_due.complete',
+      reminderDueId: due.reminderDueId,
+      reminderDueAttemptId: due.reminderDueAttemptId,
+      generation: 7,
+    }]);
+    expect(sent.slice(before).some((message) => JSON.stringify(message).includes('Private reminder'))).toBe(false);
+  });
+
+  it('a tap on any other productivity page sends nothing', async () => {
+    const { menu, sent } = rig(true, true, true);
+    expect(await menu.presentProductivity({
+      domain: 'reminders', phase: 'failed', title: 'Buy filters',
+      primary: 'Not saved', secondary: 'No reminders item was changed.', hint: 'left x2 Planning',
+    })).toBe(true);
+    const before = sent.length;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent.slice(before)).toEqual([]);
+  });
+
   it('hands a deferred due acknowledgement to the presenter without sending it early', async () => {
     const { menu, deferredProductivityVisibleCallbacks } = rig(true, true, false);
     const due: ProductivityHudModel = {

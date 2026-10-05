@@ -1,6 +1,7 @@
 import type { ProductivityHudModel, UplinkMessage } from './types';
 
 type ReminderDueAck = Extract<UplinkMessage, { kind: 'reminder_due.ack' }>;
+type ReminderDueComplete = Extract<UplinkMessage, { kind: 'reminder_due.complete' }>;
 
 const OCCURRENCE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -35,5 +36,23 @@ export function reminderDueAckFor(
     reminderDueAttemptId,
     generation,
     outcome: 'accepted',
+  };
+}
+
+/**
+ * The tap on a bound due page: complete this occurrence. Carries exactly the
+ * opaque identifiers the acknowledgement carried, so the Mac can refuse a
+ * tap for a page it never had accepted under this connection.
+ */
+export function reminderDueCompleteFor(
+  productivity: ProductivityHudModel,
+): ReminderDueComplete | undefined {
+  const ack = reminderDueAckFor(productivity);
+  if (!ack) return undefined;
+  return {
+    kind: 'reminder_due.complete',
+    reminderDueId: ack.reminderDueId,
+    reminderDueAttemptId: ack.reminderDueAttemptId,
+    generation: ack.generation,
   };
 }

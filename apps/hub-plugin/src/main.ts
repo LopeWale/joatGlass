@@ -1413,7 +1413,7 @@ function productivityLifecycleFixture(
       return {
         domain, phase: 'due', title,
         primary: 'Due now', secondary: 'This reminder is still incomplete.',
-        hint: 'say complete reminder title · left x2 Planning',
+        hint: 'tap: complete · left x2 Planning',
       };
   }
 }
