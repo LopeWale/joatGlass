@@ -37,12 +37,10 @@ struct IntelligenceView: View {
                             .foregroundStyle(.secondary).textSelection(.enabled).padding(.bottom, 12)
                     }
                     if let help = connectionHelp { WorkspaceNotice(text: help).padding(.bottom, 12) }
-                    if readiness.isLive && !["connected_read_only", "connected_operator"].contains(status.openClaw.state) {
-                        Button("Restart and Reconnect", systemImage: "arrow.clockwise") { engine.restart() }
-                            .disabled(engine.isTransitioning || engine.isPreview)
-                        Text("Restarts JOAT’s engine and retries the saved agent Gateways.")
-                            .font(.caption).foregroundStyle(.secondary).padding(.bottom, 12)
-                    }
+                    LocalCommandView(commands: engine.commands, action: .serviceRetry,
+                                     title: "Retry Service", detail: "Check the saved Hermes / OpenClaw session.")
+                        .disabled(engine.isPreview || engine.isTransitioning)
+                        .padding(.bottom, 16)
                     Divider().padding(.bottom, 16)
                     HermesConnectionSettings(engine: engine).disabled(engine.isPreview)
                 }.padding(10)
@@ -83,10 +81,10 @@ struct IntelligenceView: View {
         case "dedicated_session_not_proven": return "JOAT is checking its dedicated session before Agent Terminal can send."
         case "tools_enabled": return "This remote session exposes tools. JOAT requires its dedicated session with tools disabled."
         case "history_recovery_required": return "Agent Terminal is paused while its session history is reconciled."
-        case "connection_closed": return "The Gateway connection closed. Check the remote Mac, then restart the engine."
+        case "connection_closed": return "The Gateway connection closed. Check the remote Mac, then retry the service."
         case "protocol_rejected": return "The Gateway returned an unexpected response. Check the connection in Diagnostics."
         default:
-            if status.openClaw.reason == "endpoint_refused" { return "The last connection attempt was refused. If the Gateway is available now, restart and reconnect to check again." }
+            if status.openClaw.reason == "endpoint_refused" { return "The last connection attempt was refused. If the Gateway is available now, retry the service to check again." }
             if status.openClaw.reason == "host_unreachable" { return "The remote Mac cannot be reached. Check that it is awake and connected to Tailscale." }
             return "Agent Terminal uses JOAT’s dedicated session. Start and control conversations from the glasses."
         }

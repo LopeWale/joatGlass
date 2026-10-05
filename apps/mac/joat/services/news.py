@@ -359,6 +359,7 @@ class NewsService:
         self._last_error: str | None = None
         self._partial = False
         self._running = False
+        self._refresh_lock = asyncio.Lock()
 
     # ── Configuration ────────────────────────────────────────────────────
 
@@ -405,6 +406,10 @@ class NewsService:
         return len(self._headlines)
 
     async def refresh_changed(self) -> bool:
+        async with self._refresh_lock:
+            return await self._refresh_changed()
+
+    async def _refresh_changed(self) -> bool:
         """One pass; True when what the wearer would see changed.
 
         The audit's N1: a pass that kept every feed's old headlines still
@@ -413,10 +418,22 @@ class NewsService:
         headlines OR the failure state changed, and only that publishes.
         """
         feeds = self.config.feeds()
-        results = await asyncio.gather(
+        fetching = asyncio.gather(
             *(asyncio.to_thread(self._fetch_feed, url, category) for category, url in feeds),
             return_exceptions=True,
         )
+        try:
+            results = await asyncio.shield(fetching)
+        except asyncio.CancelledError:
+            # urllib worker threads cannot be cancelled. Retain the refresh
+            # lock until they drain, even after repeated cancellation, and
+            # discard their result so supersession cannot commit stale news.
+            while not fetching.done():
+                try:
+                    await asyncio.shield(fetching)
+                except asyncio.CancelledError:
+                    continue
+            raise
         merged: list[Headline] = []
         failures = 0
         for (category, url), result in zip(feeds, results, strict=True):

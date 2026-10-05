@@ -83,9 +83,12 @@ final class NewsSettingsModel {
 
 struct NewsSettingsView: View {
     @Bindable var model: NewsSettingsModel
+    @ObservedObject var commands: EngineCommandChannel
 
     var body: some View {
         WorkspacePage(title: "News", subtitle: "Choose what appears in News on your glasses.") {
+            LocalCommandView(commands: commands, action: .newsRefresh,
+                             title: "Refresh News", detail: "Fetch your selected feeds now on this Mac.")
             GroupBox("Your interests") {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Headlines from BBC, NPR, and Google News. Choose the subjects you want to follow.")
