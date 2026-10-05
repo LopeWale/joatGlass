@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -41,8 +40,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..core.interfaces import ReplyEngine
+from .cli_failures import classify_cli_failure
+from .cli_locate import find_codex_binary
 from .grounding import Grounding
-from .subprocess_agent import SubprocessAgent, find_claude_binary
+from .subprocess_agent import EnvProvider, SubprocessAgent, find_claude_binary
 
 log = logging.getLogger(__name__)
 
@@ -133,13 +134,17 @@ WORKER_PERSONA = (
 
 FAILED_NOTICE = "That turn failed — say it again in a moment."
 MISSING_NOTICE = "{name} isn't installed on the Mac."
-SIGNED_OUT_NOTICE = "{name} isn't signed in on the Mac — run: {command}"
-LIMIT_NOTICE = "{name} has hit its usage limit for now."
+SIGNED_OUT_NOTICE = (
+    "{name} isn't signed in on the Mac — sign in from JOAT on your phone (Accounts)."
+)
+LIMIT_NOTICE = "{name} has hit its usage limit — switch account from JOAT on your phone."
 NO_SEAT_NOTICE = "No assistant seat is available on the Mac — sign in to Claude or Codex."
 
 ModelProvider = Callable[[], str | None]
 AccountObserver = Callable[[str, str], None]
-"""(seat name, account state) — 'logged_in', 'logged_out', 'missing', 'unknown'."""
+"""(seat name, account state) — 'logged_in', 'logged_out', 'limited',
+'missing', 'unknown'. 'limited' is still available: the wearer decides
+whether to wait out a usage limit or switch account from the phone."""
 
 @dataclass(frozen=True)
 class McpDoor:
@@ -149,16 +154,12 @@ class McpDoor:
     token: str
 
 
-def find_codex_binary() -> str | None:
-    return shutil.which("codex")
-
-
 def _classify_failure(name: str, login_command: str, output: str) -> str:
     """Turn a CLI's own complaint into the one line the wearer can act on."""
-    lowered = output.lower()
-    if "not logged in" in lowered or "please run /login" in lowered or "sign in" in lowered:
+    kind = classify_cli_failure(output)
+    if kind == "signed_out":
         return SIGNED_OUT_NOTICE.format(name=name, command=login_command)
-    if "usage limit" in lowered or "out of usage" in lowered or "rate limit" in lowered:
+    if kind == "limit":
         return LIMIT_NOTICE.format(name=name)
     return FAILED_NOTICE
 
@@ -183,6 +184,8 @@ class _CliSeat(ReplyEngine):
         on_account: AccountObserver | None = None,
         persona: str = PERSONA,
         session_ttl_s: float = SESSION_TTL_S,
+        env_provider: EnvProvider | None = None,
+        binary_provider: Callable[[], str | None] | None = None,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout must be positive")
@@ -196,6 +199,11 @@ class _CliSeat(ReplyEngine):
         self._timeout_s = timeout_s
         self._workdir = workdir
         self._on_account = on_account
+        # Which subscription account a spawn runs as (CLAUDE_CONFIG_DIR /
+        # CODEX_HOME), read per spawn, and how to find the binary again when
+        # an app update moves it. Both belong to the phone's Accounts tab.
+        self._env_provider = env_provider
+        self._binary_provider = binary_provider
         # Who this seat is: the wearer's assistant, or JOAT's own worker.
         self._persona = persona
         # 0 = every turn is a fresh session (the caller supplies any history
@@ -219,6 +227,20 @@ class _CliSeat(ReplyEngine):
     @property
     def available(self) -> bool:
         return self._binary is not None and self._account != "logged_out"
+
+    def rediscover(self) -> None:
+        """Forget the session and re-find the binary, ready to warm again.
+
+        Called after the wearer switches account or signs in from the phone:
+        a resumed session id belongs to the OLD account's config directory,
+        and an account state learned under the old login says nothing about
+        the new one.
+        """
+        if self._binary_provider is not None:
+            self._binary = self._binary_provider()
+        self._session_id = None
+        self._session_used_at = 0.0
+        self._set_account("missing" if self._binary is None else "unknown")
 
     def _set_account(self, state: str) -> None:
         if state != self._account:
@@ -294,6 +316,7 @@ class _CliSeat(ReplyEngine):
             command, env_strip=STRIP_ENV, timeout_s=timeout_s or self._timeout_s,
             name=self.name, stream_json=stream_json, notices=False, capture=True,
             cwd=str(self._workdir), env_extra=env_extra,
+            env_provider=self._env_provider,
         )
 
     async def _probe(self, argv: list[str]) -> tuple[int | None, str]:
@@ -322,9 +345,12 @@ class _CliSeat(ReplyEngine):
         return "\n\n".join(parts)
 
     def _failure(self, agent: SubprocessAgent, resuming: bool) -> str:
+        kind = classify_cli_failure(agent.last_output)
         notice = _classify_failure(self.title, self.login_command, agent.last_output)
-        if "signed in" in notice:
+        if kind == "signed_out":
             self._set_account("logged_out")
+        elif kind == "limit":
+            self._set_account("limited")
         elif resuming and "no conversation found" in agent.last_output.lower():
             self._session_id = None
         log.warning("%s turn failed rc=%s (%s)", self.name, agent.last_returncode, notice)
@@ -572,6 +598,10 @@ class CodexCliReplyEngine(_CliSeat):
             # Compatibility with a clean older stream that supplies its
             # final assistant item without a turn-completed event.
             yield answer
+
+    def rediscover(self) -> None:
+        super().rediscover()
+        self._thread_id = None
 
     def _discard_thread(self) -> None:
         """Do not resume context whose child did not finish cleanly."""

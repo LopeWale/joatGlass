@@ -354,10 +354,90 @@ export interface PromptAckMessage {
   audioEpoch?: string | null;
 }
 
+/**
+ * The phone's JOAT control screen (the plugin page inside the Even app, not
+ * the lenses): Brainstorm reset, saved subscription accounts, seat models.
+ * Mirrors `ControlAction` / `ControlState` in core/protocol.py — the two
+ * must change together (tests/unit/test_protocol.py pins the Mac side).
+ */
+export type ControlProviderName = 'claude' | 'codex';
+export type ControlModelSlotKey = 'codex' | 'claude' | 'assistant';
+
+export type ControlActionMessage =
+  | { kind: 'control.action'; action: 'refresh' | 'brainstorm.reset' | 'account.cancel' | 'account.dismiss' }
+  | { kind: 'control.action'; action: 'account.add'; provider: ControlProviderName; label: string }
+  | {
+    kind: 'control.action';
+    action: 'account.activate' | 'account.signin' | 'account.signout' | 'account.remove';
+    provider: ControlProviderName;
+    profileId: string;
+  }
+  | { kind: 'control.action'; action: 'account.rename'; provider: ControlProviderName; profileId: string; label: string }
+  /** A one-time code the Claude sign-in page showed. Never stored or logged. */
+  | { kind: 'control.action'; action: 'account.code'; code: string }
+  | { kind: 'control.action'; action: 'model.select'; slot: ControlModelSlotKey; option: string };
+
+/** logged_in · logged_out · limited · missing · unknown */
+export type ControlAccountState = string;
+
+export interface ControlSeatView {
+  name: string;
+  title: string;
+  installed: boolean;
+  account: ControlAccountState;
+  accountLabel: string;
+  model: string;
+}
+
+export interface ControlProfileView {
+  id: string;
+  label: string;
+  state: ControlAccountState;
+  isDefault: boolean;
+  active: boolean;
+  email?: string;
+  plan?: string;
+}
+
+export interface ControlProviderView {
+  provider: ControlProviderName;
+  title: string;
+  installed: boolean;
+  profiles: ControlProfileView[];
+}
+
+export interface ControlModelSlotView {
+  key: string;
+  title: string;
+  current: string;
+  options: string[];
+}
+
+export interface ControlLoginView {
+  provider: ControlProviderName;
+  profileId: string;
+  /** starting · open_link · enter_code · completing · done · failed · cancelled */
+  stage: string;
+  message: string;
+  needsCode: boolean;
+  url?: string;
+  code?: string;
+}
+
+export interface ControlStateView {
+  revision: number;
+  brainstorm: { state: string; phase: string; detail: string; seats: ControlSeatView[] };
+  accounts: ControlProviderView[];
+  models: ControlModelSlotView[];
+  login: ControlLoginView | null;
+  notice: string;
+}
+
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
   | PromptAckMessage
   | PromptCancelMessage
+  | ControlActionMessage
   /** First application frame on every socket. Credentials never belong in a URL. */
   | { kind: 'auth'; token: string | null }
   | {
@@ -602,6 +682,7 @@ export type DownlinkMessage =
     activate?: boolean;
   }
   | { kind: 'navigation.stop'; sessionId: string }
+  | ({ kind: 'control.state' } & ControlStateView)
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
 export interface InputEventPayload {

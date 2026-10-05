@@ -26,7 +26,7 @@ from ..core.protocol import (
     BRAINSTORM_ROW_COLUMNS,
     BrainstormHudView,
 )
-from .roundtable import is_failure
+from .roundtable import failure_summary, is_failure
 
 FinishedSession = Callable[
     [str, tuple[str, ...], tuple[tuple[str, str], ...], str], None
@@ -139,8 +139,10 @@ class HudSink:
         if is_failure(body):
             # The seat's stdout carried the CLI's complaint ("out of usage
             # credits"). Quoted as a summary it reads exactly like an
-            # argument the collaborator never made.
-            return "could not answer"
+            # argument the collaborator never made. Signed-out and spent
+            # seats are named, because the wearer can fix those from the
+            # phone.
+            return failure_summary(body)
         found = cls._GIST.search(body)
         line = " ".join((found.group(1) if found else body).split())
         limit = max(1, budget)
@@ -502,7 +504,7 @@ class DebateSnapshot:
             # A seat that failed reads as failed. Its stdout carried the
             # CLI's complaint ("You're out of usage credits"), and a row
             # quoting that looks exactly like an argument it never made.
-            body = "could not answer" if is_failure(text) else " ".join(text.split())
+            body = failure_summary(text) if is_failure(text) else " ".join(text.split())
             out.append(f"{who}: {body}"[:width])
         if self.running and self.speaking:
             out.append(f"{self.speaking.split(' (')[0]}: …"[:width])

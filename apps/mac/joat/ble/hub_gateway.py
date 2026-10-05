@@ -55,6 +55,7 @@ from ..core.protocol import (
     BrainstormAction,
     Confirm,
     ConfirmRequest,
+    ControlAction,
     Device,
     DownlinkMessage,
     G2Diagnostic,
@@ -104,6 +105,7 @@ ConfirmCallback = Callable[[Confirm], None]
 HelloCallback = Callable[[Hello], None]
 NavigationActionCallback = Callable[[NavigationAction], None]
 BrainstormActionCallback = Callable[[BrainstormAction], None]
+ControlActionCallback = Callable[[ControlAction], None]
 NavigationRouteAckCallback = Callable[[NavigationRouteAck], None]
 NavigationViewAckCallback = Callable[[NavigationViewAck], None]
 NavigationStateCallback = Callable[[NavigationState], None]
@@ -195,6 +197,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._hello_cbs: list[HelloCallback] = []
         self._navigation_action_cbs: list[NavigationActionCallback] = []
         self._brainstorm_action_cbs: list[BrainstormActionCallback] = []
+        self._control_action_cbs: list[ControlActionCallback] = []
         self._navigation_route_ack_cbs: list[NavigationRouteAckCallback] = []
         self._navigation_view_ack_cbs: list[NavigationViewAckCallback] = []
         self._navigation_state_cbs: list[NavigationStateCallback] = []
@@ -421,6 +424,14 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     def on_brainstorm_action(self, callback: BrainstormActionCallback) -> None:
         """Receive a bounded action from the currently painted G2 surface."""
         self._brainstorm_action_cbs.append(callback)
+
+    def on_control_action(self, callback: ControlActionCallback) -> None:
+        """Receive a request from the phone's JOAT control screen.
+
+        Same authenticated socket as the lenses, so only the paired phone
+        can switch an account or reset a Brainstorm.
+        """
+        self._control_action_cbs.append(callback)
 
     def on_navigation_route_ack(self, callback: NavigationRouteAckCallback) -> None:
         self._navigation_route_ack_cbs.append(callback)
@@ -1332,6 +1343,15 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 )
                 for brainstorm_cb in self._brainstorm_action_cbs:
                     brainstorm_cb(message)
+            case ControlAction():
+                # Logged by action only: a pasted sign-in code rides some
+                # of these and must never reach a log line.
+                log.info("control action: %s", message.action)
+                for control_cb in self._control_action_cbs:
+                    try:
+                        control_cb(message)
+                    except Exception:
+                        log.warning("control action observer failed", exc_info=False)
             case NavigationAction():
                 for navigation_cb in self._navigation_action_cbs:
                     navigation_cb(message)

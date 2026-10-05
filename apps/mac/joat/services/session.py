@@ -1433,6 +1433,29 @@ class SessionManager:
         probe = getattr(active, "terminal_owns_hud", None) if active else None
         return bool(probe()) if callable(probe) else False
 
+    async def reset_brainstorm(self, grace_s: float = 3.0) -> bool:
+        """Stop a live Brainstorm and drop any armed topic capture.
+
+        The phone's "Reset Brainstorm" — the wearer's way out of a room that
+        is stuck on a signed-out or spent seat without a voice command.
+        Only a Brainstorm is stopped; a navigation or other session is left
+        alone. Returns whether a Brainstorm was running.
+        """
+        self._disarm_topic_capture()
+        self._pending_topic = ""
+        self._pending_resume = []
+        active = self._active
+        if not isinstance(active, DebateSession):
+            return False
+        task = self._task
+        self._cancel_active()
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), grace_s)
+            except (TimeoutError, asyncio.CancelledError, Exception):
+                pass
+        return True
+
     def _cancel_active(self) -> None:
         active = self._active
         if active is None:

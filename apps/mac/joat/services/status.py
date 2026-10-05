@@ -221,6 +221,17 @@ class StatusPublisher:
         }
         self.flush()
 
+    def brainstorm_projection(self) -> dict[str, str | int]:
+        """The lifecycle metadata set_brainstorm published, for the phone."""
+        brainstorm = self._state.get("brainstorm")
+        if not isinstance(brainstorm, dict):
+            return {"state": "unavailable", "seat_count": 0, "phase": "idle"}
+        return {
+            "state": str(brainstorm.get("state", "unavailable")),
+            "seat_count": int(brainstorm.get("seat_count", 0)),
+            "phase": str(brainstorm.get("phase", "idle")),
+        }
+
     def set_personal_data(self, *, state: str) -> None:
         """Publish only the EventKit bridge state needed by the Mac shell.
 
