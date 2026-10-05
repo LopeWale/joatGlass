@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.92 confirmation-window package
+
+- Rebuilt the existing JOAT package from `b898db1` (version bump on top of the confirmation-window, streamed-frame and green-suite commits) with the same `scripts/pack.sh`, the same `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158371 bytes, SHA-256 `1ae1ddd9123822512f4aad67c77aa8366410a3454c5d03184cf59c3af402b784`. Carries the plugin side of the confirmation window (`confirmationDecisionWindowMs`) and the restored right/ring double press for an armed Brainstorm run; the Mac side (20 s envelope, streamed-frame throttle) is in the brain, not the package. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — Confirmation deadline, streamed-frame throttle, green plugin suite
 
 - The confirmation round trip no longer outruns the Mac. The Mac timed a challenge 12 s from send while the plugin always gave the wearer 8 s once the gate was visible and sent an acceptance only after restoring the page beneath, so a tap the wearer saw land could come back as "Reply cancelled.". The Mac envelope is 20 s for Messages replies and calendar/reminder writes (`CONFIRM_TRANSPORT_SECONDS`, `_CONFIRM_SECONDS`), and the plugin derives its decision window from the Mac's `expiresAtMs` (`confirmationDecisionWindowMs`: four seconds reserved for the restore, clamped to 3-8 s so a skewed phone clock never cancels a visible gate).
